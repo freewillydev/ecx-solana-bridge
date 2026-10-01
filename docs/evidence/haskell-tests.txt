@@ -5,11 +5,11 @@ In order, the following will be built (use -v for more details):
 Configuring library for ecx-bridge-0.1.0.0...
 Preprocessing library for ecx-bridge-0.1.0.0...
 Building library for ecx-bridge-0.1.0.0...
-[18 of 25] Compiling Bridge.Recovery  ( src/Bridge/Recovery.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Recovery.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Recovery.dyn_o ) [Source file changed]
 Configuring test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Preprocessing test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Building test suite 'bridge-test' for ecx-bridge-0.1.0.0...
-[2 of 2] Linking ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test [Library changed]
+[1 of 1] Compiling Main             ( test/Spec.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test-tmp/Main.o ) [Source file changed]
+[2 of 2] Linking ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test [Objects changed]
 Running 1 test suites...
 Test suite bridge-test: RUNNING...
 
@@ -198,6 +198,15 @@ durable send orchestration (offline RPC contracts)
   requires review if a signed-only transaction is observed as processed [✔]
   reconciles finalized success while paused without broadcasting again [✔]
   books only the verified fee on finalized failure and retains customer principal [✔]
+paused worker payment recovery (offline RPC contracts)
+  never sends unseen signed or broadcast bytes even when the deployment is available [✔]
+  books a finalized outcome once while paused: True [✔]
+  books a finalized outcome once while paused: False [✔]
+  records an already-paid outcome during source review without reopening payouts [✔]
+  preserves an unseen native attempt and its locks without signing or releasing fees [✔]
+  pauses and retains contradictory evidence or an unavailable RPC without duplicate alerts [✔]
+  retires conclusively expired bytes without authorizing a new preparation [✔]
+  continues booking the other chain after one attempt requires review [✔]
 conclusive Solana expiry (offline recovery contracts)
   requires finalized absence on both complete account histories and every configured provider [✔]
   refuses missing history, observed signatures, valid blockhashes, old contexts and wrong identities [✔]
@@ -231,8 +240,8 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 3.0251 seconds
-188 examples, 0 failures
+Finished in 3.1946 seconds
+196 examples, 0 failures
 Test suite bridge-test: PASS
 Test suite logged to: /Volumes/Crucial
 X9/CodexBuilds/ecx-bridge-20260930/workspace-b/outputs/ecx-bridge/./../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log

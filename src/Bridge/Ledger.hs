@@ -920,12 +920,14 @@ auditExportWithBudget l cfg = ledgerAction l $ \c -> do
   budget <- operatingBudget c cfg
   custody <- custodyHealthC c
   preparations <- pendingPreparationsC c
+  payments <- query_ c "SELECT a.txid,i.id,i.chain,a.state,a.preparation_generation FROM attempts a JOIN intents i ON i.id=a.intent_id LEFT JOIN solana_expiries e ON e.txid=a.txid WHERE i.resolved=0 AND e.txid IS NULL ORDER BY a.rowid" :: IO [(Text,Text,Text,Text,Int)]
   cancelling <- query_ c "SELECT intent_id,generation FROM preparation_cancellations WHERE completed=0" :: IO [(Text,Int)]
   let recoveries=toJSON [object ["intent" .= obligationId (preparationObligation p),"generation" .= preparationGeneration p
         ,"chain" .= preparationChain p,"hasDraft" .= (preparationDraft p/=Nothing)
         ,"cancellationPending" .= ((obligationId $ preparationObligation p,preparationGeneration p) `elem` cancelling)] | p<-preparations]
+      pending=toJSON [object ["transaction" .= tx,"intent" .= intent,"chain" .= chain,"state" .= state,"generation" .= g] | (tx,intent,chain,state,g)<-payments]
   case audit of
-    Object fields -> pure $ Object (KM.insert "unsignedPreparations" recoveries $ KM.insert "custodyReconciliation" custody $ KM.insert "operatingBudget" budget fields)
+    Object fields -> pure $ Object (KM.insert "pendingPayments" pending $ KM.insert "unsignedPreparations" recoveries $ KM.insert "custodyReconciliation" custody $ KM.insert "operatingBudget" budget fields)
     _ -> reject "invalid_audit_export"
 custodyHealth :: Ledger -> IO Value
 custodyHealth l = ledgerAction l custodyHealthC

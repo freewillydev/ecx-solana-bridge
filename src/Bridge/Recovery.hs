@@ -1,4 +1,4 @@
-module Bridge.Recovery (cancelPreparation, cancelPreparationWith) where
+module Bridge.Recovery (recoverDeployment, cancelPreparation, cancelPreparationWith) where
 
 import Bridge.Config
 import Bridge.Ledger
@@ -23,6 +23,18 @@ import Network.HTTP.Client (Manager)
 
 stored :: FromJSON a => Text -> IO a
 stored=either (const $ reject "invalid_saved_preparation") pure . eitherDecodeStrict' . TE.encodeUtf8
+
+-- Reconstruct from durable records on every startup/pass. Observing and booking
+-- a recorded outcome continue during a pause; this never prepares or broadcasts.
+recoverDeployment :: Manager -> Config -> Ledger -> IO Value
+recoverDeployment manager c ledger=do
+  scans <- observeOnce manager c ledger
+  epochSeconds >>= expireQuotes ledger
+  payments <- reconcilePayments manager c ledger
+  custody <- reconcileCustody manager c ledger
+  health <- readiness ledger
+  pure $ object ["scanners" .= scans,"payments" .= payments,"custody" .= custody
+    ,"availability" .= health,"signedOrSent" .= False]
 
 -- Private operator action under the exclusive ledger lock. This cannot sign,
 -- send, release customer principal, or resume the deployment.

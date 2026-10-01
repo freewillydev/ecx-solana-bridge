@@ -2,7 +2,7 @@
 
 A small inventory bridge: one Haskell/Servant application, two chain adapters, one SQLite ledger, and a thin browser interface. A separate Rust executable uses official Solana SDK and SPL interface crates to construct and sign a fixed transaction format. No custom blockchain or token program.
 
-**Development checkpoint — not ready for public custody.** Both ledger-driven directions have completed on real L2L Signet / Solana Devnet, alongside a full refund of a late deposit. The redemption survived a process interruption after broadcast and settled the same native transaction. The code builds and 188 Haskell examples pass. Continuous custody checks match all three real balances after restart. Unsigned preparation recovery now journals exact cancellation and retains the obligation's funds. Browser signing, full recovery and Linux deployment remain unfinished. Customer intake and signing routes are disabled in code. See [STATUS.md](docs/STATUS.md) for the evidence and outstanding work.
+**Development checkpoint — not ready for public custody.** Both ledger-driven directions have completed on real L2L Signet / Solana Devnet, alongside full refunds. The code builds and 196 Haskell examples pass. The paused worker now observes and books already-recorded payment outcomes independently of new signing and sending. Unsigned preparation cancellation preserves the obligation's funds. Browser signing, complete recovery and Linux deployment remain unfinished. Customer intake and signing routes are disabled in code. See [STATUS.md](docs/STATUS.md) for the evidence and outstanding work.
 
 ## Components
 
@@ -15,9 +15,9 @@ A small inventory bridge: one Haskell/Servant application, two chain adapters, o
 | `Bridge.Native` / `Bridge.Solana` | Real node/RPC identity checks and bounded calls. Native destinations use daemon script classification and ownership checks. Adapter integration is incomplete. |
 | `Bridge.Observer` | Native wallet history and separate finalized Solana token/SOL histories; atomic evidence/cursors, quarantined unknown activity, independent-provider deposit checks. |
 | `Bridge.Reconciliation` | Compare the journal and verified unsettled outgoing effects with custody balances at checked history positions; invalidate stale checks and pause on discrepancies. |
-| `Bridge.Recovery` | Cancel an exact unsigned preparation while paused, verify source/custody, journal and finish precise input-lock cleanup; preserve funds and reject late callbacks. |
+| `Bridge.Recovery` | Run paused observation, recorded-payment reconciliation and custody checks; cancel an exact unsigned generation with journaled lock cleanup, preserving funds and rejecting late callbacks. |
 | `Bridge.NativePayment` / `Bridge.SolanaPayment` / `Bridge.Payment` | Validate outgoing transactions and native quote amounts with the real daemon, reserve operating costs, save exact preparation requests/drafts before signing and signed bytes afterward. Solana simulations use unsigned copies. |
-| `Bridge.Settlement` | Recheck the bound source, journal broadcast intent, enforce backup coverage, send recorded bytes and book verified outcomes. Worker scheduling remains behind the disabled acceptance gate. |
+| `Bridge.Settlement` | Recheck the bound source, journal broadcast intent, enforce backup coverage, send recorded bytes and book verified outcomes. The paused worker can reconcile saved attempts; new signing/sending remains gated. |
 | `Bridge.Deposit` | Build and validate an unsigned order-bound Solana deposit, with customer token/SOL balance, fee, expiry and backup checks. |
 | `Bridge.Admission` | Solana wallet/ATA policy, balances, fee/rent estimates and unsigned simulation before a new order reserves funds. |
 | `Bridge.Order` | Both chain admission checks, durable native allocation claims, label recovery, immutable memo/address binding and first-exposure checks. |
@@ -46,6 +46,8 @@ cabal run ecx-bridge -- doctor /absolute/private/config.json
 cabal run ecx-bridge -- scan /absolute/private/config.json
 # Scan and reconcile all custody balances; leave the deployment paused.
 cabal run ecx-bridge -- reconcile /absolute/private/config.json
+# Also book verified outcomes of recorded payments, without signing or sending.
+cabal run ecx-bridge -- recover /absolute/private/config.json
 ```
 
 Copy `config/l2l-devnet.example.json` into a private directory and replace every required value with the actual deployment inputs. The example deliberately contains no usable keys or invented mint. `doctor` checks actual chain identity, synchronization, mint and token-account policy; success does not certify settlement readiness.
@@ -75,6 +77,7 @@ Build the browser assets first. Open `http://127.0.0.1:8096`. Administrator rout
 - The reverse conversion accepted 10,000 wrapped units and paid 9,900 native units, booking a 100-unit token bridge fee and a 141-unit native network fee. Its actual [Signet payout](https://explorer.signet.drivechain.info/tx/88c8c46cc3c6f34e880ffc3978c3095159059ef663c2e1573ebcf2839c3d4350) settled after the acceptance process was terminated in the mempool phase and restarted. All custody balances matched: [redemption evidence](docs/evidence/first-ledger-redemption.json), [interruption](docs/evidence/native-payout-interruption.json).
 - Replaying all three completed orders changed no financial records. The normal worker then restarted with healthy scanners and authenticated order reads, while public readiness remained disabled: [replay](docs/evidence/both-directions-replay.json), [restart](docs/evidence/both-directions-restart.json).
 - Schema 9 preserved every financial row and critical sequence. The ongoing custody check matched actual native, wrapped-token and operating-SOL balances twice across reopening, then passed in the restarted worker: [evidence](docs/evidence/custody-reconciliation.json). In-flight, failed-payment, rent, changing-history and discrepancy paths have offline contract coverage; no new payment was sent during this check.
+- The ordinary paused worker recovered a real redemption after the submitting process exited. It first matched the unconfirmed 9,900-unit payout plus its 141-unit fee against custody, then settled that same [native transaction](https://explorer.signet.drivechain.info/tx/c9083bb991bb97ea2c402cb9508b2ce14a9889cea4464bd5ba27202b7783c6c6) once after confirmation. Completed recovery replay changed no financial records; earlier orders were preserved and all custody checks passed: [evidence](docs/evidence/paused-worker-recovery.json). This is worker-process recovery and live native in-flight evidence, not host-loss restore or reorg acceptance.
 
 The native smoke script is restricted to the real L2L Signet and two dedicated test wallets. It persists exact signed bytes before sending. It is an integration probe, not a ledger-driven bridge.
 

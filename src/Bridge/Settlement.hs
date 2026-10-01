@@ -1,6 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.Settlement
-  ( PaymentTransport(..), realPaymentTransport, paymentPass, settleAttemptWith
+  ( PaymentTransport(..), realPaymentTransport, paymentPass, settleAttemptWith, reconcilePayments, reconcilePaymentsWith
   , recheckSourceWith, observeNativePayment, observeSolanaPayment, solanaExpiryEvidence, PaymentObservation(..)
   , approveSolanaRetry, approveSolanaRetryWith
   , SavedPayment(..), readSavedPayment, readNativePayment
@@ -23,6 +23,7 @@ import Control.Monad (forM_,when)
 import Data.Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
+import Data.List (nub)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -272,29 +273,64 @@ readSavedPayment transport c ledger attempt = do
     _ -> reject "wrong_destination_chain"
   pure (ob,payment)
 
+-- Reconcile only already-recorded attempts. This path never invokes signing,
+-- backup or send, even if the deployment happens to be available.
+reconcilePayments :: Manager -> Config -> Ledger -> IO Value
+reconcilePayments manager c = reconcilePaymentsWith
+  (realPaymentTransport manager c (const $ reject "unexpected_recovery_backup")) c
+
+reconcilePaymentsWith :: PaymentTransport -> Config -> Ledger -> IO Value
+reconcilePaymentsWith transport c ledger = do
+  attempts <- pendingAttempts ledger
+  let bounded=length attempts<=2 && length (nub $ map attemptChain attempts)==length attempts
+  when (not bounded) $ pause ledger "recovery_attempt_bounds"
+  require bounded "recovery_attempt_bounds"
+  reports <- mapM reconcile attempts
+  pure $ object ["attempts" .= reports,"signedOrSent" .= False]
+ where
+  reconcile attempt = do
+    outcome <- try (reconcileRecordedAttempt transport c ledger attempt
+      `catch` (\(_::IOException)->reject "payment_observation_io_unavailable")) :: IO (Either BridgeError (Either Text (Obligation,SavedPayment)))
+    case outcome of
+      Right result -> pure $ report attempt (either id (const "unseen") result) Nothing
+      Left (BridgeError code) -> do
+        health <- readiness ledger
+        let reason="payment_recovery:"<>code
+        when (health/=Availability False reason) $ pause ledger reason
+        pure $ report attempt "requires_review" (Just code)
+  report attempt state failure = object ["transaction" .= attemptId attempt,"chain" .= attemptChain attempt
+    ,"outcome" .= (state::Text),"error" .= (failure::Maybe Text)]
+
+-- A Right result means the same saved transaction is unseen and has no proven
+-- expiry. Only the separate authorized send path may act on those bytes.
+reconcileRecordedAttempt :: PaymentTransport -> Config -> Ledger -> Attempt -> IO (Either Text (Obligation,SavedPayment))
+reconcileRecordedAttempt transport c ledger attempt = do
+  paymentIdentity transport
+  (ob,payment) <- readSavedPayment transport c ledger attempt
+  observation <- case payment of
+    NativePayment signed -> observeNativePayment (paymentNative transport) signed
+    SolanaPayment signed -> observeSolanaPayment (paymentSolana transport) c signed
+  case observation of
+    PaymentConfirmed costs proof -> recorded >> recordSettlement ledger (attemptId attempt) costs proof >> pure (Left "settled")
+    PaymentFailed fee proof -> recorded >> recordFailedSolana ledger (attemptId attempt) (units fee) proof >> pure (Left "failed")
+    PaymentWaiting -> recorded >> pure (Left "confirming")
+    PaymentUnseen -> do
+      expiry <- case payment of
+        NativePayment _ -> pure Nothing
+        SolanaPayment signed -> solanaExpiryEvidence transport c signed
+      case expiry of
+        Just proof -> do
+          checkExpiryOrigins ledger c
+          recordSolanaExpiry ledger attempt proof
+          pure (Left "expired")
+        Nothing -> pure (Right (ob,payment))
+ where
+  recorded=require (attemptState attempt=="broadcast_intent") "unrecorded_broadcast_observed"
+
 settleAttemptWith :: PaymentTransport -> Config -> Ledger -> Attempt -> IO Text
 settleAttemptWith transport c ledger attempt = work `onException` pause ledger "payment_requires_reconciliation"
  where
-  work = do
-    paymentIdentity transport
-    (ob,payment) <- readSavedPayment transport c ledger attempt
-    observation <- case payment of
-      NativePayment signed -> observeNativePayment (paymentNative transport) signed
-      SolanaPayment signed -> observeSolanaPayment (paymentSolana transport) c signed
-    case observation of
-      PaymentConfirmed costs proof -> recorded >> recordSettlement ledger (attemptId attempt) costs proof >> pure "settled"
-      PaymentFailed fee proof -> recorded >> recordFailedSolana ledger (attemptId attempt) (units fee) proof >> pure "failed"
-      PaymentWaiting -> recorded >> pure "confirming"
-      PaymentUnseen -> do
-        expiry <- case payment of
-          NativePayment _ -> pure Nothing
-          SolanaPayment signed -> solanaExpiryEvidence transport c signed
-        case expiry of
-          Just proof -> do
-            checkExpiryOrigins ledger c
-            recordSolanaExpiry ledger attempt proof
-            pure "expired"
-          Nothing -> sendIfAvailable ob payment
+  work = reconcileRecordedAttempt transport c ledger attempt >>= either pure (uncurry sendIfAvailable)
   sendIfAvailable ob payment = do
         health <- readiness ledger
         if not (available health) then pure "paused" else do
@@ -312,7 +348,6 @@ settleAttemptWith transport c ledger attempt = work `onException` pause ledger "
           case result of
             Left _ -> pure "broadcast_uncertain" -- durable intent still owns all reservations
             Right identifier -> require (identifier==attemptId saved) "broadcast_identifier_mismatch" >> pure "submitted"
-  recorded=require (attemptState attempt=="broadcast_intent") "unrecorded_broadcast_observed"
   send saved = case attemptChain saved of
     "Native" -> paymentNative transport True "sendrawtransaction" [toJSON $ attemptBytes saved] >>= parseValue parseJSON
     "Solana" -> paymentSolana transport "sendTransaction" [toJSON $ attemptBytes saved,object

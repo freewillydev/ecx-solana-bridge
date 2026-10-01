@@ -106,6 +106,9 @@ testAttempt l c ob chain txid bytes policy limit point = do
 fixtureJson :: ToJSON a => a -> Text
 fixtureJson=TE.decodeUtf8 . LBS.toStrict . encode
 
+recoveryOutcomes :: Value -> IO [Text]
+recoveryOutcomes result=fieldValue "attempts" result >>= mapM (fieldValue "outcome")
+
 -- Ledger-only cancellation fixture; chain cleanup is tested separately below.
 cancelFixture :: Ledger -> Preparation -> IO ()
 cancelFixture l p=do
@@ -1853,6 +1856,124 @@ main=hspec $ do
       status <$> readOrder l cap (obligationOrder ob) `shouldReturn` "NeedsReview"
       ledgerAction l (\db->query_ db "SELECT SUM(delta) FROM postings WHERE asset='Native' AND account='principal'" :: IO [Only Int64]) `shouldReturn` [Only 4]
       obligationAmount <$> createRefund l (obligationDeposit ob) `shouldReturn` 4
+  describe "paused worker payment recovery (offline RPC contracts)" $ do
+    it "never sends unseen signed or broadcast bytes even when the deployment is available" $ forM_ [False,True] $ \broadcast ->
+      withSendFixture $ \l c _ attempt transport -> do
+        when broadcast $ markBroadcastIntent l (attemptId attempt) >> pure ()
+        before<-pendingAttempts l
+        financial<-auditExport l
+        let call method params=if method=="sendTransaction" then expectationFailure "recovery sent a transaction" >> pure Null
+              else paymentSolana transport method params
+        result<-reconcilePaymentsWith transport{paymentSolana=call} c l
+        recoveryOutcomes result `shouldReturn` ["unseen"]
+        fieldValue "signedOrSent" result `shouldReturn` False
+        pendingAttempts l `shouldReturn` before
+        auditExport l `shouldReturn` financial
+        available <$> readiness l `shouldReturn` True
+    forM_ [True,False] $ \success ->
+      it ("books a finalized outcome once while paused: "<>show success) $ withSendFixture $ \l c ob attempt transport -> do
+        _<-markBroadcastIntent l (attemptId attempt)
+        signed<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ attemptPolicy attempt)
+        proof<-codecSettlementProof c signed success
+        pause l "restart-quarantine"
+        let call method _=if method=="getTransaction" then pure proof else expectationFailure "unexpected recovery mutation" >> pure Null
+        first<-reconcilePaymentsWith transport{paymentSolana=call} c l
+        recoveryOutcomes first `shouldReturn` [if success then "settled" else "failed"]
+        pendingAttempts l `shouldReturn` []
+        pendingPreparations l `shouldReturn` []
+        status <$> readOrder l cap (obligationOrder ob) `shouldReturn` (if success then "Paid" else "NeedsReview")
+        financial<-auditExport l
+        second<-reconcilePaymentsWith transport{paymentIdentity=expectationFailure "terminal payment repeated chain IO"} c l
+        recoveryOutcomes second `shouldReturn` []
+        auditExport l `shouldReturn` financial
+        available <$> readiness l `shouldReturn` False
+    it "records an already-paid outcome during source review without reopening payouts" $ withSendFixture $ \l c ob attempt transport -> do
+      _<-markBroadcastIntent l (attemptId attempt)
+      signed<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ attemptPolicy attempt)
+      proof<-codecSettlementProof c signed True
+      refreshDeposit l (Deposit (obligationDeposit ob) (Just $ obligationOrder ob) Native (amt 4) (T.replicate 64 "b") 0 False 100)
+      result<-reconcilePaymentsWith transport{paymentSolana= \method _ -> if method=="getTransaction" then pure proof else reject "unexpected"} c l
+      recoveryOutcomes result `shouldReturn` ["settled"]
+      pendingAttempts l `shouldReturn` []
+      available <$> readiness l `shouldReturn` False
+      ledgerAction l (\db->query_ db "SELECT eligible FROM deposits" :: IO [Only Bool]) `shouldReturn` [Only False]
+      createRefund l (obligationDeposit ob) `shouldThrow` isError "refundable_deposit_not_found"
+    it "preserves an unseen native attempt and its locks without signing or releasing fees" $ withNativeCancellation $ \l c p locks transport -> do
+      captured<-BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
+      (plan,previous,fee,tx)<-nativeFixture
+      decoded<-fieldValue "decoded" captured :: IO Value
+      raw<-fieldValue "raw" captured
+      let ob=preparationObligation p
+          signed=NativeSigned raw tx plan previous fee
+          call _ method _=case method of
+            "decoderawtransaction" -> pure decoded
+            "gettransaction" -> reject "rpc_error_-5"
+            _ -> expectationFailure "native recovery touched signer, wallet locks or broadcast" >> pure Null
+      storeAttempt l ob "Native" (nativeTxid tx) raw (fixtureJson signed) 1000 Nothing 0
+      before<-pendingAttempts l
+      held<-readIORef locks
+      result<-reconcilePaymentsWith transport{paymentNative=call} c l
+      recoveryOutcomes result `shouldReturn` ["unseen"]
+      pendingAttempts l `shouldReturn` before
+      readIORef locks `shouldReturn` held
+      ledgerAction l (\db->query_ db "SELECT released FROM fee_reservations" :: IO [Only Bool]) `shouldReturn` [Only False]
+    it "pauses and retains contradictory evidence or an unavailable RPC without duplicate alerts" $ withSendFixture $ \l c _ attempt transport -> do
+      let unavailable method params=if method=="getTransaction" then ioError (userError "offline connection lost") else paymentSolana transport method params
+      first<-reconcilePaymentsWith transport{paymentSolana=unavailable} c l
+      recoveryOutcomes first `shouldReturn` ["requires_review"]
+      [failure]<-fieldValue "attempts" first :: IO [Value]
+      fieldValue "error" failure `shouldReturn` Just ("payment_observation_io_unavailable"::Text)
+      second<-reconcilePaymentsWith transport{paymentSolana=unavailable} c l
+      second `shouldBe` first
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM audit WHERE action='pause' AND detail='payment_recovery:payment_observation_io_unavailable'" :: IO [Only Int]) `shouldReturn` [Only 1]
+      let premature method params=if method=="getSignatureStatuses" then pure $ contextContract $ toJSON [object ["confirmationStatus" .= ("processed"::Text)]] else paymentSolana transport method params
+      third<-reconcilePaymentsWith transport{paymentSolana=premature} c l
+      [contradiction]<-fieldValue "attempts" third :: IO [Value]
+      fieldValue "error" contradiction `shouldReturn` Just ("unrecorded_broadcast_observed"::Text)
+      map attemptBytes <$> pendingAttempts l `shouldReturn` [attemptBytes attempt]
+      available <$> readiness l `shouldReturn` False
+    it "retires conclusively expired bytes without authorizing a new preparation" $ withSendFixture $ \l c ob attempt transport -> do
+      let configured=expiryConfig c
+      recordExpiryOrigins l configured
+      _<-markBroadcastIntent l (attemptId attempt)
+      pause l "restart-quarantine"
+      result<-reconcilePaymentsWith transport{paymentSolana=expiryContract configured} configured l
+      recoveryOutcomes result `shouldReturn` ["expired"]
+      pendingAttempts l `shouldReturn` []
+      pendingPreparations l `shouldReturn` []
+      readyObligations l `shouldReturn` []
+      status <$> readOrder l cap (obligationOrder ob) `shouldReturn` "NeedsReview"
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM solana_retry_approvals" :: IO [Only Int]) `shouldReturn` [Only 0]
+      ledgerAction l (\db->query_ db "SELECT signed_bytes FROM attempts" :: IO [Only Text]) `shouldReturn` [Only $ attemptBytes attempt]
+    it "continues booking the other chain after one attempt requires review" $ withSendFixture $ \l c _ attempt transport -> do
+      captured<-BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
+      (plan,previous,fee,tx)<-nativeFixture
+      decoded<-fieldValue "decoded" captured :: IO Value
+      raw<-fieldValue "raw" captured
+      fundAllocation l "second-chain-fees" Sol "operating" (amt 3000000)
+      fundAllocation l "second-chain-inventory" Wrapped "float" (amt 100000)
+      o<-createOrder l c 100 cap req{refund=planRecipient plan,idempotencyKey="second-chain-refund"}
+      bindInstruction l (orderId o) "fixture-second-native-address"
+      observeDeposit l (Deposit "second-native:0" (Just $ orderId o) Native (amt 100000) "anchor" 1 True 100) "cursor"
+      ob<-createRefund l "second-native:0"
+      let signed=NativeSigned raw tx plan previous fee
+      testAttempt l c ob "Native" (nativeTxid tx) raw (fixtureJson signed) 1000 Nothing
+      _<-markBroadcastIntent l (nativeTxid tx)
+      let native _ method _=case method of
+            "decoderawtransaction" -> pure decoded
+            "gettransaction" -> pure $ object ["txid" .= nativeTxid tx,"hex" .= raw,"decoded" .= decoded
+              ,"fee" .= Number (negate (fromIntegral $ units fee) / 100000000),"confirmations" .= (2::Int),"walletconflicts" .= ([]::[Text]),"blockhash" .= custodyNativeTip]
+            "getblockheader" -> pure $ object ["hash" .= custodyNativeTip,"height" .= (100::Int),"confirmations" .= (2::Int)]
+            "getblockhash" -> pure $ toJSON custodyNativeTip
+            _ -> expectationFailure "unexpected native recovery RPC" >> pure Null
+          sol method params=if method=="getTransaction" then reject "rpc_error_429" else paymentSolana transport method params
+      result<-reconcilePaymentsWith transport{paymentNative=native,paymentSolana=sol} c l
+      reports<-fieldValue "attempts" result :: IO [Value]
+      mapM (fieldValue "error") reports `shouldReturn` [Just ("rpc_error_429"::Text),Nothing]
+      recoveryOutcomes result `shouldReturn` ["requires_review","settled"]
+      map attemptId <$> pendingAttempts l `shouldReturn` [attemptId attempt]
+      status <$> readOrder l cap (orderId o) `shouldReturn` "Refunded"
+      available <$> readiness l `shouldReturn` False
   describe "conclusive Solana expiry (offline recovery contracts)" $ do
     it "requires finalized absence on both complete account histories and every configured provider" $ withSendFixture $ \_ c _ attempt transport -> do
       signed<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ attemptPolicy attempt)

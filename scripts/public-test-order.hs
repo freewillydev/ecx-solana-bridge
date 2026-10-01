@@ -23,7 +23,6 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.Int (Int64)
 import Data.Text (Text)
-import qualified Data.Text as T
 import Database.SQLite.Simple
 import Network.HTTP.Client (Manager)
 import System.Environment (getArgs)
@@ -34,7 +33,7 @@ import System.Posix.Process (exitImmediately)
 main :: IO ()
 main=do
   args<-getArgs
-  (path,privateRequest,mode)<-case args of [a,b,m] | m `elem` ["prepare","transaction","run","refund","status","unsigned-solana","unsigned-native"] -> pure(a,b,m); _->fail "public-test-order CONFIG PRIVATE_REQUEST prepare|transaction|run|refund|status|unsigned-solana|unsigned-native"
+  (path,privateRequest,mode)<-case args of [a,b,m] | m `elem` ["prepare","transaction","run","refund","status","unsigned-solana","unsigned-native","interrupt-after-submit"] -> pure(a,b,m); _->fail "public-test-order CONFIG PRIVATE_REQUEST prepare|transaction|run|refund|status|unsigned-solana|unsigned-native|interrupt-after-submit"
   c<-loadConfig path
   require (profile c==L2LSignetDevnet && not (backupRequired c)
     && fingerprint c=="027929d80f528c8da4766560c2597c3971960bd47b4fc7c9f7648c0eba5996f8") "different_public_test_deployment"
@@ -47,12 +46,12 @@ main=do
       nativeDestination=if wrapping then refund request else recipient request
   require (units (input request)==10000 && if wrapping
     then recipient request==owner && idempotencyKey request `elem` ["public-test-wrap-1","public-test-unsigned-recovery-1"] && sourceOwner request==Nothing
-    else refund request==owner && sourceOwner request==Just owner && idempotencyKey request `elem` ["public-test-redeem-1","public-test-redeem-2"]) "unexpected_public_test_order"
+    else refund request==owner && sourceOwner request==Just owner && idempotencyKey request `elem` ["public-test-redeem-1","public-test-redeem-2","public-test-paused-recovery-1"]) "unexpected_public_test_order"
   manager<-newRpcManager
   withLedger (dbPath c) (fingerprint c) $ \ledger -> (do
     orders<-ledgerAction ledger $ \db -> query_ db "SELECT id,idempotency_key,status FROM orders" :: IO [(Text,Text,Text)]
-    require (length orders<=6 && all (\(_,key,st)->
-      (key `elem` ["public-test-wrap-1","public-test-redeem-1","public-test-redeem-2","public-test-unsigned-recovery-1"]
+    require (length orders<=7 && all (\(_,key,st)->
+      (key `elem` ["public-test-wrap-1","public-test-redeem-1","public-test-redeem-2","public-test-unsigned-recovery-1","public-test-paused-recovery-1"]
         && (key==idempotencyKey request || st `elem` ["Paid","Refunded"]))
       || (key `elem` ["provision-wrap-1","provision-redeem-1"] && st=="ExpiredUnfunded")) orders) "only_sequential_acceptance_orders"
     let existing=[oid | (oid,key,_)<-orders,key==idempotencyKey request]
@@ -76,6 +75,23 @@ main=do
             requireBalances manager c ledger
             resumeAfterChecks ledger
             prepareSolanaDeposit manager c ledger capability oid >>= output
+          "interrupt-after-submit"->do
+            require (not wrapping && idempotencyKey request=="public-test-paused-recovery-1") "only_paused_recovery_order"
+            observeOnce manager c ledger >>= requireHealthy
+            requireBalances manager c ledger
+            ob<-oneObligation ledger oid "conversion"
+            requireNoPreparation ledger ob
+            pendingAttempts ledger >>= \xs->require (null xs) "unrelated_pending_payment"
+            pendingPreparations ledger >>= \xs->require (null xs) "unrelated_pending_preparation"
+            resumeAfterChecks ledger
+            paymentPass manager c ledger (const $ reject "unexpected_remote_backup")
+            submitted<-pendingAttempts ledger
+            attempt<-case submitted of
+              [a] | attemptIntent a==obligationId ob && attemptChain a=="Native" && attemptState a=="broadcast_intent" -> pure a
+              _->reject "expected_one_recorded_native_broadcast"
+            output $ object ["forcedExitAfterSubmit" .= True,"transaction" .= attemptId attempt
+              ,"intent" .= obligationId ob,"booked" .= False]
+            exitImmediately (ExitFailure 75)
           "unsigned-solana"->do
             require (recovery && wrapping) "only_unsigned_recovery_order"
             observeOnce manager c ledger >>= requireHealthy
