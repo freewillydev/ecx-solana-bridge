@@ -34,12 +34,13 @@ recoverDeployment :: Manager -> Config -> Ledger -> IO Value
 recoverDeployment manager c ledger=do
   scans <- observeOnce manager c ledger
   epochSeconds >>= expireQuotes ledger
+  sources <- reconcileNativeSources manager c ledger
   nativeSettlements <- reconcileNativeSettlements manager c ledger
   payments <- reconcilePayments manager c ledger
   locks <- reconcileNativeLocks manager c ledger
   custody <- reconcileCustody manager c ledger
   health <- readiness ledger
-  pure $ object ["scanners" .= scans,"nativeSettlements" .= nativeSettlements,"payments" .= payments,"nativeLocks" .= locks,"custody" .= custody
+  pure $ object ["scanners" .= scans,"sources" .= sources,"nativeSettlements" .= nativeSettlements,"payments" .= payments,"nativeLocks" .= locks,"custody" .= custody
     ,"availability" .= health,"signedOrSent" .= False]
 
 -- Holding saved native inputs is independent of Solana availability. This may

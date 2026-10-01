@@ -13,6 +13,7 @@ module Bridge.Ledger
   , preparationCancellation, beginPreparationCancellation, finishPreparationCancellation, checkCustodyFresh
   , pendingAttempts, PaymentCosts(..), recordSettlement, createRefund, recordFailedSolana, recordSolanaExpiry, recordSolanaRetryApproval, requireBackup, addHint, auditExport, auditExportWithBudget
   , NativeSettlementCheck(..), nativeSettlementCandidates, recordNativeSettlementCheck
+  , SourceCheck(..), nativeSourceCandidates, recordSourceCheck
   ) where
 
 import Bridge.Config
@@ -46,7 +47,7 @@ import Text.Read (readMaybe)
 -- checks integrity and always starts paused; no caller can clear the fence.
 newtype Ledger = Ledger (MVar (Maybe Connection))
 schemaVersion :: Int
-schemaVersion = 11
+schemaVersion = 12
 sqliteIdentity :: Connection -> IO Value
 sqliteIdentity c = do
   versions <- query_ c "SELECT sqlite_version(),sqlite_source_id()" :: IO [(Text,Text)]
@@ -121,6 +122,8 @@ withLedger path identity action = do
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/010.sql"))) $ execute_ c . fromString . T.unpack
     when (meta `elem` [[(v,identity)] | v<-[1..10]]) $ withTransaction c $
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/011.sql"))) $ execute_ c . fromString . T.unpack
+    when (meta `elem` [[(v,identity)] | v<-[1..11]]) $ withTransaction c $
+      forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/012.sql"))) $ execute_ c . fromString . T.unpack
     -- Restart is quarantined until external identities and unresolved attempts are checked.
     execute_ c "UPDATE deployment SET paused=1,pause_reason='restart_requires_reconciliation'"
     execute_ c "UPDATE custody_check SET revision=revision+1"
@@ -151,6 +154,12 @@ resumeAfterChecks l = ledgerAction l $ \c -> do
   require (null nativeReviews) "native_settlement_requires_review"
   lost <- query_ c "SELECT id FROM deposits WHERE allocated=1 AND eligible=0 LIMIT 1" :: IO [Only Text]
   require (null lost) "source_reorg_requires_review"
+  sourceReviews <- query_ c "SELECT deposit_id FROM source_recovery_state WHERE state<>'restored' LIMIT 1" :: IO [Only Text]
+  require (null sourceReviews) "source_recovery_requires_review"
+  deficits <- query_ c "SELECT delta FROM postings WHERE account='source_deficit'" :: IO [Only Int64]
+  require (sum [toInteger n | Only n<-deficits]==0) "source_shortfall_requires_review"
+  obligations <- query_ c "SELECT id FROM obligations WHERE status='review' LIMIT 1" :: IO [Only Text]
+  require (null obligations) "obligations_require_review"
   legacy <- query_ c "SELECT q.id FROM orders q LEFT JOIN order_cost_limits p ON p.order_id=q.id WHERE p.order_id IS NULL AND (q.status NOT IN('Paid','Refunded','ExpiredUnfunded') OR EXISTS(SELECT 1 FROM obligations o WHERE o.order_id=q.id AND o.status NOT IN('paid','cancelled'))) LIMIT 1" :: IO [Only Text]
   require (null legacy) "legacy_order_cost_review_required"
   execute_ c "UPDATE deployment SET paused=0,pause_reason='ready'"
@@ -342,7 +351,7 @@ findOrderC c cfg cap req = do
     _ -> reject "duplicate_idempotency"
 readOrderC :: Connection -> Text -> Text -> IO OrderView
 readOrderC c cap oid = do
-  rows <- query c "SELECT request_json,quote_json,CASE WHEN EXISTS(SELECT 1 FROM native_payment_recovery_state r JOIN attempts a ON a.txid=r.txid JOIN intents i ON i.id=a.intent_id JOIN obligations o ON o.id=i.obligation_id WHERE o.order_id=orders.id AND r.state<>'reconfirmed') THEN 'NeedsReview' ELSE status END,deadline,instruction,payout_tx,policy_json FROM orders WHERE id=? AND capability_hash=?" (oid,cap) :: IO [(Text,Text,Text,Int64,Maybe Text,Maybe Text,Text)]
+  rows <- query c "SELECT request_json,quote_json,CASE WHEN EXISTS(SELECT 1 FROM native_payment_recovery_state r JOIN attempts a ON a.txid=r.txid JOIN intents i ON i.id=a.intent_id JOIN obligations o ON o.id=i.obligation_id WHERE o.order_id=orders.id AND r.state<>'reconfirmed') OR EXISTS(SELECT 1 FROM source_recovery_state r JOIN deposits d ON d.id=r.deposit_id WHERE d.order_id=orders.id AND r.state<>'restored') OR EXISTS(SELECT 1 FROM obligations o WHERE o.order_id=orders.id AND o.status='review') THEN 'NeedsReview' ELSE status END,deadline,instruction,payout_tx,policy_json FROM orders WHERE id=? AND capability_hash=?" (oid,cap) :: IO [(Text,Text,Text,Int64,Maybe Text,Maybe Text,Text)]
   case rows of
     [(r,q,s,d,i,t,p)] -> OrderView oid <$> fromText r <*> fromText q <*> pure s <*> pure d <*> pure i <*> pure t <*> fromText p
     _ -> reject "order_not_found"
@@ -592,21 +601,83 @@ observeDepositC c Deposit{..} = do
           require (sourceAsset (direction req)==depositAsset) "deposit_asset_mismatch"
           when (depositAsset==Native && depositEligible) $ require (depositConfirmations>=nativeDepth policy) "deposit_confirmation_policy_mismatch"
         _ -> reject "deposit_order_missing"
-  rows <- query c "SELECT order_id,asset,amount FROM deposits WHERE id=?" (Only depositId) :: IO [(Maybe Text,Text,Int64)]
+  rows <- query c "SELECT order_id,asset,amount,eligible,anchor FROM deposits WHERE id=?" (Only depositId) :: IO [(Maybe Text,Text,Int64,Bool,Text)]
   case rows of
     [] -> do
       execute c "INSERT INTO deposits(id,order_id,asset,amount,anchor,confirmations,eligible,first_seen) VALUES(?,?,?,?,?,?,?,?)" (depositId,depositOrder,T.pack (show depositAsset),units depositAmount,depositAnchor,depositConfirmations,depositEligible,depositSeenAt)
       let account = maybe "unallocated" (const "principal") depositOrder
       posting c ("deposit:"<>depositId) "observed customer value" [(depositAsset,account,toInteger (units depositAmount)),(depositAsset,"external",negate $ toInteger $ units depositAmount)]
-    [(oid,a,n)] -> do
+    [(oid,a,n,wasEligible,previousAnchor)] -> do
       require (oid==depositOrder && a==T.pack (show depositAsset) && n==units depositAmount) "conflicting_deposit_evidence"
       execute c "UPDATE deposits SET anchor=?,confirmations=?,eligible=? WHERE id=?" (depositAnchor,depositConfirmations,depositEligible,depositId)
+      when (wasEligible && not depositEligible) $ recordSourceCheckC c depositId $ SourceUnavailable $ object
+        ["reason" .= ("source_eligibility_lost"::Text),"previousAnchor" .= previousAnchor,"anchor" .= depositAnchor]
+      -- The finalized Solana observer already requires the configured provider
+      -- agreement. Native recovery separately rechecks active blocks/mempool.
+      when (depositAsset/=Native && depositEligible) $ do
+        reviews <- query c "SELECT deposit_id FROM source_recovery_state WHERE deposit_id=? AND state<>'restored' AND shortfall=0" (Only depositId) :: IO [Only Text]
+        when (not $ null reviews) $ recordSourceCheckC c depositId $ SourceRestored $ object ["anchor" .= depositAnchor,"verifiedBy" .= ("source_observer"::Text)]
       when (not depositEligible) $ do
         allocated <- query c "SELECT allocated FROM deposits WHERE id=?" (Only depositId) :: IO [Only Bool]
         when (allocated == [Only True]) $ do
           execute_ c "UPDATE deployment SET paused=1,pause_reason='source_reorg_review'"
           execute c "UPDATE obligations SET status='review' WHERE deposit_id=? AND status NOT IN('paid','cancelled')" (Only depositId)
     _ -> reject "duplicate_deposit"
+
+data SourceCheck = SourcePending Value | SourceMissing Value | SourceRestored Value | SourceUnavailable Value
+  deriving (Eq,Show)
+
+nativeSourceCandidates :: Ledger -> IO [Deposit]
+nativeSourceCandidates l = ledgerAction l $ \c->do
+  rows <- query_ c "SELECT d.id,d.order_id,d.amount,d.anchor,d.confirmations,d.eligible,d.first_seen FROM deposits d LEFT JOIN source_recovery_state r ON r.deposit_id=d.id WHERE d.asset='Native' AND (d.eligible=0 OR r.state<>'restored') ORDER BY d.rowid LIMIT 1001" :: IO [(Text,Maybe Text,Int64,Text,Int,Bool,Int64)]
+  mapM (\(did,oid,n,anchor,depth,eligible,seen)->do
+    quantity<-either reject pure (amount $ toInteger n)
+    pure $ Deposit did oid Native quantity anchor depth eligible seen) rows
+
+-- Commit only against the exact observed receipt; a stale RPC result cannot
+-- replace newer source evidence. No obligation or reservation is released.
+recordSourceCheck :: Ledger -> Deposit -> SourceCheck -> IO ()
+recordSourceCheck l expected check = ledgerAction l $ \c->do
+  current <- query c "SELECT order_id,asset,amount,anchor,confirmations,eligible,first_seen FROM deposits WHERE id=?" (Only $ depositId expected)
+  require (current==[(depositOrder expected,T.pack(show $ depositAsset expected),units $ depositAmount expected
+    ,depositAnchor expected,depositConfirmations expected,depositEligible expected,depositSeenAt expected)]) "source_recovery_changed"
+  let observedProof=case check of SourcePending p->Just p; SourceMissing p->Just p; SourceRestored p->Just p; SourceUnavailable _->Nothing
+  forM_ observedProof $ \proof -> do
+    expectedHash<-either (const $ reject "source_recovery_scan_not_current") pure (parseEither (withObject "source proof" (.: "observationHash")) proof)
+    txid<-case T.splitOn ":" (depositId expected) of ["native",tx,_]->pure tx; _->reject "invalid_native_deposit_id"
+    history<-query c "SELECT evidence_hash FROM chain_events WHERE chain='Native' AND event_id=?" (Only txid) :: IO [Only Text]
+    require (history==[Only expectedHash]) "source_recovery_scan_not_current"
+  recordSourceCheckC c (depositId expected) check
+
+recordSourceCheckC :: Connection -> Text -> SourceCheck -> IO ()
+recordSourceCheckC c did check = do
+  sources <- query c "SELECT asset,amount,eligible,allocated FROM deposits WHERE id=?" (Only did) :: IO [(Text,Int64,Bool,Bool)]
+  (asset,n,eligible,allocated) <- case sources of
+    [(a,n,e,used)] -> do
+      asset<-case a of "Native"->pure Native; "Wrapped"->pure Wrapped; "Sol"->pure Sol; _->reject "invalid_source_asset"
+      pure(asset,n,e,used)
+    _->reject "source_deposit_missing"
+  old <- query c "SELECT state,shortfall,evidence_json FROM source_recovery_state WHERE deposit_id=?" (Only did) :: IO [(Text,Int64,Text)]
+  let previousLoss=case old of [(_,value,_)]->value; _->0
+  (state,loss,proof) <- case check of
+    SourcePending proof -> require (not eligible && asset==Native) "source_recovery_scan_not_current" >> pure("pending",0,proof)
+    SourceMissing proof -> require (not eligible && asset==Native) "source_recovery_scan_not_current" >> pure("missing",n,proof)
+    SourceRestored proof -> require eligible "source_recovery_scan_not_current" >> pure("restored",0,proof)
+    SourceUnavailable proof -> pure("unavailable",previousLoss,proof)
+  let evidence=jsonText proof
+      -- A newly seen, still-confirming deposit is ordinary intake. A loss of
+      -- prior eligibility is already journaled by the observer above.
+      ordinary=null old && not allocated && state=="pending"
+      unchanged=case old of [(s,previous,p)]->s==state && previous==loss && (state/="unavailable" || p==evidence); _->False
+  require (proof/=Null && T.length evidence<=16384) "invalid_source_recovery_evidence"
+  when (not ordinary && not unchanged) $ do
+    sequenceNo <- criticalSequence c
+    execute c "INSERT INTO source_recoveries(deposit_id,state,shortfall,evidence_json,critical_sequence) VALUES(?,?,?,?,?)" (did,state,loss,evidence,sequenceNo)
+    let delta=toInteger loss-toInteger previousLoss
+    when (delta/=0) $ posting c ("source-recovery:"<>T.pack(show sequenceNo)) "change in verified missing source value"
+      [(asset,"source_deficit",negate delta),(asset,"external",delta)]
+    execute_ c "UPDATE deployment SET paused=1,pause_reason='source_recovery_review'"
+    execute c "INSERT INTO audit(action,detail) VALUES('source_recovery',?)" (Only $ did<>":"<>state)
 checkpoint :: Connection -> Text -> Text -> IO ()
 checkpoint c chain anchor = execute c "INSERT INTO checkpoints(chain,anchor) VALUES(?,?) ON CONFLICT(chain) DO UPDATE SET anchor=excluded.anchor" (chain,anchor)
 promoteDeposit :: Ledger -> Int64 -> Text -> IO Bool
@@ -1001,12 +1072,13 @@ auditExportWithBudget l cfg = ledgerAction l $ \c -> do
   payments <- query_ c "SELECT a.txid,i.id,i.chain,a.state,a.preparation_generation FROM attempts a JOIN intents i ON i.id=a.intent_id LEFT JOIN solana_expiries e ON e.txid=a.txid WHERE i.resolved=0 AND e.txid IS NULL ORDER BY a.rowid" :: IO [(Text,Text,Text,Text,Int)]
   cancelling <- query_ c "SELECT intent_id,generation FROM preparation_cancellations WHERE completed=0" :: IO [(Text,Int)]
   nativeReviews <- query_ c "SELECT txid,state,critical_sequence FROM native_payment_recovery_state ORDER BY id DESC LIMIT 100" :: IO [(Text,Text,Int64)]
+  sourceReviews <- query_ c "SELECT r.deposit_id,d.order_id,d.asset,d.amount,r.state,r.shortfall,r.critical_sequence,CASE WHEN EXISTS(SELECT 1 FROM obligations o WHERE o.deposit_id=d.id AND o.status='paid') THEN 'paid' WHEN EXISTS(SELECT 1 FROM obligations o JOIN intents i ON i.obligation_id=o.id JOIN attempts a ON a.intent_id=i.id WHERE o.deposit_id=d.id AND a.state='broadcast_intent') THEN 'possibly_sent' WHEN EXISTS(SELECT 1 FROM obligations o JOIN intents i ON i.obligation_id=o.id JOIN attempts a ON a.intent_id=i.id WHERE o.deposit_id=d.id AND a.state='signed') THEN 'signed' WHEN d.allocated=1 THEN 'allocated' ELSE 'unallocated' END FROM source_recovery_state r JOIN deposits d ON d.id=r.deposit_id ORDER BY r.state='restored',r.id DESC LIMIT 100" :: IO [(Text,Maybe Text,Text,Int64,Text,Int64,Int64,Text)]
   let recoveries=toJSON [object ["intent" .= obligationId (preparationObligation p),"generation" .= preparationGeneration p
         ,"chain" .= preparationChain p,"hasDraft" .= (preparationDraft p/=Nothing)
         ,"cancellationPending" .= ((obligationId $ preparationObligation p,preparationGeneration p) `elem` cancelling)] | p<-preparations]
       pending=toJSON [object ["transaction" .= tx,"intent" .= intent,"chain" .= chain,"state" .= state,"generation" .= g] | (tx,intent,chain,state,g)<-payments]
   case audit of
-    Object fields -> pure $ Object (KM.insert "nativeSettlementRecovery" (toJSON [object ["transaction" .= tx,"state" .= state,"criticalSequence" .= sequenceNo] | (tx,state,sequenceNo)<-nativeReviews]) $ KM.insert "pendingPayments" pending $ KM.insert "unsignedPreparations" recoveries $ KM.insert "custodyReconciliation" custody $ KM.insert "operatingBudget" budget fields)
+    Object fields -> pure $ Object (KM.insert "sourceRecovery" (toJSON [object ["deposit" .= did,"order" .= oid,"asset" .= asset,"amount" .= T.pack(show n),"state" .= state,"shortfall" .= T.pack(show loss),"criticalSequence" .= sequenceNo,"paymentExposure" .= exposure] | (did,oid,asset,n,state,loss,sequenceNo,exposure)<-sourceReviews]) $ KM.insert "nativeSettlementRecovery" (toJSON [object ["transaction" .= tx,"state" .= state,"criticalSequence" .= sequenceNo] | (tx,state,sequenceNo)<-nativeReviews]) $ KM.insert "pendingPayments" pending $ KM.insert "unsignedPreparations" recoveries $ KM.insert "custodyReconciliation" custody $ KM.insert "operatingBudget" budget fields)
     _ -> reject "invalid_audit_export"
 custodyHealth :: Ledger -> IO Value
 custodyHealth l = ledgerAction l custodyHealthC

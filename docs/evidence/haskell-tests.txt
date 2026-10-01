@@ -1,14 +1,6 @@
 Build profile: -w ghc-9.14.1 -O1
 In order, the following will be built (use -v for more details):
- - ecx-bridge-0.1.0.0 (lib) (file docs/STATUS.md changed)
- - ecx-bridge-0.1.0.0 (test:bridge-test) (dependency rebuilt)
-Preprocessing library for ecx-bridge-0.1.0.0...
-Building library for ecx-bridge-0.1.0.0...
-[13 of 26] Compiling Bridge.Ledger    ( src/Bridge/Ledger.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Ledger.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Ledger.dyn_o ) [Source file changed]
-[18 of 26] Compiling Bridge.Reconciliation ( src/Bridge/Reconciliation.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Reconciliation.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Reconciliation.dyn_o ) [Source file changed]
-[20 of 26] Compiling Bridge.Deposit   ( src/Bridge/Deposit.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Deposit.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Deposit.dyn_o ) [Bridge.Ledger changed]
-[23 of 26] Compiling Bridge.Order     ( src/Bridge/Order.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Order.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Order.dyn_o ) [Bridge.Ledger changed]
-[26 of 26] Compiling Bridge.Worker    ( src/Bridge/Worker.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Worker.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Worker.dyn_o ) [Bridge.Ledger changed]
+ - ecx-bridge-0.1.0.0 (test:bridge-test) (file test/Spec.hs changed)
 Preprocessing test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Building test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 [1 of 1] Compiling Main             ( test/Spec.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test-tmp/Main.o ) [Source file changed]
@@ -166,6 +158,23 @@ native lock recovery (offline RPC and SQLite restart contracts)
   does not sign when a success reply is contradicted by the wallet's actual locks [✔]
   leaves a draftless preparation intact and refuses any unexplained locks [✔]
   refuses the wrong wallet before touching its locks [✔]
+native source recovery (captured receipt, offline RPC and accounting contracts)
+  keeps a newly observed mempool receipt pending without opening a recovery incident [✔]
+  journals lost eligibility atomically and retains unsigned obligations, principal and holds [✔]
+  records a proved source deficit without releasing a signed attempt: broadcast=False [✔]
+  records a proved source deficit without releasing a signed attempt: broadcast=True [✔]
+  preserves a paid payout through loss, reopening, mempool return and source reconfirmation [✔]
+  still books a possibly broadcast payout after the source conflict without paying or refunding again [✔]
+  keeps an already recorded deficit when later RPC evidence is unavailable [✔]
+  does not book a deficit on ambiguous or contradictory evidence: mempool-conflict [✔]
+  does not book a deficit on ambiguous or contradictory evidence: unspent-conflict [✔]
+  does not book a deficit on ambiguous or contradictory evidence: absent-mempool [✔]
+  does not book a deficit on ambiguous or contradictory evidence: missing-wallet [✔]
+  does not book a deficit on ambiguous or contradictory evidence: wrong-output [✔]
+  does not book a deficit on ambiguous or contradictory evidence: stale-scan [✔]
+  does not book a deficit on ambiguous or contradictory evidence: identity-refusal [✔]
+  refuses stale receipt and observation snapshots [✔]
+  rolls back the recovery decision if its financial posting cannot commit [✔]
 native settlement finality recovery (offline RPC contracts)
   shows review for an additional refund while preserving the original conversion link [✔]
   reopens a lost-finality review and reconfirms the same payment without another financial decision [✔]
@@ -277,8 +286,8 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 4.3471 seconds
-227 examples, 0 failures
+Finished in 4.9484 seconds
+243 examples, 0 failures
 Test suite bridge-test: PASS
 Test suite logged to: /Volumes/Crucial
 X9/CodexBuilds/ecx-bridge-20260930/workspace-b/outputs/ecx-bridge/./../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log

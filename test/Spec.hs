@@ -234,6 +234,95 @@ nativeSettlementPrevious l a=do
 nativeSettlementStates :: Value -> IO [Text]
 nativeSettlementStates value=fieldValue "payments" value >>= mapM (fieldValue "state")
 
+-- Real receipt bytes/identity with deliberately changed RPC responses below.
+-- Only the production adapter uses a network; these are offline contracts.
+withNativeSource :: (Ledger -> Config -> Deposit -> IORef (Maybe Value) -> PaymentTransport -> IO a) -> IO a
+withNativeSource action=withDir $ \dir->withNativeSourceAt True dir action
+
+withNativeSourceAt :: Bool -> FilePath -> (Ledger -> Config -> Deposit -> IORef (Maybe Value) -> PaymentTransport -> IO a) -> IO a
+withNativeSourceAt initiallyEligible dir action=withFundedAt dir $ \l c->do
+  captured<-BS.readFile "test/fixtures/native-signet-source.json" >>= either fail pure . eitherDecodeStrict'
+  original<-fieldValue "transaction" captured
+  ownership<-fieldValue "ownership" captured
+  txid<-fieldValue "txid" original
+  [detail]<-fieldValue "details" original :: IO [Value]
+  address<-fieldValue "address" detail
+  index<-fieldValue "vout" detail :: IO Int
+  quantity<-fieldValue "amount" detail >>= either reject pure . nativeAmount
+  anchor<-fieldValue "blockhash" original
+  depth<-fieldValue "confirmations" original :: IO Int
+  position<-fieldValue "lastprocessedblock" original
+  nodeHeight<-fieldValue "height" position :: IO Int64
+  nodeBlock<-fieldValue "hash" position
+  o<-createOrder l c 100 cap req{input=quantity}
+  bindInstruction l (orderId o) address
+  let source=Deposit ("native:"<>txid<>":"<>T.pack(show index)) (Just $ orderId o) Native quantity anchor depth initiallyEligible 100
+      value=if initiallyEligible then original else setPath ["confirmations"] (Number 0) $ setPath ["blockhash"] Null original
+      firstSource=if initiallyEligible then source else source{depositAnchor="unconfirmed",depositConfirmations=0}
+  wallet<-newIORef (Just value)
+  writeSourceHistory l c firstSource value
+  let unavailable method=expectationFailure ("unexpected source-recovery RPC: "<>T.unpack method) >> pure Null
+      call selected method params=case (method,params) of
+        ("getwalletinfo",[])->pure $ object ["walletname" .= nativeWallet c,"descriptors" .= True,"scanning" .= False,"lastprocessedblock" .= position]
+        ("gettransaction",[wanted,Bool False,Bool True])->do
+          selected `shouldBe` True
+          wanted `shouldBe` toJSON txid
+          readIORef wallet >>= maybe (reject "rpc_error_-5") pure
+        ("getaddressinfo",[wanted])->do
+          wanted `shouldBe` toJSON address
+          pure ownership
+        ("getblockheader",[String block])->pure $ object ["hash" .= block,"confirmations" .= (100::Int)
+          ,"height" .= (if block==nodeBlock then nodeHeight else nodeHeight-fromIntegral depth+1)]
+        ("getblockhash",[height])->pure $ toJSON $ if height==toJSON nodeHeight then nodeBlock else anchor
+        ("getmempoolentry",[wanted])->do
+          wanted `shouldBe` toJSON txid
+          current<-readIORef wallet >>= maybe (reject "rpc_error_-5") pure
+          confirmations<-fieldValue "confirmations" current :: IO Int
+          if confirmations==0 then pure (object ["vsize" .= (141::Int)]) else reject "rpc_error_-5"
+        ("gettxout",[wanted,n,Bool True])->do
+          wanted `shouldBe` toJSON txid
+          n `shouldBe` toJSON index
+          pure Null
+        _->unavailable method
+      transport=PaymentTransport call (\method _->unavailable method) Nothing (pure ())
+        (const $ expectationFailure "source recovery requested a backup/send decision")
+  action l c firstSource wallet transport
+
+writeSourceHistory :: Ledger -> Config -> Deposit -> Value -> IO ()
+writeSourceHistory l c source value=do
+  txid<-fieldValue "txid" value
+  depth<-fieldValue "confirmations" value :: IO Int
+  previous<-readCheckpoint l "Native"
+  commitScan l $ ScanBatch "Native" (nativeCheckpointHash c) previous custodyNativeTip 100 [source]
+    [ChainEvent txid "incoming" (depositAnchor source) (object ["confirmations" .= depth])]
+
+changeSource :: Ledger -> Config -> Deposit -> IORef (Maybe Value) -> Int -> IO Deposit
+changeSource l c original wallet depth=do
+  current<-readIORef wallet >>= maybe (fail "restore the captured wallet value first") pure
+  let anchor=if depth>0 then depositAnchor original else "unconfirmed"
+      source=original{depositConfirmations=max 0 depth,depositEligible=depth>=nativeConfirmations c,depositAnchor=anchor}
+      value=setPath ["confirmations"] (toJSON depth) $ setPath ["blockhash"] (if depth>0 then String anchor else Null)
+        $ setPath ["walletconflicts"] (toJSON [T.replicate 64 "f" | depth<0]) current
+  writeIORef wallet (Just value)
+  writeSourceHistory l c source value
+  pure source
+
+sourceStates :: Value -> IO [Text]
+sourceStates value=fieldValue "sources" value >>= mapM (fieldValue "state")
+
+sourceBalance :: Ledger -> Text -> IO Integer
+sourceBalance l account=ledgerAction l $ \db->fold db "SELECT delta FROM postings WHERE asset='Native' AND account=?" (Only account) 0
+  (\acc (Only n::Only Int64)->pure $ acc+toInteger n)
+
+sourceObligation :: Ledger -> Deposit -> IO Obligation
+sourceObligation l source=do
+  promoteDeposit l 110 (depositId source) `shouldReturn` True
+  [ob]<-readyObligations l
+  pure ob
+
+sourceAttempt :: Ledger -> Config -> Obligation -> IO ()
+sourceAttempt l c ob=testAttempt l c ob "Solana" "offline-source-payout" "offline-source-signed-bytes" "offline-ledger-policy" 5000 Nothing
+
 -- The captured bytes supply economic validation; RPC responses below are
 -- explicitly offline contracts, not evidence of a new chain transaction.
 withNativeAdmission :: (Config -> NativePlan -> IORef [Text] -> NativeRPC -> IO a) -> IO a
@@ -1762,6 +1851,158 @@ main=hspec $ do
       result<-reconcileNativeLocksWith transport{paymentNative=wrong} c l
       fieldValue "error" result `shouldReturn` ("native_wallet_not_ready"::Text)
       readIORef calls `shouldReturn` ["getwalletinfo"]
+  describe "native source recovery (captured receipt, offline RPC and accounting contracts)" $ do
+    it "keeps a newly observed mempool receipt pending without opening a recovery incident" $ withDir $ \dir->
+      withNativeSourceAt False dir $ \l c _ _ transport->do
+        before<-auditExport l
+        result<-reconcileNativeSourcesWith transport c l
+        sourceStates result `shouldReturn` ["pending"]
+        auditExport l `shouldReturn` before
+        available <$> readiness l `shouldReturn` True
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM source_recoveries" :: IO [Only Int]) `shouldReturn` [Only 0]
+    it "journals lost eligibility atomically and retains unsigned obligations, principal and holds" $ withNativeSource $ \l c source wallet transport->do
+      ob<-sourceObligation l source
+      before<-auditExport l
+      _<-changeSource l c source wallet 0
+      status <$> readOrder l cap (obligationOrder ob) `shouldReturn` "NeedsReview"
+      result<-reconcileNativeSourcesWith transport c l
+      sourceStates result `shouldReturn` ["pending"]
+      sourceBalance l "principal" `shouldReturn` toInteger (units $ depositAmount source)
+      sourceBalance l "source_deficit" `shouldReturn` 0
+      afterLoss<-auditExport l
+      oldBalances<-fieldValue "balances" before :: IO Value
+      oldEvents<-fieldValue "events" before :: IO Value
+      fieldValue "balances" afterLoss `shouldReturn` oldBalances
+      fieldValue "events" afterLoss `shouldReturn` oldEvents
+      ledgerAction l (\db->query_ db "SELECT status FROM obligations" :: IO [Only Text]) `shouldReturn` [Only "review"]
+      ledgerAction l (\db->query_ db "SELECT phase FROM reservations" :: IO [Only Text]) `shouldReturn` [Only "obligation"]
+      resumeAfterChecks l `shouldThrow` isError "source_reorg_requires_review"
+      _<-changeSource l c source wallet 2
+      _<-reconcileNativeSourcesWith transport c l
+      status <$> readOrder l cap (obligationOrder ob) `shouldReturn` "NeedsReview"
+      resumeAfterChecks l `shouldThrow` isError "obligations_require_review"
+      sourceBalance l "source_deficit" `shouldReturn` 0
+    forM_ [False,True] $ \broadcast->
+      it ("records a proved source deficit without releasing a signed attempt: broadcast="<>show broadcast) $ withNativeSource $ \l c source wallet transport->do
+        ob<-sourceObligation l source
+        sourceAttempt l c ob
+        when broadcast $ markBroadcastIntent l "offline-source-payout" >> pure ()
+        attempts<-pendingAttempts l
+        holds<-ledgerAction l (\db->query_ db "SELECT amount,released FROM fee_reservations" :: IO [(Int64,Bool)])
+        _<-changeSource l c source wallet (-1)
+        result<-reconcileNativeSourcesWith transport c l
+        sourceStates result `shouldReturn` ["missing"]
+        sourceBalance l "source_deficit" `shouldReturn` negate (toInteger $ units $ depositAmount source)
+        sourceBalance l "principal" `shouldReturn` toInteger (units $ depositAmount source)
+        pendingAttempts l `shouldReturn` attempts
+        ledgerAction l (\db->query_ db "SELECT amount,released FROM fee_reservations" :: IO [(Int64,Bool)]) `shouldReturn` holds
+        ledgerAction l (\db->query_ db "SELECT phase FROM reservations" :: IO [Only Text]) `shouldReturn` [Only "payment"]
+        createRefund l (depositId source) `shouldThrow` isError "refundable_deposit_not_found"
+        when broadcast $ authorizeRecordedSend l False "offline-source-payout" `shouldThrow` isError "source_not_eligible"
+        proof<-auditExportWithBudget l c >>= fieldValue "sourceRecovery" :: IO [Value]
+        mapM (fieldValue "paymentExposure") proof `shouldReturn` [if broadcast then "possibly_sent" else "signed"::Text]
+        before<-auditExport l
+        _<-reconcileNativeSourcesWith transport c l
+        auditExport l `shouldReturn` before
+    it "preserves a paid payout through loss, reopening, mempool return and source reconfirmation" $ withDir $ \dir->do
+      saved<-withNativeSourceAt True dir $ \l c source wallet transport->do
+        ob<-sourceObligation l source
+        sourceAttempt l c ob
+        _<-markBroadcastIntent l "offline-source-payout"
+        recordSettlement l "offline-source-payout" (PaymentCosts (amt 5000) (amt 0)) "offline-verified-outcome"
+        _<-changeSource l c source wallet (-2)
+        _<-reconcileNativeSourcesWith transport c l
+        status <$> readOrder l cap (obligationOrder ob) `shouldReturn` "NeedsReview"
+        sourceBalance l "principal" `shouldReturn` 0
+        sourceBalance l "source_deficit" `shouldReturn` (-10000)
+        rows<-auditExportWithBudget l c >>= fieldValue "sourceRecovery" :: IO [Value]
+        mapM (fieldValue "paymentExposure") rows `shouldReturn` ["paid"::Text]
+        before<-auditExport l
+        pure(c,source,wallet,transport,ob,before)
+      let (c,source,wallet,transport,ob,before)=saved
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        _<-reconcileNativeSourcesWith transport c l
+        auditExport l `shouldReturn` before
+        _<-changeSource l c source wallet 0
+        unconfirmed<-reconcileNativeSourcesWith transport c l
+        sourceStates unconfirmed `shouldReturn` ["pending"]
+        sourceBalance l "source_deficit" `shouldReturn` 0
+        status <$> readOrder l cap (obligationOrder ob) `shouldReturn` "NeedsReview"
+        _<-changeSource l c source wallet 2
+        restored<-reconcileNativeSourcesWith transport c l
+        sourceStates restored `shouldReturn` ["restored"]
+        status <$> readOrder l cap (obligationOrder ob) `shouldReturn` "Paid"
+        payoutTx <$> readOrder l cap (obligationOrder ob) `shouldReturn` Just "offline-source-payout"
+        available <$> readiness l `shouldReturn` False
+        ledgerAction l (\db->query_ db "SELECT state,signed_bytes FROM attempts" :: IO [(Text,Text)]) `shouldReturn` [("settled","offline-source-signed-bytes")]
+        ledgerAction l (\db->query_ db "SELECT delta FROM postings WHERE account='source_deficit' ORDER BY id" :: IO [Only Int64]) `shouldReturn` [Only (-10000),Only 10000]
+        ledgerAction l (\db->query_ db "SELECT SUM(delta) FROM postings GROUP BY asset" :: IO [Only Int64]) `shouldReturn` replicate 3 (Only 0)
+        repeated<-reconcileNativeSourcesWith transport{paymentIdentity=expectationFailure "completed source recovery repeated IO"} c l
+        sourceStates repeated `shouldReturn` []
+    it "still books a possibly broadcast payout after the source conflict without paying or refunding again" $ withNativeSource $ \l c source wallet transport->do
+      ob<-sourceObligation l source
+      sourceAttempt l c ob
+      _<-markBroadcastIntent l "offline-source-payout"
+      _<-changeSource l c source wallet (-1)
+      _<-reconcileNativeSourcesWith transport c l
+      recordSettlement l "offline-source-payout" (PaymentCosts (amt 5000) (amt 0)) "offline-verified-outcome"
+      sourceBalance l "source_deficit" `shouldReturn` (-10000)
+      sourceBalance l "principal" `shouldReturn` 0
+      status <$> readOrder l cap (obligationOrder ob) `shouldReturn` "NeedsReview"
+      pendingAttempts l `shouldReturn` []
+      createRefund l (depositId source) `shouldThrow` isError "refundable_deposit_not_found"
+      before<-auditExport l
+      recordSettlement l "offline-source-payout" (PaymentCosts (amt 5000) (amt 0)) "offline-verified-outcome"
+      auditExport l `shouldReturn` before
+    it "keeps an already recorded deficit when later RPC evidence is unavailable" $ withNativeSource $ \l c source wallet transport->do
+      _<-sourceObligation l source
+      _<-changeSource l c source wallet (-1)
+      _<-reconcileNativeSourcesWith transport c l
+      before<-auditExport l
+      writeIORef wallet Nothing
+      result<-reconcileNativeSourcesWith transport c l
+      sourceStates result `shouldReturn` ["requires_review"]
+      sourceBalance l "source_deficit" `shouldReturn` (-10000)
+      auditExport l `shouldReturn` before
+    forM_ ["mempool-conflict","unspent-conflict","absent-mempool","missing-wallet","wrong-output","stale-scan","identity-refusal"] $ \fault->
+      it ("does not book a deficit on ambiguous or contradictory evidence: "<>fault) $ withNativeSource $ \l c source wallet transport->do
+        _<-sourceObligation l source
+        _<-changeSource l c source wallet (if fault `elem` ["mempool-conflict","unspent-conflict"] then -1 else 0)
+        let base=paymentNative transport
+            call selected method params=case (fault,method) of
+              ("mempool-conflict","getmempoolentry")->pure (object ["vsize" .= (141::Int)])
+              ("unspent-conflict","gettxout")->pure (object ["confirmations" .= (1::Int)])
+              ("absent-mempool","getmempoolentry")->reject "rpc_error_-5"
+              _->base selected method params
+        when (fault=="missing-wallet") $ writeIORef wallet Nothing
+        when (fault=="wrong-output") $ modifyIORef' wallet (fmap $ setPath ["details"] (toJSON ([]::[Value])))
+        when (fault=="stale-scan") $ modifyIORef' wallet (fmap $ setPath ["confirmations"] (Number (-1)))
+        let checked=transport{paymentNative=call,paymentIdentity=if fault=="identity-refusal" then reject "native_checkpoint_mismatch" else pure ()}
+        before<-auditExport l
+        result<-reconcileNativeSourcesWith checked c l
+        sourceStates result `shouldReturn` ["requires_review"]
+        sourceBalance l "source_deficit" `shouldReturn` 0
+        auditExport l `shouldReturn` before
+    it "refuses stale receipt and observation snapshots" $ withNativeSource $ \l c source wallet _->do
+      lost<-changeSource l c source wallet 0
+      recordSourceCheck l source (SourceUnavailable $ object ["reason" .= ("stale callback"::Text)]) `shouldThrow` isError "source_recovery_changed"
+      recordSourceCheck l lost (SourcePending $ object ["observationHash" .= ("stale"::Text)]) `shouldThrow` isError "source_recovery_scan_not_current"
+      sourceBalance l "source_deficit" `shouldReturn` 0
+    it "rolls back the recovery decision if its financial posting cannot commit" $ withDir $ \dir->do
+      saved<-withNativeSourceAt True dir $ \l c source wallet transport->do
+        _<-sourceObligation l source
+        _<-changeSource l c source wallet (-1)
+        before<-auditExport l
+        ledgerAction l $ \db->execute_ db "CREATE TRIGGER refuse_source_deficit BEFORE INSERT ON postings WHEN NEW.account='source_deficit' BEGIN SELECT RAISE(ABORT,'offline_write_failure'); END"
+        reconcileNativeSourcesWith transport c l `shouldThrow` (\err->sqlError err==ErrorConstraint)
+        readiness l `shouldThrow` isError "ledger_requires_reopen"
+        pure(c,before)
+      let (c,before)=saved
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        auditExport l `shouldReturn` before
+        sourceBalance l "source_deficit" `shouldReturn` 0
+        ledgerAction l (\db->query_ db "SELECT state FROM source_recovery_state" :: IO [Only Text]) `shouldReturn` [Only "unavailable"]
+        ledgerAction l (\db->execute_ db "DELETE FROM source_recoveries") `shouldThrow` (\err->sqlError err==ErrorConstraint)
   describe "native settlement finality recovery (offline RPC contracts)" $ do
     it "shows review for an additional refund while preserving the original conversion link" $ withDir $ \dir->
       withNativeSettlementAt dir $ \l _ a signed _ _ _->do
@@ -2517,7 +2758,11 @@ main=hspec $ do
       recordSolanaExpiry l attempt proof
       recordSolanaExpiry l attempt "changed proof" `shouldThrow` isError "expiry_evidence_conflict"
       readyObligations l `shouldReturn` []
-      resumeAfterChecks l
+      resumeAfterChecks l `shouldThrow` isError "obligations_require_review"
+      beginPreparation l c ob "Solana" (attemptFeeLimit attempt) "new-policy" `shouldThrow` isError "payouts_paused"
+      -- Offline fault injection preserves coverage of the inner guards even
+      -- if a caller incorrectly bypasses the stronger resume refusal.
+      ledgerAction l $ \db->execute_ db "UPDATE deployment SET paused=0"
       beginPreparation l c ob "Solana" (attemptFeeLimit attempt) "new-policy" `shouldThrow` isError "obligation_not_ready"
       approveSolanaRetryWith verified configured l (attemptId attempt) "operator retry" `shouldThrow` isError "pause_before_operator_action"
       pause l "operator-action"

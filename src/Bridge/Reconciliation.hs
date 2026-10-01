@@ -56,6 +56,8 @@ readView c ledger now=ledgerAction ledger $ \db -> do
   require (null reviews) "chain_observations_require_review"
   lost <- query_ db "SELECT id FROM deposits WHERE allocated=1 AND eligible=0 LIMIT 1" :: IO [Only Text]
   require (null lost) "source_reorg_requires_review"
+  sourceReviews <- query_ db "SELECT deposit_id FROM source_recovery_state WHERE state<>'restored' LIMIT 1" :: IO [Only Text]
+  require (null sourceReviews) "source_recovery_requires_review"
   nativeReviews <- query_ db "SELECT txid FROM native_payment_recovery_state WHERE state<>'reconfirmed' LIMIT 1" :: IO [Only Text]
   require (null nativeReviews) "native_settlement_requires_review"
   -- A changed settlement needs explicit recovery even when offsetting
