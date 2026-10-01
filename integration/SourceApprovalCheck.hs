@@ -3,7 +3,8 @@ module Main (main) where
 import Bridge.Types
 import qualified Bridge.Postgres.Ledger as L
 import qualified Bridge.Postgres.Source as Source
-import Bridge.Ledger (SourceCheck(..))
+import Bridge.Ledger (SourceCheck(..),Deposit(..))
+import qualified Data.Text as T
 import Control.Exception (bracket,try)
 import Control.Monad (forM_)
 import Data.Aeson (object,(.=))
@@ -93,8 +94,29 @@ main = do
     expectError "source_approval_not_expected" $ Source.recoveryRecord ledger "stale-restoration" stale 100 "refuse obsolete restoration"
     afterStale <- snapshot ledger
     require (beforeStale==afterStale) "contract_stale_restoration_mutated_state"
+    candidateRows <- Source.candidates ledger
+    require (map depositId candidateRows==["stale-restoration"]) "contract_source_candidate_view_failed"
+    let txid=T.replicate 64 "a"
+        did="native:"<>txid<>":0"
+    L.ledgerAction ledger $ \c->do
+      _ <- PG.execute c "INSERT INTO deposits(id,asset,amount,anchor,first_seen,confirmations,eligible) VALUES(?,'Native',10000,'unconfirmed',100,0,0)" (PG.Only did)
+      _ <- PG.execute c "INSERT INTO observation_evidence(hash,chain,event_id,evidence_json) VALUES('contract-hash','Native',?,'{}')" (PG.Only txid)
+      _ <- PG.execute c "INSERT INTO chain_events(chain,event_id,kind,anchor,evidence_hash,first_seen,last_seen,needs_review) VALUES('Native',?,'incoming','unconfirmed','contract-hash',100,100,0)" (PG.Only txid)
+      pure ()
+    pendingSources <- Source.candidates ledger
+    source <- case filter ((==did).depositId) pendingSources of [row]->pure row; _->reject "contract_native_source_missing"
+    beforeFence <- snapshot ledger
+    expectError "source_recovery_changed" $ Source.recordCheck ledger source {depositAnchor="changed snapshot"} (SourceUnavailable $ object["reason" .= ("contract"::Text)])
+    expectError "source_recovery_scan_not_current" $ Source.recordCheck ledger source (SourcePending $ object["observationHash" .= ("wrong-hash"::Text)])
+    Source.recordCheck ledger source (SourcePending $ object["observationHash" .= ("contract-hash"::Text)])
+    afterFence <- snapshot ledger
+    require (beforeFence==afterFence) "contract_source_fence_mutated_financial_state"
+    L.ledgerAction ledger $ \c->do
+      history <- PG.query c "SELECT count(*) FROM source_recoveries WHERE deposit_id=?" (PG.Only did) :: IO[PG.Only Int64]
+      require (history==[PG.Only 0]) "contract_ordinary_pending_journaled"
+
   L.withLedger connectionSettings identity $ \ledger->do
     L.ledgerAction ledger $ \c->do
       rows <- PG.query_ c "SELECT id,status FROM obligations ORDER BY id" :: IO[(Text,Text)]
       require (lookup "restore-ready" rows==Just "ready" && lookup "restore-paying" rows==Just "paying" && lookup "changed-work" rows==Just "review" && lookup "stale-restoration" rows==Just "review") "contract_restart_changed_state"
-  putStrLn "PostgreSQL source approval: ready/paying restoration, freshness, replay, conflict, changed-work/stale refusal and reopen passed; database-only contract"
+  putStrLn "PostgreSQL source approval: ready/paying restoration, freshness, replay, conflict, changed-work/stale refusal, candidate view, source/evidence fences and reopen passed; database-only contract"

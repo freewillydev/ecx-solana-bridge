@@ -505,3 +505,23 @@ a real source reorg. The production PostgreSQL context/record functions and sche
 triggers are exercised. Real source observer/reorg wiring, full workflow acceptance
 and deployment of the new private route remain open.
 [Evidence](evidence/postgres-source-approval-contract.json).
+
+## PostgreSQL native-source reconciliation port — 2026-10-01
+
+The real native source inspection/reconciliation code is now shared through
+`NativeSourceStore`. PostgreSQL supplies typed order/evidence lookups, a bounded
+latest-state candidate query and an atomic receipt/evidence-hash fence before
+committing recovery accounting. The worker runs it after source observation under
+the existing critical evaluator. Native identity, canonical wallet/chain checks,
+exact receipts, current observation binding, conflict proof and double-read checks
+remain in the shared chain inspector. RPC failure records uncertainty, not missing
+principal; source checks cannot sign, send or release obligations.
+
+Build and all 371 examples pass. An isolated PostgreSQL contract verifies candidate
+selection, changed receipt/hash rejection and ordinary pending behavior alongside
+the successful source-approval cases. Those are database fixtures, not actual
+network-loss evidence. A read-only check found zero current recovery candidates in
+the live test ledger. The temporary contract database was removed. Actual source
+loss/restoration, full operator approval and deployment acceptance remain open;
+native settlement/family reorg accounting and loss-cover administration still need
+porting. [Evidence](evidence/postgres-native-source-port.json).

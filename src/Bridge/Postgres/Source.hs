@@ -1,7 +1,7 @@
-module Bridge.Postgres.Source (recordSourceCheckC, sourceWorkHashC, recoveryApproval, recoveryObligation, recoveryRecord) where
+module Bridge.Postgres.Source (recordSourceCheckC, sourceWorkHashC, recoveryApproval, recoveryObligation, recoveryRecord, candidates, recordCheck, orderBinding, eventEvidence) where
 
 import Bridge.Types
-import Bridge.Ledger (SourceCheck(..),Obligation(..))
+import Bridge.Ledger (SourceCheck(..),Obligation(..),Deposit(..))
 import Bridge.Postgres.Ledger (Ledger,ledgerAction)
 import Bridge.Postgres.Cancellation (freshC)
 import Bridge.RPC (fieldValue)
@@ -20,6 +20,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString.Lazy as LBS
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Opaleye as O
+import Data.Profunctor.Product (p2)
 
 recordSourceCheckC :: PG.Connection -> Text -> SourceCheck -> IO ()
 recordSourceCheckC connection did check = do
@@ -203,3 +204,66 @@ recoveryRecord ledger intent restoration now reason = ledgerAction ledger $ \c->
       _ <- O.runUpdate c O.Update {O.uTable=obligationsTable,O.uUpdateWith= \row->row {obligationsStatus=O.sqlStrictText previous},O.uWhere= \row->obligationsId row O..== O.sqlStrictText intent,O.uReturning=O.rCount}
       _ <- O.runInsert c O.Insert {O.iTable=auditTable,O.iRows=[Audit Nothing (O.sqlStrictText "source_recovery_approved") (O.sqlStrictText intent)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
       pure ()
+
+-- Typed read of the latest recovery view, matching the legacy candidate rules.
+sourceStateTable :: O.Table (O.Field O.SqlText,O.Field O.SqlText) (O.Field O.SqlText,O.Field O.SqlText)
+sourceStateTable = O.table "source_recovery_state" (p2 (O.requiredTableField "deposit_id",O.requiredTableField "state"))
+candidates :: Ledger -> IO [Deposit]
+candidates ledger = ledgerAction ledger $ \c->do
+  rows <- O.runSelect c $ O.limit 1001 $ O.orderBy (O.asc depositsFirstSeen <> O.asc depositsId) $ do
+    (deposit,(_,state)) <- (O.leftJoin (O.selectTable depositsTable) (O.selectTable sourceStateTable)
+      (\(deposit,(did,_))->depositsId deposit O..== did)
+      :: O.Select (DepositsRead,(O.FieldNullable O.SqlText,O.FieldNullable O.SqlText)))
+    O.where_ (depositsAsset deposit O..== O.sqlStrictText "Native" O..&&
+      (depositsEligible deposit O..== O.sqlInt8 0 O..|| O.matchNullable (O.sqlBool False) (\value->value O../= O.sqlStrictText "restored") state))
+    pure deposit
+    :: IO [Deposits]
+  mapM asNativeDeposit rows
+
+asNativeDeposit :: Deposits -> IO Deposit
+asNativeDeposit row = do
+  require (depositsAsset row=="Native" && depositsConfirmations row>=0 && toInteger(depositsConfirmations row)<=toInteger(maxBound::Int)) "invalid_native_source_receipt"
+  quantity <- either reject pure(amount $ toInteger $ depositsAmount row)
+  pure(Deposit (depositsId row) (depositsOrderId row) Native quantity (depositsAnchor row) (fromIntegral $ depositsConfirmations row) (depositsEligible row==1) (depositsFirstSeen row))
+
+recordCheck :: Ledger -> Deposit -> SourceCheck -> IO ()
+recordCheck ledger expected check = ledgerAction ledger $ \c->do
+  rows <- O.runSelect c $ do
+    row <- O.selectTable depositsTable
+    O.where_(depositsId row O..== O.sqlStrictText (depositId expected))
+    pure row
+    :: IO [Deposits]
+  current <- mapM asNativeDeposit rows
+  require (current==[expected]) "source_recovery_changed"
+  let proof=case check of SourcePending p->Just p; SourceMissing p->Just p; SourceRestored p->Just p; SourceUnavailable _->Nothing
+  forM_ proof $ \value->do
+    expectedHash <- fieldValue "observationHash" value :: IO Text
+    txid <- case T.splitOn ":" (depositId expected) of ["native",tx,_]->pure tx; _->reject "invalid_native_deposit_id"
+    hashes <- O.runSelect c $ do
+      event <- O.selectTable chaineventsTable
+      O.where_(chaineventsChain event O..== O.sqlStrictText "Native" O..&& chaineventsEventId event O..== O.sqlStrictText txid)
+      pure(chaineventsEvidenceHash event)
+      :: IO [Text]
+    require (hashes==[expectedHash]) "source_recovery_scan_not_current"
+  recordSourceCheckC c (depositId expected) check
+
+orderBinding :: Ledger -> Text -> IO (Text,Text)
+orderBinding ledger oid = ledgerAction ledger $ \c->do
+  rows <- O.runSelect c $ do
+    row <- O.selectTable ordersTable
+    O.where_(ordersId row O..== O.sqlStrictText oid)
+    pure(ordersInstruction row,ordersPolicyJson row)
+    :: IO [(Maybe Text,Text)]
+  case rows of [(Just instruction,policy)]->pure(instruction,policy); _->reject "native_source_binding_missing"
+
+eventEvidence :: Ledger -> Text -> IO (Text,Text)
+eventEvidence ledger txid = ledgerAction ledger $ \c->do
+  rows <- O.runSelect c $ do
+    event <- O.selectTable chaineventsTable
+    evidence <- O.selectTable observationevidenceTable
+    O.where_ (chaineventsChain event O..== O.sqlStrictText "Native" O..&& chaineventsEventId event O..== O.sqlStrictText txid O..&&
+      (chaineventsKind event O..== O.sqlStrictText "incoming" O..|| chaineventsKind event O..== O.sqlStrictText "unmatched_incoming") O..&&
+      chaineventsNeedsReview event O..== O.sqlInt8 0 O..&& chaineventsEvidenceHash event O..== observationevidenceHash evidence)
+    pure(chaineventsEvidenceHash event,observationevidenceEvidenceJson evidence)
+    :: IO [(Text,Text)]
+  case rows of [saved]->pure saved; _->reject "source_recovery_scan_not_current"

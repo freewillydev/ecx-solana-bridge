@@ -1,0 +1,23 @@
+{
+  "date": "2026-10-01",
+  "implementation": "Shared NativeSourceStore inspection/reconciliation with PostgreSQL typed queries and atomic receipt/evidence fences; invoked inside critical worker scan",
+  "checks": {
+    "build": true,
+    "haskellExamples": 371,
+    "failures": 0,
+    "isolatedDatabaseContract": [
+      "latest recovery candidate view",
+      "changed receipt refused",
+      "changed evidence hash refused",
+      "ordinary pending source does not create a recovery record",
+      "source approval ready/paying/replay/stale checks remain passing"
+    ],
+    "liveRuntimeCandidateCountReadOnly": 0,
+    "temporaryDatabaseRemoved": true
+  },
+  "limitations": [
+    "No actual source loss/restoration exercised by this port acceptance",
+    "New source reconciliation build not deployed to paying worker",
+    "Native settlement reorg/family accounting and operator loss-cover port remain unfinished"
+  ]
+}

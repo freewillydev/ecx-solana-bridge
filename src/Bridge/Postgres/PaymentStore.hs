@@ -8,6 +8,7 @@ import Data.Aeson (Value,object,(.=))
 import qualified Bridge.Postgres.Settlement as S
 import qualified Bridge.Postgres.Retry as Retry
 import qualified Bridge.Postgres.Source as Source
+import Bridge.Reorg (NativeSourceStore(..))
 import Bridge.Recovery (CancellationStore(..),NativeLockStore(..),SourceRecoveryStore(..))
 import qualified Bridge.Postgres.Cancellation as Cancellation
 import Bridge.Payment (PreparationStore(..))
@@ -230,3 +231,10 @@ instance SourceRecoveryStore Store where
   recoveryObligation (Store ledger) = Source.recoveryObligation ledger
   recoveryRecord (Store ledger) = Source.recoveryRecord ledger
   recoveryReconcile = cancellationReconcile
+
+instance NativeSourceStore Store where
+  sourceCandidates (Store ledger) = Source.candidates ledger
+  sourcePause (Store ledger) = pause ledger
+  sourceRecordCheck (Store ledger) = Source.recordCheck ledger
+  sourceOrderBinding (Store ledger) = Source.orderBinding ledger
+  sourceEventEvidence (Store ledger) = Source.eventEvidence ledger

@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module Bridge.Reorg (reconcileNativeSettlements,reconcileNativeSettlementsWith,reconcileNativeSources,reconcileNativeSourcesWith,inspectNativeSourceWith) where
+module Bridge.Reorg (NativeSourceStore(..),reconcileNativeSettlements,reconcileNativeSettlementsWith,reconcileNativeSources,reconcileNativeSourcesWith,inspectNativeSourceWith) where
 
 import Bridge.Config
 import Bridge.Ledger
@@ -27,10 +27,27 @@ reconcileNativeSources manager c=reconcileNativeSourcesWith
   (realPaymentTransport manager c (const $ reject "unexpected_source_recovery_backup"))
     {paymentIdentity=nativeIdentity manager c >> pure ()} c
 
-reconcileNativeSourcesWith :: PaymentTransport -> Config -> Ledger -> IO Value
+class NativeSourceStore ledger where
+  sourceCandidates :: ledger -> IO [Deposit]
+  sourcePause :: ledger -> Text -> IO ()
+  sourceRecordCheck :: ledger -> Deposit -> SourceCheck -> IO ()
+  sourceOrderBinding :: ledger -> Text -> IO (Text,Text)
+  sourceEventEvidence :: ledger -> Text -> IO (Text,Text)
+instance NativeSourceStore Ledger where
+  sourceCandidates = nativeSourceCandidates
+  sourcePause = pause
+  sourceRecordCheck = recordSourceCheck
+  sourceOrderBinding ledger oid = do
+    rows <- ledgerAction ledger $ \db->query db "SELECT instruction,policy_json FROM orders WHERE id=?" (Only oid)
+    case rows of [binding]->pure binding; _->reject "native_source_binding_missing"
+  sourceEventEvidence ledger txid = do
+    rows <- ledgerAction ledger $ \db->query db "SELECT e.evidence_hash,o.evidence_json FROM chain_events e JOIN observation_evidence o ON o.hash=e.evidence_hash WHERE e.chain='Native' AND e.event_id=? AND e.kind IN('incoming','unmatched_incoming') AND e.needs_review=0" (Only txid)
+    case rows of [evidence]->pure evidence; _->reject "source_recovery_scan_not_current"
+
+reconcileNativeSourcesWith :: NativeSourceStore ledger => PaymentTransport -> Config -> ledger -> IO Value
 reconcileNativeSourcesWith transport c ledger=do
-  sources <- nativeSourceCandidates ledger
-  when (length sources>1000) $ pause ledger "source_recovery_backlog"
+  sources <- sourceCandidates ledger
+  when (length sources>1000) $ sourcePause ledger "source_recovery_backlog"
   require (length sources<=1000) "source_recovery_backlog"
   reports <- mapM reconcile sources
   pure $ object ["sources" .= reports,"signedOrSent" .= False]
@@ -39,20 +56,20 @@ reconcileNativeSourcesWith transport c ledger=do
   reconcile source=do
     checked <- try (inspectNativeSourceWith transport c ledger source `catch` (\(_::IOException)->reject "source_recovery_io_unavailable")) :: IO (Either BridgeError SourceCheck)
     let result=either (\(BridgeError code)->unavailable code) id checked
-    committed <- try (recordSourceCheck ledger source result) :: IO (Either BridgeError ())
+    committed <- try (sourceRecordCheck ledger source result) :: IO (Either BridgeError ())
     case committed of
       Right ()->pure $ report source result
       Left (BridgeError code)->do
-        saved <- try (recordSourceCheck ledger source $ unavailable code) :: IO (Either BridgeError ())
+        saved <- try (sourceRecordCheck ledger source $ unavailable code) :: IO (Either BridgeError ())
         case saved of
           Right ()->pure ()
-          Left (BridgeError changed)->pause ledger ("source_recovery:"<>changed)
+          Left (BridgeError changed)->sourcePause ledger ("source_recovery:"<>changed)
         pure $ report source (unavailable code)
   report source check=object ["deposit" .= depositId source,"state" .= (case check of
     SourcePending _->"pending"; SourceMissing _->"missing"; SourceRestored _->"restored"; SourceUnavailable _->"requires_review"::Text)]
 
 
-inspectNativeSourceWith :: PaymentTransport -> Config -> Ledger -> Deposit -> IO SourceCheck
+inspectNativeSourceWith :: NativeSourceStore ledger => PaymentTransport -> Config -> ledger -> Deposit -> IO SourceCheck
 inspectNativeSourceWith transport c ledger source=do
   paymentIdentity transport
   wallet <- call True "getwalletinfo" []
@@ -92,8 +109,7 @@ inspectNativeSourceWith transport c ledger source=do
   needed <- case depositOrder source of
     Nothing->pure $ if category=="receive" then nativeConfirmations c else max 101 (nativeConfirmations c)
     Just oid->do
-      bindings<-ledgerAction ledger $ \db->query db "SELECT instruction,policy_json FROM orders WHERE id=?" (Only oid) :: IO [(Text,Text)]
-      (instruction,saved)<-case bindings of [b]->pure b; _->reject "native_source_binding_missing"
+      (instruction,saved)<-sourceOrderBinding ledger oid
       policy<-either (const $ reject "native_source_policy_invalid") pure (eitherDecodeStrict' $ TE.encodeUtf8 saved)
       require (category=="receive" && instruction==address && deploymentFingerprint policy==fingerprint c) "native_source_binding_mismatch"
       pure (nativeDepth policy)
@@ -101,8 +117,7 @@ inspectNativeSourceWith transport c ledger source=do
   anchor <- parseValue (withObject "source" (.:? "blockhash")) value :: IO (Maybe Text)
   conflicts <- fieldValue "walletconflicts" value :: IO [Text]
   require (length conflicts<=100 && all transactionId conflicts) "invalid_native_source_conflicts"
-  saved <- ledgerAction ledger $ \db->query db "SELECT e.evidence_hash,o.evidence_json FROM chain_events e JOIN observation_evidence o ON o.hash=e.evidence_hash WHERE e.chain='Native' AND e.event_id=? AND e.kind IN('incoming','unmatched_incoming') AND e.needs_review=0" (Only txid) :: IO [(Text,Text)]
-  (observationHash,old)<-case saved of [s]->pure s; _->reject "source_recovery_scan_not_current"
+  (observationHash,old)<-sourceEventEvidence ledger txid
   event <- either (const $ reject "source_recovery_scan_not_current") pure (eitherDecodeStrict' $ TE.encodeUtf8 old)
   recordedDepth <- fieldValue "proof" event >>= fieldValue "confirmations"
   recordedAnchor <- fieldValue "anchor" event
