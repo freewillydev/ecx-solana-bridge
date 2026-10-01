@@ -1,4 +1,4 @@
-module Bridge.Worker (runWorker, runTestWorker, runWorkerWith, scanOnce, reconcileOnce, recoverOnce, approveRetry, cancelUnsigned, approveRestoredSource, coverLoss, draftReplacement, cancelReplacement, doctor) where
+module Bridge.Worker (runWorker, runTestWorker, runWorkerWith, scanOnce, reconcileOnce, recoverOnce, allocateTestOperating, approveRetry, cancelUnsigned, approveRestoredSource, coverLoss, draftReplacement, cancelReplacement, doctor) where
 
 import Bridge.API
 import Control.Monad.IO.Class (liftIO)
@@ -64,7 +64,11 @@ runTestWorker c=do
       checked ledger $ do
         _ <- recoverDeployment manager c ledger
         health <- readiness ledger
-        when (available health) $ paymentPass manager c ledger (const $ reject "unexpected_test_backup")
+        fresh <- try (epochSeconds >>= checkCustodyFresh ledger) :: IO (Either BridgeError ())
+        case fresh of
+          Right ()->when (available health) $ paymentPass manager c ledger (const $ reject "unexpected_test_backup")
+          Left (BridgeError "custody_not_reconciled")->pure ()
+          Left (BridgeError reason)->reject reason
       threadDelay 15000000
  where
   checked ledger action=do
@@ -99,6 +103,16 @@ recoverOnce :: Config -> IO Value
 recoverOnce c = withLedger (dbPath c) (fingerprint c) $ \ledger -> do
   manager <- newRpcManager
   recoverDeployment manager c ledger
+allocateTestOperating :: Config -> Text -> Amount -> IO Value
+allocateTestOperating c signature quantity=do
+  require (profile c==L2LSignetDevnet && not (backupRequired c)) "public_test_profile_required"
+  withLedger (dbPath c) (fingerprint c) $ \ledger->do
+    manager <- newRpcManager
+    _ <- recoverDeployment manager c ledger
+    epochSeconds >>= checkCustodyFresh ledger
+    allocateSolOperatingReceipt ledger signature quantity
+    custody <- reconcileCustody manager c ledger
+    pure $ object ["allocatedSignature" .= signature,"lamports" .= quantity,"custody" .= custody,"paused" .= True,"signedOrSent" .= False]
 approveRetry :: Config -> Text -> Text -> IO Value
 approveRetry c txid reason = withLedger (dbPath c) (fingerprint c) $ \ledger -> do
   manager <- newRpcManager
@@ -129,7 +143,7 @@ customerServer testMode manager c ledger =
   configView :<|> create :<|> get :<|> transaction :<|> hint :<|> health :<|> ready
  where
   configView = do
-    a <- liftIO (readiness ledger)
+    a <- liftIO publicAvailability
     pure $ object ["profile" .= profile c,"deployment" .= deploymentId c,"mint" .= mint c,"decimals" .= (8::Int),"minInput" .= minInput c,"maxInput" .= maxInput c,"feesBps" .= object ["NativeToWrapped" .= (20::Int),"WrappedToNative" .= (100::Int)],"availability" .= a,"intakeEnabled" .= testMode,"implementationReady" .= implementationReady,"walletsTested" .= ([]::[Text])]
   create header request = asHandler $ do
     token <- bearer header
@@ -147,8 +161,13 @@ customerServer testMode manager c ledger =
     pure $ object ["accepted" .= True,"authorization" .= ("independent_chain_evidence_required"::Text)]
   health = pure (Availability True "process_running")
   ready = do
-    a <- liftIO (readiness ledger)
+    a <- liftIO publicAvailability
     if available a then pure a else throwError err503 {errBody=encode a}
+  publicAvailability = do
+    a <- readiness ledger
+    if not testMode || not (available a) then pure a else do
+      result <- try (epochSeconds >>= checkIntakeReady ledger) :: IO (Either BridgeError ())
+      pure $ case result of Right ()->a; Left (BridgeError reason)->Availability False reason
 adminServer :: Config -> Ledger -> Server AdminAPI
 adminServer c l = asHandler (readiness l)
   :<|> (\p -> asHandler (pause l (T.take 120 (pauseReason p)) >> readiness l))

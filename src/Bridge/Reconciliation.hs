@@ -79,7 +79,8 @@ headFor :: View -> Text -> IO Text
 headFor v stream=maybe (reject "custody_history_anchor_missing") pure (lookup stream $ viewHeads v)
 
 -- No RPC holds a database transaction. Concurrent observations or settlements
--- invalidate this revision before it can be certified. Failed reads also pause.
+-- invalidate this revision before it can be certified. A newer history head
+-- requires a fresh scan; other failures also impose an operator pause.
 reconcileCustodyWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> IO Value
 reconcileCustodyWith clock transport c ledger=do
   result <- try (work `catch` (\(_::IOException)->reject "custody_rpc_unavailable")) :: IO (Either BridgeError ())
@@ -151,7 +152,11 @@ recordError :: Connection -> Text -> IO ()
 recordError db code=do
   old <- query_ db "SELECT last_error FROM custody_check" :: IO [Only (Maybe Text)]
   when (old/=[Only (Just code)]) $ execute db "INSERT INTO audit(action,detail) VALUES('custody_failure',?)" (Only code)
-  execute db "UPDATE deployment SET paused=1,pause_reason=?" (Only $ "custody:"<>code)
+  -- These snapshots grant no spending permission: checked_revision is cleared
+  -- below. Let the next scan retry, without turning routine chain progress
+  -- into a permanent operator pause. Never clear an existing pause.
+  when (code `notElem` ["custody_native_history_advanced","custody_solana_history_advanced","custody_ledger_changed"]) $
+    execute db "UPDATE deployment SET paused=1,pause_reason=?" (Only $ "custody:"<>code)
 
 nativeBalance :: NativeRPC -> IO (Integer,Text,Int64)
 nativeBalance call=do

@@ -4,7 +4,7 @@ module Bridge.Ledger
   ( Ledger, withLedger, ledgerAction, schemaVersion, sqliteIdentity, readiness, pause, resumeAfterChecks
   , createOrder, readOrder, bindInstruction, criticalSequence, acknowledgeBackup
   , findOrder, checkIntakeReady, claimNativeAllocation, recordNativeInstruction, issueInstruction, instructionBackup
-  , exposeOrder, freeInventory, allocateTreasuryReceipt, recordTreasurySpend, expireQuotes
+  , exposeOrder, freeInventory, allocateTreasuryReceipt, allocateSolOperatingReceipt, recordTreasurySpend, expireQuotes
   , Deposit(..), observeDeposit, refreshDeposit, recordScan, readCheckpoint, promoteDeposit, checkpoint
   , ChainEvent(..), ScanBatch(..), commitScan, recordScanFailure, scannerHealth, custodyHealth
   , lookupInstruction, maximumNativeDepth, pendingVerification
@@ -25,6 +25,7 @@ import Bridge.Budget
 import Bridge.Types
 import Bridge.NativePayment
 import Bridge.NativeReplacement (validateNativeFamily,validateNativeReplacementDraft)
+import Bridge.SolanaMessage (signatureBytes)
 import Control.Concurrent.MVar
 import Control.Exception (bracket,mask,try,SomeException,fromException,throwIO)
 import Control.Monad (forM, forM_, when)
@@ -225,7 +226,24 @@ freeInventory c asset = do
 -- The operator's verified funding workflow supplies the ownership evidence.
 -- Move an existing observed receipt; never credit the same on-chain value twice.
 allocateTreasuryReceipt :: Ledger -> Text -> [(Text,Amount)] -> Value -> IO ()
-allocateTreasuryReceipt l did allocation evidence = ledgerAction l $ \c -> do
+allocateTreasuryReceipt l did allocation evidence = ledgerAction l $ \c -> allocateTreasuryReceiptC c did allocation evidence
+
+-- An explicit private operator decision may assign only an independently
+-- observed, finalized SOL receipt to fees. It cannot reclassify customer coins.
+allocateSolOperatingReceipt :: Ledger -> Text -> Amount -> IO ()
+allocateSolOperatingReceipt l signature expected = do
+  _ <- either reject pure (signatureBytes signature)
+  require (units expected>0) "invalid_operating_funding_amount"
+  ledgerAction l $ \c->do
+    let did="sol-operating:"<>signature
+    verified <- query c "SELECT d.amount FROM deposits d JOIN chain_events e ON e.chain='SolanaOperating' AND e.event_id=? JOIN observation_evidence p ON p.hash=e.evidence_hash WHERE d.id=? AND d.order_id IS NULL AND d.asset='Sol' AND d.eligible=1 AND d.anchor=e.anchor AND e.kind='unmatched_incoming' AND e.needs_review=0 AND json_extract(p.evidence_json,'$.proof.delta')=? AND json_type(p.evidence_json,'$.proof.failed')='false'"
+      (signature,did,T.pack $ show $ units expected) :: IO [Only Int64]
+    require (verified==[Only $ units expected]) "verified_operating_receipt_required"
+    allocateTreasuryReceiptC c did [("operating",expected)] $ object
+      ["purpose" .= ("operator_network_fees"::Text),"signature" .= signature,"lamports" .= expected]
+
+allocateTreasuryReceiptC :: Connection -> Text -> [(Text,Amount)] -> Value -> IO ()
+allocateTreasuryReceiptC c did allocation evidence = do
   let entries=sortOn fst allocation
       names=map fst entries
       allocationJSON=jsonText entries

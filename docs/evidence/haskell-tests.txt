@@ -5,6 +5,8 @@ In order, the following will be built (use -v for more details):
 Configuring library for ecx-bridge-0.1.0.0...
 Preprocessing library for ecx-bridge-0.1.0.0...
 Building library for ecx-bridge-0.1.0.0...
+[19 of 27] Compiling Bridge.Reconciliation ( src/Bridge/Reconciliation.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Reconciliation.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Reconciliation.dyn_o ) [Source file changed]
+[27 of 27] Compiling Bridge.Worker    ( src/Bridge/Worker.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Worker.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Worker.dyn_o ) [Source file changed]
 Configuring test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Preprocessing test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Building test suite 'bridge-test' for ecx-bridge-0.1.0.0...
@@ -171,6 +173,10 @@ refund principal and failed transaction fees
   charges a failed Solana transaction fee and preserves full refundable principal [✔]
   does not promote a deposit first observed after its deposit deadline [✔]
 verified treasury allocation and accounting
+  allocates a finalized SOL operating receipt once across reopening [✔]
+  refuses Native principal as operating SOL [✔]
+  refuses Wrapped principal as operating SOL [✔]
+  refuses an operating receipt whose scanner evidence requires review [✔]
   moves an observed receipt exactly once instead of crediting the asset again [✔]
   cannot allocate bound customer principal, unconfirmed receipts or an incorrect total [✔]
   separates SOL history from token history and restricts SOL to operating funds [✔]
@@ -419,8 +425,8 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 10.0040 seconds
-363 examples, 0 failures
+Finished in 10.7216 seconds
+367 examples, 0 failures
 Test suite bridge-test: PASS
 Test suite logged to: /Volumes/Crucial
 X9/CodexBuilds/ecx-bridge-20260930/workspace-b/outputs/ecx-bridge/./../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log

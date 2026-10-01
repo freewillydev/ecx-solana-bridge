@@ -2,7 +2,7 @@
 
 A small inventory bridge: one Haskell/Servant application, two chain adapters, one SQLite ledger, and a thin browser interface. A separate Rust executable uses official Solana SDK and SPL interface crates to construct and sign a fixed transaction format. No custom blockchain or token program.
 
-**Local public-test build — L2L Signet / Solana Devnet.** The explicit `test-worker` command connects the customer API to the existing order, ledger and payment engine. The browser provides deposit instructions, Wallet Standard signing, saved orders, status updates and transaction links. Both real-chain directions have completed through the customer HTTP API and running worker; a clean launcher restart preserved the ledger and completed order views. The application builds and 363 Haskell examples pass. Browser-wallet acceptance, complete recovery, Linux installation and independent review remain outstanding. Canonical intake stays disabled. See [STATUS.md](docs/STATUS.md) for evidence and remaining work.
+**Local public-test build — L2L Signet / Solana Devnet.** The explicit `test-worker` command connects the customer API to the existing order, ledger and payment engine. The browser provides deposit instructions, Wallet Standard signing, saved orders, status updates and transaction links. Both real-chain directions have completed through the customer HTTP API and running worker; a clean launcher restart preserved the ledger and completed order views. The application builds and 367 Haskell examples pass. Browser-wallet acceptance, complete recovery, Linux installation and independent review remain outstanding. Canonical intake stays disabled. See [STATUS.md](docs/STATUS.md) for evidence and remaining work.
 
 ## Components
 
@@ -60,11 +60,13 @@ To run the local public-test product after configuring and funding the real node
 ./scripts/start-local /absolute/private/config.json --binary /absolute/path/to/ecx-bridge
 ```
 
-Build the browser assets first. Open `http://127.0.0.1:61734`; Ctrl-C stops both child processes. The launcher accepts only `L2LSignetDevnet` with `backupRequired: false`. It starts the existing `test-worker` and loopback web proxy. Startup reconciles the ledger and checks custody before enabling transfers; unresolved or reviewed payments keep it paused. A later operational pause requires inspection and is not automatically cleared. Use `worker` instead for observation-only operation.
+Build the browser assets first. Open `http://127.0.0.1:61734`; Ctrl-C stops both child processes. The launcher accepts only `L2LSignetDevnet` with `backupRequired: false`. It starts the existing `test-worker` and loopback web proxy. Startup reconciles the ledger and checks custody before enabling transfers; unresolved or reviewed payments keep it paused. A later operational pause requires inspection and is not automatically cleared. Routine history-head advancement temporarily blocks intake and payment scheduling until the next fresh custody check. Use `worker` instead for observation-only operation.
 
 Native → wrapped orders display an exact Signet deposit address and amount. Wrapped → native orders bind the connected Devnet wallet and request its signature on the validated deposit transaction. Orders and private recovery links survive a page reload. If admission is temporarily unavailable, retry the saved request; it keeps the same idempotency key.
 
 Administrator routes are unavailable through the public proxy. Different Unix users and Linux sandbox enforcement still need testing on the server. This command starts a configured local build; the clean-server installer remains a separate delivery gate.
+
+For local operator fee top-ups, use the documented private [funding procedure](docs/LOCAL-DEVELOPMENT.md#operator-fee-funding-for-local-tests). It allocates an already observed Devnet SOL receipt; it cannot credit invented funds or customer principal.
 
 ## Public-network evidence
 

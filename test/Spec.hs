@@ -2127,6 +2127,35 @@ main=hspec $ do
       observeDeposit l (Deposit "late:0" (Just $ orderId o) Native (input req) "anchor" 1 True 500) "cursor"
       promoteDeposit l 500 "late:0" `shouldReturn` False
   describe "verified treasury allocation and accounting" $ do
+    it "allocates a finalized SOL operating receipt once across reopening" $ withDir $ \dir -> do
+      let c=cfg dir; sig=base58 (BS.replicate 64 7); did="sol-operating:"<>sig
+          receipt=Deposit did Nothing Sol (amt 10000) "100" 1 True 100
+          event=ChainEvent sig "unmatched_incoming" "100" (object ["delta" .= ("10000"::Text),"failed" .= False])
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        observeDeposit l receipt "origin"
+        allocateSolOperatingReceipt l sig (amt 10000) `shouldThrow` isError "verified_operating_receipt_required"
+        commitScan l (ScanBatch "SolanaOperating" "origin" (Just "origin") sig 100 [] [event])
+        allocateSolOperatingReceipt l sig (amt 9999) `shouldThrow` isError "verified_operating_receipt_required"
+        allocateSolOperatingReceipt l sig (amt 10000)
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        allocateSolOperatingReceipt l sig (amt 10000)
+        ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64]) `shouldReturn` [Only 1]
+        ledgerAction l (\db->query_ db "SELECT SUM(delta) FROM postings WHERE asset='Sol' AND account='operating'" :: IO [Only Int64]) `shouldReturn` [Only 10000]
+        ledgerAction l (\db->query_ db "SELECT SUM(delta) FROM postings WHERE asset='Sol' AND account<>'external'" :: IO [Only Int64]) `shouldReturn` [Only 10000]
+    forM_ [Native,Wrapped] $ \asset->it ("refuses "<>show asset<>" principal as operating SOL") $ withDir $ \dir->do
+      let c=cfg dir; sig=base58 (BS.replicate 64 7)
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        observeDeposit l (Deposit ("sol-operating:"<>sig) Nothing asset (amt 10000) "100" 1 True 100) "cursor"
+        let event=ChainEvent sig "unmatched_incoming" "100" (object ["delta" .= ("10000"::Text),"failed" .= False])
+        commitScan l (ScanBatch "SolanaOperating" "origin" Nothing sig 100 [] [event])
+        allocateSolOperatingReceipt l sig (amt 10000) `shouldThrow` isError "verified_operating_receipt_required"
+    it "refuses an operating receipt whose scanner evidence requires review" $ withDir $ \dir->do
+      let c=cfg dir; sig=base58 (BS.replicate 64 7)
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        let receipt=Deposit ("sol-operating:"<>sig) Nothing Sol (amt 10000) "100" 1 True 100
+            event=ChainEvent sig "unclassified" "100" (object ["delta" .= ("10000"::Text),"failed" .= False])
+        commitScan l (ScanBatch "SolanaOperating" "origin" Nothing sig 100 [receipt] [event])
+        allocateSolOperatingReceipt l sig (amt 10000) `shouldThrow` isError "verified_operating_receipt_required"
     it "moves an observed receipt exactly once instead of crediting the asset again" $ withDir $ \dir -> do
       let c=cfg dir
       withLedger (dbPath c) (fingerprint c) $ \l -> do
@@ -2243,7 +2272,8 @@ main=hspec $ do
       setupCustodyScans l c
       result<-reconcileCustodyWith (pure 100) transport{paymentSolana=sol} c l
       fieldValue "lastError" result `shouldReturn` Just ("custody_ledger_changed"::Text)
-      available <$> readiness l `shouldReturn` False
+      available <$> readiness l `shouldReturn` True
+      checkCustodyFresh l 100 `shouldThrow` isError "custody_not_reconciled"
     it "rejects a new Solana history head, an older balance context, and verifier disagreement" $ withFunded $ \l original -> do
       let c=expiryConfig original
           transport=custodyContract c (1100000,1000000,100000) []
@@ -2266,6 +2296,14 @@ main=hspec $ do
       setupCustodyScans l c
       first<-reconcileCustodyWith (pure 100) transport{paymentNative=advanced} c l
       fieldValue "lastError" first `shouldReturn` Just ("custody_native_history_advanced"::Text)
+      available <$> readiness l `shouldReturn` True
+      checkIntakeReady l 100 `shouldThrow` isError "custody_not_reconciled"
+      clean<-reconcileCustodyWith (pure 100) transport c l
+      fieldValue "lastError" clean `shouldReturn` (Nothing::Maybe Text)
+      checkIntakeReady l 100
+      pause l "operator_pause"
+      _<-reconcileCustodyWith (pure 100) transport c l
+      readiness l `shouldReturn` Availability False "operator_pause"
       calls<-newIORef (0::Int)
       let racing wallet method params=do
             value<-paymentNative transport wallet method params

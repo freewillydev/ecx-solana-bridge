@@ -1,0 +1,77 @@
+{
+  "network": "solana:devnet",
+  "purpose": "Operator network fees and new-recipient token account rent",
+  "startedUtc": "2026-10-01T14:04:10.501352+00:00",
+  "stage": "complete",
+  "signature": "5sCx951KjQv3Zua3xeUMtrAfrW88LydDF9Cbvg9imjZxvR5rJfYyA3b37rDwPaN5pR72Z2p779wYyCavX7Fe1pbk",
+  "lamports": 100000000,
+  "networkFeeLamports": 5000,
+  "criticalSequence": 53,
+  "previousFinancialRowsPreserved": true,
+  "allocationReplayUnchanged": true,
+  "custody": {
+    "checkedAt": 1790863484,
+    "checkedRevision": 15186,
+    "lastError": null,
+    "report": {
+      "assets": [
+        {
+          "asset": "Native",
+          "booked": "1879346",
+          "difference": "0",
+          "expected": "1879346",
+          "inFlight": "0",
+          "observed": "1879346"
+        },
+        {
+          "asset": "Sol",
+          "booked": "103486560",
+          "difference": "0",
+          "expected": "103486560",
+          "inFlight": "0",
+          "observed": "103486560"
+        },
+        {
+          "asset": "Wrapped",
+          "booked": "100000020034",
+          "difference": "0",
+          "expected": "100000020034",
+          "inFlight": "0",
+          "observed": "100000020034"
+        }
+      ],
+      "inFlightEffects": [],
+      "matches": true,
+      "nativeBlock": "0000027241dfc2e0201e033bb093a58e850a6afcc8f77a5537d87c0ba56d7ab7",
+      "nativeHeight": 16459,
+      "solanaSlot": 506297055
+    },
+    "revision": 15186
+  },
+  "operatingBudget": {
+    "accountingTime": 1790863485,
+    "assets": [
+      {
+        "asset": "Native",
+        "dailyLimit": "10000",
+        "freeAllocation": "148946",
+        "held": "0",
+        "spent": "1054"
+      },
+      {
+        "asset": "Sol",
+        "dailyLimit": "10000000",
+        "freeAllocation": "103486560",
+        "held": "0",
+        "spent": "1513440"
+      }
+    ],
+    "windowSeconds": 86400
+  },
+  "readiness": 200,
+  "newCustomerOrders": 0,
+  "newBridgePayoutAttempts": 0,
+  "finishedUtc": "2026-10-01T14:04:45.816120+00:00",
+  "limitations": "Operating top-up and allocation only. Browser-wallet acceptance, full recovery, Linux installation and canonical funding remain separate requirements.",
+  "applicationSha256": "9ff6bf960315c71740dd9e27808dfecbb6c692c9d66e082dab1d7925c325a742"
+}

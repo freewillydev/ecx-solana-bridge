@@ -14,12 +14,15 @@ main :: IO ()
 main = go `catch` (\(BridgeError code) -> LBS.putStrLn (encode $ object ["error" .= code]) >> exitFailure)
  where
   go = getArgs >>= \case
-    ["version"] -> putStrLn "ecx-bridge 0.1.0.0 (development; intake disabled)"
+    ["version"] -> putStrLn "ecx-bridge 0.1.0.0 (development; explicit public-test mode available)"
     ["check-config",path] -> loadConfig path >>= LBS.putStrLn . encode . object . pure . ("fingerprint" .=) . fingerprint
     ["doctor",path] -> loadConfig path >>= doctor >>= LBS.putStrLn . encode
     ["scan",path] -> loadConfig path >>= scanOnce >>= LBS.putStrLn . encode
     ["reconcile",path] -> loadConfig path >>= reconcileOnce >>= LBS.putStrLn . encode
     ["recover",path] -> loadConfig path >>= recoverOnce >>= LBS.putStrLn . encode
+    ["allocate-test-operating",path,signature,quantity] -> case readMaybe quantity >>= either (const Nothing) Just . amount of
+      Just value | units value>0 -> loadConfig path >>= \c -> allocateTestOperating c (T.pack signature) value >>= LBS.putStrLn . encode
+      _ -> die "Invalid operating funding amount (expected positive integer lamports)"
     ["approve-solana-retry",path,txid,reason] -> loadConfig path >>= \c -> approveRetry c (T.pack txid) (T.pack reason) >>= LBS.putStrLn . encode
     ["approve-source-recovery",path,intent,restoration,reason] -> case readMaybe restoration of
       Just sequenceNo | sequenceNo>0 -> loadConfig path >>= \c -> approveRestoredSource c (T.pack intent) sequenceNo (T.pack reason) >>= LBS.putStrLn . encode
@@ -42,4 +45,4 @@ main = go `catch` (\(BridgeError code) -> LBS.putStrLn (encode $ object ["error"
     ["serve",socket,port,assets] -> case readMaybe port of
       Just p | p>=1024 && p<=65535 -> runPublic socket p assets
       _ -> die "Invalid unprivileged port"
-    _ -> die "Usage: ecx-bridge version | check-config CONFIG | doctor CONFIG | scan CONFIG | reconcile CONFIG | recover CONFIG | approve-solana-retry CONFIG SIGNATURE REASON | approve-source-recovery CONFIG OBLIGATION RESTORATION_SEQUENCE REASON | cover-source-loss CONFIG DEPOSIT LOSS_SEQUENCE FLOAT_UNITS EARNED_UNITS REASON | prepare-native-replacement CONFIG TRANSACTION FEE_UNITS REASON | cancel-native-replacement CONFIG DRAFT_SEQUENCE REASON | cancel-preparation CONFIG INTENT GENERATION REASON | worker CONFIG | test-worker CONFIG | serve CUSTOMER_SOCKET PORT ASSETS"
+    _ -> die "Usage: ecx-bridge version | check-config CONFIG | doctor CONFIG | scan CONFIG | reconcile CONFIG | recover CONFIG | allocate-test-operating CONFIG SIGNATURE LAMPORTS | approve-solana-retry CONFIG SIGNATURE REASON | approve-source-recovery CONFIG OBLIGATION RESTORATION_SEQUENCE REASON | cover-source-loss CONFIG DEPOSIT LOSS_SEQUENCE FLOAT_UNITS EARNED_UNITS REASON | prepare-native-replacement CONFIG TRANSACTION FEE_UNITS REASON | cancel-native-replacement CONFIG DRAFT_SEQUENCE REASON | cancel-preparation CONFIG INTENT GENERATION REASON | worker CONFIG | test-worker CONFIG | serve CUSTOMER_SOCKET PORT ASSETS"
