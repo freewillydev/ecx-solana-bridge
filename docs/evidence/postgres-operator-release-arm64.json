@@ -1,0 +1,30 @@
+{
+  "date": "2026-10-01",
+  "architecture": "aarch64",
+  "host": "Ubuntu 24.04 task build VM; 3 GiB; one job",
+  "runtimeSourceCommit": "986a3e1",
+  "releaseId": "1f20a3fb81b317b210878ed4",
+  "installerSha256": "8cfe391c9754f74a5069f4fdd6af6b60a394940d0d5c25223aded4c2a9c279d6",
+  "installerBytes": 32503708,
+  "checks": {
+    "haskellExamples": 371,
+    "haskellFailures": 0,
+    "rustTestsPassed": 7,
+    "browserTypecheckAndBuild": true,
+    "installerTests": 9,
+    "notices": {
+      "packages": 369,
+      "collected": 369,
+      "missing": []
+    },
+    "bundleManifestVerified": true,
+    "copiedInstallerChecksumVerified": true,
+    "vmStopped": true
+  },
+  "workflow": "Reused existing pinned compiler/package caches; Cabal index refreshed only if missing or explicitly requested; npm prefers cached downloads while retaining clean locked installation; architecture-specific tests retained",
+  "limitations": [
+    "Current package is built and checksum-verified, not yet installed in affected upgrade acceptance",
+    "Cross-release upgrade, x86-64 acceptance, signed publication and remote restoration remain open",
+    "Full real replacement/source reorg acceptance and canonical token/wallet/release review remain open"
+  ]
+}

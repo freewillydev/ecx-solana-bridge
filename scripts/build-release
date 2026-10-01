@@ -77,13 +77,19 @@ os.environ["LD_LIBRARY_PATH"] = str(sqlite / "lib")
 os.environ["PKG_CONFIG_PATH"] = str(sqlite / "lib/pkgconfig")
 os.environ["LIBRARY_PATH"] = str(sqlite / "lib")
 os.environ["C_INCLUDE_PATH"] = str(sqlite / "include")
-run("cabal", "update")
+# Frozen dependencies do not require a network index refresh on every build.
+# Refresh explicitly when updating pins, or populate an empty build cache.
+index = cache / "cabal/packages/hackage.haskell.org/01-index.tar"
+if not index.exists() or os.environ.get("ECX_REFRESH_INDEX") == "1":
+    run("cabal", "update")
 build_args = [f"--builddir={cache}/dist", f"--extra-lib-dirs={sqlite}/lib", f"--extra-include-dirs={sqlite}/include", "-j" + build_jobs]
 run("cabal", "build", "all", *build_args)
 run("cabal", "test", "all", "--test-show-details=direct", *build_args)
 run("cargo", "test", "--locked", "--manifest-path", "solana-helper/Cargo.toml", "--all-targets")
 run("cargo", "build", "--locked", "--release", "--manifest-path", "solana-helper/Cargo.toml")
-run("npm", "ci", "--prefix", "web", "--ignore-scripts")
+# npm's content-addressed download cache avoids repeated fetches; retain a clean
+# locked installation so a stale or edited node_modules cannot enter a release.
+run("npm", "ci", "--prefix", "web", "--ignore-scripts", "--prefer-offline", "--no-audit", "--no-fund")
 run("npm", "run", "check", "--prefix", "web")
 run("npm", "run", "build", "--prefix", "web")
 run("python3", "test/installer_test.py")

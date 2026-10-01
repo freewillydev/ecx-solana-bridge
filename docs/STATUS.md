@@ -601,3 +601,20 @@ Live replacement-family signing/send/confirmation, source-loss/reorg and crash
 acceptance remain in the release gates, along with wallet, canonical network,
 Linux packaging/x86 installer, remote restore and independent review. See the
 [operator guide](OPERATIONS.md) and [batch evidence](evidence/postgres-operator-workflows.json).
+
+## Compiled Linux release for integrated operator workflows — 2026-10-01
+
+The current PostgreSQL replacement/loss-cover product is built into the compiled
+one-command Ubuntu 24.04 ARM64 installer (release `1f20a3fb81b317b210878ed4`).
+The existing 3-GiB build VM and pinned caches were reused with one-job compilation.
+The builder now avoids unconditional Cabal index refresh and prefers npm's cached
+downloads while retaining a clean locked dependency install. The Linux build passes
+371 Haskell examples, seven Rust tests, browser typecheck/build and nine installer
+tests. Release notice coverage now includes 369 packages with none missing. The
+bundle manifest and copied installer SHA-256 were verified, and the VM is stopped.
+
+This proves the current package builds; it does not substitute for installing the
+new package, cross-release upgrade acceptance or x86-64 acceptance. The old
+installer deliberately refuses a different installed release until a reviewed
+upgrade path is provided; that remains an explicit delivery requirement.
+[Evidence](evidence/postgres-operator-release-arm64.json).
