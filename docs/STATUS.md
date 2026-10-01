@@ -692,3 +692,24 @@ keeps intake paused until explicit resume. No synthetic block, new signature or
 additional payment was created. This covers same-member confirmation loss, not a
 winner-changing reorg or permanent source loss. The real block is restored and
 the bridge is ready. [Evidence](evidence/postgres-native-family-live.json).
+
+## Final integrated ARM64 product package — 2026-10-01
+
+Release `f1976117d2ad7e4ce81ec8d1` includes the verified upgrade installer and
+completed PostgreSQL replacement/resume/family-order runtime. Cached native ARM64
+compilation passes 371 Haskell examples, seven Rust tests, browser typecheck/build,
+16 installer tests and 369/369 dependency notices. The copied installer checksum
+is verified on the host.
+
+This exact package is installed over the earlier PostgreSQL ARM64 deployment and
+passes same-release repeat installation and reboot: health 200, observation-only
+readiness 503, nine configuration files and 32 durable tables unchanged, critical
+sequence retained, nonempty audit marker retained and three upgrade backups
+verified. The first backup restores all 37 tables, with 33 stable baseline hashes
+matching. No signer or payment was used in this Linux installer fixture. Both
+ARM64 VMs are stopped; the native x86 CI build remains active.
+
+X86 installation, supported-wallet payment, active source-loss/missing-destination
+resolution, wider Solana history/expiry and crash recovery, remote clean-host/key
+restoration, canonical-network acceptance and independent review remain open.
+[Evidence](evidence/postgres-final-product-arm64.json).
