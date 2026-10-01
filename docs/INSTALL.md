@@ -3,11 +3,12 @@
 This installer targets Ubuntu 24.04 on ARM64 or x86-64. It installs the bridge,
 fixed Solana helper, a private PostgreSQL 16 ledger, browser assets, systemd units and an
 optional dedicated **real L2L public Signet** node. No simulated chain is offered.
-The revised PostgreSQL package is being verified in local Ubuntu VMs. Earlier
-installer evidence covers the SQLite baseline, not this replacement.
-ARM64 acceptance is performed in a separate Ubuntu VM on the development Mac;
-see the installation evidence for the checks actually completed. x86-64 requires
-its own acceptance run before claiming support has been verified there.
+The revised PostgreSQL package passed ARM64 installation, repeat installation,
+reboot, private-role and same-host backup restoration checks in an Ubuntu VM on
+the development Mac. See [the recorded checks](evidence/postgres-installer-arm64.json).
+This run used observation mode and a fresh ledger; it did not authorize payments.
+x86-64 requires its own PostgreSQL acceptance run. Earlier installer evidence
+covers the SQLite baseline, not this replacement.
 
 ## One command
 

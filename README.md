@@ -103,11 +103,11 @@ sha256sum -c ecx-bridge-ubuntu-24.04-aarch64.run.sha256
 sh ecx-bridge-ubuntu-24.04-aarch64.run --with-signet --config-dir /absolute/private/setup
 ```
 
-Target hosts need no compiler or Node installation. Default worker mode observes with intake paused; `--test-worker` explicitly enables the funded public-test mode. Use the package matching the server CPU. **The previous SQLite ARM64 package passed clean-VM acceptance. The revised PostgreSQL installer still needs integrated Ubuntu acceptance on both architectures.** The locally built installers are checksummed, not signed published releases; no public download endpoint exists yet.
+Target hosts need no compiler or Node installation. Default worker mode observes with intake paused; `--test-worker` explicitly enables the funded public-test mode. Use the package matching the server CPU. **The PostgreSQL ARM64 package passed installation, repeat installation, reboot, private-role checks and same-host backup restoration. x86-64 PostgreSQL acceptance remains pending.** The locally built installers are checksummed, not signed published releases; no public download endpoint exists yet.
 
 Repeated installation of the same release/configuration preserves services and the ledger. Different releases/configuration are refused rather than silently upgrading a funded deployment. The web endpoint binds to `127.0.0.1:8080`; remote access uses an SSH tunnel unless a separately configured TLS proxy is provided. No public firewall port or native RPC endpoint is opened.
 
-See [`docs/INSTALL.md`](docs/INSTALL.md) for exact paths, users, configuration and operating commands. New builds collect build-specific dependency notices and verify saved native-notice hashes before packaging; that packaging change awaits a completed Linux build. The previously verified ARM64 artifact predates the notice integration.
+See [`docs/INSTALL.md`](docs/INSTALL.md) for exact paths, users, configuration and operating commands. The new ARM64 build includes dependency notices collected against its actual graph and verifies saved native-notice hashes before packaging. License applicability and dependency security review remain release gates.
 
 For an already configured local public-test environment:
 
@@ -127,13 +127,15 @@ The local launcher serves `http://127.0.0.1:61734` and accepts only the public-t
 | Checkpoint | Evidence and limits |
 | --- | --- |
 | Financial/state contracts | 368 Haskell examples plus 100 generated arithmetic cases; [`test output`](docs/evidence/haskell-tests.txt). These tests do not substitute for real-chain acceptance. |
-| Helper and installer contracts | Seven Rust tests and eight installer tests; [`Linux build output`](docs/evidence/linux-installer-build.txt). |
-| Browser source | Strict TypeScript checking and asset build pass. Actual supported-wallet Solana Pay and browser reload acceptance is pending. |
+| Helper and installer contracts | Seven Rust tests and nine installer tests pass in the revised ARM64 build. The new installer regression checks that helper imports preserve the package inventory. |
+| Browser source | Strict TypeScript checking and asset build pass. A connection-free quote, invalid-amount rejection, QR instructions and saved-order reload were verified in the browser. Actual supported-wallet Solana Pay signing remains pending. [`Evidence`](docs/evidence/postgres-product-flows.json). |
+| PostgreSQL product | Both new 1% conversions paid; verified-owner full refund, explicit expired retry, unsigned cancellation and clean restart passed on real Signet/Devnet. [`Evidence`](docs/evidence/postgres-product-flows.json). |
 | Automatic real-chain round trips | Both customer-API orders paid by the running test worker; custody matched. Deposits used dedicated native/official-SDK tester clients, not browser extensions. [`Transfer/restart evidence`](docs/evidence/local-product-transfers.json). |
 | Restart preservation | Financial rows and completed authenticated order views survived a clean launcher restart. Same evidence above. |
 | Real refund and expired Solana attempt | Full late-deposit refund and a retained expired attempt followed by one proven replacement; [`evidence`](docs/evidence/late-ledger-refund.json). Canonical independent-provider acceptance remains separate. |
 | Native paused recovery and locks | Existing payment reconciliation and daemon input-lock restoration were exercised; [`worker recovery`](docs/evidence/paused-worker-recovery.json), [`lock recovery`](docs/evidence/native-lock-recovery.json). |
 | Ubuntu ARM64 installation | Clean runtime VM, separate users, helper sandbox, integrity refusal, repeat installation, real-chain doctor and VM reboot; [`installer evidence`](docs/evidence/linux-installer.json). This is not full host/key restore. |
+| PostgreSQL ARM64 installation | Observation-mode installation with a fresh ledger, repeat installation, automatic service restart after reboot, restricted database roles, and all 38 tables restored with matching rows. [`Evidence`](docs/evidence/postgres-installer-arm64.json). This is a same-host restore, not remote host/key recovery. |
 
 The current public-test mint is independently created Devnet test inventory, **not the canonical wbECX mint discussed by the ECX team**. No official affiliation, canonical reserve backing, valuable-fund pilot, liquidity pool, Jupiter route or mainnet launch is claimed by these tests.
 

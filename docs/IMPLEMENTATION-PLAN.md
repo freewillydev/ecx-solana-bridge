@@ -47,8 +47,10 @@ while replacing storage; do not redesign accounting simultaneously.
 Continue from the existing PostgreSQL schema, historical import comparison,
 real scanner/custody checks, payment port, Servant DSL and Solana Pay/interface
 work. Do not repeat these investigations or treat each module as a new project.
-Some paths have evidence; the complete PostgreSQL paying product still needs
-integrated acceptance.
+Both new 1% conversions, a verified-owner full refund, explicit expired retry,
+unsigned cancellation, browser quote/reload and clean restart now have integrated
+Signet/Devnet evidence. Preserve this working baseline while completing the thin
+interface, configuration and installation work below.
 
 1. Finish and compile the actual PostgreSQL startup, scan/reconcile and paying
    worker loop with the existing API, DSL, observer, preparation and settlement.
@@ -101,6 +103,11 @@ This is a development milestone, not approval for valuable-fund operation.
 **Checkpoint: the complete test-network product is usable and installable with
 one command.** No unfinished essential path is relabeled as an audit item.
 At this point, stop feature expansion and begin the systematic audit.
+
+Current installation evidence: the PostgreSQL ARM64 package passes fresh-ledger
+installation, repeat installation, reboot, restricted-role checks and same-host
+backup restoration. Finish the remaining interface/configuration features and
+actual wallet payment acceptance, then verify the x86-64 package.
 
 ## 3. Audit the completed product in bounded passes
 

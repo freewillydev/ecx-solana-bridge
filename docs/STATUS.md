@@ -13,8 +13,11 @@ generation returned all 10,000 units. A clean restart preserved financial rows,
 critical sequence and terminal customer statuses. See
 [PostgreSQL product evidence](evidence/postgres-product-flows.json). Installer
 code now provisions private PostgreSQL, read/write roles, typed initialization,
-explicit legacy import and private dump backups. Revised Ubuntu acceptance, full
-recovery/audit, actual supported-wallet browser acceptance and canonical deployment
+explicit legacy import and private dump backups. ARM64 installation, repeat
+installation, reboot, role restrictions and same-host restoration of all 38
+tables passed. See [installer evidence](evidence/postgres-installer-arm64.json).
+x86-64 PostgreSQL acceptance, full recovery/audit, actual supported-wallet
+signing and canonical deployment
 remain open. Canonical `implementationReady` remains false.
 
 Earlier SQLite launch/transfer/restart evidence below is historical baseline
@@ -92,7 +95,7 @@ The earlier native payment and three-unit Solana payments were standalone probes
 
 ### Execution checkpoints and change control
 
-The architecture and adapter/API boundaries are frozen to the approved application, two real-chain adapters, SQLite ledger and thin interface. Finish the checkpoints below against the existing implementation; do not restart the design or substitute a smaller scope. These are delivery gates, not equal-sized percentages. The earlier overall percentage estimates were subjective and are no longer the progress measure.
+The current architecture is the approved Haskell application, two real-chain adapters, PostgreSQL/Opaleye ledger, severity DSL and thin connection-free interface. The older gate table below records baseline work; the [integrated implementation plan](IMPLEMENTATION-PLAN.md) governs current sequencing. These are delivery gates, not equal-sized percentages. The earlier overall percentage estimates were subjective and are no longer the progress measure.
 
 | Gate | Required remaining evidence | Current state |
 | --- | --- | --- |

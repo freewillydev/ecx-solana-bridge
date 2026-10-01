@@ -207,9 +207,9 @@ runRuntime paying settings cfg = do
           case outcome of
             Right ()->pure ()
             Left(BridgeError reason)->evaluate runtime (operator(Pause reason)) >> pure ()
-    checked $ do
-      _ <- evaluate runtime (worker ScanAndReconcile)
-      when paying (evaluate runtime (worker StartPayments))
+    let bootstrap=checked $ do
+          _ <- evaluate runtime (worker ScanAndReconcile)
+          when paying (evaluate runtime (worker StartPayments))
     customerApp <- securityBoundary (serve customerAPI (hoistServer customerAPI (interpret runtime) Server.customerServer))
     adminApp <- securityBoundary (serve Server.operatorAPI (hoistServer Server.operatorAPI (interpret runtime) Server.adminServer))
     let api=concurrently_ (runUnix (customerSocket cfg) 0o660 customerApp) (runUnix (adminSocket cfg) 0o600 adminApp)
@@ -221,4 +221,6 @@ runRuntime paying settings cfg = do
             Right ()->pure ()
             Left(BridgeError reason)->evaluate runtime (operator(Pause reason)) >> pure ()
           threadDelay 15000000
-    concurrently_ api loop
+    -- Liveness must not wait for initial chain synchronization. withLedger has
+    -- already paused intake; bootstrap can only resume it after reconciliation.
+    concurrently_ api (bootstrap >> loop)

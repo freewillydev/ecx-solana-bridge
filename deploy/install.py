@@ -11,10 +11,15 @@ import platform
 import pwd
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 import urllib.request
 import urllib.error
+
+# Verify exactly the packaged inventory. Importing the sibling PostgreSQL helper
+# must not add root-owned bytecode to the unprivileged extraction directory.
+sys.dont_write_bytecode = True
 
 
 def run(*args, **kw):
