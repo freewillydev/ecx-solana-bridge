@@ -213,3 +213,23 @@ without marking a funded order unfunded. This path remains unwired to the paying
 worker: observers/reconciliation/payment conversion, consistent 1% adapter quote
 previews and connection-free Solana Pay association are still required. No new
 addresses, deposits or payouts were performed in this checkpoint.
+
+### PostgreSQL receipt observation conversion
+
+The typed observation module compiles for receipt identity/amount/policy checks,
+atomic first-receipt accounting, confirming receipt updates, scan cursor fencing,
+instruction lookup and saved native-depth policy. It intentionally refuses source
+eligibility loss or existing recovery history until source-recovery journaling is
+converted; this is a temporary migration limitation, not the final behavior.
+Full evidence-page commit, observer wiring and payment settlement remain pending.
+The existing paying worker is unchanged.
+
+### Source journal integrated into receipt updates
+
+Typed source-recovery journaling now preserves missing-value postings, restored
+operator-loss allocations, critical sequences, audit records and pause behavior.
+Payment/replacement work hashes retain the legacy tuple encoding and order.
+Receipt updates now journal lost eligibility and verified non-native restoration;
+the temporary conversion refusal has been removed. Compilation passes, while
+runtime recovery parity, focused native-source proof checks and full observer/page
+commit conversion remain pending before paying-worker cutover.
