@@ -77,3 +77,10 @@ executable ecx-postgres-scan-check
   hs-source-dirs: integration
   main-is: ScanCheck.hs
   build-depends: base, ecx-bridge, aeson, bytestring, postgresql-simple, unix, text, opaleye
+
+-- Fault-injected real-network acceptance; never bundled in the server release.
+executable ecx-postgres-native-lock-check
+  import: settings
+  hs-source-dirs: integration
+  main-is: NativeLockCheck.hs
+  build-depends: base, ecx-bridge, aeson, bytestring, postgresql-simple, unix, text

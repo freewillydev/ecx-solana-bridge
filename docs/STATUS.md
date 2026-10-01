@@ -433,3 +433,24 @@ scan stopped at a chain-observation review and provides no acceptance claim. Act
 pending PostgreSQL input restoration after node restart remains to be tested; the
 current paying process was not switched to this build.
 [Evidence](evidence/postgres-native-lock-recovery.json).
+
+## Pending native-lock acceptance driver — 2026-10-01
+
+`ecx-postgres-native-lock-check` is a development-only executable, excluded from
+installed server binaries. It accepts only the actual local Signet/Devnet runtime
+database/socket and requires exclusive ledger ownership with the worker stopped.
+`stage` checks the real source and normal readiness/custody conditions, persists a
+real native unsigned draft, interrupts at `walletprocesspsbt` before signing, and
+always leaves intake paused. `verify` restores from that saved PostgreSQL draft
+without Solana RPC dependency, signing or sending. Build passes; the wrong-database
+guard was executed and refused before connection/RPC. It has not staged an actual
+pending payment yet and is not node-restart acceptance evidence.
+
+Next execution: create a real 10,000-unit unwrap order; stop its worker before
+depositing through the existing dedicated Devnet tester; confirm the deposit and
+bind its eligible obligation; retain a consistent ledger snapshot; invoke `stage`.
+Capture the exact saved inputs, financial records and sequence, restart only the
+task-owned native node with its existing arguments, confirm locks were lost, invoke
+`verify` twice and compare preserved records and one restoration audit event. Use
+the ordinary typed cancellation/recovery path before restarting the paying worker.
+No new order/deposit or node restart was performed in this driver preparation.
