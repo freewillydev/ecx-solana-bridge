@@ -30,5 +30,13 @@
     "No new payment was prepared, signed or sent.",
     "Current imported state has no pending effects; live PostgreSQL in-flight acceptance remains.",
     "Production API, paying worker and installer conversion remain."
-  ]
+  ],
+  "historicalSettlementVerification": {
+    "count": 8,
+    "idempotentRecordAcceptance": true,
+    "newSignaturesOrSends": false,
+    "custodyMatchesAfterVerification": true,
+    "nativeHeight": 16485,
+    "solanaSlot": 506364303
+  }
 }

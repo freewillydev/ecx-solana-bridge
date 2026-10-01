@@ -1,5 +1,5 @@
 module Bridge.Postgres.Observation
-  ( recordScan, readCheckpoint, lookupInstruction, maximumNativeDepth, commitScan, recordScanFailure, promoteDeposit ) where
+  ( refreshDeposit, recordScan, readCheckpoint, lookupInstruction, maximumNativeDepth, commitScan, recordScanFailure, promoteDeposit ) where
 
 import Bridge.Types
 import Bridge.Ledger (Deposit(..), SourceCheck(..), ScanBatch(..), ChainEvent(..), economicOutflow)
@@ -46,6 +46,16 @@ recordScan ledger chain previous next deposits = ledgerAction ledger $ \connecti
       _ <- O.runUpdate connection O.Update
         {O.uTable=checkpointsTable,O.uUpdateWith= \row->row {checkpointsAnchor=O.sqlStrictText next},O.uWhere= \row->checkpointsChain row O..== O.sqlStrictText chain,O.uReturning=O.rCount}
       pure ()
+
+refreshDeposit :: Ledger -> Deposit -> IO ()
+refreshDeposit ledger deposit = ledgerAction ledger $ \c->do
+  rows <- O.runSelect c $ do
+    row <- O.selectTable depositsTable
+    O.where_ (depositsId row O..== O.sqlStrictText(depositId deposit))
+    pure(depositsId row)
+    :: IO [Text]
+  require (rows==[depositId deposit]) "source_deposit_missing"
+  observeDepositC c deposit
 
 observeDepositC :: PG.Connection -> Deposit -> IO ()
 observeDepositC connection Deposit{..} = do

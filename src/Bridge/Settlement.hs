@@ -3,7 +3,7 @@ module Bridge.Settlement
   ( PaymentTransport(..), realPaymentTransport, paymentPass, settleAttemptWith, reconcilePayments, reconcilePaymentsWith
   , recheckSourceWith, observeNativePayment, observeSolanaPayment, solanaExpiryEvidence, PaymentObservation(..)
   , approveSolanaRetry, approveSolanaRetryWith
-  , PaymentStore(..), SavedPayment(..), readSavedPayment, readNativePayment, activeNativeBlock
+  , SettlementStore(..), PaymentStore(..), SavedPayment(..), readSavedPayment, readNativePayment, activeNativeBlock
   , paymentAttemptGroups, readSavedNativeFamily, activeFamilyPayment
   ) where
 
@@ -198,9 +198,9 @@ sourceContext ledger ob=ledgerAction ledger $ \db -> do
 
 -- Read the exact original transaction immediately before send, including after
 -- a backup wait. A focused read never changes a scanner's global checkpoint.
-recheckSourceWith :: PaymentTransport -> Config -> Ledger -> Obligation -> IO ()
+recheckSourceWith :: SettlementStore ledger => PaymentTransport -> Config -> ledger -> Obligation -> IO ()
 recheckSourceWith transport c ledger ob = do
-  (deposit,request,policy,instruction) <- sourceContext ledger ob
+  (deposit,request,policy,instruction) <- paymentSourceContext ledger ob
   require (deploymentFingerprint policy==fingerprint c && solanaCommitment policy=="finalized") "payment_profile_mismatch"
   refreshed <- case depositAsset deposit of
     Native -> do
@@ -240,7 +240,7 @@ recheckSourceWith transport c ledger ob = do
           require (independent==verified) "source_verifier_disagreement"
       pure deposit{depositConfirmations=1,depositEligible=True}
     Sol -> reject "unsupported_source_asset"
-  refreshDeposit ledger refreshed
+  settlementRefresh ledger refreshed
   require (depositEligible refreshed) "source_not_eligible"
 
 -- Storage boundary shared by immutable saved-payment verification. The chain
@@ -256,6 +256,30 @@ instance PaymentStore Ledger where
     case rows of [ob]->pure ob; _->reject "obligation_not_found"
   paymentSourceContext = sourceContext
   paymentNativeFamily = nativeFamilyAttempts
+
+class (PaymentStore ledger, PreparationStore ledger) => SettlementStore ledger where
+  settlementReady :: ledger -> IO [Obligation]
+  settlementBusy :: ledger -> Text -> IO Bool
+  settlementRefresh :: ledger -> Deposit -> IO ()
+  settlementRecord :: ledger -> Text -> PaymentCosts -> Text -> IO ()
+  settlementFailed :: ledger -> Text -> Int64 -> Text -> IO ()
+  settlementExpiry :: ledger -> Attempt -> Text -> IO ()
+  settlementExpiryOrigins :: ledger -> Config -> IO ()
+  settlementBroadcast :: ledger -> Text -> IO Int64
+  settlementAuthorize :: ledger -> Bool -> Text -> IO Attempt
+
+instance SettlementStore Ledger where
+  settlementReady = readyObligations
+  settlementBusy ledger chain = ledgerAction ledger $ \db->do
+    rows <- query db "SELECT id FROM intents WHERE chain=? AND resolved=0" (Only chain) :: IO [Only Text]
+    pure(not $ null rows)
+  settlementRefresh = refreshDeposit
+  settlementRecord = recordSettlement
+  settlementFailed = recordFailedSolana
+  settlementExpiry = recordSolanaExpiry
+  settlementExpiryOrigins = checkExpiryOrigins
+  settlementBroadcast = markBroadcastIntent
+  settlementAuthorize = authorizeRecordedSend
 
 data SavedPayment = NativePayment NativeSigned | SolanaPayment SolanaSigned
 readSavedPayment :: PaymentStore ledger => PaymentTransport -> Config -> ledger -> Attempt -> IO (Obligation,SavedPayment)
@@ -359,11 +383,11 @@ reconcilePaymentsWith transport c ledger = do
 
 -- A Right result means the same saved transaction is unseen and has no proven
 -- expiry. Only the separate authorized send path may act on those bytes.
-reconcileRecordedAttempt :: PaymentTransport -> Config -> Ledger -> Attempt -> IO (Either Text (Obligation,SavedPayment))
+reconcileRecordedAttempt :: SettlementStore ledger => PaymentTransport -> Config -> ledger -> Attempt -> IO (Either Text (Obligation,SavedPayment))
 reconcileRecordedAttempt transport c ledger attempt = do
   paymentIdentity transport
   (ob,payment) <- readSavedPayment transport c ledger attempt
-  family <- if attemptChain attempt=="Native" then nativeFamilyAttempts ledger (attemptIntent attempt) else pure [attempt]
+  family <- if attemptChain attempt=="Native" then paymentNativeFamily ledger (attemptIntent attempt) else pure [attempt]
   if length family>1 then do
     require (attempt `elem` family) "native_replacement_family_changed"
     (members,view) <- readSavedNativeFamily transport c ledger family
@@ -373,7 +397,7 @@ reconcileRecordedAttempt transport c ledger attempt = do
         anchor <- fieldValue "blockhash" value
         height <- activeNativeBlock (paymentNative transport) anchor (planDepth $ signedNativePlan signed)
         require (attemptState winner=="broadcast_intent") "unrecorded_broadcast_observed"
-        recordSettlement ledger (attemptId winner) (PaymentCosts (signedNativeFee signed) zero) $ json $ object
+        settlementRecord ledger (attemptId winner) (PaymentCosts (signedNativeFee signed) zero) $ json $ object
           ["txid" .= attemptId winner,"blockhash" .= anchor,"height" .= height,"requiredDepth" .= planDepth (signedNativePlan signed)]
         pure (Left "settled")
       Just (active,_,depth,_) | depth>0 || attemptId active==attemptId attempt->pure (Left "confirming")
@@ -384,8 +408,8 @@ reconcileRecordedAttempt transport c ledger attempt = do
       NativePayment signed -> observeNativePayment (paymentNative transport) signed
       SolanaPayment signed -> observeSolanaPayment (paymentSolana transport) c signed
     case observation of
-      PaymentConfirmed costs proof -> recorded >> recordSettlement ledger (attemptId attempt) costs proof >> pure (Left "settled")
-      PaymentFailed fee proof -> recorded >> recordFailedSolana ledger (attemptId attempt) (units fee) proof >> pure (Left "failed")
+      PaymentConfirmed costs proof -> recorded >> settlementRecord ledger (attemptId attempt) costs proof >> pure (Left "settled")
+      PaymentFailed fee proof -> recorded >> settlementFailed ledger (attemptId attempt) (units fee) proof >> pure (Left "failed")
       PaymentWaiting -> recorded >> pure (Left "confirming")
       PaymentUnseen -> do
         expiry <- case payment of
@@ -393,29 +417,29 @@ reconcileRecordedAttempt transport c ledger attempt = do
           SolanaPayment signed -> solanaExpiryEvidence transport c signed
         case expiry of
           Just proof -> do
-            checkExpiryOrigins ledger c
-            recordSolanaExpiry ledger attempt proof
+            settlementExpiryOrigins ledger c
+            settlementExpiry ledger attempt proof
             pure (Left "expired")
           Nothing -> pure (Right (ob,payment))
  where
   recorded=require (attemptState attempt=="broadcast_intent") "unrecorded_broadcast_observed"
 
-settleAttemptWith :: PaymentTransport -> Config -> Ledger -> Attempt -> IO Text
-settleAttemptWith transport c ledger attempt = work `onException` pause ledger "payment_requires_reconciliation"
+settleAttemptWith :: SettlementStore ledger => PaymentTransport -> Config -> ledger -> Attempt -> IO Text
+settleAttemptWith transport c ledger attempt = work `onException` preparationPause ledger "payment_requires_reconciliation"
  where
   work = reconcileRecordedAttempt transport c ledger attempt >>= either pure (uncurry sendIfAvailable)
   sendIfAvailable ob payment = do
-        health <- readiness ledger
+        health <- preparationReadiness ledger
         if not (available health) then pure "paused" else do
           recheckSourceWith transport c ledger ob
-          sequenceNumber <- markBroadcastIntent ledger (attemptId attempt)
+          sequenceNumber <- settlementBroadcast ledger (attemptId attempt)
           when (backupRequired c) $ paymentBackup transport sequenceNumber
           paymentIdentity transport
           recheckSourceWith transport c ledger ob
           case payment of
             NativePayment _ -> pure () -- no timeout can make native bytes safe to replace
             SolanaPayment signed -> checkBlockhashWindow (paymentSolana transport) (solPlanRecent $ signedSolanaPlan signed)
-          saved <- authorizeRecordedSend ledger (backupRequired c) (attemptId attempt)
+          saved <- settlementAuthorize ledger (backupRequired c) (attemptId attempt)
           require (attemptBytes saved==attemptBytes attempt && attemptPolicy saved==attemptPolicy attempt) "saved_payment_changed"
           result <- try (send saved `catch` (\(_::IOException) -> reject "broadcast_io_uncertain")) :: IO (Either BridgeError Text)
           case result of
@@ -460,24 +484,23 @@ approveSolanaRetryWith transport c ledger txid reason=do
 
 -- One bounded pass; the database owns the queue across restarts. Reconciliation
 -- runs even while paused, but only an available deployment may prepare/send.
-paymentPass :: Manager -> Config -> Ledger -> (Int64 -> IO ()) -> IO ()
-paymentPass manager c ledger backup = work `onException` pause ledger "payment_requires_reconciliation"
+paymentPass :: SettlementStore ledger => Manager -> Config -> ledger -> (Int64 -> IO ()) -> IO ()
+paymentPass manager c ledger backup = work `onException` preparationPause ledger "payment_requires_reconciliation"
  where
   transport=realPaymentTransport manager c backup
   work=do
-    attempts <- pendingAttempts ledger
+    attempts <- preparationAttempts ledger
     groups <- either reject pure (paymentAttemptGroups attempts)
     forM_ groups $ \family -> settleAttemptWith transport c ledger (last family) >> pure ()
-    ready <- readyObligations ledger
+    ready <- settlementReady ledger
     forM_ ready $ \ob -> do
-      health <- readiness ledger
-      busy <- ledgerAction ledger $ \db -> query db "SELECT id FROM intents WHERE chain=? AND resolved=0"
-        (Only $ if obligationAsset ob=="Native" then ("Native"::Text) else "Solana") :: IO [Only Text]
-      when (available health && null busy) $ do
+      health <- preparationReadiness ledger
+      busy <- settlementBusy ledger (if obligationAsset ob=="Native" then "Native" else "Solana")
+      when (available health && not busy) $ do
         paymentIdentity transport
         recheckSourceWith transport c ledger ob
         txid <- if obligationAsset ob=="Native" then prepareNativePayment manager c ledger ob else prepareSolanaPayment manager c ledger ob
-        fresh <- filter ((==txid) . attemptId) <$> pendingAttempts ledger
+        fresh <- filter ((==txid) . attemptId) <$> preparationAttempts ledger
         case fresh of
           [attempt] -> settleAttemptWith transport c ledger attempt >> pure ()
           _ -> reject "prepared_attempt_missing"

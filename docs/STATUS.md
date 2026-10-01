@@ -286,3 +286,18 @@ acceptance after payment writes are ported. The existing 367 regression examples
 passed. No signing or sending occurred and the imported deployment stays paused.
 [Evidence](evidence/postgres-custody.json). Next: payment preparation, journal and
 settlement writes, then the production worker/API and connection-free interface.
+
+### Shared payment preparation and settlement wired to Opaleye
+
+The existing native/Solana preparation and payment-pass algorithms now accept the
+PostgreSQL store through narrow storage interfaces. Typed transactions preserve
+fee holds, preparation generations and retry authorization, cancellation fences,
+draft/signed-byte storage, source refresh, broadcast intent/backup authorization,
+native replacement send choice, successful settlement, failed Solana fees and
+expiry records. No second signing or chain-validation implementation was added.
+The library and its consumers compile. Eight historical settled payments were
+validated against immutable saved transaction policies and the real adapters;
+idempotent settlement acceptance passed and custody still matched exactly. No new
+payment was signed/sent. New PostgreSQL preparation/settlement writes need actual
+integrated acceptance, and production API/DSL, recovery startup, refunds, backups,
+connection-free interface and installer remain unfinished.

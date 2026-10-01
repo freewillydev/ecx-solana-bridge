@@ -2,7 +2,10 @@ module Bridge.Postgres.PaymentStore (Store(..), pendingAttempts) where
 
 import Bridge.Types
 import Bridge.Ledger (Attempt(..),Obligation(..),Deposit(..))
-import Bridge.Settlement (PaymentStore(..))
+import Bridge.Settlement (PaymentStore(..),SettlementStore(..))
+import qualified Bridge.Postgres.Settlement as S
+import Bridge.Payment (PreparationStore(..))
+import qualified Bridge.Postgres.Preparation as P
 import Bridge.Reconciliation (CustodyStore(..),View(..))
 import qualified Bridge.Postgres.Custody as C
 import qualified Bridge.Postgres.Observation as Observation
@@ -137,3 +140,38 @@ instance CustodyStore Store where
       :: IO [Text]
     pure (not $ null rows)
 
+
+instance PreparationStore Store where
+  preparationPause (Store ledger) = pause ledger
+  preparationReadiness (Store ledger) = readiness ledger
+  preparationOrderPolicy (Store ledger) = P.orderPolicy ledger
+  preparationCostLimits (Store ledger) = P.costLimits ledger
+  preparationAttempts = pendingAttempts
+  preparationPending (Store ledger) = P.pending ledger
+  preparationBegin (Store ledger) = P.begin ledger
+  preparationActive (Store ledger) = P.active ledger
+  preparationStoreDraft (Store ledger) = P.storeDraft ledger
+  preparationStoreAttempt (Store ledger) = P.storeAttempt ledger
+
+instance SettlementStore Store where
+  settlementReady (Store ledger) = ledgerAction ledger $ \c->do
+    rows <- O.runSelect c $ O.limit 100 $ do
+      row <- O.selectTable obligationsTable
+      O.where_ (obligationsStatus row O..== O.sqlStrictText "ready")
+      pure row
+      :: IO [Obligations]
+    pure(map obligation rows)
+  settlementBusy (Store ledger) chain = ledgerAction ledger $ \c->do
+    rows <- O.runSelect c $ do
+      row <- O.selectTable intentsTable
+      O.where_ (intentsChain row O..== O.sqlStrictText chain O..&& intentsResolved row O..== O.sqlInt8 0)
+      pure(intentsId row)
+      :: IO [Text]
+    pure(not $ null rows)
+  settlementRefresh (Store ledger) = Observation.refreshDeposit ledger
+  settlementRecord (Store ledger) = S.recordSettlement ledger
+  settlementFailed (Store ledger) = S.recordFailedSolana ledger
+  settlementExpiry (Store ledger) = S.recordSolanaExpiry ledger
+  settlementExpiryOrigins (Store ledger) = S.checkExpiryOrigins ledger
+  settlementBroadcast (Store ledger) = S.markBroadcastIntent ledger
+  settlementAuthorize (Store ledger) = S.authorizeRecordedSend ledger

@@ -1,4 +1,4 @@
-module Bridge.Payment (prepareNativePayment, prepareNativeWith, prepareSolanaPayment, prepareSolanaWith, payoutReference) where
+module Bridge.Payment (PreparationStore(..), prepareNativePayment, prepareNativeWith, prepareSolanaPayment, prepareSolanaWith, payoutReference) where
 
 import Bridge.Config
 import Bridge.Budget
@@ -13,10 +13,37 @@ import Control.Exception (onException)
 import Data.Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
+import Data.Int (Int64)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Database.SQLite.Simple
 import Network.HTTP.Client (Manager)
+
+class PreparationStore ledger where
+  preparationPause :: ledger -> Text -> IO ()
+  preparationReadiness :: ledger -> IO Availability
+  preparationOrderPolicy :: ledger -> Text -> IO PolicySnapshot
+  preparationCostLimits :: ledger -> Text -> IO CostLimits
+  preparationAttempts :: ledger -> IO [Attempt]
+  preparationPending :: ledger -> IO [Preparation]
+  preparationBegin :: ledger -> Config -> Obligation -> Text -> Int64 -> Text -> IO ()
+  preparationActive :: ledger -> Text -> IO Int
+  preparationStoreDraft :: ledger -> Text -> Text -> Int -> IO ()
+  preparationStoreAttempt :: ledger -> Obligation -> Text -> Text -> Text -> Text -> Int64 -> Maybe Text -> Int -> IO ()
+
+instance PreparationStore Ledger where
+  preparationPause = pause
+  preparationReadiness = readiness
+  preparationOrderPolicy ledger oid = do
+    rows <- ledgerAction ledger $ \db->query db "SELECT policy_json FROM orders WHERE id=?" (Only oid) :: IO [Only Text]
+    case rows of [Only value]->stored value; _->reject "order_not_found"
+  preparationCostLimits ledger oid = ledgerAction ledger $ \db->orderCostLimits db oid
+  preparationAttempts = pendingAttempts
+  preparationPending = pendingPreparations
+  preparationBegin = beginPreparation
+  preparationActive = activePreparationGeneration
+  preparationStoreDraft = storeDraft
+  preparationStoreAttempt = storeAttempt
 
 json :: ToJSON a => a -> Text
 json = TE.decodeUtf8 . LBS.toStrict . encode
@@ -25,22 +52,21 @@ stored = either (const $ reject "invalid_saved_payment") pure . eitherDecodeStri
 
 -- No broadcast occurs here. The separate first-send decision must still
 -- recheck source/freshness, journal BroadcastIntent and satisfy backup coverage.
-prepareNativePayment :: Manager -> Config -> Ledger -> Obligation -> IO Text
+prepareNativePayment :: PreparationStore ledger => Manager -> Config -> ledger -> Obligation -> IO Text
 prepareNativePayment manager c ledger obligation = (do
   _ <- nativeIdentity manager c
   prepareNativeWith (nativeCall manager c) c ledger obligation)
-  `onException` pause ledger "native_preparation_requires_review"
+  `onException` preparationPause ledger "native_preparation_requires_review"
 
-prepareNativeWith :: NativeRPC -> Config -> Ledger -> Obligation -> IO Text
-prepareNativeWith call c ledger obligation = prepare `onException` pause ledger "native_preparation_requires_review"
+prepareNativeWith :: PreparationStore ledger => NativeRPC -> Config -> ledger -> Obligation -> IO Text
+prepareNativeWith call c ledger obligation = prepare `onException` preparationPause ledger "native_preparation_requires_review"
  where
   prepare = do
     require (obligationAsset obligation=="Native") "wrong_destination_chain"
     quantity <- either reject pure (amount $ toInteger $ obligationAmount obligation)
-    policies <- ledgerAction ledger $ \db -> query db "SELECT policy_json FROM orders WHERE id=?" (Only $ obligationOrder obligation) :: IO [Only Text]
-    policy <- case policies of [Only value] -> stored value; _ -> reject "order_not_found"
+    policy <- preparationOrderPolicy ledger (obligationOrder obligation)
     require (deploymentFingerprint policy==fingerprint c) "payment_profile_mismatch"
-    attempts <- filter ((==obligationId obligation) . attemptIntent) <$> pendingAttempts ledger
+    attempts <- filter ((==obligationId obligation) . attemptIntent) <$> preparationAttempts ledger
     case attempts of
       [attempt] -> do
         signed <- stored (attemptPolicy attempt)
@@ -50,15 +76,15 @@ prepareNativeWith call c ledger obligation = prepare `onException` pause ledger 
         either reject pure (validateNativeTx (signedNativePlan signed) (signedNativePrevouts signed) (signedNativeFee signed) (signedNativeTransaction signed))
         pure (attemptId attempt)
       [] -> do
-        state <- readiness ledger
+        state <- preparationReadiness ledger
         require (available state) "payouts_paused"
-        preparations <- filter ((==obligationId obligation) . obligationId . preparationObligation) <$> pendingPreparations ledger
+        preparations <- filter ((==obligationId obligation) . obligationId . preparationObligation) <$> preparationPending ledger
         (plan,savedDraft,generation) <- case preparations of
           [] -> do
-            limits <- ledgerAction ledger $ \db -> orderCostLimits db (obligationOrder obligation)
+            limits <- preparationCostLimits ledger (obligationOrder obligation)
             plan <- newNativePlan call (profile c) (nativeDepth policy) (savedNativeFee limits) (obligationRecipient obligation) quantity
-            beginPreparation ledger c obligation "Native" (units $ planFeeLimit plan) (json plan)
-            g <- activePreparationGeneration ledger (obligationId obligation)
+            preparationBegin ledger c obligation "Native" (units $ planFeeLimit plan) (json plan)
+            g <- preparationActive ledger (obligationId obligation)
             pure (plan,Nothing,g)
           [p] -> do
             plan <- stored (preparationPolicy p)
@@ -66,7 +92,7 @@ prepareNativeWith call c ledger obligation = prepare `onException` pause ledger 
             pure (plan,preparationDraft p,preparationGeneration p)
           _ -> reject "duplicate_preparation"
         validateSaved quantity policy plan
-        activePreparationGeneration ledger (obligationId obligation) >>= \g ->
+        preparationActive ledger (obligationId obligation) >>= \g ->
           require (g==generation) "preparation_generation_changed"
         draft <- case savedDraft of
           Just value -> stored value
@@ -74,13 +100,13 @@ prepareNativeWith call c ledger obligation = prepare `onException` pause ledger 
             -- No wallet lock can be orphaned by losing the funding response.
             -- signNativeDraft locks the recorded inputs after storeDraft commits.
             value <- fundNativeDraftWith False call plan
-            storeDraft ledger (obligationId obligation) (json value) generation
+            preparationStoreDraft ledger (obligationId obligation) (json value) generation
             pure value
         signed <- signNativeDraft call plan draft
         let txid=nativeTxid (signedNativeTransaction signed)
             points=map nativeOutpoint (nativeInputs $ signedNativeTransaction signed)
         first <- case points of point:_ -> pure point; [] -> reject "native_input_mismatch"
-        storeAttempt ledger obligation "Native" txid (signedNativeBytes signed) (json signed)
+        preparationStoreAttempt ledger obligation "Native" txid (signedNativeBytes signed) (json signed)
           (units $ planFeeLimit plan) (Just $ outpointTxid first<>":"<>T.pack (show $ outpointVout first)) generation
         pure txid
       _ -> reject "multiple_initial_native_attempts"
@@ -95,22 +121,21 @@ payoutReference :: Config -> Obligation -> Text
 payoutReference c obligation = digest $ TE.encodeUtf8
   ("ecx-payout-v1:"<>fingerprint c<>":"<>obligationId obligation)
 
-prepareSolanaPayment :: Manager -> Config -> Ledger -> Obligation -> IO Text
+prepareSolanaPayment :: PreparationStore ledger => Manager -> Config -> ledger -> Obligation -> IO Text
 prepareSolanaPayment manager c ledger obligation = (do
   _ <- solanaIdentity manager c
   prepareSolanaWith (solanaCall manager c) (invokeHelper c) c ledger obligation)
-  `onException` pause ledger "solana_preparation_requires_review"
+  `onException` preparationPause ledger "solana_preparation_requires_review"
 
-prepareSolanaWith :: SolanaRPC -> (HelperRequest -> IO HelperReply) -> Config -> Ledger -> Obligation -> IO Text
-prepareSolanaWith call helper c ledger obligation = prepare `onException` pause ledger "solana_preparation_requires_review"
+prepareSolanaWith :: PreparationStore ledger => SolanaRPC -> (HelperRequest -> IO HelperReply) -> Config -> ledger -> Obligation -> IO Text
+prepareSolanaWith call helper c ledger obligation = prepare `onException` preparationPause ledger "solana_preparation_requires_review"
  where
   prepare = do
     require (obligationAsset obligation=="Wrapped") "wrong_destination_chain"
     quantity <- either reject pure (amount $ toInteger $ obligationAmount obligation)
-    policies <- ledgerAction ledger $ \db -> query db "SELECT policy_json FROM orders WHERE id=?" (Only $ obligationOrder obligation) :: IO [Only Text]
-    policy <- case policies of [Only value] -> stored value; _ -> reject "order_not_found"
+    policy <- preparationOrderPolicy ledger (obligationOrder obligation)
     require (deploymentFingerprint policy==fingerprint c && solanaCommitment policy=="finalized") "payment_profile_mismatch"
-    attempts <- filter ((==obligationId obligation) . attemptIntent) <$> pendingAttempts ledger
+    attempts <- filter ((==obligationId obligation) . attemptIntent) <$> preparationAttempts ledger
     case attempts of
       [attempt] -> do
         signed <- stored (attemptPolicy attempt)
@@ -125,18 +150,18 @@ prepareSolanaWith call helper c ledger obligation = prepare `onException` pause 
           && signedSolanaRentEstimate signed<=solPlanRentLimit plan) "invalid_saved_payment"
         pure (attemptId attempt)
       [] -> do
-        state <- readiness ledger
+        state <- preparationReadiness ledger
         require (available state) "payouts_paused"
-        preparations <- filter ((==obligationId obligation) . obligationId . preparationObligation) <$> pendingPreparations ledger
+        preparations <- filter ((==obligationId obligation) . obligationId . preparationObligation) <$> preparationPending ledger
         (plan,savedDraft,generation) <- case preparations of
           [] -> do
-            limits <- ledgerAction ledger $ \db -> orderCostLimits db (obligationOrder obligation)
+            limits <- preparationCostLimits ledger (obligationOrder obligation)
             recent <- getRecentBlockhash call
             let plan=SolanaPlan (fingerprint c) (obligationRecipient obligation) quantity
                   (payoutReference c obligation) recent (savedSolanaFee limits) (savedSolanaRent limits)
             limit <- either reject pure (solanaOperatingLimit plan)
-            beginPreparation ledger c obligation "Solana" (units limit) (json plan)
-            g <- activePreparationGeneration ledger (obligationId obligation)
+            preparationBegin ledger c obligation "Solana" (units limit) (json plan)
+            g <- preparationActive ledger (obligationId obligation)
             pure (plan,Nothing,g)
           [p] -> do
             plan <- stored (preparationPolicy p)
@@ -146,11 +171,11 @@ prepareSolanaWith call helper c ledger obligation = prepare `onException` pause 
             pure (plan,preparationDraft p,preparationGeneration p)
           _ -> reject "duplicate_preparation"
         validateSaved quantity plan
-        activePreparationGeneration ledger (obligationId obligation) >>= \g ->
+        preparationActive ledger (obligationId obligation) >>= \g ->
           require (g==generation) "preparation_generation_changed"
         let request=solanaPayoutRequest c plan
         case savedDraft of
-          Nothing -> storeDraft ledger (obligationId obligation) (json request) generation
+          Nothing -> preparationStoreDraft ledger (obligationId obligation) (json request) generation
           Just value -> stored value >>= \old -> require (old==request) "saved_solana_request_mismatch"
         -- The immutable order/preparation supplies these ceilings. Current
         -- aggregate daily caps were checked by beginPreparation above.
@@ -158,7 +183,7 @@ prepareSolanaWith call helper c ledger obligation = prepare `onException` pause 
         let reply=signedSolanaReply signed
         signature <- maybe (reject "helper_signature_missing") pure (replySignature reply)
         limit <- either reject pure (solanaOperatingLimit plan)
-        storeAttempt ledger obligation "Solana" signature (replyTransaction reply) (json signed) (units limit) Nothing generation
+        preparationStoreAttempt ledger obligation "Solana" signature (replyTransaction reply) (json signed) (units limit) Nothing generation
         pure signature
       _ -> reject "multiple_initial_solana_attempts"
   validateSaved quantity plan = require

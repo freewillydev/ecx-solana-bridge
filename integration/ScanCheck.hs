@@ -7,7 +7,18 @@ import Bridge.Postgres.Ledger (withLedger, readiness)
 import qualified Bridge.Postgres.Observer as Observer
 import qualified Bridge.Postgres.Custody as Custody
 import Bridge.Observer (epochSeconds)
-import Bridge.Settlement (realPaymentTransport)
+import Bridge.Settlement (realPaymentTransport,readSavedPayment)
+import Bridge.Ledger (Attempt(..),PaymentCosts)
+import Bridge.Postgres.PaymentStore (Store(..))
+import qualified Bridge.Postgres.Settlement as Settlement
+import Bridge.Postgres.Schema
+import Bridge.Postgres.Ledger (ledgerAction)
+import Bridge.RPC (fieldValue)
+import Data.Aeson (eitherDecodeStrict')
+import Data.Text (Text)
+import qualified Data.Text.Encoding as TE
+import qualified Opaleye as O
+import Control.Monad (forM_)
 import qualified Bridge.Postgres.Reconciliation as Reconciliation
 import Bridge.Types (reject)
 import Data.Aeson (encode, object, (.=))
@@ -31,7 +42,23 @@ main = getArgs >>= \case
       health <- Observer.observeOnce manager cfg ledger
       now <- epochSeconds
       snapshot <- Custody.readSnapshot cfg ledger now False
-      reconciliation <- Reconciliation.reconcileCustodyWith epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_reconciliation_backup")) cfg ledger
+      let transport=realPaymentTransport manager cfg (const $ reject "unexpected_reconciliation_backup")
+      historical <- ledgerAction ledger $ \connection->do
+        rows <- O.runSelect connection $ do
+          a <- O.selectTable attemptsTable
+          i <- O.selectTable intentsTable
+          O.where_ (attemptsIntentId a O..== intentsId i O..&& attemptsState a O..== O.sqlStrictText "settled")
+          pure(a,intentsChain i)
+          :: IO [(Attempts,Text)]
+        pure rows
+      forM_ historical $ \(a,chain)->do
+        let attempt=Attempt (attemptsTxid a) (attemptsIntentId a) chain (attemptsSignedBytes a) (attemptsPolicyJson a) (attemptsFeeLimit a) (attemptsState a) (attemptsCriticalSequence a)
+        _ <- readSavedPayment transport cfg (Store ledger) attempt
+        saved <- maybe (reject "missing_settlement") (either (const $ reject "invalid_settlement") pure . eitherDecodeStrict' . TE.encodeUtf8) (attemptsObservationJson a)
+        costs <- fieldValue "costs" saved :: IO PaymentCosts
+        proof <- fieldValue "proof" saved
+        Settlement.recordSettlement ledger (attemptsTxid a) costs proof
+      reconciliation <- Reconciliation.reconcileCustodyWith epochSeconds transport cfg ledger
       paused <- readiness ledger
-      LBS.putStrLn (encode (object ["scannerHealth" .= health,"readiness" .= paused,"paymentsEnabled" .= False,"custodyRevision" .= Custody.revision snapshot,"bookedCustody" .= Custody.totals snapshot,"custodyReconciliation" .= reconciliation]))
+      LBS.putStrLn (encode (object ["scannerHealth" .= health,"readiness" .= paused,"paymentsEnabled" .= False,"custodyRevision" .= Custody.revision snapshot,"bookedCustody" .= Custody.totals snapshot,"custodyReconciliation" .= reconciliation,"verifiedHistoricalSettlements" .= length historical]))
   _->die "Usage: ecx-postgres-scan-check PRIVATE_CONFIG ecx_bridge_import"
