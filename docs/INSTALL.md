@@ -30,6 +30,11 @@ archive checksum also catches corruption. These locally built artifacts are not
 a signed public release, and there is no published download URL. Package checksums
 do not authenticate an unknown distributor.
 
+New builds also collect notices against the actual dependency graph and include
+them with recorded Bitcoin Core and SQLite notices in the package manifest.
+Missing dependency notices stop packaging. License applicability and system
+library review remain separate release requirements; see THIRD-PARTY.md.
+
 Without `--config-dir`, software and the requested node are installed, but the
 bridge services wait for wallet configuration. Installation cannot supply funding,
 mint authority, inventory or ownership of an existing wallet.

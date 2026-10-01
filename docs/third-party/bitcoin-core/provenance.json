@@ -1,0 +1,56 @@
+{
+  "source": "https://bitcoincore.org/bin/bitcoin-core-30.2/bitcoin-30.2.tar.gz",
+  "sourceSha256": "6fd00b8c42883d5c963901ad4109a35be1e5ec5c2dc763018c166c21a06c84cb",
+  "checksumSource": "https://bitcoincore.org/bin/bitcoin-core-30.2/SHA256SUMS",
+  "scope": "Original notice files from the matching Bitcoin Core source release, collected conservatively. Bundled dependency applicability and notices in downloaded build dependencies still need review. This is not signature verification.",
+  "files": [
+    {
+      "path": "COPYING",
+      "sha256": "b028769f3852a9368ab10bd754ff01ebb741f84a2fa658c9aff82a631bc6ecfc"
+    },
+    {
+      "path": "contrib/debian/copyright",
+      "sha256": "2b88874244ac8d8e23b39386dc1c5f00f1ae469be37b08b8994392eb02a0c84f"
+    },
+    {
+      "path": "contrib/devtools/copyright_header.py",
+      "sha256": "af0b7145a69f9b0f784d9df5c394227b4396738cf831147ff3627da7407306ed"
+    },
+    {
+      "path": "contrib/macdeploy/LICENSE",
+      "sha256": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
+    },
+    {
+      "path": "src/crc32c/AUTHORS",
+      "sha256": "6c96b5e2a101ab9a629d8623be73f69e2346ef02e8ddd7096abe030c452252d2"
+    },
+    {
+      "path": "src/crc32c/LICENSE",
+      "sha256": "a1f30b77c01e0995fa32a00119e00749e8731ee8a3c4c3549bce74083c72b0b6"
+    },
+    {
+      "path": "src/crypto/ctaes/COPYING",
+      "sha256": "705391f5c3000c942b63c028977a372a5fb12eb0abc6210b3d835115e2544a06"
+    },
+    {
+      "path": "src/ipc/libmultiprocess/COPYING",
+      "sha256": "9a0f75d688e9cf5c69d3efdaa2a83af496700d252b212ec6a72f7784b47fed0c"
+    },
+    {
+      "path": "src/leveldb/AUTHORS",
+      "sha256": "75cccce858c06397a2736b5018b304a6fe50fce7148c7ea7fd532dd255d264b9"
+    },
+    {
+      "path": "src/leveldb/LICENSE",
+      "sha256": "ccc19f1da0798ed666609b65a5b44dd8b3abe6fc08b9c0592eb76e82e174db19"
+    },
+    {
+      "path": "src/minisketch/LICENSE",
+      "sha256": "bbc657fbd4edfb2f2b0f9fbf38d6414ec71348ff4bcf3d0924caf2506f542efa"
+    },
+    {
+      "path": "src/secp256k1/COPYING",
+      "sha256": "a735999c7e5649df6fcda6fb06ab97435851c392b1b93494ae8725f37441632f"
+    }
+  ]
+}

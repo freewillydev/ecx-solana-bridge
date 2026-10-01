@@ -37,10 +37,23 @@ were resolved from upstream evidence:
   [memo repository](https://github.com/solana-program/memo/commit/0ed6992878c38222eb1b30367eea4a3ffd3ba068).
   A version-specific repository correction retrieves that commit's LICENSE.
 
-Bitcoin Core and bundled dependencies, SQLite's amalgamation notices, Ubuntu
-system libraries, and obligations beyond the presence of license texts remain
-to be reviewed. Dual-license choices have not been made by the collector.
+`third-party/bitcoin-core` preserves 12 original notice files from the official
+Bitcoin Core 30.2 source archive. Its provenance records the archive's published
+SHA-256 and each notice hash. This includes source-tree dependency notices
+conservatively, including files that may not apply to the distributed binaries.
+It does not establish notices for dependencies downloaded separately during
+Bitcoin Core's upstream build, or verify the release signatures.
 
-This collection is source material for the release review. It has not yet been
-integrated into a replacement installer, and does not certify the existing local
-installer for public distribution. The installed/tested application is unchanged.
+`third-party/sqlite` preserves the copyright disclaimer comments from the core,
+API header and CLI shell in the pinned SQLite 3.53.4 source archive. Provenance
+records the archive's SHA3-256, full source-file hashes and notice excerpt hashes.
+Additional embedded-component applicability, Ubuntu system libraries, and
+obligations beyond the presence of license texts remain to be reviewed.
+Dual-license choices have not been made by the collector.
+
+The release builder now regenerates dependency notices against its actual build
+graph, refuses missing entries, verifies saved native-notice hashes and includes
+the notices in the hashed package inventory. This packaging change is awaiting
+the next completed Linux build. The previously delivered ARM64 installer is
+unchanged and does not contain this collection. Neither collection nor packaging
+certifies a release for public distribution.

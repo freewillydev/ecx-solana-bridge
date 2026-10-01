@@ -1,0 +1,25 @@
+{
+  "source": "https://www.sqlite.org/2026/sqlite-autoconf-3530400.tar.gz",
+  "sourceSha3_256": "454e45f61c6bd75b7420e7190732dea03ce6639c63ada47bbc592f67fc340338",
+  "scope": "Original copyright disclaimer comments from the pinned SQLite core, API header and command-line shell. Additional embedded-component notice applicability still needs review.",
+  "files": [
+    {
+      "path": "sqlite3.c.notice.txt",
+      "sha256": "49cf7bcb103eb3244150a23bb23d840370a4762914faf1b450072a4b03c14670",
+      "sourceFile": "sqlite3.c",
+      "sourceFileSha256": "b1dd5d74ec7f29055a6684fa06fb3c2f6821c87dd38f9a458dfd2e8a1db28189"
+    },
+    {
+      "path": "sqlite3.h.notice.txt",
+      "sha256": "85806d613cfda5901f848b3b5b4b04396c8c64e89c97c0af3706c42b0c44bb47",
+      "sourceFile": "sqlite3.h",
+      "sourceFileSha256": "919e7f2e8ed1d8f56ac17b412b8971c76aa5d1a879752cc6058f75e7d5910e1d"
+    },
+    {
+      "path": "shell.c.notice.txt",
+      "sha256": "76bc8724a30f8e429df314a495e867b75baeee22c4efdefe02d68be0f46d3375",
+      "sourceFile": "shell.c",
+      "sourceFileSha256": "8011ed018aa12969f93573b7bb1eae2d939d64d0f451b297ff847a0211c85179"
+    }
+  ]
+}

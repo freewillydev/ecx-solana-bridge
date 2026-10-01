@@ -104,6 +104,19 @@ shutil.copytree(root / "deploy", bundle / "deploy", ignore=shutil.ignore_pattern
 shutil.copy2(root / "config/l2l-devnet.example.json", bundle / "config/l2l-devnet.example.json")
 shutil.copy2(root / "LICENSE", bundle / "LICENSE")
 shutil.copy2(root / "docs/dependencies.json", bundle / "dependencies.json")
+# Collect against this architecture's actual build, rather than copying another
+# machine's dependency report. Every distributed notice is covered by the manifest.
+run(str(root / "scripts/collect-notices"), str(cache), str(bundle / "notices"), "--fetch-missing")
+coverage = json.loads((bundle / "notices/coverage.json").read_text())
+if coverage["missing"]:
+    raise ValueError("Release dependency notices are incomplete: " + ", ".join(coverage["missing"]))
+for component in ("bitcoin-core", "sqlite"):
+    notices = root / "docs/third-party" / component
+    provenance = json.loads((notices / "provenance.json").read_text())
+    for entry in provenance["files"]:
+        if hashlib.sha256((notices / entry["path"]).read_bytes()).hexdigest() != entry["sha256"]:
+            raise ValueError(component + " notice differs from its recorded source")
+    shutil.copytree(notices, bundle / "notices" / component)
 # Relative RUNPATH makes the supplied SQLite authoritative without global linker changes.
 for name in ("ecx-bridge", "sqlite3"):
     run("patchelf", "--set-rpath", "$ORIGIN/../lib", str(bundle / "bin" / name))
