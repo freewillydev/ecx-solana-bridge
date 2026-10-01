@@ -2,7 +2,7 @@
 -- An unclassified result must remain a liability and must not authorize a payout.
 module Bridge.SolanaDeposit
   ( DepositBinding(..), SolanaDeposit(..), verifyDeposit
-  , CustodyEffect(..), custodyEffect, transactionMemo
+  , CustodyEffect(..), custodyEffect, LamportEffect(..), lamportEffect, transactionMemo
   ) where
 
 import Bridge.Config (tokenProgram)
@@ -42,6 +42,37 @@ data CustodyEffect = CustodyEffect
   { effectSlot :: !Int64, effectDelta :: !Integer, effectFailed :: !Bool
   , effectClosed :: !Bool
   } deriving (Eq,Show)
+
+data LamportEffect = LamportEffect
+  { lamportSlot :: !Int64, lamportDelta :: !Integer
+  , lamportFailed :: !Bool, lamportFee :: !Amount, lamportBefore :: !Amount
+  } deriving (Eq,Show)
+
+-- Observe every change to the dedicated fee-payer address, including fees of
+-- failed transactions and ordinary SOL funding with no token-account reference.
+lamportEffect :: Text -> Text -> Value -> Either Text LamportEffect
+lamportEffect signature address = either (const $ Left "unclassified_lamport_effect") Right . parseEither inspect
+ where
+  inspect value = do
+    slot <- get "slot" value
+    ensure (slot>=0) "invalid slot"
+    tx <- get "transaction" value
+    signatures <- get "signatures" tx :: Parser [Text]
+    ensure (take 1 signatures==[signature]) "wrong signature"
+    msg <- get "message" tx
+    meta <- get "meta" value
+    keys <- transactionAccounts msg meta
+    idx <- case elemIndices address keys of [i]->pure i; _->fail "missing or duplicate fee address"
+    before <- get "preBalances" meta :: Parser [Integer]
+    after <- get "postBalances" meta :: Parser [Integer]
+    ensure (length before==length keys && length after==length keys && all (>=0) (before<>after)) "invalid lamport balances"
+    err <- get "err" meta :: Parser Value
+    transactionFee <- get "fee" meta >>= either (fail . T.unpack) pure . amount
+    let delta=after!!idx-before!!idx
+    charged <- if idx==0 then pure transactionFee else either (fail . T.unpack) pure (amount 0)
+    ensure (err==Null || delta==negate (toInteger $ units charged)) "failed transaction changed principal"
+    initial <- either (fail . T.unpack) pure (amount $ before!!idx)
+    pure (LamportEffect slot delta (err/=Null) charged initial)
 
 custodyEffect :: Text -> Text -> Text -> Text -> Value -> Either Text CustodyEffect
 custodyEffect signature mint custody owner =

@@ -3,7 +3,7 @@
 module Bridge.Ledger
   ( Ledger, withLedger, ledgerAction, schemaVersion, sqliteIdentity, readiness, pause, resumeAfterChecks
   , createOrder, readOrder, bindInstruction, criticalSequence, acknowledgeBackup
-  , exposeOrder, freeInventory, fundAllocation, expireQuotes
+  , exposeOrder, freeInventory, allocateTreasuryReceipt, recordTreasurySpend, expireQuotes
   , Deposit(..), observeDeposit, recordScan, readCheckpoint, promoteDeposit, checkpoint
   , ChainEvent(..), ScanBatch(..), commitScan, recordScanFailure, scannerHealth
   , lookupInstruction, maximumNativeDepth, pendingVerification
@@ -18,9 +18,11 @@ import Control.Concurrent.MVar
 import Control.Exception (bracket)
 import Control.Monad (forM_, when)
 import Data.Aeson
+import Data.Aeson.Types (parseEither,Parser)
 import qualified Data.ByteString.Lazy as LBS
 import Data.FileEmbed (embedFile)
 import Data.Int (Int64)
+import Data.List (nub,sortOn)
 import qualified Data.Map.Strict as M
 import Data.String (fromString)
 import Data.Text (Text)
@@ -31,11 +33,12 @@ import System.Directory (createDirectoryIfMissing)
 import System.FileLock (SharedExclusive(Exclusive), tryLockFile, unlockFile)
 import System.FilePath (takeDirectory)
 import System.Posix.Files (setFileMode)
+import Text.Read (readMaybe)
 
 -- All financial mutations are serialized and committed before external IO.
 newtype Ledger = Ledger (MVar Connection)
 schemaVersion :: Int
-schemaVersion = 3
+schemaVersion = 4
 sqliteIdentity :: Connection -> IO Value
 sqliteIdentity c = do
   versions <- query_ c "SELECT sqlite_version(),sqlite_source_id()" :: IO [(Text,Text)]
@@ -73,8 +76,10 @@ withLedger path identity action = do
     require (meta `elem` [[(v,identity)] | v<-[1..schemaVersion]]) "ledger_profile_or_schema_mismatch"
     when (meta==[(1,identity)]) $ withTransaction c $
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/002.sql"))) $ execute_ c . fromString . T.unpack
-    when (meta/=[(schemaVersion,identity)]) $ withTransaction c $
+    when (meta `elem` [[(v,identity)] | v<-[1,2]]) $ withTransaction c $
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/003.sql"))) $ execute_ c . fromString . T.unpack
+    when (meta/=[(schemaVersion,identity)]) $ withTransaction c $
+      forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/004.sql"))) $ execute_ c . fromString . T.unpack
     -- Restart is quarantined until external identities and unresolved attempts are checked.
     execute_ c "UPDATE deployment SET paused=1,pause_reason='restart_requires_reconciliation'"
     newMVar c >>= action . Ledger
@@ -139,10 +144,113 @@ freeInventory c asset = do
   bs <- balances c
   holds <- query c "SELECT amount FROM reservations WHERE asset=? AND phase<>'released'" (Only (T.pack (show asset))) :: IO [Only Int64]
   pure $ M.findWithDefault 0 (T.pack (show asset),"float") bs - sum [toInteger n | Only n <- holds]
-fundAllocation :: Ledger -> Text -> Asset -> Text -> Amount -> IO ()
-fundAllocation l proof asset account a = ledgerAction l $ \c -> do
-  require (account `elem` ["float","backing","operating","lp"] && units a > 0) "invalid_allocation"
-  posting c ("fund:"<>proof) "verified treasury receipt" [(asset,account,toInteger (units a)),(asset,"external",negate $ toInteger $ units a)]
+-- The operator's verified funding workflow supplies the ownership evidence.
+-- Move an existing observed receipt; never credit the same on-chain value twice.
+allocateTreasuryReceipt :: Ledger -> Text -> [(Text,Amount)] -> Value -> IO ()
+allocateTreasuryReceipt l did allocation evidence = ledgerAction l $ \c -> do
+  let entries=sortOn fst allocation
+      names=map fst entries
+      allocationJSON=jsonText entries
+      proofJSON=jsonText evidence
+  require (not (null entries) && length entries<=4 && length (nub names)==length names
+    && all (`elem` ["float","backing","operating","lp"]) names && all ((>0) . units . snd) entries
+    && evidence/=Null && T.length proofJSON<=8192) "invalid_treasury_allocation"
+  old <- query c "SELECT allocation_json,proof_json FROM treasury_allocations WHERE deposit_id=?" (Only did) :: IO [(Text,Text)]
+  case old of
+    [(a,p)] -> require (a==allocationJSON && p==proofJSON) "treasury_allocation_conflict"
+    [] -> do
+      paused <- query_ c "SELECT paused FROM deployment" :: IO [Only Bool]
+      require (paused==[Only True]) "treasury_allocation_requires_pause"
+      rows <- query c "SELECT order_id,asset,amount,eligible,allocated FROM deposits WHERE id=?" (Only did) :: IO [(Maybe Text,Text,Int64,Bool,Bool)]
+      (asset,quantity) <- case rows of
+        [(Nothing,name,n,True,False)] -> case name of
+          "Native" -> pure (Native,n)
+          "Wrapped" -> pure (Wrapped,n)
+          "Sol" -> pure (Sol,n)
+          _ -> reject "invalid_treasury_asset"
+        _ -> reject "receipt_not_available_for_treasury"
+      require (sum (map (toInteger . units . snd) entries)==toInteger quantity) "treasury_allocation_amount_mismatch"
+      require (asset/=Sol || names==["operating"]) "sol_reserved_for_operating"
+      linked <- query c "SELECT id FROM obligations WHERE deposit_id=?" (Only did) :: IO [Only Text]
+      require (null linked) "receipt_has_customer_obligation"
+      sequenceNumber <- criticalSequence c
+      posting c ("treasury:"<>did) "operator allocation of verified treasury receipt"
+        ((asset,"unallocated",negate $ toInteger quantity):[(asset,account,toInteger $ units n) | (account,n)<-entries])
+      execute c "INSERT INTO treasury_allocations(deposit_id,allocation_json,proof_json,critical_sequence) VALUES(?,?,?,?)"
+        (did,allocationJSON,proofJSON,sequenceNumber)
+      execute c "UPDATE deposits SET allocated=1,state='treasury' WHERE id=?" (Only did)
+    _ -> reject "duplicate_treasury_allocation"
+
+scanAssets :: [(Text,Asset)]
+scanAssets=[("Native",Native),("Solana",Wrapped),("SolanaOperating",Sol)]
+
+-- Only already-observed, verified operator spends can be classified here.
+-- A customer attempt must settle through its own obligation, never this path.
+recordTreasurySpend :: Ledger -> Text -> Text -> Value -> IO ()
+recordTreasurySpend l stream txid proof = ledgerAction l $ \c -> do
+  let proofJSON=jsonText proof
+  require (proof/=Null && T.length proofJSON<=16384) "invalid_treasury_spend_proof"
+  rows <- query c "SELECT e.kind,e.anchor,o.evidence_json FROM chain_events e JOIN observation_evidence o ON o.hash=e.evidence_hash WHERE e.chain=? AND e.event_id=?"
+    (stream,txid) :: IO [(Text,Text,Text)]
+  (anchor,evidence) <- case rows of
+    [("outgoing",a,e)] -> do
+      value <- fromText e
+      nested <- either (const $ reject "invalid_observation_evidence") pure $ parseEither (withObject "observation" (.: "proof")) value
+      pure (a,nested)
+    _ -> reject "treasury_spend_not_observed"
+  economic@(asset,outflow,networkFee) <- either reject pure (economicOutflow stream evidence)
+  let economicJSON=jsonText economic
+  old <- query c "SELECT anchor,economic_json,proof_json FROM treasury_spends WHERE chain=? AND event_id=?" (stream,txid) :: IO [(Text,Text,Text)]
+  case old of
+    [(a,e,p)] -> require ((a,e,p)==(anchor,economicJSON,proofJSON)) "treasury_spend_conflict"
+    [] -> do
+      state <- query_ c "SELECT paused FROM deployment" :: IO [Only Bool]
+      require (state==[Only True]) "treasury_spend_requires_pause"
+      attempts <- query c "SELECT txid FROM attempts WHERE txid=?" (Only txid) :: IO [Only Text]
+      require (null attempts) "customer_attempt_cannot_be_treasury_spend"
+      bs <- balances c
+      let costs | asset==Native = [("float",toInteger (units outflow)-toInteger (units networkFee)),("operating",toInteger $ units networkFee)]
+                | asset==Wrapped = [("float",toInteger $ units outflow)]
+                | otherwise = [("operating",toInteger $ units outflow)]
+      forM_ costs $ \(account,cost) -> do
+        usable <- if account=="float" then freeInventory c asset else do
+          held <- query c "SELECT amount FROM fee_reservations WHERE asset=? AND released=0" (Only $ T.pack $ show asset) :: IO [Only Int64]
+          pure (M.findWithDefault 0 (T.pack $ show asset,account) bs - sum [toInteger n | Only n<-held])
+        require (cost>=0 && usable>=cost) "treasury_spend_exceeds_free_allocation"
+      sequenceNumber <- criticalSequence c
+      posting c ("treasury-spend:"<>stream<>":"<>txid) "verified operator spend and network costs"
+        ([(asset,account,negate cost) | (account,cost)<-costs]<>[(asset,"external",toInteger $ units outflow)])
+      execute c "INSERT INTO treasury_spends(chain,event_id,anchor,economic_json,proof_json,critical_sequence) VALUES(?,?,?,?,?,?)"
+        (stream,txid,anchor,economicJSON,proofJSON,sequenceNumber)
+      execute c "UPDATE chain_events SET needs_review=0 WHERE chain=? AND event_id=?" (stream,txid)
+    _ -> reject "duplicate_treasury_spend"
+
+economicOutflow :: Text -> Value -> Either Text (Asset,Amount,Amount)
+economicOutflow stream = either (const $ Left "invalid_treasury_outflow") Right . parseEither parseFlow
+ where
+  property key = withObject "economic evidence" (.: key)
+  signed value = do
+    text <- parseJSON value :: Parser Text
+    case readMaybe (T.unpack text) of
+      Just n | T.length text<=21 && T.pack(show (n::Integer))==text -> pure n
+      _ -> fail "invalid signed units"
+  quantity = either (fail . T.unpack) pure . amount
+  parseFlow value = do
+    (asset,delta,fee) <- case stream of
+      "Native" -> do
+        net <- property "walletNetUnits" value >>= signed
+        fee <- property "feeUnits" value :: Parser Amount
+        pure (Native,net-toInteger (units fee),fee)
+      "Solana" -> do
+        delta <- property "delta" value >>= signed
+        zero <- quantity 0
+        pure (Wrapped,delta,zero)
+      "SolanaOperating" -> (,,) Sol <$> (property "delta" value >>= signed) <*> property "feeUnits" value
+      _ -> fail "invalid observation stream"
+    requireP (delta<0 && negate delta>=toInteger (units fee))
+    outflow <- quantity (negate delta)
+    pure (asset,outflow,fee)
+  requireP ok=if ok then pure () else fail "invalid outgoing value"
 
 createOrder :: Ledger -> Config -> Int64 -> Text -> OrderRequest -> IO OrderView
 createOrder l cfg now capability req = do
@@ -208,14 +316,14 @@ data Deposit = Deposit { depositId :: !Text, depositOrder :: !(Maybe Text), depo
 observeDeposit :: Ledger -> Deposit -> Text -> IO ()
 observeDeposit l deposit cursor = ledgerAction l $ \c -> do
   observeDepositC c deposit
-  checkpoint c (T.pack (show (depositAsset deposit))) cursor
+  checkpoint c (case depositAsset deposit of Native->"Native"; Wrapped->"Solana"; Sol->"SolanaOperating") cursor
 
 -- The whole page and its continuation commit together. A stale scanner cannot
 -- advance a newer cursor, and one invalid receipt rolls back the complete page.
 recordScan :: Ledger -> Text -> Maybe Text -> Text -> [Deposit] -> IO ()
 recordScan l chain previous next deposits = ledgerAction l $ \c -> do
-  require (chain `elem` ["Native","Solana"] && not (T.null next) && T.length next<=128 && length deposits<=1000) "invalid_scan_batch"
-  require (all (\d -> depositAsset d == if chain=="Native" then Native else Wrapped) deposits) "scan_asset_mismatch"
+  require (chain `elem` map fst scanAssets && not (T.null next) && T.length next<=128 && length deposits<=1000) "invalid_scan_batch"
+  require (all (\d -> Just (depositAsset d)==lookup chain scanAssets) deposits) "scan_asset_mismatch"
   actual <- readCheckpointC c chain
   require (actual==previous) "stale_scan_cursor"
   mapM_ (observeDepositC c) deposits
@@ -235,9 +343,9 @@ data ScanBatch = ScanBatch
 
 commitScan :: Ledger -> ScanBatch -> IO ()
 commitScan l ScanBatch{..} = ledgerAction l $ \c -> do
-  require (scanChain `elem` ["Native","Solana"] && scanTime>=0 && length scanDeposits<=1000 && length scanEvents<=1000) "invalid_scan_batch"
+  require (scanChain `elem` map fst scanAssets && scanTime>=0 && length scanDeposits<=1000 && length scanEvents<=1000) "invalid_scan_batch"
   require (all (\t -> not (T.null t) && T.length t<=128) [scanOrigin,scanNext]) "invalid_scan_anchor"
-  require (all (\d -> depositAsset d == if scanChain=="Native" then Native else Wrapped) scanDeposits) "scan_asset_mismatch"
+  require (all (\d -> Just (depositAsset d)==lookup scanChain scanAssets) scanDeposits) "scan_asset_mismatch"
   actual <- readCheckpointC c scanChain
   require (actual==scanPrevious) "stale_scan_cursor"
   origins <- query c "SELECT anchor FROM scan_origins WHERE chain=?" (Only scanChain) :: IO [Only Text]
@@ -252,8 +360,13 @@ commitScan l ScanBatch{..} = ledgerAction l $ \c -> do
     let evidence = jsonText $ object ["chain" .= scanChain,"id" .= chainEventId,"anchor" .= chainEventAnchor,"kind" .= chainEventKind,"proof" .= chainEventEvidence]
         hash = digest (TE.encodeUtf8 evidence)
     require (T.length evidence<=8192) "observation_evidence_too_large"
-    known <- query c "SELECT a.txid FROM attempts a JOIN intents i ON i.id=a.intent_id WHERE a.txid=? AND i.chain=?" (chainEventId,scanChain) :: IO [Only Text]
-    let review = chainEventKind `elem` ["unsupported","unclassified","disputed"] || chainEventKind=="outgoing" && null known
+    let paymentChain=if scanChain=="SolanaOperating" then "Solana" else scanChain
+    known <- query c "SELECT a.txid FROM attempts a JOIN intents i ON i.id=a.intent_id WHERE a.txid=? AND i.chain=? AND a.state IN('broadcast_intent','settled','failed')" (chainEventId,paymentChain) :: IO [Only Text]
+    treasury <- query c "SELECT anchor,economic_json FROM treasury_spends WHERE chain=? AND event_id=?" (scanChain,chainEventId) :: IO [(Text,Text)]
+    let approved = case economicOutflow scanChain chainEventEvidence of
+          Right economic -> treasury==[(chainEventAnchor,jsonText economic)]
+          Left _ -> False
+        review = chainEventKind `elem` ["unsupported","unclassified","disputed"] || chainEventKind=="outgoing" && null known && not approved
     execute c "INSERT OR IGNORE INTO observation_evidence(hash,chain,event_id,evidence_json) VALUES(?,?,?,?)" (hash,scanChain,chainEventId,evidence)
     execute c "INSERT INTO chain_events(chain,event_id,kind,anchor,evidence_hash,first_seen,last_seen,needs_review) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(chain,event_id) DO UPDATE SET kind=excluded.kind,anchor=excluded.anchor,evidence_hash=excluded.evidence_hash,last_seen=excluded.last_seen,needs_review=MAX(chain_events.needs_review,excluded.needs_review)"
       (scanChain,chainEventId,chainEventKind,chainEventAnchor,hash,scanTime,scanTime,review)
@@ -263,7 +376,7 @@ commitScan l ScanBatch{..} = ledgerAction l $ \c -> do
 
 recordScanFailure :: Ledger -> Text -> Int64 -> Text -> IO ()
 recordScanFailure l chain now code = ledgerAction l $ \c -> do
-  require (chain `elem` ["Native","Solana"] && T.length code<=160) "invalid_scan_failure"
+  require (chain `elem` map fst scanAssets && T.length code<=160) "invalid_scan_failure"
   previous <- query c "SELECT last_error FROM scan_health WHERE chain=?" (Only chain) :: IO [Only (Maybe Text)]
   when (previous/=[Only (Just code)]) $ execute c "INSERT INTO audit(action,detail) VALUES('scanner_failure',?)" (Only (chain<>":"<>code))
   execute c "INSERT INTO scan_health(chain,last_error,checked_at) VALUES(?,?,?) ON CONFLICT(chain) DO UPDATE SET last_error=excluded.last_error,checked_at=excluded.checked_at" (chain,code,now)
@@ -302,7 +415,7 @@ readCheckpointC c chain = do
 
 observeDepositC :: Connection -> Deposit -> IO ()
 observeDepositC c Deposit{..} = do
-  require (units depositAmount>0 && depositConfirmations>=0 && depositSeenAt>=0 && depositAsset `elem` [Native,Wrapped]) "invalid_deposit"
+  require (units depositAmount>0 && depositConfirmations>=0 && depositSeenAt>=0) "invalid_deposit"
   case depositOrder of
     Nothing -> pure () -- Unknown receipts remain separate from spendable float.
     Just oid -> do

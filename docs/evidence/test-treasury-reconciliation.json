@@ -1,0 +1,142 @@
+{
+  "accountingMatches": true,
+  "audit": {
+    "balances": [
+      {
+        "allocation": "external",
+        "asset": "Native",
+        "units": "-1899718"
+      },
+      {
+        "allocation": "float",
+        "asset": "Native",
+        "units": "1750000"
+      },
+      {
+        "allocation": "operating",
+        "asset": "Native",
+        "units": "149718"
+      },
+      {
+        "allocation": "unallocated",
+        "asset": "Native",
+        "units": "0"
+      },
+      {
+        "allocation": "external",
+        "asset": "Sol",
+        "units": "-3501560"
+      },
+      {
+        "allocation": "operating",
+        "asset": "Sol",
+        "units": "3501560"
+      },
+      {
+        "allocation": "unallocated",
+        "asset": "Sol",
+        "units": "0"
+      },
+      {
+        "allocation": "external",
+        "asset": "Wrapped",
+        "units": "-99999999994"
+      },
+      {
+        "allocation": "float",
+        "asset": "Wrapped",
+        "units": "99999999994"
+      },
+      {
+        "allocation": "unallocated",
+        "asset": "Wrapped",
+        "units": "0"
+      }
+    ],
+    "events": [
+      [
+        "deposit:native:d42c6d553922668bd9176bf52b0e1b446751da7dd6d818cb97e48581856453fe:1",
+        "observed customer value"
+      ],
+      [
+        "deposit:solana:2NnCvanH599gGB7kGPJiy12LyYAjV3UYijAGoJFsQowUYZ6SZaRG6Qa8J1QXy5pdeRyX5JaXgxUDJTurupuRdkWA",
+        "observed customer value"
+      ],
+      [
+        "deposit:sol-operating:2NnCvanH599gGB7kGPJiy12LyYAjV3UYijAGoJFsQowUYZ6SZaRG6Qa8J1QXy5pdeRyX5JaXgxUDJTurupuRdkWA",
+        "observed customer value"
+      ],
+      [
+        "treasury:native:d42c6d553922668bd9176bf52b0e1b446751da7dd6d818cb97e48581856453fe:1",
+        "operator allocation of verified treasury receipt"
+      ],
+      [
+        "treasury:solana:2NnCvanH599gGB7kGPJiy12LyYAjV3UYijAGoJFsQowUYZ6SZaRG6Qa8J1QXy5pdeRyX5JaXgxUDJTurupuRdkWA",
+        "operator allocation of verified treasury receipt"
+      ],
+      [
+        "treasury:sol-operating:2NnCvanH599gGB7kGPJiy12LyYAjV3UYijAGoJFsQowUYZ6SZaRG6Qa8J1QXy5pdeRyX5JaXgxUDJTurupuRdkWA",
+        "operator allocation of verified treasury receipt"
+      ],
+      [
+        "treasury-spend:Native:b2278e8dd0be7be001a5630545ddb73c83423ee1ee7dbd0327675e27f1642bd3",
+        "verified operator spend and network costs"
+      ],
+      [
+        "treasury-spend:Solana:2GobRapeVX92w9QKpyomVvTLswXGjvkxdbvu9Azk5CCXPbujUfEshdVEccq9QGFkboaqAS1VcgiDWvB7giC9tCG3",
+        "verified operator spend and network costs"
+      ],
+      [
+        "treasury-spend:SolanaOperating:2GobRapeVX92w9QKpyomVvTLswXGjvkxdbvu9Azk5CCXPbujUfEshdVEccq9QGFkboaqAS1VcgiDWvB7giC9tCG3",
+        "verified operator spend and network costs"
+      ],
+      [
+        "treasury-spend:Solana:4kjhetrGow3ty6446oBCzSstVUtp6GGPyWeJcB63sZyKNK8eoosHvEwww6h6cQ9dpLZXK2tf5aBJHC8FrPVZE8aD",
+        "verified operator spend and network costs"
+      ],
+      [
+        "treasury-spend:SolanaOperating:4kjhetrGow3ty6446oBCzSstVUtp6GGPyWeJcB63sZyKNK8eoosHvEwww6h6cQ9dpLZXK2tf5aBJHC8FrPVZE8aD",
+        "verified operator spend and network costs"
+      ]
+    ],
+    "unresolved": []
+  },
+  "availability": {
+    "available": false,
+    "reason": "chain_review:SolanaOperating:outgoing"
+  },
+  "chainBalances": {
+    "Native": "1899718",
+    "Sol": "3501560",
+    "Wrapped": "99999999994"
+  },
+  "profile": "L2LSignetDevnet",
+  "scanners": {
+    "review": [],
+    "scanners": [
+      {
+        "chain": "Native",
+        "checkedAt": 1790823029,
+        "cursor": "0000010f8a28f46587e8d1f1512e1dbcab79955348bbfced0c6a0044b42b7fbc",
+        "lastError": null,
+        "lastSuccess": 1790823029
+      },
+      {
+        "chain": "Solana",
+        "checkedAt": 1790823029,
+        "cursor": "4kjhetrGow3ty6446oBCzSstVUtp6GGPyWeJcB63sZyKNK8eoosHvEwww6h6cQ9dpLZXK2tf5aBJHC8FrPVZE8aD",
+        "lastError": null,
+        "lastSuccess": 1790823029
+      },
+      {
+        "chain": "SolanaOperating",
+        "checkedAt": 1790823030,
+        "cursor": "4kjhetrGow3ty6446oBCzSstVUtp6GGPyWeJcB63sZyKNK8eoosHvEwww6h6cQ9dpLZXK2tf5aBJHC8FrPVZE8aD",
+        "lastError": null,
+        "lastSuccess": 1790823030
+      }
+    ]
+  },
+  "schema": 4,
+  "scope": "Known public-test treasury and prior probes only; not customer settlement or canonical readiness"
+}

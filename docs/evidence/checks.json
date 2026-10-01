@@ -1,13 +1,13 @@
 {
-  "recordedUtc": "2026-10-01T02:31:39.880291+00:00",
+  "recordedUtc": "2026-10-01T03:07:54.960366+00:00",
   "platform": "macOS arm64",
   "haskell": {
-    "examples": 74,
+    "examples": 85,
     "propertyCases": 100,
     "failures": 0,
     "sqliteVersion": "3.53.4",
     "evidence": "haskell-tests.txt",
-    "ledgerSchema": 3
+    "ledgerSchema": 4
   },
   "rust": {
     "unitTests": 5,
@@ -59,6 +59,19 @@
     "replay": "solana-observer-replay.json",
     "duplicatePostings": false,
     "realOrderBoundDepositVerified": false,
-    "treasuryAllocated": false
+    "treasuryAllocated": true
+  },
+  "treasury": {
+    "scope": "Known public-test setup and prior standalone probes",
+    "reconciliation": "test-treasury-reconciliation.json",
+    "replay": "test-treasury-replay.json",
+    "schemaMigration": "treasury-migration.json",
+    "solanaOperatingOrigin": "solana-operating-origin-check.json",
+    "restart": "treasury-scanner-restart.json",
+    "accountingMatches": true,
+    "duplicatePostings": false,
+    "customerOrders": 0,
+    "transactionsSentDuringReconciliation": 0,
+    "generalOperatorWorkflowComplete": false
   }
 }

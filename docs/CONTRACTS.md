@@ -26,7 +26,9 @@ Every event has balanced postings separately for each asset. Journal rows are ap
 | `backing` | Protected wrapped-asset backing allocation | No |
 | `lp` | Separately allocated market liquidity | No |
 
-Never initialize float from the wallet balance alone. Verified treasury receipts and the associated capital allocation must reconcile with chain balances. Current `fundAllocation` is an internal primitive; the verified funding workflow is unfinished and unavailable over HTTP.
+Never initialize float from the wallet balance alone. `allocateTreasuryReceipt` moves an existing eligible, unbound receipt from `unallocated` into explicit allocations while paused. The split must exactly equal the receipt, and SOL may only fund `operating`. Saved ownership evidence and allocation are immutable; exact repeats do not post again. There is no runtime arbitrary-credit primitive. A general verified operator workflow remains unfinished and unavailable over HTTP.
+
+`recordTreasurySpend` classifies an already observed operator outflow with immutable verification evidence. It protects customer attempts and active float/fee reservations, posts the principal and operating costs once, and clears only that event's review. A later changed anchor or economic effect requires review again. `scripts/reconcile-test-treasury.hs` uses these primitives for the exact known test setup and standalone probes, then compares all custody allocations with actual chain balances. It does not authorize new payments, canonical funding, or automatic reorg repair.
 
 Examples below use coins for readability; code uses integer base units:
 
@@ -57,7 +59,9 @@ Solana preparation saves the blockhash, validity height, obligation-specific mem
 
 A scanner batch uses a compare-and-swap on its previous cursor and commits all observations with the next cursor. A conflicting receipt rolls back the entire page. Repeated observations do not duplicate journal value. Unknown bindings remain quarantined; discovering chain history after restoring an old database cannot prove that an unrecognized deposit was never paid.
 
-Schema 2 adds immutable scan origins and observation evidence, latest event classifications, and scanner health. The native observer rechecks wallet ownership, output scripts, amounts and the order's saved confirmation depth. The Solana observer requires its exact history anchor, resolves historical token balances, and revisits deposits awaiting an independent provider. Unsupported or ambiguous balance effects and unknown outgoing transactions require review. Cursor advancement does not clear that review. Provider errors preserve the previous cursor. Current observers cover native and wrapped activity; complete operating-SOL, reorg and custody-balance reconciliation is still required.
+Schema 2 adds immutable scan origins and observation evidence, latest event classifications, and scanner health. The native observer rechecks wallet ownership, output scripts, amounts and the order's saved confirmation depth. The Solana observer requires its exact history anchor, resolves historical token balances, and revisits deposits awaiting an independent provider. Unsupported or ambiguous balance effects and unknown outgoing transactions require review. Cursor advancement does not clear that review. Provider errors preserve the previous cursor.
+
+Schema 4 adds the treasury records and a separate `SolanaOperating` history stream for the dedicated fee-payer owner. It is part of the same Solana adapter, with its own immutable origin and cursor. Historical lamport deltas include ordinary SOL receipts, network fees and recipient-account rent. The opening transaction must start with zero owner lamports; a later anchor cannot omit earlier funding. SOL observations never authorize customer conversions. Known customer outflows require a recorded broadcast intent or completed result; a merely signed attempt is not accepted as explained activity. Ongoing custody/in-flight reconciliation and full reorg recovery remain unfinished.
 
 The database starts paused after every restart and holds an exclusive worker file lock. Internal `resumeAfterChecks` is not an admin route and must only be wired after identity, history, solvency, and unresolved-attempt reconciliation are implemented.
 

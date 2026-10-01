@@ -1,15 +1,16 @@
 Build profile: -w ghc-9.14.1 -O1
 In order, the following will be built (use -v for more details):
- - ecx-bridge-0.1.0.0 (lib) (file docs/STATUS.md changed)
- - ecx-bridge-0.1.0.0 (test:bridge-test) (dependency rebuilt)
+ - ecx-bridge-0.1.0.0 (lib) (configuration changed)
+ - ecx-bridge-0.1.0.0 (test:bridge-test) (configuration changed)
+Configuring library for ecx-bridge-0.1.0.0...
 Preprocessing library for ecx-bridge-0.1.0.0...
 Building library for ecx-bridge-0.1.0.0...
-[ 9 of 18] Compiling Bridge.SolanaPayment ( src/Bridge/SolanaPayment.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/SolanaPayment.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/SolanaPayment.dyn_o ) [Source file changed]
-[13 of 18] Compiling Bridge.Payment   ( src/Bridge/Payment.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Payment.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Payment.dyn_o ) [Bridge.SolanaPayment changed]
+[12 of 18] Compiling Bridge.Ledger    ( src/Bridge/Ledger.hs, <build-cache>/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Ledger.o, <build-cache>/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Ledger.dyn_o ) [Source file changed]
+Configuring test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Preprocessing test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Building test suite 'bridge-test' for ecx-bridge-0.1.0.0...
-[1 of 1] Compiling Main             ( test/Spec.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test-tmp/Main.o ) [Source file changed]
-[2 of 2] Linking ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test [Objects changed]
+[1 of 1] Compiling Main             ( test/Spec.hs, <build-cache>/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test-tmp/Main.o ) [Source file changed]
+[2 of 2] Linking <build-cache>/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test [Objects changed]
 Running 1 test suites...
 Test suite bridge-test: RUNNING...
 
@@ -57,6 +58,19 @@ refund principal and failed transaction fees
   will not refund a signed or possibly broadcast conversion [✔]
   charges a failed Solana transaction fee and preserves full refundable principal [✔]
   does not promote a deposit first observed after its deposit deadline [✔]
+verified treasury allocation and accounting
+  moves an observed receipt exactly once instead of crediting the asset again [✔]
+  cannot allocate bound customer principal, unconfirmed receipts or an incorrect total [✔]
+  separates SOL history from token history and restricts SOL to operating funds [✔]
+  books a verified operator payment and fee once, preserving its review decision across scans [✔]
+  cannot classify an existing customer attempt as an operator spend [✔]
+  requires review when signed bytes appear on-chain before a recorded broadcast intent [✔]
+  preserves reserved operating funds when reconciling a separate operator spend [✔]
+SOL accounting from captured public Devnet metadata
+  observes the actual SOL setup receipt without charging the external payer's fee to custody [✔]
+  observes fee and account-rent SOL for the existing recipient [✔]
+  observes fee and account-rent SOL for the new recipient [✔]
+  retains failed-transaction fees but rejects a failed transaction changing other principal [✔]
 backup and schema protections
   migrates version one without losing financial rows or critical sequence [✔]
   does not expose canonical instructions before acknowledged coverage [✔]
@@ -103,9 +117,9 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 0.5096 seconds
-74 examples, 0 failures
+Finished in 0.7009 seconds
+85 examples, 0 failures
 Test suite bridge-test: PASS
 Test suite logged to:
-[repository]/./../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log
+<repository>/./<build-cache>/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log
 1 of 1 test suites (1 of 1 test cases) passed.

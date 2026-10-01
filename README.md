@@ -12,7 +12,7 @@ A small inventory bridge: one Haskell/Servant application, two chain adapters, o
 | `ecx-bridge serve` | Serves static assets and proxies the typed customer API. Binds only to loopback. Receives no key or database path. |
 | `Bridge.Ledger` | Quotes, inventory reservations, protected principal, obligations, exact signed attempts, fee accounting, backup coverage, audit records. |
 | `Bridge.Native` / `Bridge.Solana` | Real node/RPC identity checks and bounded calls. Adapter integration is incomplete. |
-| `Bridge.Observer` | Native wallet history and paginated finalized Solana custody history; atomic evidence/cursors, quarantined unknown activity, independent-provider deposit checks. |
+| `Bridge.Observer` | Native wallet history and separate finalized Solana token/SOL histories; atomic evidence/cursors, quarantined unknown activity, independent-provider deposit checks. |
 | `Bridge.NativePayment` / `Bridge.SolanaPayment` / `Bridge.Payment` | Validate outgoing transactions, reserve operating costs, save exact preparation requests/drafts before signing and signed bytes afterward. Solana simulations use unsigned copies. Not enabled in the worker loop. |
 | `ecx-solana-helper` | Fixed mint/custody configuration; exact integer amounts; checked transfer, signed memo, recipient ATA creation. No RPC client. |
 | `web/` | Wallet Standard discovery, immutable order requests, recovery links, status display. No frontend framework or Node server. |
@@ -60,6 +60,7 @@ Build the browser assets first. Open `http://127.0.0.1:8096`. Administrator rout
 - The real eight-decimal Devnet test mint was created by `solana-helper/examples/setup_devnet.rs`: [setup evidence](docs/evidence/devnet-setup.json). Mint authority remains separate from custody.
 - Real three-unit Devnet transfers finalized to an [existing account](https://explorer.solana.com/tx/2GobRapeVX92w9QKpyomVvTLswXGjvkxdbvu9Azk5CCXPbujUfEshdVEccq9QGFkboaqAS1VcgiDWvB7giC9tCG3?cluster=devnet) and a [new recipient account](https://explorer.solana.com/tx/4kjhetrGow3ty6446oBCzSstVUtp6GGPyWeJcB63sZyKNK8eoosHvEwww6h6cQ9dpLZXK2tf5aBJHC8FrPVZE8aD?cluster=devnet). Haskell checks matched the recorded bytes, amounts, fees and rent. The first expired attempt and the history decision preceding its replacement are retained in [evidence](docs/evidence/solana-devnet-expired-attempt.json). These are standalone adapter probes, not bridge orders.
 - The Solana observer scanned the actual setup and payouts; replay created no duplicate entries: [evidence](docs/evidence/solana-observer-replay.json).
+- The known public-test funding and prior probes are now reconciled to the ledger, including SOL fees and recipient-account rent. Allocations move observed receipts instead of crediting them twice; a repeated reconciliation left financial records unchanged: [balances](docs/evidence/test-treasury-reconciliation.json), [replay](docs/evidence/test-treasury-replay.json). The separate SOL scanner rejects a history origin with omitted opening funds: [real-network check](docs/evidence/solana-operating-origin-check.json).
 
 The native smoke script is restricted to the real L2L Signet and two dedicated test wallets. It persists exact signed bytes before sending. It is an integration probe, not a ledger-driven bridge.
 

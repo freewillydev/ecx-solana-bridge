@@ -1,0 +1,26 @@
+{
+  "review": [],
+  "scanners": [
+    {
+      "chain": "Native",
+      "checkedAt": 1790824063,
+      "cursor": "00000129f46a08cd88cf3f5ec1977aa57d2018dea381694230028efe8dff838c",
+      "lastError": null,
+      "lastSuccess": 1790824063
+    },
+    {
+      "chain": "Solana",
+      "checkedAt": 1790824064,
+      "cursor": "4kjhetrGow3ty6446oBCzSstVUtp6GGPyWeJcB63sZyKNK8eoosHvEwww6h6cQ9dpLZXK2tf5aBJHC8FrPVZE8aD",
+      "lastError": null,
+      "lastSuccess": 1790824064
+    },
+    {
+      "chain": "SolanaOperating",
+      "checkedAt": 1790824064,
+      "cursor": "4kjhetrGow3ty6446oBCzSstVUtp6GGPyWeJcB63sZyKNK8eoosHvEwww6h6cQ9dpLZXK2tf5aBJHC8FrPVZE8aD",
+      "lastError": null,
+      "lastSuccess": 1790824064
+    }
+  ]
+}

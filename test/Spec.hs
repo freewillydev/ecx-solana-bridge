@@ -51,7 +51,7 @@ amt n = either (error . T.unpack) id (amount n)
 cap :: Text
 cap=T.replicate 64 "a"
 cfg :: FilePath -> Config
-cfg dir = Config L2LSignetDevnet "unit-fixture" "http://127.0.0.1:29432" (dir</>"cookie") "fixture-wallet" 16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47" "https://api.devnet.solana.com" Nothing "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM" "RWjpjjkpABkEGomLbZYyN53pA3FVdPXp9izJ25wErGX" "11111111111111111111111111111111" (dir</>"private/ledger.sqlite") (dir</>"customer/api.sock") (dir</>"admin/api.sock") "/usr/bin/false" (dir</>"helper.json") (amt 2) (amt 1000000000000) 100 300 600 1 (amt 1000) (amt 1000) False Nothing (amt 2100000)
+cfg dir = Config L2LSignetDevnet "unit-fixture" "http://127.0.0.1:29432" (dir</>"cookie") "fixture-wallet" 16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47" "https://api.devnet.solana.com" Nothing "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM" "RWjpjjkpABkEGomLbZYyN53pA3FVdPXp9izJ25wErGX" "11111111111111111111111111111111" (dir</>"private/ledger.sqlite") (dir</>"customer/api.sock") (dir</>"admin/api.sock") "/usr/bin/false" (dir</>"helper.json") (amt 2) (amt 1000000000000) 100 300 600 1 (amt 1000) (amt 1000) False Nothing (amt 2100000) Nothing
 req :: OrderRequest
 req=OrderRequest NativeToWrapped (amt 100000) "fixture-solana-recipient" "fixture-native-refund" Nothing "retry-key"
 withDir :: (FilePath -> IO a) -> IO a
@@ -67,6 +67,15 @@ withFunded action=withDir $ \dir -> let c=cfg dir in withLedger (dbPath c) (fing
   fundAllocation l "fixture-native-fees" Native "operating" (amt 100000)
   resumeAfterChecks l
   action l c
+-- Offline fixture setup only. Runtime treasury allocation must move a verified
+-- observed receipt; the application exposes no arbitrary-credit primitive.
+fundAllocation :: Ledger -> Text -> Asset -> Text -> Amount -> IO ()
+fundAllocation l ident asset account value=ledgerAction l $ \db -> do
+  let event="fixture-fund:"<>ident
+      name=T.pack(show asset)
+  execute db "INSERT INTO events(id,description) VALUES(?,'offline test fixture funding')" (Only event)
+  execute db "INSERT INTO postings(event_id,asset,account,delta) VALUES(?,?,?,?)" (event,name,account,units value)
+  execute db "INSERT INTO postings(event_id,asset,account,delta) VALUES(?,?,'external',?)" (event,name,negate $ units value)
 isError :: Text -> BridgeError -> Bool
 isError expected (BridgeError actual)=expected==actual
 fundOrder :: Ledger -> Config -> IO (OrderView,Obligation)
@@ -375,6 +384,110 @@ main=hspec $ do
       o<-createOrder l c 100 cap req
       observeDeposit l (Deposit "late:0" (Just $ orderId o) Native (input req) "anchor" 1 True 500) "cursor"
       promoteDeposit l 500 "late:0" `shouldReturn` False
+  describe "verified treasury allocation and accounting" $ do
+    it "moves an observed receipt exactly once instead of crediting the asset again" $ withDir $ \dir -> do
+      let c=cfg dir
+      withLedger (dbPath c) (fingerprint c) $ \l -> do
+        observeDeposit l (Deposit "treasury-receipt" Nothing Native (amt 1000) "fixture-block" 1 True 100) "cursor"
+        let split=[("float",amt 900),("operating",amt 100)]
+            proof=object ["operatorClaim" .= ("fixture-owned-funding"::Text)]
+        allocateTreasuryReceipt l "treasury-receipt" split proof
+        allocateTreasuryReceipt l "treasury-receipt" (reverse split) proof
+        ledgerAction l (\db->freeInventory db Native) `shouldReturn` 900
+        ledgerAction l (\db->query_ db "SELECT SUM(delta) FROM postings WHERE account<>'external'" :: IO [Only Int64]) `shouldReturn` [Only 1000]
+        ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64]) `shouldReturn` [Only 1]
+        allocateTreasuryReceipt l "treasury-receipt" [("float",amt 1000)] proof `shouldThrow` isError "treasury_allocation_conflict"
+    it "cannot allocate bound customer principal, unconfirmed receipts or an incorrect total" $ withFunded $ \l c -> do
+      (o,_)<-fundOrder l c
+      pause l "fixture-review"
+      let proof=object ["operatorClaim" .= ("fixture"::Text)]
+      allocateTreasuryReceipt l "fixture-tx:0" [("float",amt 100000)] proof `shouldThrow` isError "receipt_not_available_for_treasury"
+      observeDeposit l (Deposit "unconfirmed" Nothing Native (amt 1000) "unconfirmed" 0 False 100) "cursor"
+      allocateTreasuryReceipt l "unconfirmed" [("float",amt 1000)] proof `shouldThrow` isError "receipt_not_available_for_treasury"
+      observeDeposit l (Deposit "unbound" Nothing Native (amt 1000) "fixture-block" 1 True 100) "cursor"
+      allocateTreasuryReceipt l "unbound" [("float",amt 1001)] proof `shouldThrow` isError "treasury_allocation_amount_mismatch"
+      status <$> readOrder l cap (orderId o) `shouldReturn` "Ready"
+    it "separates SOL history from token history and restricts SOL to operating funds" $ withDir $ \dir -> do
+      let c=cfg dir
+      withLedger (dbPath c) (fingerprint c) $ \l -> do
+        let receipt=Deposit "sol-operating:fund" Nothing Sol (amt 10000) "100" 1 True 100
+            event=ChainEvent "fund" "unmatched_incoming" "100" (object ["delta" .= ("10000"::Text)])
+            batch=ScanBatch "SolanaOperating" "origin" Nothing "fund" 100 [receipt] [event]
+            proof=object ["operatorClaim" .= ("fixture-SOL"::Text)]
+        commitScan l batch
+        readCheckpoint l "Solana" `shouldReturn` Nothing
+        readCheckpoint l "SolanaOperating" `shouldReturn` Just "fund"
+        allocateTreasuryReceipt l "sol-operating:fund" [("float",amt 10000)] proof `shouldThrow` isError "sol_reserved_for_operating"
+        allocateTreasuryReceipt l "sol-operating:fund" [("operating",amt 10000)] proof
+        commitScan l batch{scanPrevious=Just "fund"}
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM deposits" :: IO [Only Int]) `shouldReturn` [Only 1]
+        commitScan l batch{scanChain="Solana",scanPrevious=Nothing} `shouldThrow` isError "scan_asset_mismatch"
+    it "books a verified operator payment and fee once, preserving its review decision across scans" $ withDir $ \dir -> do
+      let c=cfg dir
+      withLedger (dbPath c) (fingerprint c) $ \l -> do
+        observeDeposit l (Deposit "capital" Nothing Native (amt 1000) "fixture-block" 1 True 100) "cursor"
+        let proof=object ["verifiedOperatorPayment" .= ("fixture"::Text)]
+            economic=object ["walletNetUnits" .= ("-100"::Text),"feeUnits" .= amt 2,"confirmations" .= (1::Int)]
+            event=ChainEvent "operator-payment" "outgoing" "fixture-block" economic
+            batch=ScanBatch "Native" "origin" (Just "cursor") "cursor" 101 [] [event]
+        allocateTreasuryReceipt l "capital" [("float",amt 900),("operating",amt 100)] proof
+        commitScan l batch
+        recordTreasurySpend l "Native" "operator-payment" proof
+        recordTreasurySpend l "Native" "operator-payment" proof
+        ledgerAction l (\db->freeInventory db Native) `shouldReturn` 800
+        ledgerAction l (\db->query_ db "SELECT SUM(delta) FROM postings WHERE account<>'external'" :: IO [Only Int64]) `shouldReturn` [Only 898]
+        commitScan l batch{scanEvents=[event{chainEventEvidence=setPath ["confirmations"] (Number 2) economic}]}
+        ledgerAction l (\db->query_ db "SELECT needs_review FROM chain_events" :: IO [Only Bool]) `shouldReturn` [Only False]
+        -- Changed block identity cannot inherit the earlier financial approval.
+        commitScan l batch{scanEvents=[event{chainEventAnchor="different-block"}]}
+        ledgerAction l (\db->query_ db "SELECT needs_review FROM chain_events" :: IO [Only Bool]) `shouldReturn` [Only True]
+        recordTreasurySpend l "Native" "operator-payment" proof `shouldThrow` isError "treasury_spend_conflict"
+    it "cannot classify an existing customer attempt as an operator spend" $ withFunded $ \l c -> do
+      (_,ob)<-fundOrder l c
+      testAttempt l ob "Solana" "customer-signature" "bytes" "{}" 5000 Nothing
+      pause l "fixture-review"
+      commitScan l (ScanBatch "Solana" "origin" Nothing "customer-signature" 100 []
+        [ChainEvent "customer-signature" "outgoing" "100" (object ["delta" .= ("-99800"::Text)])])
+      recordTreasurySpend l "Solana" "customer-signature" (object ["fixture" .= True])
+        `shouldThrow` isError "customer_attempt_cannot_be_treasury_spend"
+    it "requires review when signed bytes appear on-chain before a recorded broadcast intent" $ withFunded $ \l c -> do
+      (_,ob)<-fundOrder l c
+      testAttempt l ob "Solana" "premature-signature" "bytes" "{}" 5000 Nothing
+      commitScan l (ScanBatch "SolanaOperating" "origin" Nothing "premature-signature" 100 []
+        [ChainEvent "premature-signature" "outgoing" "100" (object ["delta" .= ("-5000"::Text),"feeUnits" .= amt 5000])])
+      ledgerAction l (\db->query_ db "SELECT needs_review FROM chain_events" :: IO [Only Bool]) `shouldReturn` [Only True]
+      available <$> readiness l `shouldReturn` False
+    it "preserves reserved operating funds when reconciling a separate operator spend" $ withFunded $ \l c -> do
+      (_,ob)<-fundOrder l c
+      beginPreparation l ob "Solana" 5000 "fixture-policy"
+      commitScan l (ScanBatch "SolanaOperating" "origin" Nothing "operator-sig" 100 []
+        [ChainEvent "operator-sig" "outgoing" "100" (object ["delta" .= ("-96000"::Text),"feeUnits" .= amt 5000])])
+      recordTreasurySpend l "SolanaOperating" "operator-sig" (object ["fixture" .= True])
+        `shouldThrow` isError "treasury_spend_exceeds_free_allocation"
+  describe "SOL accounting from captured public Devnet metadata" $ do
+    it "observes the actual SOL setup receipt without charging the external payer's fee to custody" $ do
+      captured<-BS.readFile "test/fixtures/solana-devnet-accounts.json" >>= either fail pure . eitherDecodeStrict'
+      sig<-fieldValue "manifest" captured >>= fieldValue "setupSignature"
+      proof<-fieldValue "setupTransaction" captured
+      effect<-either (fail . T.unpack) pure (lamportEffect sig (custodyOwner $ cfg "/unused") proof)
+      lamportBefore effect `shouldBe` amt 0
+      lamportDelta effect `shouldBe` 5000000
+      lamportFee effect `shouldBe` amt 0
+    forM_ [("existing",5000),("new",1493440)] $ \(kind,debit) -> it ("observes fee and account-rent SOL for the "<>kind<>" recipient") $ do
+      (c,signed,proof,_)<-capturedSolanaPayment kind
+      sig<-maybe (fail "missing signature") pure (replySignature $ signedSolanaReply signed)
+      effect<-either (fail . T.unpack) pure (lamportEffect sig (custodyOwner c) proof)
+      lamportDelta effect `shouldBe` negate debit
+      lamportFee effect `shouldBe` amt 5000
+    it "retains failed-transaction fees but rejects a failed transaction changing other principal" $ do
+      (c,signed,proof,_)<-capturedSolanaPayment "existing"
+      sig<-maybe (fail "missing signature") pure (replySignature $ signedSolanaReply signed)
+      let failed=setPath ["meta","err"] (String "fixture-error") proof
+      lamportFailed <$> lamportEffect sig (custodyOwner c) failed `shouldBe` Right True
+      (newConfig,newSigned,newProof,_)<-capturedSolanaPayment "new"
+      newSig<-maybe (fail "missing signature") pure (replySignature $ signedSolanaReply newSigned)
+      lamportEffect newSig (custodyOwner newConfig) (setPath ["meta","err"] (String "fixture-error") newProof)
+        `shouldBe` Left "unclassified_lamport_effect"
   describe "backup and schema protections" $ do
     it "migrates version one without losing financial rows or critical sequence" $ withDir $ \dir -> do
       let c=cfg dir

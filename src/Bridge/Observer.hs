@@ -1,6 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.Observer
-  ( observeOnce, observeNative, observeSolana, observerLoop
+  ( observeOnce, observeNative, observeSolana, observeSolanaOperating, observerLoop
   , SignatureInfo(..), collectSignatures, epochSeconds
   ) where
 
@@ -234,6 +234,45 @@ observeSolana manager c ledger = do
           Right secondary | secondary==primary -> "verified"
           _ -> "disputed"
 
+observeSolanaOperating :: Manager -> Config -> Ledger -> IO ()
+observeSolanaOperating manager c ledger = do
+  _ <- solanaIdentity manager c
+  origin <- maybe (reject "solana_operating_history_start_required") pure (solanaOperatingHistoryStart c)
+  previous <- readCheckpoint ledger "SolanaOperating"
+  history <- collectSignatures origin previous $ \before ->
+    solanaAddressHistory manager c (custodyOwner c) before Nothing >>= parseValue parseJSON
+  observations <- forM history $ \h -> do
+    let sig=historySignature h
+        anchor=T.pack (show $ historySlot h)
+    result <- try (finalizedTransaction manager c sig) :: IO (Either BridgeError Value)
+    case result of
+      Left (BridgeError "rpc_error_-32015") -> pure ([],ChainEvent sig "unsupported" anchor
+        (object ["reason" .= ("transaction_version_unsupported"::Text)]))
+      Left (BridgeError code) -> reject code
+      Right value -> do
+        require (value/=Null) "solana_history_transaction_unavailable"
+        case lamportEffect sig (custodyOwner c) value of
+          Left code -> pure ([],ChainEvent sig "unclassified" anchor (object ["reason" .= code]))
+          Right effect -> do
+            require (lamportSlot effect==historySlot h && lamportFailed effect==historyFailed h) "solana_history_result_mismatch"
+            when (previous==Nothing && sig==origin) $
+              require (units (lamportBefore effect)==0) "solana_operating_opening_balance_requires_history"
+            now <- epochSeconds
+            receipts <- if lamportDelta effect<=0 then pure [] else do
+              quantity <- either reject pure (amount $ lamportDelta effect)
+              pure [Deposit ("sol-operating:"<>sig) Nothing Sol quantity anchor 1 True now]
+            let kind | lamportDelta effect<0 = "outgoing"
+                     | lamportDelta effect>0 = "unmatched_incoming"
+                     | lamportFailed effect = "failed"
+                     | otherwise = "reference"
+                evidence=object ["signature" .= sig,"slot" .= lamportSlot effect,"owner" .= custodyOwner c
+                  ,"delta" .= T.pack (show $ lamportDelta effect),"feeUnits" .= lamportFee effect
+                  ,"failed" .= lamportFailed effect,"rpcPayloadHash" .= digest (LBS.toStrict $ encode value)]
+            pure (receipts,ChainEvent sig kind anchor evidence)
+  now <- epochSeconds
+  commitScan ledger (ScanBatch "SolanaOperating" origin previous (historySignature $ last history) now
+    (concatMap fst observations) (map snd observations))
+
 promoteObserved :: Ledger -> IO ()
 promoteObserved ledger = do
   candidates <- ledgerAction ledger $ \db -> query_ db "SELECT d.id FROM deposits d JOIN orders o ON o.id=d.order_id WHERE d.eligible=1 AND d.allocated=0 AND o.status IN('Provisioning','AwaitingDeposit') ORDER BY d.first_seen,d.id LIMIT 1000" :: IO [Only Text]
@@ -242,7 +281,8 @@ promoteObserved ledger = do
 
 observeOnce :: Manager -> Config -> Ledger -> IO Value
 observeOnce manager c ledger = do
-  forM_ [("Native",observeNative manager c ledger),("Solana",observeSolana manager c ledger)] $ \(chain,scan) -> do
+  forM_ [("Native",observeNative manager c ledger),("Solana",observeSolana manager c ledger)
+    ,("SolanaOperating",observeSolanaOperating manager c ledger)] $ \(chain,scan) -> do
     result <- try (scan `catch` (\(_::IOException) -> reject "observer_io_unavailable")) :: IO (Either BridgeError ())
     case result of
       Right () -> pure ()

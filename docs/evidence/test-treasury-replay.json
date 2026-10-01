@@ -1,0 +1,24 @@
+{
+  "recordedAt": "2026-10-01T02:57:00.959051+00:00",
+  "before": {
+    "critical_sequence": 8,
+    "deposits": 3,
+    "postings": 24,
+    "allocations": 3,
+    "operatorSpends": 5
+  },
+  "after": {
+    "critical_sequence": 8,
+    "deposits": 3,
+    "postings": 24,
+    "allocations": 3,
+    "operatorSpends": 5
+  },
+  "sameFinancialState": true,
+  "accountingMatches": true,
+  "chainBalances": {
+    "Native": "1899718",
+    "Sol": "3501560",
+    "Wrapped": "99999999994"
+  }
+}

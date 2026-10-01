@@ -15,6 +15,7 @@ cabal test all --test-show-details=direct --extra-lib-dirs="$sqlite_lib" --extra
 # Compile the manual public-network probe without running it or touching a wallet.
 cabal exec -- ghc -fno-code -package ecx-bridge scripts/native-unsigned-probe.hs
 cabal exec -- ghc -fno-code -package ecx-bridge scripts/solana-probe.hs
+cabal exec -- ghc -fno-code -package ecx-bridge scripts/reconcile-test-treasury.hs
 cargo test --locked --manifest-path solana-helper/Cargo.toml --all-targets
 cargo fmt --check --manifest-path solana-helper/Cargo.toml
 npm ci --prefix web --ignore-scripts

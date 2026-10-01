@@ -1,0 +1,27 @@
+{
+  "recordedAt": "2026-10-01T02:50:30.158441+00:00",
+  "before": [
+    {
+      "schema_version": 3,
+      "critical_sequence": 0,
+      "paused": 1,
+      "deposits": 2,
+      "postings": 4,
+      "orders": 0,
+      "attempts": 0
+    }
+  ],
+  "after": [
+    {
+      "schema_version": 4,
+      "critical_sequence": 8,
+      "paused": 1,
+      "deposits": 3,
+      "postings": 24,
+      "orders": 0,
+      "attempts": 0
+    }
+  ],
+  "backupTaken": true,
+  "note": "Added SOL funding observation, allocated only the three identified test receipts, and accounted for the existing operator probes. No sends or orders were created."
+}
