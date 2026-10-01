@@ -1,13 +1,13 @@
 {
-  "recordedUtc": "2026-10-01T03:34:12.811907+00:00",
+  "recordedUtc": "2026-10-01T04:27:38.826834+00:00",
   "platform": "macOS arm64",
   "haskell": {
-    "examples": 95,
+    "examples": 109,
     "propertyCases": 100,
     "failures": 0,
     "sqliteVersion": "3.53.4",
     "evidence": "haskell-tests.txt",
-    "ledgerSchema": 4
+    "ledgerSchema": 5
   },
   "rust": {
     "unitTests": 5,
@@ -27,7 +27,7 @@
     }
   },
   "realNativeProbe": "signet-probe.json",
-  "fullBridgeRoundTrip": false,
+  "fullBridgeRoundTrip": true,
   "browserWalletSigning": false,
   "linuxTargetValidated": false,
   "remoteRestoreValidated": false,
@@ -36,12 +36,12 @@
     "replay": "native-observer-replay.json",
     "schemaVersion": 2,
     "duplicatePostings": false,
-    "solanaRealDepositVerified": false
+    "solanaRealDepositVerified": true
   },
   "nativePreparation": {
     "unsignedRealNode": "native-unsigned-probe.json",
     "signedRpcContractTest": true,
-    "signedLiveLedgerTest": false,
+    "signedLiveLedgerTest": true,
     "automaticWorkerEnabled": false
   },
   "solanaPreparation": {
@@ -58,7 +58,7 @@
     "realScan": "solana-observer-first-scan.json",
     "replay": "solana-observer-replay.json",
     "duplicatePostings": false,
-    "realOrderBoundDepositVerified": false,
+    "realOrderBoundDepositVerified": true,
     "treasuryAllocated": true
   },
   "treasury": {
@@ -83,8 +83,11 @@
     "readOnlyRealAdapterEvidence": "settlement-adapter-readback.json",
     "automaticWorkerEnabled": false,
     "nativeReplacementFamilies": false,
-    "automaticSafeExpiry": false,
-    "destinationReorgRecovery": false
+    "automaticSafeExpiry": true,
+    "destinationReorgRecovery": false,
+    "canonicalExpiryLiveAcceptance": false,
+    "expiryAndRefundEvidence": "late-ledger-refund.json",
+    "nativePayoutInterruption": "native-payout-interruption.json"
   },
   "firstLedgerWrap": {
     "order": "first-ledger-wrap.json",
@@ -100,5 +103,46 @@
     "rentLamports": "0",
     "browserSigning": false,
     "customerApiEnabled": false
+  },
+  "lateLedgerRefund": {
+    "evidence": "late-ledger-refund.json",
+    "completed": true,
+    "principalReturned": "10000",
+    "bridgeFeeUnits": "0",
+    "feeLamports": "5000",
+    "retainedExpiredAttempts": 1,
+    "successfulReplacements": 1
+  },
+  "unsignedDeposit": {
+    "serverBuildAndValidation": true,
+    "officialSdkClient": true,
+    "realFinalizedDeposit": "../../test/fixtures/solana-devnet-order-deposit.json",
+    "customerHttpEnabled": false
+  },
+  "expiryMigration": {
+    "schemaVersion": 5,
+    "evidence": "expiry-migration.json",
+    "financialStatePreserved": true
+  },
+  "roundTripScope": "Both ledger-driven directions on real public L2L Signet / Solana Devnet through scoped command-line clients; browser and full recovery acceptance remain incomplete.",
+  "firstLedgerRedemption": {
+    "order": "first-ledger-redemption.json",
+    "completed": true,
+    "grossWrappedUnits": "10000",
+    "netNativeUnits": "9900",
+    "bridgeFeeWrappedUnits": "100",
+    "networkFeeNativeUnits": "141",
+    "nativeAttempts": 1,
+    "survivedProcessInterruption": true,
+    "browserSigning": false,
+    "customerApiEnabled": false
+  },
+  "bothDirectionsVerification": {
+    "replay": "both-directions-replay.json",
+    "restart": "both-directions-restart.json",
+    "financialStateUnchanged": true,
+    "allCustodyBalancesMatch": true,
+    "authenticatedOrderReads": 3,
+    "healthyScanners": 3
   }
 }

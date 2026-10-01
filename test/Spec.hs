@@ -13,6 +13,7 @@ import Bridge.Native (nativeAmount,nativeNumber)
 import Bridge.NativePayment
 import Bridge.Payment (prepareNativeWith,prepareSolanaWith)
 import Bridge.Settlement
+import Bridge.Deposit
 import Bridge.RPC
 import Bridge.API
 import Bridge.Worker
@@ -21,7 +22,7 @@ import Bridge.Observer
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently,withAsync)
 import Control.Exception (bracket,try,SomeException)
-import Control.Monad (forM_)
+import Control.Monad (forM_,when)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString as BS
@@ -355,7 +356,53 @@ main=hspec $ do
       markBroadcastIntent l "tx" `shouldReturn` sequenceNumber
       authorizeRecordedSend l True "tx" `shouldThrow` isError "source_not_eligible"
       length <$> pendingAttempts l `shouldReturn` 1
+  describe "bounded rate-limit recovery (offline transport contracts)" $ do
+    it "retries read-only requests with bounded waits and honors numeric Retry-After" $ do
+      calls<-newIORef (0::Int)
+      delays<-newIORef []
+      let action=do
+            n<-atomicModifyIORef' calls (\x->(x+1,x))
+            pure $ if n==0 then Left (Just 5) else if n==1 then Left Nothing else Right True
+      retryRateLimitedRead (\n->modifyIORef' delays (<>[n])) "getTransaction" action `shouldReturn` True
+      readIORef calls `shouldReturn` 3
+      readIORef delays `shouldReturn` [5000000,8000000]
+    it "does not retry sends, wallet mutations, unknown methods, or indefinite throttling" $ do
+      forM_ ["sendTransaction","sendrawtransaction","walletprocesspsbt","getnewaddress","futureMethod"] $ \method -> do
+        calls<-newIORef (0::Int)
+        let action=modifyIORef' calls (+1) >> pure (Left Nothing :: Either (Maybe Int) ())
+        retryRateLimitedRead (const $ expectationFailure "unexpected wait") method action `shouldThrow` isError "rpc_rate_limited"
+        readIORef calls `shouldReturn` 1
+      calls<-newIORef (0::Int)
+      retryRateLimitedRead (const $ pure ()) "getTransaction" (modifyIORef' calls (+1) >> pure (Left Nothing :: Either (Maybe Int) ()))
+        `shouldThrow` isError "rpc_rate_limited"
+      readIORef calls `shouldReturn` 3
+      retryRateLimitedRead (const $ expectationFailure "unbounded wait") "getTransaction" (pure (Left (Just 60) :: Either (Maybe Int) ()))
+        `shouldThrow` isError "rpc_rate_limited"
   describe "refund principal and failed transaction fees" $ do
+    it "keeps a late Solana receipt out of conversion and refunds its full principal once" $ withFunded $ \l c -> do
+      let redeem=req{direction=WrappedToNative,recipient="native-recipient",refund="bound-owner",sourceOwner=Just "bound-owner"}
+      o<-createOrder l c 100 cap redeem
+      let did="solana:late-receipt"
+          receipt=Deposit did (Just $ orderId o) Wrapped (input redeem) "123" 1 True (deadline o+1)
+      observeDeposit l receipt "cursor"
+      promoteDeposit l (deadline o+2) did `shouldReturn` False
+      status <$> readOrder l cap (orderId o) `shouldReturn` "NeedsReview"
+      -- A later read cannot rewrite the immutable first observation time.
+      observeDeposit l receipt{depositSeenAt=deadline o-1} "cursor"
+      promoteDeposit l (deadline o+3) did `shouldReturn` False
+      ob<-createRefund l did
+      createRefund l did `shouldReturn` ob
+      obligationAmount ob `shouldBe` units (input redeem)
+      obligationRecipient ob `shouldBe` refund redeem
+      testAttempt l ob "Solana" "late-refund" "fixture-refund-bytes" "{}" 5000 Nothing
+      _<-markBroadcastIntent l "late-refund"
+      recordSettlement l "late-refund" (PaymentCosts (amt 5000) (amt 0)) "fixture-proof"
+      recordSettlement l "late-refund" (PaymentCosts (amt 5000) (amt 0)) "fixture-proof"
+      createRefund l did `shouldReturn` ob
+      status <$> readOrder l cap (orderId o) `shouldReturn` "Refunded"
+      ledgerAction l (\db->freeInventory db Native) `shouldReturn` 1000000
+      ledgerAction l (\db->freeInventory db Wrapped) `shouldReturn` 1000000
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM postings WHERE account='earned'" :: IO [Only Int]) `shouldReturn` [Only 0]
     it "separates rent from fees, caps their total, and refuses changed settlement evidence" $ withFunded $ \l c -> do
       (_,ob)<-fundOrder l c
       testAttempt l ob "Solana" "costed-tx" "bytes" "{}" 10000 Nothing
@@ -722,6 +769,59 @@ main=hspec $ do
       prepareSolanaWith (solanaContract c plan Null) helper c l ob `shouldThrow` isError "insufficient_fee_budget"
       pendingPreparations l `shouldReturn` []
       pendingAttempts l `shouldReturn` []
+  describe "unsigned customer deposits (SDK fixture and offline RPC contracts)" $ do
+    it "binds owner, amount and memo without a custody signature or payment intent" $ withDepositFixture $ \l c order recent reply call -> do
+      let helper r=do
+            helperPayout r `shouldBe` False
+            helperOwner r `shouldBe` refund (request order)
+            helperAmount r `shouldBe` input (request order)
+            unsignedDepositReply c r reply
+      prepared<-prepareSolanaDepositWith (pure 100) call helper c l cap (orderId order)
+      bytes<-fieldValue "transaction" prepared
+      Transaction signatures _ _<-either (fail . T.unpack) pure (decodeTransaction bytes)
+      signatures `shouldBe` [BS.replicate 64 0]
+      fieldValue "memo" prepared `shouldReturn` solanaDepositMemo c (orderId order)
+      fieldValue "lastValidBlockHeight" prepared `shouldReturn` recentLastValidHeight recent
+      pendingAttempts l `shouldReturn` []
+      readyObligations l `shouldReturn` []
+    it "refreshes a blockhash without changing the order or reserving more inventory" $ withDepositFixture $ \l c order _ reply call -> do
+      let helper = \r -> unsignedDepositReply c r reply
+          prepare rpcCall=prepareSolanaDepositWith (pure 100) rpcCall helper c l cap (orderId order)
+          nextHash=base58 $ BS.replicate 32 7
+          changed method params=if method=="getLatestBlockhash" then pure $ contextContract $ object ["blockhash" .= nextHash,"lastValidBlockHeight" .= (1000::Int)] else call method params
+      first<-prepare call
+      second<-prepare changed
+      fieldValue "transaction" first >>= \bytes -> fieldValue "transaction" second >>= \newBytes -> (bytes::Text) `shouldNotBe` newBytes
+      fieldValue "memo" first >>= \memo -> fieldValue "memo" second `shouldReturn` (memo::Text)
+      request <$> readOrder l cap (orderId order) `shouldReturn` request order
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM reservations" :: IO [Only Int]) `shouldReturn` [Only 1]
+    it "requires instruction backup coverage before invoking the helper" $ withDepositFixture $ \l c order _ reply call -> do
+      let noHelper _=expectationFailure "helper called before backup coverage" >> reject "unexpected"
+          prepare helper=prepareSolanaDepositWith (pure 100) call helper c{backupRequired=True} l cap (orderId order)
+      prepare noHelper `shouldThrow` isError "backup_pending"
+      sequenceRows<-ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64])
+      sequenceNumber<-case sequenceRows of [Only n]->pure n; _->fail "missing sequence"
+      acknowledgeBackup l sequenceNumber "fixture-covered-order"
+      _<-prepare (\r->unsignedDepositReply c r reply)
+      pure ()
+    it "rechecks deadline and pause state after RPC without losing the quote" $ withDepositFixture $ \l c order _ reply call -> do
+      ticks<-newIORef ([100,deadline order+1]::[Int64])
+      let clock=atomicModifyIORef' ticks (\xs->case xs of a:rest->(rest,a); _->([],deadline order+1))
+          helper = \r -> unsignedDepositReply c r reply
+      prepareSolanaDepositWith clock call helper c l cap (orderId order) `shouldThrow` isError "deposit_window_closed"
+      let stopped method params=do
+            when (method=="getFeeForMessage") $ pause l "fixture-pause-during-RPC"
+            call method params
+      prepareSolanaDepositWith (pure 100) stopped helper c l cap (orderId order) `shouldThrow` isError "deposits_paused"
+      status <$> readOrder l cap (orderId order) `shouldReturn` "AwaitingDeposit"
+    it "rejects unauthorized access and insufficient user fee funds without signing" $ withDepositFixture $ \l c order _ reply call -> do
+      let helper = \r -> unsignedDepositReply c r reply
+      prepareSolanaDepositWith (pure 100) call helper c l (T.replicate 64 "b") (orderId order) `shouldThrow` isError "order_not_found"
+      let poor method params=if method=="getMultipleAccounts" then pure $ contextContract $ toJSON
+            [tokenContract c (refund $ request order),tokenContract c (custodyOwner c),systemContract 1] else call method params
+      prepareSolanaDepositWith (pure 100) poor helper c l cap (orderId order) `shouldThrow` isError "insufficient_deposit_fee_sol"
+      available <$> readiness l `shouldReturn` True
+      pendingAttempts l `shouldReturn` []
   describe "token account policy (captured finalized Devnet accounts)" $ do
     it "accepts the real eight-decimal custody balance" $ do
       (c,account)<-capturedCustodyAccount
@@ -782,7 +882,7 @@ main=hspec $ do
       pendingPreparations l `shouldReturn` []
     it "does not treat missing history or an expired blockhash as permission to replace" $ withSendFixture $ \l c _ attempt transport -> do
       let sol method params=if method=="getBlockHeight" then pure (Number 1100) else paymentSolana transport method params
-      settleAttemptWith transport{paymentSolana=sol} c l attempt `shouldThrow` isError "solana_blockhash_window_too_short"
+      settleAttemptWith transport{paymentSolana=sol} c l attempt `shouldThrow` isError "solana_expiry_history_required"
       map attemptBytes <$> pendingAttempts l `shouldReturn` [attemptBytes attempt]
       available <$> readiness l `shouldReturn` False
     it "requires review if a signed-only transaction is observed as processed" $ withSendFixture $ \l c _ attempt transport -> do
@@ -809,6 +909,76 @@ main=hspec $ do
       status <$> readOrder l cap (obligationOrder ob) `shouldReturn` "NeedsReview"
       ledgerAction l (\db->query_ db "SELECT SUM(delta) FROM postings WHERE asset='Native' AND account='principal'" :: IO [Only Int64]) `shouldReturn` [Only 4]
       obligationAmount <$> createRefund l (obligationDeposit ob) `shouldReturn` 4
+  describe "conclusive Solana expiry (offline recovery contracts)" $ do
+    it "requires finalized absence on both complete account histories and every configured provider" $ withSendFixture $ \_ c _ attempt transport -> do
+      signed<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ attemptPolicy attempt)
+      let configured=expiryConfig c
+          call=expiryContract configured
+      proof<-solanaExpiryEvidence transport{paymentSolana=call,paymentVerifier=Just call} configured signed
+      proof `shouldSatisfy` (/=Nothing)
+      let behind method params=if method=="getBlockHeight" then pure (Number 1000) else call method params
+      solanaExpiryEvidence transport{paymentSolana=call,paymentVerifier=Just behind} configured signed
+        `shouldThrow` isError "expiry_provider_behind"
+      solanaExpiryEvidence transport{paymentSolana=behind} configured signed `shouldReturn` Nothing
+    it "refuses missing history, observed signatures, valid blockhashes, old contexts and wrong identities" $ withSendFixture $ \_ c _ attempt transport -> do
+      signed<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ attemptPolicy attempt)
+      let configured=expiryConfig c
+          call=expiryContract configured
+          changed target value method params=if method==target then pure value else call method params
+          sigRow=object ["signature" .= attemptId attempt,"slot" .= (110::Int),"err" .= String "failed","confirmationStatus" .= ("finalized"::Text)]
+          history method params=if method=="getSignaturesForAddress" then do
+            original<-call method params >>= parseValue parseJSON :: IO [Value]
+            pure (toJSON $ sigRow:original)
+            else call method params
+      forM_ [(changed "getSignaturesForAddress" (toJSON ([]::[Value])),"solana_history_gap")
+            ,(changed "getTransaction" (object ["present" .= True]),"expired_transaction_observed")
+            ,(changed "getSignatureStatuses" (contextContract $ toJSON [object ["confirmationStatus" .= ("processed"::Text)]]),"expired_signature_observed")
+            ,(changed "isBlockhashValid" (contextContract $ Bool True),"blockhash_still_valid")
+            ,(changed "isBlockhashValid" (object ["context" .= object ["slot" .= (99::Int)],"value" .= False]),"solana_context_too_old")
+            ,(changed "getGenesisHash" (String "wrong"),"expiry_wrong_genesis")
+            ,(history,"expired_signature_in_history")] $ \(bad,code) ->
+        solanaExpiryEvidence transport{paymentSolana=bad} configured signed `shouldThrow` isError code
+      let canonical=configured{profile=CanonicalBeta}
+      solanaExpiryEvidence transport{paymentSolana=expiryContract canonical} canonical signed
+        `shouldThrow` isError "independent_rpc_required"
+    it "retires an expired attempt once while preserving principal, old bytes, and replacement barriers" $ withSendFixture $ \l c ob attempt transport -> do
+      let configured=expiryConfig c
+          verified=transport{paymentSolana=expiryContract configured}
+      recordExpiryOrigins l configured
+      pause l "fixture-restart"
+      settleAttemptWith verified configured l attempt `shouldReturn` "expired"
+      available <$> readiness l `shouldReturn` False
+      pendingAttempts l `shouldReturn` []
+      pendingPreparations l `shouldReturn` []
+      ledgerAction l (\db->query_ db "SELECT signed_bytes FROM attempts" :: IO [Only Text]) `shouldReturn` [Only $ attemptBytes attempt]
+      ledgerAction l (\db->query_ db "SELECT phase FROM reservations" :: IO [Only Text]) `shouldReturn` [Only "payment"]
+      ledgerAction l (\db->query_ db "SELECT SUM(delta) FROM postings WHERE asset='Native' AND account='principal'" :: IO [Only Int64]) `shouldReturn` [Only 4]
+      ledgerAction l (\db->query_ db "SELECT released FROM fee_reservations" :: IO [Only Bool]) `shouldReturn` [Only True]
+      [Only proof]<-ledgerAction l (\db->query_ db "SELECT proof_json FROM solana_expiries" :: IO [Only Text])
+      recordSolanaExpiry l attempt proof
+      recordSolanaExpiry l attempt "changed proof" `shouldThrow` isError "expiry_evidence_conflict"
+      resumeAfterChecks l
+      testAttempt l ob "Solana" "replacement" "new-fixture-bytes" "new-policy" (attemptFeeLimit attempt) Nothing
+      ledgerAction l (\db->query_ db "SELECT generation,retired_txid FROM preparations ORDER BY generation" :: IO [(Int,Maybe Text)])
+        `shouldReturn` [(0,Just $ attemptId attempt),(1,Nothing)]
+      map attemptId <$> pendingAttempts l `shouldReturn` ["replacement"]
+      createRefund l (obligationDeposit ob) `shouldThrow` isError "refund_would_race_payment"
+      markBroadcastIntent l (attemptId attempt) `shouldThrow` isError "attempt_not_sendable"
+      _<-markBroadcastIntent l "replacement"
+      authorizeRecordedSend l True "replacement" `shouldThrow` isError "backup_pending"
+      recordSettlement l (attemptId attempt) (PaymentCosts (amt 5000) (amt 0)) "contradictory late proof" `shouldThrow` isError "settlement_not_expected"
+    it "preserves ambiguous broadcast history before authorizing a new preparation" $ withSendFixture $ \l c _ attempt transport -> do
+      sequenceNumber<-markBroadcastIntent l (attemptId attempt)
+      [saved]<-pendingAttempts l
+      recordExpiryOrigins l (expiryConfig c)
+      settleAttemptWith transport{paymentSolana=expiryContract (expiryConfig c)} (expiryConfig c) l saved `shouldReturn` "expired"
+      ledgerAction l (\db->query_ db "SELECT critical_sequence FROM attempts" :: IO [Only Int64]) `shouldReturn` [Only sequenceNumber]
+      ledgerAction l (\db->query_ db "SELECT critical_sequence FROM solana_expiries" :: IO [Only Int64]) `shouldReturn` [Only $ sequenceNumber+1]
+      attemptBytes saved `shouldBe` attemptBytes attempt
+    it "does not permit a changed configured history origin to retire a real intent" $ withSendFixture $ \l c _ attempt transport -> do
+      settleAttemptWith transport{paymentSolana=expiryContract (expiryConfig c)} (expiryConfig c) l attempt
+        `shouldThrow` isError "expiry_scan_origin_mismatch"
+      map attemptId <$> pendingAttempts l `shouldReturn` [attemptId attempt]
   describe "native confirmation evidence (captured bytes and offline RPC contracts)" $ do
     it "requires the exact saved bytes and a confirmed active-chain anchor" $ do
       fixtureValue<-BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
@@ -889,6 +1059,16 @@ main=hspec $ do
     it "refuses a second worker on the same ledger" $ withFunded $ \_ c ->
       withLedger (dbPath c) (fingerprint c) (const $ pure ()) `shouldThrow` isError "worker_already_running"
   describe "historical Solana deposit evidence" $ do
+    it "validates the captured real Devnet order deposit without current account lookups" $ do
+      captured<-BS.readFile "test/fixtures/solana-devnet-order-deposit.json" >>= either fail pure . eitherDecodeStrict'
+      binding<-fieldValue "binding" captured
+      expected<-DepositBinding <$> fieldValue "signature" binding <*> fieldValue "owner" binding
+        <*> fieldValue "mint" binding <*> fieldValue "custody" binding <*> fieldValue "custodyOwner" binding <*> fieldValue "memo" binding
+      proof<-fieldValue "transaction" captured
+      quantity<-fieldValue "expectedAmount" captured
+      verified<-either (fail . T.unpack) pure (verifyDeposit expected proof)
+      verifiedAmount verified `shouldBe` quantity
+      verifiedSlot verified `shouldSatisfy` (>0)
     it "validates owner, mint, memo, signer and exact historical custody increase" $ do
       (binding,proof)<-depositFixture
       verifiedAmount <$> verifyDeposit binding proof `shouldBe` Right (amt 3)
@@ -1114,6 +1294,28 @@ withSendFixture action=withSolanaLedger $ \l c plan reply -> do
         (const $ expectationFailure "unexpected backup callback")
   action l c ob attempt transport
 
+expiryConfig :: Config -> Config
+expiryConfig c=c{solanaHistoryStart=Just $ base58 (BS.replicate 64 2),solanaOperatingHistoryStart=Just $ base58 (BS.replicate 64 3)}
+
+recordExpiryOrigins :: Ledger -> Config -> IO ()
+recordExpiryOrigins l c=forM_ [("Solana",solanaHistoryStart c),("SolanaOperating",solanaOperatingHistoryStart c)] $ \(chain,maybeAnchor)->do
+  anchor<-maybe (fail "missing fixture origin") pure maybeAnchor
+  commitScan l (ScanBatch chain anchor Nothing anchor 100 [] [])
+
+expiryContract :: Config -> SolanaRPC
+expiryContract c method params=case method of
+  "getGenesisHash"->pure (toJSON $ solanaGenesis $ profile c)
+  "getBlockHeight"->pure (Number 1100)
+  "getSlot"->pure (Number 100)
+  "isBlockhashValid"->pure (contextContract $ Bool False)
+  "getTransaction"->pure Null
+  "getSignatureStatuses"->pure (contextContract $ toJSON [Null])
+  "getSignaturesForAddress"->do
+    address<-case params of String a:_->pure a; _->fail "missing history address"
+    origin<-maybe (fail "missing fixture origin") pure (if address==custodyAta c then solanaHistoryStart c else solanaOperatingHistoryStart c)
+    pure $ toJSON [object ["signature" .= origin,"slot" .= (90::Int),"err" .= Null,"confirmationStatus" .= ("finalized"::Text)]]
+  _->expectationFailure ("unexpected expiry RPC: "<>T.unpack method) >> pure Null
+
 sourceNativeContract :: Int -> NativeRPC
 sourceNativeContract depth _ method _=do
   let txid=T.replicate 64 "a"
@@ -1149,3 +1351,44 @@ codecSettlementProof c signed success=do
     ,"meta" .= object ["err" .= (if success then Null else String "offline-fixture-failure"),"fee" .= (5000::Int)
       ,"preBalances" .= balances,"postBalances" .= afterBalances
       ,"preTokenBalances" .= tokens 10 0,"postTokenBalances" .= (if success then tokens 7 3 else tokens 10 0)]]
+
+withDepositFixture :: (Ledger -> Config -> OrderView -> RecentBlockhash -> HelperReply -> SolanaRPC -> IO a) -> IO a
+withDepositFixture action=withDir $ \dir -> do
+  fixtureValue<-BS.readFile "test/fixtures/unsigned-three-units.json" >>= either fail pure . eitherDecodeStrict'
+  owner<-fieldValue "owner" fixtureValue
+  target<-fieldValue "recipient" fixtureValue
+  token<-fieldValue "mint" fixtureValue
+  hash<-fieldValue "blockhash" fixtureValue
+  reply<-fieldValue "reply" fixtureValue
+  let c=(cfg dir){deploymentId="codec-fixture",mint=token,custodyOwner=target,custodyAta=replyDestination reply}
+      recent=RecentBlockhash hash 1000 100
+      depositRequest=OrderRequest WrappedToNative (amt 3) "offline-native-recipient" owner (Just owner) "offline-deposit"
+  withLedger (dbPath c) (fingerprint c) $ \l -> do
+    fundAllocation l "fixture-native-float" Native "float" (amt 10000)
+    resumeAfterChecks l
+    created<-createOrder l c 100 cap depositRequest
+    bindInstruction l (orderId created) (solanaDepositMemo c $ orderId created)
+    order<-readOrder l cap (orderId created)
+    let call method _=case method of
+          "getLatestBlockhash"->pure $ contextContract $ object ["blockhash" .= hash,"lastValidBlockHeight" .= (1000::Int)]
+          "getBlockHeight"->pure (Number 900)
+          "getMultipleAccounts"->pure $ contextContract $ toJSON [tokenContract c owner,tokenContract c target,systemContract 1000000]
+          "getFeeForMessage"->pure $ contextContract $ Number 5000
+          _->expectationFailure ("unexpected deposit RPC: "<>T.unpack method) >> pure Null
+    action l c order recent reply call
+
+unsignedDepositReply :: Config -> HelperRequest -> HelperReply -> IO HelperReply
+unsignedDepositReply c requested old=do
+  body<-either fail pure (B64.decode $ TE.encodeUtf8 $ replyMessage old)
+  Transaction _ (Message _ _ _ keys _ _) _<-either (fail . T.unpack) pure (decodeTransaction $ replyTransaction old)
+  hash<-either (fail . T.unpack) pure (publicKey $ helperBlockhash requested)
+  let memo=helperMemo c requested
+      memoBytes=TE.encodeUtf8 memo
+      oldMemo=TE.encodeUtf8 (replyMemo old)
+      hashOffset=4+32*length keys
+      freshHash=BS.take hashOffset body<>hash<>BS.drop (hashOffset+32) body
+      message=BS.take (BS.length freshHash-BS.length oldMemo-1) freshHash<>BS.singleton (fromIntegral $ BS.length memoBytes)<>memoBytes
+  BS.length memoBytes `shouldSatisfy` (<128)
+  BS.drop (BS.length body-BS.length oldMemo) body `shouldBe` oldMemo
+  pure old{replyMemo=memo,replyMessage=TE.decodeUtf8 $ B64.encode message,replySignature=Nothing
+    ,replyTransaction=TE.decodeUtf8 $ B64.encode (BS.singleton 1<>BS.replicate 64 0<>message)}

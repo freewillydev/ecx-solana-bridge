@@ -1,0 +1,25 @@
+   Compiling ecx-solana-helper v0.1.0 (/Users/lukekensik/Documents/Codex/2026-09-30/b/outputs/ecx-bridge/solana-helper)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.77s
+     Running unittests src/main.rs ([local build path]
+
+running 5 tests
+test tests::exact_integer_boundaries ... ok
+test tests::unknown_request_fields_rejected ... ok
+test wire_tests::wrong_custody_and_unknown_fields_refused ... ok
+test wire_tests::unsigned_wire_fidelity ... ok
+test wire_tests::signed_payout_and_idempotent_ata_fidelity ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/deposit_devnet.rs ([local build path]
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/setup_devnet.rs ([local build path]
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

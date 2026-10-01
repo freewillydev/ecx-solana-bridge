@@ -1,0 +1,91 @@
+{
+  "recordedUtc": "2026-10-01T04:25:36.050771+00:00",
+  "before": {
+    "criticalSequence": 15,
+    "orders": [
+      [
+        "2dc2e562c4e4dc42e77fbcb0affb360e3d719d58a6dfea35a7d8276c114bacc5",
+        "Refunded",
+        "2XMrZrQBMt8b6gZbMRHx4FtfsLm1zc1xQB716dwAC5QdgKehioAN1sy16dCFz39AP7tA2RPZ6ZQYx2kngnbTSJP"
+      ],
+      [
+        "3c177e362733fab13d29d80ecadad502b39f2c3e62ebfe9e78d44f0db24242c5",
+        "Paid",
+        "88c8c46cc3c6f34e880ffc3978c3095159059ef663c2e1573ebcf2839c3d4350"
+      ],
+      [
+        "7b565f58c01434d63aabb86d94b14309767ce9efae17c5ed45ef6b0975b8d21f",
+        "Paid",
+        "35u82cFNK2RZsiFpSYPGr26UkWP8FH4CgStxNB8LJSuVfvAcbAfpT5nWnG6BkWeNTVPSTK88k5NKbEaEizGn9Yip"
+      ]
+    ],
+    "counts": {
+      "postings": 48,
+      "deposits": 6,
+      "obligations": 3,
+      "attempts": 4,
+      "preparations": 4,
+      "solana_expiries": 1
+    },
+    "financialHashes": {
+      "postings": "bffdc1fe3b9cef29dbe699b649cd088045c5664426f0354115faf9afdeae0bf7",
+      "attempts": "a87aad312416a0fd7778961986b9ad597c584664bccb8f3fde3860c44e9701eb",
+      "reservations": "f6e504c747406dcffb9f898da7c3502567eb5180db35b2f1d604bc161dcb134a",
+      "fee_reservations": "2fcd90eb8a4a2b3c20d6d5f651343233783c10a553760ad103ae5961041bc3c3"
+    }
+  },
+  "after": {
+    "criticalSequence": 15,
+    "orders": [
+      [
+        "2dc2e562c4e4dc42e77fbcb0affb360e3d719d58a6dfea35a7d8276c114bacc5",
+        "Refunded",
+        "2XMrZrQBMt8b6gZbMRHx4FtfsLm1zc1xQB716dwAC5QdgKehioAN1sy16dCFz39AP7tA2RPZ6ZQYx2kngnbTSJP"
+      ],
+      [
+        "3c177e362733fab13d29d80ecadad502b39f2c3e62ebfe9e78d44f0db24242c5",
+        "Paid",
+        "88c8c46cc3c6f34e880ffc3978c3095159059ef663c2e1573ebcf2839c3d4350"
+      ],
+      [
+        "7b565f58c01434d63aabb86d94b14309767ce9efae17c5ed45ef6b0975b8d21f",
+        "Paid",
+        "35u82cFNK2RZsiFpSYPGr26UkWP8FH4CgStxNB8LJSuVfvAcbAfpT5nWnG6BkWeNTVPSTK88k5NKbEaEizGn9Yip"
+      ]
+    ],
+    "counts": {
+      "postings": 48,
+      "deposits": 6,
+      "obligations": 3,
+      "attempts": 4,
+      "preparations": 4,
+      "solana_expiries": 1
+    },
+    "financialHashes": {
+      "postings": "bffdc1fe3b9cef29dbe699b649cd088045c5664426f0354115faf9afdeae0bf7",
+      "attempts": "a87aad312416a0fd7778961986b9ad597c584664bccb8f3fde3860c44e9701eb",
+      "reservations": "f6e504c747406dcffb9f898da7c3502567eb5180db35b2f1d604bc161dcb134a",
+      "fee_reservations": "2fcd90eb8a4a2b3c20d6d5f651343233783c10a553760ad103ae5961041bc3c3"
+    }
+  },
+  "financialStateUnchanged": true,
+  "allCustodyBalancesMatch": true,
+  "replayedOrders": [
+    {
+      "id": "7b565f58c01434d63aabb86d94b14309767ce9efae17c5ed45ef6b0975b8d21f",
+      "status": "Paid",
+      "payout": "35u82cFNK2RZsiFpSYPGr26UkWP8FH4CgStxNB8LJSuVfvAcbAfpT5nWnG6BkWeNTVPSTK88k5NKbEaEizGn9Yip"
+    },
+    {
+      "id": "2dc2e562c4e4dc42e77fbcb0affb360e3d719d58a6dfea35a7d8276c114bacc5",
+      "status": "Refunded",
+      "payout": "2XMrZrQBMt8b6gZbMRHx4FtfsLm1zc1xQB716dwAC5QdgKehioAN1sy16dCFz39AP7tA2RPZ6ZQYx2kngnbTSJP"
+    },
+    {
+      "id": "3c177e362733fab13d29d80ecadad502b39f2c3e62ebfe9e78d44f0db24242c5",
+      "status": "Paid",
+      "payout": "88c8c46cc3c6f34e880ffc3978c3095159059ef663c2e1573ebcf2839c3d4350"
+    }
+  ],
+  "scope": "Fresh application openings and scans/payment passes for completed real public-test orders; not old-backup or clean-host restore."
+}

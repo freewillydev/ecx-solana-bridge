@@ -1,10 +1,3 @@
-Build profile: -w ghc-9.14.1 -O1
-In order, the following will be built (use -v for more details):
- - ecx-bridge-0.1.0.0 (test:bridge-test) (file test/Spec.hs changed)
-Preprocessing test suite 'bridge-test' for ecx-bridge-0.1.0.0...
-Building test suite 'bridge-test' for ecx-bridge-0.1.0.0...
-[1 of 1] Compiling Main             ( test/Spec.hs, <build-cache>/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test-tmp/Main.o ) [Source file changed]
-[2 of 2] Linking <build-cache>/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test [Objects changed]
 Running 1 test suites...
 Test suite bridge-test: RUNNING...
 
@@ -47,7 +40,11 @@ signed intent and settlement invariants
   keeps earned fees out of available source float and settles once [✔]
   cannot authorize a first send after loss of source eligibility [✔]
   rechecks backup coverage and source eligibility after a recorded broadcast intent [✔]
+bounded rate-limit recovery (offline transport contracts)
+  retries read-only requests with bounded waits and honors numeric Retry-After [✔]
+  does not retry sends, wallet mutations, unknown methods, or indefinite throttling [✔]
 refund principal and failed transaction fees
+  keeps a late Solana receipt out of conversion and refunds its full principal once [✔]
   separates rent from fees, caps their total, and refuses changed settlement evidence [✔]
   refunds a confirmed partial deposit without consuming payout float [✔]
   will not refund a signed or possibly broadcast conversion [✔]
@@ -88,6 +85,12 @@ Solana preparation (SDK fixtures and RPC contract tests)
   reserves fee plus rent and saves the request before signing; retries reuse exact bytes [✔]
   retains the request and pauses after a lost helper response [✔]
   does not invoke the helper unless the full operating budget can be reserved [✔]
+unsigned customer deposits (SDK fixture and offline RPC contracts)
+  binds owner, amount and memo without a custody signature or payment intent [✔]
+  refreshes a blockhash without changing the order or reserving more inventory [✔]
+  requires instruction backup coverage before invoking the helper [✔]
+  rechecks deadline and pause state after RPC without losing the quote [✔]
+  rejects unauthorized access and insufficient user fee funds without signing [✔]
 token account policy (captured finalized Devnet accounts)
   accepts the real eight-decimal custody balance [✔]
   rejects owner/mint changes, delegates, close authorities, frozen and extended accounts [✔]
@@ -100,6 +103,12 @@ durable send orchestration (offline RPC contracts)
   requires review if a signed-only transaction is observed as processed [✔]
   reconciles finalized success while paused without broadcasting again [✔]
   books only the verified fee on finalized failure and retains customer principal [✔]
+conclusive Solana expiry (offline recovery contracts)
+  requires finalized absence on both complete account histories and every configured provider [✔]
+  refuses missing history, observed signatures, valid blockhashes, old contexts and wrong identities [✔]
+  retires an expired attempt once while preserving principal, old bytes, and replacement barriers [✔]
+  preserves ambiguous broadcast history before authorizing a new preparation [✔]
+  does not permit a changed configured history origin to retire a real intent [✔]
 native confirmation evidence (captured bytes and offline RPC contracts)
   requires the exact saved bytes and a confirmed active-chain anchor [✔]
 Solana settlement evidence (captured finalized public Devnet payments)
@@ -113,6 +122,7 @@ public/private Unix socket boundary
   uses the shared Servant contract and separate admin socket [✔]
   refuses a second worker on the same ledger [✔]
 historical Solana deposit evidence
+  validates the captured real Devnet order deposit without current account lookups [✔]
   validates owner, mint, memo, signer and exact historical custody increase [✔]
   retains an unmatched balance increase even when automatic authorization fails [✔]
   resolves a version-zero custody address loaded from historical metadata [✔]
@@ -123,9 +133,9 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 0.7745 seconds
-95 examples, 0 failures
+Finished in 1.0532 seconds
+109 examples, 0 failures
 Test suite bridge-test: PASS
 Test suite logged to:
-<repository>/./<build-cache>/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log
+[local build log]
 1 of 1 test suites (1 of 1 test cases) passed.

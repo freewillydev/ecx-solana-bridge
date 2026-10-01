@@ -1,13 +1,14 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.Settlement
   ( PaymentTransport(..), realPaymentTransport, paymentPass, settleAttemptWith
-  , recheckSourceWith, observeNativePayment, observeSolanaPayment, PaymentObservation(..)
+  , recheckSourceWith, observeNativePayment, observeSolanaPayment, solanaExpiryEvidence, PaymentObservation(..)
   ) where
 
 import Bridge.Config
 import Bridge.Ledger
 import Bridge.Native
 import Bridge.NativePayment
+import Bridge.Observer (collectSignatures,SignatureInfo(..))
 import Bridge.Payment
 import Bridge.RPC
 import Bridge.Solana
@@ -114,6 +115,53 @@ observeSolanaPayment call c signed = do
         require (finality `elem` ["processed","confirmed"]) "finalized_solana_evidence_unavailable"
         pure PaymentWaiting
       _ -> reject "invalid_signature_status_response"
+
+-- Expiry uses finalized height, never wall time or a missing status alone.
+-- Each configured provider must supply both complete, anchored account histories.
+-- The original signature must be absent from all of them, including failed rows.
+solanaExpiryEvidence :: PaymentTransport -> Config -> SolanaSigned -> IO (Maybe Text)
+solanaExpiryEvidence transport c signed = do
+  height <- paymentSolana transport "getBlockHeight" [options minimumSlot] >>= parseValue parseJSON
+  require (height>=0) "expiry_provider_behind"
+  if height<=recentLastValidHeight recent then pure Nothing else do
+    sourceOrigin <- maybe (reject "solana_expiry_history_required") pure (solanaHistoryStart c)
+    ownerOrigin <- maybe (reject "solana_expiry_history_required") pure (solanaOperatingHistoryStart c)
+    signature <- maybe (reject "helper_signature_missing") pure (replySignature $ signedSolanaReply signed)
+    primary <- evidence (paymentSolana transport) sourceOrigin ownerOrigin signature
+    independent <- case paymentVerifier transport of
+      Nothing -> do
+        require (profile c/=CanonicalBeta && solanaVerifierRpc c==Nothing) "independent_rpc_required"
+        pure Nothing
+      Just verifier -> Just <$> evidence verifier sourceOrigin ownerOrigin signature
+    pure $ Just $ json $ object ["signature" .= signature,"blockhash" .= recentHash recent
+      ,"lastValidBlockHeight" .= recentLastValidHeight recent,"primary" .= primary,"independent" .= independent]
+ where
+  recent=solPlanRecent $ signedSolanaPlan signed
+  minimumSlot=recentSlot recent
+  options slot=object ["commitment" .= ("finalized"::Text),"minContextSlot" .= slot]
+  evidence call sourceOrigin ownerOrigin signature=do
+    genesis <- call "getGenesisHash" [] >>= parseValue parseJSON
+    require (genesis==solanaGenesis (profile c)) "expiry_wrong_genesis"
+    height <- call "getBlockHeight" [options minimumSlot] >>= parseValue parseJSON :: IO Int64
+    require (height>recentLastValidHeight recent) "expiry_provider_behind"
+    slot <- call "getSlot" [options minimumSlot] >>= parseValue parseJSON :: IO Int64
+    require (slot>=minimumSlot) "expiry_provider_behind"
+    (_,valid) <- call "isBlockhashValid" [toJSON $ recentHash recent,options slot] >>= contextValue slot
+    require (valid==Bool False) "blockhash_still_valid"
+    history <- mapM (\(address,origin)->do
+      rows <- collectSignatures origin Nothing $ \before -> call "getSignaturesForAddress"
+        [toJSON address,object $ ["commitment" .= ("finalized"::Text),"minContextSlot" .= slot,"limit" .= (100::Int)]
+          <> maybe [] (\sig->["before" .= sig]) before] >>= parseValue parseJSON
+      require (all ((/=signature).historySignature) rows) "expired_signature_in_history"
+      pure $ object ["address" .= address,"origin" .= origin
+        ,"signatures" .= [object ["signature" .= historySignature row,"slot" .= historySlot row,"failed" .= historyFailed row] | row<-rows]])
+      [(custodyAta c,sourceOrigin),(custodyOwner c,ownerOrigin)]
+    proof <- solanaProof call signature
+    require (proof==Null) "expired_transaction_observed"
+    (_,statuses) <- call "getSignatureStatuses" [toJSON [signature],object ["searchTransactionHistory" .= True]] >>= contextValue slot
+    require (statuses==toJSON [Null]) "expired_signature_observed"
+    pure $ object ["genesis" .= genesis,"finalizedHeight" .= height,"minimumFinalizedSlot" .= slot
+      ,"blockhashValid" .= False,"histories" .= history,"transaction" .= Null,"signatureStatuses" .= statuses]
 
 sourceContext :: Ledger -> Obligation -> IO (Deposit,OrderRequest,PolicySnapshot,Text)
 sourceContext ledger ob=ledgerAction ledger $ \db -> do
@@ -225,6 +273,17 @@ settleAttemptWith transport c ledger attempt = work `onException` pause ledger "
       PaymentFailed fee proof -> recorded >> recordFailedSolana ledger (attemptId attempt) (units fee) proof >> pure "failed"
       PaymentWaiting -> recorded >> pure "confirming"
       PaymentUnseen -> do
+        expiry <- case payment of
+          NativePayment _ -> pure Nothing
+          SolanaPayment signed -> solanaExpiryEvidence transport c signed
+        case expiry of
+          Just proof -> do
+            origins <- ledgerAction ledger $ \db -> query_ db "SELECT chain,anchor FROM scan_origins WHERE chain IN('Solana','SolanaOperating') ORDER BY chain" :: IO [(Text,Text)]
+            require (map (\(chain,anchor)->(chain,Just anchor)) origins==[("Solana",solanaHistoryStart c),("SolanaOperating",solanaOperatingHistoryStart c)]) "expiry_scan_origin_mismatch"
+            recordSolanaExpiry ledger attempt proof
+            pure "expired"
+          Nothing -> sendIfAvailable ob payment
+  sendIfAvailable ob payment = do
         health <- readiness ledger
         if not (available health) then pure "paused" else do
           recheckSourceWith transport c ledger ob

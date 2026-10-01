@@ -1,0 +1,135 @@
+// A dedicated public-Devnet acceptance client, never the bridge's signer.
+// Validate the app's unsigned transaction with the SDK, sign with the existing
+// tester key, and fsync exact bytes. Network submission is a separate operation.
+use base64::{engine::general_purpose::STANDARD, Engine};
+use bincode::Options;
+use serde_json::{json, Value};
+use solana_hash::Hash;
+use solana_keypair::read_keypair_file;
+use solana_message::Message;
+use solana_pubkey::Pubkey;
+use solana_signer::Signer;
+use solana_transaction::Transaction;
+use spl_associated_token_account_interface::address::get_associated_token_address_with_program_id;
+use std::{fs, io::Write, path::Path, str::FromStr};
+
+type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+fn text<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
+    v[key].as_str().ok_or("missing prepared field".into())
+}
+fn main() -> Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() != 4 || args[1..].iter().any(|p| !Path::new(p).is_absolute()) {
+        return Err("deposit_devnet PRIVATE_DEVNET_DIR PREPARED_JSON NEW_ATTEMPT_JSON".into());
+    }
+    let dir = Path::new(&args[1]);
+    let output = Path::new(&args[3]);
+    if output.exists() {
+        return Err(
+            "Saved deposit attempt exists; reconcile its exact bytes before any new signing".into(),
+        );
+    }
+    let bytes = fs::read(&args[2])?;
+    if bytes.len() > 8192 {
+        return Err("Prepared transaction is too large".into());
+    }
+    let prepared: Value = serde_json::from_slice(&bytes)?;
+    let manifest: Value = serde_json::from_slice(&fs::read(dir.join("setup.json"))?)?;
+    if manifest["network"] != "solana:devnet"
+        || manifest["mint"] != "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM"
+        || manifest["custody"] != "RWjpjjkpABkEGomLbZYyN53pA3FVdPXp9izJ25wErGX"
+        || manifest["tester"] != "HcctYHWCfLGrE5WigGKHg5hR6Q1P1Gntb5PYQWSQFHXg"
+        || prepared["chain"] != "solana:devnet"
+        || prepared["amount"] != "10000"
+        || prepared["mint"] != manifest["mint"]
+        || prepared["custody"] != manifest["custodyAta"]
+        || prepared["owner"] != manifest["tester"]
+    {
+        return Err("Different public-test deployment or amount".into());
+    }
+    let order = text(&prepared, "orderId")?;
+    if order.len() != 64
+        || !order
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err("Invalid order identifier".into());
+    }
+    let memo = format!("ecx-bridge:v1:l2l-devnet-local:deposit:{order}");
+    if text(&prepared, "memo")? != memo {
+        return Err("Memo does not bind the expected order".into());
+    }
+    let key_path = dir.join("tester.keypair.json");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if fs::metadata(&key_path)?.permissions().mode() & 0o077 != 0 {
+            return Err("Unsafe tester-key permissions".into());
+        }
+    }
+    let tester = read_keypair_file(key_path).map_err(|_| "Tester key unavailable")?;
+    if tester.pubkey().to_string() != text(&manifest, "tester")? {
+        return Err("Tester key mismatch".into());
+    }
+    let mint = Pubkey::from_str(text(&manifest, "mint")?)?;
+    let custody = Pubkey::from_str(text(&manifest, "custody")?)?;
+    let token = spl_token_interface::id();
+    let source = get_associated_token_address_with_program_id(&tester.pubkey(), &mint, &token);
+    let destination = get_associated_token_address_with_program_id(&custody, &mint, &token);
+    let blockhash = Hash::from_str(text(&prepared, "blockhash")?)?;
+    let instructions = [
+        spl_token_interface::instruction::transfer_checked(
+            &token,
+            &source,
+            &mint,
+            &destination,
+            &tester.pubkey(),
+            &[],
+            10000,
+            8,
+        )?,
+        spl_memo_interface::instruction::build_memo(
+            &spl_memo_interface::v3::id(),
+            memo.as_bytes(),
+            &[&tester.pubkey()],
+        ),
+    ];
+    let expected = Message::new_with_blockhash(&instructions, Some(&tester.pubkey()), &blockhash);
+    let serialized = STANDARD.decode(text(&prepared, "transaction")?)?;
+    if serialized.len() > 1232 {
+        return Err("Transaction exceeds packet limit".into());
+    }
+    let mut transaction: Transaction = bincode::DefaultOptions::new()
+        .with_fixint_encoding()
+        .with_limit(1232)
+        .reject_trailing_bytes()
+        .deserialize(&serialized)?;
+    if transaction.message != expected
+        || transaction.signatures.len() != 1
+        || transaction.signatures[0].as_ref().iter().any(|b| *b != 0)
+    {
+        return Err("Unsigned transaction differs from the exact expected deposit".into());
+    }
+    transaction.try_sign(&[tester], blockhash)?;
+    transaction.verify()?;
+    let signature = transaction.signatures[0].to_string();
+    let record = json!({"network":"solana:devnet","orderId":order,"amount":"10000",
+        "signature":signature,"transaction":STANDARD.encode(bincode::serialize(&transaction)?),
+        "lastValidBlockHeight":prepared["lastValidBlockHeight"],"phase":"possibly_broadcast"});
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(output)?;
+    file.write_all(&serde_json::to_vec_pretty(&record)?)?;
+    file.sync_all()?;
+    fs::File::open(output.parent().ok_or("Missing attempt directory")?)?.sync_all()?;
+    println!(
+        "{}",
+        json!({"signature":signature,"saved":true,"sent":false})
+    );
+    Ok(())
+}
