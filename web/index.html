@@ -18,9 +18,14 @@
         <strong id="network">Checking deployment…</strong>
         <p id="availability">Connecting to the private worker.</p>
         <p class="small">
-          Development build. Deposits remain disabled until the integration and
-          recovery gates pass.
+          Public test networks only. Use L2L Signet coins and this deployment’s
+          Solana Devnet token.
         </p>
+        <details class="small">
+          <summary>Devnet token mint</summary>
+          <p id="mint" class="address"></p>
+          <button id="copy-mint" type="button">Copy mint</button>
+        </details>
       </section>
       <section class="card">
         <div class="row">
@@ -33,6 +38,7 @@
           </select></label
         >
         <p id="account" class="small">No wallet connected</p>
+        <p id="limits" class="small"></p>
         <form id="order-form">
           <label
             >Direction<select id="direction">
@@ -77,16 +83,33 @@
         </form>
       </section>
       <section class="card" aria-live="polite">
-        <h2>Order status</h2>
+        <div class="row"><h2>Your transfer</h2><span id="order-short" class="small"></span></div>
         <p id="status">No order yet.</p>
-        <pre id="details"></pre>
+        <div id="order-details" hidden>
+          <dl class="order-summary">
+            <div><dt>You send</dt><dd id="order-send"></dd></div>
+            <div><dt>You receive</dt><dd id="order-receive"></dd></div>
+            <div><dt>Bridge fee</dt><dd id="order-fee"></dd></div>
+            <div><dt>Destination</dt><dd id="order-destination" class="address"></dd></div>
+          </dl>
+          <div id="native-instructions" class="deposit-box" hidden>
+            <p>Send exactly <strong id="deposit-amount"></strong> L2L Signet coins to:</p>
+            <code id="deposit-address" class="address"></code>
+            <button id="copy-address" type="button">Copy deposit address</button>
+          </div>
+          <p id="solana-instructions" hidden>Use <strong>Sign deposit</strong> below. Your wallet sends the Devnet token with this order’s reference.</p>
+          <p id="deposit-deadline" class="small"></p>
+          <a id="payout-link" target="_blank" rel="noopener noreferrer" hidden>View completed payment ↗</a>
+        </div>
         <div class="row">
           <button id="refresh" type="button" disabled>Refresh</button
           ><button id="sign" type="button" disabled>Sign deposit</button
           ><button id="copy" type="button" disabled>Copy recovery link</button>
         </div>
       </section>
+      <label id="history-field" hidden>Recent orders on this device<select id="history"></select></label>
       <p id="error" role="alert"></p>
+      <p id="message" role="status"></p>
       <footer>
         Bridge fees: native → wrapped 0.20%; wrapped → native 1%. Network costs
         for payouts are paid by the operator. Market prices do not change bridge

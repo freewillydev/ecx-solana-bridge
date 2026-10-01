@@ -114,6 +114,14 @@ pre {
 #error {
   color: #ffc3af;
 }
+a { color: #c2e8ce; }
+.order-summary { margin: 20px 0; }
+.order-summary div { display: grid; grid-template-columns: 110px 1fr; gap: 16px; margin: 12px 0; }
+dt { color: #a6b9ac; }
+dd { margin: 0; }
+.address { overflow-wrap: anywhere; }
+.deposit-box { padding: 16px; border: 1px solid #53695c; border-radius: 8px; margin: 20px 0; }
+.deposit-box code { display: block; margin-bottom: 14px; }
 input:focus,
 button:focus,
 select:focus {

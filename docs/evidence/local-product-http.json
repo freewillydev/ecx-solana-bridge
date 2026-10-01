@@ -1,0 +1,36 @@
+{
+  "checkedUtc": "2026-10-01T13:45:32.137575+00:00",
+  "scope": "HTTP API/proxy checks, not browser-wallet acceptance",
+  "checks": {
+    "/api/v1/config": {
+      "status": 200,
+      "cacheControl": "no-store",
+      "referrerPolicy": "no-referrer",
+      "contentSecurityPolicy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+      "profile": "L2LSignetDevnet",
+      "intakeEnabled": true,
+      "canonicalImplementationReady": false
+    },
+    "/healthz": {
+      "status": 200,
+      "cacheControl": "no-store",
+      "referrerPolicy": "no-referrer",
+      "contentSecurityPolicy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    },
+    "/readyz": {
+      "status": 200,
+      "cacheControl": "no-store",
+      "referrerPolicy": "no-referrer",
+      "contentSecurityPolicy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    },
+    "/audit": {
+      "status": 404,
+      "cacheControl": "no-store",
+      "referrerPolicy": "no-referrer",
+      "contentSecurityPolicy": "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"
+    }
+  },
+  "typescript": "strict check passed",
+  "browserBundleBytes": 11876,
+  "browserAcceptance": "Blocked: the browser automation tool could not verify administrator policy"
+}

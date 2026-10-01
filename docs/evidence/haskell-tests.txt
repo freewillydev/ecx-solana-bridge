@@ -5,8 +5,6 @@ In order, the following will be built (use -v for more details):
 Configuring library for ecx-bridge-0.1.0.0...
 Preprocessing library for ecx-bridge-0.1.0.0...
 Building library for ecx-bridge-0.1.0.0...
-[17 of 27] Compiling Bridge.Settlement ( src/Bridge/Settlement.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Settlement.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Settlement.dyn_o ) [Source file changed]
-[18 of 27] Compiling Bridge.Reorg     ( src/Bridge/Reorg.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Reorg.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Reorg.dyn_o ) [Bridge.Settlement changed]
 Configuring test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Preprocessing test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Building test suite 'bridge-test' for ecx-bridge-0.1.0.0...
@@ -121,10 +119,31 @@ native payment families (offline lineage and RPC contracts)
   blocks a new send while an unsigned replacement decision is outstanding [✔]
   does not accept a plausible sibling with no durable operator lineage [✔]
   retains review when a losing wallet record lacks its alleged confirmed winner [✔]
-  retains the booked winner through finality loss and refuses a changed winner without compensation [✔]
+  retains the booked winner through finality loss and reconfirms it without changing money [✔]
   refuses signing context when the original common input binding is missing [✔]
   keeps a subsequently observed unrecorded sibling quarantined in an older ledger [✔]
+native winner changes (offline reorg accounting)
+  transfers member 0 through repeated winner changes and restart without rebooking principal [✔]
+  transfers member 1 through repeated winner changes and restart without rebooking principal [✔]
+  supersedes old finality reviews and opens a fresh review if the new winner later disappears [✔]
+  retains the old settlement when the new winner's durable scan has changed depth [✔]
+  retains the old settlement when the new winner's durable scan has changed block [✔]
+  retains the old settlement when the new winner's durable scan has changed fee [✔]
+  retains the old settlement when the new winner's durable scan has changed amount [✔]
+  retains the old settlement when the new winner's durable scan has changed missing [✔]
+  cannot treat an arbitrary reviewed member as an earlier settled winner [✔]
+  preserves a primary conversion link when an additional refund changes winner [✔]
+  rolls back all winner changes after a postings failure and recovers once after restart [✔]
+  rolls back all winner changes after a audit failure and recovers once after restart [✔]
+  fences changed cost, policy, family and concurrent stale callbacks [✔]
+  keeps an independent source review after the destination winner changes [✔]
+  books a proved higher fee after operating capital was exhausted and blocks resume [✔]
+  cannot change the booked fee for an unconfirmed or unavailable competing member [✔]
 native replacement signing (offline daemon contracts)
+  refuses recipient owned before invoking the signer [✔]
+  refuses change missing before invoking the signer [✔]
+  refuses recipient script before invoking the signer [✔]
+  refuses change script before invoking the signer [✔]
   signs the saved template once, persists it before any broadcast decision and reuses it on replay [✔]
   keeps the original when the signer is rejected [✔]
   keeps the original when the signer is lost reply [✔]
@@ -384,6 +403,7 @@ Solana settlement evidence (captured finalized public Devnet payments)
   uses saved ceilings to reconcile an existing payment after future limits are lowered [✔]
   rejects a changed token delta or historical owner and contradictory failure metadata [✔]
 public/private Unix socket boundary
+  refuses canonical and backup-dependent deployments in the local test command [✔]
   uses the shared Servant contract and separate admin socket [✔]
   refuses a second worker on the same ledger [✔]
   reconnects the first GET and POST after worker replacement without replacing the clients [✔]
@@ -399,8 +419,8 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 8.2510 seconds
-342 examples, 0 failures
+Finished in 10.0040 seconds
+363 examples, 0 failures
 Test suite bridge-test: PASS
 Test suite logged to: /Volumes/Crucial
 X9/CodexBuilds/ecx-bridge-20260930/workspace-b/outputs/ecx-bridge/./../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log

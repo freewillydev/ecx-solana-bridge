@@ -1,0 +1,55 @@
+#!/usr/bin/env python3
+"""Run the public Signet/Devnet bridge locally. Ctrl-C stops both child processes."""
+import argparse
+import json
+import os
+from pathlib import Path
+import shutil
+import signal
+import subprocess
+import time
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("config", type=Path)
+parser.add_argument("--binary", default=os.environ.get("ECX_BRIDGE_BINARY", "ecx-bridge"))
+parser.add_argument("--port", type=int, default=61734)
+args = parser.parse_args()
+binary = shutil.which(args.binary)
+if not binary:
+    parser.error("Build ecx-bridge first, then supply --binary /absolute/path/to/ecx-bridge")
+config_path = args.config.resolve(strict=True)
+config = json.loads(config_path.read_text())
+if config.get("profile") != "L2LSignetDevnet" or config.get("backupRequired"):
+    parser.error("This launcher accepts only the public L2L Signet / Solana Devnet profile")
+if not 1024 <= args.port <= 65535:
+    parser.error("Use a port from 1024 through 65535")
+assets = Path(__file__).resolve().parents[1] / "web"
+if not (assets / "dist/wallet.js").is_file():
+    parser.error("Build the browser bundle first: cd web && npm ci && npm run build")
+children = []
+
+
+def stop(_signal=None, _frame=None):
+    raise KeyboardInterrupt
+
+
+signal.signal(signal.SIGTERM, stop)
+try:
+    children.append(subprocess.Popen([binary, "test-worker", str(config_path)]))
+    children.append(subprocess.Popen([binary, "serve", config["customerSocket"], str(args.port), str(assets)]))
+    print(f"Bridge: http://127.0.0.1:{args.port} — public test funds only. Ctrl-C to stop.", flush=True)
+    while all(child.poll() is None for child in children):
+        time.sleep(0.25)
+    raise SystemExit(next(child.returncode for child in children if child.poll() is not None) or 1)
+except KeyboardInterrupt:
+    pass
+finally:
+    for child in children:
+        if child.poll() is None:
+            child.terminate()
+    for child in children:
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            child.wait()

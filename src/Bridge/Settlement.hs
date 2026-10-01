@@ -299,7 +299,8 @@ readSavedNativeFamily transport c ledger expected=do
     case payment of NativePayment s->pure(attempt,s); _->reject "wrong_destination_chain"
   view <- readNativeFamilyWith (paymentNative transport) c (map snd signed)
   forM_ (familyWallet view) $ \(txid,seen)->when (seen/=Nothing) $ do
-    require (any (\a->attemptId a==txid && attemptState a `elem` ["broadcast_intent","settled"]) family) "unrecorded_broadcast_observed"
+    require (any (\a->attemptId a==txid && attemptState a `elem` ["broadcast_intent","settled","review"]
+      && maybe False (>0) (attemptSequence a)) family) "unrecorded_broadcast_observed"
   pure(signed,view)
 
 activeFamilyPayment :: [(Attempt,NativeSigned)] -> NativeFamilyView -> IO (Maybe (Attempt,NativeSigned,Int,Value))

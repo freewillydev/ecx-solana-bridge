@@ -2,13 +2,13 @@
 
 A small inventory bridge: one Haskell/Servant application, two chain adapters, one SQLite ledger, and a thin browser interface. A separate Rust executable uses official Solana SDK and SPL interface crates to construct and sign a fixed transaction format. No custom blockchain or token program.
 
-**Development checkpoint — not ready for public custody.** Both ledger-driven directions have completed on real L2L Signet / Solana Devnet, alongside full refunds. The code builds and 342 Haskell examples pass. The paused worker reconciles recorded payments, restores native input locks and tracks loss/restoration of source and settled native payment confirmations without paying again. Proven native source conflicts produce separate, reversible deficit postings while preserving the original obligations. An operator can cover a proved deficit with free native float/earnings; source return restores that allocation exactly once. Restored source work requires explicit approval against its saved state. The ledger and database permit only one successful settlement per intent. Native replacement lineage, signing and family recovery have offline contract coverage, including settlement by an older member. The signing/send command remains disabled pending winner-change compensation and live replacement acceptance. Database failures block further ledger use until reopening; unsigned preparation cancellation preserves the obligation's funds. Browser signing, complete recovery and Linux deployment remain unfinished. Customer intake and signing routes are disabled in code. See [STATUS.md](docs/STATUS.md) for the evidence and outstanding work.
+**Local public-test build — L2L Signet / Solana Devnet.** The explicit `test-worker` command connects the customer API to the existing order, ledger and payment engine. The browser provides deposit instructions, Wallet Standard signing, saved orders, status updates and transaction links. Both real-chain directions have completed through the customer HTTP API and running worker; a clean launcher restart preserved the ledger and completed order views. The application builds and 363 Haskell examples pass. Browser-wallet acceptance, complete recovery, Linux installation and independent review remain outstanding. Canonical intake stays disabled. See [STATUS.md](docs/STATUS.md) for evidence and remaining work.
 
 ## Components
 
 | Component | Responsibility |
 | --- | --- |
-| `ecx-bridge worker` | Owns the ledger and private configuration. Serves separate customer and administrator Unix sockets. |
+| `ecx-bridge worker` / `test-worker` | Owns the ledger and private configuration. Ordinary mode observes while paused; explicit public-test mode accepts orders and pays them. Both serve separate customer and administrator Unix sockets. |
 | `ecx-bridge serve` | Serves static assets and proxies the typed customer API. Binds only to loopback. Receives no key or database path. |
 | `Bridge.Budget` | Immutable order fee ceilings, separate payout/refund allowances, rolling 24-hour operating caps and private budget reporting. |
 | `Bridge.Ledger` | Quotes, inventory reservations, protected principal, obligations, exact signed attempts, fee accounting, backup coverage, audit records. |
@@ -18,8 +18,8 @@ A small inventory bridge: one Haskell/Servant application, two chain adapters, o
 | `Bridge.Recovery` | Run paused observation, recorded-payment reconciliation, native input-lock reconstruction and custody checks; cancel an exact unsigned generation or approve restored source work against its saved state, retaining funds and attempts. |
 | `Bridge.Reorg` | Recheck native source eligibility and settlement finality against the real wallet and durable scans; journal reversible source deficits and same-payment reconfirmation. Ambiguous evidence remains under review. |
 | `Bridge.NativePayment` / `Bridge.SolanaPayment` / `Bridge.Payment` | Validate outgoing transactions and native quote amounts with the real daemon, reserve operating costs, save exact preparation requests/drafts before signing and signed bytes afterward. Solana simulations use unsigned copies. |
-| `Bridge.NativeReplacement` | Validate and sign exact higher-fee templates; observe every member of the shared-input family. The private signing/send command remains gated pending winner-change recovery and live acceptance. |
-| `Bridge.Settlement` | Recheck the bound source, journal broadcast intent, enforce backup coverage, send recorded bytes and book verified outcomes. The paused worker can reconcile saved attempts; new signing/sending remains gated. |
+| `Bridge.NativeReplacement` | Validate and sign exact higher-fee templates; observe every member of the shared-input family. The private replacement signing/send command remains gated pending live acceptance. |
+| `Bridge.Settlement` | Recheck the bound source, journal broadcast intent, enforce backup coverage, send recorded bytes and book verified outcomes. The paused worker reconciles saved attempts; explicit public-test mode also schedules new payments. |
 | `Bridge.Deposit` | Build and validate an unsigned order-bound Solana deposit, with customer token/SOL balance, fee, expiry and backup checks. |
 | `Bridge.Admission` | Solana wallet/ATA policy, balances, fee/rent estimates and unsigned simulation before a new order reserves funds. |
 | `Bridge.Order` | Both chain admission checks, durable native allocation claims, label recovery, immutable memo/address binding and first-exposure checks. |
@@ -54,18 +54,21 @@ cabal run ecx-bridge -- recover /absolute/private/config.json
 
 Copy `config/l2l-devnet.example.json` into a private directory and replace every required value with the actual deployment inputs. The example deliberately contains no usable keys or invented mint. `doctor` checks actual chain identity, synchronization, mint and token-account policy; success does not certify settlement readiness.
 
-To inspect the paused development interface:
+To run the local public-test product after configuring and funding the real nodes and wallets:
 
 ```sh
-cabal run ecx-bridge -- worker /absolute/private/config.json
-# In another terminal; use the same configured customer socket:
-cabal run ecx-bridge -- serve /absolute/customer/api.sock 8096 /absolute/path/to/ecx-bridge/web
+./scripts/start-local /absolute/private/config.json --binary /absolute/path/to/ecx-bridge
 ```
 
-Build the browser assets first. Open `http://127.0.0.1:8096`. Administrator routes are unavailable through that public proxy. Different Unix users and Linux sandbox enforcement still need testing on the server; local socket tests alone do not prove service-user isolation.
+Build the browser assets first. Open `http://127.0.0.1:61734`; Ctrl-C stops both child processes. The launcher accepts only `L2LSignetDevnet` with `backupRequired: false`. It starts the existing `test-worker` and loopback web proxy. Startup reconciles the ledger and checks custody before enabling transfers; unresolved or reviewed payments keep it paused. A later operational pause requires inspection and is not automatically cleared. Use `worker` instead for observation-only operation.
+
+Native → wrapped orders display an exact Signet deposit address and amount. Wrapped → native orders bind the connected Devnet wallet and request its signature on the validated deposit transaction. Orders and private recovery links survive a page reload. If admission is temporarily unavailable, retry the saved request; it keeps the same idempotency key.
+
+Administrator routes are unavailable through the public proxy. Different Unix users and Linux sandbox enforcement still need testing on the server. This command starts a configured local build; the clean-server installer remains a separate delivery gate.
 
 ## Public-network evidence
 
+- **Current product acceptance:** two orders created through the customer HTTP API and paid automatically by `test-worker`, with all three custody balances matching. A clean launcher restart retained every financial row and both completed orders. [Transfer/restart evidence](docs/evidence/local-product-transfers.json), [API/proxy checks](docs/evidence/local-product-http.json), [preserved-ledger startup](docs/evidence/local-product-launch.json). Deposits used the dedicated native wallet and official-SDK Devnet tester; browser-wallet acceptance remains separate.
 - Real L2L Signet PSBT payment: [transaction](https://explorer.signet.drivechain.info/tx/b2278e8dd0be7be001a5630545ddb73c83423ee1ee7dbd0327675e27f1642bd3), [saved evidence](docs/evidence/signet-probe.json).
 - Live native observer recorded the faucet receipt and quarantined the standalone payment. A repeated scan changed no deposits, postings or obligations: [replay evidence](docs/evidence/native-observer-replay.json).
 - Live unsigned PSBT preparation passed the new recipient/change/input/fee validator with a 141-unit fee. It did not sign or broadcast, and released its selected input lock: [evidence](docs/evidence/native-unsigned-probe.json).

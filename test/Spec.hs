@@ -1659,7 +1659,7 @@ main=hspec $ do
       report<-reconcilePaymentsWith transport{paymentNative=missing} c l
       (fieldValue "attempts" report >>= mapM (fieldValue "error")) `shouldReturn` [Just ("native_family_conflict_not_proven"::Text)]
       auditExport l `shouldReturn` before
-    it "retains the booked winner through finality loss and refuses a changed winner without compensation" $ withDir $ \dir->withNativeFamilyAt dir $ \l c attempts members mode transport _->do
+    it "retains the booked winner through finality loss and reconfirms it without changing money" $ withDir $ \dir->withNativeFamilyAt dir $ \l c attempts members mode transport _->do
       writeIORef mode $ Just (1,1)
       scanFamilyFixture l c members (Just (1,1))
       (reconcilePaymentsWith transport c l >>= recoveryOutcomes) `shouldReturn` ["settled"]
@@ -1668,10 +1668,6 @@ main=hspec $ do
       scanFamilyFixture l c members (Just (1,0))
       confirming<-reconcileNativeSettlementsWith transport c l
       (fieldValue "payments" confirming >>= mapM (fieldValue "state")) `shouldReturn` ["confirming"::Text]
-      writeIORef mode $ Just (0,1)
-      scanFamilyFixture l c members (Just (0,1))
-      changed<-reconcileNativeSettlementsWith transport c l
-      (fieldValue "payments" changed >>= mapM (fieldValue "error")) `shouldReturn` [Just ("native_family_winner_changed"::Text)]
       result<-reconcileCustodyWith (pure 100) transport c l
       fieldValue "lastError" result `shouldReturn` Just ("native_settlement_requires_review"::Text)
       pendingAttempts l `shouldReturn` []
@@ -1694,7 +1690,221 @@ main=hspec $ do
       ledgerAction l (\db->query db "SELECT needs_review FROM chain_events WHERE event_id=?" (Only txid) :: IO [Only Bool]) `shouldReturn` [Only True]
       length <$> pendingAttempts l `shouldReturn` 1
       available <$> readiness l `shouldReturn` False
+  describe "native winner changes (offline reorg accounting)" $ do
+    forM_ [0,1] $ \first->it ("transfers member "<>show first<>" through repeated winner changes and restart without rebooking principal") $ withDir $ \dir->do
+      (c,transport,saved,finalTx)<-withNativeFamilyAt dir $ \l c attempts members mode transport calls->do
+        let other=1-first
+            tx i=attemptId $ attempts!!i
+            fee i=units $ signedNativeFee $ members!!i
+            delta=fee other-fee first
+        writeIORef mode $ Just (first,1)
+        scanFamilyFixture l c members (Just (first,1))
+        (reconcilePaymentsWith transport c l >>= recoveryOutcomes) `shouldReturn` ["settled"]
+        principal<-ledgerAction l (\db->query_ db "SELECT asset,account,delta FROM postings WHERE event_id LIKE 'settlement:%' ORDER BY id" :: IO [(Text,Text,Int64)])
+        forM_ [other,first,other] $ \winner->do
+          writeIORef mode $ Just (winner,1)
+          scanFamilyFixture l c members (Just (winner,1))
+          result<-reconcileNativeSettlementsWith transport c l
+          nativeSettlementStates result `shouldReturn` ["winner_changed"]
+          fieldValue "monetaryPostings" result `shouldReturn` True
+          (fieldValue "payments" result >>= mapM (fieldValue "transaction")) `shouldReturn` [tx winner]
+          ledgerAction l (\db->query_ db "SELECT txid FROM attempts WHERE state='settled'" :: IO [Only Text]) `shouldReturn` [Only $ tx winner]
+          ledgerAction l (\db->query_ db "SELECT payout_tx FROM orders" :: IO [Only Text]) `shouldReturn` [Only $ tx winner]
+          ledgerAction l (\db->query_ db "SELECT asset,account,delta FROM postings WHERE event_id LIKE 'settlement:%' ORDER BY id" :: IO [(Text,Text,Int64)]) `shouldReturn` principal
+          pendingAttempts l `shouldReturn` []
+          ledgerAction l (\db->query_ db "SELECT amount,released FROM fee_reservations" :: IO [(Int64,Bool)]) `shouldReturn` [(1000,True)]
+          custody<-reconcileCustodyWith (pure 100) transport c l
+          fieldValue "lastError" custody `shouldReturn` (Nothing::Maybe Text)
+          readiness l `shouldReturn` Availability False "native_winner_changed"
+          before<-auditExport l
+          (reconcileNativeSettlementsWith transport c l >>= nativeSettlementStates) `shouldReturn` []
+          auditExport l `shouldReturn` before
+        ledgerAction l (\db->query_ db "SELECT fee_delta FROM native_winner_changes ORDER BY critical_sequence" :: IO [Only Int64]) `shouldReturn` map Only [delta,negate delta,delta]
+        ledgerAction l (\db->operatingTime db >>= operatingSpent db "Native") `shouldReturn` toInteger (fee first+2*max delta 0+max (negate delta) 0)
+        ledgerAction l (\db->query_ db "SELECT COALESCE(SUM(delta),0) FROM postings WHERE asset='Native' AND account='operating' AND (event_id LIKE 'network-fee:%' OR event_id LIKE 'native-winner-fee:%')" :: IO [Only Int64]) `shouldReturn` [Only $ negate $ fee other]
+        recordSettlement l (tx first) (PaymentCosts (signedNativeFee $ members!!first) (amt 0)) "late original callback" `shouldThrow` isError "settlement_not_expected"
+        readIORef calls >>= \xs->map fst xs `shouldSatisfy` all (`notElem` ["walletprocesspsbt","sendrawtransaction","createpsbt"])
+        saved<-auditExport l
+        pure(c,transport,saved,tx other)
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        (reconcileNativeSettlementsWith transport c l >>= nativeSettlementStates) `shouldReturn` []
+        auditExport l `shouldReturn` saved
+        ledgerAction l (\db->query_ db "SELECT txid FROM attempts WHERE state='settled'" :: IO [Only Text]) `shouldReturn` [Only finalTx]
+    it "supersedes old finality reviews and opens a fresh review if the new winner later disappears" $ withDir $ \dir->withNativeFamilyAt dir $ \l c attempts members mode transport _->do
+      writeIORef mode $ Just (0,1)
+      scanFamilyFixture l c members (Just (0,1))
+      _<-reconcilePaymentsWith transport c l
+      forM_ [1,0] $ \winner->do
+        writeIORef mode Nothing
+        scanFamilyFixture l c members Nothing
+        (reconcileNativeSettlementsWith transport c l >>= nativeSettlementStates) `shouldReturn` ["requires_review"]
+        writeIORef mode $ Just (winner,1)
+        scanFamilyFixture l c members (Just (winner,1))
+        (reconcileNativeSettlementsWith transport c l >>= nativeSettlementStates) `shouldReturn` ["winner_changed"]
+        ledgerAction l (\db->query_ db "SELECT txid FROM native_payment_recovery_state WHERE state<>'reconfirmed'" :: IO [Only Text]) `shouldReturn` []
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM native_payment_recoveries" :: IO [Only Int]) `shouldReturn` [Only 2]
+      writeIORef mode Nothing
+      scanFamilyFixture l c members Nothing
+      (reconcileNativeSettlementsWith transport c l >>= nativeSettlementStates) `shouldReturn` ["requires_review"]
+      ledgerAction l (\db->query_ db "SELECT txid FROM native_payment_recovery_state WHERE state<>'reconfirmed'" :: IO [Only Text]) `shouldReturn` [Only $ attemptId $ attempts!!0]
+      resumeAfterChecks l `shouldThrow` isError "native_settlement_requires_review"
+    forM_ ["depth","block","fee","amount","missing"] $ \change->it ("retains the old settlement when the new winner's durable scan has changed "<>T.unpack change) $ withDir $ \dir->withNativeFamilyAt dir $ \l c attempts members mode transport _->do
+      writeIORef mode $ Just (0,1)
+      scanFamilyFixture l c members (Just (0,1))
+      _<-reconcilePaymentsWith transport c l
+      before<-auditExport l
+      writeIORef mode $ Just (1,1)
+      scanFamilyFixture l c members (Just (1,1))
+      let txid=attemptId $ attempts!!1
+          anchor=if change=="block" then "unconfirmed" else custodyNativeTip
+          evidence=object ["confirmations" .= (if change=="depth" then 0::Int else 1)
+            ,"walletNetUnits" .= (if change=="amount" then "-99999" else "-100000"::Text)
+            ,"feeUnits" .= (if change=="fee" then amt 999 else signedNativeFee $ members!!1)]
+      if change=="missing" then ledgerAction l (\db->execute db "DELETE FROM chain_events WHERE chain='Native' AND event_id=?" (Only txid))
+        else do
+          previous<-readCheckpoint l "Native"
+          commitScan l (ScanBatch "Native" (nativeCheckpointHash c) previous custodyNativeTip 100 [] [ChainEvent txid "outgoing" anchor evidence])
+      result<-reconcileNativeSettlementsWith transport c l
+      (fieldValue "payments" result >>= mapM (fieldValue "error")) `shouldReturn` [Just ("native_recovery_scan_not_current"::Text)]
+      fieldValue "monetaryPostings" result `shouldReturn` False
+      auditExport l `shouldReturn` before
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM native_winner_changes" :: IO [Only Int]) `shouldReturn` [Only 0]
+    it "cannot treat an arbitrary reviewed member as an earlier settled winner" $ withDir $ \dir->withNativeFamilyAt dir $ \l c attempts members mode transport _->do
+      writeIORef mode $ Just (0,1)
+      scanFamilyFixture l c members (Just (0,1))
+      _<-reconcilePaymentsWith transport c l
+      ledgerAction l $ \db->execute db "UPDATE attempts SET state='review' WHERE txid=?" (Only $ attemptId $ attempts!!1)
+      before<-auditExport l
+      writeIORef mode $ Just (1,1)
+      scanFamilyFixture l c members (Just (1,1))
+      result<-reconcileNativeSettlementsWith transport c l
+      (fieldValue "payments" result >>= mapM (fieldValue "error")) `shouldReturn` [Just ("native_family_review_not_a_previous_winner"::Text)]
+      auditExport l `shouldReturn` before
+    it "preserves a primary conversion link when an additional refund changes winner" $ withDir $ \dir->withNativeFamilyAt dir $ \l c attempts members mode transport _->do
+      writeIORef mode $ Just (0,1)
+      scanFamilyFixture l c members (Just (0,1))
+      _<-reconcilePaymentsWith transport c l
+      ledgerAction l $ \db->execute_ db "UPDATE orders SET status='Paid',payout_tx='offline-primary-conversion'"
+      writeIORef mode $ Just (1,1)
+      scanFamilyFixture l c members (Just (1,1))
+      (reconcileNativeSettlementsWith transport c l >>= nativeSettlementStates) `shouldReturn` ["winner_changed"]
+      [Only oid]<-ledgerAction l (\db->query db "SELECT order_id FROM obligations WHERE id=?" (Only $ attemptIntent $ attempts!!0))
+      customer<-readOrder l cap oid
+      status customer `shouldBe` "Paid"
+      payoutTx customer `shouldBe` Just "offline-primary-conversion"
+    forM_ ["postings","audit"] $ \failure->it ("rolls back all winner changes after a "<>T.unpack failure<>" failure and recovers once after restart") $ withDir $ \dir->do
+      (c,transport,before,oldWinner,sequenceNo)<-withNativeFamilyAt dir $ \l c attempts members mode transport _->do
+        writeIORef mode $ Just (0,1)
+        scanFamilyFixture l c members (Just (0,1))
+        _<-reconcilePaymentsWith transport c l
+        before<-auditExport l
+        [Only sequenceNo]<-ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64])
+        writeIORef mode $ Just (1,1)
+        scanFamilyFixture l c members (Just (1,1))
+        ledgerAction l $ \db->execute_ db $ if failure=="postings"
+          then "CREATE TRIGGER refuse_winner_change BEFORE INSERT ON postings WHEN NEW.event_id LIKE 'native-winner-fee:%' BEGIN SELECT RAISE(ABORT,'offline_winner_failure'); END"
+          else "CREATE TRIGGER refuse_winner_change BEFORE INSERT ON audit WHEN NEW.action='native_winner_changed' BEGIN SELECT RAISE(ABORT,'offline_winner_failure'); END"
+        reconcileNativeSettlementsWith transport c l `shouldThrow` (\err->sqlError err==ErrorConstraint)
+        pure(c,transport,before,attemptId $ attempts!!0,sequenceNo)
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        auditExport l `shouldReturn` before
+        ledgerAction l (\db->query_ db "SELECT txid FROM attempts WHERE state='settled'" :: IO [Only Text]) `shouldReturn` [Only oldWinner]
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM native_winner_changes" :: IO [Only Int]) `shouldReturn` [Only 0]
+        ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64]) `shouldReturn` [Only sequenceNo]
+        ledgerAction l $ \db->execute_ db "DROP TRIGGER refuse_winner_change"
+        (reconcileNativeSettlementsWith transport c l >>= nativeSettlementStates) `shouldReturn` ["winner_changed"]
+        saved<-auditExport l
+        (reconcileNativeSettlementsWith transport c l >>= nativeSettlementStates) `shouldReturn` []
+        auditExport l `shouldReturn` saved
+        ledgerAction l (\db->execute_ db "DELETE FROM native_winner_changes") `shouldThrow` (\err->sqlError err==ErrorConstraint)
+    it "fences changed cost, policy, family and concurrent stale callbacks" $ withDir $ \dir->withNativeFamilyAt dir $ \l c attempts members mode transport _->do
+      writeIORef mode $ Just (0,1)
+      scanFamilyFixture l c members (Just (0,1))
+      _<-reconcilePaymentsWith transport c l
+      family<-nativeFamilyAttempts l (attemptIntent $ attempts!!0)
+      let old=family!!0
+          winner=attemptId $ family!!1
+          cost=PaymentCosts (signedNativeFee $ members!!1) (amt 0)
+          proof=nativeSettlementProof winner custodyNativeTip 1
+      previous<-nativeSettlementPrevious l old
+      writeIORef mode $ Just (1,1)
+      scanFamilyFixture l c members (Just (1,1))
+      before<-auditExport l
+      recordNativeSettlementCheck l old previous (NativeSettlementReplaced family winner cost{networkFee=amt 999} proof) `shouldThrow` isError "native_recovery_cost_changed"
+      recordNativeSettlementCheck l old previous (NativeSettlementReplaced family winner cost{accountRent=amt 1} proof) `shouldThrow` isError "native_recovery_cost_changed"
+      recordNativeSettlementCheck l old previous (NativeSettlementReplaced family winner cost (nativeSettlementProof winner custodyNativeTip 2)) `shouldThrow` isError "native_recovery_policy_changed"
+      recordNativeSettlementCheck l old previous (NativeSettlementReplaced (drop 1 family) winner cost proof) `shouldThrow` isError "native_replacement_family_changed"
+      auditExport l `shouldReturn` before
+      results<-mapConcurrently (\_->try (recordNativeSettlementCheck l old previous $ NativeSettlementReplaced family winner cost proof) :: IO (Either BridgeError ())) [0,1::Int]
+      length [() | Right ()<-results] `shouldBe` 1
+      [code | Left (BridgeError code)<-results] `shouldBe` ["native_settlement_changed"]
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM native_winner_changes" :: IO [Only Int]) `shouldReturn` [Only 1]
+    it "keeps an independent source review after the destination winner changes" $ withDir $ \dir->withNativeFamilyAt dir $ \l c attempts members mode transport _->do
+      writeIORef mode $ Just (0,1)
+      scanFamilyFixture l c members (Just (0,1))
+      _<-reconcilePaymentsWith transport c l
+      [(did,sourceOrder,n,anchor,depth,eligible,seen)]<-ledgerAction l (\db->query_ db "SELECT id,order_id,amount,anchor,confirmations,eligible,first_seen FROM deposits WHERE allocated=1" :: IO [(Text,Maybe Text,Int64,Text,Int,Bool,Int64)])
+      let source=Deposit did sourceOrder Native (amt $ toInteger n) anchor depth eligible seen
+      recordSourceCheck l source (SourceUnavailable $ object ["reason" .= ("offline source history unavailable"::Text)])
+      writeIORef mode $ Just (1,1)
+      scanFamilyFixture l c members (Just (1,1))
+      (reconcileNativeSettlementsWith transport c l >>= nativeSettlementStates) `shouldReturn` ["winner_changed"]
+      [Only oid]<-ledgerAction l (\db->query db "SELECT order_id FROM obligations WHERE id=?" (Only $ attemptIntent $ attempts!!0))
+      status <$> readOrder l cap oid `shouldReturn` "NeedsReview"
+      resumeAfterChecks l `shouldThrow` isError "source_recovery_requires_review"
+      ledgerAction l (\db->query_ db "SELECT state FROM source_recovery_state" :: IO [Only Text]) `shouldReturn` [Only "unavailable"]
+    it "books a proved higher fee after operating capital was exhausted and blocks resume" $ withDir $ \dir->withNativeFamilyAt dir $ \l c _ members mode transport _->do
+      writeIORef mode $ Just (0,1)
+      scanFamilyFixture l c members (Just (0,1))
+      _<-reconcilePaymentsWith transport c l
+      ledgerAction l $ \db->do
+        allocation<-freeOperating db "Native"
+        execute_ db "INSERT INTO events(id,description) VALUES('offline-reallocation','offline operating capital exhaustion')"
+        execute db "INSERT INTO postings(event_id,asset,account,delta) VALUES('offline-reallocation','Native','operating',?)" (Only $ fromInteger $ negate allocation::Only Int64)
+        execute db "INSERT INTO postings(event_id,asset,account,delta) VALUES('offline-reallocation','Native','float',?)" (Only $ fromInteger allocation::Only Int64)
+      writeIORef mode $ Just (1,1)
+      scanFamilyFixture l c members (Just (1,1))
+      (reconcileNativeSettlementsWith transport c l >>= nativeSettlementStates) `shouldReturn` ["winner_changed"]
+      ledgerAction l (\db->freeOperating db "Native") `shouldReturn` (-100)
+      custody<-reconcileCustodyWith (pure 100) transport c l
+      fieldValue "lastError" custody `shouldReturn` (Nothing::Maybe Text)
+      resumeAfterChecks l `shouldThrow` isError "operating_allocation_requires_funding"
+      available <$> readiness l `shouldReturn` False
+    it "cannot change the booked fee for an unconfirmed or unavailable competing member" $ withDir $ \dir->withNativeFamilyAt dir $ \l c _ members mode transport _->do
+      writeIORef mode $ Just (0,1)
+      scanFamilyFixture l c members (Just (0,1))
+      _<-reconcilePaymentsWith transport c l
+      before<-auditExport l
+      forM_ [(Just (1,0),"confirming"),(Nothing,"requires_review")] $ \(position,state)->do
+        writeIORef mode position
+        scanFamilyFixture l c members position
+        result<-reconcileNativeSettlementsWith transport c l
+        nativeSettlementStates result `shouldReturn` [state]
+        fieldValue "monetaryPostings" result `shouldReturn` False
+        auditExport l `shouldReturn` before
+        pendingAttempts l `shouldReturn` []
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM native_winner_changes" :: IO [Only Int]) `shouldReturn` [Only 0]
   describe "native replacement signing (offline daemon contracts)" $ do
+    forM_ [("recipient owned","bridge_owned_destination"),("change missing","native_input_or_change_not_owned")
+      ,("recipient script","native_output_ownership_changed"),("change script","native_output_ownership_changed")]
+      $ \(changed,code)->it ("refuses "<>T.unpack changed<>" before invoking the signer") $ withDir $ \dir->withReplacementSignerAt dir $ \l c parent _ sequenceNo transport calls->do
+        originalPayment<-nativeSignedFixture
+        let plan=signedNativePlan originalPayment
+            original=paymentNative transport
+            altered wallet method params=do
+              value<-original wallet method params
+              pure $ case (method,params) of
+                ("getaddressinfo",[address]) | address==toJSON (planRecipient plan) && changed=="recipient owned"->setPath ["ismine"] (Bool True) value
+                ("getaddressinfo",[address]) | address==toJSON (planChange plan) && changed=="change missing"->setPath ["ismine"] (Bool False) value
+                ("getaddressinfo",[address]) | address==toJSON (planRecipient plan) && changed=="recipient script"
+                  || address==toJSON (planChange plan) && changed=="change script"->setPath ["scriptPubKey"] (toJSON $ "0014"<>T.replicate 40 "f") value
+                _->value
+        before<-auditExport l
+        signNativeReplacementWith (pure 100) transport{paymentNative=altered} c l sequenceNo `shouldThrow` isError code
+        nativeReplacementMember l sequenceNo `shouldReturn` Nothing
+        pendingAttempts l `shouldReturn` [parent]
+        auditExport l `shouldReturn` before
+        readIORef calls >>= \requests->map fst requests `shouldSatisfy` all (`notElem` ["walletprocesspsbt","finalizepsbt","sendrawtransaction"])
     it "signs the saved template once, persists it before any broadcast decision and reuses it on replay" $ withDir $ \dir->withReplacementSignerAt dir $ \l c parent draft sequenceNo transport calls->do
       before<-auditExport l
       member<-signNativeReplacementWith (pure 100) transport c l sequenceNo
@@ -4072,6 +4282,9 @@ main=hspec $ do
         ,setPath ["meta","err"] (String "fixture-failure") proof] $ \bad ->
           verifySolanaOutcome c signed bad `shouldBe` Left "solana_settlement_evidence_mismatch"
   describe "public/private Unix socket boundary" $ do
+    it "refuses canonical and backup-dependent deployments in the local test command" $ withDir $ \dir->do
+      runTestWorker (cfg dir){profile=CanonicalBeta} `shouldThrow` isError "public_test_profile_required"
+      runTestWorker (cfg dir){backupRequired=True} `shouldThrow` isError "public_test_profile_required"
     it "uses the shared Servant contract and separate admin socket" $ withDir $ \dir -> do
       let c=cfg dir
       withAsync (runWorkerWith c (const $ pure ())) $ \_ -> do
@@ -4083,6 +4296,9 @@ main=hspec $ do
               env=mkClientEnv manager (BaseUrl Http "localhost" 80 "")
           configResult<-runClientM configCall env
           configResult `shouldSatisfy` either (const False) (const True)
+          case configResult of
+            Right value->fieldValue "intakeEnabled" value `shouldReturn` False
+            Left _->expectationFailure "configuration unavailable"
           runClientM healthCall env `shouldReturn` Right (Availability True "process_running")
           rejected<-runClientM (createCall "Bearer invalid" req) env
           rejected `shouldSatisfy` either (const True) (const False)

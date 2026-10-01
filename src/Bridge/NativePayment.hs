@@ -228,6 +228,9 @@ signNativeDraft call plan draft = do
 -- input ownership before invoking this shared daemon signer. It never sends.
 signNativeTemplate :: NativeRPC -> NativePlan -> NativeDraft -> [NativePrevout] -> IO NativeSigned
 signNativeTemplate call plan draft current=do
+  recipientScript <- validateNativeRecipientWith call (planRecipient plan)
+  changeScript <- ownedScript call (planChange plan)
+  require (recipientScript==planRecipientScript plan && changeScript==planChangeScript plan) "native_output_ownership_changed"
   signed <- call True "walletprocesspsbt" [toJSON (draftPsbt draft),Bool True,String "ALL",Bool True]
   complete <- fieldValue "complete" signed
   require complete "native_signing_incomplete"

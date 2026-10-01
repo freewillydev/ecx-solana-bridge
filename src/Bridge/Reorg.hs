@@ -135,7 +135,7 @@ inspectNativeSourceWith transport c ledger source=do
  where call=paymentNative transport
 
 -- Recheck previously settled native bytes when their recorded finality changed.
--- No source funds, reservation, fee, signature or intent is created or released.
+-- A different proved family winner adjusts its fee only, without a new payment.
 reconcileNativeSettlements :: Manager -> Config -> Ledger -> IO Value
 reconcileNativeSettlements manager c=reconcileNativeSettlementsWith
   (realPaymentTransport manager c (const $ reject "unexpected_reorg_backup"))
@@ -147,7 +147,7 @@ reconcileNativeSettlementsWith transport c ledger=do
   when (length candidates>1000) $ pause ledger "native_settlement_recovery_backlog"
   require (length candidates<=1000) "native_settlement_recovery_backlog"
   reports <- mapM reconcile candidates
-  pure $ object ["payments" .= reports,"signedOrSent" .= False,"monetaryPostings" .= False]
+  pure $ object ["payments" .= map fst reports,"signedOrSent" .= False,"monetaryPostings" .= any snd reports]
  where
   reconcile attempt=do
     old <- ledgerAction ledger $ \db->query db "SELECT observation_json FROM attempts WHERE txid=?" (Only $ attemptId attempt) :: IO [Only Text]
@@ -167,6 +167,8 @@ reconcileNativeSettlementsWith transport c ledger=do
         NativeSettlementConfirming->report attempt "confirming" Nothing
         NativeSettlementUnavailable code->report attempt "requires_review" (Just code)
         NativeSettlementReconfirmed _ _->report attempt "reconfirmed" Nothing
+        NativeSettlementReplaced _ winner _ _->(object ["transaction" .= winner,"previousTransaction" .= attemptId attempt
+          ,"state" .= ("winner_changed"::Text),"error" .= (Nothing::Maybe Text)],True)
   inspect attempt=do
     paymentIdentity transport
     wallet <- paymentNative transport True "getwalletinfo" []
@@ -177,22 +179,24 @@ reconcileNativeSettlementsWith transport c ledger=do
     (_,saved) <- readSavedPayment transport c ledger attempt
     payment <- case saved of NativePayment value->pure value; _->reject "wrong_destination_chain"
     family <- nativeFamilyAttempts ledger (attemptIntent attempt)
-    observation <- if length family==1 then observeNativePayment (paymentNative transport) payment else do
+    if length family==1 then observeNativePayment (paymentNative transport) payment >>= sameWinner else do
       (members,view) <- readSavedNativeFamily transport c ledger family
       active <- activeFamilyPayment members view
       case active of
         Just (winner,signed,depth,value)->do
-          require (attemptId winner==attemptId attempt) "native_family_winner_changed"
-          if depth<planDepth (signedNativePlan signed) then pure PaymentWaiting else do
+          if depth<planDepth (signedNativePlan signed) then pure NativeSettlementConfirming else do
             anchor <- fieldValue "blockhash" value
             height <- activeNativeBlock (paymentNative transport) anchor (planDepth $ signedNativePlan signed)
             noRent <- either reject pure (amount 0)
-            pure $ PaymentConfirmed (PaymentCosts (signedNativeFee signed) noRent) $ TE.decodeUtf8 $ LBS.toStrict $ encode $ object
-              ["txid" .= attemptId winner,"blockhash" .= anchor,"height" .= height,"requiredDepth" .= planDepth (signedNativePlan signed)]
-        Nothing->pure PaymentUnseen
-    case observation of
+            let costs=PaymentCosts (signedNativeFee signed) noRent
+                proof=TE.decodeUtf8 $ LBS.toStrict $ encode $ object
+                  ["txid" .= attemptId winner,"blockhash" .= anchor,"height" .= height,"requiredDepth" .= planDepth (signedNativePlan signed)]
+            pure $ if attemptId winner==attemptId attempt then NativeSettlementReconfirmed costs proof
+              else NativeSettlementReplaced family (attemptId winner) costs proof
+        Nothing->pure $ NativeSettlementUnavailable "native_settled_payment_unseen"
+  sameWinner observation=case observation of
       PaymentConfirmed costs proof->pure $ NativeSettlementReconfirmed costs proof
       PaymentWaiting->pure NativeSettlementConfirming
       PaymentUnseen->pure $ NativeSettlementUnavailable "native_settled_payment_unseen"
       PaymentFailed _ _->reject "unexpected_native_payment_failure"
-  report attempt state failure=object ["transaction" .= attemptId attempt,"state" .= (state::Text),"error" .= (failure::Maybe Text)]
+  report attempt state failure=(object ["transaction" .= attemptId attempt,"state" .= (state::Text),"error" .= (failure::Maybe Text)],False)
