@@ -13,5 +13,6 @@
     "node": ["https://nodejs.org/dist/v25.4.0/node-v25.4.0-linux-x64.tar.xz", "f3bde66a96c232f34cdd9f4fea6b551f915f8f3ac0952793eef903b3e35df037"],
     "bitcoin": ["https://bitcoincore.org/bin/bitcoin-core-30.2/bitcoin-30.2-x86_64-linux-gnu.tar.gz", "6aa7bb4feb699c4c6262dd23e4004191f6df7f373b5d5978b5bcdd4bb72f75d8"]
   },
-  "sqlite": ["https://www.sqlite.org/2026/sqlite-autoconf-3530400.tar.gz", "454e45f61c6bd75b7420e7190732dea03ce6639c63ada47bbc592f67fc340338"]
+  "sqlite": ["https://www.sqlite.org/2026/sqlite-autoconf-3530400.tar.gz", "454e45f61c6bd75b7420e7190732dea03ce6639c63ada47bbc592f67fc340338"],
+  "ghc-source": ["https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz", "2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77"]
 }

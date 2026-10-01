@@ -1972,9 +1972,19 @@
       "ecosystem": "GHC bundled library",
       "name": "rts",
       "version": "1.0.3",
-      "source": "Pinned GHC 9.14.1 bindist",
-      "status": "missing",
-      "files": []
+      "source": "https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz",
+      "status": "collected",
+      "files": [
+        {
+          "path": "ghc-9.14.1/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ],
+      "sourceSha256": "2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77",
+      "licenseDeclarationSha256": "506c87863ec09c3a1ed4bb4165fdafa6b28c6d28e6f1f811115254b325724098",
+      "noticeLocation": "GHC distribution license; runtime declares BSD-3-Clause in rts/rts.cabal"
     },
     {
       "ecosystem": "Haskell",
@@ -3656,6 +3666,12 @@
       "status": "collected",
       "files": [
         {
+          "path": "fiat-crypto-0.2.9/AUTHORS",
+          "sha256": "ad74c036a6afaedc418fed65f171c877c2f74a4c70938a03930aa11c98a20508",
+          "encoding": "utf-8",
+          "gzip": false
+        },
+        {
           "path": "fiat-crypto-0.2.9/COPYRIGHT",
           "sha256": "6c935d087a2992d0f092665400a2fa99c98db58d96fbe29368f8f48182bed9aa",
           "encoding": "utf-8",
@@ -4463,10 +4479,17 @@
       "name": "r-efi",
       "version": "6.0.0",
       "source": "https://crates.io/crates/r-efi/6.0.0",
-      "status": "missing",
-      "files": [],
+      "status": "collected",
+      "files": [
+        {
+          "path": "r-efi-6.0.0/AUTHORS",
+          "sha256": "d027e91dbc9cdbb2f1190068e498bd6b61cff022b6a032b191021ba658d96111",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ],
       "sourceSha256": "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf",
-      "noticeLocation": "repository root at crate-recorded commit; review applicability"
+      "noticeLocation": "crate archive"
     },
     {
       "ecosystem": "Rust",
@@ -5496,8 +5519,15 @@
       "name": "spl-memo-interface",
       "version": "2.0.0",
       "source": "https://crates.io/crates/spl-memo-interface/2.0.0",
-      "status": "missing",
-      "files": [],
+      "status": "collected",
+      "files": [
+        {
+          "path": "https://raw.githubusercontent.com/solana-program/memo/0ed6992878c38222eb1b30367eea4a3ffd3ba068/LICENSE",
+          "sha256": "a6cba85bc92e0cff7a450b1d873c0eaa2e9fc96bf472df0247a26bec77bf3ff9",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ],
       "sourceSha256": "3d4e2aedd58f858337fa609af5ad7100d4a243fdaf6a40d6eb4c28c5f19505d3",
       "noticeLocation": "repository root at crate-recorded commit; review applicability"
     },
@@ -6184,11 +6214,7 @@
     "node_modules/@esbuild/win32-ia32",
     "node_modules/@esbuild/win32-x64"
   ],
-  "missing": [
-    "GHC bundled library: rts 1.0.3",
-    "Rust: r-efi 6.0.0",
-    "Rust: spl-memo-interface 2.0.0"
-  ],
+  "missing": [],
   "upstreamFetchErrors": [],
   "remainingReview": [
     "Bitcoin Core and its bundled third-party notices",

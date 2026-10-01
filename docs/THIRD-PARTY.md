@@ -22,16 +22,20 @@ an applicability check. esbuild's platform binary uses the notice from its
 same-version parent package. Absent optional npm platform packages are enumerated
 separately; the installed Linux npm graph is the collection target.
 
-The initial Linux collection has 333 entries, with texts collected for 330.
-Two offline runs produced identical notice output. The unresolved entries are:
+The Linux collection has 333 entries, with texts collected for all 333.
+Offline regeneration produces identical notice output. The three initial gaps
+were resolved from upstream evidence:
 
-- GHC runtime `rts-1.0.3`: its package-specific notice was not located in the
-  compiler bindist. The GHC compiler notice is included separately; this is not
-  being assumed to settle the runtime entry.
-- `r-efi-6.0.0`: neither its published archive nor the root of its recorded
-  repository revision contains a standalone license text selected by the collector.
-- `spl-memo-interface-2.0.0`: the crate omits its notice; the repository named in
-  its package metadata returned 404 for the crate-recorded commit.
+- GHC runtime `rts-1.0.3`: the official GHC 9.14.1 source archive, verified
+  against the published SHA-256, supplies the distribution license and the
+  runtime's `BSD-3-Clause` declaration in `rts/rts.cabal`. Coverage records
+  hashes for the source archive and declaration separately.
+- `r-efi-6.0.0`: its published `AUTHORS` file contains license text and
+  copyright attributions. The collector now retains AUTHORS files.
+- `spl-memo-interface-2.0.0`: its metadata names an old repository, but the
+  exact crate-recorded commit is available in the official
+  [memo repository](https://github.com/solana-program/memo/commit/0ed6992878c38222eb1b30367eea4a3ffd3ba068).
+  A version-specific repository correction retrieves that commit's LICENSE.
 
 Bitcoin Core and bundled dependencies, SQLite's amalgamation notices, Ubuntu
 system libraries, and obligations beyond the presence of license texts remain
