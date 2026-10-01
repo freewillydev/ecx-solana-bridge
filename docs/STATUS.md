@@ -7,7 +7,7 @@
 | Check | Result and evidence |
 | --- | --- |
 | Haskell application | Builds on macOS arm64 / GHC 9.14.1 with the frozen Cabal graph |
-| Financial/state tests | 35 examples pass, plus 100 generated arithmetic cases; [test output](evidence/haskell-tests.txt) |
+| Financial/state tests | 47 examples pass, plus 100 generated arithmetic cases; [test output](evidence/haskell-tests.txt) |
 | SQLite actually linked | 3.53.4, exact upstream source identity checked by the application; [doctor](evidence/doctor.json) |
 | Rust helper | Five tests pass; the separate Devnet setup example compiles; fixed SDK/interface graph in `Cargo.lock` |
 | Browser build | TypeScript strict check and esbuild succeed; generated module about 6.7 KiB |
@@ -17,6 +17,9 @@
 | Browser inspection | Actual local page loaded; both fee previews and the direction-specific refund controls checked; deposits disabled; [screenshot](evidence/local-preview.jpg) |
 | Real native chain | Public L2L Signet synchronized; challenge and height-16000 checkpoint match |
 | Real native payment | Daemon-funded/signed PSBT, 100,000 units to dedicated tester, 282-unit fee, three confirmations at latest check; [transaction](https://explorer.signet.drivechain.info/tx/b2278e8dd0be7be001a5630545ddb73c83423ee1ee7dbd0327675e27f1642bd3), [evidence](evidence/signet-probe.json) |
+| Real native observer | Recorded the actual faucet receipt as unallocated and the standalone payment as an unknown outgoing transaction requiring review; [scan](evidence/observer-first-scan.json) |
+| Observer replay and restart | Repeated scan did not duplicate deposits, postings or obligations; schema 1→2 migrated the local ledger and the observer restarted paused; [replay](evidence/native-observer-replay.json) |
+| Solana history contracts | Exact cursor pagination, missing history, independent-verifier delay/disagreement, historical token ownership and version-0 account indexes tested with explicitly labeled fixtures |
 | Solana identity | Public Devnet genesis checked; intended test mint does not yet exist; doctor correctly reports `mint_not_found` |
 
 The native payment used the standalone probe and dedicated public-test wallets. It was **not** a ledger-driven cross-chain order. The serialized Solana fixtures are explicitly codec tests and use no substitute network.
@@ -28,7 +31,7 @@ The native payment used the standalone probe and dedicated public-test wallets. 
 | 1. Dependency and integration boundary | Partial | Linux build/systemd/helper sandbox; funded real Devnet mint; actual browser-wallet finalized deposit; dependency provenance/notice/security review |
 | 2. Economic/API contracts | Partial | Implement native destination/dust policy, rolling budgets, full state/error contracts for replacement/reorg/recovery; validate all exception examples |
 | 3. Durable ledger/worker | Partial | Existing primitives are tested; still need explicit cancellation/disk-full fault injection, production-size reconciliation and restore coverage |
-| 4. Both chain observers | Not complete | Wire native output watcher, paginated Solana custody watcher, historical evidence, unknown receipts, freshness checks and cursor recovery; atomic batch primitive is ready |
+| 4. Both chain observers | Partial | Native watcher implemented and exercised on Signet; Solana watcher implemented and contract-tested. Real bound deposits, funded Solana history, operating-SOL reconciliation, long-backlog recovery and complete balance/reorg reconciliation remain |
 | 5. Settlement and recovery | Not complete | Wire signing validation, actual fee/rent budgets, serialized scheduler, source rechecks, exact-byte send/rebroadcast, finality reconciliation, native replacement families, Solana expiry and remote backup barrier |
 | 6. Usable public-test bridge | Not complete | Both real directions through the browser, new recipient ATA, reload/rejection/expiry flows and supported-wallet matrix |
 | 7. Actual ECX betanet | Not started | Adequately sized host/node, official daemon/checkpoint and replay-policy tests, funding and real round trips |
@@ -44,7 +47,7 @@ Some pure ledger work overlapped the first integration stage, as allowed by the 
 
 1. **Devnet funding:** the dedicated setup payer `3psSKHRPopKXPcBajcm2crjoKzrUtWyfsqeprTRMxAqZ` had zero lamports at the last read. A faucet request failed with an internal error; one later retry returned HTTP 429, after which requests stopped. The setup example needs at least 0.02 Devnet SOL; 0.1 gives room for the acceptance probes. Never send mainnet SOL to this test request. The official guide's alternative proof-of-work faucet was inspected: its CLI first requests an ordinary airdrop when the payer has fewer than 5,000 lamports, so it does not resolve this zero-balance bootstrap through the currently rate-limited RPC. It was not installed or run. [Official faucet guide](https://solana.com/developers/cookbook/development/airdrops-and-faucets), [inspected CLI source](https://github.com/jarry-xiao/proof-of-work-faucet/blob/1efbcbf87497ed6d75a9bda373766ab11c5b4501/cli/src/main.rs).
 2. Run the already prepared setup example against public Devnet, persist/reconcile its one setup attempt, and confirm the actual eight-decimal mint and custody/tester accounts. Produce real helper transactions including the exact three-unit case and a new recipient ATA. Then prove browser-wallet signing; programmatic test-key signing does not substitute for that step.
-3. Finish the two observers and outgoing state machine against those verified interfaces. Enforce instruction/attempt backup barriers and actual chain-balance reconciliation. Preserve the disabled intake gate during this work.
+3. Complete observer acceptance and the outgoing state machine against those verified interfaces. Enforce instruction/attempt backup barriers and actual chain-balance reconciliation. Preserve the disabled intake gate during this work. Set `solanaHistoryStart` to the actual finalized setup signature; it becomes the immutable scan origin, not an arbitrary point chosen to omit receipts.
 4. **Linux server:** user requested local continuation and will provide server details later. The local Docker storage is reporting I/O errors; unrelated containers were left alone. Test Ubuntu 24.04, native node access, distinct service users, helper isolation, and pinned SQLite/restic artifacts when an appropriate target is available.
 5. Complete full public Signet/Devnet round trips, crash/ambiguous-send cases, replacement/refund exclusions and host-loss recovery before enabling even a small tester pilot. ECX betanet requires its real node and separate test allocation.
 

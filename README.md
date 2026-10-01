@@ -2,7 +2,7 @@
 
 A small inventory bridge: one Haskell/Servant application, two chain adapters, one SQLite ledger, and a thin browser interface. A separate Rust executable uses official Solana SDK and SPL interface crates to construct and sign a fixed transaction format. No custom blockchain or token program.
 
-**Development checkpoint — the bridge is not operational.** The code compiles and the financial-state tests pass. The real L2L Signet node and native PSBT payment have been exercised. Automated observers, settlement/reconciliation, Linux deployment, browser-wallet acceptance, and full recovery remain unfinished. Customer intake and signing routes are disabled in code. See [STATUS.md](docs/STATUS.md) for the evidence and outstanding work.
+**Development checkpoint — the bridge is not operational.** The code compiles and the financial-state tests pass. The real L2L Signet node, native PSBT payment, and native observer/replay have been exercised. Both observers run in the worker; the Solana observer still needs funded Devnet acceptance. Settlement/reconciliation, Linux deployment, browser-wallet acceptance, and full recovery remain unfinished. Customer intake and signing routes are disabled in code. See [STATUS.md](docs/STATUS.md) for the evidence and outstanding work.
 
 ## Components
 
@@ -12,6 +12,7 @@ A small inventory bridge: one Haskell/Servant application, two chain adapters, o
 | `ecx-bridge serve` | Serves static assets and proxies the typed customer API. Binds only to loopback. Receives no key or database path. |
 | `Bridge.Ledger` | Quotes, inventory reservations, protected principal, obligations, exact signed attempts, fee accounting, backup coverage, audit records. |
 | `Bridge.Native` / `Bridge.Solana` | Real node/RPC identity checks and bounded calls. Adapter integration is incomplete. |
+| `Bridge.Observer` | Native wallet history and paginated finalized Solana custody history; atomic evidence/cursors, quarantined unknown activity, independent-provider deposit checks. |
 | `ecx-solana-helper` | Fixed mint/custody configuration; exact integer amounts; checked transfer, signed memo, recipient ATA creation. No RPC client. |
 | `web/` | Wallet Standard discovery, immutable order requests, recovery links, status display. No frontend framework or Node server. |
 
@@ -33,6 +34,8 @@ The script builds the application/helper/assets, runs the financial and wire-for
 cabal run ecx-bridge -- version
 cabal run ecx-bridge -- check-config /absolute/private/config.json
 cabal run ecx-bridge -- doctor /absolute/private/config.json
+# Exclusive ledger access: stop the worker before this one-shot scan.
+cabal run ecx-bridge -- scan /absolute/private/config.json
 ```
 
 Copy `config/l2l-devnet.example.json` into a private directory and replace every required value with the actual deployment inputs. The example deliberately contains no usable keys or invented mint. `doctor` checks actual chain identity, synchronization, mint and token-account policy; success does not certify settlement readiness.
@@ -50,6 +53,7 @@ Build the browser assets first. Open `http://127.0.0.1:8096`. Administrator rout
 ## Public-network evidence
 
 - Real L2L Signet PSBT payment: [transaction](https://explorer.signet.drivechain.info/tx/b2278e8dd0be7be001a5630545ddb73c83423ee1ee7dbd0327675e27f1642bd3), [saved evidence](docs/evidence/signet-probe.json).
+- Live native observer recorded the faucet receipt and quarantined the standalone payment. A repeated scan changed no deposits, postings or obligations: [replay evidence](docs/evidence/native-observer-replay.json).
 - Exact three-base-unit unsigned/signed Solana fixtures are checked against an independent Haskell decoder and Ed25519 verification. These are codec tests, **not Devnet transaction evidence**.
 - Devnet setup is prepared in `solana-helper/examples/setup_devnet.rs`. Actual mint creation and transfers are pending test SOL. This example is an operator tool, not part of the custody executable.
 

@@ -2,6 +2,7 @@ module Bridge.Backup (Snapshot(..), snapshotLedger, uploadSnapshot) where
 
 import Bridge.Types
 import Bridge.Process
+import Bridge.Ledger (schemaVersion)
 import Control.Exception (bracket)
 import Data.Aeson
 import Data.Aeson.Types (parseMaybe)
@@ -32,9 +33,9 @@ snapshotLedger sqliteExecutable database stage expectedIdentity = do
     require (integrity==[Only "ok"]) "snapshot_integrity_failed"
     meta <- query_ c "SELECT schema_version,fingerprint,critical_sequence FROM deployment" :: IO [(Int,Text,Int64)]
     case meta of
-      [(1,identity,seqNo)] -> require (identity==expectedIdentity) "snapshot_profile_mismatch" >> pure (Snapshot destination seqNo identity)
+      [(version,identity,seqNo)] | version==schemaVersion -> require (identity==expectedIdentity) "snapshot_profile_mismatch" >> pure (Snapshot destination seqNo identity)
       _ -> reject "snapshot_schema_mismatch"
-  LBS.writeFile (destination<>".manifest.json") (encode $ object ["fingerprint" .= snapshotFingerprint result,"criticalSequence" .= snapshotSequence result,"schema" .= (1::Int)])
+  LBS.writeFile (destination<>".manifest.json") (encode $ object ["fingerprint" .= snapshotFingerprint result,"criticalSequence" .= snapshotSequence result,"schema" .= schemaVersion])
   setFileMode (destination<>".manifest.json") 0o600
   pure result
 uploadSnapshot :: FilePath -> FilePath -> FilePath -> Snapshot -> IO Text

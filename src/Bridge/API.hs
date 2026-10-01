@@ -20,6 +20,7 @@ type CustomerAPI =
 type AdminAPI = "health" :> Get '[JSON] Availability
   :<|> "pause" :> ReqBody '[JSON] PauseRequest :> Post '[JSON] Availability
   :<|> "audit" :> Get '[JSON] Value
+  :<|> "scanners" :> Get '[JSON] Value
 customerAPI :: Proxy CustomerAPI
 customerAPI = Proxy
 adminAPI :: Proxy AdminAPI

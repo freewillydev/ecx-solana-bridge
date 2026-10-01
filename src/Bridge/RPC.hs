@@ -8,6 +8,7 @@ import Data.Aeson
 import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.ByteString as BS
 import Data.Text (Text)
+import qualified Data.Text as T
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
@@ -53,6 +54,7 @@ rpc manager url auth methodName params = run `catch` (\(_ :: HttpException) -> r
       err <- parseValue (withObject "RPC" (.:? "error")) value :: IO (Maybe Value)
       when (err/=Nothing && err/=Just Null) $ do
         -- Error text is untrusted and may contain credentials or supplied bytes.
-        reject "rpc_returned_error"
+        code <- maybe (pure (0::Int)) (fieldValue "code") err
+        reject ("rpc_error_"<>T.pack (show code))
       require (statusCode (responseStatus response)==200) "rpc_http_status"
       fieldValue "result" value

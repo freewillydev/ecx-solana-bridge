@@ -12,6 +12,7 @@ import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Lazy as LBS
 import Data.List (nub,sort)
 import Data.Text (Text)
+import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Word (Word8,Word64)
 
@@ -22,6 +23,12 @@ publicKey :: Text -> Either Text BS.ByteString
 publicKey t = case B58.decodeBase58 B58.bitcoinAlphabet (TE.encodeUtf8 t) of
   Just b | BS.length b==32 -> Right b
   _ -> Left "invalid_public_key"
+signatureBytes :: Text -> Either Text BS.ByteString
+signatureBytes t
+  | T.length t<64 || T.length t>88 = Left "invalid_signature"
+  | otherwise = case B58.decodeBase58 B58.bitcoinAlphabet (TE.encodeUtf8 t) of
+      Just bytes | BS.length bytes==64 -> Right bytes
+      _ -> Left "invalid_signature"
 base58 :: BS.ByteString -> Text
 base58 = TE.decodeUtf8 . B58.encodeBase58 B58.bitcoinAlphabet
 short :: Get Int

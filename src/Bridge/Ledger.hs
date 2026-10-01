@@ -1,10 +1,12 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
 module Bridge.Ledger
-  ( Ledger, withLedger, ledgerAction, sqliteIdentity, readiness, pause, resumeAfterChecks
+  ( Ledger, withLedger, ledgerAction, schemaVersion, sqliteIdentity, readiness, pause, resumeAfterChecks
   , createOrder, readOrder, bindInstruction, criticalSequence, acknowledgeBackup
   , exposeOrder, freeInventory, fundAllocation, expireQuotes
   , Deposit(..), observeDeposit, recordScan, readCheckpoint, promoteDeposit, checkpoint
+  , ChainEvent(..), ScanBatch(..), commitScan, recordScanFailure, scannerHealth
+  , lookupInstruction, maximumNativeDepth, pendingVerification
   , Obligation(..), readyObligations, Attempt(..), storeAttempt, markBroadcastIntent
   , pendingAttempts, recordSettlement, createRefund, recordFailedSolana, requireBackup, addHint, auditExport
   ) where
@@ -31,6 +33,8 @@ import System.Posix.Files (setFileMode)
 
 -- All financial mutations are serialized and committed before external IO.
 newtype Ledger = Ledger (MVar Connection)
+schemaVersion :: Int
+schemaVersion = 2
 sqliteIdentity :: Connection -> IO Value
 sqliteIdentity c = do
   versions <- query_ c "SELECT sqlite_version(),sqlite_source_id()" :: IO [(Text,Text)]
@@ -65,7 +69,9 @@ withLedger path identity action = do
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/001.sql"))) $ execute_ c . fromString . T.unpack
       execute c "INSERT INTO deployment(singleton,schema_version,fingerprint) VALUES(1,1,?)" (Only identity)
     meta <- query_ c "SELECT schema_version,fingerprint FROM deployment" :: IO [(Int,Text)]
-    require (meta == [(1,identity)]) "ledger_profile_or_schema_mismatch"
+    require (meta `elem` [[(1,identity)],[(schemaVersion,identity)]]) "ledger_profile_or_schema_mismatch"
+    when (meta==[(1,identity)]) $ withTransaction c $
+      forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/002.sql"))) $ execute_ c . fromString . T.unpack
     -- Restart is quarantined until external identities and unresolved attempts are checked.
     execute_ c "UPDATE deployment SET paused=1,pause_reason='restart_requires_reconciliation'"
     newMVar c >>= action . Ledger
@@ -89,6 +95,8 @@ resumeAfterChecks :: Ledger -> IO ()
 resumeAfterChecks l = ledgerAction l $ \c -> do
   unresolved <- query_ c "SELECT id FROM intents WHERE resolved=0" :: IO [Only Text]
   require (null unresolved) "unresolved_intents_require_review"
+  reviews <- query_ c "SELECT event_id FROM chain_events WHERE needs_review=1 LIMIT 1" :: IO [Only Text]
+  require (null reviews) "chain_observations_require_review"
   execute_ c "UPDATE deployment SET paused=0,pause_reason='ready'"
   execute_ c "INSERT INTO audit(action,detail) VALUES('resume','checks_complete')"
 
@@ -209,6 +217,78 @@ recordScan l chain previous next deposits = ledgerAction l $ \c -> do
   require (actual==previous) "stale_scan_cursor"
   mapM_ (observeDepositC c) deposits
   checkpoint c chain next
+
+-- Immutable evidence is separate from the latest observation's classification.
+-- Neither an unknown receipt nor a provider's history cursor authorizes spending.
+data ChainEvent = ChainEvent
+  { chainEventId :: !Text, chainEventKind :: !Text, chainEventAnchor :: !Text
+  , chainEventEvidence :: !Value
+  } deriving (Eq,Show)
+data ScanBatch = ScanBatch
+  { scanChain :: !Text, scanOrigin :: !Text, scanPrevious :: !(Maybe Text)
+  , scanNext :: !Text, scanTime :: !Int64, scanDeposits :: ![Deposit]
+  , scanEvents :: ![ChainEvent]
+  } deriving (Eq,Show)
+
+commitScan :: Ledger -> ScanBatch -> IO ()
+commitScan l ScanBatch{..} = ledgerAction l $ \c -> do
+  require (scanChain `elem` ["Native","Solana"] && scanTime>=0 && length scanDeposits<=1000 && length scanEvents<=1000) "invalid_scan_batch"
+  require (all (\t -> not (T.null t) && T.length t<=128) [scanOrigin,scanNext]) "invalid_scan_anchor"
+  require (all (\d -> depositAsset d == if scanChain=="Native" then Native else Wrapped) scanDeposits) "scan_asset_mismatch"
+  actual <- readCheckpointC c scanChain
+  require (actual==scanPrevious) "stale_scan_cursor"
+  origins <- query c "SELECT anchor FROM scan_origins WHERE chain=?" (Only scanChain) :: IO [Only Text]
+  case origins of
+    [] -> execute c "INSERT INTO scan_origins(chain,anchor) VALUES(?,?)" (scanChain,scanOrigin)
+    [Only origin] -> require (origin==scanOrigin) "scan_origin_mismatch"
+    _ -> reject "duplicate_scan_origin"
+  mapM_ (observeDepositC c) scanDeposits
+  forM_ scanEvents $ \ChainEvent{..} -> do
+    require (not (T.null chainEventId) && T.length chainEventId<=128 && T.length chainEventAnchor<=128) "invalid_observation_identity"
+    require (chainEventKind `elem` ["incoming","unmatched_incoming","outgoing","failed","reference","unsupported","unclassified","awaiting_verifier","disputed"]) "invalid_observation_kind"
+    let evidence = jsonText $ object ["chain" .= scanChain,"id" .= chainEventId,"anchor" .= chainEventAnchor,"kind" .= chainEventKind,"proof" .= chainEventEvidence]
+        hash = digest (TE.encodeUtf8 evidence)
+    require (T.length evidence<=8192) "observation_evidence_too_large"
+    known <- query c "SELECT a.txid FROM attempts a JOIN intents i ON i.id=a.intent_id WHERE a.txid=? AND i.chain=?" (chainEventId,scanChain) :: IO [Only Text]
+    let review = chainEventKind `elem` ["unsupported","unclassified","disputed"] || chainEventKind=="outgoing" && null known
+    execute c "INSERT OR IGNORE INTO observation_evidence(hash,chain,event_id,evidence_json) VALUES(?,?,?,?)" (hash,scanChain,chainEventId,evidence)
+    execute c "INSERT INTO chain_events(chain,event_id,kind,anchor,evidence_hash,first_seen,last_seen,needs_review) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(chain,event_id) DO UPDATE SET kind=excluded.kind,anchor=excluded.anchor,evidence_hash=excluded.evidence_hash,last_seen=excluded.last_seen,needs_review=MAX(chain_events.needs_review,excluded.needs_review)"
+      (scanChain,chainEventId,chainEventKind,chainEventAnchor,hash,scanTime,scanTime,review)
+    when review $ execute c "UPDATE deployment SET paused=1,pause_reason=?" (Only ("chain_review:"<>scanChain<>":"<>chainEventKind))
+  checkpoint c scanChain scanNext
+  execute c "INSERT INTO scan_health(chain,last_success,last_error,checked_at) VALUES(?,?,NULL,?) ON CONFLICT(chain) DO UPDATE SET last_success=excluded.last_success,last_error=NULL,checked_at=excluded.checked_at" (scanChain,scanTime,scanTime)
+
+recordScanFailure :: Ledger -> Text -> Int64 -> Text -> IO ()
+recordScanFailure l chain now code = ledgerAction l $ \c -> do
+  require (chain `elem` ["Native","Solana"] && T.length code<=160) "invalid_scan_failure"
+  previous <- query c "SELECT last_error FROM scan_health WHERE chain=?" (Only chain) :: IO [Only (Maybe Text)]
+  when (previous/=[Only (Just code)]) $ execute c "INSERT INTO audit(action,detail) VALUES('scanner_failure',?)" (Only (chain<>":"<>code))
+  execute c "INSERT INTO scan_health(chain,last_error,checked_at) VALUES(?,?,?) ON CONFLICT(chain) DO UPDATE SET last_error=excluded.last_error,checked_at=excluded.checked_at" (chain,code,now)
+  execute c "UPDATE deployment SET paused=1,pause_reason=?" (Only ("scanner_unavailable:"<>chain))
+
+scannerHealth :: Ledger -> IO Value
+scannerHealth l = ledgerAction l $ \c -> do
+  rows <- query_ c "SELECT h.chain,h.last_success,h.last_error,h.checked_at,p.anchor FROM scan_health h LEFT JOIN checkpoints p ON p.chain=h.chain ORDER BY h.chain" :: IO [(Text,Maybe Int64,Maybe Text,Int64,Maybe Text)]
+  reviews <- query_ c "SELECT chain,event_id,kind FROM chain_events WHERE needs_review=1 ORDER BY first_seen LIMIT 100" :: IO [(Text,Text,Text)]
+  pure $ object ["scanners" .= [object ["chain" .= chain,"lastSuccess" .= ok,"lastError" .= err,"checkedAt" .= checked,"cursor" .= cursor] | (chain,ok,err,checked,cursor)<-rows],"review" .= reviews]
+
+lookupInstruction :: Ledger -> Text -> IO (Maybe (Text,OrderRequest,PolicySnapshot))
+lookupInstruction l instruction = ledgerAction l $ \c -> do
+  rows <- query c "SELECT id,request_json,policy_json FROM orders WHERE instruction=?" (Only instruction) :: IO [(Text,Text,Text)]
+  case rows of
+    [] -> pure Nothing
+    [(oid,r,p)] -> Just <$> ((,,) oid <$> fromText r <*> fromText p)
+    _ -> reject "duplicate_deposit_instruction"
+
+maximumNativeDepth :: Ledger -> Int -> IO Int
+maximumNativeDepth l minimumDepth = ledgerAction l $ \c -> do
+  rows <- query_ c "SELECT MAX(json_extract(policy_json,'$.nativeDepth')) FROM orders" :: IO [Only (Maybe Int)]
+  case rows of [Only depth] -> pure (max minimumDepth (maybe 1 id depth)); _ -> reject "invalid_confirmation_policy"
+
+pendingVerification :: Ledger -> IO [Text]
+pendingVerification l = ledgerAction l $ \c -> do
+  rows <- query_ c "SELECT event_id FROM chain_events WHERE chain='Solana' AND kind='awaiting_verifier' ORDER BY first_seen LIMIT 1000" :: IO [Only Text]
+  pure [sig | Only sig<-rows]
 
 readCheckpoint :: Ledger -> Text -> IO (Maybe Text)
 readCheckpoint l chain = ledgerAction l (\c -> readCheckpointC c chain)

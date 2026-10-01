@@ -1,8 +1,8 @@
 {
-  "recordedUtc": "2026-10-01T00:53:07.661200+00:00",
+  "recordedUtc": "2026-10-01T01:27:17.333482+00:00",
   "platform": "macOS arm64",
   "haskell": {
-    "examples": 35,
+    "examples": 47,
     "propertyCases": 100,
     "failures": 0,
     "sqliteVersion": "3.53.4",
@@ -29,5 +29,12 @@
   "fullBridgeRoundTrip": false,
   "browserWalletSigning": false,
   "linuxTargetValidated": false,
-  "remoteRestoreValidated": false
+  "remoteRestoreValidated": false,
+  "nativeObserver": {
+    "realScan": "observer-first-scan.json",
+    "replay": "native-observer-replay.json",
+    "schemaVersion": 2,
+    "duplicatePostings": false,
+    "solanaRealDepositVerified": false
+  }
 }

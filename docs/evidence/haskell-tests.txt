@@ -5,17 +5,9 @@ In order, the following will be built (use -v for more details):
 Configuring library for ecx-bridge-0.1.0.0...
 Preprocessing library for ecx-bridge-0.1.0.0...
 Building library for ecx-bridge-0.1.0.0...
-[ 5 of 13] Compiling Bridge.Config    ( src/Bridge/Config.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Config.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Config.dyn_o ) [Source file changed]
-[ 6 of 13] Compiling Bridge.SolanaDeposit ( src/Bridge/SolanaDeposit.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/SolanaDeposit.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/SolanaDeposit.dyn_o ) [Bridge.Config changed]
-[ 7 of 13] Compiling Bridge.Solana    ( src/Bridge/Solana.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Solana.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Solana.dyn_o ) [Bridge.Config changed]
-[ 8 of 13] Compiling Bridge.Native    ( src/Bridge/Native.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Native.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Native.dyn_o ) [Bridge.Config changed]
-[ 9 of 13] Compiling Bridge.Ledger    ( src/Bridge/Ledger.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Ledger.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Ledger.dyn_o ) [Bridge.Config changed]
-[13 of 13] Compiling Bridge.Worker    ( src/Bridge/Worker.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Worker.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Worker.dyn_o ) [Bridge.Config changed]
 Configuring test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Preprocessing test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Building test suite 'bridge-test' for ecx-bridge-0.1.0.0...
-[1 of 1] Compiling Main             ( test/Spec.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test-tmp/Main.o ) [Bridge.Config changed]
-[2 of 2] Linking ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test [Objects changed]
 Running 1 test suites...
 Test suite bridge-test: RUNNING...
 
@@ -38,6 +30,16 @@ atomic observer checkpoints
   rolls back an entire page and its cursor if any receipt conflicts [✔]
   quarantines receipts without durable order bindings, including on replay [✔]
   requires each order's snapshotted confirmation depth before eligibility [✔]
+  commits immutable evidence, cursor and receipts together and preserves scan origin [✔]
+  keeps scanner progress moving past unsupported activity while blocking spending [✔]
+  retains first-seen time while waiting for independent verification [✔]
+  records provider failures without moving a successful cursor or duplicating alerts [✔]
+  quarantines a custody spend with no recorded intent [✔]
+Solana history pagination (transport contract tests)
+  reads multiple pages through the exact saved anchor in durable order [✔]
+  rejects an empty/truncated history without the known anchor [✔]
+  detects repeated provider pages instead of accepting a false cursor [✔]
+  rejects a nonfinalized signature-history response [✔]
 signed intent and settlement invariants
   retains exact bytes across restart and starts paused [✔]
   cannot commit an intent without operating funds [✔]
@@ -50,6 +52,7 @@ refund principal and failed transaction fees
   charges a failed Solana transaction fee and preserves full refundable principal [✔]
   does not promote a deposit first observed after its deposit deadline [✔]
 backup and schema protections
+  migrates version one without losing financial rows or critical sequence [✔]
   does not expose canonical instructions before acknowledged coverage [✔]
   makes a consistent snapshot while the ledger is open [✔]
   refuses repointing an existing database [✔]
@@ -58,6 +61,8 @@ public/private Unix socket boundary
   refuses a second worker on the same ledger [✔]
 historical Solana deposit evidence
   validates owner, mint, memo, signer and exact historical custody increase [✔]
+  retains an unmatched balance increase even when automatic authorization fails [✔]
+  resolves a version-zero custody address loaded from historical metadata [✔]
   rejects copied memos, wrong historical owners and wrong custody [✔]
   cannot authorize a failed or unsupported-version transaction [✔]
 official SDK wire fixtures (not network evidence)
@@ -65,8 +70,8 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 0.3124 seconds
-35 examples, 0 failures
+Finished in 0.4073 seconds
+47 examples, 0 failures
 Test suite bridge-test: PASS
 Test suite logged to:
 <repository>/./../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log

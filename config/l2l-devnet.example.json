@@ -24,5 +24,6 @@
   "nativeConfirmations": 1,
   "maxNativeFee": "1000",
   "maxSolFee": "10000",
-  "backupRequired": false
+  "backupRequired": false,
+  "solanaHistoryStart": null
 }

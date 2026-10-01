@@ -11,6 +11,7 @@ import Bridge.RPC
 import Bridge.API
 import Bridge.Worker
 import Bridge.Backup
+import Bridge.Observer
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently,withAsync)
 import Control.Exception (bracket,try,SomeException)
@@ -20,6 +21,8 @@ import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as B64
 import Data.Int (Int64)
+import Data.IORef
+import Data.String (fromString)
 import Data.Scientific (scientific)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -31,7 +34,7 @@ import System.Directory
 import System.FilePath ((</>),takeDirectory)
 import System.Posix.Files (getFileStatus,fileMode)
 import Data.Bits ((.&.))
-import Test.Hspec
+import Test.Hspec hiding (before,after)
 import Test.QuickCheck hiding ((.&.))
 
 amt :: Integer -> Amount
@@ -39,7 +42,7 @@ amt n = either (error . T.unpack) id (amount n)
 cap :: Text
 cap=T.replicate 64 "a"
 cfg :: FilePath -> Config
-cfg dir = Config L2LSignetDevnet "unit-fixture" "http://127.0.0.1:29432" (dir</>"cookie") "fixture-wallet" 16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47" "https://api.devnet.solana.com" Nothing "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM" "RWjpjjkpABkEGomLbZYyN53pA3FVdPXp9izJ25wErGX" "11111111111111111111111111111111" (dir</>"private/ledger.sqlite") (dir</>"customer/api.sock") (dir</>"admin/api.sock") "/usr/bin/false" (dir</>"helper.json") (amt 2) (amt 1000000000000) 100 300 600 1 (amt 1000) (amt 1000) False
+cfg dir = Config L2LSignetDevnet "unit-fixture" "http://127.0.0.1:29432" (dir</>"cookie") "fixture-wallet" 16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47" "https://api.devnet.solana.com" Nothing "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM" "RWjpjjkpABkEGomLbZYyN53pA3FVdPXp9izJ25wErGX" "11111111111111111111111111111111" (dir</>"private/ledger.sqlite") (dir</>"customer/api.sock") (dir</>"admin/api.sock") "/usr/bin/false" (dir</>"helper.json") (amt 2) (amt 1000000000000) 100 300 600 1 (amt 1000) (amt 1000) False Nothing
 req :: OrderRequest
 req=OrderRequest NativeToWrapped (amt 100000) "fixture-solana-recipient" "fixture-native-refund" Nothing "retry-key"
 withDir :: (FilePath -> IO a) -> IO a
@@ -92,6 +95,7 @@ main=hspec $ do
       policy same `shouldBe` policy o
       fresh<-createOrder l c{nativeConfirmations=6} 100 cap req{idempotencyKey="new-policy"}
       nativeDepth (policy fresh) `shouldBe` 6
+      maximumNativeDepth l 1 `shouldReturn` 6
     it "does not oversubscribe inventory under concurrent orders" $ withFunded $ \l c -> do
       let create i=try (createOrder l c 100 cap req{idempotencyKey=T.pack(show i),input=amt 100000}) :: IO (Either BridgeError OrderView)
       results<-mapConcurrently create [1..20::Int]
@@ -156,6 +160,76 @@ main=hspec $ do
       readCheckpoint l "Native" `shouldReturn` Nothing
       recordScan l "Native" Nothing "cursor-a" [deposit{depositConfirmations=6}]
       promoteDeposit l 110 "shallow:0" `shouldReturn` True
+    it "commits immutable evidence, cursor and receipts together and preserves scan origin" $ withFunded $ \l _ -> do
+      let receipt=Deposit "native:fixture:0" Nothing Native (amt 30) "block-a" 1 True 100
+          event=ChainEvent "fixture" "unmatched_incoming" "block-a" (object ["amount" .= ("30"::Text)])
+          batch=ScanBatch "Native" "origin" Nothing "cursor-a" 100 [receipt] [event]
+      commitScan l batch
+      commitScan l batch{scanPrevious=Just "cursor-a",scanNext="cursor-b",scanTime=200}
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM observation_evidence" :: IO [Only Int]) `shouldReturn` [Only 1]
+      ledgerAction l (\db->query_ db "SELECT first_seen FROM deposits" :: IO [Only Int64]) `shouldReturn` [Only 100]
+      commitScan l batch{scanPrevious=Just "cursor-b",scanOrigin="changed",scanNext="cursor-c"}
+        `shouldThrow` isError "scan_origin_mismatch"
+      readCheckpoint l "Native" `shouldReturn` Just "cursor-b"
+      changed<-try (ledgerAction l $ \db->execute_ db "UPDATE observation_evidence SET evidence_json='tampered'") :: IO (Either SomeException ())
+      changed `shouldSatisfy` either (const True) (const False)
+    it "keeps scanner progress moving past unsupported activity while blocking spending" $ withFunded $ \l _ -> do
+      let receipt=Deposit "solana:valid" Nothing Wrapped (amt 30) "123" 1 True 100
+          unsupported=ChainEvent "unsupported-sig" "unsupported" "122" (object ["reason" .= ("unsupported_version"::Text)])
+          validEvent=ChainEvent "valid-sig" "unmatched_incoming" "123" (object ["amount" .= ("30"::Text)])
+      commitScan l (ScanBatch "Solana" "origin-sig" Nothing "valid-sig" 100 [receipt] [unsupported,validEvent])
+      readCheckpoint l "Solana" `shouldReturn` Just "valid-sig"
+      available <$> readiness l `shouldReturn` False
+      resumeAfterChecks l `shouldThrow` isError "chain_observations_require_review"
+      commitScan l (ScanBatch "Solana" "origin-sig" (Just "valid-sig") "newest-sig" 110 [] [])
+      readCheckpoint l "Solana" `shouldReturn` Just "newest-sig"
+      ledgerAction l (\db->freeInventory db Wrapped) `shouldReturn` 1000000
+    it "retains first-seen time while waiting for independent verification" $ withFunded $ \l c -> do
+      let redeem=req{direction=WrappedToNative,recipient="native-recipient",refund="bound-owner",sourceOwner=Just "bound-owner"}
+      o<-createOrder l c 100 cap redeem
+      let deposit=Deposit "solana:pending" (Just $ orderId o) Wrapped (input redeem) "123" 1 False 390
+          event=ChainEvent "pending" "awaiting_verifier" "123" Null
+      commitScan l (ScanBatch "Solana" "origin" Nothing "pending" 391 [deposit] [event])
+      pendingVerification l `shouldReturn` ["pending"]
+      promoteDeposit l 391 "solana:pending" `shouldReturn` False
+      commitScan l (ScanBatch "Solana" "origin" (Just "pending") "pending" 450 [deposit{depositEligible=True,depositSeenAt=450}] [event{chainEventKind="incoming"}])
+      pendingVerification l `shouldReturn` []
+      promoteDeposit l 450 "solana:pending" `shouldReturn` True
+    it "records provider failures without moving a successful cursor or duplicating alerts" $ withFunded $ \l _ -> do
+      commitScan l (ScanBatch "Native" "origin" Nothing "cursor-a" 100 [] [])
+      recordScanFailure l "Native" 110 "rpc_transport_unknown_outcome"
+      recordScanFailure l "Native" 120 "rpc_transport_unknown_outcome"
+      readCheckpoint l "Native" `shouldReturn` Just "cursor-a"
+      ledgerAction l (\db->query_ db "SELECT last_success,checked_at FROM scan_health" :: IO [(Int64,Int64)]) `shouldReturn` [(100,120)]
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM audit WHERE action='scanner_failure'" :: IO [Only Int]) `shouldReturn` [Only 1]
+    it "quarantines a custody spend with no recorded intent" $ withFunded $ \l _ -> do
+      commitScan l (ScanBatch "Native" "origin" Nothing "cursor" 100 [] [ChainEvent "unknown-spend" "outgoing" "block" Null])
+      available <$> readiness l `shouldReturn` False
+      resumeAfterChecks l `shouldThrow` isError "chain_observations_require_review"
+  describe "Solana history pagination (transport contract tests)" $ do
+    it "reads multiple pages through the exact saved anchor in durable order" $ do
+      calls<-newIORef []
+      let row n=SignatureInfo ("signature-"<>T.pack(show n)) n False
+          fetch before=do
+            modifyIORef' calls (<>[before])
+            pure $ case before of
+              Nothing -> map row [205,204..106]
+              Just "signature-106" -> map row [105,104..6]
+              Just "signature-6" -> map row [5,4..1]
+              _ -> []
+      found<-collectSignatures "signature-1" (Just "signature-3") fetch
+      map historySlot found `shouldBe` [3..205]
+      readIORef calls `shouldReturn` [Nothing,Just "signature-106",Just "signature-6"]
+    it "rejects an empty/truncated history without the known anchor" $ do
+      let fetch Nothing=pure [SignatureInfo "recent" 20 False]
+          fetch _=pure []
+      collectSignatures "known-origin" Nothing fetch `shouldThrow` isError "solana_history_gap"
+    it "detects repeated provider pages instead of accepting a false cursor" $ do
+      collectSignatures "known-origin" Nothing (const $ pure [SignatureInfo "repeated" 20 False])
+        `shouldThrow` isError "solana_history_repeated_page"
+    it "rejects a nonfinalized signature-history response" $ do
+      let value=object ["signature" .= base58 (BS.replicate 64 1),"slot" .= (10::Int),"confirmationStatus" .= ("confirmed"::Text),"err" .= Null]
+      (parseEither parseJSON value::Either String SignatureInfo) `shouldSatisfy` either (const True) (const False)
   describe "signed intent and settlement invariants" $ do
     it "retains exact bytes across restart and starts paused" $ withDir $ \dir -> do
       let c=cfg dir
@@ -228,6 +302,19 @@ main=hspec $ do
       observeDeposit l (Deposit "late:0" (Just $ orderId o) Native (input req) "anchor" 1 True 500) "cursor"
       promoteDeposit l 500 "late:0" `shouldReturn` False
   describe "backup and schema protections" $ do
+    it "migrates version one without losing financial rows or critical sequence" $ withDir $ \dir -> do
+      let c=cfg dir
+      createDirectoryIfMissing True (takeDirectory $ dbPath c)
+      schema<-TE.decodeUtf8 <$> BS.readFile "migrations/001.sql"
+      bracket (open $ dbPath c) close $ \db -> do
+        forM_ (T.splitOn "-- @statement" schema) $ execute_ db . fromString . T.unpack
+        execute db "INSERT INTO deployment(singleton,schema_version,fingerprint,critical_sequence,backup_sequence) VALUES(1,1,?,47,46)" (Only $ fingerprint c)
+        execute_ db "INSERT INTO events(id,description) VALUES('legacy','existing receipt')"
+        execute_ db "INSERT INTO postings(event_id,asset,account,delta) VALUES('legacy','Native','float',1000),('legacy','Native','external',-1000)"
+      withLedger (dbPath c) (fingerprint c) $ \l -> do
+        ledgerAction l (\db->query_ db "SELECT schema_version,critical_sequence,backup_sequence FROM deployment" :: IO [(Int,Int64,Int64)]) `shouldReturn` [(schemaVersion,47,46)]
+        ledgerAction l (\db->freeInventory db Native) `shouldReturn` 1000
+        available <$> readiness l `shouldReturn` False
     it "does not expose canonical instructions before acknowledged coverage" $ withFunded $ \l c -> do
       o<-createOrder l c 100 cap req
       bindInstruction l (orderId o) "fixture-address"
@@ -249,7 +336,7 @@ main=hspec $ do
   describe "public/private Unix socket boundary" $ do
     it "uses the shared Servant contract and separate admin socket" $ withDir $ \dir -> do
       let c=cfg dir
-      withAsync (runWorker c) $ \_ -> do
+      withAsync (runWorkerWith c (const $ pure ())) $ \_ -> do
         awaitFile (customerSocket c) 100
         awaitFile (adminSocket c) 100
         manager <- unixManager (customerSocket c)
@@ -261,7 +348,7 @@ main=hspec $ do
           runClientM healthCall env `shouldReturn` Right (Availability True "process_running")
           rejected<-runClientM (createCall "Bearer invalid" req) env
           rejected `shouldSatisfy` either (const True) (const False)
-          let adminHealth :<|> _ :<|> _ = client adminAPI
+          let adminHealth :<|> _ :<|> _ :<|> _ = client adminAPI
           wrongSocket<-runClientM adminHealth env
           wrongSocket `shouldSatisfy` either (const True) (const False)
         publicMode<-fileMode <$> getFileStatus (customerSocket c)
@@ -274,6 +361,18 @@ main=hspec $ do
     it "validates owner, mint, memo, signer and exact historical custody increase" $ do
       (binding,proof)<-depositFixture
       verifiedAmount <$> verifyDeposit binding proof `shouldBe` Right (amt 3)
+      effectDelta <$> custodyEffect (boundSignature binding) (boundMint binding) (boundCustody binding) (boundCustodyOwner binding) proof `shouldBe` Right 3
+      transactionMemo proof `shouldBe` Just (boundMemo binding)
+    it "retains an unmatched balance increase even when automatic authorization fails" $ do
+      (binding,proof)<-depositFixture
+      verifyDeposit binding{boundMemo="different-order"} proof `shouldSatisfy` either (const True) (const False)
+      effectDelta <$> custodyEffect (boundSignature binding) (boundMint binding) (boundCustody binding) (boundCustodyOwner binding) proof `shouldBe` Right 3
+      custodyEffect (boundSignature binding) (boundMint binding) (boundCustody binding) "incorrect-owner" proof `shouldSatisfy` either (const True) (const False)
+    it "resolves a version-zero custody address loaded from historical metadata" $ do
+      (binding,proof)<-depositFixture
+      versioned<-versionZeroFixture (boundCustody binding) proof
+      verifiedAmount <$> verifyDeposit binding versioned `shouldBe` Right (amt 3)
+      effectDelta <$> custodyEffect (boundSignature binding) (boundMint binding) (boundCustody binding) (boundCustodyOwner binding) versioned `shouldBe` Right 3
     it "rejects copied memos, wrong historical owners and wrong custody" $ do
       (binding,proof)<-depositFixture
       verifyDeposit binding{boundOwner="different-owner"} proof `shouldSatisfy` either (const True) (const False)
@@ -320,6 +419,45 @@ awaitFile path tries = do
   present<-doesPathExist path
   if present then pure () else threadDelay 10000 >> awaitFile path (tries-1)
 
+-- Re-index the contract fixture using the documented v0 loaded-address layout.
+-- This tests decoding only; it is not a signed or submitted chain transaction.
+versionZeroFixture :: Text -> Value -> IO Value
+versionZeroFixture custody proof = do
+  root<-parseValue (withObject "proof" pure) proof
+  transaction<-fieldValue "transaction" proof
+  tx<-parseValue (withObject "transaction" pure) transaction
+  message<-fieldValue "message" transaction
+  msg<-parseValue (withObject "message" pure) message
+  keys<-fieldValue "accountKeys" message :: IO [Text]
+  metaValue<-fieldValue "meta" proof
+  meta<-parseValue (withObject "meta" pure) metaValue
+  idx<-case [i | (i,k)<-zip [0..] keys,k==custody] of [i]->pure i; _->fail "missing custody"
+  let static=[i | i<-[0..length keys-1],i/=idx]
+      order=static<>[idx]
+      remap old=case lookup old (zip order [0..]) of Just new->new::Int; Nothing->error "fixture index"
+  instructions<-fieldValue "instructions" message :: IO [Value]
+  rewritten<-mapM (\v -> do
+    p<-fieldValue "programIdIndex" v
+    accounts<-fieldValue "accounts" v
+    dat<-fieldValue "data" v :: IO Text
+    pure $ object ["programIdIndex" .= remap p,"accounts" .= map remap accounts,"data" .= dat]) instructions
+  let changeBalances key=do
+        rows<-fieldValue key metaValue :: IO [Value]
+        mapM (\v -> do
+          fields<-parseValue (withObject "balance" pure) v
+          i<-fieldValue "accountIndex" v
+          pure $ Object (KM.insert "accountIndex" (toJSON $ remap i) fields)) rows
+  before<-changeBalances "preTokenBalances"
+  after<-changeBalances "postTokenBalances"
+  preLamports<-fieldValue "preBalances" metaValue :: IO [Int64]
+  postLamports<-fieldValue "postBalances" metaValue :: IO [Int64]
+  let newMsg=Object $ KM.insert "accountKeys" (toJSON $ map (keys!!) static) $ KM.insert "instructions" (toJSON rewritten) msg
+      newMeta=Object $ KM.insert "loadedAddresses" (object ["writable" .= [custody],"readonly" .= ([]::[Text])])
+        $ KM.insert "preTokenBalances" (toJSON before) $ KM.insert "postTokenBalances" (toJSON after)
+        $ KM.insert "preBalances" (toJSON $ map (preLamports!!) order) $ KM.insert "postBalances" (toJSON $ map (postLamports!!) order) meta
+  pure $ Object $ KM.insert "version" (Number 0) $ KM.insert "meta" newMeta
+    $ KM.insert "transaction" (Object $ KM.insert "message" newMsg tx) root
+
 -- Contract fixture generated from official SDK message bytes, not chain evidence.
 -- No current getAccountInfo is available or needed: ownership comes from metadata.
 depositFixture :: IO (DepositBinding,Value)
@@ -336,6 +474,6 @@ depositFixture=do
           sig="fixture-signature"
           proof=object ["slot" .= (123::Int),"version" .= ("legacy"::Text)
             ,"transaction" .= object ["signatures" .= [sig],"message" .= object ["accountKeys" .= map base58 keys,"recentBlockhash" .= base58 blockhash,"header" .= object ["numRequiredSignatures" .= required,"numReadonlySignedAccounts" .= signedReadonly,"numReadonlyUnsignedAccounts" .= unsignedReadonly],"instructions" .= [object ["programIdIndex" .= p,"accounts" .= as,"data" .= base58 dat] | Instruction p as dat<-instructions]]]
-            ,"meta" .= object ["err" .= Null,"preTokenBalances" .= [tokenBalance sourceIndex "10",tokenBalance destIndex "0"],"postTokenBalances" .= [tokenBalance sourceIndex "7",tokenBalance destIndex "3"],"innerInstructions" .= ([]::[Value])]]
+            ,"meta" .= object ["err" .= Null,"preTokenBalances" .= [tokenBalance sourceIndex "10",tokenBalance destIndex "0"],"postTokenBalances" .= [tokenBalance sourceIndex "7",tokenBalance destIndex "3"],"preBalances" .= replicate (length keys) (2039280::Int64),"postBalances" .= replicate (length keys) (2039280::Int64),"innerInstructions" .= ([]::[Value])]]
           binding=DepositBinding sig (expectedOwner expected) (expectedMint expected) (expectedDestination expected) (expectedRecipient expected) (expectedMemo expected)
       pure(binding,proof)

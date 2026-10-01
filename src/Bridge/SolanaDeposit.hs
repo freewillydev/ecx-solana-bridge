@@ -1,6 +1,9 @@
 -- Validation of actual getTransaction JSON, independent of current account state.
 -- An unclassified result must remain a liability and must not authorize a payout.
-module Bridge.SolanaDeposit (DepositBinding(..), SolanaDeposit(..), verifyDeposit) where
+module Bridge.SolanaDeposit
+  ( DepositBinding(..), SolanaDeposit(..), verifyDeposit
+  , CustodyEffect(..), custodyEffect, transactionMemo
+  ) where
 
 import Bridge.Config (tokenProgram)
 import Bridge.Types
@@ -12,6 +15,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base58 as B58
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
+import Data.List (elemIndices)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -31,6 +35,87 @@ optional :: FromJSON a => Key -> Value -> Parser (Maybe a)
 optional key = withObject "RPC object" (.:? key)
 ensure :: Bool -> String -> Parser ()
 ensure ok msg = unless ok (fail msg)
+
+-- Classification is intentionally broader than automatic deposit authorization:
+-- a successful CPI or no-memo receipt still changes custody and must be held.
+data CustodyEffect = CustodyEffect
+  { effectSlot :: !Int64, effectDelta :: !Integer, effectFailed :: !Bool
+  , effectClosed :: !Bool
+  } deriving (Eq,Show)
+
+custodyEffect :: Text -> Text -> Text -> Text -> Value -> Either Text CustodyEffect
+custodyEffect signature mint custody owner =
+  either (const $ Left "unclassified_custody_effect") Right . parseEither parseEffect
+ where
+  parseEffect value = do
+    slot <- get "slot" value
+    ensure (slot>=0) "invalid slot"
+    transaction <- get "transaction" value
+    signatures <- get "signatures" transaction :: Parser [Text]
+    ensure (take 1 signatures==[signature]) "wrong signature"
+    message <- get "message" transaction
+    meta <- get "meta" value
+    keys <- transactionAccounts message meta
+    idx <- case elemIndices custody keys of [i] -> pure i; _ -> fail "missing or duplicate custody"
+    before <- get "preTokenBalances" meta
+    after <- get "postTokenBalances" meta
+    preLamports <- get "preBalances" meta :: Parser [Integer]
+    postLamports <- get "postBalances" meta :: Parser [Integer]
+    ensure (length preLamports==length keys && length postLamports==length keys) "missing lamport balances"
+    pre <- historical idx (preLamports!!idx) before
+    post <- historical idx (postLamports!!idx) after
+    err <- get "err" meta :: Parser Value
+    ensure (err==Null || pre==post) "failed transaction changed token balance"
+    pure $ CustodyEffect slot (post-pre) (err/=Null) (postLamports!!idx==0)
+  historical idx lamports entries = do
+    ensure (lamports>=0) "invalid lamports"
+    indexes <- mapM (get "accountIndex") entries :: Parser [Int]
+    case [v | (i,v)<-zip indexes entries,i==idx] of
+      [] -> ensure (lamports==0) "missing historical token metadata" >> pure 0
+      [v] -> do
+        actualMint <- get "mint" v
+        actualOwner <- get "owner" v
+        ensure (actualMint==mint && actualOwner==owner) "historical custody identity mismatch"
+        tokenAmount <- get "uiTokenAmount" v
+        decimals <- get "decimals" tokenAmount :: Parser Int
+        ensure (decimals==8) "wrong decimals"
+        raw <- get "amount" tokenAmount
+        quantity <- either (fail . T.unpack) pure (parseUnits raw)
+        pure (toInteger $ units quantity)
+      _ -> fail "duplicate balance"
+
+transactionAccounts :: Value -> Value -> Parser [Text]
+transactionAccounts message meta = do
+  static <- get "accountKeys" message
+  loaded <- optional "loadedAddresses" meta
+  writable <- maybe (pure []) (get "writable") loaded
+  readonly <- maybe (pure []) (get "readonly") loaded
+  let accounts=static<>writable<>readonly
+  ensure (not (null accounts) && length accounts<=256 && all ((<=44) . T.length) accounts) "invalid accounts"
+  pure accounts
+
+transactionMemo :: Value -> Maybe Text
+transactionMemo value = either (const Nothing) id $ parseEither parseMemo value
+ where
+  parseMemo v = do
+    transaction <- get "transaction" v
+    message <- get "message" transaction
+    meta <- get "meta" v
+    keys <- transactionAccounts message meta
+    instructions <- get "instructions" message :: Parser [Value]
+    ensure (length instructions<=64) "too many instructions"
+    candidates <- mapM (\ix -> do
+      index <- get "programIdIndex" ix :: Parser Int
+      ensure (index>=0 && index<length keys) "invalid program index"
+      if keys!!index/="MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr" then pure Nothing else do
+        encoded <- get "data" ix
+        ensure (T.length encoded<=256) "memo too long"
+        raw <- maybe (fail "invalid memo") pure (B58.decodeBase58 B58.bitcoinAlphabet (TE.encodeUtf8 encoded))
+        memo <- either (const $ fail "non-UTF8 memo") pure (TE.decodeUtf8' raw)
+        ensure (T.length memo<=160) "memo too long"
+        pure (Just memo)) instructions
+    case [memo | Just memo<-candidates] of [memo] -> pure (Just memo); _ -> pure Nothing
+
 verifyDeposit :: DepositBinding -> Value -> Either Text SolanaDeposit
 verifyDeposit binding = either (const $ Left "unclassified_solana_deposit") Right . parseEither (verify binding)
 verify :: DepositBinding -> Value -> Parser SolanaDeposit

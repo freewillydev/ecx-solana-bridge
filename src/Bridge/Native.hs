@@ -48,8 +48,8 @@ validateNativeRecipient manager c address = do
   fieldValue "scriptPubKey" v
 newNativeAddress :: Manager -> Config -> Text -> IO Text
 newNativeAddress manager c order = nativeCall manager c True "getnewaddress" [toJSON ("bridge:"<>order),String "bech32"] >>= parseValue parseJSON
-nativeHistory :: Manager -> Config -> Maybe Text -> IO Value
-nativeHistory manager c anchor = nativeCall manager c True "listsinceblock" [maybe Null toJSON anchor,Number 1,Bool True,Bool True]
+nativeHistory :: Manager -> Config -> Maybe Text -> Int -> IO Value
+nativeHistory manager c anchor depth = nativeCall manager c True "listsinceblock" [maybe Null toJSON anchor,toJSON depth,Bool False,Bool True]
 nativeAmount :: Scientific -> Either Text Amount
 nativeAmount n
   | abs (base10Exponent n) > 20 || abs (coefficient n) > 1000000000000000000000000000000 = Left "native_amount_out_of_range"

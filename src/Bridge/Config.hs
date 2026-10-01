@@ -1,7 +1,7 @@
 module Bridge.Config where
 
 import Bridge.Types
-import Bridge.SolanaMessage (publicKey)
+import Bridge.SolanaMessage (publicKey,signatureBytes)
 import Control.Monad (unless)
 import Data.Aeson
 import qualified Data.ByteString as BS
@@ -26,7 +26,7 @@ data Config = Config
   , minInput :: !Amount, maxInput :: !Amount, maxQueued :: !Int
   , quoteSeconds :: !Int64, confirmationGraceSeconds :: !Int64
   , nativeConfirmations :: !Int, maxNativeFee :: !Amount, maxSolFee :: !Amount
-  , backupRequired :: !Bool
+  , backupRequired :: !Bool, solanaHistoryStart :: !(Maybe Text)
   } deriving (Eq, Show, Generic, ToJSON)
 instance FromJSON Config where parseJSON = genericParseJSON defaultOptions { rejectUnknownFields = True }
 
@@ -68,6 +68,8 @@ validateConfig c = do
     then do
       require (mint c == canonicalMint && backupRequired c) "canonical_identity_or_backup_required"
       require (maybe False (/= solanaRpc c) (solanaVerifierRpc c)) "independent_rpc_required"
+      require (maybe False (const True) (solanaHistoryStart c)) "solana_history_start_required"
     else require (mint c /= canonicalMint) "canonical_mint_forbidden_on_devnet"
   require (all (\t -> T.length t >= 32 && T.length t <= 44 && BS.all (<128) (TE.encodeUtf8 t)) [mint c,custodyOwner c,custodyAta c]) "invalid_solana_identity"
   mapM_ (either reject (const $ pure ()) . publicKey) [mint c,custodyOwner c,custodyAta c]
+  mapM_ (either reject (const $ pure ()) . signatureBytes) (solanaHistoryStart c)

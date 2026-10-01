@@ -1,10 +1,11 @@
-module Bridge.Worker (runWorker, doctor) where
+module Bridge.Worker (runWorker, runWorkerWith, scanOnce, doctor) where
 
 import Bridge.API
 import Control.Monad.IO.Class (liftIO)
 import Bridge.Config
 import Bridge.Ledger
 import Bridge.Native
+import Bridge.Observer
 import Bridge.RPC
 import Bridge.Solana
 import Bridge.Types
@@ -26,11 +27,23 @@ bearer header = case T.stripPrefix "Bearer " header of
   Just token -> either reject (const $ pure token) (capabilityHash token)
   Nothing -> reject "authorization_required"
 runWorker :: Config -> IO ()
-runWorker c = withLedger (dbPath c) (fingerprint c) $ \ledger -> do
+runWorker c = do
+  manager <- newRpcManager
+  runWorkerWith c (observerLoop manager c)
+
+-- The socket tests supply an idle observer; the runtime always uses the real
+-- adapters above. This seam does not expose a selectable substitute chain.
+runWorkerWith :: Config -> (Ledger -> IO ()) -> IO ()
+runWorkerWith c observer = withLedger (dbPath c) (fingerprint c) $ \ledger -> do
   pause ledger "implementation_acceptance_pending"
   customer <- securityBoundary (serve customerAPI (customerServer c ledger))
   admin <- securityBoundary (serve adminAPI (adminServer ledger))
-  concurrently_ (runUnix (customerSocket c) 0o660 customer) (runUnix (adminSocket c) 0o600 admin)
+  concurrently_ (concurrently_ (runUnix (customerSocket c) 0o660 customer) (runUnix (adminSocket c) 0o600 admin)) (observer ledger)
+
+scanOnce :: Config -> IO Value
+scanOnce c = withLedger (dbPath c) (fingerprint c) $ \ledger -> do
+  manager <- newRpcManager
+  observeOnce manager c ledger
 customerServer :: Config -> Ledger -> Server CustomerAPI
 customerServer c ledger =
   configView :<|> create :<|> get :<|> transaction :<|> hint :<|> health :<|> ready
@@ -56,6 +69,7 @@ adminServer :: Ledger -> Server AdminAPI
 adminServer l = asHandler (readiness l)
   :<|> (\p -> asHandler (pause l (T.take 120 (pauseReason p)) >> readiness l))
   :<|> asHandler (auditExport l)
+  :<|> asHandler (scannerHealth l)
 doctor :: Config -> IO Value
 doctor c = do
   manager <- newRpcManager

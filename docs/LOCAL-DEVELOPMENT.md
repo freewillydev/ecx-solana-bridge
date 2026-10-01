@@ -23,7 +23,9 @@ The current process IDs, logs and private configuration are in `work/build/cache
 
 The worker's customer socket is `/tmp/ecx-bridge-0930/customer/api.sock`; its administrator socket is separate at `/tmp/ecx-bridge-0930/admin/api.sock`. The development web and worker run under the same local account. Actual service-user separation is still a Linux test requirement.
 
-The public preview ledger is newly initialized, empty and paused. The standalone network probe's receipt/payment is not represented as application float. Do not create treasury allocations from a wallet's historical gross receipts without reconciling already-spent outputs.
+The preview ledger is at schema 2 and paused. The live observer recorded the faucet receipt as unallocated and flagged the standalone probe's payment as outgoing without a ledger intent. Repeated scanning did not duplicate accounting. Neither event creates application float. Do not create treasury allocations from a wallet's historical gross receipts without reconciling already-spent outputs. The worker continues both scans every 15 seconds; Solana reports `mint_not_found`. Private `/scanners` reports cursor, last success/error and pending review.
+
+The schema 1→2 migration preserves financial rows and critical/backup sequences and starts paused. A consistent private snapshot was taken before upgrading this local ledger. For a manual one-shot scan, stop the verified worker PID, then run `ecx-bridge scan /absolute/private/config.json`; the exclusive ledger lock prevents concurrent workers or offline commands.
 
 ## Real L2L Signet node
 
@@ -47,6 +49,8 @@ cargo run --locked --manifest-path solana-helper/Cargo.toml \
 Use the already configured external `CARGO_HOME`/`CARGO_TARGET_DIR` for this Mac. The example checks Devnet genesis, creates an eight-decimal legacy SPL mint, two token accounts and test allocations, and saves/fsyncs exact signed bytes before sending. On a later invocation it checks the saved signature before looking at remaining funding. A pending/expired/failed setup outcome requires reconciliation; the tool deliberately refuses to create another setup transaction automatically.
 
 The test mint authority is separate from the custody key and is not installed with the bridge helper. No official wbECX mint authority is needed or requested.
+
+After setup finalizes, set `solanaHistoryStart` to the saved real setup signature that created the custody ATA. The first successful scan stores that immutable origin. Every later scan must find its previous cursor; an empty or truncated history response stops progress. Do not change the origin to skip unexpected transfers. The implemented Solana observer still needs real public-chain deposit and pagination acceptance; its fixtures are decoding/recovery contracts only.
 
 ## Recovery and deployment
 

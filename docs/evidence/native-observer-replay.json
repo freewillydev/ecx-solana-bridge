@@ -1,0 +1,78 @@
+{
+  "network": "public-l2l-signet",
+  "scope": "Read-only chain observation into the real paused ledger. No new transfer, allocation or payout.",
+  "migration": [
+    {
+      "schema_version": 2,
+      "critical_sequence": 0,
+      "backup_sequence": 0
+    }
+  ],
+  "replayPreservedDepositsAndPostings": true,
+  "ledger": {
+    "deposits": [
+      {
+        "id": "native:d42c6d553922668bd9176bf52b0e1b446751da7dd6d818cb97e48581856453fe:1",
+        "order_id": null,
+        "asset": "Native",
+        "amount": 2000000,
+        "anchor": "000002400ebcf0e396ae71ee8fbf2fe21f63b2294d88e09dbfe800f80ec5e39f",
+        "confirmations": 9,
+        "eligible": 1,
+        "first_seen": 1790817605
+      }
+    ],
+    "postings": [
+      {
+        "asset": "Native",
+        "account": "unallocated",
+        "delta": 2000000
+      },
+      {
+        "asset": "Native",
+        "account": "external",
+        "delta": -2000000
+      }
+    ],
+    "obligations": [],
+    "events": [
+      {
+        "chain": "Native",
+        "event_id": "b2278e8dd0be7be001a5630545ddb73c83423ee1ee7dbd0327675e27f1642bd3",
+        "kind": "outgoing",
+        "needs_review": 1
+      },
+      {
+        "chain": "Native",
+        "event_id": "d42c6d553922668bd9176bf52b0e1b446751da7dd6d818cb97e48581856453fe",
+        "kind": "unmatched_incoming",
+        "needs_review": 0
+      }
+    ]
+  },
+  "secondScan": {
+    "review": [
+      [
+        "Native",
+        "b2278e8dd0be7be001a5630545ddb73c83423ee1ee7dbd0327675e27f1642bd3",
+        "outgoing"
+      ]
+    ],
+    "scanners": [
+      {
+        "chain": "Native",
+        "checkedAt": 1790817666,
+        "cursor": "000002e056d17229199142f7fc0a0bd043395bfff1e2b2e1375976b29f8acd58",
+        "lastError": null,
+        "lastSuccess": 1790817666
+      },
+      {
+        "chain": "Solana",
+        "checkedAt": 1790817666,
+        "cursor": null,
+        "lastError": "mint_not_found",
+        "lastSuccess": null
+      }
+    ]
+  }
+}

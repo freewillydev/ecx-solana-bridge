@@ -51,6 +51,8 @@ Signed bytes are immutable. The ledger permits one unresolved outgoing intent pe
 
 A scanner batch uses a compare-and-swap on its previous cursor and commits all observations with the next cursor. A conflicting receipt rolls back the entire page. Repeated observations do not duplicate journal value. Unknown bindings remain quarantined; discovering chain history after restoring an old database cannot prove that an unrecognized deposit was never paid.
 
+Schema 2 adds immutable scan origins and observation evidence, latest event classifications, and scanner health. The native observer rechecks wallet ownership, output scripts, amounts and the order's saved confirmation depth. The Solana observer requires its exact history anchor, resolves historical token balances, and revisits deposits awaiting an independent provider. Unsupported or ambiguous balance effects and unknown outgoing transactions require review. Cursor advancement does not clear that review. Provider errors preserve the previous cursor. Current observers cover native and wrapped activity; complete operating-SOL, reorg and custody-balance reconciliation is still required.
+
 The database starts paused after every restart and holds an exclusive worker file lock. Internal `resumeAfterChecks` is not an admin route and must only be wired after identity, history, solvency, and unresolved-attempt reconciliation are implemented.
 
 ## API and authorization
@@ -80,7 +82,7 @@ Before sending a create request, generate/save a cryptographically random 32-byt
 }
 ```
 
-The example describes the contract, not an enabled API. Semantic errors currently return structured 409 responses; complete external error categorization is still pending. A separate filesystem-restricted admin socket provides readiness, pause and audit reads. The public process cannot proxy that API. No SQL console or unrestricted signing endpoint exists.
+The example describes the contract, not an enabled API. Semantic errors currently return structured 409 responses; complete external error categorization is still pending. A separate filesystem-restricted admin socket provides `/health`, `/pause`, `/audit` and `/scanners`. Scanner evidence is private; the public proxy returns 404 for `/scanners`. No SQL console or unrestricted signing endpoint exists.
 
 ## Backup boundary
 
