@@ -24,21 +24,23 @@ nativeCall manager c wallet methodName params = do
   let url = nativeRpc c <> if wallet then "/wallet/" <> T.unpack (nativeWallet c) else ""
   rpc manager url (Just (username,BS.drop 1 rest)) methodName params
 nativeIdentity :: Manager -> Config -> IO Value
-nativeIdentity manager c = do
-  info <- nativeCall manager c False "getblockchaininfo" []
+nativeIdentity manager c = nativeIdentityWith (nativeCall manager c) c
+nativeIdentityWith :: (Bool -> Text -> [Value] -> IO Value) -> Config -> IO Value
+nativeIdentityWith call c = do
+  info <- call False "getblockchaininfo" []
   name <- fieldValue "chain" info :: IO Text
   syncing <- fieldValue "initialblockdownload" info
   require (not syncing) "native_synchronizing"
   height <- fieldValue "blocks" info :: IO Int64
   require (height >= nativeCheckpointHeight c) "native_checkpoint_unavailable"
-  actual <- nativeCall manager c False "getblockhash" [toJSON (nativeCheckpointHeight c)] >>= parseValue parseJSON
+  actual <- call False "getblockhash" [toJSON (nativeCheckpointHeight c)] >>= parseValue parseJSON
   require (actual==nativeCheckpointHash c) "native_checkpoint_mismatch"
   if profile c==L2LSignetDevnet
     then do
       challenge <- fieldValue "signet_challenge" info
       require (name=="signet" && challenge==signetChallenge) "wrong_signet"
     else require (name=="main") "wrong_ecx_chain"
-  peers <- nativeCall manager c False "getconnectioncount" [] >>= parseValue parseJSON :: IO Int
+  peers <- call False "getconnectioncount" [] >>= parseValue parseJSON :: IO Int
   require (peers>0) "native_no_peers"
   pure info
 validateNativeRecipient :: Manager -> Config -> Text -> IO Text

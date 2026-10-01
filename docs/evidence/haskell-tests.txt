@@ -300,6 +300,20 @@ conclusive Solana expiry (offline recovery contracts)
   requires durable operator approval even if an expired obligation is made ready by a caller [✔]
   rechecks source eligibility before approving a replacement [✔]
   does not revive an expired conversion after a refund has been authorized [✔]
+native replacement construction (captured public templates and offline pending contracts)
+  raises only the fee, preserving every input and the exact customer payment [✔]
+  rejects non-increasing fees, the immutable ceiling and exhausted change [✔]
+  cannot replace original inputs with fresh inputs even at the same value [✔]
+  rejects changed replay fields and a changed recipient despite balanced fees [✔]
+  accepts an evicted saved payment only while all exact chain inputs remain available [✔]
+  refuses a confirmed family member before constructing a PSBT [✔]
+  refuses a conflicted family member before constructing a PSBT [✔]
+  refuses a mempool spender outside the saved family [✔]
+  refuses an input already spent in the active chain [✔]
+  refuses lagging wallet state and a wrong chain checkpoint [✔]
+  discards a draft if the chain view changes while it is being built [✔]
+  rejects unexpected signatures and mismatched PSBT fees [✔]
+  propagates unavailable RPC evidence without allocating keys or signing [✔]
 native confirmation evidence (captured bytes and offline RPC contracts)
   requires the exact saved bytes and a confirmed active-chain anchor [✔]
 Solana settlement evidence (captured finalized public Devnet payments)
@@ -325,8 +339,8 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 6.3791 seconds
-280 examples, 0 failures
+Finished in 6.4024 seconds
+293 examples, 0 failures
 Test suite bridge-test: PASS
 Test suite logged to: /Volumes/Crucial
 X9/CodexBuilds/ecx-bridge-20260930/workspace-b/outputs/ecx-bridge/./../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log

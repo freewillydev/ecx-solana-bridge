@@ -13,8 +13,10 @@ import Bridge.Solana (inspectTokenAccount)
 import Bridge.SolanaHelper
 import Bridge.SolanaPayment
 import qualified Data.Aeson.KeyMap as KM
+import qualified Data.Aeson.Key as Key
 import Bridge.Native (nativeAmount,nativeNumber,validateNativeRecipientWith)
 import Bridge.NativePayment
+import Bridge.NativeReplacement
 import Bridge.Payment (prepareNativeWith,prepareSolanaWith,payoutReference)
 import Bridge.Settlement
 import Bridge.Deposit
@@ -134,6 +136,69 @@ nativeSignedFixture=do
   (plan,previous,fee,tx)<-nativeFixture
   raw<-fieldValue "raw" value
   pure (NativeSigned raw tx plan previous fee)
+
+-- A real unsigned PSBT/decoded template, with modeled pending wallet state.
+-- The captured input payment is actually confirmed; these are offline RPC
+-- contracts, never evidence that a replacement was broadcast on Signet.
+withNativeReplacementContract :: (Config -> NativeSigned -> NativeDraft -> NativeRPC -> IORef [(Text,[Value])] -> IO a) -> IO a
+withNativeReplacementContract action=do
+  original<-nativeSignedFixture
+  captured<-BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
+  replacement<-BS.readFile "test/fixtures/native-signet-replacement-draft.json" >>= either fail pure . eitherDecodeStrict'
+  oldDecoded<-fieldValue "decoded" captured :: IO Value
+  newDecoded<-fieldValue "decoded" replacement :: IO Value
+  draft<-fieldValue "draft" replacement
+  created<-fieldValue "createdPsbt" replacement :: IO Text
+  calls<-newIORef []
+  let c=cfg "offline-native-replacement"
+      plan=signedNativePlan original
+      tx=signedNativeTransaction original
+      position=object ["hash" .= custodyNativeTip,"height" .= (16010::Int)]
+      call _ method params=do
+        modifyIORef' calls (<>[(method,params)])
+        case (method,params) of
+          ("getblockchaininfo",[])->pure $ object ["chain" .= ("signet"::Text),"initialblockdownload" .= False
+            ,"blocks" .= (16010::Int),"bestblockhash" .= custodyNativeTip,"signet_challenge" .= signetChallenge]
+          ("getblockhash",[height]) | height==toJSON (nativeCheckpointHeight c)->pure $ toJSON $ nativeCheckpointHash c
+          ("getblockhash",[Number 16010])->pure $ toJSON custodyNativeTip
+          ("getconnectioncount",[])->pure $ toJSON (1::Int)
+          ("getwalletinfo",[])->pure $ object ["walletname" .= nativeWallet c,"descriptors" .= True,"private_keys_enabled" .= True
+            ,"external_signer" .= False,"scanning" .= False,"lastprocessedblock" .= position]
+          ("decoderawtransaction",[raw]) | raw==toJSON (signedNativeBytes original)->pure oldDecoded
+          ("getaddressinfo",[address]) | address==toJSON (planRecipient plan)->pure $ object ["ismine" .= False,"scriptPubKey" .= planRecipientScript plan]
+          ("getaddressinfo",[address]) | address==toJSON (planChange plan)->pure $ object ["ismine" .= True,"scriptPubKey" .= planChangeScript plan]
+          ("decodescript",[_])->pure $ object ["type" .= ("witness_v0_keyhash"::Text)]
+          ("gettransaction",[txid,Bool False,Bool True]) | txid==toJSON (nativeTxid tx)->pure $ object
+            ["txid" .= nativeTxid tx,"hex" .= signedNativeBytes original,"decoded" .= oldDecoded
+            ,"fee" .= scientific (negate $ toInteger $ units $ signedNativeFee original) (-8),"confirmations" .= (0::Int)
+            ,"walletconflicts" .= ([]::[Text]),"lastprocessedblock" .= position]
+          ("gettxout",[txid,index,Bool False])->case [p | p<-signedNativePrevouts original
+              ,txid==toJSON (outpointTxid $ prevout p),index==toJSON (outpointVout $ prevout p)] of
+            [p]->pure $ object ["bestblock" .= custodyNativeTip,"value" .= nativeNumber (prevoutAmount p)
+              ,"confirmations" .= prevoutDepth p,"coinbase" .= prevoutCoinbase p
+              ,"scriptPubKey" .= object ["hex" .= prevoutScript p,"address" .= ("offline-prevout-address"::Text)]]
+            _->reject "unexpected_replacement_prevout"
+          ("getaddressinfo",[String "offline-prevout-address"])->case signedNativePrevouts original of
+            [p]->pure $ object ["ismine" .= True,"scriptPubKey" .= prevoutScript p]
+            _->reject "unexpected_fixture_prevouts"
+          ("gettxspendingprevout",[points])->do
+            points `shouldBe` toJSON (map nativeOutpoint $ nativeInputs tx)
+            pure $ toJSON [object ["txid" .= outpointTxid point,"vout" .= outpointVout point,"spendingtxid" .= nativeTxid tx]
+              | point<-map nativeOutpoint $ nativeInputs tx]
+          ("listlockunspent",[])->pure $ toJSON $ map nativeOutpoint $ nativeInputs tx
+          ("createpsbt",[inputs,outputs,locktime,Bool False])->do
+            inputs `shouldBe` toJSON [object ["txid" .= outpointTxid point,"vout" .= outpointVout point,"sequence" .= nativeSequence input]
+              | input<-nativeInputs tx,let point=nativeOutpoint input]
+            locktime `shouldBe` toJSON (nativeLocktime tx)
+            outputs `shouldBe` toJSON [object [Key.fromText (if nativeOutputScript o==planRecipientScript plan then planRecipient plan else planChange plan)
+              .= nativeNumber (nativeOutputAmount o)] | o<-nativeOutputs $ draftTransaction draft]
+            pure $ toJSON created
+          ("walletprocesspsbt",[psbt,Bool False,String "ALL",Bool False,Bool False])->do
+            psbt `shouldBe` toJSON created
+            pure $ object ["psbt" .= draftPsbt draft,"complete" .= False]
+          ("decodepsbt",[psbt]) | psbt==toJSON (draftPsbt draft)->pure newDecoded
+          _->reject $ "unexpected_replacement_rpc:"<>method
+  action c original draft call calls
 
 withNativeLockRecovery :: (Ledger -> Config -> Preparation -> IORef [Outpoint] -> IORef [Text] -> PaymentTransport -> IO a) -> IO a
 withNativeLockRecovery action=withDir $ \dir->withNativeLockRecoveryAt True dir action
@@ -3237,6 +3302,98 @@ main=hspec $ do
       pause l "operator-action"
       approveSolanaRetryWith verified configured l (attemptId attempt) "retry after expiry" `shouldThrow` isError "solana_retry_not_expected"
       ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM solana_retry_approvals" :: IO [Only Int]) `shouldReturn` [Only 0]
+  describe "native replacement construction (captured public templates and offline pending contracts)" $ do
+    it "raises only the fee, preserving every input and the exact customer payment" $ withNativeReplacementContract $ \c original draft call calls->do
+      let fee=draftFee draft
+          old=signedNativeTransaction original
+          new=draftTransaction draft
+          customer=NativeOutput (planRecipientScript $ signedNativePlan original) (planAmount $ signedNativePlan original)
+      validateNativeFamily [original] `shouldBe` Right ()
+      validateNativeReplacementDraft [original] fee draft `shouldBe` Right ()
+      units fee-units (signedNativeFee original) `shouldBe` 100
+      nativeInputs new `shouldBe` nativeInputs old
+      filter (==customer) (nativeOutputs new) `shouldBe` [customer]
+      draftNativeReplacementWith call c [original] fee `shouldReturn` draft
+      methods<-map fst <$> readIORef calls
+      length (filter (=="createpsbt") methods) `shouldBe` 1
+      methods `shouldSatisfy` all (`notElem` ["sendrawtransaction","lockunspent","getrawchangeaddress","walletcreatefundedpsbt"])
+    it "rejects non-increasing fees, the immutable ceiling and exhausted change" $ withNativeReplacementContract $ \_ original _ _ _->do
+      let plan=signedNativePlan original
+          old=signedNativeFee original
+      forM_ [old,amt $ toInteger (units old)-1,amt $ toInteger (units $ planFeeLimit plan)+1] $ \fee->
+        replacementOutputs original fee `shouldBe` Left "native_replacement_fee_bounds"
+      let change=sum [toInteger $ units $ nativeOutputAmount o | o<-nativeOutputs $ signedNativeTransaction original,nativeOutputScript o==planChangeScript plan]
+          exhausted=amt $ toInteger (units old)+change
+          enlarged=original{signedNativePlan=plan{planFeeLimit=exhausted}}
+      replacementOutputs enlarged exhausted `shouldBe` Left "native_replacement_change_unavailable"
+    it "cannot replace original inputs with fresh inputs even at the same value" $ withNativeReplacementContract $ \_ original draft _ _->do
+      let tx=draftTransaction draft
+          changed point=point{outpointTxid=nativeTxid tx}
+          bad=draft{draftTransaction=tx{nativeInputs=[input{nativeOutpoint=changed $ nativeOutpoint input} | input<-nativeInputs tx]}
+            ,draftPrevouts=[p{prevout=changed $ prevout p} | p<-draftPrevouts draft]}
+      validateNativeTx (signedNativePlan original) (draftPrevouts bad) (draftFee bad) (draftTransaction bad) `shouldBe` Right ()
+      validateNativeReplacementDraft [original] (draftFee draft) bad `shouldBe` Left "native_replacement_draft_changed"
+    it "rejects changed replay fields and a changed recipient despite balanced fees" $ withNativeReplacementContract $ \_ original draft _ _->do
+      let tx=draftTransaction draft
+          plan=signedNativePlan original
+          moved=tx{nativeOutputs=[if nativeOutputScript o==planRecipientScript plan then o{nativeOutputScript=planChangeScript plan} else o | o<-nativeOutputs tx]}
+          rbf=tx{nativeInputs=[i{nativeSequence=4294967293} | i<-nativeInputs tx]}
+      forM_ [tx{nativeLocktime=1},rbf] $ \bad->
+        validateNativeReplacementDraft [original] (draftFee draft) draft{draftTransaction=bad} `shouldBe` Left "native_replay_policy_mismatch"
+      validateNativeReplacementDraft [original] (draftFee draft) draft{draftTransaction=moved} `shouldBe` Left "native_output_mismatch"
+      validateNativeFamily [] `shouldBe` Left "native_replacement_family_bounds"
+      validateNativeFamily [original,original] `shouldBe` Left "native_replacement_duplicate_member"
+      validateNativeFamily (replicate 9 original) `shouldBe` Left "native_replacement_family_bounds"
+    it "accepts an evicted saved payment only while all exact chain inputs remain available" $ withNativeReplacementContract $ \c original draft call _->do
+      let unseen wallet method params=case method of
+            "gettransaction"->reject "rpc_error_-5"
+            "gettxspendingprevout"->pure $ toJSON $ map (toJSON.nativeOutpoint) $ nativeInputs $ signedNativeTransaction original
+            _->call wallet method params
+      draftNativeReplacementWith unseen c [original] (draftFee draft) `shouldReturn` draft
+    forM_ [(1,"confirmed"),(-1,"conflicted")] $ \(depth,caseName)->
+      it ("refuses a "<>caseName<>" family member before constructing a PSBT") $ withNativeReplacementContract $ \c original draft call calls->do
+        let changed wallet method params=do
+              value<-call wallet method params
+              pure $ if method=="gettransaction" then setPath ["confirmations"] (toJSON (depth::Int)) value else value
+        draftNativeReplacementWith changed c [original] (draftFee draft) `shouldThrow` isError "native_replacement_member_not_pending"
+        map fst <$> readIORef calls >>= (`shouldSatisfy` (not . elem "createpsbt"))
+    it "refuses a mempool spender outside the saved family" $ withNativeReplacementContract $ \c original draft call _->do
+      let changed wallet method params=if method=="gettxspendingprevout" then pure $ toJSON
+            [object ["txid" .= outpointTxid point,"vout" .= outpointVout point,"spendingtxid" .= nativeTxid (draftTransaction draft)]
+            | point<-map nativeOutpoint $ nativeInputs $ signedNativeTransaction original] else call wallet method params
+      draftNativeReplacementWith changed c [original] (draftFee draft) `shouldThrow` isError "native_replacement_unknown_spender"
+    it "refuses an input already spent in the active chain" $ withNativeReplacementContract $ \c original draft call _->do
+      let changed wallet method params=if method=="gettxout" then pure Null else call wallet method params
+      draftNativeReplacementWith changed c [original] (draftFee draft) `shouldThrow` isError "native_replacement_input_spent"
+    it "refuses lagging wallet state and a wrong chain checkpoint" $ withNativeReplacementContract $ \c original draft call _->do
+      let lagging wallet method params=do
+            value<-call wallet method params
+            pure $ if method=="getwalletinfo" then setPath ["lastprocessedblock","height"] (toJSON (16009::Int)) value else value
+          wrong wallet method params=if method=="getblockhash" then pure (String $ T.replicate 64 "f") else call wallet method params
+      draftNativeReplacementWith lagging c [original] (draftFee draft) `shouldThrow` isError "native_replacement_wallet_behind"
+      draftNativeReplacementWith wrong c [original] (draftFee draft) `shouldThrow` isError "native_checkpoint_mismatch"
+    it "discards a draft if the chain view changes while it is being built" $ withNativeReplacementContract $ \c original draft call _->do
+      checks<-newIORef (0::Int)
+      let changed wallet method params=do
+            value<-call wallet method params
+            if method/="getblockchaininfo" then pure value else do
+              modifyIORef' checks (+1)
+              count<-readIORef checks
+              pure $ if count>1 then setPath ["bestblockhash"] (String $ T.replicate 64 "f") value else value
+      draftNativeReplacementWith changed c [original] (draftFee draft) `shouldThrow` isError "native_replacement_view_changed"
+    it "rejects unexpected signatures and mismatched PSBT fees" $ withNativeReplacementContract $ \c original draft call _->do
+      let altered signature wallet method params=do
+            value<-call wallet method params
+            if method/="decodepsbt" then pure value else if signature then do
+              inputs<-fieldValue "inputs" value :: IO [Value]
+              pure $ setPath ["inputs"] (toJSON [setPath ["partial_signatures"] (object ["unexpected" .= ("00"::Text)]) input | input<-inputs]) value
+             else pure $ setPath ["fee"] (toJSON $ nativeNumber $ amt $ toInteger (units $ draftFee draft)+1) value
+      draftNativeReplacementWith (altered True) c [original] (draftFee draft) `shouldThrow` isError "native_replacement_not_unsigned"
+      draftNativeReplacementWith (altered False) c [original] (draftFee draft) `shouldThrow` isError "native_replacement_draft_changed"
+    it "propagates unavailable RPC evidence without allocating keys or signing" $ withNativeReplacementContract $ \c original draft call calls->do
+      let unavailable wallet method params=if method=="gettxout" then reject "rpc_error_-28" else call wallet method params
+      draftNativeReplacementWith unavailable c [original] (draftFee draft) `shouldThrow` isError "rpc_error_-28"
+      map fst <$> readIORef calls >>= (`shouldSatisfy` (not . elem "walletprocesspsbt"))
   describe "native confirmation evidence (captured bytes and offline RPC contracts)" $ do
     it "requires the exact saved bytes and a confirmed active-chain anchor" $ do
       fixtureValue<-BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
