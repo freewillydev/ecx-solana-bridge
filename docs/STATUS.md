@@ -682,3 +682,13 @@ this is not completed build or install evidence. Slow local compiler emulation w
 stopped with its caches preserved. All four task VMs are stopped; the required
 local product/node/PostgreSQL services remain. Local x86 installation and reboot
 acceptance follow the completed native artifact.
+
+The same real replacement family also passes local-view confirmation-loss
+acceptance on the dedicated public Signet node: invalidate its existing real
+block, record `confirming`, retain the payout link, pause intake and preserve all
+11 compared financial/work tables. Reconsidering that same public-network block
+records `reconfirmed` for the same transaction, restores matching custody and
+keeps intake paused until explicit resume. No synthetic block, new signature or
+additional payment was created. This covers same-member confirmation loss, not a
+winner-changing reorg or permanent source loss. The real block is restored and
+the bridge is ready. [Evidence](evidence/postgres-native-family-live.json).

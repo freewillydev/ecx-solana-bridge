@@ -49,8 +49,25 @@
   ],
   "limitations": [
     "Completed-payment restart occurred after confirmation; this is not a crash at every signing/send boundary",
-    "No real winner-changing reorg, permanent source loss, remote/key restore or canonical-token acceptance",
     "Deposits used a dedicated Devnet test client, not a supported wallet UI",
-    "Independent security review remains open"
-  ]
+    "Independent security review remains open",
+    "Same-member confirmation-loss/reconfirmation passed on the actual Signet node; no winner-changing reorg, permanent source loss, remote/key restore or canonical-token acceptance"
+  ],
+  "sameFamilyConfirmationLossRecovery": {
+    "transaction": "14c6d610bb3986dce90a838da888330bf7415f8a49d360f49397edd454876fc7",
+    "realBlock": "0000027d4dc7469b1685506dee4254af0a764b0572077cbe2f7f208c18fe1347",
+    "syntheticBlocksGenerated": false,
+    "additionalSignatureCreated": false,
+    "additionalPaymentSent": false,
+    "blockDisconnected": true,
+    "recoveryState": "confirming",
+    "intakePaused": true,
+    "financialTablesUnchanged": true,
+    "payoutLinkRetained": true,
+    "reconfirmedSameTransaction": true,
+    "custodyMatchedAfterRecovery": true,
+    "comparedFinancialTables": 11,
+    "intakeRemainsPaused": true,
+    "explicitResumeAfterRecovery": true
+  }
 }

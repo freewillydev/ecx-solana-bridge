@@ -192,3 +192,12 @@ Prioritize the usable integrated product. Preserve all financial/signing guards
 while building it; then perform the outstanding deep recovery, clean-host restore,
 canonical network, supported-wallet and independent release reviews together.
 Database fixture acceptance does not substitute for actual chain/host acceptance.
+
+Current construction evidence now includes explicit ARM64 PostgreSQL cross-release
+upgrade/backup/repeat/reboot acceptance and a real PostgreSQL native replacement
+family through draft/sign/replay/paused-send/resume/mempool replacement/confirmation,
+completed restart and same-member confirmation-loss/reconfirmation. Native x86
+CI compilation replaces slow local emulation; retain the local VM only for
+installation/reboot acceptance. Do not repeat these workflows for unrelated edits.
+Remaining work follows the existing recovery/restore, wallet, canonical-network
+and independent-review gates; these results do not declare them complete.
