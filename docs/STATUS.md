@@ -233,3 +233,13 @@ Receipt updates now journal lost eligibility and verified non-native restoration
 the temporary conversion refusal has been removed. Compilation passes, while
 runtime recovery parity, focused native-source proof checks and full observer/page
 commit conversion remain pending before paying-worker cutover.
+
+### Atomic PostgreSQL scanner-page commit
+
+The typed scanner-page commit now includes origin/cursor fencing, deposit updates,
+immutable evidence, known-payment/approved-treasury classification, sticky event
+review, cursor advancement and scanner health in one transaction. Failure booking
+preserves prior success, audits changed errors and pauses the deployment. The
+existing economic evidence decoder is reused. The library compiles; adapter wiring,
+real scan replay, custody reconciliation and payment conversion remain before
+cutover. This checkpoint does not change the running funded worker.

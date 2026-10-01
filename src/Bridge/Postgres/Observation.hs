@@ -1,14 +1,15 @@
 module Bridge.Postgres.Observation
-  ( recordScan, readCheckpoint, lookupInstruction, maximumNativeDepth ) where
+  ( recordScan, readCheckpoint, lookupInstruction, maximumNativeDepth, commitScan, recordScanFailure ) where
 
 import Bridge.Types
-import Bridge.Ledger (Deposit(..), SourceCheck(..))
+import Bridge.Ledger (Deposit(..), SourceCheck(..), ScanBatch(..), ChainEvent(..), economicOutflow)
 import Bridge.Postgres.Source (recordSourceCheckC, sourceWorkHashC)
 import Bridge.Postgres.Ledger (Ledger, ledgerAction, posting)
 import Bridge.Postgres.Schema
-import Control.Monad (when, forM)
-import Data.Aeson (FromJSON, eitherDecodeStrict', object, (.=))
+import Control.Monad (when, forM, forM_)
+import Data.Aeson (FromJSON, eitherDecodeStrict', object, (.=), ToJSON, encode)
 import Data.List (sortOn)
+import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -145,3 +146,132 @@ maximumNativeDepth ledger minimumDepth = ledgerAction ledger $ \connection->do
 
 decodeSaved :: FromJSON a => Text -> IO a
 decodeSaved = either (const $ reject "corrupt_ledger_json") pure . eitherDecodeStrict' . TE.encodeUtf8
+
+checkpointC :: PG.Connection -> Text -> Text -> IO ()
+checkpointC connection chain anchor = do
+  previous <- readCheckpointC connection chain
+  case previous of
+    Nothing->do
+      _ <- O.runInsert connection O.Insert {O.iTable=checkpointsTable,O.iRows=[Checkpoints (O.sqlStrictText chain) (O.sqlStrictText anchor)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      pure ()
+    Just _->do
+      _ <- O.runUpdate connection O.Update
+        {O.uTable=checkpointsTable,O.uUpdateWith= \row->row {checkpointsAnchor=O.sqlStrictText anchor},O.uWhere= \row->checkpointsChain row O..== O.sqlStrictText chain,O.uReturning=O.rCount}
+      pure ()
+
+commitScan :: Ledger -> ScanBatch -> IO ()
+commitScan ledger ScanBatch{..} = ledgerAction ledger $ \connection->do
+  require (scanChain `elem` map fst scanAssets && scanTime>=0 && length scanDeposits<=1000 && length scanEvents<=1000) "invalid_scan_batch"
+  require (all (\anchor->not (T.null anchor) && T.length anchor<=128) [scanOrigin,scanNext]) "invalid_scan_anchor"
+  require (all (\deposit->Just (depositAsset deposit)==lookup scanChain scanAssets) scanDeposits) "scan_asset_mismatch"
+  previous <- readCheckpointC connection scanChain
+  require (previous==scanPrevious) "stale_scan_cursor"
+  origins <- O.runSelect connection $ do
+    row <- O.selectTable scanoriginsTable
+    O.where_ (scanoriginsChain row O..== O.sqlStrictText scanChain)
+    pure (scanoriginsAnchor row)
+    :: IO [Text]
+  case origins of
+    []->do
+      _ <- O.runInsert connection O.Insert {O.iTable=scanoriginsTable,O.iRows=[ScanOrigins (O.sqlStrictText scanChain) (O.sqlStrictText scanOrigin)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      pure ()
+    [origin]->require (origin==scanOrigin) "scan_origin_mismatch"
+    _->reject "duplicate_scan_origin"
+  mapM_ (observeDepositC connection) scanDeposits
+  forM_ scanEvents $ \ChainEvent{..}->do
+    require (not (T.null chainEventId) && T.length chainEventId<=128 && T.length chainEventAnchor<=128) "invalid_observation_identity"
+    require (chainEventKind `elem` ["incoming","unmatched_incoming","outgoing","failed","reference","unsupported","unclassified","awaiting_verifier","disputed"]) "invalid_observation_kind"
+    let evidence=jsonText (object ["chain" .= scanChain,"id" .= chainEventId,"anchor" .= chainEventAnchor,"kind" .= chainEventKind,"proof" .= chainEventEvidence])
+        hash=digest (TE.encodeUtf8 evidence)
+        paymentChain=if scanChain=="SolanaOperating" then "Solana" else scanChain
+    require (T.length evidence<=8192) "observation_evidence_too_large"
+    candidates <- O.runSelect connection $ do
+      attempt <- O.selectTable attemptsTable
+      intent <- O.selectTable intentsTable
+      O.where_ (attemptsIntentId attempt O..== intentsId intent O..&& attemptsTxid attempt O..== O.sqlStrictText chainEventId O..&& intentsChain intent O..== O.sqlStrictText paymentChain)
+      pure (attemptsState attempt,attemptsCriticalSequence attempt,attemptsObservationJson attempt)
+      :: IO [(Text,Maybe Int64,Maybe Text)]
+    formerWinners <- O.runSelect connection $ do
+      row <- O.selectTable nativewinnerchangesTable
+      O.where_ (nativewinnerchangesPreviousTxid row O..== O.sqlStrictText chainEventId)
+      pure (nativewinnerchangesPreviousObservation row)
+      :: IO [Text]
+    let known=any (\(state,sequenceNo,observation)->state `elem` ["broadcast_intent","settled","failed"] ||
+          state=="review" && paymentChain=="Native" && maybe False (>0) sequenceNo && maybe False (`elem` formerWinners) observation) candidates
+    treasury <- O.runSelect connection $ do
+      row <- O.selectTable treasuryspendsTable
+      O.where_ (treasuryspendsChain row O..== O.sqlStrictText scanChain O..&& treasuryspendsEventId row O..== O.sqlStrictText chainEventId)
+      pure (treasuryspendsAnchor row,treasuryspendsEconomicJson row)
+      :: IO [(Text,Text)]
+    let approved=case economicOutflow scanChain chainEventEvidence of Right economic->treasury==[(chainEventAnchor,jsonText economic)]; Left _->False
+        review=chainEventKind `elem` ["unsupported","unclassified","disputed"] || chainEventKind=="outgoing" && not known && not approved
+        reviewed=if review then 1 else 0
+    proofs <- O.runSelect connection $ do
+      row <- O.selectTable observationevidenceTable
+      O.where_ (observationevidenceHash row O..== O.sqlStrictText hash)
+      pure (observationevidenceHash row)
+      :: IO [Text]
+    when (null proofs) $ do
+      _ <- O.runInsert connection O.Insert
+        {O.iTable=observationevidenceTable,O.iRows=[ObservationEvidence (O.sqlStrictText hash) (O.sqlStrictText scanChain) (O.sqlStrictText chainEventId) (O.sqlStrictText evidence)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      pure ()
+    existing <- O.runSelect connection $ do
+      row <- O.selectTable chaineventsTable
+      O.where_ (chaineventsChain row O..== O.sqlStrictText scanChain O..&& chaineventsEventId row O..== O.sqlStrictText chainEventId)
+      pure (chaineventsEventId row)
+      :: IO [Text]
+    if null existing then do
+      _ <- O.runInsert connection O.Insert
+        {O.iTable=chaineventsTable,O.iRows=[ChainEvents (O.sqlStrictText scanChain) (O.sqlStrictText chainEventId) (O.sqlStrictText chainEventKind) (O.sqlStrictText chainEventAnchor) (O.sqlStrictText hash) (O.sqlInt8 scanTime) (O.sqlInt8 scanTime) (O.sqlInt8 reviewed)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      pure ()
+    else do
+      _ <- O.runUpdate connection O.Update
+        { O.uTable=chaineventsTable,O.uUpdateWith= \row->row {chaineventsKind=O.sqlStrictText chainEventKind,chaineventsAnchor=O.sqlStrictText chainEventAnchor,chaineventsEvidenceHash=O.sqlStrictText hash,chaineventsLastSeen=O.sqlInt8 scanTime,
+            chaineventsNeedsReview=O.ifThenElse (chaineventsNeedsReview row O..> O.sqlInt8 reviewed) (chaineventsNeedsReview row) (O.sqlInt8 reviewed)}
+        , O.uWhere= \row->chaineventsChain row O..== O.sqlStrictText scanChain O..&& chaineventsEventId row O..== O.sqlStrictText chainEventId,O.uReturning=O.rCount }
+      pure ()
+    when review (pauseC connection ("chain_review:"<>scanChain<>":"<>chainEventKind))
+  checkpointC connection scanChain scanNext
+  healthC connection scanChain (Just scanTime) Nothing scanTime True
+
+pauseC :: PG.Connection -> Text -> IO ()
+pauseC connection reason = do
+  _ <- O.runUpdate connection O.Update
+    {O.uTable=deploymentTable,O.uUpdateWith= \row->row {deploymentPaused=O.sqlInt8 1,deploymentPauseReason=O.sqlStrictText reason},O.uWhere=const (O.sqlBool True),O.uReturning=O.rCount}
+  pure ()
+
+healthC :: PG.Connection -> Text -> Maybe Int64 -> Maybe Text -> Int64 -> Bool -> IO ()
+healthC connection chain success failure now replaceSuccess = do
+  previous <- O.runSelect connection $ do
+    row <- O.selectTable scanhealthTable
+    O.where_ (scanhealthChain row O..== O.sqlStrictText chain)
+    pure row
+    :: IO [ScanHealth]
+  let nullableTime=maybe O.null (O.toNullable . O.sqlInt8) success
+      nullableError=maybe O.null (O.toNullable . O.sqlStrictText) failure
+  case previous of
+    []->do
+      _ <- O.runInsert connection O.Insert {O.iTable=scanhealthTable,O.iRows=[ScanHealth (O.sqlStrictText chain) nullableTime nullableError (O.sqlInt8 now)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      pure ()
+    [_]->do
+      _ <- O.runUpdate connection O.Update
+        {O.uTable=scanhealthTable,O.uUpdateWith= \row->row {scanhealthLastSuccess=if replaceSuccess then nullableTime else scanhealthLastSuccess row,scanhealthLastError=nullableError,scanhealthCheckedAt=O.sqlInt8 now},O.uWhere= \row->scanhealthChain row O..== O.sqlStrictText chain,O.uReturning=O.rCount}
+      pure ()
+    _->reject "duplicate_scan_health"
+
+recordScanFailure :: Ledger -> Text -> Int64 -> Text -> IO ()
+recordScanFailure ledger chain now code = ledgerAction ledger $ \connection->do
+  require (chain `elem` map fst scanAssets && T.length code<=160) "invalid_scan_failure"
+  previous <- O.runSelect connection $ do
+    row <- O.selectTable scanhealthTable
+    O.where_ (scanhealthChain row O..== O.sqlStrictText chain)
+    pure (scanhealthLastError row)
+    :: IO [Maybe Text]
+  when (previous/=[Just code]) $ do
+    _ <- O.runInsert connection O.Insert {O.iTable=auditTable,O.iRows=[Audit Nothing (O.sqlStrictText "scanner_failure") (O.sqlStrictText (chain<>":"<>code))],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+    pure ()
+  healthC connection chain Nothing (Just code) now False
+  pauseC connection ("scanner_unavailable:"<>chain)
+
+jsonText :: ToJSON a => a -> Text
+jsonText = TE.decodeUtf8 . LBS.toStrict . encode

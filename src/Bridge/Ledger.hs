@@ -6,7 +6,7 @@ module Bridge.Ledger
   , findOrder, checkIntakeReady, claimNativeAllocation, recordNativeInstruction, issueInstruction, instructionBackup
   , exposeOrder, freeInventory, allocateTreasuryReceipt, allocateSolOperatingReceipt, recordTreasurySpend, expireQuotes
   , Deposit(..), observeDeposit, refreshDeposit, recordScan, readCheckpoint, promoteDeposit, checkpoint
-  , ChainEvent(..), ScanBatch(..), commitScan, recordScanFailure, scannerHealth, custodyHealth
+  , economicOutflow, ChainEvent(..), ScanBatch(..), commitScan, recordScanFailure, scannerHealth, custodyHealth
   , lookupInstruction, maximumNativeDepth, pendingVerification
   , Obligation(..), readyObligations, Attempt(..), storeAttempt, markBroadcastIntent, authorizeRecordedSend
   , Preparation(..), beginPreparation, storeDraft, pendingPreparations, activePreparationGeneration
