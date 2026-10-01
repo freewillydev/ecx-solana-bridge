@@ -51,7 +51,7 @@ runWorkerWith :: Config -> (Ledger -> IO ()) -> IO ()
 runWorkerWith c observer = withLedger (dbPath c) (fingerprint c) $ \ledger -> do
   pause ledger "implementation_acceptance_pending"
   customer <- securityBoundary (serve customerAPI (customerServer c ledger))
-  admin <- securityBoundary (serve adminAPI (adminServer ledger))
+  admin <- securityBoundary (serve adminAPI (adminServer c ledger))
   concurrently_ (concurrently_ (runUnix (customerSocket c) 0o660 customer) (runUnix (adminSocket c) 0o600 admin)) (observer ledger)
 
 scanOnce :: Config -> IO Value
@@ -84,10 +84,10 @@ customerServer c ledger =
   ready = do
     a <- liftIO (readiness ledger)
     if available a then pure a else throwError err503 {errBody=encode a}
-adminServer :: Ledger -> Server AdminAPI
-adminServer l = asHandler (readiness l)
+adminServer :: Config -> Ledger -> Server AdminAPI
+adminServer c l = asHandler (readiness l)
   :<|> (\p -> asHandler (pause l (T.take 120 (pauseReason p)) >> readiness l))
-  :<|> asHandler (auditExport l)
+  :<|> asHandler (auditExportWithBudget l c)
   :<|> asHandler (scannerHealth l)
 doctor :: Config -> IO Value
 doctor c = do

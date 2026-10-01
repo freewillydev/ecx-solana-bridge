@@ -16,6 +16,19 @@ durable order and inventory invariants
   expired unfunded quotes release capacity without erasing their order [✔]
   holds partial and excess deposits for review [✔]
   rolls back a failed database action as one financial decision [✔]
+quote allowances and rolling operating budgets
+  reserves payout rent and refund costs before accepting a quote [✔]
+  refuses a quote without refund funds even when its payout is funded [✔]
+  serializes concurrent admission against the shared daily cap [✔]
+  snapshots fee ceilings and never reserves twice on a repeated request [✔]
+  transfers the allowance once and charges only actual settled costs [✔]
+  keeps the separate refund allowance after a failed conversion [✔]
+  releases only provisional costs on expiry and reacquires them for a late refund [✔]
+  rolls back a failed transfer if the current spending cap was lowered [✔]
+  counts an extra refund on an already-paid order against queue capacity [✔]
+  cannot classify a treasury spend that consumes quoted operating funds [✔]
+  counts fees once until the full rolling day ends, including future bookings [✔]
+  retains holds and accounting time across restart and clock rollback [✔]
 atomic observer checkpoints
   rolls back an entire page and its cursor if any receipt conflicts [✔]
   quarantines receipts without durable order bindings, including on replay [✔]
@@ -35,7 +48,7 @@ signed intent and settlement invariants
   retains an immutable unsigned draft after interruption and restart [✔]
   cannot store signed bytes without a prior durable preparation [✔]
   retains exact bytes across restart and starts paused [✔]
-  cannot commit an intent without operating funds [✔]
+  cannot exceed the order's saved fee ceiling [✔]
   requires correct chain and database-bound obligation [✔]
   keeps earned fees out of available source float and settles once [✔]
   cannot authorize a first send after loss of source eligibility [✔]
@@ -65,6 +78,7 @@ SOL accounting from captured public Devnet metadata
   retains failed-transaction fees but rejects a failed transaction changing other principal [✔]
 backup and schema protections
   migrates version one without losing financial rows or critical sequence [✔]
+  preserves an unfinished legacy order without inventing cost policy or allowing resume [✔]
   does not expose canonical instructions before acknowledged coverage [✔]
   makes a consistent snapshot while the ledger is open [✔]
   refuses repointing an existing database [✔]
@@ -82,9 +96,9 @@ Solana preparation (SDK fixtures and RPC contract tests)
   charges no rent for an existing ATA and credits lamports pre-funded to a new ATA [✔]
   refuses excess rent/fees, missing fee quotes and insufficient operating SOL [✔]
   refuses short-lived blockhashes, stale account context and failed simulation [✔]
-  reserves fee plus rent and saves the request before signing; retries reuse exact bytes [✔]
+  uses the quoted fee/rent ceilings after settings change and reuses saved bytes [✔]
   retains the request and pauses after a lost helper response [✔]
-  does not invoke the helper unless the full operating budget can be reserved [✔]
+  does not invoke the helper after the current daily operating cap is lowered [✔]
 unsigned customer deposits (SDK fixture and offline RPC contracts)
   binds owner, amount and memo without a custody signature or payment intent [✔]
   refreshes a blockhash without changing the order or reserving more inventory [✔]
@@ -136,9 +150,6 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 1.1024 seconds
-112 examples, 0 failures
+Finished in 1.5377 seconds
+125 examples, 0 failures
 Test suite bridge-test: PASS
-Test suite logged to:
-[local build log]
-1 of 1 test suites (1 of 1 test cases) passed.

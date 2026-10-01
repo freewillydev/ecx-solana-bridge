@@ -1,4 +1,4 @@
-# Implementation status — 2026-09-30
+# Implementation status — 2026-10-01
 
 **This is an unfinished development checkpoint, not a deployable custody release.** Both real ledger-driven directions and a full late-deposit refund have completed through a scoped acceptance tool. The native payout survived a process interruption; the refund exercised conclusive Solana expiry and one replacement. `implementationReady = False` in `Bridge.Worker`; it is deliberately not a configuration toggle. New orders and unsigned deposit transactions cannot be requested through the customer API. No administrator resume endpoint is exposed.
 
@@ -7,7 +7,7 @@
 | Check | Result and evidence |
 | --- | --- |
 | Haskell application | Builds on macOS arm64 / GHC 9.14.1 with the frozen Cabal graph |
-| Financial/state tests | 112 examples pass, plus 100 generated arithmetic cases; [test output](evidence/haskell-tests.txt) |
+| Financial/state tests | 125 examples pass, plus 100 generated arithmetic cases; [test output](evidence/haskell-tests.txt) |
 | SQLite actually linked | 3.53.4, exact upstream source identity checked by the application; [doctor](evidence/doctor.json) |
 | Rust helper | Five tests pass; the separate Devnet setup and deposit-client examples compile; fixed SDK/interface graph in `Cargo.lock` |
 | Browser build | TypeScript strict check and esbuild succeed; generated module about 6.7 KiB |
@@ -39,6 +39,7 @@
 | Conclusive outgoing Solana expiry | The rate-limited refund attempt remained saved. Finalized height, invalid blockhash and complete anchored token/SOL histories proved absence; one replacement finalized. Original bytes, preparation and decision remain recorded; [evidence](evidence/late-ledger-refund.json). Independent-provider refusal paths are contract tests, not canonical acceptance. |
 | Schema 4→5 | Existing financial rows, pending signed bytes and critical sequence preserved; private snapshot retained; [migration](evidence/expiry-migration.json) |
 | Operator retry gate / schema 6 | Expiry leaves an obligation in review; a separate private command rechecks the source and absence proof before recording operator approval. Tests prevent automatic replacement, revival after refund and approval after a source reorg. The actual ledger upgrade preserved all financial records; the CLI refused the already-settled refund, created no approvals, and the worker restarted with healthy scans; [evidence](evidence/operator-retry-upgrade.json). Successful approval currently has contract-test coverage; the earlier live replacement preceded this gate. |
+| Quote operating budgets / schema 7 | Separate payout/refund allowances, immutable fee ceilings, atomic transfer to payment holds, rolling 24-hour caps and queue limits including extra refunds. Concurrent admission, expiry/failure/refund, clock rollback and restart checks pass. The real ledger upgrade preserved financial records; old costs were conservatively timestamped, private budget readback matched, and all scans restarted healthy; [evidence](evidence/operating-budget-upgrade.json). New budgeted quote/payment behavior currently has contract-test coverage. |
 | Bounded read retries | Explicit read-only RPC allowlist; at most two waits, bounded numeric Retry-After; sends and wallet mutations are never retried by the transport layer |
 | Real ledger-driven redemption | 10,000 wrapped units in, 9,900 native units out, 100-unit token bridge fee and 141-unit native network fee; confirmed native payout and matching custody balances; [evidence](evidence/first-ledger-redemption.json) |
 | Native payout interruption | The acceptance process was terminated with the payout in the real mempool and restarted paused. It reconciled the same transaction after confirmation; no second attempt was created; [interruption](evidence/native-payout-interruption.json). This is one real interruption point, not complete host-loss recovery. |
@@ -51,10 +52,10 @@ The earlier native payment and three-unit Solana payments were standalone probes
 | Plan stage | Status | Remaining exit requirements |
 | --- | --- | --- |
 | 1. Dependency and integration boundary | Partial | Linux build/systemd/helper sandbox; actual browser-wallet finalized deposit; dependency provenance/notice/security review |
-| 2. Economic/API contracts | Partial | Implement native destination/dust policy, rolling budgets, full state/error contracts for replacement/reorg/recovery; validate all exception examples |
+| 2. Economic/API contracts | Partial | Implement native destination/dust policy and full state/error contracts for replacement/reorg/recovery; validate all exception examples |
 | 3. Durable ledger/worker | Partial | Existing primitives are tested; still need explicit cancellation/disk-full fault injection, production-size reconciliation and restore coverage |
 | 4. Both chain observers | Partial | Real order-bound deposits in both directions and native/token/operating-SOL history verified. Ongoing custody/in-flight reconciliation, long-backlog recovery and complete reorg reconciliation remain |
-| 5. Settlement and recovery | Partial | Source rechecks, intent/backup barriers, exact-byte sends, fee/rent settlement, a real full refund and conclusive Solana expiry now work. Still need quote/queue operating budgets, full startup recovery, destination reorgs, native replacement families, independent-provider live expiry acceptance and remote backup orchestration |
+| 5. Settlement and recovery | Partial | Source rechecks, intent/backup barriers, exact-byte sends, fee/rent settlement, a real full refund and conclusive Solana expiry now work. Quote operating allowances and rolling caps are now implemented. Still need full startup recovery, destination reorgs, native replacement families, independent-provider live expiry acceptance and remote backup orchestration |
 | 6. Usable public-test bridge | Not complete | Both real directions through the browser, new recipient ATA, reload/rejection/expiry flows and supported-wallet matrix |
 | 7. Actual ECX betanet | Not started | Adequately sized host/node, official daemon/checkpoint and replay-policy tests, funding and real round trips |
 | 8. Installation and recovery | Not complete | Candidate service files exist; installer, release verification, remote backup permissions/retention, key restore and clean-host restore still required |
@@ -68,7 +69,7 @@ Some pure ledger work overlapped the first integration stage, as allowed by the 
 ## External inputs and next actions
 
 1. **Devnet funding received:** the user funded the existing setup payer with 10 Devnet SOL. Setup and two tiny payout probes finalized. The actual mint is `Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM`; it is a public-test mint, not canonical ECX.
-2. Finish quote/capacity, ongoing reconciliation and recovery gates, then enable and test both directions through a supported browser wallet. Real helper-built incoming Solana transfers, both ledger directions and a full refund have completed. Acceptance uses scoped command-line tools; customer API intake remains disabled.
+2. Finish native quote admission, ongoing reconciliation and recovery gates, then enable and test both directions through a supported browser wallet. Real helper-built incoming Solana transfers, both ledger directions and a full refund have completed. Acceptance uses scoped command-line tools; customer API intake remains disabled.
 3. Complete ongoing custody/in-flight reconciliation and the remaining recovery paths. After the wrap, full refund and redemption, balances match at 1,899,677 native units (1,750,080 float, 149,577 operating and 20 earned), 100,000,000,014 wrapped units (99,999,999,914 float and 100 earned), and 3,491,560 fee-payer lamports (operating). The scoped test tools are not a general operator workflow or canonical reserve proof. Both Solana histories use the actual setup signature as their immutable origin.
 4. **Linux server:** user requested local continuation and will provide server details later. The local Docker storage is reporting I/O errors; unrelated containers were left alone. Test Ubuntu 24.04, native node access, distinct service users, helper isolation, and pinned SQLite/restic artifacts when an appropriate target is available.
 5. Complete full public Signet/Devnet round trips, crash/ambiguous-send cases, replacement/refund exclusions and host-loss recovery before enabling even a small tester pilot. ECX betanet requires its real node and separate test allocation.

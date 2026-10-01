@@ -9,15 +9,17 @@ module Bridge.Ledger
   , lookupInstruction, maximumNativeDepth, pendingVerification
   , Obligation(..), readyObligations, Attempt(..), storeAttempt, markBroadcastIntent, authorizeRecordedSend
   , Preparation(..), beginPreparation, storeDraft, pendingPreparations
-  , pendingAttempts, PaymentCosts(..), recordSettlement, createRefund, recordFailedSolana, recordSolanaExpiry, recordSolanaRetryApproval, requireBackup, addHint, auditExport
+  , pendingAttempts, PaymentCosts(..), recordSettlement, createRefund, recordFailedSolana, recordSolanaExpiry, recordSolanaRetryApproval, requireBackup, addHint, auditExport, auditExportWithBudget
   ) where
 
 import Bridge.Config
+import Bridge.Budget
 import Bridge.Types
 import Control.Concurrent.MVar
 import Control.Exception (bracket)
 import Control.Monad (forM_, when)
 import Data.Aeson
+import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (parseEither,Parser)
 import qualified Data.ByteString.Lazy as LBS
 import Data.FileEmbed (embedFile)
@@ -39,7 +41,7 @@ import Text.Read (readMaybe)
 -- All financial mutations are serialized and committed before external IO.
 newtype Ledger = Ledger (MVar Connection)
 schemaVersion :: Int
-schemaVersion = 6
+schemaVersion = 7
 sqliteIdentity :: Connection -> IO Value
 sqliteIdentity c = do
   versions <- query_ c "SELECT sqlite_version(),sqlite_source_id()" :: IO [(Text,Text)]
@@ -83,8 +85,10 @@ withLedger path identity action = do
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/004.sql"))) $ execute_ c . fromString . T.unpack
     when (meta `elem` [[(v,identity)] | v<-[1..4]]) $ withTransaction c $
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/005.sql"))) $ execute_ c . fromString . T.unpack
-    when (meta/=[(schemaVersion,identity)]) $ withTransaction c $
+    when (meta `elem` [[(v,identity)] | v<-[1..5]]) $ withTransaction c $
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/006.sql"))) $ execute_ c . fromString . T.unpack
+    when (meta/=[(schemaVersion,identity)]) $ withTransaction c $
+      forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/007.sql"))) $ execute_ c . fromString . T.unpack
     -- Restart is quarantined until external identities and unresolved attempts are checked.
     execute_ c "UPDATE deployment SET paused=1,pause_reason='restart_requires_reconciliation'"
     newMVar c >>= action . Ledger
@@ -110,6 +114,8 @@ resumeAfterChecks l = ledgerAction l $ \c -> do
   require (null unresolved) "unresolved_intents_require_review"
   reviews <- query_ c "SELECT event_id FROM chain_events WHERE needs_review=1 LIMIT 1" :: IO [Only Text]
   require (null reviews) "chain_observations_require_review"
+  legacy <- query_ c "SELECT q.id FROM orders q LEFT JOIN order_cost_limits p ON p.order_id=q.id WHERE p.order_id IS NULL AND (q.status NOT IN('Paid','Refunded','ExpiredUnfunded') OR EXISTS(SELECT 1 FROM obligations o WHERE o.order_id=q.id AND o.status NOT IN('paid','cancelled'))) LIMIT 1" :: IO [Only Text]
+  require (null legacy) "legacy_order_cost_review_required"
   execute_ c "UPDATE deployment SET paused=0,pause_reason='ready'"
   execute_ c "INSERT INTO audit(action,detail) VALUES('resume','checks_complete')"
 
@@ -213,14 +219,11 @@ recordTreasurySpend l stream txid proof = ledgerAction l $ \c -> do
       require (state==[Only True]) "treasury_spend_requires_pause"
       attempts <- query c "SELECT txid FROM attempts WHERE txid=?" (Only txid) :: IO [Only Text]
       require (null attempts) "customer_attempt_cannot_be_treasury_spend"
-      bs <- balances c
       let costs | asset==Native = [("float",toInteger (units outflow)-toInteger (units networkFee)),("operating",toInteger $ units networkFee)]
                 | asset==Wrapped = [("float",toInteger $ units outflow)]
                 | otherwise = [("operating",toInteger $ units outflow)]
       forM_ costs $ \(account,cost) -> do
-        usable <- if account=="float" then freeInventory c asset else do
-          held <- query c "SELECT amount FROM fee_reservations WHERE asset=? AND released=0" (Only $ T.pack $ show asset) :: IO [Only Int64]
-          pure (M.findWithDefault 0 (T.pack $ show asset,account) bs - sum [toInteger n | Only n<-held])
+        usable <- if account=="float" then freeInventory c asset else freeOperating c (T.pack $ show asset)
         require (cost>=0 && usable>=cost) "treasury_spend_exceeds_free_allocation"
       sequenceNumber <- criticalSequence c
       posting c ("treasury-spend:"<>stream<>":"<>txid) "verified operator spend and network costs"
@@ -274,13 +277,15 @@ createOrder l cfg now capability req = do
         require (input req >= minInput cfg && input req <= maxInput cfg) "amount_outside_limits"
         when (direction req == WrappedToNative) $ require (sourceOwner req==Just (refund req)) "refund_owner_mismatch"
         require (not (T.null (recipient req)) && not (T.null (refund req)) && T.length (recipient req)<=128 && T.length (refund req)<=128) "invalid_destination"
-        pending <- query_ c "SELECT count(*) FROM orders WHERE status NOT IN('Paid','Refunded','ExpiredUnfunded')" :: IO [Only Int]
+        pending <- query_ c "SELECT count(*) FROM orders q WHERE status NOT IN('Paid','Refunded','ExpiredUnfunded') OR EXISTS(SELECT 1 FROM obligations o WHERE o.order_id=q.id AND o.status NOT IN('paid','cancelled'))" :: IO [Only Int]
         require (case pending of [Only n] -> n < maxQueued cfg; _ -> False) "queue_full"
         inventory <- freeInventory c (destinationAsset (direction req))
         require (inventory >= toInteger (units (net q))) "insufficient_inventory"
+        require (now>=0 && toInteger now+toInteger (quoteSeconds cfg)+toInteger (confirmationGraceSeconds cfg)<=toInteger (maxBound::Int64)) "invalid_order_time"
         let end = now+quoteSeconds cfg
         execute c "INSERT INTO orders(id,capability_hash,idempotency_key,request_hash,request_json,quote_json,policy_json,status,deadline,grace_deadline) VALUES(?,?,?,?,?,?,?,'Provisioning',?,?)" (oid,cap,idempotencyKey req,rh,jsonText req,jsonText q,jsonText (PolicySnapshot (nativeConfirmations cfg) "finalized" (fingerprint cfg)),end,end+confirmationGraceSeconds cfg)
         execute c "INSERT INTO reservations(order_id,asset,amount,phase) VALUES(?,?,?,'quote')" (oid,T.pack (show (destinationAsset (direction req))),units (net q))
+        reserveOrderCosts c cfg oid (direction req)
         readOrderC c cap oid
       _ -> reject "duplicate_idempotency"
 readOrderC :: Connection -> Text -> Text -> IO OrderView
@@ -315,6 +320,7 @@ exposeOrder l remote capability oid = do
 expireQuotes :: Ledger -> Int64 -> IO ()
 expireQuotes l now = ledgerAction l $ \c -> do
   execute c "UPDATE reservations SET phase='released' WHERE phase='quote' AND order_id IN (SELECT id FROM orders WHERE grace_deadline<?)" (Only now)
+  execute c "UPDATE operating_reservations SET phase='released' WHERE phase='quote' AND order_id IN (SELECT id FROM orders WHERE grace_deadline<?)" (Only now)
   execute c "UPDATE orders SET status='ExpiredUnfunded' WHERE grace_deadline<? AND status IN('Provisioning','AwaitingDeposit') AND NOT EXISTS (SELECT 1 FROM deposits WHERE deposits.order_id=orders.id)" (Only now)
 
 data Deposit = Deposit { depositId :: !Text, depositOrder :: !(Maybe Text), depositAsset :: !Asset, depositAmount :: !Amount, depositAnchor :: !Text, depositConfirmations :: !Int, depositEligible :: !Bool, depositSeenAt :: !Int64 } deriving (Eq,Show)
@@ -476,6 +482,7 @@ promoteDeposit l now did = ledgerAction l $ \c -> do
               execute c "INSERT INTO obligations(id,order_id,deposit_id,kind,asset,amount,recipient,status) VALUES(?,?,?,'conversion',?,?,?,'ready')" ("convert:"<>oid,oid,did,T.pack (show (destinationAsset (direction req))),units (net qt),recipient req)
               execute c "UPDATE deposits SET allocated=1 WHERE id=?" (Only did)
               execute c "UPDATE reservations SET phase='obligation' WHERE order_id=?" (Only oid)
+              execute c "UPDATE operating_reservations SET phase='obligation' WHERE order_id=? AND phase='quote'" (Only oid)
               execute c "UPDATE orders SET status='Ready' WHERE id=?" (Only oid)
               pure True
         _ -> reject "order_not_found"
@@ -505,8 +512,8 @@ checkObligation c obligation chain = do
   require (stored==[obligation]) "obligation_mismatch"
   require (chain == if obligationAsset obligation=="Native" then "Native" else "Solana") "wrong_destination_chain"
 
-beginPreparation :: Ledger -> Obligation -> Text -> Int64 -> Text -> IO ()
-beginPreparation l obligation chain feeLimit policy = ledgerAction l $ \c -> do
+beginPreparation :: Ledger -> Config -> Obligation -> Text -> Int64 -> Text -> IO ()
+beginPreparation l cfg obligation chain feeLimit policy = ledgerAction l $ \c -> do
   checkObligation c obligation chain
   require (feeLimit>=0 && not (T.null policy) && T.length policy<=16384) "invalid_preparation"
   existing <- query c "SELECT i.chain,f.amount,p.policy_json FROM intents i JOIN preparations p ON p.intent_id=i.id JOIN fee_reservations f ON f.intent_id=i.id WHERE i.id=? AND i.resolved=0 AND p.retired_txid IS NULL" (Only $ obligationId obligation) :: IO [(Text,Int64,Text)]
@@ -522,9 +529,7 @@ beginPreparation l obligation chain feeLimit policy = ledgerAction l $ \c -> do
       busy <- query c "SELECT id FROM intents WHERE chain=? AND resolved=0" (Only chain) :: IO [Only Text]
       require (null busy) "destination_payment_unresolved"
       let feeAsset = if chain=="Native" then "Native" else "Sol"
-      bs <- balances c
-      reserved <- query c "SELECT amount FROM fee_reservations WHERE asset=? AND released=0" (Only feeAsset) :: IO [Only Int64]
-      require (M.findWithDefault 0 (feeAsset,"operating") bs - sum [toInteger n | Only n <- reserved] >= toInteger feeLimit) "insufficient_fee_budget"
+      transferOrderCosts c cfg (obligationOrder obligation) (obligationKind obligation) feeAsset feeLimit
       old <- query c "SELECT chain,resolved FROM intents WHERE id=?" (Only $ obligationId obligation) :: IO [(Text,Bool)]
       generation <- case old of
         [] -> do
@@ -688,6 +693,7 @@ recordSettlement l txid costs evidence = ledgerAction l $ \c -> do
         then execute c "UPDATE orders SET status='Refunded',payout_tx=? WHERE id=? AND status<>'Paid'" (txid,oid)
         else execute c "UPDATE orders SET status='Paid',payout_tx=? WHERE id=?" (txid,oid)
       execute c "UPDATE reservations SET phase='released' WHERE order_id=?" (Only oid)
+      execute c "UPDATE operating_reservations SET phase='released' WHERE order_id=? AND phase IN('quote','obligation')" (Only oid)
     _ -> reject "settlement_not_expected"
  where
   parseAsset "Native" = pure Native
@@ -703,7 +709,14 @@ addHint l capability oid sig = do
     require (case counts of [Only n] -> n<8; _ -> False) "hint_limit"
     execute c "INSERT OR IGNORE INTO hints(order_id,signature) VALUES(?,?)" (oid,sig)
 auditExport :: Ledger -> IO Value
-auditExport l = ledgerAction l $ \c -> do
+auditExport l = ledgerAction l auditExportC
+auditExportWithBudget :: Ledger -> Config -> IO Value
+auditExportWithBudget l cfg = ledgerAction l $ \c -> do
+  audit <- auditExportC c
+  budget <- operatingBudget c cfg
+  case audit of Object fields -> pure $ Object (KM.insert "operatingBudget" budget fields); _ -> reject "invalid_audit_export"
+auditExportC :: Connection -> IO Value
+auditExportC c = do
   bs <- balances c
   events <- query_ c "SELECT id,description FROM events ORDER BY rowid" :: IO [(Text,Text)]
   pending <- query_ c "SELECT id,status FROM obligations WHERE status<>'paid' ORDER BY rowid" :: IO [(Text,Text)]
@@ -740,6 +753,8 @@ createRefund l did = ledgerAction l $ \c -> do
           execute c "INSERT INTO obligations(id,order_id,deposit_id,kind,asset,amount,recipient,status) VALUES(?,?,?,'refund',?,?,?,'ready')" (obligationId ob,oid,did,asset,n,recipient)
           execute c "UPDATE deposits SET allocated=1 WHERE id=?" (Only did)
           execute c "UPDATE reservations SET phase='released' WHERE order_id=?" (Only oid)
+          execute c "UPDATE operating_reservations SET phase='released' WHERE order_id=? AND kind='conversion' AND phase IN('quote','obligation')" (Only oid)
+          execute c "UPDATE operating_reservations SET phase='obligation' WHERE order_id=? AND kind='refund' AND phase='quote'" (Only oid)
           execute c "UPDATE orders SET status='Refunding' WHERE id=? AND status<>'Paid'" (Only oid)
           execute c "INSERT INTO audit(action,detail) VALUES('refund_authorized',?)" (Only did)
           pure ob

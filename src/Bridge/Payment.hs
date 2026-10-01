@@ -1,6 +1,7 @@
 module Bridge.Payment (prepareNativePayment, prepareNativeWith, prepareSolanaPayment, prepareSolanaWith, payoutReference) where
 
 import Bridge.Config
+import Bridge.Budget
 import Bridge.Ledger
 import Bridge.Native
 import Bridge.NativePayment
@@ -54,8 +55,9 @@ prepareNativeWith call c ledger obligation = prepare `onException` pause ledger 
         preparations <- filter ((==obligationId obligation) . obligationId . preparationObligation) <$> pendingPreparations ledger
         (plan,savedDraft) <- case preparations of
           [] -> do
-            plan <- newNativePlan call (profile c) (nativeDepth policy) (maxNativeFee c) (obligationRecipient obligation) quantity
-            beginPreparation ledger obligation "Native" (units $ planFeeLimit plan) (json plan)
+            limits <- ledgerAction ledger $ \db -> orderCostLimits db (obligationOrder obligation)
+            plan <- newNativePlan call (profile c) (nativeDepth policy) (savedNativeFee limits) (obligationRecipient obligation) quantity
+            beginPreparation ledger c obligation "Native" (units $ planFeeLimit plan) (json plan)
             pure (plan,Nothing)
           [p] -> do
             plan <- stored (preparationPolicy p)
@@ -79,7 +81,7 @@ prepareNativeWith call c ledger obligation = prepare `onException` pause ledger 
       _ -> reject "multiple_initial_native_attempts"
   validateSaved quantity policy plan = require
     (planProfile plan==profile c && planRecipient plan==obligationRecipient obligation && planAmount plan==quantity
-      && planDepth plan==nativeDepth policy && planFeeLimit plan<=maxNativeFee c)
+      && planDepth plan==nativeDepth policy && units (planFeeLimit plan)>0)
     "saved_native_policy_mismatch"
 
 -- The memo identifies the durable obligation, including refunds. Hashing keeps
@@ -123,11 +125,12 @@ prepareSolanaWith call helper c ledger obligation = prepare `onException` pause 
         preparations <- filter ((==obligationId obligation) . obligationId . preparationObligation) <$> pendingPreparations ledger
         (plan,savedDraft) <- case preparations of
           [] -> do
+            limits <- ledgerAction ledger $ \db -> orderCostLimits db (obligationOrder obligation)
             recent <- getRecentBlockhash call
             let plan=SolanaPlan (fingerprint c) (obligationRecipient obligation) quantity
-                  (payoutReference c obligation) recent (maxSolFee c) (maxSolAccountRent c)
+                  (payoutReference c obligation) recent (savedSolanaFee limits) (savedSolanaRent limits)
             limit <- either reject pure (solanaOperatingLimit plan)
-            beginPreparation ledger obligation "Solana" (units limit) (json plan)
+            beginPreparation ledger c obligation "Solana" (units limit) (json plan)
             pure (plan,Nothing)
           [p] -> do
             plan <- stored (preparationPolicy p)
@@ -141,7 +144,9 @@ prepareSolanaWith call helper c ledger obligation = prepare `onException` pause 
         case savedDraft of
           Nothing -> storeDraft ledger (obligationId obligation) (json request)
           Just value -> stored value >>= \old -> require (old==request) "saved_solana_request_mismatch"
-        signed <- prepareSolanaSigned call helper c plan
+        -- The immutable order/preparation supplies these ceilings. Current
+        -- aggregate daily caps were checked by beginPreparation above.
+        signed <- prepareSolanaSigned call helper c{maxSolFee=solPlanFeeLimit plan,maxSolAccountRent=solPlanRentLimit plan} plan
         let reply=signedSolanaReply signed
         signature <- maybe (reject "helper_signature_missing") pure (replySignature reply)
         limit <- either reject pure (solanaOperatingLimit plan)
@@ -151,6 +156,6 @@ prepareSolanaWith call helper c ledger obligation = prepare `onException` pause 
   validateSaved quantity plan = require
     (solPlanFingerprint plan==fingerprint c && solPlanRecipient plan==obligationRecipient obligation
       && solPlanAmount plan==quantity && solPlanReference plan==payoutReference c obligation
-      && units (solPlanFeeLimit plan)>0 && solPlanFeeLimit plan<=maxSolFee c && solPlanRentLimit plan<=maxSolAccountRent c
+      && units (solPlanFeeLimit plan)>0
       && recentSlot (solPlanRecent plan)>=0 && recentLastValidHeight (solPlanRecent plan)>0)
     "saved_solana_policy_mismatch"

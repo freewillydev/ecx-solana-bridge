@@ -25,6 +25,8 @@
   "maxNativeFee": "1000",
   "maxSolFee": "10000",
   "maxSolAccountRent": "2100000",
+  "maxNativeDailyCost": "10000",
+  "maxSolDailyCost": "10000000",
   "backupRequired": false,
   "solanaHistoryStart": null,
   "solanaOperatingHistoryStart": null

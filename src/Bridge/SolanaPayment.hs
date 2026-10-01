@@ -70,7 +70,7 @@ systemLamports account = do
 
 prepareSolanaSigned :: SolanaRPC -> (HelperRequest -> IO HelperReply) -> Config -> SolanaPlan -> IO SolanaSigned
 prepareSolanaSigned call helper c plan = do
-  require (solPlanFingerprint plan==fingerprint c && solPlanFeeLimit plan<=maxSolFee c
+  require (solPlanFingerprint plan==fingerprint c && units (solPlanFeeLimit plan)>0 && solPlanFeeLimit plan<=maxSolFee c
     && solPlanRentLimit plan<=maxSolAccountRent c) "saved_solana_policy_mismatch"
   checkBlockhashWindow call (solPlanRecent plan)
   let request=solanaPayoutRequest c plan

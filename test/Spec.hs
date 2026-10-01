@@ -3,6 +3,7 @@ module Main where
 import Bridge.Types
 import Bridge.Config
 import Bridge.Ledger
+import Bridge.Budget
 import Bridge.SolanaMessage
 import Bridge.SolanaDeposit
 import Bridge.Solana (inspectTokenAccount)
@@ -54,7 +55,7 @@ amt n = either (error . T.unpack) id (amount n)
 cap :: Text
 cap=T.replicate 64 "a"
 cfg :: FilePath -> Config
-cfg dir = Config L2LSignetDevnet "unit-fixture" "http://127.0.0.1:29432" (dir</>"cookie") "fixture-wallet" 16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47" "https://api.devnet.solana.com" Nothing "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM" "RWjpjjkpABkEGomLbZYyN53pA3FVdPXp9izJ25wErGX" "11111111111111111111111111111111" (dir</>"private/ledger.sqlite") (dir</>"customer/api.sock") (dir</>"admin/api.sock") "/usr/bin/false" (dir</>"helper.json") (amt 2) (amt 1000000000000) 100 300 600 1 (amt 1000) (amt 1000) False Nothing (amt 2100000) Nothing
+cfg dir = Config L2LSignetDevnet "unit-fixture" "http://127.0.0.1:29432" (dir</>"cookie") "fixture-wallet" 16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47" "https://api.devnet.solana.com" Nothing "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM" "RWjpjjkpABkEGomLbZYyN53pA3FVdPXp9izJ25wErGX" "11111111111111111111111111111111" (dir</>"private/ledger.sqlite") (dir</>"customer/api.sock") (dir</>"admin/api.sock") "/usr/bin/false" (dir</>"helper.json") (amt 2) (amt 1000000000000) 100 300 600 1 (amt 1000) (amt 10000) False Nothing (amt 0) Nothing (amt 100000) (amt 100000000)
 req :: OrderRequest
 req=OrderRequest NativeToWrapped (amt 100000) "fixture-solana-recipient" "fixture-native-refund" Nothing "retry-key"
 withDir :: (FilePath -> IO a) -> IO a
@@ -90,9 +91,9 @@ fundOrder l c=do
   obligations<-readyObligations l
   case obligations of [ob]->pure(o,ob); _->error "expected single obligation"
 -- Fixtures exercise ledger transitions only, never live network funding.
-testAttempt :: Ledger -> Obligation -> Text -> Text -> Text -> Text -> Int64 -> Maybe Text -> IO ()
-testAttempt l ob chain txid bytes policy limit point = do
-  beginPreparation l ob chain limit "{\"fixture\":true}"
+testAttempt :: Ledger -> Config -> Obligation -> Text -> Text -> Text -> Text -> Int64 -> Maybe Text -> IO ()
+testAttempt l c ob chain txid bytes policy limit point = do
+  beginPreparation l c ob chain limit "{\"fixture\":true}"
   storeAttempt l ob chain txid bytes policy limit point
 
 nativeFixture :: IO (NativePlan,[NativePrevout],Amount,NativeTx)
@@ -167,6 +168,117 @@ main=hspec $ do
         execute_ db "INSERT INTO postings(event_id,asset,account,delta) VALUES('rollback','Native','float',NULL)") :: IO (Either SomeException ())
       result `shouldSatisfy` either (const True) (const False)
       auditExport l `shouldReturn` originalAudit
+  describe "quote allowances and rolling operating budgets" $ do
+    it "reserves payout rent and refund costs before accepting a quote" $ withFunded $ \l c -> do
+      o<-createOrder l c{maxSolAccountRent=amt 80000} 100 cap req
+      ledgerAction l (\db->query_ db "SELECT kind,asset,amount,phase FROM operating_reservations ORDER BY kind" :: IO [(Text,Text,Int64,Text)])
+        `shouldReturn` [("conversion","Sol",90000,"quote"),("refund","Native",1000,"quote")]
+      ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` 10000
+      ledgerAction l (\db->freeOperating db "Native") `shouldReturn` 99000
+      createOrder l c{maxSolAccountRent=amt 80000} 100 cap req{idempotencyKey="no-capacity"} `shouldThrow` isError "insufficient_fee_budget"
+      ledgerAction l (\db->query_ db "SELECT id FROM orders" :: IO [Only Text]) `shouldReturn` [Only $ orderId o]
+    it "refuses a quote without refund funds even when its payout is funded" $ withFunded $ \l c -> do
+      createOrder l c{maxNativeFee=amt 100001} 100 cap req `shouldThrow` isError "insufficient_fee_budget"
+      ledgerAction l (\db->freeInventory db Wrapped) `shouldReturn` 1000000
+      ledgerAction l (\db->query_ db "SELECT count(*) FROM orders" :: IO [Only Int]) `shouldReturn` [Only 0]
+    it "serializes concurrent admission against the shared daily cap" $ withFunded $ \l c -> do
+      let limited=c{maxSolDailyCost=amt 25000}
+          create i=try (createOrder l limited 100 cap req{idempotencyKey=T.pack(show i)}) :: IO (Either BridgeError OrderView)
+      results<-mapConcurrently create [1..20::Int]
+      length [o|Right o<-results] `shouldBe` 2
+      [err|Left err<-results] `shouldBe` replicate 18 (BridgeError "operating_daily_limit")
+      ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` 80000
+      ledgerAction l (\db->query_ db "SELECT count(*) FROM operating_reservations" :: IO [Only Int]) `shouldReturn` [Only 4]
+    it "snapshots fee ceilings and never reserves twice on a repeated request" $ withFunded $ \l c -> do
+      o<-createOrder l c 100 cap req
+      createOrder l c{maxNativeFee=amt 5,maxSolFee=amt 1,maxSolAccountRent=amt 999999} 100 cap req `shouldReturn` o
+      ledgerAction l (\db->orderCostLimits db $ orderId o) `shouldReturn` CostLimits (amt 1000) (amt 10000) (amt 0)
+      ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` 90000
+      result<-try (ledgerAction l $ \db->execute_ db "UPDATE order_cost_limits SET native_fee=5") :: IO (Either SomeException ())
+      result `shouldSatisfy` either (const True) (const False)
+    it "transfers the allowance once and charges only actual settled costs" $ withFunded $ \l c -> do
+      let limited=c{maxSolFee=amt 9000,maxSolAccountRent=amt 1000,maxSolDailyCost=amt 10000}
+      (_,ob)<-fundOrder l limited
+      ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` 90000
+      testAttempt l limited ob "Solana" "budget-settlement" "bytes" "{}" 10000 Nothing
+      ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` 90000
+      expireQuotes l 100000
+      ledgerAction l (\db->freeOperating db "Native") `shouldReturn` 99000
+      _<-markBroadcastIntent l "budget-settlement"
+      recordSettlement l "budget-settlement" (PaymentCosts (amt 5000) (amt 1000)) "proof"
+      recordSettlement l "budget-settlement" (PaymentCosts (amt 5000) (amt 1000)) "proof"
+      ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` 94000
+      ledgerAction l (\db->freeOperating db "Native") `shouldReturn` 100000
+      ledgerAction l (\db->query_ db "SELECT count(*) FROM operating_costs" :: IO [Only Int]) `shouldReturn` [Only 2]
+      createOrder l limited 100 cap req{idempotencyKey="spent-budget"} `shouldThrow` isError "operating_daily_limit"
+    it "keeps the separate refund allowance after a failed conversion" $ withFunded $ \l c -> do
+      (_,ob)<-fundOrder l c
+      testAttempt l c ob "Solana" "budget-failure" "bytes" "{}" 10000 Nothing
+      _<-markBroadcastIntent l "budget-failure"
+      recordFailedSolana l "budget-failure" 5000 "finalized-failure"
+      ledgerAction l (\db->freeOperating db "Native") `shouldReturn` 99000
+      ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` 95000
+      refundOb<-createRefund l (obligationDeposit ob)
+      testAttempt l c refundOb "Native" "budget-refund" "bytes" "{}" 1000 Nothing
+      ledgerAction l (\db->freeOperating db "Native") `shouldReturn` 99000
+      obligationAmount refundOb `shouldBe` units (input req)
+    it "releases only provisional costs on expiry and reacquires them for a late refund" $ withFunded $ \l c -> do
+      o<-createOrder l c 100 cap req
+      expireQuotes l 100000
+      ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` 100000
+      ledgerAction l (\db->freeOperating db "Native") `shouldReturn` 100000
+      observeDeposit l (Deposit "late-budget:0" (Just $ orderId o) Native (input req) "anchor" 1 True 100001) "cursor"
+      ob<-createRefund l "late-budget:0"
+      testAttempt l c ob "Native" "late-budget-refund" "bytes" "{}" 1000 Nothing
+      ledgerAction l (\db->freeOperating db "Native") `shouldReturn` 99000
+    it "rolls back a failed transfer if the current spending cap was lowered" $ withFunded $ \l c -> do
+      (_,ob)<-fundOrder l c
+      beginPreparation l c{maxSolDailyCost=amt 9999} ob "Solana" 10000 "policy" `shouldThrow` isError "operating_daily_limit"
+      ledgerAction l (\db->query_ db "SELECT phase FROM operating_reservations WHERE kind='conversion'" :: IO [Only Text]) `shouldReturn` [Only "obligation"]
+      pendingPreparations l `shouldReturn` []
+      beginPreparation l c ob "Solana" 10000 "policy"
+      ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` 90000
+    it "counts an extra refund on an already-paid order against queue capacity" $ withFunded $ \l c -> do
+      (o,ob)<-fundOrder l c
+      testAttempt l c ob "Solana" "queue-settlement" "bytes" "{}" 10000 Nothing
+      _<-markBroadcastIntent l "queue-settlement"
+      recordSettlement l "queue-settlement" (PaymentCosts (amt 5000) (amt 0)) "proof"
+      observeDeposit l (Deposit "extra:0" (Just $ orderId o) Native (amt 5000) "anchor" 1 True 120) "cursor"
+      _<-createRefund l "extra:0"
+      status <$> readOrder l cap (orderId o) `shouldReturn` "Paid"
+      createOrder l c{maxQueued=1} 120 cap req{idempotencyKey="queue-full"} `shouldThrow` isError "queue_full"
+    it "cannot classify a treasury spend that consumes quoted operating funds" $ withFunded $ \l c -> do
+      _<-createOrder l c 100 cap req
+      commitScan l (ScanBatch "SolanaOperating" "origin" Nothing "quote-spend" 100 []
+        [ChainEvent "quote-spend" "outgoing" "100" (object ["delta" .= ("-95000"::Text),"feeUnits" .= amt 5000])])
+      recordTreasurySpend l "SolanaOperating" "quote-spend" (object ["fixture" .= True]) `shouldThrow` isError "treasury_spend_exceeds_free_allocation"
+    it "counts fees once until the full rolling day ends, including future bookings" $ withFunded $ \l c -> do
+      (_,ob)<-fundOrder l c
+      testAttempt l c ob "Solana" "window-failure" "bytes" "{}" 10000 Nothing
+      _<-markBroadcastIntent l "window-failure"
+      recordFailedSolana l "window-failure" 5000 "finalized-failure"
+      [Only booked]<-ledgerAction l (\db->query_ db "SELECT recorded_at FROM operating_costs" :: IO [Only Int64])
+      ledgerAction l (\db->operatingSpent db "Sol" (booked-100)) `shouldReturn` 5000
+      ledgerAction l (\db->operatingSpent db "Sol" (booked+86399)) `shouldReturn` 5000
+      ledgerAction l (\db->operatingSpent db "Sol" (booked+86400)) `shouldReturn` 0
+      tamper<-try (ledgerAction l $ \db->execute_ db "UPDATE operating_costs SET recorded_at=0") :: IO (Either SomeException ())
+      tamper `shouldSatisfy` either (const True) (const False)
+    it "retains holds and accounting time across restart and clock rollback" $ withDir $ \dir -> do
+      let c=cfg dir
+      withLedger (dbPath c) (fingerprint c) $ \l -> do
+        fundAllocation l "float" Wrapped "float" (amt 1000000)
+        fundAllocation l "sol" Sol "operating" (amt 100000)
+        fundAllocation l "native" Native "operating" (amt 100000)
+        resumeAfterChecks l
+        _<-createOrder l c 100 cap req
+        -- Offline clock fault injection; no production clock/network is changed.
+        ledgerAction l $ \db->execute_ db "UPDATE operating_clock SET last_time=4000000000"
+        ledgerAction l operatingTime `shouldReturn` 4000000000
+      withLedger (dbPath c) (fingerprint c) $ \l -> do
+        ledgerAction l operatingTime `shouldReturn` 4000000000
+        ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` 90000
+        ledgerAction l (\db->freeOperating db "Native") `shouldReturn` 99000
+        available <$> readiness l `shouldReturn` False
   describe "atomic observer checkpoints" $ do
     it "rolls back an entire page and its cursor if any receipt conflicts" $ withFunded $ \l c -> do
       o<-createOrder l c 100 cap req
@@ -269,9 +381,9 @@ main=hspec $ do
   describe "signed intent and settlement invariants" $ do
     it "reserves the destination and fee budget before signing, without allowing a refund race" $ withFunded $ \l c -> do
       (o,ob)<-fundOrder l c
-      beginPreparation l ob "Solana" 5000 "fixture-policy"
-      beginPreparation l ob "Solana" 5000 "fixture-policy"
-      beginPreparation l ob "Solana" 6000 "fixture-policy" `shouldThrow` isError "preparation_conflict"
+      beginPreparation l c ob "Solana" 5000 "fixture-policy"
+      beginPreparation l c ob "Solana" 5000 "fixture-policy"
+      beginPreparation l c ob "Solana" 6000 "fixture-policy" `shouldThrow` isError "preparation_conflict"
       length <$> pendingPreparations l `shouldReturn` 1
       pendingAttempts l `shouldReturn` []
       status <$> readOrder l cap (orderId o) `shouldReturn` "Preparing"
@@ -282,16 +394,17 @@ main=hspec $ do
       promoteDeposit l 110 "other-tx:0" `shouldReturn` True
       obs<-readyObligations l
       case obs of
-        [otherOb]->beginPreparation l otherOb "Solana" 5000 "other-policy" `shouldThrow` isError "destination_payment_unresolved"
+        [otherOb]->beginPreparation l c otherOb "Solana" 5000 "other-policy" `shouldThrow` isError "destination_payment_unresolved"
         _->expectationFailure "expected one remaining ready obligation"
     it "retains an immutable unsigned draft after interruption and restart" $ withDir $ \dir -> do
       let c=cfg dir
       withLedger (dbPath c) (fingerprint c) $ \l -> do
         fundAllocation l "float" Wrapped "float" (amt 1000000)
         fundAllocation l "fees" Sol "operating" (amt 10000)
+        fundAllocation l "native-fees" Native "operating" (amt 1000)
         resumeAfterChecks l
         (_,ob)<-fundOrder l c
-        beginPreparation l ob "Solana" 5000 "fixture-policy"
+        beginPreparation l c ob "Solana" 5000 "fixture-policy"
         storeDraft l (obligationId ob) "fixture-unsigned-draft"
         storeDraft l (obligationId ob) "fixture-unsigned-draft"
         storeDraft l (obligationId ob) "different-draft" `shouldThrow` isError "preparation_draft_conflict"
@@ -310,9 +423,10 @@ main=hspec $ do
       withLedger (dbPath c) (fingerprint c) $ \l -> do
         fundAllocation l "float" Wrapped "float" (amt 1000000)
         fundAllocation l "sol-fees" Sol "operating" (amt 10000)
+        fundAllocation l "native-fees" Native "operating" (amt 1000)
         resumeAfterChecks l
         (_,ob)<-fundOrder l c
-        testAttempt l ob "Solana" "fixture-signature" "fixture-exact-bytes" "{}" 5000 Nothing
+        testAttempt l c ob "Solana" "fixture-signature" "fixture-exact-bytes" "{}" 5000 Nothing
         _<-markBroadcastIntent l "fixture-signature"
         pure ()
       withLedger (dbPath c) (fingerprint c) $ \l -> do
@@ -321,17 +435,17 @@ main=hspec $ do
         map attemptBytes attempts `shouldBe` ["fixture-exact-bytes"]
         map attemptState attempts `shouldBe` ["broadcast_intent"]
         resumeAfterChecks l `shouldThrow` isError "unresolved_intents_require_review"
-    it "cannot commit an intent without operating funds" $ withFunded $ \l c -> do
+    it "cannot exceed the order's saved fee ceiling" $ withFunded $ \l c -> do
       (_,ob)<-fundOrder l c
-      testAttempt l ob "Solana" "fixture-signature" "bytes" "{}" 100001 Nothing `shouldThrow` isError "insufficient_fee_budget"
+      testAttempt l c ob "Solana" "fixture-signature" "bytes" "{}" 100001 Nothing `shouldThrow` isError "order_fee_limit_exceeded"
       pendingAttempts l `shouldReturn` []
     it "requires correct chain and database-bound obligation" $ withFunded $ \l c -> do
       (_,ob)<-fundOrder l c
-      testAttempt l ob "Native" "tx" "bytes" "{}" 1 Nothing `shouldThrow` isError "wrong_destination_chain"
-      testAttempt l ob{obligationRecipient="attacker"} "Solana" "tx" "bytes" "{}" 1 Nothing `shouldThrow` isError "obligation_mismatch"
+      testAttempt l c ob "Native" "tx" "bytes" "{}" 1 Nothing `shouldThrow` isError "wrong_destination_chain"
+      testAttempt l c ob{obligationRecipient="attacker"} "Solana" "tx" "bytes" "{}" 1 Nothing `shouldThrow` isError "obligation_mismatch"
     it "keeps earned fees out of available source float and settles once" $ withFunded $ \l c -> do
       (_,ob)<-fundOrder l c
-      testAttempt l ob "Solana" "fixture-signature" "bytes" "{}" 5000 Nothing
+      testAttempt l c ob "Solana" "fixture-signature" "bytes" "{}" 5000 Nothing
       _<-markBroadcastIntent l "fixture-signature"
       recordSettlement l "fixture-signature" (PaymentCosts (amt 5000) (amt 0)) "fixture-finalized-proof"
       recordSettlement l "fixture-signature" (PaymentCosts (amt 5000) (amt 0)) "fixture-finalized-proof"
@@ -340,13 +454,13 @@ main=hspec $ do
       pendingAttempts l `shouldReturn` []
     it "cannot authorize a first send after loss of source eligibility" $ withFunded $ \l c -> do
       (o,ob)<-fundOrder l c
-      testAttempt l ob "Solana" "tx" "bytes" "{}" 5000 Nothing
+      testAttempt l c ob "Solana" "tx" "bytes" "{}" 5000 Nothing
       observeDeposit l (Deposit "fixture-tx:0" (Just $ orderId o) Native (input req) "reorg" 0 False 100) "reorg-cursor"
       markBroadcastIntent l "tx" `shouldThrow` isError "attempt_not_sendable"
       length <$> pendingAttempts l `shouldReturn` 1
     it "rechecks backup coverage and source eligibility after a recorded broadcast intent" $ withFunded $ \l c -> do
       (o,ob)<-fundOrder l c
-      testAttempt l ob "Solana" "tx" "exact-bytes" "{}" 5000 Nothing
+      testAttempt l c ob "Solana" "tx" "exact-bytes" "{}" 5000 Nothing
       authorizeRecordedSend l True "tx" `shouldThrow` isError "broadcast_intent_required"
       sequenceNumber<-markBroadcastIntent l "tx"
       authorizeRecordedSend l True "tx" `shouldThrow` isError "backup_pending"
@@ -394,7 +508,7 @@ main=hspec $ do
       createRefund l did `shouldReturn` ob
       obligationAmount ob `shouldBe` units (input redeem)
       obligationRecipient ob `shouldBe` refund redeem
-      testAttempt l ob "Solana" "late-refund" "fixture-refund-bytes" "{}" 5000 Nothing
+      testAttempt l c ob "Solana" "late-refund" "fixture-refund-bytes" "{}" 5000 Nothing
       _<-markBroadcastIntent l "late-refund"
       recordSettlement l "late-refund" (PaymentCosts (amt 5000) (amt 0)) "fixture-proof"
       recordSettlement l "late-refund" (PaymentCosts (amt 5000) (amt 0)) "fixture-proof"
@@ -405,7 +519,7 @@ main=hspec $ do
       ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM postings WHERE account='earned'" :: IO [Only Int]) `shouldReturn` [Only 0]
     it "separates rent from fees, caps their total, and refuses changed settlement evidence" $ withFunded $ \l c -> do
       (_,ob)<-fundOrder l c
-      testAttempt l ob "Solana" "costed-tx" "bytes" "{}" 10000 Nothing
+      testAttempt l c ob "Solana" "costed-tx" "bytes" "{}" 10000 Nothing
       _<-markBroadcastIntent l "costed-tx"
       recordSettlement l "costed-tx" (PaymentCosts (amt 5000) (amt 5001)) "proof" `shouldThrow` isError "settlement_fee_or_evidence_invalid"
       recordSettlement l "costed-tx" (PaymentCosts (amt 5000) (amt 3000)) "proof"
@@ -418,7 +532,7 @@ main=hspec $ do
       observeDeposit l (Deposit "partial:0" (Just $ orderId o) Native (amt 1000) "anchor" 1 True 100) "cursor"
       ob<-createRefund l "partial:0"
       obligationRecipient ob `shouldBe` refund req
-      testAttempt l ob "Native" "refund-tx" "fixture-refund-bytes" "{}" 100 Nothing
+      testAttempt l c ob "Native" "refund-tx" "fixture-refund-bytes" "{}" 100 Nothing
       _<-markBroadcastIntent l "refund-tx"
       recordSettlement l "refund-tx" (PaymentCosts (amt 100) (amt 0)) "fixture-refund-proof"
       ledgerAction l (\db->freeInventory db Native) `shouldReturn` 1000000
@@ -426,13 +540,13 @@ main=hspec $ do
       status <$> readOrder l cap (orderId o) `shouldReturn` "Refunded"
     it "will not refund a signed or possibly broadcast conversion" $ withFunded $ \l c -> do
       (_,ob)<-fundOrder l c
-      testAttempt l ob "Solana" "tx" "signed-bytes" "{}" 5000 Nothing
+      testAttempt l c ob "Solana" "tx" "signed-bytes" "{}" 5000 Nothing
       createRefund l "fixture-tx:0" `shouldThrow` isError "refund_would_race_payment"
       _<-markBroadcastIntent l "tx"
       createRefund l "fixture-tx:0" `shouldThrow` isError "refund_would_race_payment"
     it "charges a failed Solana transaction fee and preserves full refundable principal" $ withFunded $ \l c -> do
       (_,ob)<-fundOrder l c
-      testAttempt l ob "Solana" "failed-tx" "bytes" "{}" 5000 Nothing
+      testAttempt l c ob "Solana" "failed-tx" "bytes" "{}" 5000 Nothing
       _<-markBroadcastIntent l "failed-tx"
       recordFailedSolana l "failed-tx" 5000 "fixture-finalized-failure"
       recordFailedSolana l "failed-tx" 5000 "fixture-finalized-failure"
@@ -503,7 +617,7 @@ main=hspec $ do
         recordTreasurySpend l "Native" "operator-payment" proof `shouldThrow` isError "treasury_spend_conflict"
     it "cannot classify an existing customer attempt as an operator spend" $ withFunded $ \l c -> do
       (_,ob)<-fundOrder l c
-      testAttempt l ob "Solana" "customer-signature" "bytes" "{}" 5000 Nothing
+      testAttempt l c ob "Solana" "customer-signature" "bytes" "{}" 5000 Nothing
       pause l "fixture-review"
       commitScan l (ScanBatch "Solana" "origin" Nothing "customer-signature" 100 []
         [ChainEvent "customer-signature" "outgoing" "100" (object ["delta" .= ("-99800"::Text)])])
@@ -511,14 +625,14 @@ main=hspec $ do
         `shouldThrow` isError "customer_attempt_cannot_be_treasury_spend"
     it "requires review when signed bytes appear on-chain before a recorded broadcast intent" $ withFunded $ \l c -> do
       (_,ob)<-fundOrder l c
-      testAttempt l ob "Solana" "premature-signature" "bytes" "{}" 5000 Nothing
+      testAttempt l c ob "Solana" "premature-signature" "bytes" "{}" 5000 Nothing
       commitScan l (ScanBatch "SolanaOperating" "origin" Nothing "premature-signature" 100 []
         [ChainEvent "premature-signature" "outgoing" "100" (object ["delta" .= ("-5000"::Text),"feeUnits" .= amt 5000])])
       ledgerAction l (\db->query_ db "SELECT needs_review FROM chain_events" :: IO [Only Bool]) `shouldReturn` [Only True]
       available <$> readiness l `shouldReturn` False
     it "preserves reserved operating funds when reconciling a separate operator spend" $ withFunded $ \l c -> do
       (_,ob)<-fundOrder l c
-      beginPreparation l ob "Solana" 5000 "fixture-policy"
+      beginPreparation l c ob "Solana" 5000 "fixture-policy"
       commitScan l (ScanBatch "SolanaOperating" "origin" Nothing "operator-sig" 100 []
         [ChainEvent "operator-sig" "outgoing" "100" (object ["delta" .= ("-96000"::Text),"feeUnits" .= amt 5000])])
       recordTreasurySpend l "SolanaOperating" "operator-sig" (object ["fixture" .= True])
@@ -557,9 +671,33 @@ main=hspec $ do
         execute db "INSERT INTO deployment(singleton,schema_version,fingerprint,critical_sequence,backup_sequence) VALUES(1,1,?,47,46)" (Only $ fingerprint c)
         execute_ db "INSERT INTO events(id,description) VALUES('legacy','existing receipt')"
         execute_ db "INSERT INTO postings(event_id,asset,account,delta) VALUES('legacy','Native','float',1000),('legacy','Native','external',-1000)"
+        execute_ db "INSERT INTO events(id,description) VALUES('legacy-cost','historical fee with no trustworthy timestamp')"
+        execute_ db "INSERT INTO postings(event_id,asset,account,delta) VALUES('legacy-cost','Native','operating',-10),('legacy-cost','Native','external',10)"
       withLedger (dbPath c) (fingerprint c) $ \l -> do
         ledgerAction l (\db->query_ db "SELECT schema_version,critical_sequence,backup_sequence FROM deployment" :: IO [(Int,Int64,Int64)]) `shouldReturn` [(schemaVersion,47,46)]
         ledgerAction l (\db->freeInventory db Native) `shouldReturn` 1000
+        ledgerAction l (\db->operatingTime db >>= operatingSpent db "Native") `shouldReturn` 10
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM operating_costs" :: IO [Only Int]) `shouldReturn` [Only 1]
+        available <$> readiness l `shouldReturn` False
+    it "preserves an unfinished legacy order without inventing cost policy or allowing resume" $ withDir $ \dir -> do
+      let c=cfg dir
+          json value=TE.decodeUtf8 $ LBS.toStrict $ encode value
+      capHash<-either (fail . T.unpack) pure (capabilityHash cap)
+      quoted<-either (fail . T.unpack) pure (makeQuote (direction req) (input req))
+      createDirectoryIfMissing True (takeDirectory $ dbPath c)
+      bracket (open $ dbPath c) close $ \db -> do
+        schema<-TE.decodeUtf8 <$> BS.readFile "migrations/001.sql"
+        forM_ (T.splitOn "-- @statement" schema) $ execute_ db . fromString . T.unpack
+        execute db "INSERT INTO deployment(singleton,schema_version,fingerprint) VALUES(1,1,?)" (Only $ fingerprint c)
+        forM_ [2..6::Int] $ \v -> do
+          migration<-TE.decodeUtf8 <$> BS.readFile ("migrations/00"<>show v<>".sql")
+          forM_ (T.splitOn "-- @statement" migration) $ execute_ db . fromString . T.unpack
+        execute db "INSERT INTO orders(id,capability_hash,idempotency_key,request_hash,request_json,quote_json,policy_json,status,deadline,grace_deadline) VALUES('legacy-order',?,'legacy-key','legacy-request',?,?,?,'Provisioning',400,1000)"
+          (capHash,json req,json quoted,json $ PolicySnapshot 1 "finalized" (fingerprint c))
+      withLedger (dbPath c) (fingerprint c) $ \l -> do
+        request <$> readOrder l cap "legacy-order" `shouldReturn` req
+        ledgerAction l (\db->orderCostLimits db "legacy-order") `shouldThrow` isError "order_cost_policy_missing"
+        resumeAfterChecks l `shouldThrow` isError "legacy_order_cost_review_required"
         available <$> readiness l `shouldReturn` False
     it "does not expose canonical instructions before acknowledged coverage" $ withFunded $ \l c -> do
       o<-createOrder l c 100 cap req
@@ -664,7 +802,7 @@ main=hspec $ do
             _ -> reject "unused"
       -- Persisting an unsigned draft may be interrupted after node-side locks.
       -- The ledger must still prevent another payment/refund without recovery.
-      beginPreparation l ob "Native" 1000 (TE.decodeUtf8 $ LBS.toStrict $ encode plan)
+      beginPreparation l c ob "Native" 1000 (TE.decodeUtf8 $ LBS.toStrict $ encode plan)
       let lost _ method _=if method=="listlockunspent" then pure (toJSON ([]::[Outpoint])) else reject "simulated_lost_funding_reply"
       prepareNativeWith lost c l ob `shouldThrow` isError "simulated_lost_funding_reply"
       map preparationDraft <$> pendingPreparations l `shouldReturn` [Nothing]
@@ -730,7 +868,7 @@ main=hspec $ do
       prepare expired `shouldThrow` isError "solana_blockhash_window_too_short"
       prepare stale `shouldThrow` isError "solana_context_too_old"
       prepare failed `shouldThrow` isError "solana_simulation_failed"
-    it "reserves fee plus rent and saves the request before signing; retries reuse exact bytes" $ withSolanaLedger $ \l c plan reply -> do
+    it "uses the quoted fee/rent ceilings after settings change and reuses saved bytes" $ withSolanaLedger $ \l c plan reply -> do
       (_,ob)<-fundSolanaOrder l c plan
       calls<-newIORef []
       let call method params=modifyIORef' calls (<>[method]) >> solanaContract c plan Null method params
@@ -741,7 +879,7 @@ main=hspec $ do
             pendingAttempts l `shouldReturn` []
             -- The public deterministic codec key signs only this offline test.
             codecReply c request reply
-      signature<-prepareSolanaWith call helper c l ob
+      signature<-prepareSolanaWith call helper c{maxSolFee=amt 1,maxSolAccountRent=amt 0} l ob
       initialCalls<-readIORef calls
       pause l "fixture-restart"
       prepareSolanaWith call helper c l ob `shouldReturn` signature
@@ -762,11 +900,11 @@ main=hspec $ do
       pendingAttempts l `shouldReturn` []
       available <$> readiness l `shouldReturn` False
       prepareSolanaWith (solanaContract c plan Null) helper c l ob `shouldThrow` isError "payouts_paused"
-    it "does not invoke the helper unless the full operating budget can be reserved" $ withFunded $ \l c -> do
+    it "does not invoke the helper after the current daily operating cap is lowered" $ withFunded $ \l c -> do
       (_,ob)<-fundOrder l c
       (_,plan,_)<-solanaFixture
       let helper _=expectationFailure "signer called without budget" >> reject "unexpected"
-      prepareSolanaWith (solanaContract c plan Null) helper c l ob `shouldThrow` isError "insufficient_fee_budget"
+      prepareSolanaWith (solanaContract c plan Null) helper c{maxSolDailyCost=amt 1} l ob `shouldThrow` isError "operating_daily_limit"
       pendingPreparations l `shouldReturn` []
       pendingAttempts l `shouldReturn` []
   describe "unsigned customer deposits (SDK fixture and offline RPC contracts)" $ do
@@ -959,7 +1097,7 @@ main=hspec $ do
       recordSolanaExpiry l attempt "changed proof" `shouldThrow` isError "expiry_evidence_conflict"
       readyObligations l `shouldReturn` []
       resumeAfterChecks l
-      beginPreparation l ob "Solana" (attemptFeeLimit attempt) "new-policy" `shouldThrow` isError "obligation_not_ready"
+      beginPreparation l c ob "Solana" (attemptFeeLimit attempt) "new-policy" `shouldThrow` isError "obligation_not_ready"
       approveSolanaRetryWith verified configured l (attemptId attempt) "operator retry" `shouldThrow` isError "pause_before_operator_action"
       pause l "operator-action"
       approveSolanaRetryWith verified configured l (attemptId attempt) "operator retry"
@@ -968,7 +1106,12 @@ main=hspec $ do
       available <$> readiness l `shouldReturn` False
       ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM solana_retry_approvals" :: IO [Only Int]) `shouldReturn` [Only 1]
       resumeAfterChecks l
-      testAttempt l ob "Solana" "replacement" "new-fixture-bytes" "new-policy" (attemptFeeLimit attempt) Nothing
+      ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` 3000000
+      testAttempt l c{maxSolDailyCost=amt 1} ob "Solana" "unbudgeted-replacement" "bytes" "new-policy" (attemptFeeLimit attempt) Nothing
+        `shouldThrow` isError "operating_daily_limit"
+      pendingPreparations l `shouldReturn` []
+      testAttempt l c ob "Solana" "replacement" "new-fixture-bytes" "new-policy" (attemptFeeLimit attempt) Nothing
+      ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` 890000
       ledgerAction l (\db->query_ db "SELECT generation,retired_txid FROM preparations ORDER BY generation" :: IO [(Int,Maybe Text)])
         `shouldReturn` [(0,Just $ attemptId attempt),(1,Nothing)]
       map attemptId <$> pendingAttempts l `shouldReturn` ["replacement"]
@@ -994,7 +1137,7 @@ main=hspec $ do
       recordExpiryOrigins l configured
       settleAttemptWith transport{paymentSolana=expiryContract configured} configured l attempt `shouldReturn` "expired"
       ledgerAction l $ \db->execute db "UPDATE obligations SET status='ready' WHERE id=?" (Only $ obligationId ob)
-      beginPreparation l ob "Solana" (attemptFeeLimit attempt) "new-policy" `shouldThrow` isError "solana_retry_not_authorized"
+      beginPreparation l c ob "Solana" (attemptFeeLimit attempt) "new-policy" `shouldThrow` isError "solana_retry_not_authorized"
       pendingPreparations l `shouldReturn` []
     it "rechecks source eligibility before approving a replacement" $ withSendFixture $ \l c _ attempt transport -> do
       let configured=expiryConfig c
@@ -1234,7 +1377,7 @@ solanaFixture=do
   target<-fieldValue "recipient" value
   token<-fieldValue "mint" value
   hash<-fieldValue "blockhash" value
-  let c=(cfg "/unused-codec-test"){deploymentId="codec-fixture",mint=token,custodyOwner=owner,custodyAta=replySource reply,maxSolFee=amt 10000}
+  let c=(cfg "/unused-codec-test"){deploymentId="codec-fixture",mint=token,custodyOwner=owner,custodyAta=replySource reply,maxSolFee=amt 10000,maxSolAccountRent=amt 2100000}
       plan=SolanaPlan (fingerprint c) target (amt 3) "order-1" (RecentBlockhash hash 1000 100) (maxSolFee c) (maxSolAccountRent c)
   pure(c,plan,reply)
 
@@ -1264,6 +1407,7 @@ withSolanaLedger action=withDir $ \dir -> do
   withLedger (dbPath c) (fingerprint c) $ \l -> do
     fundAllocation l "fixture-tokens" Wrapped "float" (amt 10000)
     fundAllocation l "fixture-operating" Sol "operating" (amt 3000000)
+    fundAllocation l "fixture-native-operating" Native "operating" (amt 10000)
     resumeAfterChecks l
     action l c plan reply
 fundSolanaOrder :: Ledger -> Config -> SolanaPlan -> IO (OrderView,Obligation)
@@ -1401,6 +1545,8 @@ withDepositFixture action=withDir $ \dir -> do
       depositRequest=OrderRequest WrappedToNative (amt 3) "offline-native-recipient" owner (Just owner) "offline-deposit"
   withLedger (dbPath c) (fingerprint c) $ \l -> do
     fundAllocation l "fixture-native-float" Native "float" (amt 10000)
+    fundAllocation l "fixture-sol-fees" Sol "operating" (amt 3000000)
+    fundAllocation l "fixture-native-fees" Native "operating" (amt 10000)
     resumeAfterChecks l
     created<-createOrder l c 100 cap depositRequest
     bindInstruction l (orderId created) (solanaDepositMemo c $ orderId created)
