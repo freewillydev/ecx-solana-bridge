@@ -1,5 +1,7 @@
 module Bridge.Postgres.NativeRecovery (candidates,observation,recordCheck) where
 import Bridge.Types
+import Bridge.NativePayment
+import qualified Bridge.Postgres.NativeFamily as Family
 import Bridge.Ledger (Attempt(..),PaymentCosts(..),NativeSettlementCheck(..))
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
@@ -71,6 +73,12 @@ recordCheck ledger expected previous check = ledgerAction ledger $ \c->do
     :: IO [(Attempts,Text)]
   require (map (uncurry asAttempt) rows==[expected] && attemptState expected=="settled" && attemptChain expected=="Native" &&
     map (attemptsObservationJson . fst) rows==[Just previous]) "native_settlement_changed"
+  case check of
+    NativeSettlementReplaced family txid costs proof->winnerChangeC c expected previous family txid costs proof
+    _->finalityC c expected previous check
+
+finalityC :: PG.Connection -> Attempt -> Text -> NativeSettlementCheck -> IO ()
+finalityC c expected previous check = do
   (state,saved) <- case check of
     NativeSettlementConfirming->pure("confirming",json $ object["reason" .= ("native_confirmation_policy_pending"::Text)])
     NativeSettlementUnavailable reason->do
@@ -97,8 +105,7 @@ recordCheck ledger expected previous check = ledgerAction ledger $ \c->do
           require (chaineventsAnchor event==anchor && confirmations>=depth) "native_recovery_scan_not_current"
         _->reject "native_recovery_scan_not_current"
       pure("reconfirmed",json $ object["costs" .= costs,"proof" .= proof])
-    -- Family fee adjustment is a separate required port. Until it exists, an
-    -- observed winner change stays paused for review and cannot book new money.
+    -- Winner changes must use the family/accounting path selected above.
     NativeSettlementReplaced{}->reject "native_winner_change_requires_accounting"
   require (T.length saved<=32768) "native_recovery_evidence_too_large"
   oldReview <- O.runSelect c $ O.limit 1 $ O.orderBy (O.desc nativepaymentrecoveriesId) $ do
@@ -133,3 +140,66 @@ text :: Text -> O.Field O.SqlText
 text = O.sqlStrictText
 num :: Int64 -> O.Field O.SqlInt8
 num = O.sqlInt8
+
+-- Atomic canonical-winner move. Principal, reservations and intent resolution
+-- remain settled; only the proved fee difference is appended to the ledger.
+winnerChangeC :: PG.Connection -> Attempt -> Text -> [Attempt] -> Text -> PaymentCosts -> Text -> IO ()
+winnerChangeC c previousWinner previous expected txid costs proof = do
+  family <- Family.familyC c (attemptIntent previousWinner)
+  require (family==expected && previousWinner `elem` family && txid/=attemptId previousWinner) "native_replacement_family_changed"
+  winner <- case filter ((==txid).attemptId) family of [a]->pure a; _->reject "native_family_winner_missing"
+  require (attemptState winner `elem` ["broadcast_intent","review"] && all (maybe False (>0).attemptSequence) [previousWinner,winner]) "unrecorded_broadcast_observed"
+  contexts <- O.runSelect c $ do
+    i <- O.selectTable intentsTable
+    ob <- O.selectTable obligationsTable
+    order <- O.selectTable ordersTable
+    reservation <- O.selectTable feereservationsTable
+    O.where_ (intentsId i O..== text(attemptIntent winner) O..&& intentsResolved i O..== num 1 O..&&
+      intentsObligationId i O..== obligationsId ob O..&& obligationsOrderId ob O..== ordersId order O..&&
+      obligationsStatus ob O..== text "paid" O..&& feereservationsIntentId reservation O..== intentsId i O..&& feereservationsReleased reservation O..== num 1)
+    pure(ob,order)
+    :: IO [(Obligations,Orders)]
+  (ob,order) <- case contexts of [row]->pure row; _->reject "native_winner_context_changed"
+  policy <- stored(ordersPolicyJson order)
+  signed <- stored(attemptPolicy winner)
+  oldSigned <- stored(attemptPolicy previousWinner)
+  let plan=signedNativePlan signed
+      quantity=obligationsAmount ob
+  require (obligationsAsset ob=="Native" && units(planAmount plan)==quantity && planRecipient plan==obligationsRecipient ob && planDepth plan==nativeDepth policy) "saved_native_policy_mismatch"
+  old <- stored previous :: IO Value
+  oldCosts <- fieldValue "costs" old
+  oldProofText <- fieldValue "proof" old
+  oldProof <- stored oldProofText :: IO Value
+  oldTxid <- fieldValue "txid" oldProof
+  oldDepth <- fieldValue "requiredDepth" oldProof
+  zero <- either reject pure(amount 0)
+  require (oldTxid==attemptId previousWinner && oldDepth==planDepth plan && oldCosts==PaymentCosts (signedNativeFee oldSigned) zero) "native_recovery_cost_changed"
+  require (costs==PaymentCosts (signedNativeFee signed) zero) "native_recovery_cost_changed"
+  value <- stored proof :: IO Value
+  provedTxid <- fieldValue "txid" value
+  anchor <- fieldValue "blockhash" value
+  depth <- fieldValue "requiredDepth" value
+  require (provedTxid==txid && depth==planDepth plan) "native_recovery_policy_changed"
+  history <- eventRows c txid
+  (event,evidence) <- case history of [row]->pure row; _->reject "native_recovery_scan_not_current"
+  observed <- stored(observationevidenceEvidenceJson evidence) :: IO Value
+  eventProof <- fieldValue "proof" observed :: IO Value
+  confirmations <- fieldValue "confirmations" eventProof
+  net <- fieldValue "walletNetUnits" eventProof
+  fee <- fieldValue "feeUnits" eventProof
+  require (chaineventsAnchor event==anchor && confirmations>=depth && net==T.pack(show $ negate $ toInteger quantity) && fee==signedNativeFee signed) "native_recovery_scan_not_current"
+  let saved=json $ object["costs" .= costs,"proof" .= proof]
+      delta=toInteger(units $ networkFee costs)-toInteger(units $ networkFee oldCosts)
+  require (T.length saved<=32768 && delta/=0 && abs delta<=toInteger(maxBound::Int64)) "invalid_native_settlement"
+  sequenceNo <- criticalSequence c
+  inserted <- O.runInsert c O.Insert {O.iTable=nativewinnerchangesTable,O.iRows=[NativeWinnerChanges (num sequenceNo) (text $ attemptId previousWinner) (text txid) (text previous) (text saved) (text $ chaineventsEvidenceHash event) (num $ fromInteger delta)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  require (inserted==1) "native_winner_record_failed"
+  posting c ("native-winner-fee:"<>T.pack(show sequenceNo)) "canonical native winner fee adjustment" [(Native,"operating",negate delta),(Native,"external",delta)]
+  oldChanged <- O.runUpdate c O.Update {O.uTable=attemptsTable,O.uUpdateWith= \a->a {attemptsState=text "review"},O.uWhere= \a->attemptsTxid a O..== text(attemptId previousWinner),O.uReturning=O.rCount}
+  newChanged <- O.runUpdate c O.Update {O.uTable=attemptsTable,O.uUpdateWith= \a->a {attemptsState=text "settled",attemptsObservationJson=O.toNullable(text saved)},O.uWhere= \a->attemptsTxid a O..== text txid,O.uReturning=O.rCount}
+  require (oldChanged==1 && newChanged==1) "native_winner_context_changed"
+  -- A later refund must not replace the conversion's primary payout link.
+  _ <- O.runUpdate c O.Update {O.uTable=ordersTable,O.uUpdateWith= \o->o {ordersPayoutTx=O.toNullable(text txid)},O.uWhere= \o->ordersId o O..== text(ordersId order) O..&& O.fromNullable (text "") (ordersPayoutTx o) O..== text(attemptId previousWinner),O.uReturning=O.rCount}
+  _ <- O.runUpdate c O.Update {O.uTable=deploymentTable,O.uUpdateWith= \row->row {deploymentPaused=num 1,deploymentPauseReason=text "native_winner_changed"},O.uWhere=const(O.sqlBool True),O.uReturning=O.rCount}
+  _ <- O.runInsert c O.Insert {O.iTable=auditTable,O.iRows=[Audit Nothing (text "native_winner_changed") (text $ attemptId previousWinner<>":"<>txid)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  pure ()

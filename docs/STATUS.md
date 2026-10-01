@@ -543,3 +543,30 @@ The temporary database is removed. Runtime wiring and deployment remain pending.
 Replacement-winner fee adjustment is still a required port and is explicitly
 refused here; this does not complete the full native recovery gate.
 [Evidence](evidence/postgres-native-finality-port.json).
+
+## PostgreSQL native winner accounting and runtime integration — 2026-10-01
+
+The replacement-winner accounting port now shares `NativeFamily.familyC` with
+normal payment inspection, inside the existing financial transaction. It fences
+the previous winner and saved observation, checks the entire durable family and
+current chain evidence, moves the canonical settled attempt and appends only the
+proved fee difference to operating/external accounts. Principal and resolved
+obligations stay settled; additional refunds preserve a separate primary link.
+Older winners return the fee difference and stale callbacks cannot repeat it.
+
+The positive PostgreSQL contract exposed a PL/pgSQL alias collision: SQL `old`
+was interpreted as the trigger's `OLD` row. Schema generation now uses `prior`;
+`003.sql` corrects existing schemas without changing the constraints. The installer
+requires the worker stopped before applying this correction. All 371 shared
+examples and nine installer tests pass. Isolated PostgreSQL tests exercise both
+winner directions, policy/anchor/cost/family fences and replay. They use a captured
+Signet template with non-sendable replacement bytes, not live reorg evidence.
+
+Settlement recovery is wired into the existing critical worker scan. After a
+private consistent backup and stopped-worker schema correction, the local real
+Signet/Devnet bridge was restarted: ready, all scanners without errors, no pending
+intents or native recovery candidates, unchanged critical sequence 71 and order
+counts (9 paid, 3 refunded, 3 expired unfunded). The temporary contract database is
+removed. Full PostgreSQL replacement draft/sign/send, loss-cover administration,
+crash/rollback acceptance and actual network recovery tests remain required.
+[Evidence](evidence/postgres-native-winner-port.json).

@@ -18,7 +18,7 @@ import Bridge.Settlement (realPaymentTransport,paymentPass,reconcilePaymentsWith
 import qualified Bridge.Postgres.Startup as Startup
 import Bridge.Recovery (cancelPreparationWith,reconcileNativeLocksWith,approveSourceRecoveryWith)
 import Bridge.Native (nativeIdentity)
-import Bridge.Reorg (reconcileNativeSourcesWith)
+import Bridge.Reorg (reconcileNativeSourcesWith,reconcileNativeSettlementsWith)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar,newMVar,withMVar)
 import Control.Monad (forever,when)
@@ -150,6 +150,9 @@ evalCritical (CriticalContext manager cfg ledger) plan = case plan of
         {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg (Store ledger)
     _ <- Observer.observeOnce manager cfg ledger
     _ <- reconcileNativeSourcesWith
+      (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup"))
+        {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg (Store ledger)
+    _ <- reconcileNativeSettlementsWith
       (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup"))
         {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg (Store ledger)
     now <- epochSeconds

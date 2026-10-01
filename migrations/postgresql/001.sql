@@ -517,7 +517,7 @@ $body$;
 CREATE TRIGGER custody_native_replacement_member AFTER INSERT ON native_replacement_members FOR EACH ROW EXECUTE FUNCTION trg_custody_native_replacement_member();
 
 CREATE FUNCTION trg_native_winner_change_binding() RETURNS trigger LANGUAGE plpgsql AS $body$
-BEGIN IF NOT EXISTS(SELECT 1 FROM attempts old JOIN attempts winner ON winner.intent_id=old.intent_id JOIN intents i ON i.id=old.intent_id WHERE old.txid=NEW.previous_txid AND winner.txid=NEW.winner_txid AND old.state='settled' AND old.observation_json=NEW.previous_observation AND winner.state IN('broadcast_intent','review') AND old.critical_sequence>0 AND winner.critical_sequence>0 AND old.preparation_generation=winner.preparation_generation AND old.fee_limit=winner.fee_limit AND i.chain='Native' AND i.resolved=1) THEN RAISE EXCEPTION 'native_winner_change_binding' USING ERRCODE='23514'; END IF; RETURN NEW; END
+BEGIN IF NOT EXISTS(SELECT 1 FROM attempts prior JOIN attempts winner ON winner.intent_id=prior.intent_id JOIN intents i ON i.id=prior.intent_id WHERE prior.txid=NEW.previous_txid AND winner.txid=NEW.winner_txid AND prior.state='settled' AND prior.observation_json=NEW.previous_observation AND winner.state IN('broadcast_intent','review') AND prior.critical_sequence>0 AND winner.critical_sequence>0 AND prior.preparation_generation=winner.preparation_generation AND prior.fee_limit=winner.fee_limit AND i.chain='Native' AND i.resolved=1) THEN RAISE EXCEPTION 'native_winner_change_binding' USING ERRCODE='23514'; END IF; RETURN NEW; END
 $body$;
 CREATE TRIGGER native_winner_change_binding BEFORE INSERT ON native_winner_changes FOR EACH ROW EXECUTE FUNCTION trg_native_winner_change_binding();
 

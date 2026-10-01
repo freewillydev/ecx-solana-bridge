@@ -37,6 +37,11 @@ def trigger(sql):
         raise ValueError('unsupported trigger: ' + sql)
     name, timing, event, table, condition, body = match.groups()
     body = re.sub(r"SELECT RAISE\(ABORT,'([\w]+)'\);", r"RAISE EXCEPTION '\1' USING ERRCODE='23514';", body)
+    # PL/pgSQL reserves OLD/NEW as trigger records, including lowercase aliases.
+    body = re.sub(r"\bold\.", "prior.", body)
+    body = re.sub(r"\battempts old\b", "attempts prior", body)
+    condition = re.sub(r"\bold\.", "prior.", condition) if condition else condition
+    condition = re.sub(r"\battempts old\b", "attempts prior", condition) if condition else condition
     body = translate(body)
     if event.startswith('UPDATE OF '):
         # Opaleye emits all fields in SET, including unchanged immutable fields.

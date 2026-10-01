@@ -1,0 +1,42 @@
+{
+  "date": "2026-10-01",
+  "implementation": "Typed PostgreSQL canonical native winner fee accounting with shared transaction-local family validation; worker settlement recovery wired through existing critical evaluator",
+  "checks": {
+    "haskellExamples": 371,
+    "failures": 0,
+    "installerTests": 9,
+    "isolatedPostgresContracts": [
+      "newer winner moves canonical settled attempt and primary link",
+      "older winner returns exact fee difference",
+      "only operating/external fee postings, no principal changes",
+      "changed costs, family, depth and anchor rejected atomically",
+      "stale callback cannot repeat fee adjustment",
+      "additional refund preserves unrelated primary link",
+      "family lineage remains valid after winner review"
+    ],
+    "fixtures": "Captured Signet transaction and replacement template with explicitly non-sendable replacement byte stub; database accounting only",
+    "schemaGeneration": "38 tables, 12 indexes, 5 views, 84 triggers; regenerated winner trigger avoids PL/pgSQL OLD alias collision",
+    "upgradeCorrection": "003.sql applied with worker stopped after private consistent backup; repeat application accepted in contract database",
+    "localRuntime": {
+      "health": "ready",
+      "scannerErrors": 0,
+      "pendingIntents": 0,
+      "criticalSequenceBefore": 71,
+      "criticalSequenceAfter": 71,
+      "orderStatusCounts": {
+        "Paid": 9,
+        "Refunded": 3,
+        "ExpiredUnfunded": 3
+      },
+      "nativeSettlementRecoveryCandidates": 0
+    },
+    "temporaryDatabaseRemoved": true
+  },
+  "limitations": [
+    "No live replacement-winner reorg acceptance; fixture replacement bytes are non-sendable",
+    "Full PostgreSQL native replacement draft/sign/send operator workflow remains to port",
+    "PostgreSQL operator source loss-cover administration remains to port",
+    "New recovery path still needs targeted crash/rollback and real-chain recovery acceptance",
+    "Canonical chains, supported-wallet acceptance, x86 installer, remote restore and release review remain outstanding"
+  ]
+}

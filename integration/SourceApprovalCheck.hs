@@ -1,6 +1,10 @@
 -- Database-only recovery contract. No chain transport, signer or broadcast.
 module Main (main) where
 import Bridge.Types
+import Bridge.NativePayment
+import Bridge.RPC (fieldValue)
+import qualified Bridge.Postgres.NativeFamily as Family
+import qualified Data.ByteString as BS
 import qualified Bridge.Postgres.Ledger as L
 import qualified Bridge.Postgres.Source as Source
 import qualified Bridge.Postgres.NativeRecovery as NativeRecovery
@@ -8,7 +12,7 @@ import Bridge.Ledger (SourceCheck(..),Deposit(..),Attempt(..),PaymentCosts(..),N
 import qualified Data.Text as T
 import Control.Exception (bracket,try)
 import Control.Monad (forM_)
-import Data.Aeson (object,(.=),encode,ToJSON)
+import Data.Aeson (object,(.=),encode,ToJSON,eitherDecodeStrict')
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text.Encoding as TE
 import Data.Int (Int64)
@@ -157,18 +161,111 @@ main = do
     expectError "native_settlement_changed" $ NativeRecovery.recordCheck ledger expected old NativeSettlementConfirming
     NativeRecovery.recordCheck ledger expected updated (NativeSettlementReconfirmed costs $ proof "block-b" 1)
     expectError "native_recovery_policy_changed" $ NativeRecovery.recordCheck ledger expected updated (NativeSettlementReconfirmed costs $ proof "block-b" 2)
-    expectError "native_winner_change_requires_accounting" $ NativeRecovery.recordCheck ledger expected updated (NativeSettlementReplaced [expected] "other-member" costs $ proof "block-b" 1)
     afterConfirmedReplay <- snapshot ledger
     require (beforeConfirmedReplay==afterConfirmedReplay) "contract_finality_refusal_mutated_state"
     NativeRecovery.candidates ledger >>= \rows->require (null rows) "contract_reconfirmed_candidate_not_closed"
     L.ledgerAction ledger $ \c->do
       [PG.Only count] <- PG.query_ c "SELECT count(*) FROM postings WHERE event_id LIKE 'native-winner-fee:%'" :: IO[PG.Only Int64]
       require (count==0) "contract_unapproved_winner_money_posted"
+    winnerContract ledger
   L.withLedger connectionSettings identity $ \ledger->do
     L.ledgerAction ledger $ \c->do
       rows <- PG.query_ c "SELECT id,status FROM obligations ORDER BY id" :: IO[(Text,Text)]
       require (lookup "restore-ready" rows==Just "ready" && lookup "restore-paying" rows==Just "paying" && lookup "changed-work" rows==Just "review" && lookup "stale-restoration" rows==Just "review") "contract_restart_changed_state"
-  putStrLn "PostgreSQL source approval: ready/paying restoration, freshness, replay, conflict, changed-work/stale refusal, candidate view, source/evidence fences and reopen plus native finality review/reconfirmation/fences passed; database-only contract"
+  putStrLn "PostgreSQL source approval: ready/paying restoration, freshness, replay, conflict, changed-work/stale refusal, candidate view, source/evidence fences and reopen plus native finality and older/newer winner fee accounting/fences passed; database-only contract"
 
 jsonText :: ToJSON a => a -> Text
 jsonText = TE.decodeUtf8 . LBS.toStrict . encode
+
+-- Captured real-chain template, with an explicitly non-sendable replacement
+-- byte stub. This exercises PostgreSQL accounting, never network replacement.
+winnerContract :: L.Ledger -> IO ()
+winnerContract ledger = do
+  captured <- BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
+  plan <- fieldValue "plan" captured
+  prevouts <- fieldValue "previous" captured
+  oldFee <- fieldValue "fee" captured
+  tx <- fieldValue "decoded" captured >>= either reject pure . decodeNativeTx
+  raw <- fieldValue "raw" captured
+  replacement <- BS.readFile "test/fixtures/native-signet-replacement-draft.json" >>= either fail pure . eitherDecodeStrict'
+  draft <- fieldValue "draft" replacement
+  point <- case nativeInputs tx of input:_->pure(nativeOutpoint input); _->reject "contract_native_inputs_missing"
+  let original=NativeSigned raw tx plan prevouts oldFee
+      newer=original {signedNativeBytes="00",signedNativeTransaction=draftTransaction draft,signedNativePrevouts=draftPrevouts draft,signedNativeFee=draftFee draft}
+      oldId=nativeTxid tx
+      newId=nativeTxid(signedNativeTransaction newer)
+      oid="native-winner-contract"
+      policy=PolicySnapshot (planDepth plan) "finalized" identity
+      common=outpointTxid point<>":"<>T.pack(show $ outpointVout point)
+      proof tid=jsonText $ object["txid" .= tid,"blockhash" .= ("winner-contract-anchor"::Text),"requiredDepth" .= planDepth plan]
+  zero <- either reject pure(amount 0)
+  let oldCosts=PaymentCosts oldFee zero
+      newCosts=PaymentCosts (draftFee draft) zero
+      previous=jsonText $ object["costs" .= oldCosts,"proof" .= proof oldId]
+  L.ledgerAction ledger $ \c->do
+    _ <- PG.execute c "INSERT INTO orders(id,capability_hash,idempotency_key,request_hash,request_json,quote_json,policy_json,status,deadline,grace_deadline,payout_tx) VALUES(?,?,?,'contract','{}','{}',?,'Paid',100,200,?)" (oid,oid,oid,jsonText policy,oldId)
+    _ <- PG.execute c "INSERT INTO deposits(id,order_id,asset,amount,anchor,first_seen,confirmations,eligible,allocated) VALUES(?,?,'Wrapped',101010,'database-contract',100,1,1,1)" (oid,oid)
+    _ <- PG.execute c "INSERT INTO obligations(id,order_id,deposit_id,kind,asset,amount,recipient,status) VALUES(?,?,?,'conversion','Native',?,?,'paying')" (oid,oid,oid,units $ planAmount plan,planRecipient plan)
+    _ <- PG.execute c "INSERT INTO intents(id,obligation_id,chain,common_input) VALUES(?,?,'Native',?)" (oid,oid,common)
+    _ <- PG.execute c "INSERT INTO preparations(intent_id,generation,policy_json) VALUES(?,0,?)" (oid,jsonText plan)
+    _ <- PG.execute c "INSERT INTO fee_reservations(intent_id,asset,amount,released) VALUES(?,'Native',?,0)" (oid,units $ planFeeLimit plan)
+    oldSequence <- L.criticalSequence c
+    _ <- PG.execute c "INSERT INTO attempts(txid,intent_id,signed_bytes,policy_json,fee_limit,state,critical_sequence) VALUES(?,?,?,?,?,'broadcast_intent',?)" (oldId,oid,raw,jsonText original,units $ planFeeLimit plan,oldSequence)
+    draftSequence <- L.criticalSequence c
+    _ <- PG.execute c "INSERT INTO native_replacement_drafts(critical_sequence,parent_txid,draft_json,fee,reason,work_hash,proof_json) VALUES(?,?,?,?,?,repeat('d',64),'{}')" (draftSequence,oldId,jsonText draft,units $ draftFee draft,"database contract"::Text)
+    memberSequence <- L.criticalSequence c
+    _ <- PG.execute c "INSERT INTO attempts(txid,intent_id,signed_bytes,policy_json,fee_limit,state,critical_sequence) VALUES(?,?,?,?,?,'signed',?)" (newId,oid,"00"::Text,jsonText newer,units $ planFeeLimit plan,memberSequence)
+    _ <- PG.execute c "INSERT INTO native_replacement_members(txid,draft_sequence,critical_sequence) VALUES(?,?,?)" (newId,draftSequence,memberSequence)
+    _ <- PG.execute c "UPDATE attempts SET state='broadcast_intent' WHERE txid=?" (PG.Only newId)
+    _ <- PG.execute c "UPDATE attempts SET state='settled',observation_json=? WHERE txid=?" (previous,oldId)
+    _ <- PG.execute c "UPDATE intents SET resolved=1 WHERE id=?" (PG.Only oid)
+    _ <- PG.execute c "UPDATE obligations SET status='paid' WHERE id=?" (PG.Only oid)
+    _ <- PG.execute c "UPDATE fee_reservations SET released=1 WHERE intent_id=?" (PG.Only oid)
+    _ <- PG.execute c "INSERT INTO observation_evidence(hash,chain,event_id,evidence_json) VALUES('winner-contract-evidence','Native',?,?)" (newId,jsonText $ object["proof" .= object["confirmations" .= (2::Int),"walletNetUnits" .= ("-100000"::Text),"feeUnits" .= draftFee draft]])
+    _ <- PG.execute c "INSERT INTO chain_events(chain,event_id,kind,anchor,evidence_hash,first_seen,last_seen,needs_review) VALUES('Native',?,'outgoing','winner-contract-anchor','winner-contract-evidence',100,100,0)" (PG.Only newId)
+    pure ()
+  family <- L.ledgerAction ledger $ \c->Family.familyC c oid
+  old <- case filter ((==oldId).attemptId) family of [a]->pure a; _->reject "contract_old_winner_missing"
+  before <- snapshot ledger
+  expectError "native_recovery_cost_changed" $ NativeRecovery.recordCheck ledger old previous (NativeSettlementReplaced family newId oldCosts $ proof newId)
+  expectError "native_replacement_family_changed" $ NativeRecovery.recordCheck ledger old previous (NativeSettlementReplaced (drop 1 family) newId newCosts $ proof newId)
+  expectError "native_recovery_policy_changed" $ NativeRecovery.recordCheck ledger old previous (NativeSettlementReplaced family newId newCosts $ jsonText $ object["txid" .= newId,"blockhash" .= ("winner-contract-anchor"::Text),"requiredDepth" .= (2::Int)])
+  expectError "native_recovery_scan_not_current" $ NativeRecovery.recordCheck ledger old previous (NativeSettlementReplaced family newId newCosts $ jsonText $ object["txid" .= newId,"blockhash" .= ("wrong-anchor"::Text),"requiredDepth" .= planDepth plan])
+  snapshot ledger >>= \after->require (before==after) "contract_winner_refusal_mutated_state"
+  NativeRecovery.recordCheck ledger old previous (NativeSettlementReplaced family newId newCosts $ proof newId)
+  after <- snapshot ledger
+  expectError "native_settlement_changed" $ NativeRecovery.recordCheck ledger old previous (NativeSettlementReplaced family newId newCosts $ proof newId)
+  snapshot ledger >>= \replayed->require (after==replayed) "contract_winner_replay_mutated_state"
+  L.ledgerAction ledger $ \c->do
+    states <- PG.query c "SELECT txid,state FROM attempts WHERE intent_id=? ORDER BY txid" (PG.Only oid) :: IO [(Text,Text)]
+    require (lookup oldId states==Just "review" && lookup newId states==Just "settled") "contract_winner_not_moved"
+    [PG.Only link] <- PG.query c "SELECT payout_tx FROM orders WHERE id=?" (PG.Only oid) :: IO [PG.Only Text]
+    require (link==newId) "contract_winner_link_not_moved"
+    [PG.Only delta] <- PG.query_ c "SELECT fee_delta FROM native_winner_changes" :: IO [PG.Only Int64]
+    require (delta==units(draftFee draft)-units oldFee) "contract_winner_delta_wrong"
+    posts <- PG.query_ c "SELECT account,delta FROM postings WHERE event_id LIKE 'native-winner-fee:%' ORDER BY account" :: IO [(Text,Int64)]
+    require (posts==[("external",delta),("operating",negate delta)]) "contract_winner_principal_changed"
+    pure ()
+  -- Re-read through the same validator after the prior winner becomes reviewed.
+  L.ledgerAction ledger (\c->Family.familyC c oid) >>= \current->require (length current==2) "contract_winner_lineage_not_preserved"
+  -- A later reorg can restore the older winner. Charge/refund the delta once
+  -- while preserving an unrelated primary conversion link (e.g. extra refund).
+  L.ledgerAction ledger $ \c->do
+    _ <- PG.execute c "UPDATE orders SET payout_tx='other-primary-link' WHERE id=?" (PG.Only oid)
+    _ <- PG.execute c "INSERT INTO observation_evidence(hash,chain,event_id,evidence_json) VALUES('older-winner-contract-evidence','Native',?,?)" (oldId,jsonText $ object["proof" .= object["confirmations" .= (2::Int),"walletNetUnits" .= ("-100000"::Text),"feeUnits" .= oldFee]])
+    _ <- PG.execute c "INSERT INTO chain_events(chain,event_id,kind,anchor,evidence_hash,first_seen,last_seen,needs_review) VALUES('Native',?,'outgoing','winner-contract-anchor','older-winner-contract-evidence',100,100,0)" (PG.Only oldId)
+    pure ()
+  current <- L.ledgerAction ledger $ \c->Family.familyC c oid
+  new <- case filter ((==newId).attemptId) current of [a]->pure a; _->reject "contract_new_winner_missing"
+  saved <- NativeRecovery.observation ledger newId
+  NativeRecovery.recordCheck ledger new saved (NativeSettlementReplaced current oldId oldCosts $ proof oldId)
+  L.ledgerAction ledger $ \c->do
+    [PG.Only link] <- PG.query c "SELECT payout_tx FROM orders WHERE id=?" (PG.Only oid) :: IO [PG.Only Text]
+    require (link=="other-primary-link") "contract_additional_refund_replaced_primary"
+    [PG.Only count] <- PG.query_ c "SELECT count(*) FROM native_winner_changes" :: IO [PG.Only Int64]
+    require (count==2) "contract_older_winner_missing"
+    [PG.Only total] <- PG.query_ c "SELECT sum(delta)::bigint FROM postings WHERE event_id LIKE 'native-winner-fee:%' AND account='operating'" :: IO [PG.Only Int64]
+    require (total==0) "contract_older_winner_fee_not_returned"
+    states <- PG.query c "SELECT txid,state FROM attempts WHERE intent_id=?" (PG.Only oid) :: IO [(Text,Text)]
+    require (lookup oldId states==Just "settled" && lookup newId states==Just "review") "contract_older_winner_not_canonical"
+    pure ()
