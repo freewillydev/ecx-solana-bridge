@@ -254,3 +254,21 @@ exact deposits become reserved conversion obligations through typed transactions
 The full existing bridge-test suite passes after the shared observer refactor.
 Actual PostgreSQL-backed chain replay, custody reconciliation and paying-worker
 wiring remain incomplete; no live funds were moved.
+
+### Consistent historical ledger import
+
+The maintenance importer copied the existing local ledger's consistent SQLite
+snapshot into an isolated PostgreSQL schema. All 545 records across all 38 tables
+matched, column for column, inside the destination transaction before commit.
+Foreign keys remained enforced; user triggers were temporarily suspended to retain
+historical journals/revisions. Generated identities were advanced to imported
+maxima. Snapshot/full comparison report stay private outside Git; the paying worker
+was not switched. [Evidence](evidence/postgres-ledger-import.json).
+
+### Real PostgreSQL-backed chain replay
+
+The imported PostgreSQL ledger ran the shared real L2L Signet/Solana Devnet
+observer successfully: native, token and operating SOL scanners all recorded fresh
+success, no errors and no review events. It remained paused pending reconciliation;
+no payout engine, signer, address allocation or broadcast was invoked. The original
+funded worker was unchanged. [Evidence](evidence/postgres-real-scan.json).

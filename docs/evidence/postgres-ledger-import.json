@@ -1,0 +1,15 @@
+{
+  "date": "2026-10-01",
+  "source": "consistent private backup of existing schema-18 local public-test ledger",
+  "sqlite": "3.53.4, exact pinned source identity checked",
+  "destination": "isolated local PostgreSQL database ecx_bridge_import",
+  "tablesVerified": 38,
+  "recordsVerified": 545,
+  "comparison": "every column of every row compared as a sorted canonical record multiset inside the destination transaction before COMMIT",
+  "allRecordsMatch": true,
+  "foreignKeys": "enabled during import; only user triggers suspended to preserve original journal history and revisions",
+  "identitySequences": "reset to imported maxima",
+  "workerSwitched": false,
+  "privateSnapshotAndReport": "kept outside repository with restricted permissions",
+  "remaining": ["real PostgreSQL-backed scanner replay", "custody/payment conversion", "controlled final import with worker stopped", "restore/role/import failure acceptance"]
+}

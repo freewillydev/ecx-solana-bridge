@@ -70,3 +70,9 @@ executable ecx-postgres-journal-check
   hs-source-dirs: integration
   main-is: JournalCheck.hs
   build-depends: base, ecx-bridge, containers, postgresql-simple, unix
+
+executable ecx-postgres-scan-check
+  import: settings
+  hs-source-dirs: integration
+  main-is: ScanCheck.hs
+  build-depends: base, ecx-bridge, aeson, bytestring, postgresql-simple, unix
