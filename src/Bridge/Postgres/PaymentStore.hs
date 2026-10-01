@@ -26,7 +26,8 @@ import qualified Bridge.Postgres.NativeFamily as NativeFamily
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
 import Data.Aeson (FromJSON,eitherDecodeStrict')
-import Data.List (sortOn)
+import Data.List (sortOn,nub)
+import Control.Monad (forM)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -73,7 +74,11 @@ pendingAttempts (Store ledger) = ledgerAction ledger $ \connection->do
     pure (a,intentsChain i)
     :: IO [(Attempts,Text)]
   expired <- O.runSelect connection (O.selectTable solanaexpiriesTable) :: IO [SolanaExpiries]
-  pure [attempt a chain | (a,chain)<-sortOn (\(a,_)->(attemptsPreparationGeneration a,attemptsCriticalSequence a,attemptsTxid a)) rows,not(any ((==attemptsTxid a).solanaexpiriesTxid) expired)]
+  native <- fmap concat $ forM (nub [attemptsIntentId a | (a,chain)<-rows,chain=="Native"]) (NativeFamily.familyC connection)
+  -- A newly signed replacement has no broadcast sequence yet. Sorting on that
+  -- nullable field puts it before its parent; lineage readers require fee order.
+  -- Use the same verified family order as signing, settlement and recovery.
+  pure $ native <> [attempt a chain | (a,chain)<-sortOn (\(a,_)->(attemptsPreparationGeneration a,attemptsCriticalSequence a,attemptsTxid a)) rows,chain/="Native",not(any ((==attemptsTxid a).solanaexpiriesTxid) expired)]
 
 obligation :: Obligations -> Obligation
 obligation row = Obligation (obligationsId row) (obligationsOrderId row) (obligationsDepositId row) (obligationsKind row) (obligationsAsset row) (obligationsAmount row) (obligationsRecipient row)

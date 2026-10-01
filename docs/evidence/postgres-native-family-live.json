@@ -1,0 +1,56 @@
+{
+  "date": "2026-10-01",
+  "scope": "Actual public L2L Signet replacement-family operator workflow with real Solana Devnet source; PostgreSQL runtime and completed-payment restart",
+  "orderId": "4ed9faf203aeeb3dee983d0d884976d9232cb00855d0d182eab767c73159949c",
+  "sourceSignature": "2BgGDDAB2X9TERcuf7Smr3RvsuCA72vB1FBSo49w1WMPj1danUfsjUSbGpYQyv8VQC6gTtfwaygq73exteZUWBxn",
+  "parentTransaction": "354b5d57d8f0b02ae4e67566f37ae849d659bad208ccdbc95af05c888ee94f77",
+  "replacementTransaction": "14c6d610bb3986dce90a838da888330bf7415f8a49d360f49397edd454876fc7",
+  "gross": "10000",
+  "bridgeFee": "100",
+  "payout": "9900",
+  "networkFee": "700",
+  "confirmation": {
+    "blockhash": "0000027d4dc7469b1685506dee4254af0a764b0572077cbe2f7f208c18fe1347",
+    "height": 16512,
+    "requiredDepth": 1,
+    "txid": "14c6d610bb3986dce90a838da888330bf7415f8a49d360f49397edd454876fc7"
+  },
+  "draftSequence": 78,
+  "actualSignature": true,
+  "repeatedSigningReturnsSameMember": true,
+  "pausedSendRefused": true,
+  "explicitResumeSucceeded": true,
+  "replacementSubmitted": true,
+  "mempool": {
+    "replacement": "14c6d610bb3986dce90a838da888330bf7415f8a49d360f49397edd454876fc7",
+    "parent": "354b5d57d8f0b02ae4e67566f37ae849d659bad208ccdbc95af05c888ee94f77",
+    "replacementInMempool": true,
+    "parentNoLongerInMempool": true,
+    "network": "real-public-l2l-signet"
+  },
+  "paidOnce": true,
+  "unresolvedIntents": 0,
+  "custodyMatches": true,
+  "completedRestart": {
+    "comparedTables": 14,
+    "unchangedTables": 14,
+    "criticalSequenceUnchanged": true,
+    "custodyMatched": true,
+    "restartAfterConfirmation": true,
+    "automaticStartupAfterResolvedIntents": true
+  },
+  "haskellExamples": 371,
+  "haskellFailures": 0,
+  "postgresContractPassed": true,
+  "regression": "Pending native family remains in canonical lineage order with a new signed member whose broadcast sequence is null",
+  "fixedIntegrationIssues": [
+    "Explicit operator resume rechecks pending saved work while automatic startup still refuses unresolved intents",
+    "Pending native family order now reuses the verified family reader"
+  ],
+  "limitations": [
+    "Completed-payment restart occurred after confirmation; this is not a crash at every signing/send boundary",
+    "No real winner-changing reorg, permanent source loss, remote/key restore or canonical-token acceptance",
+    "Deposits used a dedicated Devnet test client, not a supported wallet UI",
+    "Independent security review remains open"
+  ]
+}

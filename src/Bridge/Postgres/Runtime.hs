@@ -133,8 +133,7 @@ evalCritical (CriticalContext manager cfg ledger) plan = case plan of
     Pause reason->pause ledger reason >> readiness ledger
     CancelPreparation intent generation reason->cancelPreparationWith epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) intent generation reason
     Resume->do
-      now <- epochSeconds
-      Startup.resumeAfterChecks cfg ledger now
+      Startup.resumeAfterReview epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg ledger
       readiness ledger
     ApproveSolanaRetry txid reason->do
       approveSolanaRetryWith (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) txid reason

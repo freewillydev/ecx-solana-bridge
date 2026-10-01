@@ -3,6 +3,7 @@ module Main (main) where
 import Bridge.Types
 import Bridge.Config (Config,fingerprint)
 import qualified Bridge.Postgres.Replacement as Replacement
+import qualified Bridge.Postgres.PaymentStore as PaymentStore
 import Bridge.NativePayment
 import Bridge.RPC (fieldValue)
 import qualified Bridge.Postgres.NativeFamily as Family
@@ -235,6 +236,9 @@ winnerContract ledger = do
   signedMember <- Replacement.recordMember ledger cfg draftSequence expectedFamily newer 100
   beforeSignedReplay <- snapshot ledger
   Replacement.recordMember ledger cfg draftSequence expectedFamily newer 100 >>= \a->require (a==signedMember) "contract_replacement_signed_replay_changed"
+  pendingFamily <- PaymentStore.pendingAttempts (PaymentStore.Store ledger)
+  canonicalFamily <- L.ledgerAction ledger (\c->Family.familyC c $ attemptIntent signedMember)
+  require (filter ((==attemptIntent signedMember).attemptIntent) pendingFamily==canonicalFamily) "contract_pending_family_lineage_order"
   expectError "native_replacement_already_signed" $ Replacement.cancel ledger draftSequence "cannot cancel signature"
   snapshot ledger >>= \after->require (beforeSignedReplay==after) "contract_replacement_signed_replay_mutated"
   Replacement.member ledger draftSequence >>= \a->require (a==Just signedMember) "contract_replacement_member_missing"

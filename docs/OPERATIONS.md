@@ -45,8 +45,10 @@ sudo -u ecx-worker curl --unix-socket /run/ecx-bridge/admin/api.sock \
 
 Pausing intake does not stop completion/recovery of already authorized obligations.
 For an offline maintenance snapshot stop the worker service and confirm it is
-inactive. `/resume` is a private POST that rechecks readiness; it is not a way to
-bypass custody/history errors. Private POST operations also include `/refund`
+inactive. `/resume` is a private POST that reconciles and revalidates any pending exact
+saved payment, its source and current custody before fencing that work in the
+resume transaction. Automatic startup still refuses unresolved intents. Neither
+path bypasses custody/history errors. Private POST operations also include `/refund`
 (`depositId`), `/retry-solana` (`transaction`, `reason`) and `/cancel-preparation`
 (`intent`, `generation`, `cancellationReason`). `/approve-source-recovery`
 accepts `obligation`, `restorationSequence`, `approvalReason` and restores only the
@@ -76,8 +78,10 @@ sources return the covered capital through the recovery journal.
 
 These commands use closed critical DSL operations and the same serialized
 interpreter as the worker. Rejections require investigation rather than direct
-ledger editing. PostgreSQL storage contracts pass; live replacement/source-loss,
-crash/backup and canonical-chain acceptance remain release requirements.
+ledger editing. PostgreSQL contracts and an actual Signet replacement-family draft/sign/send/
+confirmation pass, including signing replay and completed-payment restart. Real
+winner-changing reorg/source-loss, broader crash/backup and canonical-chain
+acceptance remain release requirements. See [live evidence](evidence/postgres-native-family-live.json).
 
 The CLI `scan`, `reconcile`, `recover`, `approve-source-recovery`,
 `cover-source-loss` and native replacement commands still target the legacy SQLite

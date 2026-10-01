@@ -100,7 +100,7 @@ The current architecture is the approved Haskell application, two real-chain ada
 | Gate | Required remaining evidence | Current state |
 | --- | --- | --- |
 | U1 — Usable local test bridge — **first priority** | Existing real-chain core exposed through customer API and thin UI; both automatic transfer directions; saved-order reload; simple start command; actual supported-wallet signing | API, UI and launcher implemented; both real customer-API transfers and a clean restart pass with matching custody. Actual supported-wallet Solana Pay acceptance remains unverified. Additional recovery gates below follow this explicitly authorized local test milestone. |
-| R1 — Complete native replacement workflow | Exact private operator draft/sign/send; backup and source gates; one actual Signet replacement family, confirmation, paused restart and matched custody | Winner-change accounting and signer guards pass contract tests; schema 18 is applied. Private PostgreSQL draft/sign/send/cancel workflows are integrated; actual family signing/send/confirmation and recovery acceptance remain. |
+| R1 — Complete native replacement workflow | Exact private operator draft/sign/send; backup and source gates; one actual Signet replacement family, confirmation, paused restart and matched custody | Winner-change accounting and signer guards pass contract tests; schema 18 is applied. Private PostgreSQL draft/sign/send/cancel workflows are integrated; Actual family signing/send/mempool replacement/confirmation and completed restart pass; winner-changing reorg and broader recovery acceptance remain. |
 | R2 — Close recovery state transitions | Explicit covered-source resolution, proved missing-destination treatment, finalized Solana history-loss handling, and unchanged claims during ambiguous evidence | Partial; existing source/finality/capital journals are the implementation base. Follow U1. |
 | R3 — Complete restore and resume | Critical backup coverage, old-ledger/old-signer fencing, key restore, exact-byte recovery and a final resume decision; independent-provider Solana expiry, in-flight and backlog acceptance | Partial; follow U1. Remote and clean-host checks also close D1. |
 | N1 — Actual ECX betanet | Official node/provenance/checkpoint, separate funded profile, replay fields and real deposit/payout/refund | Not started; real node and test allocation required. |
@@ -641,3 +641,29 @@ checksum is verified on the host; the task VM is stopped.
 X86 installation, supported-wallet payment, real replacement/reorg and source-loss
 acceptance, remote clean-host/key restoration, canonical network acceptance and
 independent review remain open. [Evidence](evidence/postgres-upgrade-arm64.json).
+
+## Actual PostgreSQL native replacement workflow — 2026-10-01
+
+A real customer redemption, funded through standard Solana Pay reference semantics
+on Devnet, now completes the private native replacement workflow on public L2L
+Signet: draft, sign, repeat the same signature, refuse sending while paused,
+explicitly resume, submit, displace the original from the mempool, confirm and
+settle one 9,900-unit payout. The saved 1% fee is 100 units; the observed network
+fee is 700. A completed-payment restart preserves all 14 compared ledger/work
+tables and the critical sequence. Custody matches; no intents remain unresolved.
+
+This full workflow exposed and fixed two integration defects: the operator resume
+route previously used the strict startup refusal for pending work, and nullable
+broadcast-sequence sorting put a newly signed replacement before its parent.
+Explicit resume now rechecks exact saved work, sources, custody and all review
+gates, then atomically fences the pending attempts; automatic startup keeps its
+strict unresolved-intent refusal. Pending native reads reuse verified family order.
+The existing PostgreSQL contract now checks the signed/null-sequence case. All
+371 shared tests and the complete source/finality/replacement/loss-cover contract
+pass. The temporary contract database is removed.
+
+An earlier real family also settled its original member while a replacement was
+saved but unsent. These checks do not establish winner-changing reorg, every
+crash boundary, permanent source-loss resolution, remote/key restoration, actual
+supported-wallet payment or canonical-token acceptance. X86 build is active with
+one job in the sole 3-GiB task VM. [Evidence](evidence/postgres-native-family-live.json).

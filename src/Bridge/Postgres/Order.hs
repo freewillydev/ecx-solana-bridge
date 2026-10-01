@@ -1,5 +1,5 @@
 module Bridge.Postgres.Order
-  ( checkIntakeReadyC, exposeOrderC, readSavedOrder, findSavedOrder, bindInstruction, instructionBackup, createOrder, checkIntakeReady, exposeOrder, readOrderC, claimNativeAllocation, recordNativeInstruction, issueInstruction, expireQuotes ) where
+  ( recoveryPayments, recoverySources, accountedLosses, checkIntakeReadyC, exposeOrderC, readSavedOrder, findSavedOrder, bindInstruction, instructionBackup, createOrder, checkIntakeReady, exposeOrder, readOrderC, claimNativeAllocation, recordNativeInstruction, issueInstruction, expireQuotes ) where
 
 import Bridge.Config
 import qualified Bridge.Postgres.Budget as Budget
