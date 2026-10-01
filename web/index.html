@@ -12,33 +12,23 @@
       <header>
         <span class="eyebrow">ECX / OPEN SOURCE</span>
         <h1>A direct bridge.</h1>
-        <p>Move between native coins and wrapped tokens on Solana.</p>
-      </header>
-      <section class="notice" aria-live="polite">
-        <strong id="network">Checking deployment…</strong>
-        <p id="availability">Connecting to the private worker.</p>
-        <p class="small">
-          Public test networks only. Use L2L Signet coins and this deployment’s
-          Solana Devnet token.
+        <p>
+          Wrap and unwrap ECX. Pay from your wallet without connecting it to
+          this site.
         </p>
-        <details class="small">
-          <summary>Devnet token mint</summary>
+      </header>
+      <section class="notice">
+        <strong id="network">Checking deployment…</strong>
+        <p id="availability"></p>
+        <p id="limits" class="small"></p>
+        <details>
+          <summary>Configured token</summary>
           <p id="mint" class="address"></p>
-          <button id="copy-mint" type="button">Copy mint</button>
         </details>
+        <p id="network-note" class="small"></p>
       </section>
       <section class="card">
-        <div class="row">
-          <h2>Transfer</h2>
-          <button id="connect" type="button">Connect wallet</button>
-        </div>
-        <label
-          >Solana wallet<select id="wallets">
-            <option value="">Choose a detected wallet</option>
-          </select></label
-        >
-        <p id="account" class="small">No wallet connected</p>
-        <p id="limits" class="small"></p>
+        <h2>Transfer</h2>
         <form id="order-form">
           <label
             >Direction<select id="direction">
@@ -58,7 +48,8 @@
             ><span>You receive <strong id="net">—</strong></span>
           </div>
           <label
-            >Destination address<input
+            ><span id="destination-label">Solana destination address</span
+            ><input
               id="recipient"
               required
               autocomplete="off"
@@ -71,49 +62,50 @@
               spellcheck="false"
           /></label>
           <p id="refund-note" class="small" hidden>
-            Any refund returns to the connected source wallet.
+            Any token refund returns to the verified owner of the account that
+            paid this order.
           </p>
-          <p class="small">
-            Use the exact native network shown above. ECX addresses can resemble
-            Bitcoin addresses.
-          </p>
-          <button id="create" type="submit" disabled>
-            Deposits unavailable</button
-          ><button id="new" type="button">New order</button>
+          <button id="create" type="submit" disabled>Create order</button>
         </form>
       </section>
-      <section class="card" aria-live="polite">
-        <div class="row"><h2>Your transfer</h2><span id="order-short" class="small"></span></div>
+      <section class="card">
+        <div class="row">
+          <h2>Your order</h2>
+          <button id="new" type="button">New order</button>
+        </div>
         <p id="status">No order yet.</p>
         <div id="order-details" hidden>
-          <dl class="order-summary">
-            <div><dt>You send</dt><dd id="order-send"></dd></div>
-            <div><dt>You receive</dt><dd id="order-receive"></dd></div>
-            <div><dt>Bridge fee</dt><dd id="order-fee"></dd></div>
-            <div><dt>Destination</dt><dd id="order-destination" class="address"></dd></div>
-          </dl>
-          <div id="native-instructions" class="deposit-box" hidden>
-            <p>Send exactly <strong id="deposit-amount"></strong> L2L Signet coins to:</p>
-            <code id="deposit-address" class="address"></code>
-            <button id="copy-address" type="button">Copy deposit address</button>
-          </div>
-          <p id="solana-instructions" hidden>Use <strong>Sign deposit</strong> below. Your wallet sends the Devnet token with this order’s reference.</p>
+          <p id="order-short" class="small"></p>
+          <p id="order-summary"></p>
           <p id="deposit-deadline" class="small"></p>
-          <a id="payout-link" target="_blank" rel="noopener noreferrer" hidden>View completed payment ↗</a>
+          <p id="deposit-address" class="address"></p>
+          <canvas id="qr" hidden></canvas>
+          <p><a id="payment-link" hidden>Open payment in your wallet</a></p>
+          <button id="copy-payment" type="button" hidden>
+            Copy payment instructions
+          </button>
+          <p>
+            <a id="payout-link" target="_blank" rel="noopener noreferrer" hidden
+              >View payout transaction</a
+            >
+          </p>
         </div>
         <div class="row">
           <button id="refresh" type="button" disabled>Refresh</button
-          ><button id="sign" type="button" disabled>Sign deposit</button
-          ><button id="copy" type="button" disabled>Copy recovery link</button>
+          ><button id="copy" type="button" disabled>
+            Copy private recovery link
+          </button>
         </div>
       </section>
-      <label id="history-field" hidden>Recent orders on this device<select id="history"></select></label>
+      <label id="history-field" hidden
+        >Recent orders on this device<select id="history"></select
+      ></label>
       <p id="error" role="alert"></p>
       <p id="message" role="status"></p>
       <footer>
-        Bridge fees: native → wrapped 0.20%; wrapped → native 1%. Network costs
-        for payouts are paid by the operator. Market prices do not change bridge
-        settlement.
+        Bridge fee: 1% in each direction. Operator pays payout network costs.
+        Keep your recovery link private. Use only the networks and token mint
+        shown above.
       </footer>
     </main>
   </body>

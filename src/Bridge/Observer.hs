@@ -10,6 +10,8 @@ import qualified Bridge.Ledger as Legacy
 import Bridge.Native
 import Bridge.RPC
 import Bridge.Solana
+import qualified Bridge.SolanaPay as Pay
+import qualified Data.Aeson.KeyMap as KM
 import Bridge.SolanaDeposit
 import Bridge.SolanaMessage (signatureBytes)
 import Bridge.Types
@@ -35,6 +37,8 @@ class ObserverLedger ledger where
   observerMaximumNativeDepth :: ledger -> Int -> IO Int
   observerCommitScan :: ledger -> ScanBatch -> IO ()
   observerLookupInstruction :: ledger -> Text -> IO (Maybe (Text,OrderRequest,PolicySnapshot))
+  observerLookupReferences :: ledger -> [Text] -> IO (Maybe (Text,OrderRequest,PolicySnapshot,Text))
+  observerLookupReferences _ _ = pure Nothing
   observerPendingVerification :: ledger -> IO [Text]
   observerRecordScanFailure :: ledger -> Text -> Int64 -> Text -> IO ()
   observerScannerHealth :: ledger -> IO Value
@@ -226,37 +230,43 @@ observeSolana manager c ledger = do
             else if effectDelta effect<0 || effectClosed effect then pure ([],ChainEvent sig "outgoing" anchor (evidence (Just effect) "custody_decreased"))
             else if effectDelta effect==0 then pure ([],ChainEvent sig "reference" anchor (evidence (Just effect) "no_token_change"))
             else do
-              binding <- maybe (pure Nothing) (observerLookupInstruction ledger) (transactionMemo value)
-              authorized <- case binding of
-                Just (oid,request,_) | direction request==WrappedToNative,Just owner<-sourceOwner request -> do
-                  let memo=maybe "" id (transactionMemo value)
-                      expected=DepositBinding sig owner (mint c) (custodyAta c) (custodyOwner c) memo
-                  case verifyDeposit expected value of
-                    Right proof -> do
-                      -- Preserve primary first-seen time even while an independent
-                      -- provider is behind. Pending receipts are retried explicitly.
-                      now <- epochSeconds
-                      verification <- verifyIndependent expected proof
-                      pure (Just (oid,now,verification))
-                    Left _ -> pure Nothing
-                _ -> pure Nothing
+              let memo=transactionMemo value
+              legacy <- maybe (pure Nothing) (observerLookupInstruction ledger) memo
+              referenced <- case Pay.transactionKeys value of
+                Left _->pure Nothing
+                Right keys->observerLookupReferences ledger keys
+              authorized <- case (legacy,referenced) of
+                (Nothing,Just (oid,request,_,reference)) | direction request==WrappedToNative ->
+                  authorize sig value oid (Just ("solana-pay:"<>reference)) (Pay.verifyPay (Pay.PayBinding sig (mint c) (custodyAta c) (custodyOwner c) reference))
+                (Just (oid,request,_),Nothing) | direction request==WrappedToNative,Just owner<-sourceOwner request ->
+                  authorize sig value oid memo (verifyDeposit (DepositBinding sig owner (mint c) (custodyAta c) (custodyOwner c) (maybe "" id memo)))
+                _->pure Nothing
               now <- epochSeconds
               quantity <- either reject pure (amount $ effectDelta effect)
               let (order,seen,kind,eligible)=case authorized of
                     Nothing -> (Nothing,now,"unmatched_incoming",True)
-                    Just (oid,at,"verified") -> (Just oid,at,"incoming",True)
-                    Just (oid,at,reason) -> (Just oid,at,reason,False)
+                    Just (oid,at,"verified",_,_) -> (Just oid,at,"incoming",True)
+                    Just (oid,at,reason,_,_) -> (Just oid,at,reason,False)
                   receipt=Deposit ("solana:"<>sig) order Wrapped quantity anchor 1 eligible seen
-              pure ([receipt],ChainEvent sig kind anchor (evidence (Just effect) kind))
-  verifyIndependent expected primary = case solanaVerifierRpc c of
+              let saved=case (authorized,evidence (Just effect) kind) of
+                    (Just (_,_,_,owner,instruction),Object fields)->Object(KM.insert "verifiedOwner" (toJSON owner) $ KM.insert "instruction" (toJSON instruction) fields)
+                    (_,plain)->plain
+              pure ([receipt],ChainEvent sig kind anchor saved)
+  authorize signature value oid instruction verify = case verify value of
+    Left _->pure Nothing
+    Right proof->do
+      now <- epochSeconds
+      verification <- verifyIndependent signature verify proof
+      pure(Just(oid,now,verification,Just(verifiedOwner proof),instruction))
+  verifyIndependent signature verify primary = case solanaVerifierRpc c of
     Nothing -> require (profile c/=CanonicalBeta) "independent_rpc_required" >> pure "verified"
     Just verifier -> do
-      result <- try (rpc manager verifier Nothing "getTransaction" [toJSON (boundSignature expected)
+      result <- try (rpc manager verifier Nothing "getTransaction" [toJSON signature
         ,object ["commitment" .= ("finalized"::Text),"encoding" .= ("json"::Text),"maxSupportedTransactionVersion" .= (0::Int)]]) :: IO (Either BridgeError Value)
       pure $ case result of
         Left _ -> "awaiting_verifier"
         Right Null -> "awaiting_verifier"
-        Right value -> case verifyDeposit expected value of
+        Right value -> case verify value of
           Right secondary | secondary==primary -> "verified"
           _ -> "disputed"
 

@@ -98,10 +98,9 @@ createOrder ledger cfg now capability req = do
       []->do
         checkIntakeReadyC connection now
         require (input req>=minInput cfg && input req<=maxInput cfg) "amount_outside_limits"
-        -- The new connection-free contract will replace this legacy owner binding
-        -- together with observer validation, not relax it in isolation.
-        when (direction req==WrappedToNative) $ require (sourceOwner req==Just (refund req)) "refund_owner_mismatch"
-        require (not (T.null (recipient req)) && not (T.null (refund req)) && T.length (recipient req)<=128 && T.length (refund req)<=128) "invalid_destination"
+        require (sourceOwner req==Nothing && (direction req/=WrappedToNative || T.null(refund req))) "invalid_connection_free_order"
+        require (not(T.null(recipient req)) && T.length(recipient req)<=128 && T.length(refund req)<=128 &&
+          (direction req/=NativeToWrapped || not(T.null(refund req)))) "invalid_destination"
         pending <- O.runSelect connection $ do
           row <- O.selectTable ordersTable
           O.where_ (ordersStatus row O../= O.sqlStrictText "Paid" O..&& ordersStatus row O../= O.sqlStrictText "Refunded" O..&& ordersStatus row O../= O.sqlStrictText "ExpiredUnfunded")

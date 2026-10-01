@@ -1,4 +1,4 @@
-module Bridge.Admission (SolanaQuoteCheck(..), checkSolanaQuote, checkSolanaQuoteWith) where
+module Bridge.Admission (checkSolanaQuoteFor, SolanaQuoteCheck(..), checkSolanaQuote, checkSolanaQuoteWith) where
 
 import Bridge.Config
 import Bridge.RPC
@@ -27,14 +27,22 @@ checkSolanaQuote manager c request = do
   _ <- solanaIdentity manager c
   checkSolanaQuoteWith (solanaCall manager c) (invokeUnsignedHelper c) c request
 
+checkSolanaQuoteFor :: Manager -> Config -> Quote -> OrderRequest -> IO SolanaQuoteCheck
+checkSolanaQuoteFor manager c quote request = do
+  _ <- solanaIdentity manager c
+  checkSolanaQuoteUsing quote (solanaCall manager c) (invokeUnsignedHelper c) c request
+
 -- This check has no signer, wallet mutation or ledger mutation. Its previews
 -- contain only zero signatures and are never returned as deposit instructions.
 -- Admission is a current-state check; signing still rechecks the saved order,
 -- live accounts and costs. Full fee/rent ceilings are reserved in the ledger.
 checkSolanaQuoteWith :: SolanaRPC -> (HelperRequest -> IO HelperReply) -> Config -> OrderRequest -> IO SolanaQuoteCheck
 checkSolanaQuoteWith call helper c request = do
+  quote <- either reject pure(makeQuote (direction request) (input request))
+  checkSolanaQuoteUsing quote call helper c request
+checkSolanaQuoteUsing :: Quote -> SolanaRPC -> (HelperRequest -> IO HelperReply) -> Config -> OrderRequest -> IO SolanaQuoteCheck
+checkSolanaQuoteUsing quote call helper c request = do
   require (input request>=minInput c && input request<=maxInput c) "amount_outside_limits"
-  quote <- either reject pure (makeQuote (direction request) (input request))
   let wrapping=direction request==NativeToWrapped
       owner=if wrapping then recipient request else refund request
       outgoing=if wrapping then net quote else input request

@@ -12,6 +12,7 @@ class Operation (s :: Severity) (op :: Type -> Type) | op -> s where
 
 data SafeOperation a where
   PublicConfig :: SafeOperation Value
+  PaymentInstructions :: Text -> Text -> SafeOperation Value
   OrderStatus :: Text -> Text -> SafeOperation OrderView
   Health :: SafeOperation Availability
   Readiness :: SafeOperation Availability
@@ -21,11 +22,11 @@ data SafeOperation a where
 
 data CustomerOperation a where
   CreateOrder :: Text -> OrderRequest -> CustomerOperation OrderView
-  PaymentInstructions :: Text -> Text -> CustomerOperation Value
   DepositHint :: Text -> Text -> Text -> CustomerOperation Value
 
 data OperatorOperation a where
   Pause :: Text -> OperatorOperation Availability
+  RefundDeposit :: Text -> OperatorOperation Value
 
 data WorkerOperation a where
   ScanAndReconcile :: WorkerOperation Value

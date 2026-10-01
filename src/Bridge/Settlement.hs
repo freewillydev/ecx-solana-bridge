@@ -16,6 +16,7 @@ import Bridge.Observer (collectSignatures,SignatureInfo(..))
 import Bridge.Payment
 import Bridge.RPC
 import Bridge.Solana
+import qualified Bridge.SolanaPay as Pay
 import Bridge.SolanaDeposit
 import Bridge.SolanaHelper
 import Bridge.SolanaPayment
@@ -228,15 +229,18 @@ recheckSourceWith transport c ledger ob = do
         pure deposit{depositAnchor=anchor,depositConfirmations=depth,depositEligible=True}
     Wrapped -> do
       signature <- maybe (reject "invalid_solana_deposit_id") pure (T.stripPrefix "solana:" $ depositId deposit)
-      owner <- maybe (reject "source_owner_missing") pure (sourceOwner request)
-      let binding=DepositBinding signature owner (mint c) (custodyAta c) (custodyOwner c) instruction
+      verify <- case T.stripPrefix "solana-pay:" instruction of
+        Just reference->pure(Pay.verifyPay (Pay.PayBinding signature (mint c) (custodyAta c) (custodyOwner c) reference))
+        Nothing->do
+          owner <- maybe (reject "source_owner_missing") pure(sourceOwner request)
+          pure(verifyDeposit (DepositBinding signature owner (mint c) (custodyAta c) (custodyOwner c) instruction))
       proof <- solanaProof (paymentSolana transport) signature
-      verified <- either reject pure (verifyDeposit binding proof)
+      verified <- either reject pure(verify proof)
       require (verifiedAmount verified==depositAmount deposit && T.pack(show $ verifiedSlot verified)==depositAnchor deposit) "source_binding_mismatch"
       case paymentVerifier transport of
         Nothing -> require (profile c/=CanonicalBeta && solanaVerifierRpc c==Nothing) "independent_rpc_required"
         Just verifier -> do
-          independent <- solanaProof verifier signature >>= either reject pure . verifyDeposit binding
+          independent <- solanaProof verifier signature >>= either reject pure . verify
           require (independent==verified) "source_verifier_disagreement"
       pure deposit{depositConfirmations=1,depositEligible=True}
     Sol -> reject "unsupported_source_asset"

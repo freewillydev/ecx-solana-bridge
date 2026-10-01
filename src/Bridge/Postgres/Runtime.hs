@@ -11,9 +11,12 @@ import qualified Bridge.Postgres.Order as Order
 import qualified Bridge.Postgres.Observer as Observer
 import qualified Bridge.Postgres.Reconciliation as Reconciliation
 import qualified Bridge.Postgres.Server as Server
+import qualified Bridge.Postgres.Refund as Refund
+import qualified Bridge.Ledger as Domain
 import Bridge.Postgres.PaymentStore (Store(..))
 import Bridge.Settlement (realPaymentTransport,paymentPass)
-import Bridge.Deposit (prepareSolanaDeposit)
+import qualified Bridge.SolanaPay as Pay
+import Bridge.RPC (fieldValue)
 import qualified Bridge.Postgres.Provisioning as Provisioning
 import Bridge.Observer (epochSeconds)
 import Bridge.RPC (newRpcManager)
@@ -71,6 +74,19 @@ evalSafe context@(SafeContext _ public remote) (SafeDSL operation) = case operat
     token <- bearer header
     cap <- either reject pure(capabilityHash token)
     readOnly context (\connection->Order.exposeOrderC connection remote cap oid)
+  PaymentInstructions header oid->do
+    token <- bearer header
+    cap <- either reject pure(capabilityHash token)
+    readOnly context $ \connection->do
+      order <- Order.exposeOrderC connection remote cap oid
+      now <- epochSeconds
+      state <- publicAvailability connection
+      require (available state && status order=="AwaitingDeposit" && now<=deadline order && direction(request order)==WrappedToNative) "deposit_window_closed"
+      instruction <- maybe (reject "instruction_not_recorded") pure(depositInstruction order)
+      owner <- fieldValue "custodyOwner" public
+      mintId <- fieldValue "mint" public
+      uri <- either reject pure(Pay.payURIFor owner mintId instruction (gross $ quote order))
+      pure(object["uri" .= uri,"reference" .= T.drop 11 instruction,"mint" .= mintId,"amount" .= gross(quote order),"refundPolicy" .= ("verified_source_owner"::Text)])
   Health->pure(Availability True "process_running")
   Readiness->readOnly context publicAvailability
   ReadyEndpoint->readOnly context publicAvailability
@@ -87,7 +103,6 @@ evalCritical :: CriticalContext -> DSL 'Critical a -> IO a
 evalCritical (CriticalContext manager cfg ledger) plan = case plan of
   CustomerDSL operation->case operation of
     CreateOrder header request->bearer header >>= \token->Provisioning.createCustomerOrder manager cfg ledger (const $ reject "unexpected_test_backup") token request
-    PaymentInstructions header oid->bearer header >>= \token->prepareSolanaDeposit manager cfg (Store ledger) token oid
     DepositHint header oid signature->do
       token <- bearer header
       cap <- either reject pure(capabilityHash token)
@@ -104,7 +119,11 @@ evalCritical (CriticalContext manager cfg ledger) plan = case plan of
           _ <- O.runInsert connection O.Insert {O.iTable=hintsTable,O.iRows=[Hints (O.sqlStrictText oid) (O.sqlStrictText signature)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
           pure ()
       pure(object["accepted" .= True,"authorization" .= ("independent_chain_evidence_required"::Text)])
-  OperatorDSL (Pause reason)->pause ledger reason >> readiness ledger
+  OperatorDSL operation->case operation of
+    Pause reason->pause ledger reason >> readiness ledger
+    RefundDeposit did->do
+      obligation <- Refund.createRefund ledger did
+      pure(object["obligation" .= Domain.obligationId obligation,"recipient" .= Domain.obligationRecipient obligation,"amount" .= T.pack(show $ Domain.obligationAmount obligation)])
   WorkerDSL ScanAndReconcile->do
     _ <- Observer.observeOnce manager cfg ledger
     Reconciliation.reconcileCustodyWith epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg ledger
@@ -135,9 +154,9 @@ runAPI settings cfg = do
   require (profile cfg==L2LSignetDevnet && not(backupRequired cfg)) "public_test_profile_required"
   withLedger settings (fingerprint cfg) $ \ledger->do
     manager <- newRpcManager
-    let public=object["profile" .= profile cfg,"deployment" .= deploymentId cfg,"mint" .= mint cfg,"decimals" .= (8::Int),"minInput" .= minInput cfg,"maxInput" .= maxInput cfg,"feesBps" .= object["NativeToWrapped" .= (100::Int),"WrappedToNative" .= (100::Int)],"intakeEnabled" .= False,"implementationReady" .= False]
+    let public=object["profile" .= profile cfg,"deployment" .= deploymentId cfg,"mint" .= mint cfg,"custodyOwner" .= custodyOwner cfg,"decimals" .= (8::Int),"minInput" .= minInput cfg,"maxInput" .= maxInput cfg,"feesBps" .= object["NativeToWrapped" .= (100::Int),"WrappedToNative" .= (100::Int)],"intakeEnabled" .= False,"implementationReady" .= False]
         runtime=Runtime (SafeContext settings public (backupRequired cfg)) (CriticalContext manager cfg ledger)
     _ <- evaluate runtime (worker ScanAndReconcile)
     customerApp <- securityBoundary (serve customerAPI (hoistServer customerAPI (interpret runtime) Server.customerServer))
-    adminApp <- securityBoundary (serve adminAPI (hoistServer adminAPI (interpret runtime) Server.adminServer))
+    adminApp <- securityBoundary (serve Server.operatorAPI (hoistServer Server.operatorAPI (interpret runtime) Server.adminServer))
     concurrently_ (runUnix (customerSocket cfg) 0o660 customerApp) (runUnix (adminSocket cfg) 0o600 adminApp)

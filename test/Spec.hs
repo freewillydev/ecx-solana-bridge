@@ -8,6 +8,7 @@ import Bridge.Recovery
 import Bridge.Reorg
 import Bridge.Budget
 import Bridge.SolanaMessage
+import qualified Bridge.SolanaPay as Pay
 import Bridge.SolanaDeposit
 import Bridge.Solana (inspectTokenAccount)
 import Bridge.SolanaHelper
@@ -4371,6 +4372,28 @@ main=hspec $ do
         result <- runClientM (createCall "Bearer invalid" req) writeEnv
         result `shouldSatisfy` (\case Left (FailureResponse _ _) -> True; _ -> False)
   describe "historical Solana deposit evidence" $ do
+    it "binds a Solana Pay reference to the transfer and historical owner (offline contract)" $ do
+      captured <- BS.readFile "test/fixtures/solana-devnet-order-deposit.json" >>= either fail pure . eitherDecodeStrict'
+      binding <- fieldValue "binding" captured
+      original <- fieldValue "transaction" captured
+      tx <- fieldValue "transaction" original
+      message <- fieldValue "message" tx
+      keys <- fieldValue "accountKeys" message :: IO [Text]
+      reference <- either (fail . T.unpack) pure (Pay.payReference $ T.replicate 64 "f")
+      index <- maybe (fail "memo program missing") pure (elemIndex "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr" keys)
+      instructions <- fieldValue "instructions" message :: IO [Value]
+      tokenInstructions <- mapM (\ix->do
+        program <- fieldValue "programIdIndex" ix :: IO Int
+        accounts <- fieldValue "accounts" ix :: IO [Int]
+        pure (keys!!program,case ix of Object fields->Object(KM.insert "accounts" (toJSON $ accounts<>[index]) fields); _->ix)) instructions
+      let proof=setPath ["transaction","message","accountKeys"] (toJSON [if i==index then reference else key | (i,key)<-zip [0..] keys]) $
+            setPath ["transaction","message","instructions"] (toJSON [ix | (program,ix)<-tokenInstructions,program==tokenProgram]) original
+      expected <- Pay.PayBinding <$> fieldValue "signature" binding <*> fieldValue "mint" binding
+        <*> fieldValue "custody" binding <*> fieldValue "custodyOwner" binding <*> pure reference
+      owner <- fieldValue "owner" binding
+      verifiedOwner <$> Pay.verifyPay expected proof `shouldBe` Right owner
+      Pay.verifyPay expected{Pay.payOrderReference="11111111111111111111111111111111"} proof `shouldSatisfy` either (const True) (const False)
+      Pay.verifyPay expected (setPath ["transaction","message","header","numReadonlyUnsignedAccounts"] (Number 0) proof) `shouldSatisfy` either (const True) (const False)
     it "validates the captured real Devnet order deposit without current account lookups" $ do
       captured<-BS.readFile "test/fixtures/solana-devnet-order-deposit.json" >>= either fail pure . eitherDecodeStrict'
       binding<-fieldValue "binding" captured

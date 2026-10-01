@@ -322,3 +322,32 @@ interface conversion. This is an integrated API checkpoint, not a paying-worker
 cutover: the connection-free Solana Pay contract, startup/recovery, full role/module
 isolation, remaining operator functions, UI and installer are still unfinished.
 The original funded deployment was not changed.
+
+### Connection-free Solana Pay and thin interface implemented
+
+New PostgreSQL unwrap orders require only the native destination and amount;
+`sourceOwner` is absent and the refund field is empty. A durable order-derived
+32-byte reference is stored before instructions are issued. The safe payment
+instructions route produces a standard Solana Pay v1 transfer URI. The shared
+observer matches reference-bearing transactions and verifies Transfer or
+TransferChecked, read-only/non-signer reference placement, signing authority, mint,
+custody, historical token ownership and exact balance effects. Independent-RPC
+verification and pre-send source checks use the same decoder. Legacy memo receipts
+remain supported by the shared observer/payment engine. Immutable observation
+evidence records the verified source owner for PostgreSQL refund authorization;
+the private operator API can create a refund without choosing its recipient.
+
+The thin interface now has manual destinations, integer 1% quotes both ways,
+copyable instructions, locally generated QR codes, Solana Pay wallet-opening links,
+private saved-order recovery/history, polling, deadlines and payout explorer links.
+Wallet Standard connection/signing dependencies and controls were removed. New wrap
+admission uses the saved 1% quote; unwrap admission no longer requires knowing the
+payer before a wallet pays. Haskell build and TypeScript checking/bundling pass.
+An offline reference-placement/ownership contract was added to the existing test
+suite; this is not evidence of an actual wallet transfer. New PostgreSQL round trips,
+ordinary-wallet Devnet acceptance, rendered UI checks, controlled worker startup
+and remaining recovery/installer work still need completion. The funded original
+deployment has not been switched. Solana Pay URIs do not select Devnet; the interface
+explicitly tells testers to select the matching network in their wallet.
+
+Specification: https://solana.com/docs/tools/solana-pay/specification/version1

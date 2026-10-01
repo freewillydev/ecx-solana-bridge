@@ -10,6 +10,9 @@ import Data.Aeson
 import Data.Int (Int64)
 import Data.List (sortOn)
 import Data.Text (Text)
+import qualified Data.Text as T
+import Bridge.Types (reject)
+import qualified Data.Text.Encoding as TE
 import Network.HTTP.Client (Manager)
 import qualified Opaleye as O
 
@@ -19,6 +22,18 @@ instance Chain.ObserverLedger PostgresObserver where
   observerMaximumNativeDepth (PostgresObserver ledger) = Store.maximumNativeDepth ledger
   observerCommitScan (PostgresObserver ledger) = Store.commitScan ledger
   observerLookupInstruction (PostgresObserver ledger) = Store.lookupInstruction ledger
+  observerLookupReferences (PostgresObserver ledger) keys = ledgerAction ledger $ \connection->do
+    rows <- O.runSelect connection $ do
+      row <- O.selectTable ordersTable
+      O.where_ (O.matchNullable (O.sqlBool False) (\instruction->foldr (O..||) (O.sqlBool False) [instruction O..== O.sqlStrictText ("solana-pay:"<>key) | key<-keys]) (ordersInstruction row))
+      pure(ordersId row,ordersRequestJson row,ordersPolicyJson row,ordersInstruction row)
+      :: IO [(Text,Text,Text,Maybe Text)]
+    case rows of
+      [(oid,request,policy,Just instruction)] | Just reference<-T.stripPrefix "solana-pay:" instruction->do
+        req <- either (const $ reject "corrupt_ledger_json") pure(eitherDecodeStrict' $ TE.encodeUtf8 request)
+        saved <- either (const $ reject "corrupt_ledger_json") pure(eitherDecodeStrict' $ TE.encodeUtf8 policy)
+        pure(Just(oid,req,saved,reference))
+      _->pure Nothing
   observerRecordScanFailure (PostgresObserver ledger) = Store.recordScanFailure ledger
   observerPendingVerification (PostgresObserver ledger) = ledgerAction ledger $ \connection->do
     rows <- O.runSelect connection $ do
