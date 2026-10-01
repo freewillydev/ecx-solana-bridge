@@ -417,3 +417,19 @@ mint/metadata, inventory and pool administration. Private `health`, `scanners` a
 The guide distinguishes unported SQLite CLI commands and unverified canonical
 backing, metadata transactions, liquidity/Jupiter routing and remote restoration.
 Documentation does not satisfy those remaining execution gates.
+
+## PostgreSQL native advisory lock recovery — 2026-10-01
+
+The tested native recovery algorithm now uses a `NativeLockStore` capability with
+SQLite and PostgreSQL implementations. The PostgreSQL worker invokes it before
+chain observation and before payment startup, under the existing critical evaluator
+lock. Native identity is checked independently of Solana availability. It can
+restore exact saved inputs and append an audit event; it cannot sign, send, unlock
+or release principal. Startup refuses recovery errors.
+
+All 371 tests pass after this refactor. A native-only real Signet read against the
+isolated PostgreSQL import returned idle with zero inputs and no error. A broader
+scan stopped at a chain-observation review and provides no acceptance claim. Actual
+pending PostgreSQL input restoration after node restart remains to be tested; the
+current paying process was not switched to this build.
+[Evidence](evidence/postgres-native-lock-recovery.json).

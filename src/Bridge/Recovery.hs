@@ -1,6 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.Recovery
-  ( recoverDeployment, reconcileNativeLocks, reconcileNativeLocksWith
+  ( recoverDeployment, NativeLockStore(..), reconcileNativeLocks, reconcileNativeLocksWith
   , CancellationStore(..), cancelPreparation, cancelPreparationWith, approveSourceRecovery, approveSourceRecoveryWith
   , coverSourceLoss, coverSourceLossWith, prepareNativeReplacement, prepareNativeReplacementWith
   , signNativeReplacementWith ) where
@@ -185,15 +185,20 @@ reconcileNativeLocks manager c=reconcileNativeLocksWith
   (realPaymentTransport manager c (const $ reject "unexpected_lock_recovery_backup"))
     {paymentIdentity=nativeIdentity manager c >> pure ()} c
 
-reconcileNativeLocksWith :: PaymentTransport -> Config -> Ledger -> IO Value
+class CancellationStore ledger => NativeLockStore ledger where
+  nativeLockAudit :: ledger -> Text -> IO ()
+instance NativeLockStore Ledger where
+  nativeLockAudit ledger subject = ledgerAction ledger $ \db->execute db "INSERT INTO audit(action,detail) VALUES('native_locks_restored',?)" (Only subject)
+
+reconcileNativeLocksWith :: NativeLockStore ledger => PaymentTransport -> Config -> ledger -> IO Value
 reconcileNativeLocksWith transport c ledger=do
   result <- try (work `catch` (\(_::IOException)->reject "native_lock_recovery_io_unavailable")) :: IO (Either BridgeError Value)
   case result of
     Right value->pure value
     Left (BridgeError code)->do
       let reason="native_lock_recovery:"<>code
-      health <- readiness ledger
-      when (health/=Availability False reason) $ pause ledger reason
+      health <- preparationReadiness ledger
+      when (health/=Availability False reason) $ preparationPause ledger reason
       pure $ object ["state" .= ("requires_review"::Text),"error" .= code,"signedOrSent" .= False]
  where
   call=paymentNative transport
@@ -204,14 +209,14 @@ reconcileNativeLocksWith transport c ledger=do
     descriptors <- fieldValue "descriptors" wallet
     scanning <- fieldValue "scanning" wallet :: IO Value
     require (name==nativeWallet c && descriptors && scanning==Bool False) "native_wallet_not_ready"
-    preparations <- filter ((=="Native").preparationChain) <$> pendingPreparations ledger
-    attempts <- filter ((=="Native").attemptChain) <$> pendingAttempts ledger
+    preparations <- filter ((=="Native").preparationChain) <$> preparationPending ledger
+    attempts <- filter ((=="Native").attemptChain) <$> preparationAttempts ledger
     case (preparations,attempts) of
       ([],[])->verifyOnly "idle" []
       ([p],[])->do
         policy <- preparationPolicyFor c ledger p
         (plan,draft) <- readNativePreparation call c p policy
-        cancelling <- preparationCancellation ledger (obligationId $ preparationObligation p) (preparationGeneration p)
+        cancelling <- cancellationRead ledger (obligationId $ preparationObligation p) (preparationGeneration p)
         let subject=obligationId (preparationObligation p)<>"@"<>T.pack(show $ preparationGeneration p)
         case draft of
           Nothing->verifyOnly (if cancelling==Nothing then "awaiting_draft" else "cancellation_pending") []
@@ -239,7 +244,7 @@ reconcileNativeLocksWith transport c ledger=do
     current <- readNativePrevouts call (planDepth plan) (nativeInputs tx)
     require (sameNativePrevouts current previous) "native_previous_output_changed"
     restored <- restoreNativeInputLocks call (map nativeOutpoint $ nativeInputs tx)
-    when (restored>0) $ ledgerAction ledger $ \db->execute db "INSERT INTO audit(action,detail) VALUES('native_locks_restored',?)" (Only subject)
+    when (restored>0) $ nativeLockAudit ledger subject
     pure $ report "locked" (length $ nativeInputs tx) restored
   recordedNativeSpend attempt signed=do
     found <- readNativePayment call signed

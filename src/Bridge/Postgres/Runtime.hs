@@ -16,8 +16,8 @@ import qualified Bridge.Ledger as Domain
 import Bridge.Postgres.PaymentStore (Store(..))
 import Bridge.Settlement (realPaymentTransport,paymentPass,reconcilePaymentsWith,PaymentTransport(..),approveSolanaRetryWith)
 import qualified Bridge.Postgres.Startup as Startup
-import Bridge.Recovery (cancelPreparationWith)
-import Bridge.NativePayment (ownedNativeLocks)
+import Bridge.Recovery (cancelPreparationWith,reconcileNativeLocksWith)
+import Bridge.Native (nativeIdentity)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar,newMVar,withMVar)
 import Control.Monad (forever,when)
@@ -142,6 +142,10 @@ evalCritical (CriticalContext manager cfg ledger) plan = case plan of
       obligation <- Refund.createRefund ledger did
       pure(object["obligation" .= Domain.obligationId obligation,"recipient" .= Domain.obligationRecipient obligation,"amount" .= T.pack(show $ Domain.obligationAmount obligation)])
   WorkerDSL ScanAndReconcile->do
+    -- Advisory native locks must be restored independently of Solana RPC health.
+    _ <- reconcileNativeLocksWith
+      (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup"))
+        {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg (Store ledger)
     _ <- Observer.observeOnce manager cfg ledger
     now <- epochSeconds
     Order.expireQuotes ledger now
@@ -149,7 +153,9 @@ evalCritical (CriticalContext manager cfg ledger) plan = case plan of
     Reconciliation.reconcileCustodyWith epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg ledger
   WorkerDSL StartPayments->do
     let transport=realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")
-    _ <- ownedNativeLocks (paymentNative transport) []
+    lockResult <- reconcileNativeLocksWith transport {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg (Store ledger)
+    lockError <- fieldValue "error" lockResult :: IO (Maybe Text)
+    maybe (pure ()) reject lockError
     now <- epochSeconds
     Startup.resumeAfterChecks cfg ledger now
   WorkerDSL AdvancePayments->do

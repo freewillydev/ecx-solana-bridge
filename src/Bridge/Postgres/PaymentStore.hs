@@ -7,7 +7,7 @@ import Control.Exception (IOException,catch,try)
 import Data.Aeson (Value,object,(.=))
 import qualified Bridge.Postgres.Settlement as S
 import qualified Bridge.Postgres.Retry as Retry
-import Bridge.Recovery (CancellationStore(..))
+import Bridge.Recovery (CancellationStore(..),NativeLockStore(..))
 import qualified Bridge.Postgres.Cancellation as Cancellation
 import Bridge.Payment (PreparationStore(..))
 import Bridge.Deposit (DepositStore(..))
@@ -217,3 +217,9 @@ instance CancellationStore Store where
   cancellationCheckFresh (Store ledger) = Cancellation.checkFresh ledger
   cancellationBegin (Store ledger) = Cancellation.begin ledger
   cancellationFinish (Store ledger) = Cancellation.finish ledger
+
+instance NativeLockStore Store where
+  nativeLockAudit (Store ledger) subject = ledgerAction ledger $ \connection->do
+    _ <- O.runInsert connection O.Insert
+      {O.iTable=auditTable,O.iRows=[Audit Nothing (O.sqlStrictText "native_locks_restored") (O.sqlStrictText subject)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+    pure ()
