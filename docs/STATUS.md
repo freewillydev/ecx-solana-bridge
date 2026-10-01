@@ -570,3 +570,34 @@ counts (9 paid, 3 refunded, 3 expired unfunded). The temporary contract database
 removed. Full PostgreSQL replacement draft/sign/send, loss-cover administration,
 crash/rollback acceptance and actual network recovery tests remain required.
 [Evidence](evidence/postgres-native-winner-port.json).
+
+## Integrated PostgreSQL operator workflows — 2026-10-01
+
+The replacement operator workflow is integrated across typed PostgreSQL storage,
+shared chain/source/custody/signing logic, the critical DSL, private Servant routes
+and the running local product. Drafting stores an unsigned reviewed template;
+cancellation cannot erase signed work; signing persists exact bytes and lineage;
+resume or an explicit send advances the recorded member through the existing
+send and observation engine. Signing remains an explicit paused operator action.
+The worker does not automatically create replacement signatures.
+
+Source-loss coverage is also integrated through `LossCoverStore`: only a reverified
+canonical conflict plus a current matching custody view permits free float/earned
+capital to cover the saved deficit. It cannot resume, sign or send. The existing
+restoration journal returns covered capital exactly once. Both workflows retain
+the original safeguards and use the sole production critical evaluator.
+
+The combined isolated PostgreSQL contract passes drafting, cancellation, signing
+context, saved-member replay, both winner directions, loss allocation/freshness
+fences and capital return. All 371 shared examples and nine installer tests pass.
+These database fixtures explicitly use non-sendable replacement bytes and are not
+actual signing/reorg evidence. One backed-up local restart deployed the full batch;
+the bridge is ready with no scanner errors. All five new private routes reject
+invalid work with the intended domain codes; the public replacement route is 404.
+All 29 compared ledger/work tables and critical sequence 71 are unchanged after
+restart and API checks. The temporary test database is removed.
+
+Live replacement-family signing/send/confirmation, source-loss/reorg and crash
+acceptance remain in the release gates, along with wallet, canonical network,
+Linux packaging/x86 installer, remote restore and independent review. See the
+[operator guide](OPERATIONS.md) and [batch evidence](evidence/postgres-operator-workflows.json).

@@ -1,0 +1,65 @@
+{
+  "date": "2026-10-01",
+  "scope": "Integrated PostgreSQL replacement operator workflow and source-loss capital coverage, shared chain inspectors/signing/send engine, closed critical DSL/private API, local deployment",
+  "implementation": [
+    "Replacement parent/draft/decision/signing context/member/cancellation stored through typed Opaleye transactions",
+    "Legacy and PostgreSQL replacement orchestration use NativeReplacementStore; source/custody/template checks retained",
+    "LossCoverStore shares conflict proof and loss-inclusive custody inspector; PostgreSQL capital coverage and return use append-only journal",
+    "Private prepare/sign/cancel/send replacement and cover-source-loss routes resolved through sole critical evaluation site"
+  ],
+  "checks": {
+    "isolatedPostgresContracts": [
+      "draft decision replay",
+      "unsigned cancellation replay/conflict and cancelled signing refusal",
+      "signing context original family/template",
+      "saved replacement member replay and signed cancellation refusal",
+      "older/newer winner fee adjustments and stale/family/policy/anchor fences",
+      "loss-cover insufficient capital/current revision/recovery refusal",
+      "exact coverage replay/conflict",
+      "restored-source covered capital return once",
+      "source approval/recovery/finality contracts remain passing"
+    ],
+    "haskellExamples": 371,
+    "failures": 0,
+    "installerTests": 9,
+    "localRuntime": {
+      "routes": {
+        "prepare-native-replacement": {
+          "status": 409,
+          "error": "invalid_native_replacement_draft"
+        },
+        "sign-native-replacement": {
+          "status": 409,
+          "error": "pause_before_operator_action"
+        },
+        "cancel-native-replacement": {
+          "status": 409,
+          "error": "invalid_native_replacement_cancellation"
+        },
+        "send-native-replacement": {
+          "status": 409,
+          "error": "native_replacement_member_missing"
+        },
+        "cover-source-loss": {
+          "status": 409,
+          "error": "invalid_source_loss_cover"
+        }
+      },
+      "health": {
+        "available": true,
+        "reason": "ready"
+      },
+      "scannerErrors": 0,
+      "financialTablesUnchanged": 29,
+      "criticalSequence": 71,
+      "publicReplacementRouteStatus": 404
+    },
+    "temporaryDatabaseRemoved": true,
+    "privateBackupTaken": true
+  },
+  "limitations": [
+    "Database fixtures contain non-sendable replacement byte stub; no claim of real signing/broadcast or live source reorg",
+    "Private send route reaches existing guarded send engine, but actual replacement family signing/send/confirmation acceptance remains outstanding",
+    "Canonical-chain, supported-wallet, Linux release packaging/x86 install, remote restore and independent release reviews remain required"
+  ]
+}

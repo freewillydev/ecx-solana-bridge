@@ -1,4 +1,4 @@
-module Bridge.Postgres.Source (recordSourceCheckC, sourceWorkHashC, recoveryApproval, recoveryObligation, recoveryRecord, candidates, recordCheck, orderBinding, eventEvidence) where
+module Bridge.Postgres.Source (recordSourceCheckC, paymentWorkHashC, sourceWorkHashC, recoveryApproval, recoveryObligation, recoveryRecord, candidates, recordCheck, orderBinding, eventEvidence) where
 
 import Bridge.Types
 import Bridge.Ledger (SourceCheck(..),Obligation(..),Deposit(..))
@@ -75,8 +75,8 @@ recordSourceCheckC connection did check = do
       {O.iTable=auditTable,O.iRows=[Audit Nothing (O.sqlStrictText "source_recovery") (O.sqlStrictText (did<>":"<>state))],O.iReturning=O.rCount,O.iOnConflict=Nothing}
     pure ()
 
-sourceWorkHashC :: PG.Connection -> Text -> IO Text
-sourceWorkHashC connection intent = do
+paymentWorkHashC :: PG.Connection -> Text -> IO Text
+paymentWorkHashC connection intent = do
   obligations <- O.runSelect connection $ matching (\row->obligationsId row O..== O.sqlStrictText intent) (O.selectTable obligationsTable) :: IO [Obligations]
   work <- O.runSelect connection $ matching (\row->intentsId row O..== O.sqlStrictText intent) (O.selectTable intentsTable) :: IO [Intents]
   preparations <- O.runSelect connection $ matching (\row->preparationsIntentId row O..== O.sqlStrictText intent) (O.selectTable preparationsTable) :: IO [Preparations]
@@ -90,6 +90,11 @@ sourceWorkHashC connection intent = do
       cancellationRows=[(preparationcancellationsGeneration r,preparationcancellationsReason r,preparationcancellationsCleanupJson r,preparationcancellationsCompleted r==1) | r<-sortOn preparationcancellationsGeneration cancellations]
       feeRows=[(feereservationsAsset r,feereservationsAmount r,feereservationsReleased r==1) | r<-fees]
       base=hashJson (obligationRows,workRows,preparationRows,attemptRows,cancellationRows,feeRows)
+  pure base
+
+sourceWorkHashC :: PG.Connection -> Text -> IO Text
+sourceWorkHashC connection intent = do
+  base <- paymentWorkHashC connection intent
   drafts <- O.runSelect connection $ do
     draft <- O.selectTable nativereplacementdraftsTable
     attempt <- O.selectTable attemptsTable

@@ -14,9 +14,9 @@ import qualified Bridge.Postgres.Server as Server
 import qualified Bridge.Postgres.Refund as Refund
 import qualified Bridge.Ledger as Domain
 import Bridge.Postgres.PaymentStore (Store(..))
-import Bridge.Settlement (realPaymentTransport,paymentPass,reconcilePaymentsWith,PaymentTransport(..),approveSolanaRetryWith)
+import Bridge.Settlement (realPaymentTransport,settleAttemptWith,paymentPass,reconcilePaymentsWith,PaymentTransport(..),approveSolanaRetryWith)
 import qualified Bridge.Postgres.Startup as Startup
-import Bridge.Recovery (cancelPreparationWith,reconcileNativeLocksWith,approveSourceRecoveryWith)
+import Bridge.Recovery (cancelPreparationWith,reconcileNativeLocksWith,approveSourceRecoveryWith,prepareNativeReplacementWith,signNativeReplacementWith,NativeReplacementStore(..),coverSourceLossWith)
 import Bridge.Native (nativeIdentity)
 import Bridge.Reorg (reconcileNativeSourcesWith,reconcileNativeSettlementsWith)
 import Control.Concurrent (threadDelay)
@@ -140,6 +140,21 @@ evalCritical (CriticalContext manager cfg ledger) plan = case plan of
       approveSolanaRetryWith (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) txid reason
       pure(object["approvedRetryOf" .= txid,"signedOrSent" .= False])
     ApproveSourceRecovery intent restoration reason->approveSourceRecoveryWith epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) intent restoration reason
+    PrepareNativeReplacement parent fee reason->
+      prepareNativeReplacementWith epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) parent fee reason
+    SignNativeReplacement sequenceNo->do
+      a <- signNativeReplacementWith epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) sequenceNo
+      pure(object["transaction" .= Domain.attemptId a,"draftSequence" .= sequenceNo,"signed" .= True,"sent" .= False])
+    CancelNativeReplacement sequenceNo reason->do
+      replacementCancel (Store ledger) sequenceNo reason
+      pure(object["draftSequence" .= sequenceNo,"cancelled" .= True,"signedOrSent" .= False])
+    SendNativeReplacement sequenceNo->do
+      saved <- replacementMember (Store ledger) sequenceNo
+      a <- maybe (reject "native_replacement_member_missing") pure saved
+      outcome <- settleAttemptWith (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) a
+      pure(object["transaction" .= Domain.attemptId a,"outcome" .= outcome])
+    CoverSourceLoss did recovery capital reason->
+      coverSourceLossWith epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) did recovery capital reason
     RefundDeposit did->do
       obligation <- Refund.createRefund ledger did
       pure(object["obligation" .= Domain.obligationId obligation,"recipient" .= Domain.obligationRecipient obligation,"amount" .= T.pack(show $ Domain.obligationAmount obligation)])

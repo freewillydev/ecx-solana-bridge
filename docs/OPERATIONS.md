@@ -48,16 +48,41 @@ For an offline maintenance snapshot stop the worker service and confirm it is
 inactive. `/resume` is a private POST that rechecks readiness; it is not a way to
 bypass custody/history errors. Private POST operations also include `/refund`
 (`depositId`), `/retry-solana` (`transaction`, `reason`) and `/cancel-preparation`
-(`intent`, `generation`, `cancellationReason`). Latest source also adds
-`/approve-source-recovery` (`obligation`, `restorationSequence`, `approvalReason`);
-its PostgreSQL positive/reorg acceptance and deployment are still pending.
-Their typed evaluators validate the
-exact current work; a rejection requires investigation, not direct ledger editing.
+(`intent`, `generation`, `cancellationReason`). `/approve-source-recovery`
+accepts `obligation`, `restorationSequence`, `approvalReason` and restores only the
+exact reviewed work after the saved source restoration is reverified.
+
+The PostgreSQL private socket also supports this replacement workflow:
+
+1. Pause; call `/prepare-native-replacement` with `parentTransaction`,
+   `replacementFee` (integer base units as a JSON string), `replacementReason`.
+   It saves an unsigned template and returns `draftSequence`.
+2. While paused, call `/sign-native-replacement` with `draftSequence`. It rechecks
+   the source, custody and exact template, then persists the signature and lineage.
+   A repeated call returns the same saved member; it does not make a new signature.
+3. Call `/resume` after reviewing the saved work. The normal worker can send the
+   latest authorized member; `/send-native-replacement` with `draftSequence` also
+   advances that exact member through the existing send/backup/observation engine.
+   A paused deployment returns a paused outcome without broadcasting.
+
+An unsigned draft can be cancelled through `/cancel-native-replacement` using
+`cancelledDraftSequence`, `replacementCancellationReason`. Cancellation cannot
+remove a signature or release the original payment. `/cover-source-loss` takes
+`lossDeposit`, `lossRecoverySequence`, `lossCapital` (`lossFloat`, `lossEarned`,
+base-unit strings), `lossReason`. It independently verifies the missing source
+and current custody view before allocating existing free capital. It does not
+resume, sign or send, and cannot treat an RPC failure as a proved loss. Restored
+sources return the covered capital through the recovery journal.
+
+These commands use closed critical DSL operations and the same serialized
+interpreter as the worker. Rejections require investigation rather than direct
+ledger editing. PostgreSQL storage contracts pass; live replacement/source-loss,
+crash/backup and canonical-chain acceptance remain release requirements.
 
 The CLI `scan`, `reconcile`, `recover`, `approve-source-recovery`,
 `cover-source-loss` and native replacement commands still target the legacy SQLite
-implementation. **Do not run those against the PostgreSQL deployment.** Porting the
-remaining source/reorg/replacement workflows is unfinished. Native advisory-input
+implementation. **Do not run those against the PostgreSQL deployment.** Use the
+private PostgreSQL routes above. Native advisory-input
 lock recovery now runs in the PostgreSQL worker and has actual unsigned-draft
 node-restart acceptance; it is not an operator command. `postgres-init` is offline maintenance;
 `postgres-test-worker` is the explicit public-test payment runtime. Do not run a

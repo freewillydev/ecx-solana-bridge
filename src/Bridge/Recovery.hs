@@ -2,8 +2,8 @@
 module Bridge.Recovery
   ( recoverDeployment, NativeLockStore(..), reconcileNativeLocks, reconcileNativeLocksWith
   , CancellationStore(..), cancelPreparation, cancelPreparationWith, SourceRecoveryStore(..), approveSourceRecovery, approveSourceRecoveryWith
-  , coverSourceLoss, coverSourceLossWith, prepareNativeReplacement, prepareNativeReplacementWith
-  , signNativeReplacementWith ) where
+  , LossCoverStore(..), coverSourceLoss, coverSourceLossWith, prepareNativeReplacement, prepareNativeReplacementWith
+  , NativeReplacementStore(..), signNativeReplacementWith ) where
 
 import Bridge.Config
 import Bridge.Ledger
@@ -95,22 +95,45 @@ prepareNativeReplacement manager c ledger parent fee reason=do
   prepareNativeReplacementWith epochSeconds
     (realPaymentTransport manager c (const $ reject "unexpected_replacement_backup")) c ledger parent fee reason
 
+-- Storage capability for the complete explicit operator workflow. Chain
+-- inspection and signing remain shared; callers cannot substitute arbitrary IO.
+class (SettlementStore ledger,CustodyStore ledger) => NativeReplacementStore ledger where
+  replacementDecision :: ledger -> Text -> Amount -> Text -> IO (Maybe(Int64,Bool))
+  replacementParent :: ledger -> Config -> Text -> IO Attempt
+  replacementRecordDraft :: ledger -> Config -> Attempt -> NativeDraft -> Text -> Int64 -> IO Int64
+  replacementMember :: ledger -> Int64 -> IO (Maybe Attempt)
+  replacementSigningContext :: ledger -> Config -> Int64 -> IO ([Attempt],NativeDraft)
+  replacementRecordMember :: ledger -> Config -> Int64 -> [Attempt] -> NativeSigned -> Int64 -> IO Attempt
+  replacementCustody :: IO Int64 -> PaymentTransport -> Config -> ledger -> IO Value
+  replacementFresh :: ledger -> Int64 -> IO ()
+  replacementCancel :: ledger -> Int64 -> Text -> IO ()
+instance NativeReplacementStore Ledger where
+  replacementDecision = nativeReplacementDecision
+  replacementParent = nativeReplacementParent
+  replacementRecordDraft = recordNativeReplacementDraft
+  replacementMember = nativeReplacementMember
+  replacementSigningContext = nativeReplacementSigningContext
+  replacementRecordMember = recordNativeReplacementMember
+  replacementCustody = reconcileCustodyWith
+  replacementFresh = checkCustodyFresh
+  replacementCancel = recordNativeReplacementCancellation
+
 -- Persist the reviewed unsigned template; this command cannot invoke a signer
 -- or create another economic intent. Cancellation keeps the original payment.
-prepareNativeReplacementWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> Text -> Amount -> Text -> IO Value
+prepareNativeReplacementWith :: NativeReplacementStore ledger => IO Int64 -> PaymentTransport -> Config -> ledger -> Text -> Amount -> Text -> IO Value
 prepareNativeReplacementWith clock transport c ledger parent fee reason=do
   require (units fee>0 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_native_replacement_draft"
-  health <- readiness ledger
+  health <- preparationReadiness ledger
   require (not $ available health) "pause_before_operator_action"
-  previous <- nativeReplacementDecision ledger parent fee reason
+  previous <- replacementDecision ledger parent fee reason
   (sequenceNo,cancelled) <- case previous of
     Just saved->pure saved
     Nothing->do
-      expected <- nativeReplacementParent ledger c parent
+      expected <- replacementParent ledger c parent
       paymentIdentity transport
       (ob,payment) <- readSavedPayment transport c ledger expected
       signed <- case payment of NativePayment s->pure s; _->reject "wrong_destination_chain"
-      attempts <- nativeFamilyAttempts ledger (attemptIntent expected)
+      attempts <- paymentNativeFamily ledger (attemptIntent expected)
       family <- if attempts==[expected] then pure [signed] else do
         (members,_) <- readSavedNativeFamily transport c ledger attempts
         pure (map snd members)
@@ -123,42 +146,42 @@ prepareNativeReplacementWith clock transport c ledger parent fee reason=do
       failures <- mapM (fieldValue "error") outcomes :: IO [Maybe Text]
       require (all (==Nothing) failures) "native_replacement_payment_requires_review"
       recheckSourceWith transport c ledger ob
-      _ <- reconcileCustodyWith clock transport c ledger
+      _ <- replacementCustody clock transport c ledger
       now <- clock
-      sequenceNo <- recordNativeReplacementDraft ledger c expected draft reason now
+      sequenceNo <- replacementRecordDraft ledger c expected draft reason now
       pure(sequenceNo,False)
   pure $ object ["parentTransaction" .= parent,"draftSequence" .= sequenceNo,"fee" .= fee
     ,"cancelled" .= cancelled,"paused" .= True,"signedOrSent" .= False]
 
--- Signing is an explicit call, never a paused-worker task. The command/send
--- entry point remains gated until family reorg compensation is integrated.
-signNativeReplacementWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> Int64 -> IO Attempt
+-- Signing is an explicit paused operator call, never a worker task. Saved
+-- members advance only through the ordinary durable send/observation engine.
+signNativeReplacementWith :: NativeReplacementStore ledger => IO Int64 -> PaymentTransport -> Config -> ledger -> Int64 -> IO Attempt
 signNativeReplacementWith clock transport c ledger sequenceNo=do
-  previous <- nativeReplacementMember ledger sequenceNo
+  previous <- replacementMember ledger sequenceNo
   case previous of
     Just member->pure member
     Nothing->do
-      (expected,draft) <- nativeReplacementSigningContext ledger c sequenceNo
+      (expected,draft) <- replacementSigningContext ledger c sequenceNo
       paymentIdentity transport
       (members,_) <- readSavedNativeFamily transport c ledger expected
       (ob,_) <- readSavedPayment transport c ledger (last expected)
       recheckSourceWith transport c ledger ob
       reconcile
-      _ <- nativeReplacementSigningContext ledger c sequenceNo
+      _ <- replacementSigningContext ledger c sequenceNo
       signed <- signNativeReplacementDraftWith (paymentNative transport) c (map snd members) draft
       recheckSourceWith transport c ledger ob
       reconcile
       now <- clock
-      recordNativeReplacementMember ledger c sequenceNo expected signed now
+      replacementRecordMember ledger c sequenceNo expected signed now
  where
   reconcile=do
     payments <- reconcilePaymentsWith transport c ledger
     outcomes <- fieldValue "attempts" payments :: IO [Value]
     failures <- mapM (fieldValue "error") outcomes :: IO [Maybe Text]
     require (all (==Nothing) failures) "native_replacement_payment_requires_review"
-    _ <- reconcileCustodyWith clock transport c ledger
+    _ <- replacementCustody clock transport c ledger
     now <- clock
-    checkCustodyFresh ledger now
+    replacementFresh ledger now
 
 coverSourceLoss :: Manager -> Config -> Ledger -> Text -> Int64 -> LossCapital -> Text -> IO Value
 coverSourceLoss manager c ledger did recovery capital reason=do
@@ -166,16 +189,25 @@ coverSourceLoss manager c ledger did recovery capital reason=do
   coverSourceLossWith epochSeconds
     (realPaymentTransport manager c (const $ reject "unexpected_loss_cover_backup")) c ledger did recovery capital reason
 
-coverSourceLossWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> Text -> Int64 -> LossCapital -> Text -> IO Value
+class (NativeSourceStore ledger,CustodyStore ledger) => LossCoverStore ledger where
+  lossReadiness :: ledger -> IO Availability
+  lossDecision :: ledger -> Text -> Int64 -> IO (Maybe(LossCapital,Text))
+  lossRecord :: ledger -> Deposit -> Int64 -> Int64 -> LossCapital -> Text -> Value -> Value -> IO ()
+instance LossCoverStore Ledger where
+  lossReadiness = readiness
+  lossDecision = sourceLossCover
+  lossRecord = recordSourceLossCover
+
+coverSourceLossWith :: LossCoverStore ledger => IO Int64 -> PaymentTransport -> Config -> ledger -> Text -> Int64 -> LossCapital -> Text -> IO Value
 coverSourceLossWith clock transport c ledger did recovery capital reason=do
   require (recovery>0 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_source_loss_cover"
-  health <- readiness ledger
+  health <- lossReadiness ledger
   require (not $ available health) "pause_before_operator_action"
-  old <- sourceLossCover ledger did recovery
+  old <- lossDecision ledger did recovery
   case old of
     Just previous->require (previous==(capital,reason)) "source_loss_cover_conflict"
     Nothing->do
-      candidates <- nativeSourceCandidates ledger
+      candidates <- sourceCandidates ledger
       require (length candidates<=1000) "source_recovery_backlog"
       source <- case filter ((==did).depositId) candidates of [s]->pure s; _->reject "source_loss_not_proven"
       sourceProof <- inspectNativeSourceWith transport c ledger source >>= \case
@@ -185,7 +217,7 @@ coverSourceLossWith clock transport c ledger did recovery capital reason=do
       -- ordinary custody readiness pass before the actual capital allocation.
       custodyProof <- inspectSourceLossCustodyWith clock transport c ledger
       now <- clock
-      recordSourceLossCover ledger source recovery now capital reason sourceProof custodyProof
+      lossRecord ledger source recovery now capital reason sourceProof custodyProof
   pure $ object ["coveredSourceLoss" .= did,"recoverySequence" .= recovery,"capital" .= capital
     ,"paused" .= True,"signedOrSent" .= False]
 

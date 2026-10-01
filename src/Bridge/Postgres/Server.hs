@@ -1,7 +1,8 @@
 {-# LANGUAGE DataKinds,TypeOperators,DeriveGeneric,DeriveAnyClass #-}
 module Bridge.Postgres.Server (customerServer,adminServer,operatorAPI) where
 import Bridge.API
-import Bridge.Types (Availability)
+import Bridge.Ledger (LossCapital)
+import Bridge.Types (Availability,Amount)
 import Data.Aeson (FromJSON)
 import qualified Data.Aeson
 import Data.Text (Text)
@@ -24,10 +25,19 @@ data RefundRequest = RefundRequest { depositId :: Text } deriving (Generic,FromJ
 data RetryRequest = RetryRequest { transaction :: Text, reason :: Text } deriving (Generic,FromJSON)
 data CancelRequest = CancelRequest { intent :: Text, generation :: Int, cancellationReason :: Text } deriving (Generic,FromJSON)
 data SourceRecoveryRequest = SourceRecoveryRequest { obligation :: Text, restorationSequence :: Int64, approvalReason :: Text } deriving (Generic,FromJSON)
+data ReplacementDraftRequest = ReplacementDraftRequest { parentTransaction :: Text, replacementFee :: Amount, replacementReason :: Text } deriving (Generic,FromJSON)
+data ReplacementRequest = ReplacementRequest { draftSequence :: Int64 } deriving (Generic,FromJSON)
+data ReplacementCancelRequest = ReplacementCancelRequest { cancelledDraftSequence :: Int64, replacementCancellationReason :: Text } deriving (Generic,FromJSON)
+data LossCoverRequest = LossCoverRequest { lossDeposit :: Text, lossRecoverySequence :: Int64, lossCapital :: LossCapital, lossReason :: Text } deriving (Generic,FromJSON)
 type OperatorAPI = AdminAPI :<|> "refund" :> ReqBody '[JSON] RefundRequest :> Post '[JSON] Data.Aeson.Value
   :<|> "retry-solana" :> ReqBody '[JSON] RetryRequest :> Post '[JSON] Data.Aeson.Value
   :<|> "cancel-preparation" :> ReqBody '[JSON] CancelRequest :> Post '[JSON] Data.Aeson.Value
   :<|> "approve-source-recovery" :> ReqBody '[JSON] SourceRecoveryRequest :> Post '[JSON] Data.Aeson.Value
+  :<|> "prepare-native-replacement" :> ReqBody '[JSON] ReplacementDraftRequest :> Post '[JSON] Data.Aeson.Value
+  :<|> "sign-native-replacement" :> ReqBody '[JSON] ReplacementRequest :> Post '[JSON] Data.Aeson.Value
+  :<|> "cancel-native-replacement" :> ReqBody '[JSON] ReplacementCancelRequest :> Post '[JSON] Data.Aeson.Value
+  :<|> "send-native-replacement" :> ReqBody '[JSON] ReplacementRequest :> Post '[JSON] Data.Aeson.Value
+  :<|> "cover-source-loss" :> ReqBody '[JSON] LossCoverRequest :> Post '[JSON] Data.Aeson.Value
   :<|> "resume" :> Post '[JSON] Availability
 operatorAPI :: Proxy OperatorAPI
 operatorAPI = Proxy
@@ -40,4 +50,9 @@ adminServer = (safe Readiness
   :<|> (\request->operator(ApproveSolanaRetry(transaction request)(reason request)))
   :<|> (\request->operator(CancelPreparation(intent request)(generation request)(cancellationReason request)))
   :<|> (\request->operator(ApproveSourceRecovery(obligation request)(restorationSequence request)(approvalReason request)))
+  :<|> (\request->operator(PrepareNativeReplacement(parentTransaction request)(replacementFee request)(replacementReason request)))
+  :<|> (\request->operator(SignNativeReplacement(draftSequence request)))
+  :<|> (\request->operator(CancelNativeReplacement(cancelledDraftSequence request)(replacementCancellationReason request)))
+  :<|> (\request->operator(SendNativeReplacement(draftSequence request)))
+  :<|> (\request->operator(CoverSourceLoss(lossDeposit request)(lossRecoverySequence request)(lossCapital request)(lossReason request)))
   :<|> operator Resume

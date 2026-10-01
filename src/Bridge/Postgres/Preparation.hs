@@ -1,5 +1,5 @@
 module Bridge.Postgres.Preparation
-  ( orderPolicy, costLimits, begin, active, storeDraft, storeAttempt, pending, pendingC ) where
+  ( orderPolicy, costLimits, begin, active, activeC, storeDraft, storeAttempt, pending, pendingC ) where
 
 import Bridge.Config
 import Bridge.Types

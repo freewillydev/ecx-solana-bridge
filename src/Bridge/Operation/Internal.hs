@@ -2,6 +2,7 @@
 module Bridge.Operation.Internal where
 
 import Bridge.Types
+import Bridge.Ledger (LossCapital)
 import Data.Aeson (Value)
 import Data.Kind (Type)
 import Data.Text (Text)
@@ -31,6 +32,11 @@ data OperatorOperation a where
   Resume :: OperatorOperation Availability
   ApproveSolanaRetry :: Text -> Text -> OperatorOperation Value
   ApproveSourceRecovery :: Text -> Int64 -> Text -> OperatorOperation Value
+  PrepareNativeReplacement :: Text -> Amount -> Text -> OperatorOperation Value
+  SignNativeReplacement :: Int64 -> OperatorOperation Value
+  CancelNativeReplacement :: Int64 -> Text -> OperatorOperation Value
+  SendNativeReplacement :: Int64 -> OperatorOperation Value
+  CoverSourceLoss :: Text -> Int64 -> LossCapital -> Text -> OperatorOperation Value
   RefundDeposit :: Text -> OperatorOperation Value
 
 data WorkerOperation a where

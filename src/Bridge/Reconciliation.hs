@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module Bridge.Reconciliation (CustodyStore(..), View(..), inspectCustodyWith, reconcileCustody, reconcileCustodyWith, inspectSourceLossCustodyWith) where
+module Bridge.Reconciliation (CustodyStore(..), View(..), inspectCustodyWith, reconcileCustodyRecordWith, reconcileCustody, reconcileCustodyWith, inspectSourceLossCustodyWith) where
 
 import Bridge.Config
 import Bridge.Ledger
@@ -126,7 +126,7 @@ reconcileCustodyWith clock transport c ledger=do
 
 -- This inspection checks physical custody including proved deficits, but never
 -- certifies the ordinary custody gate or ignores unavailable/unknown history.
-inspectSourceLossCustodyWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> IO Value
+inspectSourceLossCustodyWith :: CustodyStore ledger => IO Int64 -> PaymentTransport -> Config -> ledger -> IO Value
 inspectSourceLossCustodyWith clock transport c ledger=do
   (revision,at,matches,report) <- inspectCustodyWith clock transport c ledger True
     `catch` (\(_::IOException)->reject "custody_rpc_unavailable")
@@ -301,3 +301,18 @@ pendingEffect transport c ledger attempt=do
           require (observedAnchor==anchor && actual==T.pack(show delta)
             && kind==(if stream=="Solana" && n==0 then "failed" else "outgoing")) "custody_payment_observation_mismatch"
         pure [(txid,"Wrapped",negate n),(txid,"Sol",negate cost)]
+
+-- Share inspection and uncertainty handling while each ledger owns its atomic
+-- custody-check record. This does not grant a signer or payment capability.
+reconcileCustodyRecordWith :: CustodyStore ledger => (Int64 -> Int64 -> Maybe Text -> Maybe Value -> IO ()) -> IO Int64 -> PaymentTransport -> Config -> ledger -> IO Value
+reconcileCustodyRecordWith record clock transport cfg ledger = do
+  expected <- custodyRevision ledger
+  result <- try (inspectCustodyWith clock transport cfg ledger False `catch` (\(_::IOException)->reject "custody_rpc_unavailable")) :: IO (Either BridgeError (Int64,Int64,Bool,Value))
+  case result of
+    Right (revision,at,matches,report)->do
+      record revision at (if matches then Nothing else Just "custody_balance_mismatch") (Just report)
+      pure(object["matches" .= matches,"revision" .= revision,"report" .= report])
+    Left (BridgeError code)->do
+      at <- clock
+      record expected at (Just code) Nothing
+      pure(object["matches" .= False,"error" .= code])

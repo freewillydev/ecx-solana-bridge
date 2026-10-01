@@ -175,3 +175,20 @@ seeds alone do not reconstruct order obligations or payment history.
 Report progress using the three checkpoints above and concrete working flows.
 Do not use arbitrary completion percentages, confuse compilation with actual
 wallet acceptance, or claim that an unfinished core path is merely an edge case.
+
+## Execution batching — 2026-10-01
+
+Complete each remaining workflow across storage, shared chain logic, closed DSL,
+private/public API as applicable, interface and installer before opening a new
+checkpoint. Use incremental one-job compilation and scoped contracts during
+implementation, then run the shared suite once for the complete batch. Record
+which requirement each acceptance proves and reuse that evidence until a relevant
+change or concrete failure invalidates it. Avoid repeating toolchain downloads,
+VM installation, package builds, full suites or real transfers for internal helper
+changes. Group Linux packaging/install checks after runtime workflows stabilize;
+keep one 3-GiB task VM at most and stop disposable resources after acceptance.
+
+Prioritize the usable integrated product. Preserve all financial/signing guards
+while building it; then perform the outstanding deep recovery, clean-host restore,
+canonical network, supported-wallet and independent release reviews together.
+Database fixture acceptance does not substitute for actual chain/host acceptance.

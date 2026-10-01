@@ -10,13 +10,15 @@ import qualified Bridge.Postgres.Retry as Retry
 import qualified Bridge.Postgres.Source as Source
 import Bridge.Reorg (NativeSourceStore(..),NativeSettlementStore(..))
 import qualified Bridge.Postgres.NativeRecovery as NativeRecovery
-import Bridge.Recovery (CancellationStore(..),NativeLockStore(..),SourceRecoveryStore(..))
+import Bridge.Recovery (CancellationStore(..),NativeLockStore(..),SourceRecoveryStore(..),NativeReplacementStore(..),LossCoverStore(..))
 import qualified Bridge.Postgres.Cancellation as Cancellation
+import qualified Bridge.Postgres.Replacement as Replacement
+import qualified Bridge.Postgres.LossCover as LossCover
 import Bridge.Payment (PreparationStore(..))
 import Bridge.Deposit (DepositStore(..))
 import qualified Bridge.Postgres.Order as Order
 import qualified Bridge.Postgres.Preparation as P
-import Bridge.Reconciliation (CustodyStore(..),View(..),inspectCustodyWith)
+import Bridge.Reconciliation (CustodyStore(..),View(..),inspectCustodyWith,reconcileCustodyRecordWith)
 import qualified Bridge.Postgres.Custody as C
 import qualified Bridge.Postgres.Observation as Observation
 import Data.Int (Int64)
@@ -194,3 +196,19 @@ instance NativeSettlementStore Store where
   recoveryPause (Store ledger) = pause ledger
   recoveryObservation (Store ledger) = NativeRecovery.observation ledger
   recoveryCheck (Store ledger) = NativeRecovery.recordCheck ledger
+
+instance NativeReplacementStore Store where
+  replacementDecision (Store ledger) = Replacement.decision ledger
+  replacementParent (Store ledger) = Replacement.parent ledger
+  replacementRecordDraft (Store ledger) = Replacement.recordDraft ledger
+  replacementMember (Store ledger) = Replacement.member ledger
+  replacementSigningContext (Store ledger) = Replacement.signingContext ledger
+  replacementRecordMember (Store ledger) = Replacement.recordMember ledger
+  replacementCustody clock transport cfg store@(Store ledger) = reconcileCustodyRecordWith (C.recordCheck ledger) clock transport cfg store
+  replacementFresh (Store ledger) = Cancellation.checkFresh ledger
+  replacementCancel (Store ledger) = Replacement.cancel ledger
+
+instance LossCoverStore Store where
+  lossReadiness (Store ledger) = readiness ledger
+  lossDecision (Store ledger) = LossCover.decision ledger
+  lossRecord (Store ledger) = LossCover.record ledger

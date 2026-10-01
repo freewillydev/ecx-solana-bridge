@@ -1,6 +1,8 @@
 -- Database-only recovery contract. No chain transport, signer or broadcast.
 module Main (main) where
 import Bridge.Types
+import Bridge.Config (Config,fingerprint)
+import qualified Bridge.Postgres.Replacement as Replacement
 import Bridge.NativePayment
 import Bridge.RPC (fieldValue)
 import qualified Bridge.Postgres.NativeFamily as Family
@@ -8,7 +10,8 @@ import qualified Data.ByteString as BS
 import qualified Bridge.Postgres.Ledger as L
 import qualified Bridge.Postgres.Source as Source
 import qualified Bridge.Postgres.NativeRecovery as NativeRecovery
-import Bridge.Ledger (SourceCheck(..),Deposit(..),Attempt(..),PaymentCosts(..),NativeSettlementCheck(..))
+import qualified Bridge.Postgres.LossCover as LossCover
+import Bridge.Ledger (LossCapital(..),SourceCheck(..),Deposit(..),Attempt(..),PaymentCosts(..),NativeSettlementCheck(..))
 import qualified Data.Text as T
 import Control.Exception (bracket,try)
 import Control.Monad (forM_)
@@ -168,11 +171,12 @@ main = do
       [PG.Only count] <- PG.query_ c "SELECT count(*) FROM postings WHERE event_id LIKE 'native-winner-fee:%'" :: IO[PG.Only Int64]
       require (count==0) "contract_unapproved_winner_money_posted"
     winnerContract ledger
+    lossCoverContract ledger
   L.withLedger connectionSettings identity $ \ledger->do
     L.ledgerAction ledger $ \c->do
       rows <- PG.query_ c "SELECT id,status FROM obligations ORDER BY id" :: IO[(Text,Text)]
       require (lookup "restore-ready" rows==Just "ready" && lookup "restore-paying" rows==Just "paying" && lookup "changed-work" rows==Just "review" && lookup "stale-restoration" rows==Just "review") "contract_restart_changed_state"
-  putStrLn "PostgreSQL source approval: ready/paying restoration, freshness, replay, conflict, changed-work/stale refusal, candidate view, source/evidence fences and reopen plus native finality and older/newer winner fee accounting/fences passed; database-only contract"
+  putStrLn "PostgreSQL source approval: ready/paying restoration, freshness, replay, conflict, changed-work/stale refusal, candidate view, source/evidence fences and reopen plus native finality and replacement draft/sign/cancel, older/newer winner fees, loss cover/return and fences passed; database-only contract"
 
 jsonText :: ToJSON a => a -> Text
 jsonText = TE.decodeUtf8 . LBS.toStrict . encode
@@ -181,6 +185,7 @@ jsonText = TE.decodeUtf8 . LBS.toStrict . encode
 -- byte stub. This exercises PostgreSQL accounting, never network replacement.
 winnerContract :: L.Ledger -> IO ()
 winnerContract ledger = do
+  cfg <- BS.readFile "config/l2l-devnet.example.json" >>= either fail pure . eitherDecodeStrict' :: IO Config
   captured <- BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
   plan <- fieldValue "plan" captured
   prevouts <- fieldValue "previous" captured
@@ -195,7 +200,7 @@ winnerContract ledger = do
       oldId=nativeTxid tx
       newId=nativeTxid(signedNativeTransaction newer)
       oid="native-winner-contract"
-      policy=PolicySnapshot (planDepth plan) "finalized" identity
+      policy=PolicySnapshot (planDepth plan) "finalized" (fingerprint cfg)
       common=outpointTxid point<>":"<>T.pack(show $ outpointVout point)
       proof tid=jsonText $ object["txid" .= tid,"blockhash" .= ("winner-contract-anchor"::Text),"requiredDepth" .= planDepth plan]
   zero <- either reject pure(amount 0)
@@ -211,11 +216,31 @@ winnerContract ledger = do
     _ <- PG.execute c "INSERT INTO fee_reservations(intent_id,asset,amount,released) VALUES(?,'Native',?,0)" (oid,units $ planFeeLimit plan)
     oldSequence <- L.criticalSequence c
     _ <- PG.execute c "INSERT INTO attempts(txid,intent_id,signed_bytes,policy_json,fee_limit,state,critical_sequence) VALUES(?,?,?,?,?,'broadcast_intent',?)" (oldId,oid,raw,jsonText original,units $ planFeeLimit plan,oldSequence)
-    draftSequence <- L.criticalSequence c
-    _ <- PG.execute c "INSERT INTO native_replacement_drafts(critical_sequence,parent_txid,draft_json,fee,reason,work_hash,proof_json) VALUES(?,?,?,?,?,repeat('d',64),'{}')" (draftSequence,oldId,jsonText draft,units $ draftFee draft,"database contract"::Text)
-    memberSequence <- L.criticalSequence c
-    _ <- PG.execute c "INSERT INTO attempts(txid,intent_id,signed_bytes,policy_json,fee_limit,state,critical_sequence) VALUES(?,?,?,?,?,'signed',?)" (newId,oid,"00"::Text,jsonText newer,units $ planFeeLimit plan,memberSequence)
-    _ <- PG.execute c "INSERT INTO native_replacement_members(txid,draft_sequence,critical_sequence) VALUES(?,?,?)" (newId,draftSequence,memberSequence)
+    pure ()
+  expected <- Replacement.parent ledger cfg oldId
+  fresh ledger
+  cancelled <- Replacement.recordDraft ledger cfg expected draft "cancelled database contract" 100
+  Replacement.decision ledger oldId (draftFee draft) "cancelled database contract" >>= \saved->require (saved==Just(cancelled,False)) "contract_replacement_decision_missing"
+  Replacement.cancel ledger cancelled "cancel before signing"
+  beforeCancelledReplay <- snapshot ledger
+  Replacement.cancel ledger cancelled "cancel before signing"
+  expectError "native_replacement_cancellation_conflict" $ Replacement.cancel ledger cancelled "other reason"
+  expectError "native_replacement_not_unsigned" $ Replacement.signingContext ledger cfg cancelled >> pure ()
+  snapshot ledger >>= \after->require (beforeCancelledReplay==after) "contract_replacement_cancel_replay_mutated"
+  fresh ledger
+  draftSequence <- Replacement.recordDraft ledger cfg expected draft "signed database contract" 100
+  (expectedFamily,savedDraft) <- Replacement.signingContext ledger cfg draftSequence
+  require (expectedFamily==[expected] && savedDraft==draft) "contract_replacement_signing_context_changed"
+  fresh ledger
+  signedMember <- Replacement.recordMember ledger cfg draftSequence expectedFamily newer 100
+  beforeSignedReplay <- snapshot ledger
+  Replacement.recordMember ledger cfg draftSequence expectedFamily newer 100 >>= \a->require (a==signedMember) "contract_replacement_signed_replay_changed"
+  expectError "native_replacement_already_signed" $ Replacement.cancel ledger draftSequence "cannot cancel signature"
+  snapshot ledger >>= \after->require (beforeSignedReplay==after) "contract_replacement_signed_replay_mutated"
+  Replacement.member ledger draftSequence >>= \a->require (a==Just signedMember) "contract_replacement_member_missing"
+  L.ledgerAction ledger $ \c->do
+    broadcastSequence <- L.criticalSequence c
+    _ <- PG.execute c "UPDATE attempts SET critical_sequence=? WHERE txid=?" (broadcastSequence,newId)
     _ <- PG.execute c "UPDATE attempts SET state='broadcast_intent' WHERE txid=?" (PG.Only newId)
     _ <- PG.execute c "UPDATE attempts SET state='settled',observation_json=? WHERE txid=?" (previous,oldId)
     _ <- PG.execute c "UPDATE intents SET resolved=1 WHERE id=?" (PG.Only oid)
@@ -268,4 +293,49 @@ winnerContract ledger = do
     require (total==0) "contract_older_winner_fee_not_returned"
     states <- PG.query c "SELECT txid,state FROM attempts WHERE intent_id=?" (PG.Only oid) :: IO [(Text,Text)]
     require (lookup oldId states==Just "settled" && lookup newId states==Just "review") "contract_older_winner_not_canonical"
+    pure ()
+
+lossCoverContract :: L.Ledger -> IO ()
+lossCoverContract ledger = do
+  let txid=T.replicate 64 "a"
+      did="native:"<>txid<>":0"
+      sourceProof=object["transaction" .= txid,"output" .= (0::Int),"observationHash" .= ("contract-hash"::Text),"confirmations" .= (-1::Int),"nodeBlock" .= ("loss-contract-block"::Text),"nodeHeight" .= (100::Int)]
+  (source,recovery) <- L.ledgerAction ledger $ \c->do
+    Source.recordSourceCheckC c did (SourceMissing sourceProof)
+    [PG.Only sequenceNo] <- PG.query c "SELECT critical_sequence FROM source_recoveries WHERE deposit_id=? ORDER BY id DESC LIMIT 1" (PG.Only did) :: IO [PG.Only Int64]
+    quantity <- either reject pure(amount 10000)
+    L.posting c "contract-loss-capital" "synthetic database fixture only" [(Native,"float",5000),(Native,"earned",4000),(Native,"external",-9000)]
+    pure(Deposit did Nothing Native quantity "unconfirmed" 0 False 100,sequenceNo)
+  fromFloat <- either reject pure(amount 6000)
+  fromEarned <- either reject pure(amount 4000)
+  let capital=LossCapital fromFloat fromEarned
+      reason="contract capital coverage"
+      custody revision=object["revision" .= revision,"checkedAt" .= (100::Int),"report" .= object["matches" .= True,"nativeBlock" .= ("loss-contract-block"::Text),"nativeHeight" .= (100::Int)]]
+  revision <- L.ledgerAction ledger $ \c->do
+    [PG.Only current] <- PG.query_ c "SELECT revision FROM custody_check" :: IO [PG.Only Int64]
+    pure current
+  before <- snapshot ledger
+  expectError "insufficient_loss_capital" $ LossCover.record ledger source recovery 100 capital reason sourceProof (custody revision)
+  expectError "source_loss_custody_not_current" $ LossCover.record ledger source recovery 100 capital reason sourceProof (custody $ revision+1)
+  expectError "source_loss_not_proven" $ LossCover.record ledger source (recovery+1) 100 capital reason sourceProof (custody revision)
+  snapshot ledger >>= \after->require (before==after) "contract_loss_refusal_mutated"
+  L.ledgerAction ledger $ \c->L.posting c "contract-extra-loss-capital" "synthetic database fixture only" [(Native,"float",1000),(Native,"external",-1000)]
+  coverRevision <- L.ledgerAction ledger $ \c->do
+    [PG.Only current] <- PG.query_ c "SELECT revision FROM custody_check" :: IO [PG.Only Int64]
+    pure current
+  LossCover.record ledger source recovery 100 capital reason sourceProof (custody coverRevision)
+  LossCover.decision ledger did recovery >>= \saved->require (saved==Just(capital,reason)) "contract_loss_decision_missing"
+  beforeReplay <- snapshot ledger
+  LossCover.record ledger source recovery 100 capital reason sourceProof (custody coverRevision)
+  expectError "source_loss_cover_conflict" $ LossCover.record ledger source recovery 100 capital "changed allocation reason" sourceProof (custody coverRevision)
+  snapshot ledger >>= \after->require (beforeReplay==after) "contract_loss_cover_repeated"
+  L.ledgerAction ledger $ \c->do
+    [PG.Only deficit] <- PG.query_ c "SELECT sum(delta)::bigint FROM postings WHERE asset='Native' AND account='source_deficit'" :: IO [PG.Only Int64]
+    require (deficit==0) "contract_loss_deficit_not_covered"
+    _ <- PG.execute c "UPDATE deposits SET eligible=1 WHERE id=?" (PG.Only did)
+    Source.recordSourceCheckC c did (SourceRestored $ object["contractRestored" .= True])
+    [PG.Only count] <- PG.query_ c "SELECT count(*) FROM source_loss_returns" :: IO [PG.Only Int64]
+    require (count==1) "contract_loss_capital_not_returned"
+    posts <- PG.query_ c "SELECT account,sum(delta)::bigint FROM postings WHERE asset='Native' AND account IN('float','earned','source_deficit') GROUP BY account ORDER BY account" :: IO [(Text,Int64)]
+    require (posts==[("earned",4000),("float",6000),("source_deficit",0)]) "contract_loss_return_changed_capital"
     pure ()

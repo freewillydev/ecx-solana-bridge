@@ -8,7 +8,7 @@ The project follows the later requirements in the original ECX discussion: an op
 
 ## Current integrated revision
 
-The [integrated implementation plan](docs/IMPLEMENTATION-PLAN.md) targets a connection-free interface, 1% fees in both directions, PostgreSQL/Opaleye throughout the database layer, and Servant handlers that produce a severity-indexed DSL for separate safe and critical evaluation. The local PostgreSQL paying runtime and both new 1% customer flows are working. Historical orders keep their original terms. The revised installer and remaining recovery workflows are being completed; deep auditing follows integrated acceptance.
+The [integrated implementation plan](docs/IMPLEMENTATION-PLAN.md) targets a connection-free interface, 1% fees in both directions, PostgreSQL/Opaleye throughout the database layer, and Servant handlers that produce a severity-indexed DSL for separate safe and critical evaluation. The local PostgreSQL paying runtime and both new 1% customer flows are working. Historical orders keep their original terms. The revised installer and private PostgreSQL replacement/loss-cover workflows are integrated locally; remaining live recovery, restore and release acceptance follows the integrated product.
 
 ## What the bridge does
 
