@@ -215,17 +215,10 @@ signNativeDraft call plan draft = do
   unsigned <- fieldValue "tx" decoded >>= either reject pure . decodeNativeTx
   require (sameNativeTemplate unsigned (draftTransaction draft)) "native_psbt_changed"
   current <- readNativePrevouts call (planDepth plan) (nativeInputs unsigned)
-  let economic p=(prevout p,prevoutAmount p,prevoutScript p,prevoutCoinbase p)
-  require (map economic current==map economic (draftPrevouts draft)) "native_previous_output_changed"
+  require (sameNativePrevouts current (draftPrevouts draft)) "native_previous_output_changed"
   -- Reapply advisory locks, including after a daemon restart. Signing does
   -- not authorize sending; the caller must save the exact result to its ledger.
-  locked <- call True "listlockunspent" [] >>= parseValue parseJSON :: IO [Outpoint]
-  let wanted=map nativeOutpoint (nativeInputs unsigned)
-  require (all (`elem` wanted) locked) "native_preparation_locks_require_review"
-  let missing=filter (`notElem` locked) wanted
-  when (not $ null missing) $ do
-    ok <- call True "lockunspent" [Bool False,toJSON missing] >>= parseValue parseJSON
-    require ok "native_input_lock_failed"
+  _ <- restoreNativeInputLocks call (map nativeOutpoint $ nativeInputs unsigned)
   signed <- call True "walletprocesspsbt" [toJSON (draftPsbt draft),Bool True,String "ALL",Bool True]
   complete <- fieldValue "complete" signed
   require complete "native_signing_incomplete"
@@ -242,6 +235,31 @@ signNativeDraft call plan draft = do
   let result=NativeSigned bytes final plan current (draftFee draft)
   checkNativeAcceptance call result
   pure result
+
+sameNativePrevouts :: [NativePrevout] -> [NativePrevout] -> Bool
+sameNativePrevouts a b = map economic a==map economic b
+ where economic p=(prevout p,prevoutAmount p,prevoutScript p,prevoutCoinbase p)
+
+-- The caller validates the saved draft/attempt and current owned prevouts first.
+-- Never unlock unknown inputs or pass an empty mutation to the wallet.
+ownedNativeLocks :: NativeRPC -> [Outpoint] -> IO [Outpoint]
+ownedNativeLocks call expected=do
+  require (length expected<=100 && length expected==length (nub expected)
+    && all (\p->transactionId (outpointTxid p) && outpointVout p>=0) expected) "native_input_mismatch"
+  locked <- call True "listlockunspent" [] >>= parseValue parseJSON :: IO [Outpoint]
+  require (length locked<=100 && length locked==length (nub locked) && all (`elem` expected) locked) "native_preparation_locks_require_review"
+  pure locked
+
+restoreNativeInputLocks :: NativeRPC -> [Outpoint] -> IO Int
+restoreNativeInputLocks call expected=do
+  locked <- ownedNativeLocks call expected
+  let missing=filter (`notElem` locked) expected
+  when (not $ null missing) $ do
+    ok <- call True "lockunspent" [Bool False,toJSON missing] >>= parseValue parseJSON
+    require ok "native_input_lock_failed"
+  after <- ownedNativeLocks call expected
+  require (length after==length expected) "native_input_lock_unverified"
+  pure (length missing)
 
 checkNativeAcceptance :: NativeRPC -> NativeSigned -> IO ()
 checkNativeAcceptance call signed = do

@@ -1,11 +1,10 @@
 Build profile: -w ghc-9.14.1 -O1
 In order, the following will be built (use -v for more details):
- - ecx-bridge-0.1.0.0 (lib) (configuration changed)
- - ecx-bridge-0.1.0.0 (test:bridge-test) (configuration changed)
-Configuring library for ecx-bridge-0.1.0.0...
+ - ecx-bridge-0.1.0.0 (lib) (file src/Bridge/Recovery.hs changed)
+ - ecx-bridge-0.1.0.0 (test:bridge-test) (dependency rebuilt)
 Preprocessing library for ecx-bridge-0.1.0.0...
 Building library for ecx-bridge-0.1.0.0...
-Configuring test suite 'bridge-test' for ecx-bridge-0.1.0.0...
+[18 of 25] Compiling Bridge.Recovery  ( src/Bridge/Recovery.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Recovery.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Recovery.dyn_o ) [Source file changed]
 Preprocessing test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Building test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 [1 of 1] Compiling Main             ( test/Spec.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test-tmp/Main.o ) [Source file changed]
@@ -142,6 +141,22 @@ native transaction validation (captured public-Signet transaction)
   refuses a corrupted saved draft before invoking the wallet signer [✔]
   stores the draft before locking/signing and reuses a recorded attempt (RPC contract test) [✔]
   retains preparation and pauses if a funding response is lost (RPC contract test) [✔]
+native lock recovery (offline RPC and SQLite restart contracts)
+  reconstructs exact unsigned inputs after reopening, once, without changing funds or signing [✔]
+  preserves unseen native signed bytes and restores their inputs: broadcast=False [✔]
+  preserves unseen native signed bytes and restores their inputs: broadcast=True [✔]
+  does not relock a generation whose recorded cancellation has a lost cleanup reply [✔]
+  protects native inputs during source review without resolving or releasing the obligation [✔]
+  reconciles a recorded native spend without creating another transaction: mempool [✔]
+  reconciles a recorded native spend without creating another transaction: confirmed [✔]
+  reconciles a recorded native spend without creating another transaction: evicted [✔]
+  refuses an observed signed-only transaction before treating its inputs as spent [✔]
+  never unlocks or replaces unknown wallet locks [✔]
+  refuses unavailable, changed or insufficiently confirmed inputs before any lock mutation [✔]
+  reconciles a lost lock response without repeating it or releasing any funds [✔]
+  does not sign when a success reply is contradicted by the wallet's actual locks [✔]
+  leaves a draftless preparation intact and refuses any unexplained locks [✔]
+  refuses the wrong wallet before touching its locks [✔]
 Solana preparation (SDK fixtures and RPC contract tests)
   binds the helper protocol, message, memo, signature and custody account [✔]
   simulates the exact SDK message without exposing its valid signature [✔]
@@ -240,8 +255,8 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 3.1946 seconds
-196 examples, 0 failures
+Finished in 3.7928 seconds
+211 examples, 0 failures
 Test suite bridge-test: PASS
 Test suite logged to: /Volumes/Crucial
 X9/CodexBuilds/ecx-bridge-20260930/workspace-b/outputs/ecx-bridge/./../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log

@@ -33,7 +33,7 @@ import System.Posix.Process (exitImmediately)
 main :: IO ()
 main=do
   args<-getArgs
-  (path,privateRequest,mode)<-case args of [a,b,m] | m `elem` ["prepare","transaction","run","refund","status","unsigned-solana","unsigned-native","interrupt-after-submit"] -> pure(a,b,m); _->fail "public-test-order CONFIG PRIVATE_REQUEST prepare|transaction|run|refund|status|unsigned-solana|unsigned-native|interrupt-after-submit"
+  (path,privateRequest,mode)<-case args of [a,b,m] | m `elem` ["prepare","transaction","run","refund","status","unsigned-solana","unsigned-native","interrupt-after-submit","unsigned-native-locks"] -> pure(a,b,m); _->fail "public-test-order CONFIG PRIVATE_REQUEST prepare|transaction|run|refund|status|unsigned-solana|unsigned-native|interrupt-after-submit|unsigned-native-locks"
   c<-loadConfig path
   require (profile c==L2LSignetDevnet && not (backupRequired c)
     && fingerprint c=="027929d80f528c8da4766560c2597c3971960bd47b4fc7c9f7648c0eba5996f8") "different_public_test_deployment"
@@ -46,12 +46,12 @@ main=do
       nativeDestination=if wrapping then refund request else recipient request
   require (units (input request)==10000 && if wrapping
     then recipient request==owner && idempotencyKey request `elem` ["public-test-wrap-1","public-test-unsigned-recovery-1"] && sourceOwner request==Nothing
-    else refund request==owner && sourceOwner request==Just owner && idempotencyKey request `elem` ["public-test-redeem-1","public-test-redeem-2","public-test-paused-recovery-1"]) "unexpected_public_test_order"
+    else refund request==owner && sourceOwner request==Just owner && idempotencyKey request `elem` ["public-test-redeem-1","public-test-redeem-2","public-test-paused-recovery-1","public-test-native-locks-1"]) "unexpected_public_test_order"
   manager<-newRpcManager
   withLedger (dbPath c) (fingerprint c) $ \ledger -> (do
     orders<-ledgerAction ledger $ \db -> query_ db "SELECT id,idempotency_key,status FROM orders" :: IO [(Text,Text,Text)]
-    require (length orders<=7 && all (\(_,key,st)->
-      (key `elem` ["public-test-wrap-1","public-test-redeem-1","public-test-redeem-2","public-test-unsigned-recovery-1","public-test-paused-recovery-1"]
+    require (length orders<=8 && all (\(_,key,st)->
+      (key `elem` ["public-test-wrap-1","public-test-redeem-1","public-test-redeem-2","public-test-unsigned-recovery-1","public-test-paused-recovery-1","public-test-native-locks-1"]
         && (key==idempotencyKey request || st `elem` ["Paid","Refunded"]))
       || (key `elem` ["provision-wrap-1","provision-redeem-1"] && st=="ExpiredUnfunded")) orders) "only_sequential_acceptance_orders"
     let existing=[oid | (oid,key,_)<-orders,key==idempotencyKey request]
@@ -101,6 +101,17 @@ main=do
             resumeAfterChecks ledger
             let stop _=interruptPreparation ledger ob "Solana"
             _<-prepareSolanaWith (solanaCall manager c) stop c ledger ob
+            reject "expected_interruption"
+          "unsigned-native-locks"->do
+            require (not wrapping && idempotencyKey request=="public-test-native-locks-1") "only_native_lock_recovery_order"
+            observeOnce manager c ledger >>= requireHealthy
+            requireBalances manager c ledger
+            ob<-oneObligation ledger oid "conversion"
+            requireNoPreparation ledger ob
+            resumeAfterChecks ledger
+            let stop wallet method params=if method=="walletprocesspsbt"
+                  then interruptPreparation ledger ob "Native" else nativeCall manager c wallet method params
+            _<-prepareNativeWith stop c ledger ob
             reject "expected_interruption"
           "unsigned-native"->do
             require (recovery && wrapping) "only_unsigned_recovery_order"

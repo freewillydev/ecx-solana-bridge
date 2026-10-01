@@ -46,8 +46,8 @@ main=do
   manager<-newRpcManager
   withLedger (dbPath c) (fingerprint c) $ \ledger -> (do
     orders<-ledgerAction ledger $ \db -> query_ db "SELECT idempotency_key,status FROM orders" :: IO [(Text,Text)]
-    require (length orders<=7 && all (\(key,st)->
-      (key `elem` ["public-test-wrap-1","public-test-redeem-1","public-test-redeem-2","public-test-unsigned-recovery-1","public-test-paused-recovery-1"] && st `elem` ["Paid","Refunded"])
+    require (length orders<=8 && all (\(key,st)->
+      (key `elem` ["public-test-wrap-1","public-test-redeem-1","public-test-redeem-2","public-test-unsigned-recovery-1","public-test-paused-recovery-1","public-test-native-locks-1"] && st `elem` ["Paid","Refunded"])
       || key==idempotencyKey request
       || (key `elem` ["provision-wrap-1","provision-redeem-1"] && st=="ExpiredUnfunded")) orders) "unexpected_existing_test_orders"
     pendingAttempts ledger >>= \xs->require (null xs) "pending_payment_must_resolve_first"

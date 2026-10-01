@@ -126,6 +126,66 @@ nativeFixture = do
   decoded <- fieldValue "decoded" value >>= either (fail . T.unpack) pure . decodeNativeTx
   pure (plan,previous,fee,decoded)
 
+nativeSignedFixture :: IO NativeSigned
+nativeSignedFixture=do
+  value<-BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
+  (plan,previous,fee,tx)<-nativeFixture
+  raw<-fieldValue "raw" value
+  pure (NativeSigned raw tx plan previous fee)
+
+withNativeLockRecovery :: (Ledger -> Config -> Preparation -> IORef [Outpoint] -> IORef [Text] -> PaymentTransport -> IO a) -> IO a
+withNativeLockRecovery action=withDir $ \dir->withNativeLockRecoveryAt True dir action
+
+-- Only local SQLite reopening and captured public bytes; these RPCs do not
+-- contact a chain. The ordinary worker supplies the real native transport.
+withNativeLockRecoveryAt :: Bool -> FilePath -> (Ledger -> Config -> Preparation -> IORef [Outpoint] -> IORef [Text] -> PaymentTransport -> IO a) -> IO a
+withNativeLockRecoveryAt draft dir action=withNativeCancellationDraft draft dir $ \l c p locks original->do
+  signed<-nativeSignedFixture
+  captured<-BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
+  decoded<-fieldValue "decoded" captured :: IO Value
+  previous<-case signedNativePrevouts signed of [v]->pure v; _->fail "expected captured prevout"
+  calls<-newIORef []
+  let tx=signedNativeTransaction signed
+      wanted=map nativeOutpoint $ nativeInputs tx
+      call wallet method params=do
+        modifyIORef' calls (<>[method])
+        case (method,params) of
+          ("getwalletinfo",[]) -> pure $ object ["walletname" .= nativeWallet c,"descriptors" .= True,"scanning" .= False]
+          ("gettxout",[txid,index,Bool True]) -> do
+            (txid,index) `shouldBe` (toJSON $ outpointTxid $ prevout previous,toJSON $ outpointVout $ prevout previous)
+            pure $ object ["value" .= nativeNumber (prevoutAmount previous),"confirmations" .= (1000::Int)
+              ,"coinbase" .= prevoutCoinbase previous,"scriptPubKey" .= object ["hex" .= prevoutScript previous,"address" .= ("offline-lock-prevout"::Text)]]
+          ("getaddressinfo",[String "offline-lock-prevout"]) -> pure $ object ["ismine" .= True,"scriptPubKey" .= prevoutScript previous]
+          ("lockunspent",[Bool False,value]) -> do
+            points<-parseValue parseJSON value
+            points `shouldSatisfy` (not . null)
+            points `shouldSatisfy` all (`elem` wanted)
+            modifyIORef' locks (<>points)
+            pure (Bool True)
+          ("decoderawtransaction",_) -> pure decoded
+          ("gettransaction",txid:_) | txid==toJSON (nativeTxid tx) -> reject "rpc_error_-5"
+          ("getmempoolentry",_) -> reject "rpc_error_-5"
+          (forbidden,_) | forbidden `elem` ["walletprocesspsbt","finalizepsbt","walletcreatefundedpsbt","sendrawtransaction"] ->
+            expectationFailure "lock recovery touched funding, signer or broadcast" >> pure Null
+          _->paymentNative original wallet method params
+  action l c p locks calls original{paymentNative=call}
+
+saveNativeFixtureAttempt :: Ledger -> Preparation -> IO Attempt
+saveNativeFixtureAttempt l p=do
+  signed<-nativeSignedFixture
+  storeAttempt l (preparationObligation p) "Native" (nativeTxid $ signedNativeTransaction signed)
+    (signedNativeBytes signed) (fixtureJson signed) (units $ planFeeLimit $ signedNativePlan signed) Nothing (preparationGeneration p)
+  [attempt]<-pendingAttempts l
+  pure attempt
+
+-- This cancellation fixture starts paused. Model the earlier authorized send
+-- decision in this isolated database, then restore the crash/recovery pause.
+markNativeFixtureBroadcast :: Ledger -> Attempt -> IO ()
+markNativeFixtureBroadcast l attempt=do
+  ledgerAction l $ \db->execute_ db "UPDATE deployment SET paused=0"
+  _<-markBroadcastIntent l (attemptId attempt)
+  pause l "offline-native-restart"
+
 -- The captured bytes supply economic validation; RPC responses below are
 -- explicitly offline contracts, not evidence of a new chain transaction.
 withNativeAdmission :: (Config -> NativePlan -> IORef [Text] -> NativeRPC -> IO a) -> IO a
@@ -1406,6 +1466,170 @@ main=hspec $ do
       available <$> readiness l `shouldReturn` False
       pendingAttempts l `shouldReturn` []
       prepareNativeWith call c l ob `shouldThrow` isError "payouts_paused"
+  describe "native lock recovery (offline RPC and SQLite restart contracts)" $ do
+    it "reconstructs exact unsigned inputs after reopening, once, without changing funds or signing" $ withDir $ \dir->do
+      restartFixture<-newIORef Nothing
+      withNativeLockRecoveryAt True dir $ \l c p locks calls transport->do
+        before<-auditExport l
+        held<-readIORef locks
+        writeIORef locks [] -- model daemon loss of advisory locks
+        writeIORef restartFixture (Just (c,p,locks,calls,transport,before,held))
+      Just (c,p,locks,calls,transport,before,held)<-readIORef restartFixture
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        first<-reconcileNativeLocksWith transport c l
+        fieldValue "state" first `shouldReturn` ("locked"::Text)
+        fieldValue "restoredInputs" first `shouldReturn` (1::Int)
+        fieldValue "signedOrSent" first `shouldReturn` False
+        readIORef locks `shouldReturn` held
+        pendingPreparations l `shouldReturn` [p]
+        pendingAttempts l `shouldReturn` []
+        auditExport l `shouldReturn` before
+        second<-reconcileNativeLocksWith transport c l
+        fieldValue "restoredInputs" second `shouldReturn` (0::Int)
+        length . filter (=="lockunspent") <$> readIORef calls `shouldReturn` 1
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM audit WHERE action='native_locks_restored'" :: IO [Only Int]) `shouldReturn` [Only 1]
+        available <$> readiness l `shouldReturn` False
+    forM_ [False,True] $ \broadcast->
+      it ("preserves unseen native signed bytes and restores their inputs: broadcast="<>show broadcast) $ withNativeLockRecovery $ \l c p locks _ transport->do
+        attempt<-saveNativeFixtureAttempt l p
+        when broadcast $ markNativeFixtureBroadcast l attempt
+        before<-pendingAttempts l
+        financial<-auditExport l
+        writeIORef locks []
+        result<-reconcileNativeLocksWith transport c l
+        fieldValue "state" result `shouldReturn` ("locked"::Text)
+        fieldValue "restoredInputs" result `shouldReturn` (1::Int)
+        pendingAttempts l `shouldReturn` before
+        auditExport l `shouldReturn` financial
+        ledgerAction l (\db->query_ db "SELECT released FROM fee_reservations" :: IO [Only Bool]) `shouldReturn` [Only False]
+    it "does not relock a generation whose recorded cancellation has a lost cleanup reply" $ withNativeLockRecovery $ \l c p locks calls transport->do
+      let lost wallet method params=do
+            answer<-paymentNative transport wallet method params
+            if method=="lockunspent" then reject "offline_lost_unlock_response" else pure answer
+      cancelPreparationWith (pure 100) transport{paymentNative=lost} c l (obligationId $ preparationObligation p) 0 "cancel interrupted native"
+        `shouldThrow` isError "offline_lost_unlock_response"
+      readIORef locks `shouldReturn` []
+      writeIORef calls []
+      result<-reconcileNativeLocksWith transport c l
+      fieldValue "state" result `shouldReturn` ("cancellation_pending"::Text)
+      readIORef calls >>= (`shouldSatisfy` all (`notElem` ["lockunspent","gettxout"]))
+      readIORef locks `shouldReturn` []
+      pendingPreparations l `shouldReturn` [p]
+      ledgerAction l (\db->query_ db "SELECT completed FROM preparation_cancellations" :: IO [Only Bool]) `shouldReturn` [Only False]
+    it "protects native inputs during source review without resolving or releasing the obligation" $ withNativeLockRecovery $ \l c p locks _ transport->do
+      let ob=preparationObligation p
+      refreshDeposit l (Deposit (obligationDeposit ob) (Just $ obligationOrder ob) Native (amt 100000) "unconfirmed" 0 False 100)
+      financial<-auditExport l
+      writeIORef locks []
+      result<-reconcileNativeLocksWith transport c l
+      fieldValue "state" result `shouldReturn` ("locked"::Text)
+      auditExport l `shouldReturn` financial
+      available <$> readiness l `shouldReturn` False
+      ledgerAction l (\db->query_ db "SELECT eligible FROM deposits" :: IO [Only Bool]) `shouldReturn` [Only False]
+    forM_ ["mempool","confirmed","evicted"] $ \stage->
+      it ("reconciles a recorded native spend without creating another transaction: "<>stage) $ withNativeLockRecovery $ \l c p locks calls transport->do
+        signed<-nativeSignedFixture
+        captured<-BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
+        decoded<-fieldValue "decoded" captured :: IO Value
+        attempt<-saveNativeFixtureAttempt l p
+        markNativeFixtureBroadcast l attempt
+        before<-pendingAttempts l
+        writeIORef locks []
+        let call wallet method params=case method of
+              "gettransaction"->pure $ object ["txid" .= attemptId attempt,"hex" .= signedNativeBytes signed,"decoded" .= decoded
+                ,"fee" .= scientific (negate $ toInteger $ units $ signedNativeFee signed) (-8),"walletconflicts" .= ([]::[Text])
+                ,"confirmations" .= (if stage=="confirmed" then 2::Int else 0),"blockhash" .= custodyNativeTip]
+              "getmempoolentry" | stage=="mempool"->pure $ object ["vsize" .= (141::Int)]
+              "getblockheader"->pure $ object ["hash" .= custodyNativeTip,"height" .= (100::Int),"confirmations" .= (2::Int)]
+              "getblockhash"->pure $ toJSON custodyNativeTip
+              _->paymentNative transport wallet method params
+        result<-reconcileNativeLocksWith transport{paymentNative=call} c l
+        fieldValue "state" result `shouldReturn` (if stage=="evicted" then "locked" else "spent_by_recorded_payment"::Text)
+        fieldValue "restoredInputs" result `shouldReturn` (if stage=="evicted" then 1::Int else 0)
+        pendingAttempts l `shouldReturn` before
+        when (stage/="evicted") $ readIORef calls >>= (`shouldSatisfy` all (`notElem` ["gettxout","lockunspent"]))
+        available <$> readiness l `shouldReturn` False
+    it "refuses an observed signed-only transaction before treating its inputs as spent" $ withNativeLockRecovery $ \l c p locks calls transport->do
+      signed<-nativeSignedFixture
+      captured<-BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
+      decoded<-fieldValue "decoded" captured :: IO Value
+      attempt<-saveNativeFixtureAttempt l p
+      writeIORef locks []
+      let call wallet method params=if method=="gettransaction" then pure $ object
+            ["txid" .= attemptId attempt,"hex" .= signedNativeBytes signed,"decoded" .= decoded
+            ,"fee" .= scientific (negate $ toInteger $ units $ signedNativeFee signed) (-8)
+            ,"walletconflicts" .= ([]::[Text]),"confirmations" .= (0::Int)]
+            else paymentNative transport wallet method params
+      result<-reconcileNativeLocksWith transport{paymentNative=call} c l
+      fieldValue "error" result `shouldReturn` ("unrecorded_broadcast_observed"::Text)
+      readIORef locks `shouldReturn` []
+      readIORef calls >>= (`shouldSatisfy` all (`notElem` ["gettxout","lockunspent"]))
+      pendingAttempts l `shouldReturn` [attempt]
+    it "never unlocks or replaces unknown wallet locks" $ withNativeLockRecovery $ \l c p locks calls transport->do
+      let unknown=Outpoint (T.replicate 64 "f") 3
+      modifyIORef' locks (<>[unknown])
+      before<-readIORef locks
+      result<-reconcileNativeLocksWith transport c l
+      fieldValue "error" result `shouldReturn` ("native_preparation_locks_require_review"::Text)
+      readIORef locks `shouldReturn` before
+      readIORef calls >>= (`shouldSatisfy` notElem "lockunspent")
+      pendingPreparations l `shouldReturn` [p]
+      available <$> readiness l `shouldReturn` False
+    it "refuses unavailable, changed or insufficiently confirmed inputs before any lock mutation" $
+      forM_ (["missing","changed","unconfirmed","not-owned"]::[Text]) $ \kind->withNativeLockRecovery $ \l c p locks calls transport->do
+        writeIORef locks []
+        let call wallet method params=do
+              value<-paymentNative transport wallet method params
+              pure $ case (method,kind) of
+                ("gettxout","missing")->Null
+                ("gettxout","changed")->setPath ["value"] (nativeNumber $ amt 1) value
+                ("gettxout","unconfirmed")->setPath ["confirmations"] (Number 0) value
+                ("getaddressinfo","not-owned")->setPath ["ismine"] (Bool False) value
+                _->value
+        result<-reconcileNativeLocksWith transport{paymentNative=call} c l
+        fieldValue "state" result `shouldReturn` ("requires_review"::Text)
+        readIORef calls >>= (`shouldSatisfy` notElem "lockunspent")
+        readIORef locks `shouldReturn` []
+        pendingPreparations l `shouldReturn` [p]
+    it "reconciles a lost lock response without repeating it or releasing any funds" $ withNativeLockRecovery $ \l c _ locks calls transport->do
+      financial<-auditExport l
+      writeIORef locks []
+      let lost wallet method params=do
+            answer<-paymentNative transport wallet method params
+            if method=="lockunspent" then reject "rpc_transport_unknown_outcome" else pure answer
+      result<-reconcileNativeLocksWith transport{paymentNative=lost} c l
+      fieldValue "error" result `shouldReturn` ("rpc_transport_unknown_outcome"::Text)
+      readIORef locks >>= (`shouldSatisfy` not . null)
+      retry<-reconcileNativeLocksWith transport c l
+      fieldValue "state" retry `shouldReturn` ("locked"::Text)
+      fieldValue "restoredInputs" retry `shouldReturn` (0::Int)
+      length . filter (=="lockunspent") <$> readIORef calls `shouldReturn` 1
+      auditExport l `shouldReturn` financial
+      available <$> readiness l `shouldReturn` False
+    it "does not sign when a success reply is contradicted by the wallet's actual locks" $ withNativeLockRecovery $ \l _ p locks calls transport->do
+      writeIORef locks []
+      plan<-either fail pure $ eitherDecodeStrict' $ TE.encodeUtf8 $ preparationPolicy p
+      draft<-maybe (fail "missing draft") (either fail pure . eitherDecodeStrict' . TE.encodeUtf8) (preparationDraft p)
+      let falseSuccess wallet method params=if method=="lockunspent" then pure (Bool True) else paymentNative transport wallet method params
+      signNativeDraft falseSuccess plan draft `shouldThrow` isError "native_input_lock_unverified"
+      readIORef calls >>= (`shouldSatisfy` notElem "walletprocesspsbt")
+      pendingAttempts l `shouldReturn` []
+    it "leaves a draftless preparation intact and refuses any unexplained locks" $ withDir $ \dir->
+      withNativeLockRecoveryAt False dir $ \l c p locks calls transport->do
+        first<-reconcileNativeLocksWith transport c l
+        fieldValue "state" first `shouldReturn` ("awaiting_draft"::Text)
+        writeIORef locks [Outpoint (T.replicate 64 "f") 3]
+        second<-reconcileNativeLocksWith transport c l
+        fieldValue "error" second `shouldReturn` ("native_preparation_locks_require_review"::Text)
+        readIORef calls >>= (`shouldSatisfy` all (`notElem` ["lockunspent","gettxout"]))
+        pendingPreparations l `shouldReturn` [p]
+    it "refuses the wrong wallet before touching its locks" $ withNativeLockRecovery $ \l c _ _ calls transport->do
+      let wrong wallet method params=do
+            value<-paymentNative transport wallet method params
+            pure $ if method=="getwalletinfo" then setPath ["walletname"] (String "different-wallet") value else value
+      result<-reconcileNativeLocksWith transport{paymentNative=wrong} c l
+      fieldValue "error" result `shouldReturn` ("native_wallet_not_ready"::Text)
+      readIORef calls `shouldReturn` ["getwalletinfo"]
   describe "Solana preparation (SDK fixtures and RPC contract tests)" $ do
     it "binds the helper protocol, message, memo, signature and custody account" $ do
       (c,plan,reply)<-solanaFixture

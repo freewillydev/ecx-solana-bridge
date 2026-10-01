@@ -3,7 +3,7 @@ module Bridge.Settlement
   ( PaymentTransport(..), realPaymentTransport, paymentPass, settleAttemptWith, reconcilePayments, reconcilePaymentsWith
   , recheckSourceWith, observeNativePayment, observeSolanaPayment, solanaExpiryEvidence, PaymentObservation(..)
   , approveSolanaRetry, approveSolanaRetryWith
-  , SavedPayment(..), readSavedPayment, readNativePayment
+  , SavedPayment(..), readSavedPayment, readNativePayment, activeNativeBlock
   ) where
 
 import Bridge.Config
