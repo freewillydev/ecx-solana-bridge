@@ -1,0 +1,18 @@
+{
+  "name": "ecx-bridge-web-tools",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "esbuild wallet.ts --bundle --minify --format=esm --outfile=dist/wallet.js",
+    "check": "tsc --noEmit --strict --target es2022 --module nodenext --moduleResolution nodenext wallet.ts"
+  },
+  "dependencies": {
+    "@wallet-standard/app": "1.1.0",
+    "@solana/wallet-standard-features": "1.3.0"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.10",
+    "typescript": "5.9.3"
+  }
+}

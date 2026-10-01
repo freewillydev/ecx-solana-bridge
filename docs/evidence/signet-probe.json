@@ -1,0 +1,11 @@
+{
+  "network": "public-l2l-signet",
+  "checkpointHeight": 16000,
+  "checkpointHash": "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47",
+  "recipient": "tb1qqq606d6hcwkf3mu5us3m6848ylz4chnkvat79g",
+  "amountUnits": "100000",
+  "feeUnits": "282",
+  "txid": "b2278e8dd0be7be001a5630545ddb73c83423ee1ee7dbd0327675e27f1642bd3",
+  "phase": "confirmed",
+  "confirmations": 3
+}

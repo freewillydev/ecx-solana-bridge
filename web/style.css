@@ -1,0 +1,141 @@
+:root {
+  font-family: Inter, system-ui, sans-serif;
+  color: #e6eee9;
+  background: #101a17;
+  color-scheme: dark;
+  font-size: 16px;
+}
+* {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+}
+main {
+  width: min(720px, calc(100% - 32px));
+  margin: 64px auto;
+}
+header {
+  margin-bottom: 36px;
+}
+.eyebrow {
+  color: #b7d9c2;
+  letter-spacing: 0.17em;
+  font-size: 0.75rem;
+}
+h1 {
+  font-size: clamp(2.5rem, 6vw, 4rem);
+  letter-spacing: -0.05em;
+  margin: 0.3em 0;
+}
+h2 {
+  font-size: 1.1rem;
+  margin: 0 0 12px;
+}
+p {
+  line-height: 1.6;
+  color: #b8c9c0;
+}
+.card,
+.notice {
+  border: 1px solid #35453d;
+  border-radius: 14px;
+  padding: 24px;
+  margin-bottom: 20px;
+}
+.card {
+  background: #17241e;
+}
+.notice {
+  background: #23302a;
+}
+.row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+label {
+  display: grid;
+  gap: 8px;
+  margin: 18px 0;
+  color: #d9e6de;
+  font-size: 0.9rem;
+}
+input,
+select,
+button {
+  font: inherit;
+  border: 1px solid #53695c;
+  border-radius: 7px;
+  padding: 12px;
+  background: #101a17;
+  color: inherit;
+  max-width: 100%;
+}
+button {
+  cursor: pointer;
+}
+button:hover:enabled {
+  border-color: #bae7c7;
+}
+button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+button[type="submit"] {
+  background: #c2e8ce;
+  color: #102018;
+  font-weight: 650;
+}
+.quote {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.85rem;
+}
+.quote span {
+  display: grid;
+  gap: 6px;
+}
+.small,
+footer {
+  font-size: 0.8rem;
+  line-height: 1.6;
+  color: #a6b9ac;
+}
+pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 0.85rem;
+  line-height: 1.6;
+}
+#error {
+  color: #ffc3af;
+}
+input:focus,
+button:focus,
+select:focus {
+  outline: 2px solid #bae7c7;
+  outline-offset: 3px;
+}
+@media (max-width: 480px) {
+  main {
+    margin-top: 32px;
+  }
+  .card,
+  .notice {
+    padding: 18px;
+  }
+  .row button {
+    flex: 1;
+  }
+  h1 {
+    font-size: 2.7rem;
+  }
+}
+
+[hidden] {
+  display: none;
+}

@@ -1,0 +1,33 @@
+{
+  "recordedUtc": "2026-10-01T00:53:07.661200+00:00",
+  "platform": "macOS arm64",
+  "haskell": {
+    "examples": 35,
+    "propertyCases": 100,
+    "failures": 0,
+    "sqliteVersion": "3.53.4",
+    "evidence": "haskell-tests.txt"
+  },
+  "rust": {
+    "unitTests": 5,
+    "failures": 0,
+    "allTargetsCompiled": true
+  },
+  "web": {
+    "typescriptStrict": true,
+    "bundleBytes": 6820,
+    "npmVulnerabilities": {
+      "info": 0,
+      "low": 0,
+      "moderate": 0,
+      "high": 0,
+      "critical": 0,
+      "total": 0
+    }
+  },
+  "realNativeProbe": "signet-probe.json",
+  "fullBridgeRoundTrip": false,
+  "browserWalletSigning": false,
+  "linuxTargetValidated": false,
+  "remoteRestoreValidated": false
+}

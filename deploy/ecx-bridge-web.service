@@ -1,0 +1,29 @@
+[Unit]
+Description=ECX bridge public interface
+After=ecx-bridge-worker.service
+Requires=ecx-bridge-worker.service
+
+[Service]
+Type=simple
+User=ecx-web
+Group=ecx-api
+UMask=0077
+ExecStart=/opt/ecx-bridge/current/bin/ecx-bridge serve /run/ecx-bridge/customer/api.sock 8080 /opt/ecx-bridge/current/web
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+InaccessiblePaths=/var/lib/ecx-bridge/private /etc/ecx-bridge /run/ecx-bridge/admin
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+LimitNOFILE=1024
+TasksMax=128
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,32 @@
+[Unit]
+Description=ECX bridge private worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ecx-worker
+Group=ecx-api
+SupplementaryGroups=ecx-worker
+UMask=0077
+ExecStart=/opt/ecx-bridge/current/bin/ecx-bridge worker /etc/ecx-bridge/worker.json
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=ecx-bridge
+RuntimeDirectoryMode=0750
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ecx-bridge/private /run/ecx-bridge
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+LimitNOFILE=1024
+TasksMax=128
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,11 @@
+dist-newstyle/
+cabal.project.local
+solana-helper/target/
+web/node_modules
+web/dist/
+*.sqlite*
+*.keypair.json
+.env
+config/local.json
+run/
+.DS_Store

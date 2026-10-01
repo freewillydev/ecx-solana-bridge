@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>ECX Bridge</title>
+    <link rel="stylesheet" href="/style.css" />
+    <script type="module" src="/wallet.js"></script>
+  </head>
+  <body>
+    <main>
+      <header>
+        <span class="eyebrow">ECX / OPEN SOURCE</span>
+        <h1>A direct bridge.</h1>
+        <p>Move between native coins and wrapped tokens on Solana.</p>
+      </header>
+      <section class="notice" aria-live="polite">
+        <strong id="network">Checking deployment…</strong>
+        <p id="availability">Connecting to the private worker.</p>
+        <p class="small">
+          Development build. Deposits remain disabled until the integration and
+          recovery gates pass.
+        </p>
+      </section>
+      <section class="card">
+        <div class="row">
+          <h2>Transfer</h2>
+          <button id="connect" type="button">Connect wallet</button>
+        </div>
+        <label
+          >Solana wallet<select id="wallets">
+            <option value="">Choose a detected wallet</option>
+          </select></label
+        >
+        <p id="account" class="small">No wallet connected</p>
+        <form id="order-form">
+          <label
+            >Direction<select id="direction">
+              <option value="NativeToWrapped">Native → wrapped</option>
+              <option value="WrappedToNative">Wrapped → native</option>
+            </select></label
+          ><label
+            >Amount<input
+              id="amount"
+              inputmode="decimal"
+              placeholder="0.00000000"
+              required
+              autocomplete="off"
+          /></label>
+          <div class="quote">
+            <span>Bridge fee <strong id="fee">—</strong></span
+            ><span>You receive <strong id="net">—</strong></span>
+          </div>
+          <label
+            >Destination address<input
+              id="recipient"
+              required
+              autocomplete="off"
+              spellcheck="false" /></label
+          ><label id="refund-field"
+            >Native refund address<input
+              id="refund"
+              required
+              autocomplete="off"
+              spellcheck="false"
+          /></label>
+          <p id="refund-note" class="small" hidden>
+            Any refund returns to the connected source wallet.
+          </p>
+          <p class="small">
+            Use the exact native network shown above. ECX addresses can resemble
+            Bitcoin addresses.
+          </p>
+          <button id="create" type="submit" disabled>
+            Deposits unavailable</button
+          ><button id="new" type="button">New order</button>
+        </form>
+      </section>
+      <section class="card" aria-live="polite">
+        <h2>Order status</h2>
+        <p id="status">No order yet.</p>
+        <pre id="details"></pre>
+        <div class="row">
+          <button id="refresh" type="button" disabled>Refresh</button
+          ><button id="sign" type="button" disabled>Sign deposit</button
+          ><button id="copy" type="button" disabled>Copy recovery link</button>
+        </div>
+      </section>
+      <p id="error" role="alert"></p>
+      <footer>
+        Bridge fees: native → wrapped 0.20%; wrapped → native 1%. Network costs
+        for payouts are paid by the operator. Market prices do not change bridge
+        settlement.
+      </footer>
+    </main>
+  </body>
+</html>
