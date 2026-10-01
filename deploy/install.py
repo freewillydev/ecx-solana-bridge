@@ -80,7 +80,7 @@ def main():
     parser.add_argument("--port", type=int, help="loopback web port (default 8080, or existing configuration)")
     parser.add_argument("--legacy-snapshot", type=Path, help="consistent final SQLite snapshot; old worker must be stopped")
     parser.add_argument("--with-signet", action="store_true", help="install/start a dedicated real L2L public Signet node")
-    parser.add_argument("--test-worker", action="store_true", help="enable payments only for the public Signet/Devnet profile")
+    parser.add_argument("--test-worker", action="store_true", help="enable payments only for explicit Signet/Devnet or betanet/Devnet test profiles")
     args = parser.parse_args()
     if args.upgrade and (args.configure or args.config_dir or args.legacy_snapshot or args.test_worker or args.port is not None):
         parser.error("--upgrade preserves configuration/payment mode; do not combine it with configuration, import, port or payment-mode changes")
@@ -215,7 +215,7 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
         if not config.exists():
             raise ValueError("--test-worker requires configured real chains and wallets")
         worker = json.loads(config.read_text())
-        if worker.get("profile") != "L2LSignetDevnet" or worker.get("backupRequired"):
+        if worker.get("profile") not in {"L2LSignetDevnet", "ECXBetanetDevnet"} or worker.get("backupRequired"):
             raise ValueError("Payments allowed only for the explicit public test profile")
         if not Path("/etc/ecx-bridge/signer.json").is_file():
             raise ValueError("Payment mode requires the custody signer")

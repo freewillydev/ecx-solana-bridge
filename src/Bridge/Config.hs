@@ -79,6 +79,11 @@ validateInterface c links = do
     Nothing->False
   allowedHost names url = maybe False (\r->host r `elem` names) (parseLink url)
 
+-- Public test deployments always use a noncanonical Solana Devnet mint.
+-- Valuable-fund/canonical activation remains a distinct release gate.
+publicTestProfile :: Config -> Bool
+publicTestProfile c = profile c `elem` [L2LSignetDevnet,ECXBetanetDevnet] && not(backupRequired c)
+
 tokenProgram, canonicalMint, ecxCheckpoint, signetChallenge :: Text
 tokenProgram = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 canonicalMint = "EVHqNdzjCupKi4rQkbuYw52sa1m8A7jeUAMP23S9AVVq"

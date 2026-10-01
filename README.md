@@ -38,7 +38,7 @@ flowchart LR
     Worker --> Native[Native adapter / dedicated daemon wallet]
     Worker --> Solana[Solana RPC adapter]
     Worker --> Helper[Sandboxed Rust Solana helper]
-    Native --> NativeChain[Real L2L Signet; betanet integration pending]
+    Native --> NativeChain[Real L2L Signet or ECX betanet]
     Solana --> SolanaChain[Real Solana Devnet]
 ```
 
@@ -47,7 +47,7 @@ flowchart LR
 | Component | Responsibility and access |
 | --- | --- |
 | `ecx-bridge postgres-api` | Exclusively owns the ledger; scans and reconciles while intake is paused. Serves separate customer and administrator Unix sockets. |
-| `ecx-bridge postgres-test-worker` | Uses the same engine and explicitly enables automatic intake/payouts only for the real L2L Signet / Solana Devnet public-test profile with backups not required. It is not a canonical deployment mode. |
+| `ecx-bridge postgres-test-worker` | Uses the same engine and explicitly enables automatic intake/payouts for real L2L Signet or ECX betanet paired with a noncanonical Solana Devnet mint, with backups not required. It is not a canonical deployment mode. |
 | `ecx-bridge serve` | Serves static assets and proxies only the typed customer API. Binds to loopback and receives no signer or database path. Administrator routes are excluded. |
 | Native daemon wallet | Generates deposit addresses, funds/signs PSBTs and provides native chain/wallet evidence. RPC stays private and uses a cookie. |
 | `ecx-solana-helper` | Constructs or signs only supported transactions under fixed mint/custody configuration. It has no RPC client. Unsigned previews do not read the signer. |
@@ -152,7 +152,7 @@ The following inventory retains the broader release scope. These are not equal-s
 | 2. Finish installer acceptance | Complete Ubuntu x86-64 build/install/reboot checks, verify notice-bearing packages and prepare authenticated release distribution. | A source build or ARM64 result does not prove an Intel/AMD server installation. |
 | 3. Complete payment/reorg recovery | Integrated private native replacement send with a real Signet family; covered-source resolution, missing-destination treatment and finalized Solana history-loss handling. | Ambiguous or changed chain evidence must preserve customer claims and prevent duplicate payout. |
 | 4. Complete backup, restore and resume | Remote critical backups/retention, old-ledger/old-signer fencing, key restoration, exact-byte recovery, independent-provider expiry and clean-host acceptance. | Process restart is much narrower than losing a host and recovering a hot wallet. |
-| 5. Exercise actual ECX betanet | Official daemon provenance/checkpoint, separate funded deployment, replay policy and real deposit/payout/refund. | Signet is real, but does not establish betanet compatibility. |
+| 5. Exercise actual ECX betanet | Official daemon provenance/checkpoint, separate funded deployment, replay policy and real deposit/payout/refund. | Actual betanet checkpoint and compiled adapter identity now pass; a separate funded betanet round trip remains unverified. |
 | 6. Freeze and review | Native/system-library notice applicability, Rust/Haskell advisory analysis, release provenance/signatures, installed-release review and independent security review. | Passing tests and having license texts are not a security audit or distribution certification. |
 | 7. Authorized canonical pilot | Operator identities, mint policy, verified backing/supply, inventory, limits, independent RPC and explicitly allocated funding. | This establishes the actual token and reserve relationships; the test mint cannot stand in for them. |
 | 8. Solana markets and pricing | Choose/fund a real wrapped-ECX/USDC liquidity venue, verify actual Jupiter routing/API access and provide historical pricing plus the intended eCash-site integration. | The bridge moves value at quoted conversion terms; market prices come from real liquidity. |
@@ -171,3 +171,17 @@ Jupiter was part of the intended market path, not a replacement for native wrapp
 - [`docs/THIRD-PARTY.md`](docs/THIRD-PARTY.md): notice provenance, 333-entry dependency collection and remaining review.
 
 MIT license for this repository. Dependencies retain their respective licenses. This repository contains source and public-test evidence; custody keys, private runtime configuration, ledgers, backups and chain data belong outside Git.
+
+The PostgreSQL runtime accepts `ECXBetanetDevnet` as an explicit test profile;
+[the configuration template](config/ecx-betanet-devnet.example.json) requires an
+existing actual ECX node and separate configured custody/ledger identities. The
+managed `--with-signet` node remains Signet-specific. Read-only acceptance against
+an actual synchronized betanet node passed the pinned checkpoint and compiled
+adapter identity, with ten peers. This does not establish a funded betanet
+round trip or canonical-token backing.
+
+`postgres-api` is observation-only at the DSL dispatcher: customer creation,
+operator resume, signatures, broadcasts and refunds are refused before waiting
+for chain scanning. Public readiness stays false. Recorded-effect reconciliation,
+private pause, diagnostics and authenticated hints remain available. The signing
+worker is an explicit separate mode; canonical mode remains blocked.

@@ -4347,6 +4347,10 @@ main=hspec $ do
           verifySolanaOutcome c signed bad `shouldBe` Left "solana_settlement_evidence_mismatch"
   describe "public/private Unix socket boundary" $ do
     it "refuses canonical and backup-dependent deployments in the local test command" $ withDir $ \dir->do
+      publicTestProfile (cfg dir) `shouldBe` True
+      publicTestProfile (cfg dir){profile=ECXBetanetDevnet} `shouldBe` True
+      publicTestProfile (cfg dir){profile=CanonicalBeta} `shouldBe` False
+      publicTestProfile (cfg dir){backupRequired=True} `shouldBe` False
       runTestWorker (cfg dir){profile=CanonicalBeta} `shouldThrow` isError "public_test_profile_required"
       runTestWorker (cfg dir){backupRequired=True} `shouldThrow` isError "public_test_profile_required"
     it "uses the shared Servant contract and separate admin socket" $ withDir $ \dir -> do

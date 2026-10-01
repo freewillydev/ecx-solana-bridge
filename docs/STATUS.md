@@ -744,3 +744,27 @@ requires 30 GiB free up front, and uses two remote build jobs. The release build
 removes expanded GHC/Rust installers after verified installation and omits debug
 symbols in Rust test builds; production release profiles remain unchanged. Local
 build/resource limits remain unchanged.
+
+### Actual betanet identity and explicit runtime authority — October 1
+
+An existing actual ECX betanet node was checked read-only: chain `main`, matching
+pinned checkpoint at height 967680, synchronized at height 970827, ten peers.
+The compiled native identity adapter and actual Solana Devnet identity check both
+passed. No wallet, ledger or signing operation was performed for identity checks.
+Evidence: `docs/evidence/ecx-betanet-identity.json`.
+
+The PostgreSQL runtime and installer now accept the explicit `ECXBetanetDevnet`
+test profile, with an existing real node and noncanonical Devnet mint. Canonical
+operation and backup-required production activation remain blocked. The managed
+node installer is still Signet-specific; a separate funded betanet round trip is
+not claimed.
+
+Observation-only runtime now refuses financial DSL operations before the workflow
+lock, so a chain scan cannot delay an immutable mode refusal. An isolated real
+PostgreSQL API deployment using the actual betanet/Devnet endpoints verified
+public observation-only availability and refusal of order creation, resume,
+signing, broadcasting and refund creation. It retained zero orders, attempts and
+critical sequence, and the temporary process/database were removed. Evidence:
+`docs/evidence/postgres-observer-authority.json`. The sole production critical
+evaluator invocation remains in the dispatcher. The 371-example Haskell suite
+and 16 installer contracts pass. The existing local paying bridge remains ready.

@@ -210,3 +210,18 @@ chain payment configuration. Actions are pinned to commit hashes. Toolchain and
 frozen dependency caches avoid repeating setup; the job does not run on each push.
 This replaces slow local x86 compiler emulation. Installation/reboot acceptance
 still runs in the local x86 Ubuntu VM; CI build success alone does not close it.
+
+### Existing ECX betanet node with Solana Devnet
+
+The PostgreSQL test worker also accepts `ECXBetanetDevnet`, using
+`config/ecx-betanet-devnet.example.json`. Supply an existing synchronized actual
+ECX node with the pinned height-967680 checkpoint, its protected RPC cookie,
+a dedicated native wallet, and separately configured noncanonical Devnet token
+custody and PostgreSQL ledger. Use the existing `--config-dir` installation path
+and explicit `--test-worker` option after funding/reconciliation. Do not combine
+this profile with `--with-signet`, reuse another deployment's custody balances,
+or relabel a canonical mainnet token as a Devnet mint.
+
+Read-only actual node/compiled-adapter and observation-mode authorization checks
+pass. A funded betanet conversion/refund and installation acceptance still remain;
+the existing complete round trips are Signet/Devnet evidence.

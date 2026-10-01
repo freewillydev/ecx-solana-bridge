@@ -45,8 +45,8 @@ import qualified Opaleye as O
 import Servant
 
 -- No signer, mutating chain transport, writable ledger or private Config.
-data SafeContext = SafeContext PG.ConnectInfo Value Bool
-data CriticalContext = CriticalContext Manager Config Ledger
+data SafeContext = SafeContext PG.ConnectInfo Value Bool Bool
+data CriticalContext = CriticalContext Manager Config Ledger Bool
 
 data Runtime = Runtime SafeContext CriticalContext (MVar ())
 
@@ -57,7 +57,7 @@ bearer header = do
   pure token
 
 readOnly :: SafeContext -> (PG.Connection -> IO a) -> IO a
-readOnly (SafeContext settings _ _) action = bracket (PG.connect settings) PG.close $ \connection->
+readOnly (SafeContext settings _ _ _) action = bracket (PG.connect settings) PG.close $ \connection->
   Tx.withTransactionMode (Tx.TransactionMode Tx.RepeatableRead Tx.ReadOnly) connection (action connection)
 
 availability :: PG.Connection -> IO Availability
@@ -65,8 +65,9 @@ availability connection = do
   rows <- O.runSelect connection (O.selectTable deploymentTable) :: IO [Deployment]
   case rows of [row]->pure(Availability (deploymentPaused row==0) (deploymentPauseReason row)); _->reject "corrupt_deployment"
 
-publicAvailability :: PG.Connection -> IO Availability
-publicAvailability connection = do
+publicAvailability :: Bool -> PG.Connection -> IO Availability
+publicAvailability False _ = pure(Availability False "observation_only")
+publicAvailability True connection = do
   state <- availability connection
   if not(available state) then pure state else do
     now <- epochSeconds
@@ -74,9 +75,9 @@ publicAvailability connection = do
     pure $ case outcome of Right ()->state; Left(BridgeError reason)->Availability False reason
 
 evalSafe :: SafeContext -> DSL 'Safe a -> IO a
-evalSafe context@(SafeContext _ public remote) (SafeDSL operation) = case operation of
+evalSafe context@(SafeContext _ public remote paying) (SafeDSL operation) = case operation of
   PublicConfig->readOnly context $ \connection->do
-    state <- publicAvailability connection
+    state <- publicAvailability paying connection
     case public of
       Object fields->pure(Object(KM.insert "availability" (toJSON state) fields))
       _->reject "invalid_public_configuration"
@@ -90,7 +91,7 @@ evalSafe context@(SafeContext _ public remote) (SafeDSL operation) = case operat
     readOnly context $ \connection->do
       order <- Order.exposeOrderC connection remote cap oid
       now <- epochSeconds
-      state <- publicAvailability connection
+      state <- publicAvailability paying connection
       require (available state && status order=="AwaitingDeposit" && now<=deadline order && direction(request order)==WrappedToNative) "deposit_window_closed"
       instruction <- maybe (reject "instruction_not_recorded") pure(depositInstruction order)
       owner <- fieldValue "custodyOwner" public
@@ -98,8 +99,8 @@ evalSafe context@(SafeContext _ public remote) (SafeDSL operation) = case operat
       uri <- either reject pure(Pay.payURIFor owner mintId instruction (gross $ quote order))
       pure(object["uri" .= uri,"reference" .= T.drop 11 instruction,"mint" .= mintId,"amount" .= gross(quote order),"refundPolicy" .= ("verified_source_owner"::Text)])
   Health->pure(Availability True "process_running")
-  Readiness->readOnly context publicAvailability
-  ReadyEndpoint->readOnly context publicAvailability
+  Readiness->readOnly context (publicAvailability paying)
+  ReadyEndpoint->readOnly context (publicAvailability paying)
   Scanners->readOnly context $ \connection->do
     rows <- O.runSelect connection (O.selectTable scanhealthTable) :: IO [ScanHealth]
     pure(object["scanners" .= [object["chain" .= scanhealthChain row,"lastSuccess" .= scanhealthLastSuccess row,"lastError" .= scanhealthLastError row] | row<-rows]])
@@ -110,7 +111,16 @@ evalSafe context@(SafeContext _ public remote) (SafeDSL operation) = case operat
     pure(object["balances" .= [object["asset" .= asset,"allocation" .= account,"units" .= T.pack(show n)] | ((asset,account),n)<-M.toList totals],"unresolved" .= [object["id" .= obligationsId row,"status" .= obligationsStatus row] | row<-obligations,obligationsStatus row/="paid"]])
 
 evalCritical :: CriticalContext -> DSL 'Critical a -> IO a
-evalCritical (CriticalContext manager cfg ledger) plan = case plan of
+-- Observer mode can retain payment hints, pause and reconcile recorded effects.
+-- It has no order-creation, resume, new signature or broadcast authority.
+observationOperation :: DSL 'Critical a -> Bool
+observationOperation = \case
+  CustomerDSL (DepositHint _ _ _)->True
+  OperatorDSL (Pause _)->True
+  WorkerDSL ScanAndReconcile->True
+  _->False
+
+evalCritical (CriticalContext manager cfg ledger _) plan = case plan of
   CustomerDSL operation->case operation of
     CreateOrder header request->bearer header >>= \token->Provisioning.createCustomerOrder manager cfg ledger (const $ reject "unexpected_test_backup") token request
     DepositHint header oid signature->do
@@ -202,7 +212,11 @@ evaluate (Runtime safeContext criticalContext gate) plan = case plan of
  -- Keep scanning, admission and payment workflows from interleaving; otherwise
  -- a request's sampled time can precede a newer custody certificate after it
  -- waits for the ledger. Safe reads retain their independent connections.
- where critical dsl = withMVar gate (\_->evalCritical criticalContext dsl)
+ where critical dsl = case criticalContext of
+         CriticalContext _ _ _ paying->do
+           -- Immutable mode authorization must not wait behind a chain scan.
+           require (paying || observationOperation dsl) "payment_worker_required"
+           withMVar gate (\_->evalCritical criticalContext dsl)
 
 interpret :: Runtime -> Plan a -> Handler a
 interpret runtime plan = do
@@ -222,7 +236,7 @@ runTestWorker = runRuntime True
 
 runRuntime :: Bool -> PG.ConnectInfo -> Config -> IO ()
 runRuntime paying settings cfg = do
-  require (profile cfg==L2LSignetDevnet && not(backupRequired cfg)) "public_test_profile_required"
+  require (publicTestProfile cfg) "public_test_profile_required"
   links <- lookupEnv "ECX_INTERFACE_CONFIG" >>= loadInterface cfg
   withLedger settings (fingerprint cfg) $ \ledger->do
     manager <- newRpcManager
@@ -230,7 +244,7 @@ runRuntime paying settings cfg = do
     readUser <- fromMaybe (PG.connectUser settings) <$> lookupEnv "PGREADUSER"
     let readSettings=settings {PG.connectUser=readUser}
         public=object["profile" .= profile cfg,"solanaCluster" .= (if profile cfg==CanonicalBeta then "mainnet-beta" else "devnet"::Text),"links" .= links,"deployment" .= deploymentId cfg,"mint" .= mint cfg,"custodyOwner" .= custodyOwner cfg,"decimals" .= (8::Int),"minInput" .= minInput cfg,"maxInput" .= maxInput cfg,"feesBps" .= object["NativeToWrapped" .= (100::Int),"WrappedToNative" .= (100::Int)],"intakeEnabled" .= paying,"implementationReady" .= False]
-        runtime=Runtime (SafeContext readSettings public (backupRequired cfg)) (CriticalContext manager cfg ledger) gate
+        runtime=Runtime (SafeContext readSettings public (backupRequired cfg) paying) (CriticalContext manager cfg ledger paying) gate
     let checked action = do
           outcome <- try (action `catch` (\(_::IOException)->reject "postgres_worker_io_unavailable")) :: IO (Either BridgeError ())
           case outcome of
