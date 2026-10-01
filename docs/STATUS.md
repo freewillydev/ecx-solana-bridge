@@ -407,3 +407,13 @@ reload and order recovery passed; supported-wallet signing remains open.
 371 Haskell examples and nine installer checks pass. Cross-release service upgrades
 remain separate work; the installer refuses differing existing unit definitions.
 [Evidence](evidence/postgres-setup-interface.json).
+
+## Operator runbook — 2026-10-01
+
+[OPERATIONS.md](OPERATIONS.md) now covers customer payments, restricted diagnostics,
+paused intake versus offline maintenance, backup/upgrade limits, and separate
+mint/metadata, inventory and pool administration. Private `health`, `scanners` and
+`audit` reads returned HTTP 200 and valid JSON against the active PostgreSQL runtime.
+The guide distinguishes unported SQLite CLI commands and unverified canonical
+backing, metadata transactions, liquidity/Jupiter routing and remote restoration.
+Documentation does not satisfy those remaining execution gates.
