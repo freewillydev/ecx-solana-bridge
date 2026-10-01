@@ -1,5 +1,5 @@
 {
-  "status": "Compiled development graph on macOS arm64. Linux and independent security review pending.",
+  "status": "Historical macOS arm64 development graph. Ubuntu ARM64 build/service evidence is in docs/evidence/linux-installer.json; current Linux notice coverage is in docs/third-party/coverage.json. Independent security review remains pending.",
   "ghc": "9.14.1",
   "cabal": "3.16.1.0",
   "rustc": "1.97.1",

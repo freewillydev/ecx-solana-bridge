@@ -108,4 +108,4 @@ The native smoke script is restricted to the real L2L Signet and two dedicated t
 
 [Contracts and accounting](docs/CONTRACTS.md), [implementation status](docs/STATUS.md), and [local operation](docs/LOCAL-DEVELOPMENT.md) distinguish implemented behavior from planned behavior. Service files and the installer are in `deploy/`; Ubuntu ARM64 installation is tested locally. There is no published installer or release URL yet.
 
-MIT license for this repository. Dependency licenses remain their respective owners' licenses. License metadata is inventoried; release notice assembly and independent dependency/security review are still pending.
+MIT license for this repository. Dependency licenses remain their respective owners' licenses. License metadata is inventoried; [upstream notice collection](docs/THIRD-PARTY.md) covers 330 of 333 entries. Remaining notices, release integration and independent dependency/security review are pending.
