@@ -1,0 +1,176 @@
+{
+  "scope": "database transaction failure guard; unchanged real-ledger reopening and paused worker restart",
+  "schema": 10,
+  "criticalSequence": 31,
+  "applicationSha256": "a8f5ef854179217ce8b58b5d0d22dcaf4c72b2035c26f778317f7c5ddc792b78",
+  "haskellExamplesPassed": 215,
+  "generatedArithmeticCasesPassed": 100,
+  "failureChecks": [
+    "Cancelled request rolls back money, critical sequence and cursor, then releases the writer.",
+    "A deferred foreign-key failure at COMMIT is rolled back and further ledger access is fenced.",
+    "A bounded SQLite page limit produces the original SQLITE_FULL error and fences further access.",
+    "An injected BroadcastIntent write failure prevents send authorization and retains the signed attempt and holds across reopening."
+  ],
+  "realLedgerFinancialAndBindingRowsPreserved": true,
+  "recovery": {
+    "availability": {
+      "available": false,
+      "reason": "restart_requires_reconciliation"
+    },
+    "custody": {
+      "checkedAt": 1790845612,
+      "checkedRevision": 4921,
+      "lastError": null,
+      "report": {
+        "assets": [
+          {
+            "asset": "Native",
+            "booked": "1879387",
+            "difference": "0",
+            "expected": "1879387",
+            "inFlight": "0",
+            "observed": "1879387"
+          },
+          {
+            "asset": "Sol",
+            "booked": "3491560",
+            "difference": "0",
+            "expected": "3491560",
+            "inFlight": "0",
+            "observed": "3491560"
+          },
+          {
+            "asset": "Wrapped",
+            "booked": "100000020014",
+            "difference": "0",
+            "expected": "100000020014",
+            "inFlight": "0",
+            "observed": "100000020014"
+          }
+        ],
+        "inFlightEffects": [],
+        "matches": true,
+        "nativeBlock": "000000e515e403456e999c45265d0965c50604a0b27d1953fb5ff225b65b23e6",
+        "nativeHeight": 16429,
+        "solanaSlot": 506220751
+      },
+      "revision": 4921
+    },
+    "nativeLocks": {
+      "error": null,
+      "ownedInputs": 0,
+      "restoredInputs": 0,
+      "signedOrSent": false,
+      "state": "idle"
+    },
+    "payments": {
+      "attempts": [],
+      "signedOrSent": false
+    },
+    "scanners": {
+      "review": [],
+      "scanners": [
+        {
+          "chain": "Native",
+          "checkedAt": 1790845610,
+          "cursor": "000000e515e403456e999c45265d0965c50604a0b27d1953fb5ff225b65b23e6",
+          "lastError": null,
+          "lastSuccess": 1790845610
+        },
+        {
+          "chain": "Solana",
+          "checkedAt": 1790845611,
+          "cursor": "3dArKVRqpyuXLNfcUXzsfyfA29ZoPKqoZXmkoBXETez8WYnCec8tB4bfGMgn5wHKG1V6vF8neYVCM33KY7vf2rik",
+          "lastError": null,
+          "lastSuccess": 1790845611
+        },
+        {
+          "chain": "SolanaOperating",
+          "checkedAt": 1790845612,
+          "cursor": "2XMrZrQBMt8b6gZbMRHx4FtfsLm1zc1xQB716dwAC5QdgKehioAN1sy16dCFz39AP7tA2RPZ6ZQYx2kngnbTSJP",
+          "lastError": null,
+          "lastSuccess": 1790845612
+        }
+      ]
+    },
+    "signedOrSent": false
+  },
+  "restartedWorkerCustody": {
+    "checkedAt": 1790845613,
+    "checkedRevision": 4931,
+    "lastError": null,
+    "report": {
+      "assets": [
+        {
+          "asset": "Native",
+          "booked": "1879387",
+          "difference": "0",
+          "expected": "1879387",
+          "inFlight": "0",
+          "observed": "1879387"
+        },
+        {
+          "asset": "Sol",
+          "booked": "3491560",
+          "difference": "0",
+          "expected": "3491560",
+          "inFlight": "0",
+          "observed": "3491560"
+        },
+        {
+          "asset": "Wrapped",
+          "booked": "100000020014",
+          "difference": "0",
+          "expected": "100000020014",
+          "inFlight": "0",
+          "observed": "100000020014"
+        }
+      ],
+      "inFlightEffects": [],
+      "matches": true,
+      "nativeBlock": "000000e515e403456e999c45265d0965c50604a0b27d1953fb5ff225b65b23e6",
+      "nativeHeight": 16429,
+      "solanaSlot": 506220757
+    },
+    "revision": 4931
+  },
+  "restartedScanners": {
+    "review": [],
+    "scanners": [
+      {
+        "chain": "Native",
+        "checkedAt": 1790845612,
+        "cursor": "000000e515e403456e999c45265d0965c50604a0b27d1953fb5ff225b65b23e6",
+        "lastError": null,
+        "lastSuccess": 1790845612
+      },
+      {
+        "chain": "Solana",
+        "checkedAt": 1790845613,
+        "cursor": "3dArKVRqpyuXLNfcUXzsfyfA29ZoPKqoZXmkoBXETez8WYnCec8tB4bfGMgn5wHKG1V6vF8neYVCM33KY7vf2rik",
+        "lastError": null,
+        "lastSuccess": 1790845613
+      },
+      {
+        "chain": "SolanaOperating",
+        "checkedAt": 1790845613,
+        "cursor": "2XMrZrQBMt8b6gZbMRHx4FtfsLm1zc1xQB716dwAC5QdgKehioAN1sy16dCFz39AP7tA2RPZ6ZQYx2kngnbTSJP",
+        "lastError": null,
+        "lastSuccess": 1790845613
+      }
+    ]
+  },
+  "httpStatus": {
+    "/healthz": "200",
+    "/readyz": "503",
+    "/api/v1/config": "200",
+    "/audit": "404"
+  },
+  "integrityCheck": "ok",
+  "foreignKeyViolations": 0,
+  "pendingPayments": 0,
+  "pendingPreparations": 0,
+  "signedOrSent": false,
+  "finishedUtc": "2026-10-01T09:06:54.583676+00:00",
+  "limitations": "Fault injection uses real local SQLite databases with offline ledger fixtures and a bounded file-page limit; it does not fill the host filesystem or prove power-loss durability. Runtime reopening reads actual public Signet/Devnet. Full host-loss/key restore, remote signer fencing and reorg accounting remain."
+}

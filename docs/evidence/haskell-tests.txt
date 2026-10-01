@@ -1,14 +1,11 @@
 Build profile: -w ghc-9.14.1 -O1
 In order, the following will be built (use -v for more details):
- - ecx-bridge-0.1.0.0 (lib) (file src/Bridge/Recovery.hs changed)
+ - ecx-bridge-0.1.0.0 (lib) (file docs/STATUS.md changed)
  - ecx-bridge-0.1.0.0 (test:bridge-test) (dependency rebuilt)
 Preprocessing library for ecx-bridge-0.1.0.0...
 Building library for ecx-bridge-0.1.0.0...
-[18 of 25] Compiling Bridge.Recovery  ( src/Bridge/Recovery.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Recovery.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Recovery.dyn_o ) [Source file changed]
 Preprocessing test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Building test suite 'bridge-test' for ecx-bridge-0.1.0.0...
-[1 of 1] Compiling Main             ( test/Spec.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test-tmp/Main.o ) [Source file changed]
-[2 of 2] Linking ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test [Objects changed]
 Running 1 test suites...
 Test suite bridge-test: RUNNING...
 
@@ -27,6 +24,11 @@ durable order and inventory invariants
   expired unfunded quotes release capacity without erasing their order [✔]
   holds partial and excess deposits for review [✔]
   rolls back a failed database action as one financial decision [✔]
+SQLite transaction failure boundaries (local database, no chain IO)
+  rolls back an interrupted request and releases the writer without publishing its checkpoint [✔]
+  fences a failed COMMIT, rolls it back, and reopens with the original balances and sequence [✔]
+  retains the original SQLITE_FULL error and fences writes when the private file reaches its page limit [✔]
+  cannot authorize a send after the broadcast-intent write fails, and preserves the exact signed attempt [✔]
 quote allowances and rolling operating budgets
   reserves payout rent and refund costs before accepting a quote [✔]
   refuses a quote without refund funds even when its payout is funded [✔]
@@ -255,8 +257,8 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 3.7928 seconds
-211 examples, 0 failures
+Finished in 3.7619 seconds
+215 examples, 0 failures
 Test suite bridge-test: PASS
 Test suite logged to: /Volumes/Crucial
 X9/CodexBuilds/ecx-bridge-20260930/workspace-b/outputs/ecx-bridge/./../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log

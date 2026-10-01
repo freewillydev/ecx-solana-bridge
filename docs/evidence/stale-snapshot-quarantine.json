@@ -1,0 +1,77 @@
+{
+  "network": "public L2L Signet / Solana Devnet",
+  "scope": "isolated stale snapshot replay with real chain reads",
+  "schema": 10,
+  "snapshotSequence": 27,
+  "currentSequence": 31,
+  "missingOrder": "478c5de1dfce591148344e21ff60ececb60267585a5ad647a8a8b155286e7aae",
+  "missingPayout": "235bf2ba1cfe20852a8d19c234759f4e6ef0c493fdc17824521be7864939a0ad",
+  "snapshotSha256": "bd2b791539dc226dd71eb7418662aa0c92be0f95adabe8ec748e0e4c83c14ccb",
+  "applicationSha256": "2900be2101c8c94792cd43f26f003c26b0b1baf6866e1c0f8b8554e380b8ea6b",
+  "passes": [
+    {
+      "pass": "initial-replay",
+      "custody": {
+        "checkedAt": 1790845008,
+        "checkedRevision": null,
+        "lastError": "chain_observations_require_review",
+        "report": null,
+        "revision": 4037
+      },
+      "review": [
+        [
+          "Native",
+          "235bf2ba1cfe20852a8d19c234759f4e6ef0c493fdc17824521be7864939a0ad",
+          "outgoing"
+        ]
+      ],
+      "unmatchedReceipt": {
+        "transaction": "3dArKVRqpyuXLNfcUXzsfyfA29ZoPKqoZXmkoBXETez8WYnCec8tB4bfGMgn5wHKG1V6vF8neYVCM33KY7vf2rik",
+        "units": "10000",
+        "asset": "Wrapped",
+        "order": null,
+        "allocated": false,
+        "obligationCreated": false
+      },
+      "paused": true,
+      "criticalSequence": 27,
+      "savedAttempts": 6,
+      "priorFinancialAndBindingRowsPreserved": true
+    },
+    {
+      "pass": "reopened-replay",
+      "custody": {
+        "checkedAt": 1790845009,
+        "checkedRevision": null,
+        "lastError": "chain_observations_require_review",
+        "report": null,
+        "revision": 4047
+      },
+      "review": [
+        [
+          "Native",
+          "235bf2ba1cfe20852a8d19c234759f4e6ef0c493fdc17824521be7864939a0ad",
+          "outgoing"
+        ]
+      ],
+      "unmatchedReceipt": {
+        "transaction": "3dArKVRqpyuXLNfcUXzsfyfA29ZoPKqoZXmkoBXETez8WYnCec8tB4bfGMgn5wHKG1V6vF8neYVCM33KY7vf2rik",
+        "units": "10000",
+        "asset": "Wrapped",
+        "order": null,
+        "allocated": false,
+        "obligationCreated": false
+      },
+      "paused": true,
+      "criticalSequence": 27,
+      "savedAttempts": 6,
+      "priorFinancialAndBindingRowsPreserved": true
+    }
+  ],
+  "liveFinancialRowsUnchanged": true,
+  "originalSnapshotUnchanged": true,
+  "reopenedFinancialReplayUnchanged": true,
+  "signedOrSent": false,
+  "finishedUtc": "2026-10-01T08:56:49.810319+00:00",
+  "limitations": "One old snapshot missing a subsequently completed redemption. No keys or remote backups were restored; no signer fencing, operator resume, destination reorg or release installation was accepted."
+}

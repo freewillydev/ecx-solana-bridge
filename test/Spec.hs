@@ -24,8 +24,8 @@ import Bridge.API
 import Bridge.Worker
 import Bridge.Backup
 import Bridge.Observer
-import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (mapConcurrently,withAsync)
+import Control.Concurrent (threadDelay,newEmptyMVar,putMVar,takeMVar)
+import Control.Concurrent.Async (mapConcurrently,withAsync,cancel)
 import Control.Exception (bracket,try,SomeException)
 import Control.Monad (forM_,when)
 import Data.Aeson
@@ -50,6 +50,7 @@ import Servant.Client
 import System.Directory
 import System.FilePath ((</>),takeDirectory)
 import System.Posix.Files (getFileStatus,fileMode)
+import System.Timeout (timeout)
 import Data.Bits ((.&.))
 import Test.Hspec hiding (before,after)
 import Test.QuickCheck hiding ((.&.))
@@ -331,13 +332,97 @@ main=hspec $ do
       promoteDeposit l 110 "partial:0" `shouldReturn` False
       readyObligations l `shouldReturn` []
       status <$> readOrder l cap (orderId o) `shouldReturn` "NeedsReview"
-    it "rolls back a failed database action as one financial decision" $ withFunded $ \l _ -> do
-      originalAudit<-auditExport l
-      result<-try (ledgerAction l $ \db -> do
-        execute_ db "INSERT INTO events(id,description) VALUES('rollback','test')"
-        execute_ db "INSERT INTO postings(event_id,asset,account,delta) VALUES('rollback','Native','float',NULL)") :: IO (Either SomeException ())
-      result `shouldSatisfy` either (const True) (const False)
-      auditExport l `shouldReturn` originalAudit
+    it "rolls back a failed database action as one financial decision" $ withDir $ \dir->do
+      originalAudit<-withFundedAt dir $ \l _->do
+        before<-auditExport l
+        result<-try (ledgerAction l $ \db -> do
+          execute_ db "INSERT INTO events(id,description) VALUES('rollback','test')"
+          execute_ db "INSERT INTO postings(event_id,asset,account,delta) VALUES('rollback','Native','float',NULL)") :: IO (Either SQLError ())
+        either (Just . sqlError) (const Nothing) result `shouldBe` Just ErrorConstraint
+        auditExport l `shouldThrow` isError "ledger_requires_reopen"
+        pure before
+      let c=cfg dir
+      withLedger (dbPath c) (fingerprint c) $ \l->auditExport l `shouldReturn` originalAudit
+  describe "SQLite transaction failure boundaries (local database, no chain IO)" $ do
+    it "rolls back an interrupted request and releases the writer without publishing its checkpoint" $ withFunded $ \l _->do
+      original<-auditExport l
+      sequenceBefore<-ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64])
+      custodyBefore<-custodyHealth l
+      reached<-newEmptyMVar
+      hold<-newEmptyMVar
+      withAsync (ledgerAction l $ \db->do
+        execute_ db "INSERT INTO events(id,description) VALUES('interrupted','offline cancellation')"
+        execute_ db "INSERT INTO postings(event_id,asset,account,delta) VALUES('interrupted','Native','float',1),('interrupted','Native','external',-1)"
+        _<-criticalSequence db
+        checkpoint db "Native" "uncommitted-offline-cursor"
+        putMVar reached ()
+        takeMVar hold :: IO ()) $ \request->do
+          timeout 1000000 (takeMVar reached) `shouldReturn` Just ()
+          cancel request
+      auditExport l `shouldReturn` original
+      custodyHealth l `shouldReturn` custodyBefore
+      readCheckpoint l "Native" `shouldReturn` Nothing
+      ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64]) `shouldReturn` sequenceBefore
+    it "fences a failed COMMIT, rolls it back, and reopens with the original balances and sequence" $ withDir $ \dir->do
+      (original,sequenceBefore)<-withFundedAt dir $ \l _->do
+        before<-auditExport l
+        previous<-ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64])
+        bodyCompleted<-newIORef False
+        result<-try (ledgerAction l $ \db->do
+          execute_ db "PRAGMA defer_foreign_keys=ON"
+          execute_ db "INSERT INTO postings(event_id,asset,account,delta) VALUES('missing-offline-event','Native','float',1)"
+          _<-criticalSequence db
+          writeIORef bodyCompleted True) :: IO (Either SQLError ())
+        readIORef bodyCompleted `shouldReturn` True
+        either (Just . sqlError) (const Nothing) result `shouldBe` Just ErrorConstraint
+        auditExport l `shouldThrow` isError "ledger_requires_reopen"
+        pure (before,previous)
+      let c=cfg dir
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        auditExport l `shouldReturn` original
+        ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64]) `shouldReturn` sequenceBefore
+        ledgerAction l (\db->query_ db "PRAGMA foreign_key_check" :: IO [(Text,Int64,Text,Int)]) `shouldReturn` []
+        available <$> readiness l `shouldReturn` False
+    it "retains the original SQLITE_FULL error and fences writes when the private file reaches its page limit" $ withDir $ \dir->do
+      (original,sequenceBefore)<-withFundedAt dir $ \l _->do
+        before<-auditExport l
+        previous<-ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64])
+        ledgerAction l $ \db->do
+          [Only pages]<-query_ db "PRAGMA page_count" :: IO [Only Int]
+          limit<-query_ db (fromString $ "PRAGMA max_page_count="<>show pages) :: IO [Only Int]
+          limit `shouldBe` [Only pages]
+        -- This bounded SQLite capacity error does not fill the host disk and
+        -- is not claimed as a filesystem/power-loss acceptance test.
+        result<-try (ledgerAction l $ \db->do
+          _<-criticalSequence db
+          execute_ db "INSERT INTO audit(action,detail) VALUES('offline-capacity-failure',zeroblob(4194304))") :: IO (Either SQLError ())
+        either (Just . sqlError) (const Nothing) result `shouldBe` Just ErrorFull
+        ledgerAction l (const $ pure ()) `shouldThrow` isError "ledger_requires_reopen"
+        pure (before,previous)
+      let c=cfg dir
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        auditExport l `shouldReturn` original
+        ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64]) `shouldReturn` sequenceBefore
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM audit WHERE action='offline-capacity-failure'" :: IO [Only Int]) `shouldReturn` [Only 0]
+        available <$> readiness l `shouldReturn` False
+    it "cannot authorize a send after the broadcast-intent write fails, and preserves the exact signed attempt" $ withDir $ \dir->do
+      (original,attempts,sequenceBefore)<-withFundedAt dir $ \l c->do
+        (_,ob)<-fundOrder l c
+        testAttempt l c ob "Solana" "offline-write-failure" "original-bytes" "{}" 10000 Nothing
+        before<-auditExport l
+        saved<-pendingAttempts l
+        previous<-ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64])
+        ledgerAction l $ \db->execute_ db "CREATE TEMP TRIGGER injected_intent_failure BEFORE UPDATE OF state ON attempts WHEN NEW.state='broadcast_intent' BEGIN SELECT RAISE(ABORT,'offline injected database failure'); END"
+        markBroadcastIntent l "offline-write-failure" `shouldThrow` (\e->sqlError e==ErrorConstraint)
+        authorizeRecordedSend l False "offline-write-failure" `shouldThrow` isError "ledger_requires_reopen"
+        pure (before,saved,previous)
+      let c=cfg dir
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        auditExport l `shouldReturn` original
+        pendingAttempts l `shouldReturn` attempts
+        ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64]) `shouldReturn` sequenceBefore
+        ledgerAction l (\db->query_ db "SELECT released FROM fee_reservations" :: IO [Only Bool]) `shouldReturn` [Only False]
+        available <$> readiness l `shouldReturn` False
   describe "quote allowances and rolling operating budgets" $ do
     it "reserves payout rent and refund costs before accepting a quote" $ withFunded $ \l c -> do
       o<-createOrder l c{maxSolAccountRent=amt 80000} 100 cap req

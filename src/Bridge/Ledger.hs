@@ -18,7 +18,7 @@ import Bridge.Config
 import Bridge.Budget
 import Bridge.Types
 import Control.Concurrent.MVar
-import Control.Exception (bracket)
+import Control.Exception (bracket,mask,try,SomeException,fromException,throwIO)
 import Control.Monad (forM_, when)
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KM
@@ -41,7 +41,9 @@ import System.Posix.Files (setFileMode)
 import Text.Read (readMaybe)
 
 -- All financial mutations are serialized and committed before external IO.
-newtype Ledger = Ledger (MVar Connection)
+-- Nothing fences this process after a database/cleanup failure. Reopening
+-- checks integrity and always starts paused; no caller can clear the fence.
+newtype Ledger = Ledger (MVar (Maybe Connection))
 schemaVersion :: Int
 schemaVersion = 10
 sqliteIdentity :: Connection -> IO Value
@@ -53,7 +55,26 @@ sqliteIdentity c = do
       pure $ object ["version" .= version,"sourceId" .= source]
     _ -> reject "sqlite_identity_unavailable"
 ledgerAction :: Ledger -> (Connection -> IO a) -> IO a
-ledgerAction (Ledger l) action = withMVar l $ \c -> withTransaction c (action c)
+ledgerAction (Ledger l) action = do
+  result <- modifyMVar l $ \current -> case current of
+    Nothing -> reject "ledger_requires_reopen"
+    Just c -> mask $ \restore -> do
+      outcome <- try $ do
+        execute_ c "BEGIN TRANSACTION"
+        value <- restore (action c)
+        execute_ c "COMMIT TRANSACTION"
+        pure value
+      case outcome of
+        Right value -> pure (Just c,Right value)
+        Left (err::SomeException) -> do
+          -- COMMIT can fail with the transaction still open. SQLITE_FULL may
+          -- instead roll back automatically; never replace its original error
+          -- with a second "no transaction" error during cleanup.
+          cleanup <- try (execute_ c "ROLLBACK TRANSACTION") :: IO (Either SomeException ())
+          let databaseFailure=case fromException err of Just (_::SQLError)->True; Nothing->False
+              reusable=not databaseFailure && case cleanup of Right ()->True; Left _->False
+          pure (if reusable then Just c else Nothing,Left err)
+  either throwIO pure result
 withLedger :: FilePath -> Text -> (Ledger -> IO a) -> IO a
 withLedger path identity action = do
   createDirectoryIfMissing True (takeDirectory path)
@@ -100,7 +121,7 @@ withLedger path identity action = do
     -- Restart is quarantined until external identities and unresolved attempts are checked.
     execute_ c "UPDATE deployment SET paused=1,pause_reason='restart_requires_reconciliation'"
     execute_ c "UPDATE custody_check SET revision=revision+1"
-    newMVar c >>= action . Ledger
+    newMVar (Just c) >>= action . Ledger
  where
   acquire = tryLockFile (path<>".lock") Exclusive >>= maybe (reject "worker_already_running") pure
 
