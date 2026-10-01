@@ -525,3 +525,21 @@ the live test ledger. The temporary contract database was removed. Actual source
 loss/restoration, full operator approval and deployment acceptance remain open;
 native settlement/family reorg accounting and loss-cover administration still need
 porting. [Evidence](evidence/postgres-native-source-port.json).
+
+## PostgreSQL native settlement finality port — 2026-10-01
+
+Native settlement inspection now has a shared `NativeSettlementStore` boundary.
+The PostgreSQL implementation uses typed, bounded candidate queries and atomic
+saved-attempt/observation fences. It records confirmation uncertainty without
+changing the paid principal, and accepts reconfirmation only with the original
+fee and confirmation policy plus matching current outgoing-chain evidence.
+Repeated records are idempotent; stale observations and policy changes fail
+without changing attempts, recovery history or postings.
+
+All 371 shared examples and the isolated PostgreSQL source/finality contract pass.
+The database fixture follows the production preparation constraints; no triggers
+are disabled. These are synthetic database contracts, not real-chain reorg proof.
+The temporary database is removed. Runtime wiring and deployment remain pending.
+Replacement-winner fee adjustment is still a required port and is explicitly
+refused here; this does not complete the full native recovery gate.
+[Evidence](evidence/postgres-native-finality-port.json).

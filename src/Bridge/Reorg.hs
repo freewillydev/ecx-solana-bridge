@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module Bridge.Reorg (NativeSourceStore(..),reconcileNativeSettlements,reconcileNativeSettlementsWith,reconcileNativeSources,reconcileNativeSourcesWith,inspectNativeSourceWith) where
+module Bridge.Reorg (NativeSettlementStore(..),NativeSourceStore(..),reconcileNativeSettlements,reconcileNativeSettlementsWith,reconcileNativeSources,reconcileNativeSourcesWith,inspectNativeSourceWith) where
 
 import Bridge.Config
 import Bridge.Ledger
@@ -156,27 +156,39 @@ reconcileNativeSettlements manager c=reconcileNativeSettlementsWith
   (realPaymentTransport manager c (const $ reject "unexpected_reorg_backup"))
     {paymentIdentity=nativeIdentity manager c >> pure ()} c
 
-reconcileNativeSettlementsWith :: PaymentTransport -> Config -> Ledger -> IO Value
+class PaymentStore ledger => NativeSettlementStore ledger where
+  recoveryCandidates :: ledger -> IO [Attempt]
+  recoveryPause :: ledger -> Text -> IO ()
+  recoveryObservation :: ledger -> Text -> IO Text
+  recoveryCheck :: ledger -> Attempt -> Text -> NativeSettlementCheck -> IO ()
+instance NativeSettlementStore Ledger where
+  recoveryCandidates = nativeSettlementCandidates
+  recoveryPause = pause
+  recoveryObservation ledger txid = do
+    rows <- ledgerAction ledger $ \db->query db "SELECT observation_json FROM attempts WHERE txid=?" (Only txid)
+    case rows of [Only saved]->pure saved; _->reject "native_settlement_missing"
+  recoveryCheck = recordNativeSettlementCheck
+
+reconcileNativeSettlementsWith :: NativeSettlementStore ledger => PaymentTransport -> Config -> ledger -> IO Value
 reconcileNativeSettlementsWith transport c ledger=do
-  candidates <- nativeSettlementCandidates ledger
-  when (length candidates>1000) $ pause ledger "native_settlement_recovery_backlog"
+  candidates <- recoveryCandidates ledger
+  when (length candidates>1000) $ recoveryPause ledger "native_settlement_recovery_backlog"
   require (length candidates<=1000) "native_settlement_recovery_backlog"
   reports <- mapM reconcile candidates
   pure $ object ["payments" .= map fst reports,"signedOrSent" .= False,"monetaryPostings" .= any snd reports]
  where
   reconcile attempt=do
-    old <- ledgerAction ledger $ \db->query db "SELECT observation_json FROM attempts WHERE txid=?" (Only $ attemptId attempt) :: IO [Only Text]
-    previous <- case old of [Only saved]->pure saved; _->reject "native_settlement_missing"
+    previous <- recoveryObservation ledger (attemptId attempt)
     checked <- try (inspect attempt `catch` (\(_::IOException)->reject "native_recovery_io_unavailable")) :: IO (Either BridgeError NativeSettlementCheck)
     let result=either (\(BridgeError code)->NativeSettlementUnavailable code) id checked
-    committed <- try (recordNativeSettlementCheck ledger attempt previous result) :: IO (Either BridgeError ())
+    committed <- try (recoveryCheck ledger attempt previous result) :: IO (Either BridgeError ())
     case committed of
       Left (BridgeError code)->do
-        pending <- try (recordNativeSettlementCheck ledger attempt previous (NativeSettlementUnavailable code)) :: IO (Either BridgeError ())
+        pending <- try (recoveryCheck ledger attempt previous (NativeSettlementUnavailable code)) :: IO (Either BridgeError ())
         case pending of
           Right ()->pure $ report attempt "requires_review" (Just code)
           Left (BridgeError changed)->do
-            pause ledger ("native_settlement_recovery:"<>changed)
+            recoveryPause ledger ("native_settlement_recovery:"<>changed)
             pure $ report attempt "requires_review" (Just changed)
       Right ()->pure $ case result of
         NativeSettlementConfirming->report attempt "confirming" Nothing
@@ -193,7 +205,7 @@ reconcileNativeSettlementsWith transport c ledger=do
     require (name==nativeWallet c && descriptors && scanning==Bool False) "native_wallet_not_ready"
     (_,saved) <- readSavedPayment transport c ledger attempt
     payment <- case saved of NativePayment value->pure value; _->reject "wrong_destination_chain"
-    family <- nativeFamilyAttempts ledger (attemptIntent attempt)
+    family <- paymentNativeFamily ledger (attemptIntent attempt)
     if length family==1 then observeNativePayment (paymentNative transport) payment >>= sameWinner else do
       (members,view) <- readSavedNativeFamily transport c ledger family
       active <- activeFamilyPayment members view
