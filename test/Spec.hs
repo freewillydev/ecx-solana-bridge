@@ -2,6 +2,7 @@
 module Main where
 import Bridge.Types
 import Bridge.Config
+import qualified Bridge.Postgres.Maintenance as Maintenance
 import Bridge.Ledger
 import Bridge.Reconciliation
 import Bridge.Recovery
@@ -53,7 +54,7 @@ import Servant.API ((:<|>)(..))
 import Servant.Client
 import System.Directory
 import System.FilePath ((</>),takeDirectory)
-import System.Posix.Files (getFileStatus,fileMode)
+import System.Posix.Files (getFileStatus,fileMode,setFileMode)
 import System.Timeout (timeout)
 import Data.Bits ((.&.))
 import Test.Hspec hiding (before,after)
@@ -662,6 +663,30 @@ withNativeCancellationDraft saveDraft dir action=withFundedAt dir $ \l original 
 
 main :: IO ()
 main=hspec $ do
+  describe "operator configuration boundaries" $ do
+    it "refuses mainnet trading links on a Devnet deployment" $ withDir $ \dir->do
+      let links=(defaultInterface L2LSignetDevnet){jupiterUrl=Just "https://jup.ag/swap/SOL-token"}
+      validateInterface (cfg dir) links `shouldThrow` isError "trading_links_require_mainnet"
+    it "refuses script URLs, credential-bearing URLs and malformed explorer prefixes" $ withDir $ \dir->do
+      let c=cfg dir; links=defaultInterface L2LSignetDevnet
+      forM_ ["javascript:alert(1)","https://user:secret@example.com/support"] $ \url->
+        validateInterface c links{supportUrl=Just url} `shouldThrow` isError "invalid_support_url"
+      validateInterface c links{nativeExplorerBase=Just "https://example.com/tx/?key="} `shouldThrow` isError "invalid_native_explorer"
+    it "validates a custody keypair against its derived public key without signing" $ withDir $ \dir->do
+      case Ed.secretKey (BS.replicate 32 7) of
+        CryptoFailed _->expectationFailure "fixture secret rejected"
+        CryptoPassed secret->do
+          let public=BA.convert(Ed.toPublic secret)::BS.ByteString
+              filename=dir</>"signer.json"
+              c=(cfg dir){custodyOwner=base58 public}
+              writeKey bytes=LBS.writeFile filename (encode $ BS.unpack bytes) >> setFileMode filename 0o600
+          writeKey (BS.replicate 32 7<>public)
+          Maintenance.verifySigner c filename
+          writeKey (BS.replicate 32 8<>public)
+          Maintenance.verifySigner c filename `shouldThrow` isError "signer_mismatch"
+          writeKey (BS.replicate 32 7<>public)
+          setFileMode filename 0o644
+          Maintenance.verifySigner c filename `shouldThrow` isError "unsafe_signer_permissions"
   describe "exact amounts" $ do
     it "rejects floats, exponents, leading zeros, signs, overflow and extra precision" $ do
       forM_ ["", "01", "-1", "+1", "1e8", "1.0", "9223372036854775808"] $ \s -> parseUnits s `shouldSatisfy` either (const True) (const False)

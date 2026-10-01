@@ -49,11 +49,11 @@ class ReleaseIntegrity(unittest.TestCase):
         deploy = self.path / "deploy"
         deploy.mkdir()
         source = Path(__file__).resolve().parents[1] / "deploy"
-        for name in ("install.py", "postgres.py"):
+        for name in ("install.py", "postgres.py", "configure.py"):
             shutil.copyfile(source / name, deploy / name)
             self.manifest["files"]["deploy/" + name] = hashlib.sha256((deploy / name).read_bytes()).hexdigest()
         self.save()
-        subprocess.run([sys.executable, "-c", "import runpy,sys; from pathlib import Path; p=Path(sys.argv[1]); sys.path.insert(0,str(p/'deploy')); m=runpy.run_path(str(p/'deploy/install.py')); import postgres; m['verify'](p)", str(self.path)], check=True)
+        subprocess.run([sys.executable, "-c", "import runpy,sys; from pathlib import Path; p=Path(sys.argv[1]); sys.path.insert(0,str(p/'deploy')); m=runpy.run_path(str(p/'deploy/install.py')); import postgres,configure; m['verify'](p)", str(self.path)], check=True)
         self.assertFalse((deploy / "__pycache__").exists())
 
     def test_symlink_refused(self):

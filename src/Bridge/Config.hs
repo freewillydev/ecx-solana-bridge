@@ -11,7 +11,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import GHC.Generics (Generic)
-import Network.HTTP.Client (parseRequest, host, secure)
+import Network.HTTP.Client (parseRequest,Request,host,secure,path,requestHeaders)
 import System.FilePath (isAbsolute)
 
 data Profile = L2LSignetDevnet | ECXBetanetDevnet | CanonicalBeta deriving (Eq, Show, Generic, ToJSON, FromJSON)
@@ -32,6 +32,52 @@ data Config = Config
   , maxNativeDailyCost :: !Amount, maxSolDailyCost :: !Amount
   } deriving (Eq, Show, Generic, ToJSON)
 instance FromJSON Config where parseJSON = genericParseJSON defaultOptions { rejectUnknownFields = True }
+
+-- Public presentation settings are separate from financial identity and orders.
+data InterfaceConfig = InterfaceConfig
+  { supportUrl :: !(Maybe Text), jupiterUrl :: !(Maybe Text)
+  , orcaUrl :: !(Maybe Text), nativeExplorerBase :: !(Maybe Text)
+  , publicOrigin :: !(Maybe Text)
+  } deriving (Eq,Show,Generic,ToJSON)
+instance FromJSON InterfaceConfig where
+  parseJSON = genericParseJSON defaultOptions { rejectUnknownFields = True }
+
+defaultInterface :: Profile -> InterfaceConfig
+defaultInterface p = InterfaceConfig Nothing Nothing Nothing
+  (if p==L2LSignetDevnet then Just "https://explorer.signet.drivechain.info/tx/" else Nothing) Nothing
+
+loadInterface :: Config -> Maybe FilePath -> IO InterfaceConfig
+loadInterface c file = do
+  links <- case file of
+    Nothing->pure(defaultInterface $ profile c)
+    Just filename->do
+      bytes <- BS.readFile filename
+      require (BS.length bytes<=8192) "interface_config_too_large"
+      either (const $ reject "invalid_interface_config") pure(eitherDecodeStrict' bytes)
+  validateInterface c links
+  pure links
+
+validateInterface :: Config -> InterfaceConfig -> IO ()
+validateInterface c links = do
+  mapM_ (\url->require (httpsLink url && not(T.any (`elem` ("?#"::String)) url) && maybe False ((=="/") . path) (parseLink url)) "invalid_public_origin") (publicOrigin links)
+  mapM_ (\url->require (httpsLink url || mailLink url) "invalid_support_url") (supportUrl links)
+  mapM_ (\url->require (httpsLink url && "/tx/" `T.isSuffixOf` url && not(T.any (`elem` ("?#"::String)) url)) "invalid_native_explorer") (nativeExplorerBase links)
+  require (profile c==CanonicalBeta || (jupiterUrl links==Nothing && orcaUrl links==Nothing)) "trading_links_require_mainnet"
+  mapM_ (\url->require (httpsLink url && allowedHost ["jup.ag","www.jup.ag"] url && mint c `T.isInfixOf` url) "invalid_jupiter_link") (jupiterUrl links)
+  mapM_ (\url->do
+    require (httpsLink url && allowedHost ["orca.so","www.orca.so"] url && not(T.any (`elem` ("?#"::String)) url)) "invalid_orca_link"
+    case parseLink url of
+      Just r | Just pool<-T.stripPrefix "/pools/" (TE.decodeUtf8 $ path r)->either (const $ reject "invalid_orca_pool") (const $ pure ()) (publicKey pool)
+      _->reject "invalid_orca_pool") (orcaUrl links)
+ where
+  parseLink :: Text -> Maybe Request
+  parseLink = parseRequest . T.unpack
+  httpsLink url = T.length url<=2048 && T.all (\x->x>' ' && x<'\DEL') url &&
+    case parseLink url of Just r->secure r && null(requestHeaders r); Nothing->False
+  mailLink url = case T.stripPrefix "mailto:" url of
+    Just address->T.length address<=320 && T.count "@" address==1 && T.all (\x->x `elem` ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-@"::String)) address
+    Nothing->False
+  allowedHost names url = maybe False (\r->host r `elem` names) (parseLink url)
 
 tokenProgram, canonicalMint, ecxCheckpoint, signetChallenge :: Text
 tokenProgram = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"

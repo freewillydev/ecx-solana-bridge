@@ -22,6 +22,8 @@ type Config = {
   mint: string;
   minInput: string;
   maxInput: string;
+  solanaCluster: "devnet" | "mainnet-beta";
+  links: { supportUrl: string | null; jupiterUrl: string | null; orcaUrl: string | null; nativeExplorerBase: string | null };
   availability: { available: boolean; reason: string };
 };
 const el = <T extends HTMLElement = HTMLElement>(id: string): T => {
@@ -83,8 +85,10 @@ function persist() {
   }
   const select = el<HTMLSelectElement>("history");
   select.replaceChildren(
+    new Option("Select saved order", ""),
     ...history.map((s) => new Option(s.id!.slice(0, 12), s.id!)),
   );
+  select.value = session?.id || "";
   el("history-field").hidden = !history.length;
 }
 async function api(path: string, method = "GET", body?: unknown): Promise<any> {
@@ -142,6 +146,22 @@ function direction() {
   );
   preview();
 }
+function showRequest(request: Request) {
+  input("direction").value = request.direction;
+  input("amount").value = coins(BigInt(request.input));
+  input("recipient").value = request.recipient;
+  input("refund").value = request.refund;
+  direction();
+}
+function externalLink(id: string, url: string | null | undefined) {
+  const link = el<HTMLAnchorElement>(id);
+  link.hidden = !url;
+  if (url) link.href = url;
+  else link.removeAttribute("href");
+}
+function solanaExplorer(kind: "tx" | "address", value: string) {
+  return `https://explorer.solana.com/${kind}/${encodeURIComponent(value)}${config?.solanaCluster === "mainnet-beta" ? "" : "?cluster=devnet"}`;
+}
 function preview() {
   try {
     const n = units(input("amount").value),
@@ -168,6 +188,11 @@ async function loadConfig() {
       : "Verify the configured networks before paying.",
   );
   text("mint", config!.mint);
+  externalLink("mint-link", solanaExplorer("address", config!.mint));
+  externalLink("support-link", config!.links?.supportUrl);
+  externalLink("jupiter-link", config!.links?.jupiterUrl);
+  externalLink("orca-link", config!.links?.orcaUrl);
+  el("trading").hidden = !config!.links?.jupiterUrl && !config!.links?.orcaUrl;
   text(
     "availability",
     config!.availability.available
@@ -195,11 +220,17 @@ const statuses: Record<string, string> = {
 async function refresh() {
   if (!session?.id) return;
   order = await api(`/api/v1/orders/${encodeURIComponent(session.id)}`);
+  showRequest(order!.request);
+  const refunding = order!.status === "Refunded" || order!.status === "Refunding";
+  text("fee", refunding ? "0.00000000" : coins(BigInt(order!.quote.fee)));
+  text("net", refunding ? "—" : coins(BigInt(order!.quote.net)));
   text("status", statuses[order!.status] || order!.status);
   text("order-short", `Order ${order!.orderId}`);
   text(
     "order-summary",
-    `Send ${coins(BigInt(order!.quote.gross))}; receive ${coins(BigInt(order!.quote.net))}. Fee ${coins(BigInt(order!.quote.fee))}. Destination: ${order!.request.recipient}`,
+    refunding
+      ? "Refunds return the deposit to its verified refund destination with no bridge fee. The refund transaction shows the actual amount and recipient."
+      : `Send ${coins(BigInt(order!.quote.gross))}; receive ${coins(BigInt(order!.quote.net))}. Fee ${coins(BigInt(order!.quote.fee))}. Destination: ${order!.request.recipient}`,
   );
   el("order-details").hidden = false;
   const awaiting =
@@ -238,17 +269,18 @@ async function refresh() {
     el("copy-payment").hidden = false;
   }
   const link = el<HTMLAnchorElement>("payout-link");
+  link.textContent = refunding ? "View refund transaction" : "View payout transaction";
   link.hidden = !order!.payoutTx;
   if (order!.payoutTx) {
     const native =
       order!.status === "Refunded"
         ? order!.request.direction === "NativeToWrapped"
         : order!.request.direction === "WrappedToNative";
-    link.href = native
-      ? `https://explorer.signet.drivechain.info/tx/${encodeURIComponent(order!.payoutTx)}`
-      : `https://explorer.solana.com/tx/${encodeURIComponent(order!.payoutTx)}${config?.profile === "L2LSignetDevnet" ? "?cluster=devnet" : ""}`;
+    const url = native
+      ? config?.links?.nativeExplorerBase ? config.links.nativeExplorerBase + encodeURIComponent(order!.payoutTx) : null
+      : solanaExplorer("tx", order!.payoutTx);
+    externalLink("payout-link", url);
   }
-  persist();
 }
 el<HTMLFormElement>("order-form").onsubmit = (e) => {
   e.preventDefault();
@@ -294,9 +326,13 @@ button("new").onclick = () => {
   session = undefined;
   order = undefined;
   payment = "";
+  for (const id of ["amount", "recipient", "refund"]) input(id).value = "";
+  direction();
   persist();
   el("order-details").hidden = true;
   text("status", "No order yet.");
+  text("error", "");
+  text("message", "");
   controls();
 };
 button("copy").onclick = () =>
@@ -314,6 +350,10 @@ button("copy-payment").onclick = () =>
   });
 el<HTMLSelectElement>("history").onchange = () =>
   void attempt(async () => {
+    if (!el<HTMLSelectElement>("history").value) {
+      el<HTMLSelectElement>("history").value = session?.id || "";
+      return;
+    }
     session = history.find(
       (s) => s.id === el<HTMLSelectElement>("history").value,
     );
@@ -321,13 +361,14 @@ el<HTMLSelectElement>("history").onchange = () =>
     await refresh();
   });
 direction();
+if (session?.request) showRequest(session.request);
 persist();
 void attempt(async () => {
   await loadConfig();
   await refresh();
 });
 setInterval(() => {
-  if (session?.id && !busy)
+  if (!busy)
     void attempt(async () => {
       await loadConfig();
       await refresh();

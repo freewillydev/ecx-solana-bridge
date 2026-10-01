@@ -42,6 +42,29 @@ Without `--config-dir`, software and the requested node are installed, but the
 bridge services wait for wallet configuration. Installation cannot supply funding,
 mint authority, inventory or ownership of an existing wallet.
 
+For interactive setup in a terminal, use `--configure` instead of `--config-dir`:
+
+```sh
+./scripts/install --with-signet --configure
+```
+
+The same flag is available in newly built compiled packages. The wizard asks for
+real Devnet mint/custody/account identities, history origins, integer limits,
+budgets, support/public URLs and the loopback port. RPC URLs and pasted keypair
+JSON are hidden; terminal echo is restored on interruption and plaintext fallback
+is refused. An existing keypair file must be private. The application checks that
+its secret derives the configured custody public key, without signing or sending.
+The setup is staged privately and validated before managed configuration is copied.
+Default operation is observation-only; selecting a signer does not enable payments.
+The wizard neither creates a mint nor provides funds or liquidity.
+
+The compiled ARM64 package passed the interactive wizard on Ubuntu 24.04 with
+real Signet/Devnet identities, a custom port and support link, followed by repeat
+installation and reboot with port/link settings preserved. No signer was supplied and payment intake stayed paused.
+Existing service definitions from another release are deliberately not overwritten;
+release upgrades need a separately verified stop, backup and replacement procedure.
+See [setup evidence](evidence/postgres-setup-interface.json).
+
 ## Configuration supplied once
 
 The private setup directory contains:
@@ -52,6 +75,23 @@ The private setup directory contains:
   and `signer_path` set to `/etc/ecx-bridge/signer.json`, or null for observation.
 - `signer.json`: the existing custody keypair in official Solana JSON format,
   only when the helper is configured to sign. Never use the mint-authority key.
+- `interface.json` (optional): start with `config/interface.example.json`.
+  Set `supportUrl` to an HTTPS support page or a simple `mailto:` address,
+  `publicOrigin` to an externally configured HTTPS origin, and
+  `nativeExplorerBase` to the correct network's transaction prefix ending `/tx/`.
+  This file contains public presentation settings, not signing material.
+
+`jupiterUrl` and `orcaUrl` accept operator-verified, prefilled mainnet trading
+links. Jupiter must use its official host and contain the configured token mint;
+Orca must use its official host and a pool address. Devnet deployments reject
+these links rather than direct test tokens to mainnet. Pool mint/reserve identity
+and a usable route still need real-chain verification before enabling links.
+No embedded trading SDK or wallet connection is introduced.
+
+Use `--port PORT` with protected noninteractive configuration, or enter the port
+in the wizard. It remains a loopback listener. `publicOrigin` records your domain;
+it does not configure DNS, TLS or a reverse proxy. Preserve the configured port
+on repeat installation; a changed existing setting requires a reviewed edit.
 
 Required managed paths in `worker.json`:
 

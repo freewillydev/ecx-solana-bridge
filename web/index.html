@@ -24,6 +24,7 @@
         <details>
           <summary>Configured token</summary>
           <p id="mint" class="address"></p>
+          <p><a id="mint-link" target="_blank" rel="noopener noreferrer" hidden>View token on Solana Explorer</a></p>
         </details>
         <p id="network-note" class="small"></p>
       </section>
@@ -102,10 +103,19 @@
       ></label>
       <p id="error" role="alert"></p>
       <p id="message" role="status"></p>
+      <section id="trading" class="notice" hidden>
+        <h2>Trade the wrapped token</h2>
+        <p class="row">
+          <a id="jupiter-link" target="_blank" rel="noopener noreferrer" hidden>Open Jupiter</a>
+          <a id="orca-link" target="_blank" rel="noopener noreferrer" hidden>Open Orca pool</a>
+        </p>
+        <p class="small">Trading uses your wallet on the external site. Verify its token mint and quote before signing.</p>
+      </section>
       <footer>
         Bridge fee: 1% in each direction. Operator pays payout network costs.
         Keep your recovery link private. Use only the networks and token mint
         shown above.
+        <p><a id="support-link" target="_blank" rel="noopener noreferrer" hidden>Contact the bridge operator</a></p>
       </footer>
     </main>
   </body>

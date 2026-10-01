@@ -394,3 +394,16 @@ Two customer API orders were created with 10,000-unit gross, 100-unit fee and
 Pay transfer were submitted using dedicated tester clients. Completion/settlement
 is pending verification; this is not browser-wallet acceptance or a release gate.
 Private capabilities, signed bytes, snapshots and configuration remain outside Git.
+
+## Integrated setup and interface — 2026-10-01
+
+The compiled ARM64 installer now accepts private interactive configuration, validates
+custody key identity without signing, and installs separate public interface settings.
+Ubuntu acceptance used actual Signet/Devnet identities without a signer, port 8090,
+a support link and repeated installation; liveness passed and intake remained paused.
+The customer interface restores saved destination/fee terms, displays the configured
+token explorer, and exposes only configured support/trading links. Local browser
+reload and order recovery passed; supported-wallet signing remains open.
+371 Haskell examples and nine installer checks pass. Cross-release service upgrades
+remain separate work; the installer refuses differing existing unit definitions.
+[Evidence](evidence/postgres-setup-interface.json).

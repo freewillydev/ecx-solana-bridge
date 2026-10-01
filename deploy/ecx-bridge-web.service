@@ -8,7 +8,9 @@ Type=simple
 User=ecx-web
 Group=ecx-api
 UMask=0077
-ExecStart=/opt/ecx-bridge/current/bin/ecx-bridge serve /run/ecx-bridge/customer/api.sock 8080 /opt/ecx-bridge/current/web
+Environment=ECX_PORT=8080
+EnvironmentFile=-/etc/ecx-bridge/web.env
+ExecStart=/opt/ecx-bridge/current/bin/ecx-bridge serve /run/ecx-bridge/customer/api.sock ${ECX_PORT} /opt/ecx-bridge/current/web
 Restart=on-failure
 RestartSec=5
 NoNewPrivileges=true

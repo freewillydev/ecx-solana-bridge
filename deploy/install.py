@@ -75,10 +75,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle", type=Path)
     parser.add_argument("--config-dir", type=Path, help="private directory containing worker.json, helper.json and optional signer.json")
+    parser.add_argument("--configure", action="store_true", help="interactively collect and validate private Signet/Devnet configuration")
+    parser.add_argument("--port", type=int, help="loopback web port (default 8080, or existing configuration)")
     parser.add_argument("--legacy-snapshot", type=Path, help="consistent final SQLite snapshot; old worker must be stopped")
     parser.add_argument("--with-signet", action="store_true", help="install/start a dedicated real L2L public Signet node")
     parser.add_argument("--test-worker", action="store_true", help="enable payments only for the public Signet/Devnet profile")
     args = parser.parse_args()
+    if args.configure and (args.config_dir or not sys.stdin.isatty()):
+        parser.error("--configure requires a terminal and cannot be combined with --config-dir")
+    if args.port is not None and not 1024 <= args.port <= 65535:
+        parser.error("--port must be from 1024 through 65535")
     if os.geteuid() != 0:
         parser.error("Run with sudo")
     if 'ID=ubuntu\n' not in Path('/etc/os-release').read_text() or 'VERSION_ID="24.04"' not in Path('/etc/os-release').read_text():
@@ -89,7 +95,6 @@ def main():
 
 
 def install(args):
-    import postgres
     # Snapshot unprivileged build output, then verify the root-owned copy before using it.
     mkdir("/opt/ecx-bridge/releases", 0o755)
     with tempfile.TemporaryDirectory(prefix=".stage-", dir="/opt/ecx-bridge/releases") as tmp:
@@ -110,6 +115,21 @@ def install(args):
         raise ValueError("current must be a release symlink")
     if current.is_symlink() and current.resolve() != target:
         raise ValueError("A different release is installed; stop and back up before a reviewed upgrade")
+    # Subsequent helper imports use the verified root-owned snapshot, rather
+    # than the caller's writable extraction directory.
+    sys.path.insert(0, str(target / "deploy"))
+    if args.configure:
+        from configure import create_setup
+        with tempfile.TemporaryDirectory(prefix="ecx-setup-", dir="/run") as directory:
+            args.config_dir = Path(directory)
+            args.port = create_setup(target / "bin/ecx-bridge", target / "config/l2l-devnet.example.json", args.config_dir, args.with_signet)
+            install_runtime(args, target, release_id, current)
+    else:
+        install_runtime(args, target, release_id, current)
+
+
+def install_runtime(args, target, release_id, current):
+    import postgres
     for name in ("ecx-api", "ecx-worker", "ecx-node"):
         try:
             grp.getgrnam(name)
@@ -145,8 +165,13 @@ def install(args):
         if signer not in (None, "/etc/ecx-bridge/signer.json"):
             raise ValueError("Signer must use the managed path")
         run(str(target / "bin/ecx-bridge"), "check-config", str(source / "worker.json"), stdout=subprocess.DEVNULL)
+        if signer:
+            run(str(target / "bin/ecx-bridge"), "check-signer", str(source / "worker.json"), str(source / "signer.json"), stdout=subprocess.DEVNULL)
         # Check all collisions before writing any config files.
         incoming = [("worker.json", (source / "worker.json").read_bytes()), ("helper.json", (source / "helper.json").read_bytes())]
+        if (source / "interface.json").is_file():
+            run(str(target / "bin/ecx-bridge"), "check-interface", str(source / "worker.json"), str(source / "interface.json"), stdout=subprocess.DEVNULL)
+            incoming.append(("interface.json", (source / "interface.json").read_bytes()))
         if signer:
             incoming.append(("signer.json", (source / "signer.json").read_bytes()))
         for name, content in incoming:
@@ -155,6 +180,17 @@ def install(args):
                 raise ValueError(f"Refusing to replace existing {name}")
         for name, content in incoming:
             keep_file(Path("/etc/ecx-bridge") / name, content, 0o640, "ecx-worker")
+    if Path("/etc/ecx-bridge/interface.json").is_file():
+        keep_file("/etc/ecx-bridge/interface.env", b"ECX_INTERFACE_CONFIG=/etc/ecx-bridge/interface.json\n", 0o640, "ecx-worker")
+    port = 8080
+    web_environment = Path("/etc/ecx-bridge/web.env")
+    if args.port is not None:
+        keep_file(web_environment, f"ECX_PORT={args.port}\n".encode(), 0o640, "ecx-worker")
+    if web_environment.is_file():
+        line = web_environment.read_text().strip()
+        if not line.startswith("ECX_PORT=") or not line[9:].isdecimal() or not 1024 <= int(line[9:]) <= 65535:
+            raise ValueError("Invalid managed web port")
+        port = int(line[9:])
     if args.test_worker:
         if not config.exists():
             raise ValueError("--test-worker requires configured real chains and wallets")
@@ -209,7 +245,7 @@ def install(args):
         run("systemctl", "enable", "--now", "ecx-bridge-worker.service", "ecx-bridge-web.service")
         for _ in range(30):
             try:
-                with urllib.request.urlopen("http://127.0.0.1:8080/healthz", timeout=2) as response:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=2) as response:
                     if response.status == 200:
                         break
             except (OSError, urllib.error.URLError):
@@ -217,7 +253,7 @@ def install(args):
             time.sleep(1)
         else:
             raise ValueError("Installed services failed their liveness check; inspect journalctl -u ecx-bridge-worker -u ecx-bridge-web")
-        print("Installed. Interface: http://127.0.0.1:8080; check /readyz before use.")
+        print(f"Installed. Interface: http://127.0.0.1:{port}; check /readyz before use.")
     else:
         print("Installed; awaiting real wallet configuration. See docs/INSTALL.md. Services have not been started.")
     print("Release:", release_id)

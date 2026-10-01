@@ -11,6 +11,7 @@ Group=ecx-api
 SupplementaryGroups=ecx-worker ecx-node
 UMask=0077
 EnvironmentFile=/etc/ecx-bridge/postgres.env
+EnvironmentFile=-/etc/ecx-bridge/interface.env
 ExecStart=/opt/ecx-bridge/current/bin/ecx-bridge postgres-api /etc/ecx-bridge/worker.json
 Restart=on-failure
 RestartSec=5

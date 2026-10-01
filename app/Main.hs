@@ -21,6 +21,8 @@ main = go `catch` (\(BridgeError code) -> LBS.putStrLn (encode $ object ["error"
   go = getArgs >>= \case
     ["version"] -> putStrLn "ecx-bridge 0.1.0.0 (development; explicit public-test mode available)"
     ["check-config",path] -> loadConfig path >>= LBS.putStrLn . encode . object . pure . ("fingerprint" .=) . fingerprint
+    ["check-interface",configPath,interfacePath] -> loadConfig configPath >>= \c -> loadInterface c (Just interfacePath) >> putStrLn "Interface configuration valid"
+    ["check-signer",configPath,keyPath] -> loadConfig configPath >>= \c -> Maintenance.verifySigner c keyPath >> putStrLn "Custody signer valid"
     ["doctor",path] -> loadConfig path >>= doctor >>= LBS.putStrLn . encode
     ["scan",path] -> loadConfig path >>= scanOnce >>= LBS.putStrLn . encode
     ["reconcile",path] -> loadConfig path >>= reconcileOnce >>= LBS.putStrLn . encode
@@ -62,7 +64,7 @@ main = go `catch` (\(BridgeError code) -> LBS.putStrLn (encode $ object ["error"
     ["serve",socket,port,assets] -> case readMaybe port of
       Just p | p>=1024 && p<=65535 -> runPublic socket p assets
       _ -> die "Invalid unprivileged port"
-    _ -> die "Usage: ecx-bridge version | check-config CONFIG | doctor CONFIG | scan CONFIG | reconcile CONFIG | recover CONFIG | allocate-test-operating CONFIG SIGNATURE LAMPORTS | approve-solana-retry CONFIG SIGNATURE REASON | approve-source-recovery CONFIG OBLIGATION RESTORATION_SEQUENCE REASON | cover-source-loss CONFIG DEPOSIT LOSS_SEQUENCE FLOAT_UNITS EARNED_UNITS REASON | prepare-native-replacement CONFIG TRANSACTION FEE_UNITS REASON | cancel-native-replacement CONFIG DRAFT_SEQUENCE REASON | cancel-preparation CONFIG INTENT GENERATION REASON | postgres-init CONFIG (offline maintenance) | postgres-test-worker CONFIG (PG* settings, Signet/Devnet) | postgres-api CONFIG (PG* settings, paused test deployment) | worker CONFIG | test-worker CONFIG | serve CUSTOMER_SOCKET PORT ASSETS"
+    _ -> die "Usage: ecx-bridge version | check-config CONFIG | check-interface CONFIG INTERFACE | check-signer CONFIG KEYFILE (offline, no signing) | doctor CONFIG | scan CONFIG | reconcile CONFIG | recover CONFIG | allocate-test-operating CONFIG SIGNATURE LAMPORTS | approve-solana-retry CONFIG SIGNATURE REASON | approve-source-recovery CONFIG OBLIGATION RESTORATION_SEQUENCE REASON | cover-source-loss CONFIG DEPOSIT LOSS_SEQUENCE FLOAT_UNITS EARNED_UNITS REASON | prepare-native-replacement CONFIG TRANSACTION FEE_UNITS REASON | cancel-native-replacement CONFIG DRAFT_SEQUENCE REASON | cancel-preparation CONFIG INTENT GENERATION REASON | postgres-init CONFIG (offline maintenance) | postgres-test-worker CONFIG (PG* settings, Signet/Devnet) | postgres-api CONFIG (PG* settings, paused test deployment) | worker CONFIG | test-worker CONFIG | serve CUSTOMER_SOCKET PORT ASSETS"
 
 postgresSettings :: IO PG.ConnectInfo
 postgresSettings = do

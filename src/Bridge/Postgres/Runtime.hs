@@ -195,12 +195,13 @@ runTestWorker = runRuntime True
 runRuntime :: Bool -> PG.ConnectInfo -> Config -> IO ()
 runRuntime paying settings cfg = do
   require (profile cfg==L2LSignetDevnet && not(backupRequired cfg)) "public_test_profile_required"
+  links <- lookupEnv "ECX_INTERFACE_CONFIG" >>= loadInterface cfg
   withLedger settings (fingerprint cfg) $ \ledger->do
     manager <- newRpcManager
     gate <- newMVar ()
     readUser <- fromMaybe (PG.connectUser settings) <$> lookupEnv "PGREADUSER"
     let readSettings=settings {PG.connectUser=readUser}
-        public=object["profile" .= profile cfg,"deployment" .= deploymentId cfg,"mint" .= mint cfg,"custodyOwner" .= custodyOwner cfg,"decimals" .= (8::Int),"minInput" .= minInput cfg,"maxInput" .= maxInput cfg,"feesBps" .= object["NativeToWrapped" .= (100::Int),"WrappedToNative" .= (100::Int)],"intakeEnabled" .= paying,"implementationReady" .= False]
+        public=object["profile" .= profile cfg,"solanaCluster" .= (if profile cfg==CanonicalBeta then "mainnet-beta" else "devnet"::Text),"links" .= links,"deployment" .= deploymentId cfg,"mint" .= mint cfg,"custodyOwner" .= custodyOwner cfg,"decimals" .= (8::Int),"minInput" .= minInput cfg,"maxInput" .= maxInput cfg,"feesBps" .= object["NativeToWrapped" .= (100::Int),"WrappedToNative" .= (100::Int)],"intakeEnabled" .= paying,"implementationReady" .= False]
         runtime=Runtime (SafeContext readSettings public (backupRequired cfg)) (CriticalContext manager cfg ledger) gate
     let checked action = do
           outcome <- try (action `catch` (\(_::IOException)->reject "postgres_worker_io_unavailable")) :: IO (Either BridgeError ())

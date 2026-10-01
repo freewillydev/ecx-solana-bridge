@@ -1,12 +1,39 @@
 -- Explicit offline installation authority; never reachable from Servant/DSL.
-module Bridge.Postgres.Maintenance (initialize) where
-import Bridge.Config (Config,fingerprint)
+module Bridge.Postgres.Maintenance (initialize,verifySigner) where
+import Bridge.Config (Config,fingerprint,custodyOwner)
+import Bridge.SolanaMessage (publicKey)
 import Bridge.Types (require,reject)
 import Bridge.Observer (epochSeconds)
 import Bridge.Postgres.Schema
 import Control.Exception (bracket)
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Opaleye as O
+import Crypto.Error (CryptoFailable(..))
+import qualified Crypto.PubKey.Ed25519 as Ed
+import qualified Data.ByteArray as BA
+import qualified Data.ByteString as BS
+import Data.Aeson (eitherDecodeStrict')
+import Data.Bits ((.&.))
+import Data.Word (Word8)
+import System.IO (withBinaryFile,IOMode(ReadMode))
+import System.Posix.Files (getFileStatus,fileMode)
+
+-- Offline identity validation only: no signature, chain send or ledger mutation.
+verifySigner :: Config -> FilePath -> IO ()
+verifySigner cfg filename = do
+  permissions <- fileMode <$> getFileStatus filename
+  require (permissions .&. 0o077==0) "unsafe_signer_permissions"
+  bytes <- withBinaryFile filename ReadMode (\h->BS.hGet h 32769)
+  require (BS.length bytes<=32768) "signer_file_too_large"
+  values <- either (const $ reject "invalid_signer_json") pure(eitherDecodeStrict' bytes :: Either String [Word8])
+  require (length values==64) "invalid_signer_length"
+  let key=BS.pack values
+  expected <- either reject pure(publicKey $ custodyOwner cfg)
+  case Ed.secretKey (BS.take 32 key) of
+    CryptoPassed secret->do
+      let actual=BA.convert(Ed.toPublic secret) :: BS.ByteString
+      require (actual==BS.drop 32 key && actual==expected) "signer_mismatch"
+    CryptoFailed _->reject "invalid_signer"
 
 -- DDL is supplied by the reviewed installer. Repeat initialization verifies the
 -- identity without changing an existing ledger, pause state or critical sequence.
