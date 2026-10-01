@@ -7,7 +7,8 @@ module Bridge.Ledger
   , Deposit(..), observeDeposit, recordScan, readCheckpoint, promoteDeposit, checkpoint
   , ChainEvent(..), ScanBatch(..), commitScan, recordScanFailure, scannerHealth
   , lookupInstruction, maximumNativeDepth, pendingVerification
-  , Obligation(..), readyObligations, Attempt(..), storeAttempt, markBroadcastIntent
+  , Obligation(..), readyObligations, Attempt(..), storeAttempt, markBroadcastIntent, authorizeRecordedSend
+  , Preparation(..), beginPreparation, storeDraft, pendingPreparations
   , pendingAttempts, recordSettlement, createRefund, recordFailedSolana, requireBackup, addHint, auditExport
   ) where
 
@@ -34,7 +35,7 @@ import System.Posix.Files (setFileMode)
 -- All financial mutations are serialized and committed before external IO.
 newtype Ledger = Ledger (MVar Connection)
 schemaVersion :: Int
-schemaVersion = 2
+schemaVersion = 3
 sqliteIdentity :: Connection -> IO Value
 sqliteIdentity c = do
   versions <- query_ c "SELECT sqlite_version(),sqlite_source_id()" :: IO [(Text,Text)]
@@ -69,9 +70,11 @@ withLedger path identity action = do
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/001.sql"))) $ execute_ c . fromString . T.unpack
       execute c "INSERT INTO deployment(singleton,schema_version,fingerprint) VALUES(1,1,?)" (Only identity)
     meta <- query_ c "SELECT schema_version,fingerprint FROM deployment" :: IO [(Int,Text)]
-    require (meta `elem` [[(1,identity)],[(schemaVersion,identity)]]) "ledger_profile_or_schema_mismatch"
+    require (meta `elem` [[(v,identity)] | v<-[1..schemaVersion]]) "ledger_profile_or_schema_mismatch"
     when (meta==[(1,identity)]) $ withTransaction c $
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/002.sql"))) $ execute_ c . fromString . T.unpack
+    when (meta/=[(schemaVersion,identity)]) $ withTransaction c $
+      forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/003.sql"))) $ execute_ c . fromString . T.unpack
     -- Restart is quarantined until external identities and unresolved attempts are checked.
     execute_ c "UPDATE deployment SET paused=1,pause_reason='restart_requires_reconciliation'"
     newMVar c >>= action . Ledger
@@ -361,26 +364,77 @@ readyObligations :: Ledger -> IO [Obligation]
 readyObligations l = ledgerAction l $ \c -> query_ c "SELECT id,order_id,deposit_id,kind,asset,amount,recipient FROM obligations WHERE status='ready' ORDER BY rowid LIMIT 100"
 data Attempt = Attempt { attemptId :: !Text, attemptIntent :: !Text, attemptChain :: !Text, attemptBytes :: !Text, attemptPolicy :: !Text, attemptFeeLimit :: !Int64, attemptState :: !Text, attemptSequence :: !(Maybe Int64) } deriving (Eq,Show)
 instance FromRow Attempt where fromRow = Attempt <$> field <*> field <*> field <*> field <*> field <*> field <*> field <*> field
-storeAttempt :: Ledger -> Obligation -> Text -> Text -> Text -> Text -> Int64 -> Maybe Text -> IO ()
-storeAttempt l obligation chain txid bytes policy feeLimit commonInput = ledgerAction l $ \c -> do
+
+-- Reserve the chain and its fee budget before the wallet/helper is invoked.
+-- A crash during preparation leaves an intent even if no signed bytes exist.
+data Preparation = Preparation
+  { preparationObligation :: !Obligation, preparationChain :: !Text
+  , preparationFeeLimit :: !Int64, preparationPolicy :: !Text
+  , preparationDraft :: !(Maybe Text)
+  } deriving (Eq,Show)
+instance FromRow Preparation where fromRow = Preparation <$> fromRow <*> field <*> field <*> field <*> field
+
+checkObligation :: Connection -> Obligation -> Text -> IO ()
+checkObligation c obligation chain = do
   stored <- query c "SELECT id,order_id,deposit_id,kind,asset,amount,recipient FROM obligations WHERE id=?" (Only $ obligationId obligation)
   require (stored==[obligation]) "obligation_mismatch"
   require (chain == if obligationAsset obligation=="Native" then "Native" else "Solana") "wrong_destination_chain"
-  require (not (T.null bytes) && T.length bytes <= 200000 && feeLimit>=0) "invalid_attempt"
+
+beginPreparation :: Ledger -> Obligation -> Text -> Int64 -> Text -> IO ()
+beginPreparation l obligation chain feeLimit policy = ledgerAction l $ \c -> do
+  checkObligation c obligation chain
+  require (feeLimit>=0 && not (T.null policy) && T.length policy<=16384) "invalid_preparation"
+  existing <- query c "SELECT i.chain,f.amount,p.policy_json FROM intents i JOIN preparations p ON p.intent_id=i.id JOIN fee_reservations f ON f.intent_id=i.id WHERE i.id=? AND i.resolved=0" (Only $ obligationId obligation) :: IO [(Text,Int64,Text)]
+  case existing of
+    [(oldChain,oldLimit,oldPolicy)] -> require ((oldChain,oldLimit,oldPolicy)==(chain,feeLimit,policy)) "preparation_conflict"
+    [] -> do
+      health <- query_ c "SELECT paused FROM deployment" :: IO [Only Bool]
+      require (health==[Only False]) "payouts_paused"
+      ds <- query c "SELECT eligible FROM deposits WHERE id=?" (Only $ obligationDeposit obligation) :: IO [Only Bool]
+      require (ds==[Only True]) "source_not_eligible"
+      state <- query c "SELECT status FROM obligations WHERE id=?" (Only $ obligationId obligation) :: IO [Only Text]
+      require (state==[Only "ready"]) "obligation_not_ready"
+      busy <- query c "SELECT id FROM intents WHERE chain=? AND resolved=0" (Only chain) :: IO [Only Text]
+      require (null busy) "destination_payment_unresolved"
+      let feeAsset = if chain=="Native" then "Native" else "Sol"
+      bs <- balances c
+      reserved <- query c "SELECT amount FROM fee_reservations WHERE asset=? AND released=0" (Only feeAsset) :: IO [Only Int64]
+      require (M.findWithDefault 0 (feeAsset,"operating") bs - sum [toInteger n | Only n <- reserved] >= toInteger feeLimit) "insufficient_fee_budget"
+      execute c "INSERT INTO intents(id,obligation_id,chain) VALUES(?,?,?)" (obligationId obligation,obligationId obligation,chain)
+      execute c "INSERT INTO fee_reservations(intent_id,asset,amount) VALUES(?,?,?)" (obligationId obligation,feeAsset,feeLimit)
+      execute c "INSERT INTO preparations(intent_id,policy_json) VALUES(?,?)" (obligationId obligation,policy)
+      execute c "UPDATE obligations SET status='paying' WHERE id=?" (Only $ obligationId obligation)
+      execute c "UPDATE reservations SET phase='payment' WHERE order_id=? AND phase='obligation'" (Only $ obligationOrder obligation)
+      execute c "UPDATE orders SET status='Preparing' WHERE id=? AND status<>'Paid'" (Only $ obligationOrder obligation)
+    _ -> reject "duplicate_preparation"
+
+storeDraft :: Ledger -> Text -> Text -> IO ()
+storeDraft l intent draft = ledgerAction l $ \c -> do
+  require (not (T.null draft) && T.length draft<=200000) "invalid_preparation_draft"
+  rows <- query c "SELECT p.draft_json FROM preparations p JOIN intents i ON i.id=p.intent_id WHERE p.intent_id=? AND i.resolved=0" (Only intent) :: IO [Only (Maybe Text)]
+  case rows of
+    [Only Nothing] -> execute c "UPDATE preparations SET draft_json=? WHERE intent_id=?" (draft,intent)
+    [Only (Just old)] -> require (draft==old) "preparation_draft_conflict"
+    _ -> reject "preparation_not_found"
+
+pendingPreparations :: Ledger -> IO [Preparation]
+pendingPreparations l = ledgerAction l $ \c -> query_ c "SELECT o.id,o.order_id,o.deposit_id,o.kind,o.asset,o.amount,o.recipient,i.chain,f.amount,p.policy_json,p.draft_json FROM preparations p JOIN intents i ON i.id=p.intent_id JOIN obligations o ON o.id=i.obligation_id JOIN fee_reservations f ON f.intent_id=i.id WHERE i.resolved=0 AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.intent_id=i.id) ORDER BY i.rowid"
+
+storeAttempt :: Ledger -> Obligation -> Text -> Text -> Text -> Text -> Int64 -> Maybe Text -> IO ()
+storeAttempt l obligation chain txid bytes policy feeLimit commonInput = ledgerAction l $ \c -> do
+  checkObligation c obligation chain
+  require (not (T.null bytes) && T.length bytes <= 200000 && not (T.null policy) && T.length policy<=32768 && feeLimit>=0) "invalid_attempt"
+  prepared <- query c "SELECT f.amount FROM intents i JOIN preparations p ON p.intent_id=i.id JOIN fee_reservations f ON f.intent_id=i.id WHERE i.id=? AND i.resolved=0 AND f.released=0" (Only $ obligationId obligation) :: IO [Only Int64]
+  require (prepared==[Only feeLimit]) "payment_not_prepared"
   ds <- query c "SELECT eligible FROM deposits WHERE id=?" (Only $ obligationDeposit obligation) :: IO [Only Bool]
   require (ds==[Only True]) "source_not_eligible"
   state <- query c "SELECT status FROM obligations WHERE id=?" (Only $ obligationId obligation) :: IO [Only Text]
-  require (state==[Only "ready"]) "obligation_not_ready"
-  execute c "INSERT INTO intents(id,obligation_id,chain,common_input) VALUES(?,?,?,?)" (obligationId obligation,obligationId obligation,chain,commonInput)
-  let feeAsset = if chain=="Native" then "Native" else "Sol"
-  bs <- balances c
-  reserved <- query c "SELECT amount FROM fee_reservations WHERE asset=? AND released=0" (Only feeAsset) :: IO [Only Int64]
-  require (M.findWithDefault 0 (feeAsset,"operating") bs - sum [toInteger n | Only n <- reserved] >= toInteger feeLimit) "insufficient_fee_budget"
-  execute c "INSERT INTO fee_reservations(intent_id,asset,amount) VALUES(?,?,?)" (obligationId obligation,feeAsset,feeLimit)
+  require (state==[Only "paying"]) "obligation_not_preparing"
+  previous <- query c "SELECT txid FROM attempts WHERE intent_id=?" (Only $ obligationId obligation) :: IO [Only Text]
+  require (null previous) "attempt_already_recorded"
+  execute c "UPDATE intents SET common_input=? WHERE id=?" (commonInput,obligationId obligation)
   execute c "INSERT INTO attempts(txid,intent_id,signed_bytes,policy_json,fee_limit,state) VALUES(?,?,?,?,?,'signed')" (txid,obligationId obligation,bytes,policy,feeLimit)
-  execute c "UPDATE obligations SET status='paying' WHERE id=?" (Only $ obligationId obligation)
-  execute c "UPDATE reservations SET phase='payment' WHERE order_id=? AND phase='obligation'" (Only $ obligationOrder obligation)
-  execute c "UPDATE orders SET status='Paying' WHERE id=?" (Only $ obligationOrder obligation)
+  execute c "UPDATE orders SET status='Paying' WHERE id=? AND status<>'Paid'" (Only $ obligationOrder obligation)
 markBroadcastIntent :: Ledger -> Text -> IO Int64
 markBroadcastIntent l txid = ledgerAction l $ \c -> do
   rows <- query c "SELECT a.state,a.critical_sequence,d.eligible FROM attempts a JOIN intents i ON i.id=a.intent_id JOIN obligations o ON o.id=i.obligation_id JOIN deposits d ON d.id=o.deposit_id WHERE a.txid=?" (Only txid) :: IO [(Text,Maybe Int64,Bool)]
@@ -395,6 +449,22 @@ markBroadcastIntent l txid = ledgerAction l $ \c -> do
     _ -> reject "attempt_not_sendable"
 pendingAttempts :: Ledger -> IO [Attempt]
 pendingAttempts l = ledgerAction l $ \c -> query_ c "SELECT a.txid,a.intent_id,i.chain,a.signed_bytes,a.policy_json,a.fee_limit,a.state,a.critical_sequence FROM attempts a JOIN intents i ON i.id=a.intent_id WHERE i.resolved=0 ORDER BY a.rowid"
+
+-- Recheck after a backup wait, even when BroadcastIntent was already recorded.
+-- Returning its sequence alone never grants permission to send old signed data.
+authorizeRecordedSend :: Ledger -> Bool -> Text -> IO Attempt
+authorizeRecordedSend l remote txid = ledgerAction l $ \c -> do
+  attempts <- query c "SELECT a.txid,a.intent_id,i.chain,a.signed_bytes,a.policy_json,a.fee_limit,a.state,a.critical_sequence FROM attempts a JOIN intents i ON i.id=a.intent_id WHERE a.txid=? AND i.resolved=0" (Only txid)
+  attempt <- case attempts of [a] -> pure a; _ -> reject "attempt_not_sendable"
+  require (attemptState attempt=="broadcast_intent") "broadcast_intent_required"
+  sequenceNumber <- maybe (reject "broadcast_intent_required") pure (attemptSequence attempt)
+  requireBackup c remote sequenceNumber
+  source <- query c "SELECT d.eligible,o.status FROM intents i JOIN obligations o ON o.id=i.obligation_id JOIN deposits d ON d.id=o.deposit_id WHERE i.id=?" (Only $ attemptIntent attempt) :: IO [(Bool,Text)]
+  require (source==[(True,"paying")]) "source_not_eligible"
+  health <- query_ c "SELECT paused FROM deployment" :: IO [Only Bool]
+  require (health==[Only False]) "payouts_paused"
+  pure attempt
+
 recordSettlement :: Ledger -> Text -> Int64 -> Text -> IO ()
 recordSettlement l txid actualFee evidence = ledgerAction l $ \c -> do
   rows <- query c "SELECT a.state,a.fee_limit,o.id,o.order_id,d.asset,d.amount,o.asset,o.amount,q.quote_json,o.kind FROM attempts a JOIN intents i ON i.id=a.intent_id JOIN obligations o ON o.id=i.obligation_id JOIN deposits d ON d.id=o.deposit_id JOIN orders q ON q.id=o.order_id WHERE a.txid=?" (Only txid) :: IO [(Text,Int64,Text,Text,Text,Int64,Text,Int64,Text,Text)]

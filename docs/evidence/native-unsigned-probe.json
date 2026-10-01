@@ -1,0 +1,21 @@
+{
+  "broadcast": false,
+  "feeUnits": "141",
+  "inputs": 1,
+  "kind": "unsigned-PSBT-validation",
+  "ledgerSchema": 3,
+  "locktime": 0,
+  "network": "public-l2l-signet",
+  "outputs": 2,
+  "recipient": "tb1qqq606d6hcwkf3mu5us3m6848ylz4chnkvat79g",
+  "selectedLocksReleased": true,
+  "signerInvoked": false,
+  "units": "100000",
+  "recordedUtc": "2026-10-01T01:46:42.295534+00:00",
+  "financialCountsAfter": {
+    "deposits": 1,
+    "postings": 2,
+    "obligations": 0,
+    "attempts": 0
+  }
+}

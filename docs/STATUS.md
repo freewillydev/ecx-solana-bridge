@@ -7,7 +7,7 @@
 | Check | Result and evidence |
 | --- | --- |
 | Haskell application | Builds on macOS arm64 / GHC 9.14.1 with the frozen Cabal graph |
-| Financial/state tests | 47 examples pass, plus 100 generated arithmetic cases; [test output](evidence/haskell-tests.txt) |
+| Financial/state tests | 58 examples pass, plus 100 generated arithmetic cases; [test output](evidence/haskell-tests.txt) |
 | SQLite actually linked | 3.53.4, exact upstream source identity checked by the application; [doctor](evidence/doctor.json) |
 | Rust helper | Five tests pass; the separate Devnet setup example compiles; fixed SDK/interface graph in `Cargo.lock` |
 | Browser build | TypeScript strict check and esbuild succeed; generated module about 6.7 KiB |
@@ -16,7 +16,9 @@
 | HTTP preview | Customer config/liveness 200, readiness 503, public `/audit` 404; no-store/CSP headers; [evidence](evidence/http-preview.json) |
 | Browser inspection | Actual local page loaded; both fee previews and the direction-specific refund controls checked; deposits disabled; [screenshot](evidence/local-preview.jpg) |
 | Real native chain | Public L2L Signet synchronized; challenge and height-16000 checkpoint match |
-| Real native payment | Daemon-funded/signed PSBT, 100,000 units to dedicated tester, 282-unit fee, three confirmations at latest check; [transaction](https://explorer.signet.drivechain.info/tx/b2278e8dd0be7be001a5630545ddb73c83423ee1ee7dbd0327675e27f1642bd3), [evidence](evidence/signet-probe.json) |
+| Real native payment | Daemon-funded/signed PSBT, 100,000 units to dedicated tester, 282-unit fee, three confirmations at the recorded probe check; [transaction](https://explorer.signet.drivechain.info/tx/b2278e8dd0be7be001a5630545ddb73c83423ee1ee7dbd0327675e27f1642bd3), [evidence](evidence/signet-probe.json) |
+| Native preparation on real node | New Haskell validator accepted an unsigned 100,000-unit PSBT with confirmed owned input, owned change and 141-unit fee; no signing/broadcast, selected input unlocked; [evidence](evidence/native-unsigned-probe.json) |
+| Preparation/restart contracts | Chain/fee reservation before wallet funding, immutable draft before signing, lost RPC response, repeated preparation, refund exclusion and post-backup source recheck tested; schema 2→3 preserved the actual local ledger; [restart evidence](evidence/native-preparation-restart.json) |
 | Real native observer | Recorded the actual faucet receipt as unallocated and the standalone payment as an unknown outgoing transaction requiring review; [scan](evidence/observer-first-scan.json) |
 | Observer replay and restart | Repeated scan did not duplicate deposits, postings or obligations; schema 1→2 migrated the local ledger and the observer restarted paused; [replay](evidence/native-observer-replay.json) |
 | Solana history contracts | Exact cursor pagination, missing history, independent-verifier delay/disagreement, historical token ownership and version-0 account indexes tested with explicitly labeled fixtures |
@@ -32,7 +34,7 @@ The native payment used the standalone probe and dedicated public-test wallets. 
 | 2. Economic/API contracts | Partial | Implement native destination/dust policy, rolling budgets, full state/error contracts for replacement/reorg/recovery; validate all exception examples |
 | 3. Durable ledger/worker | Partial | Existing primitives are tested; still need explicit cancellation/disk-full fault injection, production-size reconciliation and restore coverage |
 | 4. Both chain observers | Partial | Native watcher implemented and exercised on Signet; Solana watcher implemented and contract-tested. Real bound deposits, funded Solana history, operating-SOL reconciliation, long-backlog recovery and complete balance/reorg reconciliation remain |
-| 5. Settlement and recovery | Not complete | Wire signing validation, actual fee/rent budgets, serialized scheduler, source rechecks, exact-byte send/rebroadcast, finality reconciliation, native replacement families, Solana expiry and remote backup barrier |
+| 5. Settlement and recovery | Partial | Native preparation/validation and durable intent/fee holds are implemented. Still need Solana preparation integration, rent/rolling budgets, automatic scheduler, live source rechecks, exact-byte send/rebroadcast, finality/reorg reconciliation, native replacement families, Solana expiry and remote backup orchestration |
 | 6. Usable public-test bridge | Not complete | Both real directions through the browser, new recipient ATA, reload/rejection/expiry flows and supported-wallet matrix |
 | 7. Actual ECX betanet | Not started | Adequately sized host/node, official daemon/checkpoint and replay-policy tests, funding and real round trips |
 | 8. Installation and recovery | Not complete | Candidate service files exist; installer, release verification, remote backup permissions/retention, key restore and clean-host restore still required |
@@ -63,3 +65,5 @@ Unfinished implementation is an additional requirement beyond those external inp
 - No public repository, release, one-line installer, official token minting, LP contribution, customer-fund transaction, external outreach or public launch was performed.
 
 The next implementation must retain the original plan's security/recovery scope. Do not remove the disabled intake gate simply to make the interface appear finished.
+
+The native preparation module is not called by the worker's observer loop and has no HTTP signing route. Its full signing path has RPC contract tests; the fresh real-node check intentionally covered unsigned construction/validation only. The earlier standalone real signed payment remains separate evidence. No new signed native transaction or on-chain transfer was produced during this preparation checkpoint.

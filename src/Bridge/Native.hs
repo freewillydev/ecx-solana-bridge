@@ -4,7 +4,6 @@ import Bridge.Config
 import Bridge.RPC
 import Bridge.Types
 import Data.Aeson
-import qualified Data.Aeson.Key
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import Data.Int (Int64)
@@ -58,15 +57,5 @@ nativeAmount n
  where e=base10Exponent n+8
 nativeNumber :: Amount -> Value
 nativeNumber a = Number (fromIntegral (units a) / 100000000)
-prepareNativePSBT :: Manager -> Config -> Text -> Amount -> IO Value
-prepareNativePSBT manager c destination quantity = do
-  _ <- nativeIdentity manager c
-  _ <- validateNativeRecipient manager c destination
-  nativeCall manager c True "walletcreatefundedpsbt"
-    [ toJSON ([]::[Value]), object [fromStringKey destination .= nativeNumber quantity]
-    , toJSON (if profile c==L2LSignetDevnet then 0::Int64 else 499999999)
-    , object ["lockUnspents" .= True,"replaceable" .= False,"minconf" .= (nativeConfirmations c),"includeWatching" .= False]
-    , Bool True ]
- where fromStringKey = Data.Aeson.Key.fromText
 broadcastNative :: Manager -> Config -> Text -> IO Text
 broadcastNative manager c signed = nativeCall manager c True "sendrawtransaction" [toJSON signed] >>= parseValue parseJSON

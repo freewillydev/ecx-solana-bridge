@@ -23,9 +23,9 @@ The current process IDs, logs and private configuration are in `work/build/cache
 
 The worker's customer socket is `/tmp/ecx-bridge-0930/customer/api.sock`; its administrator socket is separate at `/tmp/ecx-bridge-0930/admin/api.sock`. The development web and worker run under the same local account. Actual service-user separation is still a Linux test requirement.
 
-The preview ledger is at schema 2 and paused. The live observer recorded the faucet receipt as unallocated and flagged the standalone probe's payment as outgoing without a ledger intent. Repeated scanning did not duplicate accounting. Neither event creates application float. Do not create treasury allocations from a wallet's historical gross receipts without reconciling already-spent outputs. The worker continues both scans every 15 seconds; Solana reports `mint_not_found`. Private `/scanners` reports cursor, last success/error and pending review.
+The preview ledger is at schema 3 and paused. The live observer recorded the faucet receipt as unallocated and flagged the standalone probe's payment as outgoing without a ledger intent. Repeated scanning did not duplicate accounting. Neither event creates application float. Do not create treasury allocations from a wallet's historical gross receipts without reconciling already-spent outputs. The worker continues both scans every 15 seconds; Solana reports `mint_not_found`. Private `/scanners` reports cursor, last success/error and pending review. Native preparation exists as a library path, not an enabled HTTP route or scheduled payment task.
 
-The schema 1→2 migration preserves financial rows and critical/backup sequences and starts paused. A consistent private snapshot was taken before upgrading this local ledger. For a manual one-shot scan, stop the verified worker PID, then run `ecx-bridge scan /absolute/private/config.json`; the exclusive ledger lock prevents concurrent workers or offline commands.
+The schema 1→2 and 2→3 migrations preserve financial rows and critical/backup sequences and start paused. Consistent private snapshots were taken before both local upgrades. Schema 3 adds preparation policy/draft records; it does not erase old attempts. For a manual one-shot scan, stop the verified worker PID, then run `ecx-bridge scan /absolute/private/config.json`; the exclusive ledger lock prevents concurrent workers or offline commands.
 
 ## Real L2L Signet node
 
@@ -34,6 +34,10 @@ The isolated node directory is `work/build/cache/l2l-signet` relative to the tas
 Wallets `ecx-bridge-test` and `ecx-bridge-tester` are dedicated to this test. The verified native probe has its possibly-sent record at `work/build/cache/native-probe.json`; the checked-in evidence omits raw transaction/input material. Rerunning `scripts/native-smoke.py` against that exact existing record only checks or rebroadcasts the same transaction. Never delete the record to force a retry. Interrupted PSBT funding without saved signed bytes requires inspection of the wallet's locked inputs.
 
 The node was left running for subsequent public-network tests. Its data directory and keys are on the external disk. Use the node's CLI with this **exact** data directory for an orderly stop; do not stop unrelated native nodes.
+
+`scripts/native-unsigned-probe.hs` exercises the new native preparation module on that real Signet wallet under the ledger lock. It accepts a private configuration path and the dedicated tester's recipient, funds and validates an unsigned PSBT, then releases only the selected input locks. It has no signing or broadcasting step. The successful run left deposits/postings/obligations/attempts unchanged, as recorded in `docs/evidence/native-unsigned-probe.json`. If interrupted before cleanup, inspect the specific test wallet's locks; do not blindly unlock the wallet.
+
+Compile this manual probe against the same pinned SQLite library as the application. The initial `runghc` invocation selected macOS's system SQLite and was correctly rejected before any wallet operation. The successful local binary was compiled with `-L/opt/homebrew/opt/sqlite/lib` and `-optl-Wl,-rpath,/opt/homebrew/opt/sqlite/lib`, into the external build cache. Keep the SQLite runtime identity check; do not disable it to run an interpreter. `scripts/check` typechecks the probe without executing it.
 
 ## Devnet setup
 

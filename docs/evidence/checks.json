@@ -1,12 +1,13 @@
 {
-  "recordedUtc": "2026-10-01T01:27:17.333482+00:00",
+  "recordedUtc": "2026-10-01T01:52:44.226239+00:00",
   "platform": "macOS arm64",
   "haskell": {
-    "examples": 47,
+    "examples": 58,
     "propertyCases": 100,
     "failures": 0,
     "sqliteVersion": "3.53.4",
-    "evidence": "haskell-tests.txt"
+    "evidence": "haskell-tests.txt",
+    "ledgerSchema": 3
   },
   "rust": {
     "unitTests": 5,
@@ -36,5 +37,11 @@
     "schemaVersion": 2,
     "duplicatePostings": false,
     "solanaRealDepositVerified": false
+  },
+  "nativePreparation": {
+    "unsignedRealNode": "native-unsigned-probe.json",
+    "signedRpcContractTest": true,
+    "signedLiveLedgerTest": false,
+    "automaticWorkerEnabled": false
   }
 }

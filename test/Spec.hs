@@ -6,7 +6,9 @@ import Bridge.Ledger
 import Bridge.SolanaMessage
 import Bridge.SolanaDeposit
 import qualified Data.Aeson.KeyMap as KM
-import Bridge.Native (nativeAmount)
+import Bridge.Native (nativeAmount,nativeNumber)
+import Bridge.NativePayment
+import Bridge.Payment (prepareNativeWith)
 import Bridge.RPC
 import Bridge.API
 import Bridge.Worker
@@ -19,6 +21,7 @@ import Control.Monad (forM_)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Base64 as B64
 import Data.Int (Int64)
 import Data.IORef
@@ -68,6 +71,21 @@ fundOrder l c=do
   promoteDeposit l 110 "fixture-tx:0" `shouldReturn` True
   obligations<-readyObligations l
   case obligations of [ob]->pure(o,ob); _->error "expected single obligation"
+-- Fixtures exercise ledger transitions only, never live network funding.
+testAttempt :: Ledger -> Obligation -> Text -> Text -> Text -> Text -> Int64 -> Maybe Text -> IO ()
+testAttempt l ob chain txid bytes policy limit point = do
+  beginPreparation l ob chain limit "{\"fixture\":true}"
+  storeAttempt l ob chain txid bytes policy limit point
+
+nativeFixture :: IO (NativePlan,[NativePrevout],Amount,NativeTx)
+nativeFixture = do
+  value <- BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
+  plan <- fieldValue "plan" value
+  previous <- fieldValue "previous" value
+  fee <- fieldValue "fee" value
+  decoded <- fieldValue "decoded" value >>= either (fail . T.unpack) pure . decodeNativeTx
+  pure (plan,previous,fee,decoded)
+
 main :: IO ()
 main=hspec $ do
   describe "exact amounts" $ do
@@ -231,6 +249,44 @@ main=hspec $ do
       let value=object ["signature" .= base58 (BS.replicate 64 1),"slot" .= (10::Int),"confirmationStatus" .= ("confirmed"::Text),"err" .= Null]
       (parseEither parseJSON value::Either String SignatureInfo) `shouldSatisfy` either (const True) (const False)
   describe "signed intent and settlement invariants" $ do
+    it "reserves the destination and fee budget before signing, without allowing a refund race" $ withFunded $ \l c -> do
+      (o,ob)<-fundOrder l c
+      beginPreparation l ob "Solana" 5000 "fixture-policy"
+      beginPreparation l ob "Solana" 5000 "fixture-policy"
+      beginPreparation l ob "Solana" 6000 "fixture-policy" `shouldThrow` isError "preparation_conflict"
+      length <$> pendingPreparations l `shouldReturn` 1
+      pendingAttempts l `shouldReturn` []
+      status <$> readOrder l cap (orderId o) `shouldReturn` "Preparing"
+      ledgerAction l (\db->query_ db "SELECT amount,released FROM fee_reservations" :: IO [(Int64,Bool)]) `shouldReturn` [(5000,False)]
+      createRefund l "fixture-tx:0" `shouldThrow` isError "refund_would_race_payment"
+      other<-createOrder l c 100 cap req{idempotencyKey="other-order"}
+      observeDeposit l (Deposit "other-tx:0" (Just $ orderId other) Native (input req) "anchor" 1 True 100) "cursor"
+      promoteDeposit l 110 "other-tx:0" `shouldReturn` True
+      obs<-readyObligations l
+      case obs of
+        [otherOb]->beginPreparation l otherOb "Solana" 5000 "other-policy" `shouldThrow` isError "destination_payment_unresolved"
+        _->expectationFailure "expected one remaining ready obligation"
+    it "retains an immutable unsigned draft after interruption and restart" $ withDir $ \dir -> do
+      let c=cfg dir
+      withLedger (dbPath c) (fingerprint c) $ \l -> do
+        fundAllocation l "float" Wrapped "float" (amt 1000000)
+        fundAllocation l "fees" Sol "operating" (amt 10000)
+        resumeAfterChecks l
+        (_,ob)<-fundOrder l c
+        beginPreparation l ob "Solana" 5000 "fixture-policy"
+        storeDraft l (obligationId ob) "fixture-unsigned-draft"
+        storeDraft l (obligationId ob) "fixture-unsigned-draft"
+        storeDraft l (obligationId ob) "different-draft" `shouldThrow` isError "preparation_draft_conflict"
+      withLedger (dbPath c) (fingerprint c) $ \l -> do
+        map preparationDraft <$> pendingPreparations l `shouldReturn` [Just "fixture-unsigned-draft"]
+        pendingAttempts l `shouldReturn` []
+        available <$> readiness l `shouldReturn` False
+        resumeAfterChecks l `shouldThrow` isError "unresolved_intents_require_review"
+        createRefund l "fixture-tx:0" `shouldThrow` isError "refund_would_race_payment"
+    it "cannot store signed bytes without a prior durable preparation" $ withFunded $ \l c -> do
+      (_,ob)<-fundOrder l c
+      storeAttempt l ob "Solana" "signature" "bytes" "{}" 5000 Nothing `shouldThrow` isError "payment_not_prepared"
+      pendingAttempts l `shouldReturn` []
     it "retains exact bytes across restart and starts paused" $ withDir $ \dir -> do
       let c=cfg dir
       withLedger (dbPath c) (fingerprint c) $ \l -> do
@@ -238,7 +294,7 @@ main=hspec $ do
         fundAllocation l "sol-fees" Sol "operating" (amt 10000)
         resumeAfterChecks l
         (_,ob)<-fundOrder l c
-        storeAttempt l ob "Solana" "fixture-signature" "fixture-exact-bytes" "{}" 5000 Nothing
+        testAttempt l ob "Solana" "fixture-signature" "fixture-exact-bytes" "{}" 5000 Nothing
         _<-markBroadcastIntent l "fixture-signature"
         pure ()
       withLedger (dbPath c) (fingerprint c) $ \l -> do
@@ -249,15 +305,15 @@ main=hspec $ do
         resumeAfterChecks l `shouldThrow` isError "unresolved_intents_require_review"
     it "cannot commit an intent without operating funds" $ withFunded $ \l c -> do
       (_,ob)<-fundOrder l c
-      storeAttempt l ob "Solana" "fixture-signature" "bytes" "{}" 100001 Nothing `shouldThrow` isError "insufficient_fee_budget"
+      testAttempt l ob "Solana" "fixture-signature" "bytes" "{}" 100001 Nothing `shouldThrow` isError "insufficient_fee_budget"
       pendingAttempts l `shouldReturn` []
     it "requires correct chain and database-bound obligation" $ withFunded $ \l c -> do
       (_,ob)<-fundOrder l c
-      storeAttempt l ob "Native" "tx" "bytes" "{}" 1 Nothing `shouldThrow` isError "wrong_destination_chain"
-      storeAttempt l ob{obligationRecipient="attacker"} "Solana" "tx" "bytes" "{}" 1 Nothing `shouldThrow` isError "obligation_mismatch"
+      testAttempt l ob "Native" "tx" "bytes" "{}" 1 Nothing `shouldThrow` isError "wrong_destination_chain"
+      testAttempt l ob{obligationRecipient="attacker"} "Solana" "tx" "bytes" "{}" 1 Nothing `shouldThrow` isError "obligation_mismatch"
     it "keeps earned fees out of available source float and settles once" $ withFunded $ \l c -> do
       (_,ob)<-fundOrder l c
-      storeAttempt l ob "Solana" "fixture-signature" "bytes" "{}" 5000 Nothing
+      testAttempt l ob "Solana" "fixture-signature" "bytes" "{}" 5000 Nothing
       _<-markBroadcastIntent l "fixture-signature"
       recordSettlement l "fixture-signature" 5000 "fixture-finalized-proof"
       recordSettlement l "fixture-signature" 5000 "fixture-finalized-proof"
@@ -266,9 +322,21 @@ main=hspec $ do
       pendingAttempts l `shouldReturn` []
     it "cannot authorize a first send after loss of source eligibility" $ withFunded $ \l c -> do
       (o,ob)<-fundOrder l c
-      storeAttempt l ob "Solana" "tx" "bytes" "{}" 5000 Nothing
+      testAttempt l ob "Solana" "tx" "bytes" "{}" 5000 Nothing
       observeDeposit l (Deposit "fixture-tx:0" (Just $ orderId o) Native (input req) "reorg" 0 False 100) "reorg-cursor"
       markBroadcastIntent l "tx" `shouldThrow` isError "attempt_not_sendable"
+      length <$> pendingAttempts l `shouldReturn` 1
+    it "rechecks backup coverage and source eligibility after a recorded broadcast intent" $ withFunded $ \l c -> do
+      (o,ob)<-fundOrder l c
+      testAttempt l ob "Solana" "tx" "exact-bytes" "{}" 5000 Nothing
+      authorizeRecordedSend l True "tx" `shouldThrow` isError "broadcast_intent_required"
+      sequenceNumber<-markBroadcastIntent l "tx"
+      authorizeRecordedSend l True "tx" `shouldThrow` isError "backup_pending"
+      acknowledgeBackup l sequenceNumber "fixture-covered-snapshot"
+      attemptBytes <$> authorizeRecordedSend l True "tx" `shouldReturn` "exact-bytes"
+      observeDeposit l (Deposit "fixture-tx:0" (Just $ orderId o) Native (input req) "reorg" 0 False 100) "reorg-cursor"
+      markBroadcastIntent l "tx" `shouldReturn` sequenceNumber
+      authorizeRecordedSend l True "tx" `shouldThrow` isError "source_not_eligible"
       length <$> pendingAttempts l `shouldReturn` 1
   describe "refund principal and failed transaction fees" $ do
     it "refunds a confirmed partial deposit without consuming payout float" $ withFunded $ \l c -> do
@@ -276,7 +344,7 @@ main=hspec $ do
       observeDeposit l (Deposit "partial:0" (Just $ orderId o) Native (amt 1000) "anchor" 1 True 100) "cursor"
       ob<-createRefund l "partial:0"
       obligationRecipient ob `shouldBe` refund req
-      storeAttempt l ob "Native" "refund-tx" "fixture-refund-bytes" "{}" 100 Nothing
+      testAttempt l ob "Native" "refund-tx" "fixture-refund-bytes" "{}" 100 Nothing
       _<-markBroadcastIntent l "refund-tx"
       recordSettlement l "refund-tx" 100 "fixture-refund-proof"
       ledgerAction l (\db->freeInventory db Native) `shouldReturn` 1000000
@@ -284,13 +352,13 @@ main=hspec $ do
       status <$> readOrder l cap (orderId o) `shouldReturn` "Refunded"
     it "will not refund a signed or possibly broadcast conversion" $ withFunded $ \l c -> do
       (_,ob)<-fundOrder l c
-      storeAttempt l ob "Solana" "tx" "signed-bytes" "{}" 5000 Nothing
+      testAttempt l ob "Solana" "tx" "signed-bytes" "{}" 5000 Nothing
       createRefund l "fixture-tx:0" `shouldThrow` isError "refund_would_race_payment"
       _<-markBroadcastIntent l "tx"
       createRefund l "fixture-tx:0" `shouldThrow` isError "refund_would_race_payment"
     it "charges a failed Solana transaction fee and preserves full refundable principal" $ withFunded $ \l c -> do
       (_,ob)<-fundOrder l c
-      storeAttempt l ob "Solana" "failed-tx" "bytes" "{}" 5000 Nothing
+      testAttempt l ob "Solana" "failed-tx" "bytes" "{}" 5000 Nothing
       _<-markBroadcastIntent l "failed-tx"
       recordFailedSolana l "failed-tx" 5000 "fixture-finalized-failure"
       recordFailedSolana l "failed-tx" 5000 "fixture-finalized-failure"
@@ -333,6 +401,98 @@ main=hspec $ do
       let c=cfg dir
       withLedger (dbPath c) (fingerprint c) (const $ pure ())
       withLedger (dbPath c) "other-profile" (const $ pure ()) `shouldThrow` isError "ledger_profile_or_schema_mismatch"
+  describe "native transaction validation (captured public-Signet transaction)" $ do
+    it "accepts the exact recipient, change, input and fee in the recorded real payment" $ do
+      (plan,previous,fee,tx)<-nativeFixture
+      validateNativeTx plan previous fee tx `shouldBe` Right ()
+      nativeTxid tx `shouldBe` "b2278e8dd0be7be001a5630545ddb73c83423ee1ee7dbd0327675e27f1642bd3"
+    it "rejects changed amounts, destinations, third outputs and nonowned change scripts" $ do
+      (plan,previous,fee,tx)<-nativeFixture
+      let mutations=[plan{planAmount=amt 100001},plan{planRecipientScript="0014"<>T.replicate 40 "a"},plan{planChangeScript="0014"<>T.replicate 40 "b"}]
+      forM_ mutations $ \changed->validateNativeTx changed previous fee tx `shouldBe` Left "native_output_mismatch"
+      validateNativeTx plan previous fee tx{nativeOutputs=nativeOutputs tx<>[NativeOutput "6a00" (amt 1)]} `shouldBe` Left "native_output_mismatch"
+    it "computes fees from verified prevouts and rejects unconfirmed or duplicate inputs" $ do
+      (plan,previous,fee,tx)<-nativeFixture
+      validateNativeTx plan{planFeeLimit=amt 281} previous fee tx `shouldBe` Left "native_fee_mismatch"
+      validateNativeTx plan previous (amt 283) tx `shouldBe` Left "native_fee_mismatch"
+      validateNativeTx plan (map (\p->p{prevoutAmount=amt 2000001}) previous) fee tx `shouldBe` Left "native_fee_mismatch"
+      validateNativeTx plan (map (\p->p{prevoutDepth=0}) previous) fee tx `shouldBe` Left "native_input_not_confirmed"
+      validateNativeTx plan (previous<>previous) fee tx{nativeInputs=nativeInputs tx<>nativeInputs tx} `shouldBe` Left "native_input_mismatch"
+    it "enforces separate Signet and ECX locktime rules (pure mutation checks, not ECX acceptance)" $ do
+      (plan,previous,fee,tx)<-nativeFixture
+      validateNativeTx plan previous fee tx{nativeLocktime=499999999} `shouldBe` Left "native_replay_policy_mismatch"
+      validateNativeTx plan{planProfile=ECXBetanetDevnet} previous fee tx `shouldBe` Left "native_replay_policy_mismatch"
+      validateNativeTx plan{planProfile=ECXBetanetDevnet} previous fee tx{nativeLocktime=499999999} `shouldBe` Right ()
+      validateNativeTx plan previous fee tx{nativeInputs=map (\i->i{nativeSequence=4294967295}) (nativeInputs tx)} `shouldBe` Left "native_replay_policy_mismatch"
+    it "refuses a corrupted saved draft before invoking the wallet signer" $ do
+      (plan,previous,fee,tx)<-nativeFixture
+      let draft=NativeDraft "unused-transport-fixture" tx{nativeLocktime=1} previous fee
+          unexpected _ _ _=expectationFailure "unexpected wallet RPC" >> pure Null
+      signNativeDraft unexpected plan draft `shouldThrow` isError "native_replay_policy_mismatch"
+    it "stores the draft before signing and reuses a recorded attempt (RPC contract test)" $ withFunded $ \l c -> do
+      captured<-BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
+      (plan,previous,fee,tx)<-nativeFixture
+      previousOutput<-case previous of [p]->pure p; _->fail "expected one captured previous output"
+      decoded<-fieldValue "decoded" captured
+      raw<-fieldValue "raw" captured :: IO Text
+      o<-createOrder l c 100 cap req{refund=planRecipient plan}
+      observeDeposit l (Deposit "native-contract:0" (Just $ orderId o) Native (amt 100000) "fixture-anchor" 1 True 100) "fixture-cursor"
+      ob<-createRefund l "native-contract:0"
+      calls<-newIORef []
+      locks<-newIORef ([]::[Outpoint])
+      let call _ method params=do
+            modifyIORef' calls (<>[method])
+            case (method,params) of
+              ("getaddressinfo",[String address]) -> pure $ object
+                ["ismine" .= (address/=planRecipient plan),"scriptPubKey" .=
+                  (if address==planRecipient plan then planRecipientScript plan
+                   else if address==planChange plan then planChangeScript plan else prevoutScript previousOutput)]
+              ("getrawchangeaddress",_) -> pure $ toJSON (planChange plan)
+              ("listlockunspent",_) -> toJSON <$> readIORef locks
+              ("walletcreatefundedpsbt",[_,_,_,options,_]) -> do
+                -- These responses test the RPC contract, not chain acceptance.
+                fieldValue "replaceable" options `shouldReturn` False
+                fieldValue "lockUnspents" options `shouldReturn` True
+                fieldValue "minconf" options `shouldReturn` planDepth plan
+                writeIORef locks (map nativeOutpoint $ nativeInputs tx)
+                pure $ object ["psbt" .= ("rpc-contract-psbt"::Text),"fee" .= nativeNumber fee,"changepos" .= (0::Int)]
+              ("decodepsbt",_) -> pure $ object ["tx" .= (decoded::Value),"fee" .= nativeNumber fee]
+              ("gettxout",_) -> pure $ object ["value" .= nativeNumber (prevoutAmount previousOutput),"confirmations" .= (1000::Int),"coinbase" .= False,"scriptPubKey" .= object ["hex" .= prevoutScript previousOutput,"address" .= ("rpc-contract-source"::Text)]]
+              ("walletprocesspsbt",_) -> do
+                saved<-pendingPreparations l
+                length saved `shouldBe` 1
+                map preparationDraft saved `shouldSatisfy` all (/=Nothing)
+                pendingAttempts l `shouldReturn` []
+                pure $ object ["complete" .= True,"psbt" .= ("rpc-contract-signed-psbt"::Text)]
+              ("finalizepsbt",_) -> pure $ object ["complete" .= True,"hex" .= raw]
+              ("decoderawtransaction",_) -> pure decoded
+              ("testmempoolaccept",_) -> pure $ toJSON [object ["txid" .= nativeTxid tx,"allowed" .= True,"fees" .= object ["base" .= nativeNumber fee]]]
+              _ -> expectationFailure ("unexpected RPC: "<>T.unpack method) >> pure Null
+      prepareNativeWith call c l ob `shouldReturn` nativeTxid tx
+      firstCalls<-readIORef calls
+      prepareNativeWith call c l ob `shouldReturn` nativeTxid tx
+      readIORef calls `shouldReturn` firstCalls
+      firstCalls `shouldSatisfy` notElem "sendrawtransaction"
+      map attemptState <$> pendingAttempts l `shouldReturn` ["signed"]
+      map attemptBytes <$> pendingAttempts l `shouldReturn` [raw]
+      pendingPreparations l `shouldReturn` []
+    it "retains preparation and pauses if a funding response is lost (RPC contract test)" $ withFunded $ \l c -> do
+      (plan,_,_,_)<-nativeFixture
+      o<-createOrder l c 100 cap req{refund=planRecipient plan}
+      observeDeposit l (Deposit "lost-reply:0" (Just $ orderId o) Native (amt 100000) "anchor" 1 True 100) "cursor"
+      ob<-createRefund l "lost-reply:0"
+      let call _ method _=case method of
+            "getaddressinfo" -> pure $ object ["ismine" .= False,"scriptPubKey" .= planRecipientScript plan]
+            _ -> reject "unused"
+      -- Persisting an unsigned draft may be interrupted after node-side locks.
+      -- The ledger must still prevent another payment/refund without recovery.
+      beginPreparation l ob "Native" 1000 (TE.decodeUtf8 $ LBS.toStrict $ encode plan)
+      let lost _ method _=if method=="listlockunspent" then pure (toJSON ([]::[Outpoint])) else reject "simulated_lost_funding_reply"
+      prepareNativeWith lost c l ob `shouldThrow` isError "simulated_lost_funding_reply"
+      map preparationDraft <$> pendingPreparations l `shouldReturn` [Nothing]
+      available <$> readiness l `shouldReturn` False
+      pendingAttempts l `shouldReturn` []
+      prepareNativeWith call c l ob `shouldThrow` isError "payouts_paused"
   describe "public/private Unix socket boundary" $ do
     it "uses the shared Servant contract and separate admin socket" $ withDir $ \dir -> do
       let c=cfg dir
