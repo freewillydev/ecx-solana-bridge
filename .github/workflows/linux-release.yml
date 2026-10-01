@@ -9,11 +9,16 @@ concurrency:
 jobs:
   x86-release:
     runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    timeout-minutes: 90
     env:
       ECX_BUILD_DIR: ${{ github.workspace }}/.release-build
-      ECX_BUILD_JOBS: '1'
+      ECX_BUILD_JOBS: '2'
     steps:
+      - name: Reserve capacity on the disposable runner
+        run: |
+          # These image SDKs are unrelated to the pinned bridge toolchains.
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift /opt/ghc /opt/hostedtoolcache
+          python3 -c 'import shutil; free=shutil.disk_usage(".").free; print("Free build GiB:", round(free/2**30, 1)); assert free >= 30*2**30, "Insufficient native build space"'
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false

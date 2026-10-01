@@ -57,6 +57,12 @@ if not (tools / "bin/cabal").exists():
     shutil.copy2(fetch("cabal") / "cabal", tools / "bin/cabal")
 if not (tools / "bin/rustc").exists():
     run("./install.sh", f"--prefix={tools}", "--components=rustc,cargo,rust-std-" + ("aarch64" if arch == "aarch64" else "x86_64") + "-unknown-linux-gnu,rustfmt-preview", "--disable-ldconfig", cwd=fetch("rust"))
+# Installation copies the verified toolchains; retaining the expanded installers
+# doubles disk use without helping subsequent builds (the archives are retained).
+for name in ("ghc-source", "rust-source"):
+    expanded = cache / name
+    if expanded.exists():
+        shutil.rmtree(expanded)
 node = fetch("node")
 os.environ["PATH"] = f"{tools}/bin:{node}/bin:" + os.environ["PATH"]
 os.environ["CARGO_HOME"] = str(cache / "cargo")
@@ -66,6 +72,10 @@ build_jobs = os.environ.get("ECX_BUILD_JOBS", "1")
 if build_jobs not in ("1", "2"):
     raise ValueError("ECX_BUILD_JOBS must be 1 or 2")
 os.environ["CARGO_BUILD_JOBS"] = build_jobs
+# Test symbols are unnecessary for acceptance and consume substantial disk/link
+# time in the Solana dependency graph. Release artifacts keep their own profile.
+os.environ["CARGO_PROFILE_DEV_DEBUG"] = "0"
+os.environ["CARGO_PROFILE_TEST_DEBUG"] = "0"
 sqlite = cache / "sqlite"
 if not (sqlite / "bin/sqlite3").exists():
     source = fetch("sqlite")
