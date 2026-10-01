@@ -5,3 +5,6 @@ tests: True
 
 package direct-sqlite
   flags: +systemlib
+
+-- Opaleye 0.10.8.0 predates base 4.22; validate against GHC 9.14 explicitly.
+allow-newer: opaleye:base, postgresql-simple:base, postgresql-simple:template-haskell, postgresql-simple:containers, postgresql-simple:aeson

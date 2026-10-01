@@ -6,6 +6,10 @@ An inventory-backed bridge between native ECX-family networks and a wrapped Sola
 
 The project follows the later requirements in the original ECX discussion: an operator-run wrapping/redemption service, **0.20% to wrap and 1% to redeem**, and separate Solana liquidity that can eventually be traded through Jupiter. The bridge is the conversion service; a DEX pool supplies market trading and price discovery. There is no custom blockchain, Solana token program or AMM implementation here.
 
+## Approved next revision
+
+The [integrated implementation plan](docs/IMPLEMENTATION-PLAN.md) targets a connection-free interface, 1% fees in both directions, PostgreSQL/Opaleye throughout the database layer, and Servant handlers that produce a severity-indexed DSL for separate safe and critical evaluation. These changes are planned; the runtime architecture and fee descriptions below describe the current baseline.
+
 ## What the bridge does
 
 The operator holds inventory on both chains. A confirmed native deposit authorizes a payout from wrapped-token inventory; a finalized wrapped-token deposit authorizes a native payout. Runtime conversion does not mint or burn tokens. Mint authority, official backing operations and liquidity-provider capital belong to separate operator workflows.

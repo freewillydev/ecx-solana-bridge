@@ -1,0 +1,1392 @@
+{
+  "table": [
+    "orders",
+    "events",
+    "postings",
+    "reservations",
+    "deposits",
+    "obligations",
+    "intents",
+    "attempts",
+    "checkpoints",
+    "audit",
+    "hints",
+    "fee_reservations",
+    "deployment",
+    "observation_evidence",
+    "scan_origins",
+    "scan_health",
+    "chain_events",
+    "treasury_allocations",
+    "treasury_spends",
+    "solana_expiries",
+    "preparations",
+    "solana_retry_approvals",
+    "operating_clock",
+    "operating_costs",
+    "order_cost_limits",
+    "operating_reservations",
+    "native_allocations",
+    "custody_check",
+    "preparation_cancellations",
+    "native_payment_recoveries",
+    "source_recoveries",
+    "source_recovery_approvals",
+    "source_loss_covers",
+    "source_loss_returns",
+    "native_replacement_drafts",
+    "native_replacement_cancellations",
+    "native_replacement_members",
+    "native_winner_changes"
+  ],
+  "index": [
+    "posting_balance",
+    "one_conversion",
+    "one_unresolved_chain_intent",
+    "one_active_deposit_allocation",
+    "chain_event_review",
+    "operating_cost_time",
+    "one_active_preparation",
+    "native_payment_recovery_latest",
+    "source_recovery_latest",
+    "source_loss_deposit",
+    "one_settled_payment_per_intent",
+    "native_winner_change_history"
+  ],
+  "view": [
+    "source_recovery_state",
+    "active_source_loss_covers",
+    "proven_source_losses",
+    "accounted_source_losses",
+    "native_payment_recovery_state"
+  ],
+  "trigger": [
+    "immutable_order",
+    "immutable_posting_update",
+    "immutable_posting_delete",
+    "immutable_signed_bytes",
+    "immutable_evidence_update",
+    "immutable_evidence_delete",
+    "immutable_scan_origin",
+    "immutable_treasury_allocation_update",
+    "immutable_treasury_allocation_delete",
+    "immutable_treasury_spend_update",
+    "immutable_treasury_spend_delete",
+    "immutable_solana_expiry_update",
+    "immutable_solana_expiry_delete",
+    "immutable_preparation_policy",
+    "immutable_preparation_draft",
+    "immutable_preparation_retirement",
+    "immutable_preparation_delete",
+    "immutable_attempt_generation",
+    "immutable_retry_approval_update",
+    "immutable_retry_approval_delete",
+    "immutable_operating_cost_update",
+    "immutable_operating_cost_delete",
+    "record_operating_cost",
+    "immutable_order_cost_update",
+    "immutable_order_cost_delete",
+    "immutable_operating_reservation",
+    "immutable_operating_reservation_delete",
+    "immutable_instruction",
+    "irreversible_instruction_issue",
+    "immutable_native_allocation_update",
+    "immutable_native_allocation_delete",
+    "custody_posting",
+    "custody_deposit_insert",
+    "custody_deposit_update",
+    "custody_attempt_insert",
+    "custody_attempt_update",
+    "custody_checkpoint_insert",
+    "custody_checkpoint_update",
+    "custody_scan_insert",
+    "custody_scan_update",
+    "custody_event_insert",
+    "custody_event_update",
+    "immutable_preparation_cancellation",
+    "immutable_preparation_cancellation_delete",
+    "irreversible_preparation_cleanup",
+    "irreversible_preparation_cancellation",
+    "cancelled_preparation_draft",
+    "cancelled_preparation_attempt",
+    "immutable_native_payment_recovery_update",
+    "immutable_native_payment_recovery_delete",
+    "native_payment_recovery_binding",
+    "custody_native_payment_recovery",
+    "immutable_source_recovery_update",
+    "immutable_source_recovery_delete",
+    "source_recovery_binding",
+    "custody_source_recovery",
+    "immutable_source_approval_update",
+    "immutable_source_approval_delete",
+    "source_approval_binding",
+    "custody_source_approval",
+    "source_loss_cover_binding",
+    "source_loss_return_binding",
+    "immutable_source_cover_update",
+    "immutable_source_cover_delete",
+    "immutable_source_return_update",
+    "immutable_source_return_delete",
+    "custody_source_cover",
+    "custody_source_return",
+    "immutable_native_replacement_draft_update",
+    "immutable_native_replacement_draft_delete",
+    "immutable_native_replacement_cancel_update",
+    "immutable_native_replacement_cancel_delete",
+    "custody_native_replacement_draft",
+    "custody_native_replacement_cancel",
+    "native_replacement_member_binding",
+    "immutable_native_replacement_member_update",
+    "immutable_native_replacement_member_delete",
+    "native_replacement_cancel_unsigned",
+    "native_replacement_draft_binding",
+    "custody_native_replacement_member",
+    "native_winner_change_binding",
+    "immutable_native_winner_change_update",
+    "immutable_native_winner_change_delete",
+    "custody_native_winner_change"
+  ],
+  "legacySchemaVersion": 18,
+  "columns": {
+    "orders": [
+      {
+        "name": "id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "capability_hash",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "idempotency_key",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "request_hash",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "request_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "quote_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "policy_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "status",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "deadline",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "grace_deadline",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "instruction",
+        "type": "TEXT",
+        "nullable": true,
+        "primaryKey": false
+      },
+      {
+        "name": "instruction_sequence",
+        "type": "INTEGER",
+        "nullable": true,
+        "primaryKey": false
+      },
+      {
+        "name": "payout_tx",
+        "type": "TEXT",
+        "nullable": true,
+        "primaryKey": false
+      },
+      {
+        "name": "instruction_issued",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "events": [
+      {
+        "name": "id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "description",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "postings": [
+      {
+        "name": "id",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "event_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "asset",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "account",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "delta",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "reservations": [
+      {
+        "name": "order_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "asset",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "amount",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "phase",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "deposits": [
+      {
+        "name": "id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "order_id",
+        "type": "TEXT",
+        "nullable": true,
+        "primaryKey": false
+      },
+      {
+        "name": "asset",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "amount",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "anchor",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "first_seen",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "confirmations",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "eligible",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "allocated",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "state",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "obligations": [
+      {
+        "name": "id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "order_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "deposit_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "kind",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "asset",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "amount",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "recipient",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "status",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "intents": [
+      {
+        "name": "id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "obligation_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "chain",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "common_input",
+        "type": "TEXT",
+        "nullable": true,
+        "primaryKey": false
+      },
+      {
+        "name": "resolved",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "attempts": [
+      {
+        "name": "txid",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "intent_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "signed_bytes",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "policy_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "fee_limit",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "state",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "critical_sequence",
+        "type": "INTEGER",
+        "nullable": true,
+        "primaryKey": false
+      },
+      {
+        "name": "observation_json",
+        "type": "TEXT",
+        "nullable": true,
+        "primaryKey": false
+      },
+      {
+        "name": "preparation_generation",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "checkpoints": [
+      {
+        "name": "chain",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "anchor",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "audit": [
+      {
+        "name": "id",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "action",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "detail",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "hints": [
+      {
+        "name": "order_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "signature",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      }
+    ],
+    "fee_reservations": [
+      {
+        "name": "intent_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "asset",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "amount",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "released",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "deployment": [
+      {
+        "name": "singleton",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "schema_version",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "fingerprint",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "critical_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "backup_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "paused",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "pause_reason",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "observation_evidence": [
+      {
+        "name": "hash",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "chain",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "event_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "evidence_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "scan_origins": [
+      {
+        "name": "chain",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "anchor",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "scan_health": [
+      {
+        "name": "chain",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "last_success",
+        "type": "INTEGER",
+        "nullable": true,
+        "primaryKey": false
+      },
+      {
+        "name": "last_error",
+        "type": "TEXT",
+        "nullable": true,
+        "primaryKey": false
+      },
+      {
+        "name": "checked_at",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "chain_events": [
+      {
+        "name": "chain",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "event_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "kind",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "anchor",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "evidence_hash",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "first_seen",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "last_seen",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "needs_review",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "treasury_allocations": [
+      {
+        "name": "deposit_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "allocation_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "proof_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "critical_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "treasury_spends": [
+      {
+        "name": "chain",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "event_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "anchor",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "economic_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "proof_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "critical_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "solana_expiries": [
+      {
+        "name": "txid",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "proof_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "critical_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "preparations": [
+      {
+        "name": "intent_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "generation",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "policy_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "draft_json",
+        "type": "TEXT",
+        "nullable": true,
+        "primaryKey": false
+      },
+      {
+        "name": "retired_txid",
+        "type": "TEXT",
+        "nullable": true,
+        "primaryKey": false
+      },
+      {
+        "name": "cancelled",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "solana_retry_approvals": [
+      {
+        "name": "expired_txid",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "reason",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "proof_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "critical_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "operating_clock": [
+      {
+        "name": "singleton",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "last_time",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "operating_costs": [
+      {
+        "name": "posting_id",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "recorded_at",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "order_cost_limits": [
+      {
+        "name": "order_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "native_fee",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "solana_fee",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "solana_rent",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "operating_reservations": [
+      {
+        "name": "order_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "kind",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "asset",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "amount",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "phase",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "native_allocations": [
+      {
+        "name": "order_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "label",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "critical_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "custody_check": [
+      {
+        "name": "singleton",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "revision",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "checked_revision",
+        "type": "INTEGER",
+        "nullable": true,
+        "primaryKey": false
+      },
+      {
+        "name": "checked_at",
+        "type": "INTEGER",
+        "nullable": true,
+        "primaryKey": false
+      },
+      {
+        "name": "last_error",
+        "type": "TEXT",
+        "nullable": true,
+        "primaryKey": false
+      },
+      {
+        "name": "report_json",
+        "type": "TEXT",
+        "nullable": true,
+        "primaryKey": false
+      }
+    ],
+    "preparation_cancellations": [
+      {
+        "name": "intent_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "generation",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "reason",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "cleanup_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "critical_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "completed",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "native_payment_recoveries": [
+      {
+        "name": "id",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "txid",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "previous_observation",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "state",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "observation_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "critical_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "source_recoveries": [
+      {
+        "name": "id",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "deposit_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "state",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "shortfall",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "evidence_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "critical_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "source_recovery_approvals": [
+      {
+        "name": "obligation_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "restoration_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "loss_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "prior_status",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "work_hash",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "reason",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "proof_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "critical_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "source_loss_covers": [
+      {
+        "name": "critical_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "deposit_id",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "recovery_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "amount",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "float_amount",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "earned_amount",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "reason",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "proof_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "source_loss_returns": [
+      {
+        "name": "cover_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "recovery_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "native_replacement_drafts": [
+      {
+        "name": "critical_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "parent_txid",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "fee",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "draft_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "work_hash",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "reason",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "proof_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "native_replacement_cancellations": [
+      {
+        "name": "draft_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "reason",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "critical_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "native_replacement_members": [
+      {
+        "name": "draft_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "txid",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "critical_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ],
+    "native_winner_changes": [
+      {
+        "name": "critical_sequence",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": true
+      },
+      {
+        "name": "previous_txid",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "winner_txid",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "previous_observation",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "observation_json",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "evidence_hash",
+        "type": "TEXT",
+        "nullable": false,
+        "primaryKey": false
+      },
+      {
+        "name": "fee_delta",
+        "type": "INTEGER",
+        "nullable": false,
+        "primaryKey": false
+      }
+    ]
+  }
+}

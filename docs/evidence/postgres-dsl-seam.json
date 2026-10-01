@@ -1,0 +1,24 @@
+{
+  "date": "2026-10-01",
+  "scope": "real PostgreSQL integration seam; not converted financial ledger",
+  "compiler": "GHC 9.14.1",
+  "postgresql": "16.14",
+  "opaleye": "0.10.8.0",
+  "postgresqlSimple": "0.7.0.1",
+  "build": "cabal build exe:ecx-postgres-seam -j2 passed",
+  "transport": "owner-only Unix socket; PostgreSQL TCP disabled; private socket directory",
+  "initialRead": {"available": false, "reason": "integration_pending"},
+  "criticalPause": {"available": false, "reason": "typed_dsl_verified"},
+  "subsequentRead": {"available": false, "reason": "typed_dsl_verified"},
+  "independentSqlRead": "t|typed_dsl_verified",
+  "handler": "ServerT API AdminDSL, operation dictionary resolved to DSL before central hoist",
+  "queries": "Opaleye runSelect and runUpdate; maintenance bootstrap DDL only uses SQL",
+  "safeTransaction": "PostgreSQL read-only transaction",
+  "criticalEvaluationCallSites": 1,
+  "limitations": [
+    "Development status table only, not financial schema migration",
+    "Dedicated integration executable; existing customer and worker handlers not converted",
+    "Read and write database roles are not yet separated",
+    "Scoped package-bound overrides require regression and release review"
+  ]
+}

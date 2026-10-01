@@ -8,7 +8,7 @@ category: Finance
 license: MIT
 license-file: LICENSE
 build-type: Simple
-extra-source-files: migrations/*.sql, config/*.json, web/*.html, web/*.css, docs/*.md,
+extra-source-files: migrations/*.sql, migrations/postgresql/*.sql, migrations/postgresql/*.json, config/*.json, web/*.html, web/*.css, docs/*.md,
                     test/fixtures/*.json
 
 common settings
@@ -19,7 +19,7 @@ common settings
 library
   import: settings
   hs-source-dirs: src
-  exposed-modules: Bridge.Types, Bridge.Config, Bridge.Budget, Bridge.Ledger, Bridge.Reconciliation, Bridge.Recovery, Bridge.Reorg, Bridge.RPC, Bridge.Native, Bridge.NativePayment, Bridge.NativeReplacement, Bridge.Payment, Bridge.Settlement, Bridge.Deposit, Bridge.Order, Bridge.Admission, Bridge.Solana, Bridge.SolanaHelper, Bridge.SolanaPayment, Bridge.SolanaMessage, Bridge.SolanaDeposit, Bridge.Observer, Bridge.Process, Bridge.Backup, Bridge.API, Bridge.Web, Bridge.Worker
+  exposed-modules: Bridge.Postgres.Ledger, Bridge.Postgres.Schema, Bridge.Types, Bridge.Config, Bridge.Budget, Bridge.Ledger, Bridge.Reconciliation, Bridge.Recovery, Bridge.Reorg, Bridge.RPC, Bridge.Native, Bridge.NativePayment, Bridge.NativeReplacement, Bridge.Payment, Bridge.Settlement, Bridge.Deposit, Bridge.Order, Bridge.Admission, Bridge.Solana, Bridge.SolanaHelper, Bridge.SolanaPayment, Bridge.SolanaMessage, Bridge.SolanaDeposit, Bridge.Observer, Bridge.Process, Bridge.Backup, Bridge.API, Bridge.Web, Bridge.Worker
   build-depends:
     base >=4.20 && <4.23, aeson >=2.2 && <2.4, async >=2.2 && <2.3,
     base16-bytestring >=1 && <1.1, base58-bytestring >=0.1 && <0.2,
@@ -31,6 +31,8 @@ library
     memory >=0.18 && <0.19, network >=3.1 && <3.3,
     process >=1.6 && <1.7, scientific >=0.3 && <0.4,
     servant >=0.20 && <0.21, servant-server >=0.20 && <0.21,
+    product-profunctors >=0.11 && <0.12,
+    opaleye ==0.10.8.0, postgresql-simple >=0.7 && <0.8,
     servant-client >=0.20 && <0.21, sqlite-simple >=0.4.19 && <0.5,
     transformers >=0.6 && <0.7, stm >=2.5 && <2.6, text >=2.1 && <2.2, time >=1.12 && <1.16,
     unix >=2.8 && <2.9, wai >=3.2 && <3.3, wai-extra >=3.1 && <3.2,
@@ -53,3 +55,18 @@ test-suite bridge-test
     hspec >=2.11 && <2.12, QuickCheck >=2.15 && <2.19, sqlite-simple,
     text, time, async, network, http-client, servant-client, servant, unix, scientific, base64-bytestring,
     crypton, memory
+
+-- Real integration seam for the PostgreSQL/DSL migration, private Unix API only.
+executable ecx-postgres-seam
+  import: settings
+  hs-source-dirs: integration
+  main-is: Main.hs
+  ghc-options: -threaded
+  build-depends: base, ecx-bridge, text, servant, servant-server,
+    postgresql-simple, opaleye
+
+executable ecx-postgres-journal-check
+  import: settings
+  hs-source-dirs: integration
+  main-is: JournalCheck.hs
+  build-depends: base, ecx-bridge, containers, postgresql-simple, unix

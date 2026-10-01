@@ -136,3 +136,40 @@ The native preparation path has RPC contract tests, real unsigned validation and
 The normal worker now reconciles already-recorded payment outcomes while paused. Ordinary `worker` mode retains the disabled intake gate; explicit `test-worker` mode enables the existing payment path only on the public test profile. The scoped order acceptance tool uses the real payment pass. Schema-5 expiry was exercised by the real refund using the primary public-Devnet RPC; canonical independent-provider recovery remains a separate gate. The earlier standalone probes and client-side expiry decisions remain separate historical evidence.
 
 The treasury checkpoint sent no transactions. Its operator tool checks the exact existing public-test deployment, requires zero customer orders, verifies the known funding and finalized probe evidence, and matches current chain balances. Customer attempts cannot be reclassified as treasury spends. An on-chain signature saved only as `signed`, without `BroadcastIntent`, now triggers review. The ordinary worker stays paused; the separate public-test mode is described above.
+
+## PostgreSQL / typed DSL integration checkpoint (2026-10-01)
+
+The new private `ecx-postgres-seam` executable compiles against Opaleye 0.10.8.0,
+postgresql-simple 0.7.0.1 and the existing GHC 9.14.1 toolchain. Servant handlers
+resolve constrained operation packages to result/severity-indexed DSL values;
+the central hoist selects separate safe and critical evaluators. A real local
+PostgreSQL 16.14 status row was read, updated through the critical pause DSL,
+read again and independently checked using psql. Safe reads run in PostgreSQL
+read-only transactions; there is one critical evaluator invocation site.
+
+This establishes compatibility and the real execution seam, not financial
+migration completion. The existing funded SQLite worker is unchanged. Typed
+financial tables, separate database roles, migrated workflows and real-chain
+acceptance remain next. Evidence: [postgres-dsl-seam.json](evidence/postgres-dsl-seam.json).
+
+### Financial schema translation
+
+The complete final legacy schema now has fresh PostgreSQL DDL in
+`migrations/postgresql/001.sql`, with a column/object mapping and a reproducible
+strict translator. PostgreSQL accepted all 38 tables, 12 explicit indexes, five
+views and 84 triggers. Targeted checks verified immutable postings, asset
+constraints, custody revision updates and JSON validation; test rows rolled back.
+Typed Opaleye definitions for deployment, events, postings and custody compile.
+This is schema/access-layer progress; financial runtime conversion and exhaustive
+semantic parity checks remain. [Evidence](evidence/postgres-financial-schema.json).
+
+### Typed financial tables and core journal
+
+All 38 financial tables now have explicit generated record types, nullable/default
+field mappings and Opaleye adapters in `Bridge.Postgres.Schema`. The core
+PostgreSQL ledger implements session ownership, serialized transaction boundaries,
+connection fencing, audited pause, critical sequences, balances and balanced
+postings. A dedicated local database contract passed balanced write, unbalanced
+rejection, sequence increment, competing-worker refusal and close/reopen checks.
+Financial workflow conversion is still underway; this is not customer conversion
+or real-chain acceptance. [Evidence](evidence/postgres-journal.json).
