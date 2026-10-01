@@ -30,6 +30,7 @@ data OperatorOperation a where
 
 data WorkerOperation a where
   ScanAndReconcile :: WorkerOperation Value
+  StartPayments :: WorkerOperation ()
   AdvancePayments :: WorkerOperation ()
 
 data DSL (s :: Severity) a where

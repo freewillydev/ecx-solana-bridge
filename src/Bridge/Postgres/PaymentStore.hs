@@ -156,6 +156,13 @@ instance PreparationStore Store where
   preparationStoreAttempt (Store ledger) = P.storeAttempt ledger
 
 instance SettlementStore Store where
+  settlementWinner (Store ledger) intent = ledgerAction ledger $ \connection->do
+    rows <- O.runSelect connection $ do
+      row <- O.selectTable attemptsTable
+      O.where_(attemptsIntentId row O..== O.sqlStrictText intent O..&& attemptsState row O..== O.sqlStrictText "settled")
+      pure(attemptsTxid row)
+      :: IO [Text]
+    case rows of [winner]->pure winner; _->reject "settled_payment_missing"
   settlementReady (Store ledger) = ledgerAction ledger $ \c->do
     rows <- O.runSelect c $ O.limit 100 $ do
       row <- O.selectTable obligationsTable

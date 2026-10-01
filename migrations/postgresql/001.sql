@@ -117,7 +117,7 @@ CREATE INDEX native_winner_change_history ON native_winner_changes(winner_txid,c
 CREATE VIEW native_payment_recovery_state AS SELECT r.* FROM native_payment_recoveries r JOIN attempts a ON a.txid=r.txid WHERE a.state='settled' AND r.id=(SELECT MAX(p.id) FROM native_payment_recoveries p WHERE p.txid=r.txid) AND r.critical_sequence>COALESCE((SELECT MAX(w.critical_sequence) FROM native_winner_changes w WHERE w.winner_txid=r.txid),0);
 
 CREATE FUNCTION trg_immutable_order() RETURNS trigger LANGUAGE plpgsql AS $body$
-BEGIN RAISE EXCEPTION 'immutable_order' USING ERRCODE='23514'; RETURN NEW; END
+BEGIN IF (NEW.id IS DISTINCT FROM OLD.id OR NEW.capability_hash IS DISTINCT FROM OLD.capability_hash OR NEW.idempotency_key IS DISTINCT FROM OLD.idempotency_key OR NEW.request_hash IS DISTINCT FROM OLD.request_hash OR NEW.request_json IS DISTINCT FROM OLD.request_json OR NEW.quote_json IS DISTINCT FROM OLD.quote_json OR NEW.policy_json IS DISTINCT FROM OLD.policy_json OR NEW.deadline IS DISTINCT FROM OLD.deadline OR NEW.grace_deadline IS DISTINCT FROM OLD.grace_deadline) THEN RAISE EXCEPTION 'immutable_order' USING ERRCODE='23514'; END IF; RETURN NEW; END
 $body$;
 CREATE TRIGGER immutable_order BEFORE UPDATE OF id,capability_hash,idempotency_key,request_hash,request_json,quote_json,policy_json,deadline,grace_deadline ON orders FOR EACH ROW EXECUTE FUNCTION trg_immutable_order();
 
@@ -132,7 +132,7 @@ $body$;
 CREATE TRIGGER immutable_posting_delete BEFORE DELETE ON postings FOR EACH ROW EXECUTE FUNCTION trg_immutable_posting_delete();
 
 CREATE FUNCTION trg_immutable_signed_bytes() RETURNS trigger LANGUAGE plpgsql AS $body$
-BEGIN RAISE EXCEPTION 'immutable_attempt' USING ERRCODE='23514'; RETURN NEW; END
+BEGIN IF (NEW.txid IS DISTINCT FROM OLD.txid OR NEW.intent_id IS DISTINCT FROM OLD.intent_id OR NEW.signed_bytes IS DISTINCT FROM OLD.signed_bytes OR NEW.policy_json IS DISTINCT FROM OLD.policy_json OR NEW.fee_limit IS DISTINCT FROM OLD.fee_limit) THEN RAISE EXCEPTION 'immutable_attempt' USING ERRCODE='23514'; END IF; RETURN NEW; END
 $body$;
 CREATE TRIGGER immutable_signed_bytes BEFORE UPDATE OF txid,intent_id,signed_bytes,policy_json,fee_limit ON attempts FOR EACH ROW EXECUTE FUNCTION trg_immutable_signed_bytes();
 
@@ -182,17 +182,17 @@ $body$;
 CREATE TRIGGER immutable_solana_expiry_delete BEFORE DELETE ON solana_expiries FOR EACH ROW EXECUTE FUNCTION trg_immutable_solana_expiry_delete();
 
 CREATE FUNCTION trg_immutable_preparation_policy() RETURNS trigger LANGUAGE plpgsql AS $body$
-BEGIN RAISE EXCEPTION 'immutable_preparation' USING ERRCODE='23514'; RETURN NEW; END
+BEGIN IF (NEW.intent_id IS DISTINCT FROM OLD.intent_id OR NEW.generation IS DISTINCT FROM OLD.generation OR NEW.policy_json IS DISTINCT FROM OLD.policy_json) THEN RAISE EXCEPTION 'immutable_preparation' USING ERRCODE='23514'; END IF; RETURN NEW; END
 $body$;
 CREATE TRIGGER immutable_preparation_policy BEFORE UPDATE OF intent_id,generation,policy_json ON preparations FOR EACH ROW EXECUTE FUNCTION trg_immutable_preparation_policy();
 
 CREATE FUNCTION trg_immutable_preparation_draft() RETURNS trigger LANGUAGE plpgsql AS $body$
-BEGIN IF OLD.draft_json IS NOT NULL THEN RAISE EXCEPTION 'immutable_preparation_draft' USING ERRCODE='23514'; END IF; RETURN NEW; END
+BEGIN IF (NEW.draft_json IS DISTINCT FROM OLD.draft_json) AND (OLD.draft_json IS NOT NULL) THEN RAISE EXCEPTION 'immutable_preparation_draft' USING ERRCODE='23514'; END IF; RETURN NEW; END
 $body$;
 CREATE TRIGGER immutable_preparation_draft BEFORE UPDATE OF draft_json ON preparations FOR EACH ROW EXECUTE FUNCTION trg_immutable_preparation_draft();
 
 CREATE FUNCTION trg_immutable_preparation_retirement() RETURNS trigger LANGUAGE plpgsql AS $body$
-BEGIN IF OLD.retired_txid IS NOT NULL THEN RAISE EXCEPTION 'immutable_preparation_retirement' USING ERRCODE='23514'; END IF; RETURN NEW; END
+BEGIN IF (NEW.retired_txid IS DISTINCT FROM OLD.retired_txid) AND (OLD.retired_txid IS NOT NULL) THEN RAISE EXCEPTION 'immutable_preparation_retirement' USING ERRCODE='23514'; END IF; RETURN NEW; END
 $body$;
 CREATE TRIGGER immutable_preparation_retirement BEFORE UPDATE OF retired_txid ON preparations FOR EACH ROW EXECUTE FUNCTION trg_immutable_preparation_retirement();
 
@@ -202,7 +202,7 @@ $body$;
 CREATE TRIGGER immutable_preparation_delete BEFORE DELETE ON preparations FOR EACH ROW EXECUTE FUNCTION trg_immutable_preparation_delete();
 
 CREATE FUNCTION trg_immutable_attempt_generation() RETURNS trigger LANGUAGE plpgsql AS $body$
-BEGIN RAISE EXCEPTION 'immutable_attempt' USING ERRCODE='23514'; RETURN NEW; END
+BEGIN IF (NEW.preparation_generation IS DISTINCT FROM OLD.preparation_generation) THEN RAISE EXCEPTION 'immutable_attempt' USING ERRCODE='23514'; END IF; RETURN NEW; END
 $body$;
 CREATE TRIGGER immutable_attempt_generation BEFORE UPDATE OF preparation_generation ON attempts FOR EACH ROW EXECUTE FUNCTION trg_immutable_attempt_generation();
 
@@ -242,7 +242,7 @@ $body$;
 CREATE TRIGGER immutable_order_cost_delete BEFORE DELETE ON order_cost_limits FOR EACH ROW EXECUTE FUNCTION trg_immutable_order_cost_delete();
 
 CREATE FUNCTION trg_immutable_operating_reservation() RETURNS trigger LANGUAGE plpgsql AS $body$
-BEGIN RAISE EXCEPTION 'immutable_operating_reservation' USING ERRCODE='23514'; RETURN NEW; END
+BEGIN IF (NEW.order_id IS DISTINCT FROM OLD.order_id OR NEW.kind IS DISTINCT FROM OLD.kind OR NEW.asset IS DISTINCT FROM OLD.asset OR NEW.amount IS DISTINCT FROM OLD.amount) THEN RAISE EXCEPTION 'immutable_operating_reservation' USING ERRCODE='23514'; END IF; RETURN NEW; END
 $body$;
 CREATE TRIGGER immutable_operating_reservation BEFORE UPDATE OF order_id,kind,asset,amount ON operating_reservations FOR EACH ROW EXECUTE FUNCTION trg_immutable_operating_reservation();
 
@@ -252,12 +252,12 @@ $body$;
 CREATE TRIGGER immutable_operating_reservation_delete BEFORE DELETE ON operating_reservations FOR EACH ROW EXECUTE FUNCTION trg_immutable_operating_reservation_delete();
 
 CREATE FUNCTION trg_immutable_instruction() RETURNS trigger LANGUAGE plpgsql AS $body$
-BEGIN IF OLD.instruction IS NOT NULL AND (NEW.instruction IS DISTINCT FROM OLD.instruction OR NEW.instruction_sequence IS DISTINCT FROM OLD.instruction_sequence) THEN RAISE EXCEPTION 'immutable_instruction' USING ERRCODE='23514'; END IF; RETURN NEW; END
+BEGIN IF (NEW.instruction IS DISTINCT FROM OLD.instruction OR NEW.instruction_sequence IS DISTINCT FROM OLD.instruction_sequence) AND (OLD.instruction IS NOT NULL AND (NEW.instruction IS DISTINCT FROM OLD.instruction OR NEW.instruction_sequence IS DISTINCT FROM OLD.instruction_sequence)) THEN RAISE EXCEPTION 'immutable_instruction' USING ERRCODE='23514'; END IF; RETURN NEW; END
 $body$;
 CREATE TRIGGER immutable_instruction BEFORE UPDATE OF instruction,instruction_sequence ON orders FOR EACH ROW EXECUTE FUNCTION trg_immutable_instruction();
 
 CREATE FUNCTION trg_irreversible_instruction_issue() RETURNS trigger LANGUAGE plpgsql AS $body$
-BEGIN IF NEW.instruction_issued<OLD.instruction_issued OR (NEW.instruction_issued=1 AND NEW.instruction IS NULL) THEN RAISE EXCEPTION 'invalid_instruction_issue' USING ERRCODE='23514'; END IF; RETURN NEW; END
+BEGIN IF (NEW.instruction_issued IS DISTINCT FROM OLD.instruction_issued) AND (NEW.instruction_issued<OLD.instruction_issued OR (NEW.instruction_issued=1 AND NEW.instruction IS NULL)) THEN RAISE EXCEPTION 'invalid_instruction_issue' USING ERRCODE='23514'; END IF; RETURN NEW; END
 $body$;
 CREATE TRIGGER irreversible_instruction_issue BEFORE UPDATE OF instruction_issued ON orders FOR EACH ROW EXECUTE FUNCTION trg_irreversible_instruction_issue();
 
@@ -327,7 +327,7 @@ $body$;
 CREATE TRIGGER custody_event_update AFTER UPDATE ON chain_events FOR EACH ROW EXECUTE FUNCTION trg_custody_event_update();
 
 CREATE FUNCTION trg_immutable_preparation_cancellation() RETURNS trigger LANGUAGE plpgsql AS $body$
-BEGIN RAISE EXCEPTION 'immutable_preparation_cancellation' USING ERRCODE='23514'; RETURN NEW; END
+BEGIN IF (NEW.intent_id IS DISTINCT FROM OLD.intent_id OR NEW.generation IS DISTINCT FROM OLD.generation OR NEW.reason IS DISTINCT FROM OLD.reason OR NEW.cleanup_json IS DISTINCT FROM OLD.cleanup_json OR NEW.critical_sequence IS DISTINCT FROM OLD.critical_sequence) THEN RAISE EXCEPTION 'immutable_preparation_cancellation' USING ERRCODE='23514'; END IF; RETURN NEW; END
 $body$;
 CREATE TRIGGER immutable_preparation_cancellation BEFORE UPDATE OF intent_id,generation,reason,cleanup_json,critical_sequence ON preparation_cancellations FOR EACH ROW EXECUTE FUNCTION trg_immutable_preparation_cancellation();
 
@@ -337,17 +337,17 @@ $body$;
 CREATE TRIGGER immutable_preparation_cancellation_delete BEFORE DELETE ON preparation_cancellations FOR EACH ROW EXECUTE FUNCTION trg_immutable_preparation_cancellation_delete();
 
 CREATE FUNCTION trg_irreversible_preparation_cleanup() RETURNS trigger LANGUAGE plpgsql AS $body$
-BEGIN IF NEW.completed<OLD.completed THEN RAISE EXCEPTION 'irreversible_preparation_cleanup' USING ERRCODE='23514'; END IF; RETURN NEW; END
+BEGIN IF (NEW.completed IS DISTINCT FROM OLD.completed) AND (NEW.completed<OLD.completed) THEN RAISE EXCEPTION 'irreversible_preparation_cleanup' USING ERRCODE='23514'; END IF; RETURN NEW; END
 $body$;
 CREATE TRIGGER irreversible_preparation_cleanup BEFORE UPDATE OF completed ON preparation_cancellations FOR EACH ROW EXECUTE FUNCTION trg_irreversible_preparation_cleanup();
 
 CREATE FUNCTION trg_irreversible_preparation_cancellation() RETURNS trigger LANGUAGE plpgsql AS $body$
-BEGIN IF NEW.cancelled<OLD.cancelled OR (NEW.cancelled=1 AND (NEW.retired_txid IS NOT NULL OR NOT EXISTS(SELECT 1 FROM preparation_cancellations c WHERE c.intent_id=NEW.intent_id AND c.generation=NEW.generation AND c.completed=1) OR EXISTS(SELECT 1 FROM attempts a WHERE a.intent_id=NEW.intent_id AND a.preparation_generation=NEW.generation))) THEN RAISE EXCEPTION 'invalid_preparation_cancellation' USING ERRCODE='23514'; END IF; RETURN NEW; END
+BEGIN IF (NEW.cancelled IS DISTINCT FROM OLD.cancelled) AND (NEW.cancelled<OLD.cancelled OR (NEW.cancelled=1 AND (NEW.retired_txid IS NOT NULL OR NOT EXISTS(SELECT 1 FROM preparation_cancellations c WHERE c.intent_id=NEW.intent_id AND c.generation=NEW.generation AND c.completed=1) OR EXISTS(SELECT 1 FROM attempts a WHERE a.intent_id=NEW.intent_id AND a.preparation_generation=NEW.generation)))) THEN RAISE EXCEPTION 'invalid_preparation_cancellation' USING ERRCODE='23514'; END IF; RETURN NEW; END
 $body$;
 CREATE TRIGGER irreversible_preparation_cancellation BEFORE UPDATE OF cancelled ON preparations FOR EACH ROW EXECUTE FUNCTION trg_irreversible_preparation_cancellation();
 
 CREATE FUNCTION trg_cancelled_preparation_draft() RETURNS trigger LANGUAGE plpgsql AS $body$
-BEGIN IF EXISTS(SELECT 1 FROM preparation_cancellations c WHERE c.intent_id=NEW.intent_id AND c.generation=NEW.generation) THEN RAISE EXCEPTION 'preparation_cancellation_pending' USING ERRCODE='23514'; END IF; RETURN NEW; END
+BEGIN IF (NEW.draft_json IS DISTINCT FROM OLD.draft_json) AND (EXISTS(SELECT 1 FROM preparation_cancellations c WHERE c.intent_id=NEW.intent_id AND c.generation=NEW.generation)) THEN RAISE EXCEPTION 'preparation_cancellation_pending' USING ERRCODE='23514'; END IF; RETURN NEW; END
 $body$;
 CREATE TRIGGER cancelled_preparation_draft BEFORE UPDATE OF draft_json ON preparations FOR EACH ROW EXECUTE FUNCTION trg_cancelled_preparation_draft();
 

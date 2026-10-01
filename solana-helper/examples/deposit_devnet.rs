@@ -5,6 +5,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use bincode::Options;
 use serde_json::{json, Value};
 use solana_hash::Hash;
+use solana_instruction::AccountMeta;
 use solana_keypair::read_keypair_file;
 use solana_message::Message;
 use solana_pubkey::Pubkey;
@@ -56,7 +57,8 @@ fn main() -> Result<()> {
         return Err("Invalid order identifier".into());
     }
     let memo = format!("ecx-bridge:v1:l2l-devnet-local:deposit:{order}");
-    if text(&prepared, "memo")? != memo {
+    let pay_reference = prepared.get("reference").and_then(Value::as_str);
+    if pay_reference.is_none() && text(&prepared, "memo")? != memo {
         return Err("Memo does not bind the expected order".into());
     }
     let key_path = dir.join("tester.keypair.json");
@@ -77,39 +79,60 @@ fn main() -> Result<()> {
     let source = get_associated_token_address_with_program_id(&tester.pubkey(), &mint, &token);
     let destination = get_associated_token_address_with_program_id(&custody, &mint, &token);
     let blockhash = Hash::from_str(text(&prepared, "blockhash")?)?;
-    let instructions = [
-        spl_token_interface::instruction::transfer_checked(
-            &token,
-            &source,
-            &mint,
-            &destination,
-            &tester.pubkey(),
-            &[],
-            10000,
-            8,
-        )?,
-        spl_memo_interface::instruction::build_memo(
+    let mut transfer = spl_token_interface::instruction::transfer_checked(
+        &token,
+        &source,
+        &mint,
+        &destination,
+        &tester.pubkey(),
+        &[],
+        10000,
+        8,
+    )?;
+    let mut instructions = vec![];
+    if let Some(reference) = pay_reference {
+        let raw: Vec<u8> = (0..64)
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&order[i..i + 2], 16))
+            .collect::<std::result::Result<_, _>>()?;
+        let expected =
+            Pubkey::new_from_array(raw.try_into().map_err(|_| "Invalid reference bytes")?);
+        if expected.to_string() != reference {
+            return Err("Reference differs from order".into());
+        }
+        transfer
+            .accounts
+            .push(AccountMeta::new_readonly(expected, false));
+    }
+    instructions.push(transfer);
+    if pay_reference.is_none() {
+        instructions.push(spl_memo_interface::instruction::build_memo(
             &spl_memo_interface::v3::id(),
             memo.as_bytes(),
             &[&tester.pubkey()],
-        ),
-    ];
+        ));
+    }
     let expected = Message::new_with_blockhash(&instructions, Some(&tester.pubkey()), &blockhash);
-    let serialized = STANDARD.decode(text(&prepared, "transaction")?)?;
-    if serialized.len() > 1232 {
-        return Err("Transaction exceeds packet limit".into());
-    }
-    let mut transaction: Transaction = bincode::DefaultOptions::new()
-        .with_fixint_encoding()
-        .with_limit(1232)
-        .reject_trailing_bytes()
-        .deserialize(&serialized)?;
-    if transaction.message != expected
-        || transaction.signatures.len() != 1
-        || transaction.signatures[0].as_ref().iter().any(|b| *b != 0)
-    {
-        return Err("Unsigned transaction differs from the exact expected deposit".into());
-    }
+    let mut transaction = if pay_reference.is_some() {
+        Transaction::new_unsigned(expected)
+    } else {
+        let serialized = STANDARD.decode(text(&prepared, "transaction")?)?;
+        if serialized.len() > 1232 {
+            return Err("Transaction exceeds packet limit".into());
+        }
+        let transaction: Transaction = bincode::DefaultOptions::new()
+            .with_fixint_encoding()
+            .with_limit(1232)
+            .reject_trailing_bytes()
+            .deserialize(&serialized)?;
+        if transaction.message != expected
+            || transaction.signatures.len() != 1
+            || transaction.signatures[0].as_ref().iter().any(|b| *b != 0)
+        {
+            return Err("Unsigned transaction differs from the exact expected deposit".into());
+        }
+        transaction
+    };
     transaction.try_sign(&[tester], blockhash)?;
     transaction.verify()?;
     let signature = transaction.signatures[0].to_string();

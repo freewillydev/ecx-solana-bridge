@@ -1,5 +1,5 @@
 {-# LANGUAGE DataKinds,GADTs #-}
-module Bridge.Postgres.Runtime (runAPI) where
+module Bridge.Postgres.Runtime (runAPI,runTestWorker) where
 
 import Bridge.API
 import Bridge.Config
@@ -14,7 +14,12 @@ import qualified Bridge.Postgres.Server as Server
 import qualified Bridge.Postgres.Refund as Refund
 import qualified Bridge.Ledger as Domain
 import Bridge.Postgres.PaymentStore (Store(..))
-import Bridge.Settlement (realPaymentTransport,paymentPass)
+import Bridge.Settlement (realPaymentTransport,paymentPass,reconcilePaymentsWith,PaymentTransport(..))
+import qualified Bridge.Postgres.Startup as Startup
+import Bridge.NativePayment (ownedNativeLocks)
+import Control.Concurrent (threadDelay)
+import Control.Monad (forever,when)
+import Control.Exception (IOException,catch)
 import qualified Bridge.SolanaPay as Pay
 import Bridge.RPC (fieldValue)
 import qualified Bridge.Postgres.Provisioning as Provisioning
@@ -126,8 +131,24 @@ evalCritical (CriticalContext manager cfg ledger) plan = case plan of
       pure(object["obligation" .= Domain.obligationId obligation,"recipient" .= Domain.obligationRecipient obligation,"amount" .= T.pack(show $ Domain.obligationAmount obligation)])
   WorkerDSL ScanAndReconcile->do
     _ <- Observer.observeOnce manager cfg ledger
+    now <- epochSeconds
+    Order.expireQuotes ledger now
+    _ <- reconcilePaymentsWith (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger)
     Reconciliation.reconcileCustodyWith epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg ledger
-  WorkerDSL AdvancePayments->paymentPass manager cfg (Store ledger) (const $ reject "unexpected_test_backup")
+  WorkerDSL StartPayments->do
+    let transport=realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")
+    _ <- ownedNativeLocks (paymentNative transport) []
+    now <- epochSeconds
+    Startup.resumeAfterChecks cfg ledger now
+  WorkerDSL AdvancePayments->do
+    state <- readiness ledger
+    when (available state) $ do
+      now <- epochSeconds
+      fresh <- try (Order.checkIntakeReady ledger now) :: IO (Either BridgeError ())
+      case fresh of
+        Right ()->paymentPass manager cfg (Store ledger) (const $ reject "unexpected_test_backup")
+        Left (BridgeError "custody_not_reconciled")->pure ()
+        Left (BridgeError reason)->reject reason
 
 -- The sole production invocation of critical evaluation. Routes have already
 -- resolved their existential operation to a typed DSL, without performing IO.
@@ -147,16 +168,32 @@ interpret runtime plan = do
     _->pure result
 
 -- This command exposes the actual API against a paused test deployment. It
--- performs one real scan/reconciliation; it never resumes or advances payments.
--- The paying worker will reuse this runtime after controlled cutover acceptance.
+-- continuously scans/reconciles; it never resumes or advances payments.
+-- The paying test worker shares the same runtime and guarded dispatcher.
 runAPI :: PG.ConnectInfo -> Config -> IO ()
-runAPI settings cfg = do
+runAPI = runRuntime False
+
+runTestWorker :: PG.ConnectInfo -> Config -> IO ()
+runTestWorker = runRuntime True
+
+runRuntime :: Bool -> PG.ConnectInfo -> Config -> IO ()
+runRuntime paying settings cfg = do
   require (profile cfg==L2LSignetDevnet && not(backupRequired cfg)) "public_test_profile_required"
   withLedger settings (fingerprint cfg) $ \ledger->do
     manager <- newRpcManager
-    let public=object["profile" .= profile cfg,"deployment" .= deploymentId cfg,"mint" .= mint cfg,"custodyOwner" .= custodyOwner cfg,"decimals" .= (8::Int),"minInput" .= minInput cfg,"maxInput" .= maxInput cfg,"feesBps" .= object["NativeToWrapped" .= (100::Int),"WrappedToNative" .= (100::Int)],"intakeEnabled" .= False,"implementationReady" .= False]
+    let public=object["profile" .= profile cfg,"deployment" .= deploymentId cfg,"mint" .= mint cfg,"custodyOwner" .= custodyOwner cfg,"decimals" .= (8::Int),"minInput" .= minInput cfg,"maxInput" .= maxInput cfg,"feesBps" .= object["NativeToWrapped" .= (100::Int),"WrappedToNative" .= (100::Int)],"intakeEnabled" .= paying,"implementationReady" .= False]
         runtime=Runtime (SafeContext settings public (backupRequired cfg)) (CriticalContext manager cfg ledger)
     _ <- evaluate runtime (worker ScanAndReconcile)
+    when paying (evaluate runtime (worker StartPayments))
     customerApp <- securityBoundary (serve customerAPI (hoistServer customerAPI (interpret runtime) Server.customerServer))
     adminApp <- securityBoundary (serve Server.operatorAPI (hoistServer Server.operatorAPI (interpret runtime) Server.adminServer))
-    concurrently_ (runUnix (customerSocket cfg) 0o660 customerApp) (runUnix (adminSocket cfg) 0o600 adminApp)
+    let api=concurrently_ (runUnix (customerSocket cfg) 0o660 customerApp) (runUnix (adminSocket cfg) 0o600 adminApp)
+        loop=forever $ do
+          result <- try ((do
+            _ <- evaluate runtime (worker ScanAndReconcile)
+            when paying(evaluate runtime (worker AdvancePayments))) `catch` (\(_::IOException)->reject "postgres_worker_io_unavailable")) :: IO(Either BridgeError ())
+          case result of
+            Right ()->pure ()
+            Left(BridgeError reason)->evaluate runtime (operator(Pause reason)) >> pure ()
+          threadDelay 15000000
+    concurrently_ api loop

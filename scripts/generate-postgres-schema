@@ -38,6 +38,12 @@ def trigger(sql):
     name, timing, event, table, condition, body = match.groups()
     body = re.sub(r"SELECT RAISE\(ABORT,'([\w]+)'\);", r"RAISE EXCEPTION '\1' USING ERRCODE='23514';", body)
     body = translate(body)
+    if event.startswith('UPDATE OF '):
+        # Opaleye emits all fields in SET, including unchanged immutable fields.
+        # Protect actual value changes, not the presence of a column in SET.
+        changed = ' OR '.join(f'NEW.{column} IS DISTINCT FROM OLD.{column}'
+                              for column in event.removeprefix('UPDATE OF ').split(','))
+        condition = f'({changed})' + (f' AND ({condition})' if condition else '')
     if condition:
         body = 'IF ' + translate(condition) + ' THEN ' + body + ' END IF;'
     returned = 'OLD' if event == 'DELETE' else 'NEW'

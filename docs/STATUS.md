@@ -351,3 +351,27 @@ deployment has not been switched. Solana Pay URIs do not select Devnet; the inte
 explicitly tells testers to select the matching network in their wallet.
 
 Specification: https://solana.com/docs/tools/solana-pay/specification/version1
+
+### PostgreSQL paying runtime cutover (2026-10-01)
+
+The complete PostgreSQL test worker compiles and runs through the shared severity
+DSL dispatcher. It continuously scans, reconciles and advances saved payments;
+startup requires fresh custody, resolved intents and supported order cost state.
+Unimplemented recovery situations remain paused for explicit completion/review.
+The local launcher now accepts `--postgres` with protected libpq PG* settings.
+
+The original SQLite launcher and both children were verified stopped before a
+final consistent snapshot. The fresh `ecx_bridge_runtime` database imported and
+compared all 546 records across 38 tables. Startup enabled the public-test worker.
+A custody/history race now skips payment until fresh reconciliation, as in the
+existing worker. Opaleye's full-row updates exposed column-trigger incompatibility;
+the schema generator and incremental migration 002 now guard actual value changes.
+A rolled-back live PostgreSQL check permitted unchanged quotes and rejected altered
+quotes. Existing regression suite: 368 examples, zero failures (primarily legacy
+workflow/offline contract coverage; this does not establish full PostgreSQL audit).
+
+Two customer API orders were created with 10,000-unit gross, 100-unit fee and
+9,900-unit net. A real Signet deposit and a real Devnet reference-bearing Solana
+Pay transfer were submitted using dedicated tester clients. Completion/settlement
+is pending verification; this is not browser-wallet acceptance or a release gate.
+Private capabilities, signed bytes, snapshots and configuration remain outside Git.

@@ -262,6 +262,7 @@ instance PaymentStore Ledger where
   paymentNativeFamily = nativeFamilyAttempts
 
 class (PaymentStore ledger, PreparationStore ledger) => SettlementStore ledger where
+  settlementWinner :: ledger -> Text -> IO Text
   settlementReady :: ledger -> IO [Obligation]
   settlementBusy :: ledger -> Text -> IO Bool
   settlementRefresh :: ledger -> Deposit -> IO ()
@@ -273,6 +274,9 @@ class (PaymentStore ledger, PreparationStore ledger) => SettlementStore ledger w
   settlementAuthorize :: ledger -> Bool -> Text -> IO Attempt
 
 instance SettlementStore Ledger where
+  settlementWinner ledger intent = ledgerAction ledger $ \db->do
+    rows <- query db "SELECT txid FROM attempts WHERE intent_id=? AND state='settled'" (Only intent) :: IO [Only Text]
+    case rows of [Only winner]->pure winner; _->reject "settled_payment_missing"
   settlementReady = readyObligations
   settlementBusy ledger chain = ledgerAction ledger $ \db->do
     rows <- query db "SELECT id FROM intents WHERE chain=? AND resolved=0" (Only chain) :: IO [Only Text]
@@ -353,15 +357,15 @@ activeFamilyPayment family view=case familyActive view of
 
 -- Reconcile only already-recorded attempts. This path never invokes signing,
 -- backup or send, even if the deployment happens to be available.
-reconcilePayments :: Manager -> Config -> Ledger -> IO Value
+reconcilePayments :: SettlementStore ledger => Manager -> Config -> ledger -> IO Value
 reconcilePayments manager c = reconcilePaymentsWith
   (realPaymentTransport manager c (const $ reject "unexpected_recovery_backup")) c
 
-reconcilePaymentsWith :: PaymentTransport -> Config -> Ledger -> IO Value
+reconcilePaymentsWith :: SettlementStore ledger => PaymentTransport -> Config -> ledger -> IO Value
 reconcilePaymentsWith transport c ledger = do
-  attempts <- pendingAttempts ledger
+  attempts <- preparationAttempts ledger
   groups <- case paymentAttemptGroups attempts of
-    Left code->pause ledger code >> reject code
+    Left code->preparationPause ledger code >> reject code
     Right groups->pure groups
   reports <- mapM (reconcile.last) groups
   pure $ object ["attempts" .= reports,"signedOrSent" .= False]
@@ -372,15 +376,13 @@ reconcilePaymentsWith transport c ledger = do
     case outcome of
       Right result -> do
         txid <- case result of
-          Left "settled"->do
-            winners <- ledgerAction ledger $ \db->query db "SELECT txid FROM attempts WHERE intent_id=? AND state='settled'" (Only $ attemptIntent attempt) :: IO [Only Text]
-            case winners of [Only winner]->pure winner; _->reject "settled_payment_missing"
+          Left "settled"->settlementWinner ledger (attemptIntent attempt)
           _->pure $ attemptId attempt
         pure $ report txid attempt (either id (const "unseen") result) Nothing
       Left (BridgeError code) -> do
-        health <- readiness ledger
+        health <- preparationReadiness ledger
         let reason="payment_recovery:"<>code
-        when (health/=Availability False reason) $ pause ledger reason
+        when (health/=Availability False reason) $ preparationPause ledger reason
         pure $ report (attemptId attempt) attempt "requires_review" (Just code)
   report txid attempt state failure = object ["transaction" .= txid,"chain" .= attemptChain attempt
     ,"outcome" .= (state::Text),"error" .= (failure::Maybe Text)]

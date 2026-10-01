@@ -13,6 +13,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("config", type=Path)
 parser.add_argument("--binary", default=os.environ.get("ECX_BRIDGE_BINARY", "ecx-bridge"))
 parser.add_argument("--port", type=int, default=61734)
+parser.add_argument("--postgres", action="store_true", help="Use PostgreSQL via PG* settings instead of the legacy SQLite worker")
 args = parser.parse_args()
 binary = shutil.which(args.binary)
 if not binary:
@@ -26,6 +27,8 @@ if not 1024 <= args.port <= 65535:
 assets = Path(__file__).resolve().parents[1] / "web"
 if not (assets / "dist/wallet.js").is_file():
     parser.error("Build the browser bundle first: cd web && npm ci && npm run build")
+if args.postgres and not os.environ.get("PGDATABASE"):
+    parser.error("--postgres requires PGDATABASE; set private PostgreSQL PG* connection settings")
 children = []
 
 
@@ -35,7 +38,7 @@ def stop(_signal=None, _frame=None):
 
 signal.signal(signal.SIGTERM, stop)
 try:
-    children.append(subprocess.Popen([binary, "test-worker", str(config_path)]))
+    children.append(subprocess.Popen([binary, "postgres-test-worker" if args.postgres else "test-worker", str(config_path)]))
     children.append(subprocess.Popen([binary, "serve", config["customerSocket"], str(args.port), str(assets)]))
     print(f"Bridge: http://127.0.0.1:{args.port} — public test funds only. Ctrl-C to stop.", flush=True)
     while all(child.poll() is None for child in children):

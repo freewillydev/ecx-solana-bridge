@@ -1,0 +1,23 @@
+{
+  "date": "2026-10-01",
+  "legacyWorkerStopped": true,
+  "tablesCompared": 38,
+  "recordsCompared": 546,
+  "allImportedRecordsMatch": true,
+  "database": "ecx_bridge_runtime",
+  "newWorkerStarted": true,
+  "regressionExamples": 368,
+  "regressionFailures": 0,
+  "quoteImmutableGuardVerified": true,
+  "customerOrdersCreated": [
+    "NativeToWrapped",
+    "WrappedToNative"
+  ],
+  "grossUnits": "10000",
+  "feeUnits": "100",
+  "netUnits": "9900",
+  "nativeDeposit": "418fc018c52f9a10d33dcb1bb36b3fb8a3e72eb8c62346c3f07b7a3d3367b080",
+  "solanaPayDeposit": "2wVrX5hozdxUUdtxEXKKE5nGf4BGiKQvifv47M1wpCAxT5t1jNAVyJaYYN12aVPF8tob7F2psEr2ZaNyTBMVBDv3",
+  "settlementVerified": false,
+  "browserWalletVerified": false
+}
