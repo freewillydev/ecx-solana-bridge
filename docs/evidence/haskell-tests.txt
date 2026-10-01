@@ -1,6 +1,10 @@
 Build profile: -w ghc-9.14.1 -O1
 In order, the following will be built (use -v for more details):
- - ecx-bridge-0.1.0.0 (test:bridge-test) (file test/Spec.hs changed)
+ - ecx-bridge-0.1.0.0 (lib) (file src/Bridge/Recovery.hs changed)
+ - ecx-bridge-0.1.0.0 (test:bridge-test) (dependency rebuilt)
+Preprocessing library for ecx-bridge-0.1.0.0...
+Building library for ecx-bridge-0.1.0.0...
+[19 of 26] Compiling Bridge.Recovery  ( src/Bridge/Recovery.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Recovery.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Recovery.dyn_o ) [Source file changed]
 Preprocessing test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Building test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 [1 of 1] Compiling Main             ( test/Spec.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test-tmp/Main.o ) [Source file changed]
@@ -175,6 +179,23 @@ native source recovery (captured receipt, offline RPC and accounting contracts)
   does not book a deficit on ambiguous or contradictory evidence: identity-refusal [✔]
   refuses stale receipt and observation snapshots [✔]
   rolls back the recovery decision if its financial posting cannot commit [✔]
+operator approval of a restored source (offline contracts)
+  restores only the suspended work, with money and bytes retained: ready [✔]
+  restores only the suspended work, with money and bytes retained: unsigned [✔]
+  restores only the suspended work, with money and bytes retained: signed [✔]
+  restores only the suspended work, with money and bytes retained: broadcast [✔]
+  refuses an old restoration after another loss and approves unchanged work against the latest restoration only [✔]
+  does not revive work changed during source review: draft-callback [✔]
+  does not revive work changed during source review: expiry [✔]
+  does not revive work changed during source review: settlement [✔]
+  does not reinterpret an existing failure review as a suspended source obligation [✔]
+  survives reopening and cannot reuse an old approval to clear a new source review [✔]
+  rolls back approval, sequence and status together when the state write fails [✔]
+  refuses a pending unsigned cancellation even when it predates the source loss [✔]
+  does not approve source recovery when the saved outgoing payment needs separate review [✔]
+  runs real source/custody validation before operator approval: healthy [✔]
+  runs real source/custody validation before operator approval: shortfall [✔]
+  runs real source/custody validation before operator approval: identity [✔]
 native settlement finality recovery (offline RPC contracts)
   shows review for an additional refund while preserving the original conversion link [✔]
   reopens a lost-finality review and reconfirms the same payment without another financial decision [✔]
@@ -286,8 +307,8 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 4.9484 seconds
-243 examples, 0 failures
+Finished in 5.5274 seconds
+259 examples, 0 failures
 Test suite bridge-test: PASS
 Test suite logged to: /Volumes/Crucial
 X9/CodexBuilds/ecx-bridge-20260930/workspace-b/outputs/ecx-bridge/./../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log

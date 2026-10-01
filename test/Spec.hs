@@ -323,6 +323,16 @@ sourceObligation l source=do
 sourceAttempt :: Ledger -> Config -> Obligation -> IO ()
 sourceAttempt l c ob=testAttempt l c ob "Solana" "offline-source-payout" "offline-source-signed-bytes" "offline-ledger-policy" 5000 Nothing
 
+sourceRestoration :: Ledger -> Deposit -> IO Int64
+sourceRestoration l source=do
+  rows<-ledgerAction l $ \db->query db "SELECT critical_sequence FROM source_recovery_state WHERE deposit_id=? AND state='restored'" (Only $ depositId source)
+  case rows of [Only n]->pure n; _->fail "fixture source not restored"
+
+-- Ledger-only approval tests model a successful custody check explicitly.
+-- The coordinator tests below run the actual reconciliation against RPC fixtures.
+assumeSourceApprovalCustody :: Ledger -> IO ()
+assumeSourceApprovalCustody l=ledgerAction l $ \db->execute_ db "UPDATE custody_check SET checked_revision=revision,checked_at=100,last_error=NULL,report_json='{\"offlineFixture\":true}'"
+
 -- The captured bytes supply economic validation; RPC responses below are
 -- explicitly offline contracts, not evidence of a new chain transaction.
 withNativeAdmission :: (Config -> NativePlan -> IORef [Text] -> NativeRPC -> IO a) -> IO a
@@ -2003,6 +2013,185 @@ main=hspec $ do
         sourceBalance l "source_deficit" `shouldReturn` 0
         ledgerAction l (\db->query_ db "SELECT state FROM source_recovery_state" :: IO [Only Text]) `shouldReturn` [Only "unavailable"]
         ledgerAction l (\db->execute_ db "DELETE FROM source_recoveries") `shouldThrow` (\err->sqlError err==ErrorConstraint)
+  describe "operator approval of a restored source (offline contracts)" $ do
+    forM_ ["ready","unsigned","signed","broadcast"] $ \stage->
+      it ("restores only the suspended work, with money and bytes retained: "<>T.unpack stage) $ withNativeSource $ \l c source wallet transport->do
+        ob<-sourceObligation l source
+        when (stage=="unsigned") $ beginPreparation l c ob "Solana" 5000 "offline-policy"
+        when (stage `elem` ["signed","broadcast"]) $ sourceAttempt l c ob
+        when (stage=="broadcast") $ markBroadcastIntent l "offline-source-payout" >> pure ()
+        _<-changeSource l c source wallet 0
+        _<-changeSource l c source wallet 2
+        _<-reconcileNativeSourcesWith transport c l
+        restored<-sourceRestoration l source
+        original<-auditExport l
+        attempts<-pendingAttempts l
+        preparations<-pendingPreparations l
+        holds<-ledgerAction l (\db->query_ db "SELECT asset,amount,phase FROM reservations" :: IO [(Text,Int64,Text)])
+        recordSourceRecoveryApproval l (obligationId ob) restored 100 "verified restored source" `shouldThrow` isError "custody_not_reconciled"
+        assumeSourceApprovalCustody l
+        recordSourceRecoveryApproval l (obligationId ob) restored 100 "verified restored source"
+        ledgerAction l (\db->query_ db "SELECT status FROM obligations" :: IO [Only Text]) `shouldReturn` [Only $ if stage=="ready" then "ready" else "paying"]
+        updated<-auditExport l
+        forM_ ["balances","events"] $ \key->do
+          old<-fieldValue key original :: IO Value
+          fieldValue key updated `shouldReturn` old
+        pendingAttempts l `shouldReturn` attempts
+        pendingPreparations l `shouldReturn` preparations
+        ledgerAction l (\db->query_ db "SELECT asset,amount,phase FROM reservations" :: IO [(Text,Int64,Text)]) `shouldReturn` holds
+        available <$> readiness l `shouldReturn` False
+        recordSourceRecoveryApproval l (obligationId ob) restored 100 "verified restored source"
+        recordSourceRecoveryApproval l (obligationId ob) restored 100 "changed reason" `shouldThrow` isError "source_approval_conflict"
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM source_recovery_approvals" :: IO [Only Int]) `shouldReturn` [Only 1]
+        when (stage=="broadcast") $ do
+          [Only approved]<-ledgerAction l (\db->query_ db "SELECT critical_sequence FROM source_recovery_approvals")
+          required<-markBroadcastIntent l "offline-source-payout"
+          required `shouldBe` approved
+          acknowledgeBackup l restored "offline-before-approval"
+          authorizeRecordedSend l True "offline-source-payout" `shouldThrow` isError "backup_pending"
+          acknowledgeBackup l required "offline-including-approval"
+          authorizeRecordedSend l True "offline-source-payout" `shouldThrow` isError "payouts_paused"
+    it "refuses an old restoration after another loss and approves unchanged work against the latest restoration only" $ withNativeSource $ \l c source wallet transport->do
+      ob<-sourceObligation l source
+      _<-changeSource l c source wallet 0
+      _<-changeSource l c source wallet 2
+      _<-reconcileNativeSourcesWith transport c l
+      old<-sourceRestoration l source
+      _<-changeSource l c source wallet (-1)
+      _<-reconcileNativeSourcesWith transport c l
+      recordSourceRecoveryApproval l (obligationId ob) old 100 "review" `shouldThrow` isError "source_approval_not_expected"
+      _<-changeSource l c source wallet 2
+      _<-reconcileNativeSourcesWith transport c l
+      current<-sourceRestoration l source
+      current `shouldSatisfy` (>old)
+      assumeSourceApprovalCustody l
+      recordSourceRecoveryApproval l (obligationId ob) old 100 "review" `shouldThrow` isError "source_approval_not_expected"
+      recordSourceRecoveryApproval l (obligationId ob) current 100 "review"
+      readyObligations l `shouldReturn` [ob]
+      sourceBalance l "source_deficit" `shouldReturn` 0
+    forM_ ["draft-callback","expiry","settlement"] $ \change->
+      it ("does not revive work changed during source review: "<>T.unpack change) $ withNativeSource $ \l c source wallet transport->do
+        ob<-sourceObligation l source
+        if change=="draft-callback" then beginPreparation l c ob "Solana" 5000 "offline-policy" else sourceAttempt l c ob
+        when (change=="settlement") $ markBroadcastIntent l "offline-source-payout" >> pure ()
+        _<-changeSource l c source wallet 0
+        case change of
+          "draft-callback"->storeDraft l (obligationId ob) "offline-late-draft" 0
+          "expiry"->do
+            [a]<-pendingAttempts l
+            recordSolanaExpiry l a "offline-conclusive-expiry"
+          _->recordSettlement l "offline-source-payout" (PaymentCosts (amt 5000) (amt 0)) "offline-finalized-payment"
+        _<-changeSource l c source wallet 2
+        _<-reconcileNativeSourcesWith transport c l
+        restored<-sourceRestoration l source
+        assumeSourceApprovalCustody l
+        before<-auditExport l
+        recordSourceRecoveryApproval l (obligationId ob) restored 100 "review"
+          `shouldThrow` isError (if change=="settlement" then "source_approval_not_expected" else "source_review_work_changed")
+        auditExport l `shouldReturn` before
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM source_recovery_approvals" :: IO [Only Int]) `shouldReturn` [Only 0]
+    it "does not reinterpret an existing failure review as a suspended source obligation" $ withNativeSource $ \l c source wallet transport->do
+      ob<-sourceObligation l source
+      sourceAttempt l c ob
+      _<-markBroadcastIntent l "offline-source-payout"
+      recordFailedSolana l "offline-source-payout" 5000 "offline-finalized-failure"
+      _<-changeSource l c source wallet 0
+      _<-changeSource l c source wallet 2
+      _<-reconcileNativeSourcesWith transport c l
+      restored<-sourceRestoration l source
+      assumeSourceApprovalCustody l
+      recordSourceRecoveryApproval l (obligationId ob) restored 100 "review" `shouldThrow` isError "source_review_context_missing"
+    it "survives reopening and cannot reuse an old approval to clear a new source review" $ withDir $ \dir->do
+      saved<-withNativeSourceAt True dir $ \l c source wallet transport->do
+        ob<-sourceObligation l source
+        _<-changeSource l c source wallet 0
+        _<-changeSource l c source wallet 2
+        _<-reconcileNativeSourcesWith transport c l
+        restored<-sourceRestoration l source
+        assumeSourceApprovalCustody l
+        recordSourceRecoveryApproval l (obligationId ob) restored 100 "review"
+        pure(c,source,wallet,transport,ob,restored)
+      let (c,source,wallet,transport,ob,restored)=saved
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        _<-approveSourceRecoveryWith (pure 100) transport{paymentIdentity=expectationFailure "duplicate approval contacted chain"} c l (obligationId ob) restored "review"
+        _<-changeSource l c source wallet 0
+        _<-changeSource l c source wallet 2
+        _<-reconcileNativeSourcesWith transport c l
+        current<-sourceRestoration l source
+        recordSourceRecoveryApproval l (obligationId ob) restored 100 "review"
+        status <$> readOrder l cap (obligationOrder ob) `shouldReturn` "NeedsReview"
+        assumeSourceApprovalCustody l
+        recordSourceRecoveryApproval l (obligationId ob) current 100 "second episode"
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM source_recovery_approvals" :: IO [Only Int]) `shouldReturn` [Only 2]
+        ledgerAction l (\db->execute_ db "DELETE FROM source_recovery_approvals") `shouldThrow` (\err->sqlError err==ErrorConstraint)
+    it "rolls back approval, sequence and status together when the state write fails" $ withDir $ \dir->do
+      saved<-withNativeSourceAt True dir $ \l c source wallet transport->do
+        ob<-sourceObligation l source
+        _<-changeSource l c source wallet 0
+        _<-changeSource l c source wallet 2
+        _<-reconcileNativeSourcesWith transport c l
+        restored<-sourceRestoration l source
+        assumeSourceApprovalCustody l
+        ledgerAction l $ \db->execute_ db "CREATE TRIGGER refuse_source_approval BEFORE UPDATE OF status ON obligations BEGIN SELECT RAISE(ABORT,'offline_approval_failure'); END"
+        before<-auditExport l
+        [Only sequenceNo]<-ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment")
+        recordSourceRecoveryApproval l (obligationId ob) restored 100 "review" `shouldThrow` (\err->sqlError err==ErrorConstraint)
+        readiness l `shouldThrow` isError "ledger_requires_reopen"
+        pure(c,ob,restored,before,sequenceNo::Int64)
+      let (c,ob,restored,before,sequenceNo)=saved
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        auditExport l `shouldReturn` before
+        sourceRecoveryApproval l (obligationId ob) restored `shouldReturn` Nothing
+        ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment") `shouldReturn` [Only sequenceNo]
+    it "refuses a pending unsigned cancellation even when it predates the source loss" $ withNativeSource $ \l c source wallet transport->do
+      ob<-sourceObligation l source
+      beginPreparation l c ob "Solana" 5000 "offline-policy"
+      [preparation]<-pendingPreparations l
+      pause l "operator cancellation"
+      assumeSourceApprovalCustody l
+      beginPreparationCancellation l preparation 100 "cancel this draft" (object ["offlineFixture" .= True])
+      _<-changeSource l c source wallet 0
+      _<-changeSource l c source wallet 2
+      _<-reconcileNativeSourcesWith transport c l
+      restored<-sourceRestoration l source
+      assumeSourceApprovalCustody l
+      recordSourceRecoveryApproval l (obligationId ob) restored 100 "review" `shouldThrow` isError "preparation_cancellation_pending"
+    it "does not approve source recovery when the saved outgoing payment needs separate review" $ withNativeSource $ \l c source wallet transport->do
+      ob<-sourceObligation l source
+      -- The intentionally invalid offline policy makes payment validation fail.
+      -- Source approval must not bypass that independent recovery error.
+      sourceAttempt l c ob
+      _<-changeSource l c source wallet 0
+      _<-changeSource l c source wallet 2
+      _<-reconcileNativeSourcesWith transport c l
+      restored<-sourceRestoration l source
+      assumeSourceApprovalCustody l
+      approveSourceRecoveryWith (pure 100) transport c l (obligationId ob) restored "review"
+        `shouldThrow` isError "source_approval_payment_requires_review"
+      sourceRecoveryApproval l (obligationId ob) restored `shouldReturn` Nothing
+      status <$> readOrder l cap (obligationOrder ob) `shouldReturn` "NeedsReview"
+    forM_ ["healthy","shortfall","identity"] $ \scenario->
+      it ("runs real source/custody validation before operator approval: "<>T.unpack scenario) $ withNativeSource $ \l original source wallet sourceTransport->do
+        let c=expiryConfig original
+        ob<-sourceObligation l source
+        _<-changeSource l c source wallet 0
+        _<-changeSource l c source wallet 2
+        _<-reconcileNativeSourcesWith sourceTransport c l
+        restored<-sourceRestoration l source
+        setupCustodyScans l c
+        let custody=custodyContract c (if scenario=="shortfall" then 1109999 else 1110000,1000000,100000) []
+            native selected method params
+              | method `elem` ["getbalances","listsinceblock"] || (method=="getblockhash" && params==[Number 20000])=paymentNative custody selected method params
+              | otherwise=paymentNative sourceTransport selected method params
+            transport=custody{paymentNative=native,paymentIdentity=if scenario=="identity" then reject "wrong_chain" else pure ()}
+            action=approveSourceRecoveryWith (pure 100) transport c l (obligationId ob) restored "checked source and custody"
+        if scenario=="healthy" then do
+          result<-action
+          fieldValue "signedOrSent" result `shouldReturn` False
+          readyObligations l `shouldReturn` [ob]
+          sourceRecoveryApproval l (obligationId ob) restored `shouldReturn` Just "checked source and custody"
+        else action `shouldThrow` isError (if scenario=="identity" then "wrong_chain" else "custody_not_reconciled")
+        available <$> readiness l `shouldReturn` False
   describe "native settlement finality recovery (offline RPC contracts)" $ do
     it "shows review for an additional refund while preserving the original conversion link" $ withDir $ \dir->
       withNativeSettlementAt dir $ \l _ a signed _ _ _->do

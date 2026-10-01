@@ -14,6 +14,7 @@ module Bridge.Ledger
   , pendingAttempts, PaymentCosts(..), recordSettlement, createRefund, recordFailedSolana, recordSolanaExpiry, recordSolanaRetryApproval, requireBackup, addHint, auditExport, auditExportWithBudget
   , NativeSettlementCheck(..), nativeSettlementCandidates, recordNativeSettlementCheck
   , SourceCheck(..), nativeSourceCandidates, recordSourceCheck
+  , sourceRecoveryApproval, sourceRecoveryObligation, recordSourceRecoveryApproval
   ) where
 
 import Bridge.Config
@@ -21,7 +22,7 @@ import Bridge.Budget
 import Bridge.Types
 import Control.Concurrent.MVar
 import Control.Exception (bracket,mask,try,SomeException,fromException,throwIO)
-import Control.Monad (forM_, when)
+import Control.Monad (forM, forM_, when)
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson.Types (parseEither,Parser)
@@ -47,7 +48,7 @@ import Text.Read (readMaybe)
 -- checks integrity and always starts paused; no caller can clear the fence.
 newtype Ledger = Ledger (MVar (Maybe Connection))
 schemaVersion :: Int
-schemaVersion = 12
+schemaVersion = 13
 sqliteIdentity :: Connection -> IO Value
 sqliteIdentity c = do
   versions <- query_ c "SELECT sqlite_version(),sqlite_source_id()" :: IO [(Text,Text)]
@@ -124,6 +125,8 @@ withLedger path identity action = do
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/011.sql"))) $ execute_ c . fromString . T.unpack
     when (meta `elem` [[(v,identity)] | v<-[1..11]]) $ withTransaction c $
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/012.sql"))) $ execute_ c . fromString . T.unpack
+    when (meta `elem` [[(v,identity)] | v<-[1..12]]) $ withTransaction c $
+      forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/013.sql"))) $ execute_ c . fromString . T.unpack
     -- Restart is quarantined until external identities and unresolved attempts are checked.
     execute_ c "UPDATE deployment SET paused=1,pause_reason='restart_requires_reconciliation'"
     execute_ c "UPDATE custody_check SET revision=revision+1"
@@ -610,8 +613,13 @@ observeDepositC c Deposit{..} = do
     [(oid,a,n,wasEligible,previousAnchor)] -> do
       require (oid==depositOrder && a==T.pack (show depositAsset) && n==units depositAmount) "conflicting_deposit_evidence"
       execute c "UPDATE deposits SET anchor=?,confirmations=?,eligible=? WHERE id=?" (depositAnchor,depositConfirmations,depositEligible,depositId)
-      when (wasEligible && not depositEligible) $ recordSourceCheckC c depositId $ SourceUnavailable $ object
-        ["reason" .= ("source_eligibility_lost"::Text),"previousAnchor" .= previousAnchor,"anchor" .= depositAnchor]
+      when (wasEligible && not depositEligible) $ do
+        reviewed <- query c "SELECT id,status FROM obligations WHERE deposit_id=? AND status IN('ready','paying')" (Only depositId) :: IO [(Text,Text)]
+        work <- forM reviewed $ \(intent,status)->do
+          workHash <- sourceWorkHashC c intent
+          pure $ object ["intent" .= intent,"previousStatus" .= status,"workHash" .= workHash]
+        recordSourceCheckC c depositId $ SourceUnavailable $ object
+          ["reason" .= ("source_eligibility_lost"::Text),"previousAnchor" .= previousAnchor,"anchor" .= depositAnchor,"reviewedObligations" .= work]
       -- The finalized Solana observer already requires the configured provider
       -- agreement. Native recovery separately rechecks active blocks/mempool.
       when (depositAsset/=Native && depositEligible) $ do
@@ -678,6 +686,68 @@ recordSourceCheckC c did check = do
       [(asset,"source_deficit",negate delta),(asset,"external",delta)]
     execute_ c "UPDATE deployment SET paused=1,pause_reason='source_recovery_review'"
     execute c "INSERT INTO audit(action,detail) VALUES('source_recovery',?)" (Only $ did<>":"<>state)
+
+-- Snapshot only the work that source loss suspends. Hashing keeps private
+-- drafts/bytes out of the recovery record, while detecting later callbacks,
+-- cancellation, expiry and settlement before any operator state restoration.
+sourceWorkHashC :: Connection -> Text -> IO Text
+sourceWorkHashC c intent=do
+  obligation <- query c "SELECT id,order_id,deposit_id,kind,asset,amount,recipient FROM obligations WHERE id=?" (Only intent) :: IO [(Text,Text,Text,Text,Text,Int64,Text)]
+  work <- query c "SELECT chain,resolved,common_input FROM intents WHERE id=?" (Only intent) :: IO [(Text,Bool,Maybe Text)]
+  preparations <- query c "SELECT generation,policy_json,draft_json,retired_txid,cancelled FROM preparations WHERE intent_id=? ORDER BY generation" (Only intent) :: IO [(Int,Text,Maybe Text,Maybe Text,Bool)]
+  attempts <- query c "SELECT txid,state,preparation_generation,critical_sequence,observation_json FROM attempts WHERE intent_id=? ORDER BY preparation_generation,txid" (Only intent) :: IO [(Text,Text,Int,Maybe Int64,Maybe Text)]
+  cancellations <- query c "SELECT generation,reason,cleanup_json,completed FROM preparation_cancellations WHERE intent_id=? ORDER BY generation" (Only intent) :: IO [(Int,Text,Text,Bool)]
+  fees <- query c "SELECT asset,amount,released FROM fee_reservations WHERE intent_id=?" (Only intent) :: IO [(Text,Int64,Bool)]
+  pure $ digest $ TE.encodeUtf8 $ jsonText (obligation,work,preparations,attempts,cancellations,fees)
+
+sourceRecoveryApproval :: Ledger -> Text -> Int64 -> IO (Maybe Text)
+sourceRecoveryApproval l intent restoration=ledgerAction l $ \c->do
+  old <- query c "SELECT reason FROM source_recovery_approvals WHERE obligation_id=? AND restoration_sequence=?" (intent,restoration) :: IO [Only Text]
+  case old of []->pure Nothing; [Only reason]->pure(Just reason); _->reject "duplicate_source_approval"
+
+sourceRecoveryObligation :: Ledger -> Text -> Int64 -> IO Obligation
+sourceRecoveryObligation l intent restoration=ledgerAction l $ \c->do
+  (ob,_,_,_) <- sourceRecoveryContextC c intent restoration
+  pure ob
+
+sourceRecoveryContextC :: Connection -> Text -> Int64 -> IO (Obligation,Text,Int64,Text)
+sourceRecoveryContextC c intent restoration=do
+  rows <- query c "SELECT o.id,o.order_id,o.deposit_id,o.kind,o.asset,o.amount,o.recipient FROM obligations o JOIN deposits d ON d.id=o.deposit_id JOIN source_recovery_state r ON r.deposit_id=d.id WHERE o.id=? AND o.status='review' AND d.eligible=1 AND r.state='restored' AND r.shortfall=0 AND r.critical_sequence=?" (intent,restoration)
+  ob <- case rows of [o]->pure o; _->reject "source_approval_not_expected"
+  previous <- query c "SELECT r.critical_sequence,json_extract(j.value,'$.previousStatus'),json_extract(j.value,'$.workHash') FROM source_recoveries r,json_each(r.evidence_json,'$.reviewedObligations') j WHERE r.deposit_id=? AND json_extract(r.evidence_json,'$.reason')='source_eligibility_lost' AND json_extract(j.value,'$.intent')=? AND r.critical_sequence<? AND r.critical_sequence>COALESCE((SELECT MAX(critical_sequence) FROM source_recovery_approvals WHERE obligation_id=?),0) ORDER BY r.id DESC LIMIT 1" (obligationDeposit ob,intent,restoration,intent) :: IO [(Int64,Text,Text)]
+  (loss,status,expected) <- case previous of
+    [(s,p,h)] | p `elem` ["ready","paying"]->pure(s,p,h)
+    _->reject "source_review_context_missing"
+  actual <- sourceWorkHashC c intent
+  require (actual==expected) "source_review_work_changed"
+  cancelling <- query c "SELECT generation FROM preparation_cancellations WHERE intent_id=? AND completed=0" (Only intent) :: IO [Only Int]
+  require (null cancelling) "preparation_cancellation_pending"
+  pure(ob,status,loss,actual)
+
+recordSourceRecoveryApproval :: Ledger -> Text -> Int64 -> Int64 -> Text -> IO ()
+recordSourceRecoveryApproval l intent restoration now reason=ledgerAction l $ \c->do
+  require (restoration>0 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_source_approval"
+  state <- query_ c "SELECT paused FROM deployment" :: IO [Only Bool]
+  require (state==[Only True]) "pause_before_operator_action"
+  old <- query c "SELECT reason FROM source_recovery_approvals WHERE obligation_id=? AND restoration_sequence=?" (intent,restoration) :: IO [Only Text]
+  case old of
+    [Only previous]->require (previous==reason) "source_approval_conflict"
+    []->do
+      (_,previous,loss,workHash) <- sourceRecoveryContextC c intent restoration
+      checkCustodyFreshC c now
+      checks <- query_ c "SELECT revision,checked_at,report_json FROM custody_check" :: IO [(Int64,Maybe Int64,Maybe Text)]
+      let proof=jsonText $ object ["custody" .= checks,"sourceRestoration" .= restoration]
+      require (T.length proof<=32768) "source_approval_evidence_too_large"
+      seqNo <- criticalSequence c
+      execute c "INSERT INTO source_recovery_approvals(obligation_id,restoration_sequence,loss_sequence,prior_status,work_hash,reason,proof_json,critical_sequence) VALUES(?,?,?,?,?,?,?,?)" (intent,restoration,loss,previous,workHash,reason,proof,seqNo)
+      execute c "UPDATE obligations SET status=? WHERE id=?" (previous,intent)
+      execute c "INSERT INTO audit(action,detail) VALUES('source_recovery_approved',?)" (Only intent)
+    _->reject "duplicate_source_approval"
+
+sourceApprovalBackupC :: Connection -> Text -> Int64 -> IO Int64
+sourceApprovalBackupC c txid original=do
+  rows <- query c "SELECT r.critical_sequence FROM source_recovery_approvals r JOIN attempts a ON a.intent_id=r.obligation_id WHERE a.txid=?" (Only txid) :: IO [Only Int64]
+  pure $ maximum (original:[s | Only s<-rows])
 checkpoint :: Connection -> Text -> Text -> IO ()
 checkpoint c chain anchor = execute c "INSERT INTO checkpoints(chain,anchor) VALUES(?,?) ON CONFLICT(chain) DO UPDATE SET anchor=excluded.anchor" (chain,anchor)
 promoteDeposit :: Ledger -> Int64 -> Text -> IO Bool
@@ -888,7 +958,7 @@ markBroadcastIntent :: Ledger -> Text -> IO Int64
 markBroadcastIntent l txid = ledgerAction l $ \c -> do
   rows <- query c "SELECT a.state,a.critical_sequence,d.eligible FROM attempts a JOIN intents i ON i.id=a.intent_id JOIN obligations o ON o.id=i.obligation_id JOIN deposits d ON d.id=o.deposit_id WHERE a.txid=?" (Only txid) :: IO [(Text,Maybe Int64,Bool)]
   case rows of
-    [("broadcast_intent",Just n,_)] -> pure n
+    [("broadcast_intent",Just n,_)] -> sourceApprovalBackupC c txid n
     [("signed",_,True)] -> do
       health <- query_ c "SELECT paused FROM deployment" :: IO [Only Bool]
       require (health==[Only False]) "payouts_paused"
@@ -955,7 +1025,8 @@ authorizeRecordedSend l remote txid = ledgerAction l $ \c -> do
   attempt <- case attempts of [a] -> pure a; _ -> reject "attempt_not_sendable"
   require (attemptState attempt=="broadcast_intent") "broadcast_intent_required"
   sequenceNumber <- maybe (reject "broadcast_intent_required") pure (attemptSequence attempt)
-  requireBackup c remote sequenceNumber
+  needed <- sourceApprovalBackupC c txid sequenceNumber
+  requireBackup c remote needed
   source <- query c "SELECT d.eligible,o.status FROM intents i JOIN obligations o ON o.id=i.obligation_id JOIN deposits d ON d.id=o.deposit_id WHERE i.id=?" (Only $ attemptIntent attempt) :: IO [(Bool,Text)]
   require (source==[(True,"paying")]) "source_not_eligible"
   health <- query_ c "SELECT paused FROM deployment" :: IO [Only Bool]
@@ -1072,13 +1143,18 @@ auditExportWithBudget l cfg = ledgerAction l $ \c -> do
   payments <- query_ c "SELECT a.txid,i.id,i.chain,a.state,a.preparation_generation FROM attempts a JOIN intents i ON i.id=a.intent_id LEFT JOIN solana_expiries e ON e.txid=a.txid WHERE i.resolved=0 AND e.txid IS NULL ORDER BY a.rowid" :: IO [(Text,Text,Text,Text,Int)]
   cancelling <- query_ c "SELECT intent_id,generation FROM preparation_cancellations WHERE completed=0" :: IO [(Text,Int)]
   nativeReviews <- query_ c "SELECT txid,state,critical_sequence FROM native_payment_recovery_state ORDER BY id DESC LIMIT 100" :: IO [(Text,Text,Int64)]
+  sourceApprovals <- query_ c "SELECT obligation_id,restoration_sequence,prior_status,critical_sequence FROM source_recovery_approvals ORDER BY critical_sequence DESC LIMIT 100" :: IO [(Text,Int64,Text,Int64)]
   sourceReviews <- query_ c "SELECT r.deposit_id,d.order_id,d.asset,d.amount,r.state,r.shortfall,r.critical_sequence,CASE WHEN EXISTS(SELECT 1 FROM obligations o WHERE o.deposit_id=d.id AND o.status='paid') THEN 'paid' WHEN EXISTS(SELECT 1 FROM obligations o JOIN intents i ON i.obligation_id=o.id JOIN attempts a ON a.intent_id=i.id WHERE o.deposit_id=d.id AND a.state='broadcast_intent') THEN 'possibly_sent' WHEN EXISTS(SELECT 1 FROM obligations o JOIN intents i ON i.obligation_id=o.id JOIN attempts a ON a.intent_id=i.id WHERE o.deposit_id=d.id AND a.state='signed') THEN 'signed' WHEN d.allocated=1 THEN 'allocated' ELSE 'unallocated' END FROM source_recovery_state r JOIN deposits d ON d.id=r.deposit_id ORDER BY r.state='restored',r.id DESC LIMIT 100" :: IO [(Text,Maybe Text,Text,Int64,Text,Int64,Int64,Text)]
   let recoveries=toJSON [object ["intent" .= obligationId (preparationObligation p),"generation" .= preparationGeneration p
         ,"chain" .= preparationChain p,"hasDraft" .= (preparationDraft p/=Nothing)
         ,"cancellationPending" .= ((obligationId $ preparationObligation p,preparationGeneration p) `elem` cancelling)] | p<-preparations]
       pending=toJSON [object ["transaction" .= tx,"intent" .= intent,"chain" .= chain,"state" .= state,"generation" .= g] | (tx,intent,chain,state,g)<-payments]
   case audit of
-    Object fields -> pure $ Object (KM.insert "sourceRecovery" (toJSON [object ["deposit" .= did,"order" .= oid,"asset" .= asset,"amount" .= T.pack(show n),"state" .= state,"shortfall" .= T.pack(show loss),"criticalSequence" .= sequenceNo,"paymentExposure" .= exposure] | (did,oid,asset,n,state,loss,sequenceNo,exposure)<-sourceReviews]) $ KM.insert "nativeSettlementRecovery" (toJSON [object ["transaction" .= tx,"state" .= state,"criticalSequence" .= sequenceNo] | (tx,state,sequenceNo)<-nativeReviews]) $ KM.insert "pendingPayments" pending $ KM.insert "unsignedPreparations" recoveries $ KM.insert "custodyReconciliation" custody $ KM.insert "operatingBudget" budget fields)
+    Object fields -> pure $ Object $ foldr (uncurry KM.insert) fields
+      [("sourceRecovery",toJSON [object ["deposit" .= did,"order" .= oid,"asset" .= asset,"amount" .= T.pack(show n),"state" .= state,"shortfall" .= T.pack(show loss),"criticalSequence" .= sequenceNo,"paymentExposure" .= exposure] | (did,oid,asset,n,state,loss,sequenceNo,exposure)<-sourceReviews])
+      ,("sourceRecoveryApprovals",toJSON [object ["obligation" .= intent,"restorationSequence" .= restored,"restoredStatus" .= status,"criticalSequence" .= sequenceNo] | (intent,restored,status,sequenceNo)<-sourceApprovals])
+      ,("nativeSettlementRecovery",toJSON [object ["transaction" .= tx,"state" .= state,"criticalSequence" .= sequenceNo] | (tx,state,sequenceNo)<-nativeReviews])
+      ,("pendingPayments",pending),("unsignedPreparations",recoveries),("custodyReconciliation",custody),("operatingBudget",budget)]
     _ -> reject "invalid_audit_export"
 custodyHealth :: Ledger -> IO Value
 custodyHealth l = ledgerAction l custodyHealthC

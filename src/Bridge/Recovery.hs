@@ -1,7 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.Recovery
   ( recoverDeployment, reconcileNativeLocks, reconcileNativeLocksWith
-  , cancelPreparation, cancelPreparationWith ) where
+  , cancelPreparation, cancelPreparationWith, approveSourceRecovery, approveSourceRecoveryWith ) where
 
 import Bridge.Config
 import Bridge.Ledger
@@ -42,6 +42,38 @@ recoverDeployment manager c ledger=do
   health <- readiness ledger
   pure $ object ["scanners" .= scans,"sources" .= sources,"nativeSettlements" .= nativeSettlements,"payments" .= payments,"nativeLocks" .= locks,"custody" .= custody
     ,"availability" .= health,"signedOrSent" .= False]
+
+-- Explicitly restore only the work suspended by a recovered source. This is
+-- neither a replacement approval nor permission to resume or send anything.
+approveSourceRecovery :: Manager -> Config -> Ledger -> Text -> Int64 -> Text -> IO Value
+approveSourceRecovery manager c ledger intent restoration reason=do
+  _ <- recoverDeployment manager c ledger
+  approveSourceRecoveryWith epochSeconds
+    (realPaymentTransport manager c (const $ reject "unexpected_source_approval_backup")) c ledger intent restoration reason
+
+approveSourceRecoveryWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> Text -> Int64 -> Text -> IO Value
+approveSourceRecoveryWith clock transport c ledger intent restoration reason=do
+  require (restoration>0 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_source_approval"
+  health <- readiness ledger
+  require (not $ available health) "pause_before_operator_action"
+  previous <- sourceRecoveryApproval ledger intent restoration
+  case previous of
+    Just old->require (old==reason) "source_approval_conflict"
+    Nothing->do
+      ob <- sourceRecoveryObligation ledger intent restoration
+      paymentIdentity transport
+      recheckSourceWith transport c ledger ob
+      -- A saved payment may have finalized or expired since the source was
+      -- restored. Reconcile it first; the ledger snapshot then refuses revival.
+      payments <- reconcilePaymentsWith transport c ledger
+      attempts <- fieldValue "attempts" payments :: IO [Value]
+      failures <- mapM (fieldValue "error") attempts :: IO [Maybe Text]
+      require (all (==Nothing) failures) "source_approval_payment_requires_review"
+      _ <- reconcileCustodyWith clock transport c ledger
+      now <- clock
+      recordSourceRecoveryApproval ledger intent restoration now reason
+  pure $ object ["approvedSourceRecovery" .= intent,"restorationSequence" .= restoration
+    ,"paused" .= True,"signedOrSent" .= False]
 
 -- Holding saved native inputs is independent of Solana availability. This may
 -- restore advisory locks, but cannot sign, broadcast, unlock or release funds.

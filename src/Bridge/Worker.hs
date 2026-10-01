@@ -1,4 +1,4 @@
-module Bridge.Worker (runWorker, runWorkerWith, scanOnce, reconcileOnce, recoverOnce, approveRetry, cancelUnsigned, doctor) where
+module Bridge.Worker (runWorker, runWorkerWith, scanOnce, reconcileOnce, recoverOnce, approveRetry, cancelUnsigned, approveRestoredSource, doctor) where
 
 import Bridge.API
 import Control.Monad.IO.Class (liftIO)
@@ -18,6 +18,7 @@ import Control.Concurrent (threadDelay)
 import Control.Exception (try,bracket,catch,IOException)
 import Control.Monad (forever,when)
 import Data.Aeson
+import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Database.SQLite.Simple (open,close)
@@ -78,6 +79,10 @@ cancelUnsigned :: Config -> Text -> Int -> Text -> IO Value
 cancelUnsigned c intent generation reason = withLedger (dbPath c) (fingerprint c) $ \ledger -> do
   manager <- newRpcManager
   cancelPreparation manager c ledger intent generation reason
+approveRestoredSource :: Config -> Text -> Int64 -> Text -> IO Value
+approveRestoredSource c intent restoration reason = withLedger (dbPath c) (fingerprint c) $ \ledger -> do
+  manager <- newRpcManager
+  approveSourceRecovery manager c ledger intent restoration reason
 customerServer :: Config -> Ledger -> Server CustomerAPI
 customerServer c ledger =
   configView :<|> create :<|> get :<|> transaction :<|> hint :<|> health :<|> ready
