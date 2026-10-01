@@ -12,6 +12,7 @@ module Bridge.Ledger
   , Preparation(..), beginPreparation, storeDraft, pendingPreparations, activePreparationGeneration
   , preparationCancellation, beginPreparationCancellation, finishPreparationCancellation, checkCustodyFresh
   , pendingAttempts, PaymentCosts(..), recordSettlement, createRefund, recordFailedSolana, recordSolanaExpiry, recordSolanaRetryApproval, requireBackup, addHint, auditExport, auditExportWithBudget
+  , NativeSettlementCheck(..), nativeSettlementCandidates, recordNativeSettlementCheck
   ) where
 
 import Bridge.Config
@@ -45,7 +46,7 @@ import Text.Read (readMaybe)
 -- checks integrity and always starts paused; no caller can clear the fence.
 newtype Ledger = Ledger (MVar (Maybe Connection))
 schemaVersion :: Int
-schemaVersion = 10
+schemaVersion = 11
 sqliteIdentity :: Connection -> IO Value
 sqliteIdentity c = do
   versions <- query_ c "SELECT sqlite_version(),sqlite_source_id()" :: IO [(Text,Text)]
@@ -116,8 +117,10 @@ withLedger path identity action = do
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/008.sql"))) $ execute_ c . fromString . T.unpack
     when (meta `elem` [[(v,identity)] | v<-[1..8]]) $ withTransaction c $
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/009.sql"))) $ execute_ c . fromString . T.unpack
-    when (meta/=[(schemaVersion,identity)]) $ withTransaction c $
+    when (meta `elem` [[(v,identity)] | v<-[1..9]]) $ withTransaction c $
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/010.sql"))) $ execute_ c . fromString . T.unpack
+    when (meta `elem` [[(v,identity)] | v<-[1..10]]) $ withTransaction c $
+      forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/011.sql"))) $ execute_ c . fromString . T.unpack
     -- Restart is quarantined until external identities and unresolved attempts are checked.
     execute_ c "UPDATE deployment SET paused=1,pause_reason='restart_requires_reconciliation'"
     execute_ c "UPDATE custody_check SET revision=revision+1"
@@ -144,6 +147,10 @@ resumeAfterChecks l = ledgerAction l $ \c -> do
   require (null unresolved) "unresolved_intents_require_review"
   reviews <- query_ c "SELECT event_id FROM chain_events WHERE needs_review=1 LIMIT 1" :: IO [Only Text]
   require (null reviews) "chain_observations_require_review"
+  nativeReviews <- query_ c "SELECT txid FROM native_payment_recovery_state WHERE state<>'reconfirmed' LIMIT 1" :: IO [Only Text]
+  require (null nativeReviews) "native_settlement_requires_review"
+  lost <- query_ c "SELECT id FROM deposits WHERE allocated=1 AND eligible=0 LIMIT 1" :: IO [Only Text]
+  require (null lost) "source_reorg_requires_review"
   legacy <- query_ c "SELECT q.id FROM orders q LEFT JOIN order_cost_limits p ON p.order_id=q.id WHERE p.order_id IS NULL AND (q.status NOT IN('Paid','Refunded','ExpiredUnfunded') OR EXISTS(SELECT 1 FROM obligations o WHERE o.order_id=q.id AND o.status NOT IN('paid','cancelled'))) LIMIT 1" :: IO [Only Text]
   require (null legacy) "legacy_order_cost_review_required"
   execute_ c "UPDATE deployment SET paused=0,pause_reason='ready'"
@@ -335,7 +342,7 @@ findOrderC c cfg cap req = do
     _ -> reject "duplicate_idempotency"
 readOrderC :: Connection -> Text -> Text -> IO OrderView
 readOrderC c cap oid = do
-  rows <- query c "SELECT request_json,quote_json,status,deadline,instruction,payout_tx,policy_json FROM orders WHERE id=? AND capability_hash=?" (oid,cap) :: IO [(Text,Text,Text,Int64,Maybe Text,Maybe Text,Text)]
+  rows <- query c "SELECT request_json,quote_json,CASE WHEN EXISTS(SELECT 1 FROM native_payment_recovery_state r JOIN attempts a ON a.txid=r.txid JOIN intents i ON i.id=a.intent_id JOIN obligations o ON o.id=i.obligation_id WHERE o.order_id=orders.id AND r.state<>'reconfirmed') THEN 'NeedsReview' ELSE status END,deadline,instruction,payout_tx,policy_json FROM orders WHERE id=? AND capability_hash=?" (oid,cap) :: IO [(Text,Text,Text,Int64,Maybe Text,Maybe Text,Text)]
   case rows of
     [(r,q,s,d,i,t,p)] -> OrderView oid <$> fromText r <*> fromText q <*> pure s <*> pure d <*> pure i <*> pure t <*> fromText p
     _ -> reject "order_not_found"
@@ -887,6 +894,56 @@ authorizeRecordedSend l remote txid = ledgerAction l $ \c -> do
 data PaymentCosts = PaymentCosts { networkFee :: !Amount, accountRent :: !Amount }
   deriving (Eq,Show,Generic,ToJSON,FromJSON)
 
+data NativeSettlementCheck
+  = NativeSettlementConfirming
+  | NativeSettlementUnavailable Text
+  | NativeSettlementReconfirmed PaymentCosts Text
+  deriving (Eq,Show)
+
+-- Inspect only changed native settlements and previously opened reviews. The
+-- existing immutable signed attempt remains resolved; no new intent is made.
+nativeSettlementCandidates :: Ledger -> IO [Attempt]
+nativeSettlementCandidates l = ledgerAction l $ \c -> query_ c "SELECT a.txid,a.intent_id,i.chain,a.signed_bytes,a.policy_json,a.fee_limit,a.state,a.critical_sequence FROM attempts a JOIN intents i ON i.id=a.intent_id LEFT JOIN chain_events e ON e.chain='Native' AND e.event_id=a.txid LEFT JOIN native_payment_recovery_state r ON r.txid=a.txid WHERE i.chain='Native' AND a.state='settled' AND (e.event_id IS NULL OR e.kind<>'outgoing' OR e.anchor IS NOT json_extract(json_extract(a.observation_json,'$.proof'),'$.blockhash') OR COALESCE(json_extract((SELECT evidence_json FROM observation_evidence WHERE hash=e.evidence_hash),'$.proof.confirmations'),-1)<json_extract(json_extract(a.observation_json,'$.proof'),'$.requiredDepth') OR r.state<>'reconfirmed') ORDER BY a.rowid LIMIT 1001"
+
+-- Preserve every previous anchor and the original financial decision. A
+-- reconfirmation can update evidence only; it cannot post or reopen a payment.
+recordNativeSettlementCheck :: Ledger -> Attempt -> Text -> NativeSettlementCheck -> IO ()
+recordNativeSettlementCheck l expected previous check = ledgerAction l $ \c -> do
+  current <- query c "SELECT a.txid,a.intent_id,i.chain,a.signed_bytes,a.policy_json,a.fee_limit,a.state,a.critical_sequence FROM attempts a JOIN intents i ON i.id=a.intent_id WHERE a.txid=? AND i.resolved=1" (Only $ attemptId expected)
+  require (current==[expected] && attemptState expected=="settled" && attemptChain expected=="Native") "native_settlement_changed"
+  saved <- query c "SELECT observation_json FROM attempts WHERE txid=?" (Only $ attemptId expected) :: IO [Only Text]
+  require (saved==[Only previous]) "native_settlement_changed"
+  (state,observation) <- case check of
+    NativeSettlementConfirming -> pure ("confirming",jsonText $ object ["reason" .= ("native_confirmation_policy_pending"::Text)])
+    NativeSettlementUnavailable reason -> do
+      require (not (T.null reason) && T.length reason<=160) "invalid_native_recovery_reason"
+      pure ("unavailable",jsonText $ object ["reason" .= reason])
+    NativeSettlementReconfirmed costs proof -> do
+      old <- fromText previous
+      oldCosts <- either (const $ reject "invalid_native_settlement") pure (parseEither (withObject "settlement" (.: "costs")) old)
+      require (costs==oldCosts && units (networkFee costs)>0 && units (accountRent costs)==0) "native_recovery_cost_changed"
+      oldProofText <- either (const $ reject "invalid_native_settlement") pure (parseEither (withObject "settlement" (.: "proof")) old)
+      oldProof <- fromText oldProofText
+      oldDepth <- either (const $ reject "invalid_native_settlement") pure (parseEither (withObject "proof" (.: "requiredDepth")) oldProof)
+      value <- fromText proof
+      (txid,anchor,depth) <- either (const $ reject "invalid_native_settlement") pure
+        (parseEither (withObject "proof" $ \o -> (,,) <$> o .: "txid" <*> o .: "blockhash" <*> o .: "requiredDepth") value)
+      require (txid==attemptId expected && depth>0) "invalid_native_settlement"
+      require (depth==oldDepth) "native_recovery_policy_changed"
+      history <- query c "SELECT e.anchor,COALESCE(json_extract(o.evidence_json,'$.proof.confirmations'),-1) FROM chain_events e JOIN observation_evidence o ON o.hash=e.evidence_hash WHERE e.chain='Native' AND e.event_id=? AND e.kind='outgoing' AND e.needs_review=0" (Only txid) :: IO [(Text,Int)]
+      require (case history of [(block,n)]->block==anchor && n>=depth; _->False) "native_recovery_scan_not_current"
+      pure ("reconfirmed",jsonText $ object ["costs" .= costs,"proof" .= proof])
+  require (T.length observation<=32768) "native_recovery_evidence_too_large"
+  oldReview <- query c "SELECT state,observation_json FROM native_payment_recovery_state WHERE txid=?" (Only $ attemptId expected) :: IO [(Text,Text)]
+  let unchanged=oldReview==[(state,observation)] || null oldReview && state=="reconfirmed" && previous==observation
+  when (not unchanged) $ do
+    seqNo <- criticalSequence c
+    execute c "INSERT INTO native_payment_recoveries(txid,previous_observation,state,observation_json,critical_sequence) VALUES(?,?,?,?,?)"
+      (attemptId expected,previous,state,observation,seqNo)
+    when (state=="reconfirmed") $ execute c "UPDATE attempts SET observation_json=? WHERE txid=?" (observation,attemptId expected)
+    execute_ c "UPDATE deployment SET paused=1,pause_reason='native_settlement_recovery'"
+    execute c "INSERT INTO audit(action,detail) VALUES('native_settlement_recovery',?)" (Only $ attemptId expected<>":"<>state)
+
 recordSettlement :: Ledger -> Text -> PaymentCosts -> Text -> IO ()
 recordSettlement l txid costs evidence = ledgerAction l $ \c -> do
   require (not (T.null evidence) && T.length evidence<=32768) "settlement_fee_or_evidence_invalid"
@@ -943,12 +1000,13 @@ auditExportWithBudget l cfg = ledgerAction l $ \c -> do
   preparations <- pendingPreparationsC c
   payments <- query_ c "SELECT a.txid,i.id,i.chain,a.state,a.preparation_generation FROM attempts a JOIN intents i ON i.id=a.intent_id LEFT JOIN solana_expiries e ON e.txid=a.txid WHERE i.resolved=0 AND e.txid IS NULL ORDER BY a.rowid" :: IO [(Text,Text,Text,Text,Int)]
   cancelling <- query_ c "SELECT intent_id,generation FROM preparation_cancellations WHERE completed=0" :: IO [(Text,Int)]
+  nativeReviews <- query_ c "SELECT txid,state,critical_sequence FROM native_payment_recovery_state ORDER BY id DESC LIMIT 100" :: IO [(Text,Text,Int64)]
   let recoveries=toJSON [object ["intent" .= obligationId (preparationObligation p),"generation" .= preparationGeneration p
         ,"chain" .= preparationChain p,"hasDraft" .= (preparationDraft p/=Nothing)
         ,"cancellationPending" .= ((obligationId $ preparationObligation p,preparationGeneration p) `elem` cancelling)] | p<-preparations]
       pending=toJSON [object ["transaction" .= tx,"intent" .= intent,"chain" .= chain,"state" .= state,"generation" .= g] | (tx,intent,chain,state,g)<-payments]
   case audit of
-    Object fields -> pure $ Object (KM.insert "pendingPayments" pending $ KM.insert "unsignedPreparations" recoveries $ KM.insert "custodyReconciliation" custody $ KM.insert "operatingBudget" budget fields)
+    Object fields -> pure $ Object (KM.insert "nativeSettlementRecovery" (toJSON [object ["transaction" .= tx,"state" .= state,"criticalSequence" .= sequenceNo] | (tx,state,sequenceNo)<-nativeReviews]) $ KM.insert "pendingPayments" pending $ KM.insert "unsignedPreparations" recoveries $ KM.insert "custodyReconciliation" custody $ KM.insert "operatingBudget" budget fields)
     _ -> reject "invalid_audit_export"
 custodyHealth :: Ledger -> IO Value
 custodyHealth l = ledgerAction l custodyHealthC

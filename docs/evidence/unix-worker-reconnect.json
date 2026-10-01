@@ -1,0 +1,65 @@
+{
+  "scope": "Actual local public proxy retained across ordinary worker replacement; no new chain action",
+  "applicationSha256": "cf75f4c74801ea07b4fe480d58bc7091c3018b6869df39b35c2c75f95082598d",
+  "schema": 11,
+  "criticalSequence": 33,
+  "proxyRestartedBetweenPrimingAndChecks": false,
+  "firstOrderGet": {
+    "httpStatus": 200,
+    "status": "Paid",
+    "payout": "235bf2ba1cfe20852a8d19c234759f4e6ef0c493fdc17824521be7864939a0ad"
+  },
+  "firstPost": {
+    "httpStatus": 409,
+    "error": "invalid_capability",
+    "invalidCapability": true
+  },
+  "requestAttemptsPerCheck": 1,
+  "automaticTransportRetries": false,
+  "unixIdleConnectionCount": 0,
+  "financialAndBindingRowsPreserved": true,
+  "savedAttempts": 7,
+  "custody": {
+    "checkedAt": 1790848205,
+    "checkedRevision": 6401,
+    "lastError": null,
+    "report": {
+      "assets": [
+        {
+          "asset": "Native",
+          "booked": "1879387",
+          "difference": "0",
+          "expected": "1879387",
+          "inFlight": "0",
+          "observed": "1879387"
+        },
+        {
+          "asset": "Sol",
+          "booked": "3491560",
+          "difference": "0",
+          "expected": "3491560",
+          "inFlight": "0",
+          "observed": "3491560"
+        },
+        {
+          "asset": "Wrapped",
+          "booked": "100000020014",
+          "difference": "0",
+          "expected": "100000020014",
+          "inFlight": "0",
+          "observed": "100000020014"
+        }
+      ],
+      "inFlightEffects": [],
+      "matches": true,
+      "nativeBlock": "000002a50ead336f56f48bc59baa634241e540cea8688aff7fc0916ade77970d",
+      "nativeHeight": 16434,
+      "solanaSlot": 506231809
+    },
+    "revision": 6401
+  },
+  "readiness": 503,
+  "signedOrSent": false,
+  "finishedUtc": "2026-10-01T09:50:06.632694+00:00",
+  "limitations": "First requests after the private worker and custody check were ready. Requests during actual worker downtime can fail. The rejected POST tests connection recovery, not enabled customer intake or signing."
+}

@@ -5,6 +5,7 @@ import Bridge.Config
 import Bridge.Ledger
 import Bridge.Reconciliation
 import Bridge.Recovery
+import Bridge.Reorg
 import Bridge.Budget
 import Bridge.SolanaMessage
 import Bridge.SolanaDeposit
@@ -186,6 +187,52 @@ markNativeFixtureBroadcast l attempt=do
   ledgerAction l $ \db->execute_ db "UPDATE deployment SET paused=0"
   _<-markBroadcastIntent l (attemptId attempt)
   pause l "offline-native-restart"
+
+-- Captured native transaction, local financial fixture, and explicit RPC
+-- responses. No alternate chain is selected or contacted by these tests.
+withNativeSettlementAt :: FilePath -> (Ledger -> Config -> Attempt -> NativeSigned -> IORef (Maybe Value) -> IORef Text -> PaymentTransport -> IO a) -> IO a
+withNativeSettlementAt dir action=withNativeLockRecoveryAt True dir $ \l c p _ _ original->do
+  signed<-nativeSignedFixture
+  captured<-BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
+  decoded<-fieldValue "decoded" captured :: IO Value
+  attempt<-saveNativeFixtureAttempt l p
+  markNativeFixtureBroadcast l attempt
+  let txid=attemptId attempt
+      depth=planDepth $ signedNativePlan signed
+      proof=nativeSettlementProof txid custodyNativeTip depth
+  recordSettlement l txid (PaymentCosts (signedNativeFee signed) (amt 0)) proof
+  [settled]<-ledgerAction l (\db->query db "SELECT a.txid,a.intent_id,i.chain,a.signed_bytes,a.policy_json,a.fee_limit,a.state,a.critical_sequence FROM attempts a JOIN intents i ON i.id=a.intent_id WHERE a.txid=?" (Only txid))
+  setNativeSettlementHistory l c txid custodyNativeTip 2
+  wallet<-newIORef $ Just $ object ["txid" .= txid,"hex" .= signedNativeBytes signed,"decoded" .= decoded
+    ,"fee" .= scientific (negate $ toInteger $ units $ signedNativeFee signed) (-8)
+    ,"walletconflicts" .= ([]::[Text]),"confirmations" .= (2::Int),"blockhash" .= custodyNativeTip]
+  active<-newIORef custodyNativeTip
+  let call selected method params=case (method,params) of
+        ("gettransaction",wanted:_) | wanted==toJSON txid->readIORef wallet >>= maybe (reject "rpc_error_-5") pure
+        ("getblockheader",[String anchor])->do
+          actual<-readIORef active
+          pure $ object ["hash" .= anchor,"height" .= (100::Int),"confirmations" .= (if actual==anchor then 2::Int else -1)]
+        ("getblockhash",[Number 100])->toJSON <$> readIORef active
+        _->paymentNative original selected method params
+  action l c settled signed wallet active original{paymentNative=call}
+
+nativeSettlementProof :: Text -> Text -> Int -> Text
+nativeSettlementProof txid anchor depth=fixtureJson $ object
+  ["txid" .= txid,"blockhash" .= anchor,"height" .= (100::Int),"requiredDepth" .= depth]
+
+setNativeSettlementHistory :: Ledger -> Config -> Text -> Text -> Int -> IO ()
+setNativeSettlementHistory l c txid anchor depth=do
+  previous<-readCheckpoint l "Native"
+  commitScan l (ScanBatch "Native" (nativeCheckpointHash c) previous custodyNativeTip 100 []
+    [ChainEvent txid "outgoing" anchor (object ["confirmations" .= depth])])
+
+nativeSettlementPrevious :: Ledger -> Attempt -> IO Text
+nativeSettlementPrevious l a=do
+  [Only proof]<-ledgerAction l (\db->query db "SELECT observation_json FROM attempts WHERE txid=?" (Only $ attemptId a))
+  pure proof
+
+nativeSettlementStates :: Value -> IO [Text]
+nativeSettlementStates value=fieldValue "payments" value >>= mapM (fieldValue "state")
 
 -- The captured bytes supply economic validation; RPC responses below are
 -- explicitly offline contracts, not evidence of a new chain transaction.
@@ -1715,6 +1762,144 @@ main=hspec $ do
       result<-reconcileNativeLocksWith transport{paymentNative=wrong} c l
       fieldValue "error" result `shouldReturn` ("native_wallet_not_ready"::Text)
       readIORef calls `shouldReturn` ["getwalletinfo"]
+  describe "native settlement finality recovery (offline RPC contracts)" $ do
+    it "shows review for an additional refund while preserving the original conversion link" $ withDir $ \dir->
+      withNativeSettlementAt dir $ \l _ a signed _ _ _->do
+        [Only oid]<-ledgerAction l (\db->query db "SELECT order_id FROM obligations WHERE id=?" (Only $ attemptIntent a))
+        -- Model the retained primary conversion view. The captured native
+        -- attempt belongs to this order's separately settled refund obligation.
+        ledgerAction l $ \db->execute db "UPDATE orders SET status='Paid',payout_tx='offline-primary-conversion' WHERE id=?" (Only (oid::Text))
+        previous<-nativeSettlementPrevious l a
+        recordNativeSettlementCheck l a previous NativeSettlementConfirming
+        review<-readOrder l cap oid
+        status review `shouldBe` "NeedsReview"
+        payoutTx review `shouldBe` Just "offline-primary-conversion"
+        recordNativeSettlementCheck l a previous (NativeSettlementReconfirmed (PaymentCosts (signedNativeFee signed) (amt 0))
+          (nativeSettlementProof (attemptId a) custodyNativeTip (planDepth $ signedNativePlan signed)))
+        recovered<-readOrder l cap oid
+        status recovered `shouldBe` "Paid"
+        payoutTx recovered `shouldBe` Just "offline-primary-conversion"
+    it "reopens a lost-finality review and reconfirms the same payment without another financial decision" $ withDir $ \dir->do
+      restartState<-withNativeSettlementAt dir $ \l c a signed wallet active transport->do
+        before<-auditExport l
+        originalProof<-nativeSettlementPrevious l a
+        let intent=attemptIntent a
+        [Only oid]<-ledgerAction l (\db->query db "SELECT order_id FROM obligations WHERE id=?" (Only intent))
+        originalStatus<-status <$> readOrder l cap oid
+        noChange<-reconcileNativeSettlementsWith transport{paymentIdentity=expectationFailure "unchanged payment rechecked RPC"} c l
+        nativeSettlementStates noChange `shouldReturn` []
+        modifyIORef' wallet (fmap $ setPath ["confirmations"] (Number 0))
+        setNativeSettlementHistory l c (attemptId a) "unconfirmed" 0
+        result<-reconcileNativeSettlementsWith transport c l
+        nativeSettlementStates result `shouldReturn` ["confirming"]
+        status <$> readOrder l cap oid `shouldReturn` "NeedsReview"
+        resumeAfterChecks l `shouldThrow` isError "native_settlement_requires_review"
+        custody<-reconcileCustodyWith (pure 100) transport c l
+        fieldValue "lastError" custody `shouldReturn` Just ("native_settlement_requires_review"::Text)
+        _<-reconcileNativeSettlementsWith transport c l
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM native_payment_recoveries" :: IO [Only Int]) `shouldReturn` [Only 1]
+        auditExport l `shouldReturn` before
+        nativeSettlementPrevious l a `shouldReturn` originalProof
+        pure (c,a,signed,wallet,active,transport,before,originalProof,oid,originalStatus)
+      let (c,a,_,wallet,active,transport,before,originalProof,oid,originalStatus)=restartState
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        let newAnchor=T.replicate 64 "e"
+        writeIORef active newAnchor
+        modifyIORef' wallet (fmap $ setPath ["blockhash"] (String newAnchor) . setPath ["confirmations"] (Number 2))
+        setNativeSettlementHistory l c (attemptId a) newAnchor 2
+        result<-reconcileNativeSettlementsWith transport c l
+        nativeSettlementStates result `shouldReturn` ["reconfirmed"]
+        auditExport l `shouldReturn` before
+        status <$> readOrder l cap oid `shouldReturn` originalStatus
+        available <$> readiness l `shouldReturn` False
+        ledgerAction l (\db->query_ db "SELECT state,previous_observation FROM native_payment_recoveries ORDER BY id" :: IO [(Text,Text)])
+          `shouldReturn` [("confirming",originalProof),("reconfirmed",originalProof)]
+        nativeSettlementPrevious l a >>= (`shouldSatisfy` (/=originalProof))
+        pendingAttempts l `shouldReturn` []
+        ledgerAction l (\db->query_ db "SELECT COUNT(*),MIN(signed_bytes),MIN(state) FROM attempts" :: IO [(Int,Text,Text)])
+          `shouldReturn` [(1,attemptBytes a,"settled")]
+        ledgerAction l (\db->query_ db "SELECT resolved FROM intents" :: IO [Only Bool]) `shouldReturn` [Only True]
+        ledgerAction l (\db->query_ db "SELECT released FROM fee_reservations" :: IO [Only Bool]) `shouldReturn` [Only True]
+        replay<-reconcileNativeSettlementsWith transport{paymentIdentity=expectationFailure "completed recovery repeated RPC"} c l
+        nativeSettlementStates replay `shouldReturn` []
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM native_payment_recoveries" :: IO [Only Int]) `shouldReturn` [Only 2]
+    it "records a new confirmed anchor even when the unconfirmed interval was not observed" $ withDir $ \dir->
+      withNativeSettlementAt dir $ \l c a _ wallet active transport->do
+        before<-auditExport l
+        let newAnchor=T.replicate 64 "e"
+        writeIORef active newAnchor
+        modifyIORef' wallet (fmap $ setPath ["blockhash"] (String newAnchor))
+        setNativeSettlementHistory l c (attemptId a) newAnchor 2
+        result<-reconcileNativeSettlementsWith transport c l
+        nativeSettlementStates result `shouldReturn` ["reconfirmed"]
+        auditExport l `shouldReturn` before
+        available <$> readiness l `shouldReturn` False
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM native_payment_recoveries" :: IO [Only Int]) `shouldReturn` [Only 1]
+    forM_ ["missing","conflicted","changed-bytes"] $ \scenario->
+      it ("keeps a completed payment under review without replacement when "<>scenario) $ withDir $ \dir->
+        withNativeSettlementAt dir $ \l c a _ wallet _ transport->do
+          before<-auditExport l
+          previous<-nativeSettlementPrevious l a
+          setNativeSettlementHistory l c (attemptId a) "unconfirmed" 0
+          case scenario of
+            "missing"->writeIORef wallet Nothing
+            "conflicted"->modifyIORef' wallet (fmap $ setPath ["walletconflicts"] (toJSON [T.replicate 64 "f"]))
+            _->modifyIORef' wallet (fmap $ setPath ["hex"] (String "00"))
+          result<-reconcileNativeSettlementsWith transport c l
+          nativeSettlementStates result `shouldReturn` ["requires_review"]
+          auditExport l `shouldReturn` before
+          nativeSettlementPrevious l a `shouldReturn` previous
+          createRefund l "native:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:0"
+            >>= \ob->prepareNativeWith (paymentNative transport) c l ob `shouldThrow` isError "payouts_paused"
+          pendingAttempts l `shouldReturn` []
+          resumeAfterChecks l `shouldThrow` isError "native_settlement_requires_review"
+    it "will not replace settlement proof until the durable scanner agrees with the canonical read" $ withDir $ \dir->
+      withNativeSettlementAt dir $ \l c a _ wallet active transport->do
+        previous<-nativeSettlementPrevious l a
+        let newAnchor=T.replicate 64 "e"
+        setNativeSettlementHistory l c (attemptId a) "unconfirmed" 0
+        writeIORef active newAnchor
+        modifyIORef' wallet (fmap $ setPath ["blockhash"] (String newAnchor))
+        result<-reconcileNativeSettlementsWith transport c l
+        nativeSettlementStates result `shouldReturn` ["requires_review"]
+        nativeSettlementPrevious l a `shouldReturn` previous
+        ledgerAction l (\db->query_ db "SELECT state FROM native_payment_recoveries" :: IO [Only Text]) `shouldReturn` [Only "unavailable"]
+        available <$> readiness l `shouldReturn` False
+    it "rejects changed costs or confirmation policy and retains every earlier recovery decision" $ withDir $ \dir->
+      withNativeSettlementAt dir $ \l _ a signed _ _ _->do
+        previous<-nativeSettlementPrevious l a
+        let proof=nativeSettlementProof (attemptId a) custodyNativeTip (planDepth $ signedNativePlan signed)
+            costs=PaymentCosts (signedNativeFee signed) (amt 0)
+        recordNativeSettlementCheck l a previous (NativeSettlementReconfirmed costs{networkFee=amt 999} proof)
+          `shouldThrow` isError "native_recovery_cost_changed"
+        recordNativeSettlementCheck l a previous (NativeSettlementReconfirmed costs (nativeSettlementProof (attemptId a) custodyNativeTip 2))
+          `shouldThrow` isError "native_recovery_policy_changed"
+        recordNativeSettlementCheck l a previous NativeSettlementConfirming
+        ledgerAction l (\db->execute_ db "DELETE FROM native_payment_recoveries") `shouldThrow` (\err->sqlError err==ErrorConstraint)
+    it "treats missing confirmation metadata as unavailable instead of accepting SQL NULL as a match" $ withDir $ \dir->
+      withNativeSettlementAt dir $ \l c a _ _ _ transport->do
+        previous<-nativeSettlementPrevious l a
+        cursor<-readCheckpoint l "Native"
+        commitScan l (ScanBatch "Native" (nativeCheckpointHash c) cursor custodyNativeTip 100 []
+          [ChainEvent (attemptId a) "outgoing" custodyNativeTip (object [])])
+        result<-reconcileNativeSettlementsWith transport c l
+        nativeSettlementStates result `shouldReturn` ["requires_review"]
+        nativeSettlementPrevious l a `shouldReturn` previous
+        ledgerAction l (\db->query_ db "SELECT state FROM native_payment_recovery_state" :: IO [Only Text]) `shouldReturn` [Only "unavailable"]
+    it "refuses a stale attempt snapshot instead of overwriting a newer decision" $ withDir $ \dir->
+      withNativeSettlementAt dir $ \l _ a _ _ _ _->do
+        before<-auditExport l
+        recordNativeSettlementCheck l a "stale observation" NativeSettlementConfirming `shouldThrow` isError "native_settlement_changed"
+        auditExport l `shouldReturn` before
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM native_payment_recoveries" :: IO [Only Int]) `shouldReturn` [Only 0]
+    it "records identity refusal without a signer, backup, send or money movement" $ withDir $ \dir->
+      withNativeSettlementAt dir $ \l c a _ _ _ transport->do
+        before<-auditExport l
+        setNativeSettlementHistory l c (attemptId a) "unconfirmed" 0
+        result<-reconcileNativeSettlementsWith transport{paymentIdentity=reject "native_checkpoint_mismatch"} c l
+        nativeSettlementStates result `shouldReturn` ["requires_review"]
+        auditExport l `shouldReturn` before
+        ledgerAction l (\db->query_ db "SELECT state FROM native_payment_recovery_state" :: IO [Only Text]) `shouldReturn` [Only "unavailable"]
   describe "Solana preparation (SDK fixtures and RPC contract tests)" $ do
     it "binds the helper protocol, message, memo, signature and custody account" $ do
       (c,plan,reply)<-solanaFixture
@@ -2473,6 +2658,27 @@ main=hspec $ do
         adminMode .&. 0o777 `shouldBe` 0o600
     it "refuses a second worker on the same ledger" $ withFunded $ \_ c ->
       withLedger (dbPath c) (fingerprint c) (const $ pure ()) `shouldThrow` isError "worker_already_running"
+    it "reconnects the first GET and POST after worker replacement without replacing the clients" $ withDir $ \dir -> do
+      let c=cfg dir
+          _ :<|> createCall :<|> _ :<|> _ :<|> _ :<|> healthCall :<|> _ = client customerAPI
+      reader <- unixManager (customerSocket c)
+      writer <- unixManager (customerSocket c)
+      let readEnv=mkClientEnv reader (BaseUrl Http "localhost" 80 "")
+          writeEnv=mkClientEnv writer (BaseUrl Http "localhost" 80 "")
+      withAsync (runWorkerWith c (const $ pure ())) $ \_ -> do
+        awaitFile (customerSocket c) 100
+        runClientM healthCall readEnv `shouldReturn` Right (Availability True "process_running")
+        runClientM healthCall writeEnv `shouldReturn` Right (Availability True "process_running")
+      -- Only fixture sockets are removed. Keeping both client managers alive
+      -- across the worker's replacement reproduces the live stale-pool error.
+      removeFile (customerSocket c)
+      removeFile (adminSocket c)
+      withAsync (runWorkerWith c (const $ pure ())) $ \_ -> do
+        awaitFile (customerSocket c) 100
+        awaitFile (adminSocket c) 100
+        runClientM healthCall readEnv `shouldReturn` Right (Availability True "process_running")
+        result <- runClientM (createCall "Bearer invalid" req) writeEnv
+        result `shouldSatisfy` (\case Left (FailureResponse _ _) -> True; _ -> False)
   describe "historical Solana deposit evidence" $ do
     it "validates the captured real Devnet order deposit without current account lookups" $ do
       captured<-BS.readFile "test/fixtures/solana-devnet-order-deposit.json" >>= either fail pure . eitherDecodeStrict'

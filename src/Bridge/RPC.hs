@@ -24,6 +24,9 @@ newRpcManager = newManager $ managerSetProxy noProxy tlsManagerSettings
 unixManager :: FilePath -> IO Manager
 unixManager path = newManager $ managerSetProxy noProxy defaultManagerSettings
   { managerRetryableException = const False, managerConnCount = 8
+  -- The worker replaces its socket on restart. Fresh local connections avoid
+  -- reusing a dead worker connection without retrying any customer action.
+  , managerIdleConnectionCount = 0
   , managerResponseTimeout = responseTimeoutMicro 15000000
   , managerRawConnection = pure $ \_ _ _ -> bracketOnError (NS.socket NS.AF_UNIX NS.Stream NS.defaultProtocol) NS.close $ \sock -> do
       NS.connect sock (NS.SockAddrUnix path)

@@ -4,8 +4,15 @@ In order, the following will be built (use -v for more details):
  - ecx-bridge-0.1.0.0 (test:bridge-test) (dependency rebuilt)
 Preprocessing library for ecx-bridge-0.1.0.0...
 Building library for ecx-bridge-0.1.0.0...
+[13 of 26] Compiling Bridge.Ledger    ( src/Bridge/Ledger.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Ledger.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Ledger.dyn_o ) [Source file changed]
+[18 of 26] Compiling Bridge.Reconciliation ( src/Bridge/Reconciliation.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Reconciliation.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Reconciliation.dyn_o ) [Source file changed]
+[20 of 26] Compiling Bridge.Deposit   ( src/Bridge/Deposit.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Deposit.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Deposit.dyn_o ) [Bridge.Ledger changed]
+[23 of 26] Compiling Bridge.Order     ( src/Bridge/Order.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Order.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Order.dyn_o ) [Bridge.Ledger changed]
+[26 of 26] Compiling Bridge.Worker    ( src/Bridge/Worker.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Worker.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Worker.dyn_o ) [Bridge.Ledger changed]
 Preprocessing test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Building test suite 'bridge-test' for ecx-bridge-0.1.0.0...
+[1 of 1] Compiling Main             ( test/Spec.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test-tmp/Main.o ) [Source file changed]
+[2 of 2] Linking ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test [Objects changed]
 Running 1 test suites...
 Test suite bridge-test: RUNNING...
 
@@ -159,6 +166,18 @@ native lock recovery (offline RPC and SQLite restart contracts)
   does not sign when a success reply is contradicted by the wallet's actual locks [✔]
   leaves a draftless preparation intact and refuses any unexplained locks [✔]
   refuses the wrong wallet before touching its locks [✔]
+native settlement finality recovery (offline RPC contracts)
+  shows review for an additional refund while preserving the original conversion link [✔]
+  reopens a lost-finality review and reconfirms the same payment without another financial decision [✔]
+  records a new confirmed anchor even when the unconfirmed interval was not observed [✔]
+  keeps a completed payment under review without replacement when missing [✔]
+  keeps a completed payment under review without replacement when conflicted [✔]
+  keeps a completed payment under review without replacement when changed-bytes [✔]
+  will not replace settlement proof until the durable scanner agrees with the canonical read [✔]
+  rejects changed costs or confirmation policy and retains every earlier recovery decision [✔]
+  treats missing confirmation metadata as unavailable instead of accepting SQL NULL as a match [✔]
+  refuses a stale attempt snapshot instead of overwriting a newer decision [✔]
+  records identity refusal without a signer, backup, send or money movement [✔]
 Solana preparation (SDK fixtures and RPC contract tests)
   binds the helper protocol, message, memo, signature and custody account [✔]
   simulates the exact SDK message without exposing its valid signature [✔]
@@ -245,6 +264,7 @@ Solana settlement evidence (captured finalized public Devnet payments)
 public/private Unix socket boundary
   uses the shared Servant contract and separate admin socket [✔]
   refuses a second worker on the same ledger [✔]
+  reconnects the first GET and POST after worker replacement without replacing the clients [✔]
 historical Solana deposit evidence
   validates the captured real Devnet order deposit without current account lookups [✔]
   validates owner, mint, memo, signer and exact historical custody increase [✔]
@@ -257,8 +277,8 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 3.7619 seconds
-215 examples, 0 failures
+Finished in 4.3471 seconds
+227 examples, 0 failures
 Test suite bridge-test: PASS
 Test suite logged to: /Volumes/Crucial
 X9/CodexBuilds/ecx-bridge-20260930/workspace-b/outputs/ecx-bridge/./../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log
