@@ -1,8 +1,8 @@
 {
-  "recordedUtc": "2026-10-01T05:22:07.407102+00:00",
+  "recordedUtc": "2026-10-01T05:44:20.430465+00:00",
   "platform": "macOS arm64",
   "haskell": {
-    "examples": 133,
+    "examples": 146,
     "propertyCases": 100,
     "failures": 0,
     "sqliteVersion": "3.53.4",
@@ -10,7 +10,7 @@
     "ledgerSchema": 7
   },
   "rust": {
-    "unitTests": 5,
+    "unitTests": 7,
     "failures": 0,
     "allTargetsCompiled": true
   },
@@ -188,5 +188,22 @@
     "customerHttpEnabled": false,
     "otherNativeAddressTypesLiveAcceptance": false,
     "ecxBetanetAcceptance": false
+  },
+  "solanaAdmission": {
+    "evidence": "solana-admission.json",
+    "officialSdkUnsignedPreview": true,
+    "onCurveWalletAndAtaPolicy": true,
+    "exactNetAndFullRefundChecked": true,
+    "realMessageFeesAndRent": true,
+    "newRecipientAtaSimulation": true,
+    "newAccountCreatedDuringProbe": false,
+    "ordinaryOwnerAndTokenAccountPolicy": true,
+    "balancesUnchanged": true,
+    "financialStatePreserved": true,
+    "helperHasSignerConfigured": false,
+    "broadcast": false,
+    "ordersCreated": 0,
+    "customerHttpEnabled": false,
+    "generalProvisioningComplete": false
   }
 }

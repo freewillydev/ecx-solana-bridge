@@ -3,6 +3,7 @@
 -- Three explicitly scoped real Signet/Devnet ledger acceptance orders.
 -- The client request/capability are private inputs; no browser/API gate is opened.
 import Bridge.Config
+import Bridge.Admission (checkSolanaQuote)
 import Bridge.Deposit
 import Bridge.Ledger
 import Bridge.Native
@@ -61,6 +62,7 @@ main=do
         order<-case existing of
           []->do
             _<-checkNativeQuote manager c request
+            _<-checkSolanaQuote manager c request
             now<-epochSeconds
             createOrder ledger c now capability request
           [oid]->do

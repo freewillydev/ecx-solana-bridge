@@ -30,6 +30,7 @@ struct Config {
 enum Verb {
     Deposit,
     Payout,
+    PayoutPreview,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -84,7 +85,7 @@ fn prepare(c: &Config, r: &Request) -> Result<Reply, &'static str> {
     if owner == recipient || !owner.is_on_curve() || !recipient.is_on_curve() {
         return Err("unsupported_owner");
     }
-    let payout = matches!(r.verb, Verb::Payout);
+    let payout = matches!(r.verb, Verb::Payout | Verb::PayoutPreview);
     if (payout && owner != custody) || (!payout && recipient != custody) {
         return Err("wrong_custody_owner");
     }
@@ -127,7 +128,10 @@ fn prepare(c: &Config, r: &Request) -> Result<Reply, &'static str> {
     let message = Message::new_with_blockhash(&instructions, Some(&owner), &blockhash);
     let message_bytes = bincode::serialize(&message).map_err(|_| "serialization_failed")?;
     let mut transaction = Transaction::new_unsigned(message);
-    let signature = if payout {
+    // Admission can inspect the exact payout message without opening a signer.
+    // Keep this separate from the economic direction: previews still include
+    // the same custody binding, idempotent ATA instruction and payout memo.
+    let signature = if matches!(r.verb, Verb::Payout) {
         let path = c.signer_path.as_ref().ok_or("signer_not_configured")?;
         #[cfg(unix)]
         {
@@ -294,6 +298,16 @@ mod wire_tests {
         c.signer_path = Some(keyfile.to_string_lossy().into_owned());
         let out = prepare(&c, &r).unwrap();
         fs::remove_file(keyfile).unwrap();
+        r.verb = Verb::PayoutPreview;
+        // The configured signer no longer exists. A preview must not read it.
+        let preview = prepare(&c, &r).unwrap();
+        let unsigned: Transaction =
+            bincode::deserialize(&STANDARD.decode(&preview.transaction).unwrap()).unwrap();
+        assert_eq!(preview.message, out.message);
+        assert_eq!(preview.source_ata, out.source_ata);
+        assert_eq!(preview.destination_ata, out.destination_ata);
+        assert_eq!(preview.signature, None);
+        assert!(unsigned.signatures[0].as_ref().iter().all(|b| *b == 0));
         let tx: Transaction =
             bincode::deserialize(&STANDARD.decode(&out.transaction).unwrap()).unwrap();
         tx.verify().unwrap();
@@ -321,5 +335,48 @@ mod wire_tests {
         assert!(prepare(&c, &r).is_err());
         let request = serde_json::json!({"protocol":1,"verb":"deposit","owner":r.owner,"recipient":r.recipient,"amount":"3","blockhash":r.blockhash,"order_id":"order-1","create_ata":false,"instructions":[]});
         assert!(serde_json::from_value::<Request>(request).is_err());
+    }
+    #[test]
+    fn preview_rejects_wrong_custody_off_curve_and_unknown_fields() {
+        let (mut c, mut r) = inputs();
+        r.verb = Verb::PayoutPreview;
+        r.create_ata = true;
+        assert_eq!(prepare(&c, &r).err(), Some("wrong_custody_owner"));
+        c.custody_owner = r.owner.clone();
+        let ata = get_associated_token_address_with_program_id(
+            &key(&r.recipient).unwrap(),
+            &key(&c.mint).unwrap(),
+            &spl_token_interface::id(),
+        );
+        r.recipient = ata.to_string();
+        assert_eq!(prepare(&c, &r).err(), Some("unsupported_owner"));
+        let request = serde_json::json!({"protocol":1,"verb":"payout_preview","owner":r.owner,"recipient":r.recipient,"amount":"3","blockhash":r.blockhash,"order_id":"order-1","create_ata":true,"sign":true});
+        assert!(serde_json::from_value::<Request>(request).is_err());
+    }
+    #[test]
+    fn unsigned_quote_fixture_never_needs_a_signer() {
+        let (mut c, mut r) = inputs();
+        c.signer_path = Some("/nonexistent-quote-signer".into());
+        r.order_id = "quote-check".into();
+        let deposit = prepare(&c, &r).unwrap();
+        let wallet = r.owner.clone();
+        r.verb = Verb::PayoutPreview;
+        r.owner = c.custody_owner.clone();
+        r.recipient = wallet.clone();
+        r.create_ata = true;
+        let payout = prepare(&c, &r).unwrap();
+        assert_eq!(deposit.source_ata, payout.destination_ata);
+        assert_eq!(deposit.destination_ata, payout.source_ata);
+        assert_eq!(deposit.signature, None);
+        assert_eq!(payout.signature, None);
+        if let Ok(dest) = std::env::var("ECX_FIXTURE_DIR") {
+            fs::create_dir_all(&dest).unwrap();
+            let fixture = serde_json::json!({"scope":"offline official-SDK codec fixture; never funded or sent", "deploymentId":c.deployment_id,"mint":c.mint,"custodyOwner":c.custody_owner,"wallet":wallet,"blockhash":r.blockhash,"deposit":deposit,"payout":payout});
+            fs::write(
+                Path::new(&dest).join("admission-unsigned.json"),
+                serde_json::to_vec_pretty(&fixture).unwrap(),
+            )
+            .unwrap();
+        }
     }
 }

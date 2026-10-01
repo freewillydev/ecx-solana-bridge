@@ -88,7 +88,7 @@ Configuration now requires `maxNativeDailyCost` and `maxSolDailyCost` as base-un
 
 The schema-7 upgrade preserved every financial table and the critical sequence. Six historical operating postings now carry conservative migration-time timestamps. Private `/audit` includes the current rolling-budget breakdown: 423 native units and 1,508,440 lamports of booked costs, zero active holds, and free operating allocations of 149,577 native units and 3,491,560 lamports at this checkpoint. Historical costs leave the rolling window after a full day; the balances remain reduced by the actual spends. [Upgrade and restart evidence](evidence/operating-budget-upgrade.json).
 
-The quote and payment contract tests exercise reservations and limits. Existing pre-schema-7 orders have no invented fee snapshots; the three live test orders are terminal. Unfinished legacy orders require operator recovery before resumption. The worker and browser intake remain disabled while native admission, reconciliation and recovery are completed.
+The quote and payment contract tests exercise reservations and limits. Existing pre-schema-7 orders have no invented fee snapshots; the three live test orders are terminal. Unfinished legacy orders require operator recovery before resumption. The worker and browser intake remain disabled while admission/provisioning integration, reconciliation and recovery are completed.
 
 ## Native admission probe
 
@@ -96,4 +96,12 @@ The quote and payment contract tests exercise reservations and limits. Existing 
 
 The actual node accepted a 10,000-unit full refund candidate and a 9,900-unit payout candidate, both with 141-unit estimated fees. The tested P2WPKH destination accepted 294 units and refused 293 units. Those two boundary cases temporarily lower only the probe's minimum-input setting; the live configuration remains at 10,000. Wrong-network and bridge-owned destinations were rejected. Custody keypool sizes, transaction count and input locks remained unchanged, as did every financial ledger table and critical sequence. [Saved evidence](evidence/native-admission.json).
 
-This validates current node policy and the shared unsigned validator. It does not sign a new native payment, activate public intake, establish all destination-type compatibility, or complete Solana wallet admission and recovery.
+This validates current node policy and the shared unsigned validator. It does not sign a new native payment, activate public intake, establish all destination-type compatibility, or complete recovery.
+
+## Solana admission probe
+
+`scripts/solana-admission-probe.hs CONFIG` is restricted to the existing public-test deployment. Stop the verified worker before using it; it takes the ledger lock and refuses unresolved payments/preparations. Its temporary helper configuration contains only public identities and no signer path. It uses a read/simulation RPC allowlist, independently refuses any usable simulation signature, and creates no order or payment.
+
+Actual Devnet admitted the dedicated tester for a 9,980-unit wrap payout and 10,000-unit redemption/full-refund preview, with 5,000-lamport message fees. A fresh unfunded recipient key was used only to simulate missing-ATA creation, requiring 1,488,440 lamports; its key was not saved and it must never receive funds. The old setup payer's ATA already exists because the earlier standalone payout created it. Custody owner/account, configured mint and the tester's token account were refused as wallet inputs. All observed balances, financial tables and critical sequence remained unchanged; the worker restarted with three healthy scans. [Evidence](evidence/solana-admission.json).
+
+The normal scoped acceptance tool runs both chain checks before creating a new order, then starts the immutable deadline. Its three existing terminal orders are reused without a new quote. Public provisioning and browser signing remain disabled; simulation does not establish later fee levels, account state or successful settlement.

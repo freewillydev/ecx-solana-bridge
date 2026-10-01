@@ -7,6 +7,7 @@ import Bridge.Types
 import Control.Monad (unless)
 import Data.Aeson
 import Data.Aeson.Types (Parser)
+import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Lazy as LBS
@@ -60,27 +61,45 @@ validateHelperRequest c HelperRequest{..} = do
     [helperOwner,helperRecipient,helperBlockhash]
 
 validateHelperReply :: Config -> HelperRequest -> HelperReply -> Either Text Transaction
-validateHelperReply c request@HelperRequest{..} HelperReply{..} = do
+validateHelperReply c request = validateHelperReplyWithSignature (helperPayout request) c request
+
+-- Preview transactions have the same economic instructions as payouts, but
+-- cannot carry a usable signature. Never accept a signed reply on this path.
+validateUnsignedHelperReply :: Config -> HelperRequest -> HelperReply -> Either Text Transaction
+validateUnsignedHelperReply = validateHelperReplyWithSignature False
+
+validateHelperReplyWithSignature :: Bool -> Config -> HelperRequest -> HelperReply -> Either Text Transaction
+validateHelperReplyWithSignature signed c request@HelperRequest{..} HelperReply{..} = do
   validateHelperRequest c request
   unless (replyProtocol==1 && replyMemo==helperMemo c request
     && (if helperPayout then replySource==custodyAta c else replyDestination==custodyAta c))
     (Left "helper_identity_mismatch")
   mapM_ (\key -> unless (T.length key<=44) (Left "invalid_public_key")) [replySource,replyDestination]
   let expected=Expected helperOwner helperRecipient (mint c) replySource replyDestination helperBlockhash
-        helperAmount (helperMemo c request) helperPayout helperPayout
+        helperAmount (helperMemo c request) helperPayout signed
   tx@(Transaction signatures _ message) <- validateTransaction expected replyTransaction
   encodedMessage <- either (const $ Left "invalid_helper_message") Right (B64.decode $ TE.encodeUtf8 replyMessage)
   unless (encodedMessage==message) (Left "helper_message_mismatch")
-  let expectedSignature=if helperPayout then case signatures of [sig]->Just (base58 sig); _->Nothing else Nothing
+  let expectedSignature=if signed then case signatures of [sig]->Just (base58 sig); _->Nothing else Nothing
   unless (replySignature==expectedSignature) (Left "helper_signature_mismatch")
   pure tx
 
 invokeHelper :: Config -> HelperRequest -> IO HelperReply
-invokeHelper c request = do
+invokeHelper c request = invokeHelperWith c request (toJSON request) (validateHelperReply c request)
+
+invokeUnsignedHelper :: Config -> HelperRequest -> IO HelperReply
+invokeUnsignedHelper c request = invokeHelperWith c request wireRequest (validateUnsignedHelperReply c request)
+ where
+  wireRequest=case toJSON request of
+    Object fields | helperPayout request -> Object (KM.insert "verb" (String "payout_preview") fields)
+    value -> value
+
+invokeHelperWith :: Config -> HelperRequest -> Value -> (HelperReply -> Either Text Transaction) -> IO HelperReply
+invokeHelperWith c request wireRequest validate = do
   either reject pure (validateHelperRequest c request)
-  output <- runBounded 10 8192 (helperPath c) ["--config",helperConfig c] (LBS.toStrict $ encode request)
+  output <- runBounded 10 8192 (helperPath c) ["--config",helperConfig c] (LBS.toStrict $ encode wireRequest)
   reply <- either (const $ reject "invalid_helper_reply") pure (eitherDecodeStrict' output)
-  _ <- either reject pure (validateHelperReply c request reply)
+  _ <- either reject pure (validate reply)
   pure reply
 
 -- The SDK's exact message is unchanged. A zero signature cannot authorize a

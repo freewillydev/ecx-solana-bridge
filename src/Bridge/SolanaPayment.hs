@@ -64,9 +64,26 @@ systemLamports :: Value -> IO Amount
 systemLamports account = do
   program <- fieldValue "owner" account :: IO Text
   executable <- fieldValue "executable" account
-  bytes <- fieldValue "data" account :: IO [Text]
-  require (program=="11111111111111111111111111111111" && not executable && bytes==["","base64"]) "unsupported_system_account"
+  bytes <- fieldValue "data" account :: IO Value
+  require (program=="11111111111111111111111111111111" && not executable && bytes==toJSON ["","base64"::Text]) "unsupported_system_account"
   fieldValue "lamports" account >>= either reject pure . amount
+
+-- Share the same account policy between quote admission and payment
+-- preparation. The budget still reserves the full configured rent ceiling:
+-- an existing recipient ATA can be closed before the eventual payout.
+solanaDestinationRent :: SolanaRPC -> Config -> Text -> Value -> IO Amount
+solanaDestinationRent call c owner destination =
+  if destination==Null then newAccountRent 0 else do
+    program <- fieldValue "owner" destination :: IO Text
+    if program==tokenProgram then do
+      _ <- either reject pure (inspectTokenAccount (mint c) owner destination)
+      either reject pure (amount 0)
+    else systemLamports destination >>= newAccountRent . toInteger . units
+ where
+  newAccountRent prefunded = do
+    required <- call "getMinimumBalanceForRentExemption" [toJSON (165::Int),object ["commitment" .= ("confirmed"::Text)]] >>= parseValue parseJSON :: IO Integer
+    require (required>0) "invalid_solana_rent_quote"
+    either reject pure (amount $ max 0 (required-prefunded))
 
 prepareSolanaSigned :: SolanaRPC -> (HelperRequest -> IO HelperReply) -> Config -> SolanaPlan -> IO SolanaSigned
 prepareSolanaSigned call helper c plan = do
@@ -88,12 +105,7 @@ prepareSolanaSigned call helper c plan = do
   (source,destination,payer) <- case accounts of [a,b,d] -> pure (a,b,d); _ -> reject "solana_account_snapshot_incomplete"
   sourceBalance <- either reject pure (inspectTokenAccount (mint c) (custodyOwner c) source)
   require (sourceBalance>=solPlanAmount plan) "insufficient_custody_tokens"
-  rent <- if destination==Null then newAccountRent 0 else do
-    program <- fieldValue "owner" destination :: IO Text
-    if program==tokenProgram then do
-      _ <- either reject pure (inspectTokenAccount (mint c) (solPlanRecipient plan) destination)
-      either reject pure (amount 0)
-    else systemLamports destination >>= newAccountRent . toInteger . units
+  rent <- solanaDestinationRent call c (solPlanRecipient plan) destination
   require (rent<=solPlanRentLimit plan) "solana_rent_above_limit"
   balance <- systemLamports payer
   require (toInteger (units balance)>=toInteger (units fee)+toInteger (units rent)) "insufficient_operating_sol"
@@ -106,11 +118,6 @@ prepareSolanaSigned call helper c plan = do
   require (err==Null) "solana_simulation_failed"
   checkBlockhashWindow call (solPlanRecent plan)
   pure (SolanaSigned plan reply fee rent)
- where
-  newAccountRent prefunded = do
-    required <- call "getMinimumBalanceForRentExemption" [toJSON (165::Int),object ["commitment" .= ("confirmed"::Text)]] >>= parseValue parseJSON :: IO Integer
-    require (required>0) "invalid_solana_rent_quote"
-    either reject pure (amount $ max 0 (required-prefunded))
 
 -- The caller must obtain this getTransaction result with finalized commitment.
 -- Matching the entire SDK message prevents unrelated transfers from being

@@ -114,6 +114,20 @@ unsigned customer deposits (SDK fixture and offline RPC contracts)
   requires instruction backup coverage before invoking the helper [✔]
   rechecks deadline and pause state after RPC without losing the quote [✔]
   rejects unauthorized access and insufficient user fee funds without signing [✔]
+Solana quote admission (offline official-SDK and RPC contracts)
+  checks the exact net payout using only unsigned messages [✔]
+  admits an unfunded wrap recipient and missing ATA within the rent ceiling [✔]
+  deducts only existing system-account lamports from ATA rent [✔]
+  checks gross redemption tokens, user deposit fees and the full-refund message [✔]
+  rejects custody identities and mismatched source owners before any IO [✔]
+  rejects token, nonce and executable accounts passed as wallet owners [✔]
+  rejects wrong-owner, frozen, delegated and extended recipient accounts [✔]
+  rejects insufficient custody tokens or operating SOL [✔]
+  rejects missing/insufficient redemption tokens and insufficient customer SOL [✔]
+  rejects fee/rent over budget and unavailable fee estimates [✔]
+  refuses stale/incomplete account responses and failed simulation [✔]
+  rejects signed or altered preview bytes before account reads/simulation [✔]
+  rechecks the blockhash after simulation [✔]
 token account policy (captured finalized Devnet accounts)
   accepts the real eight-decimal custody balance [✔]
   rejects owner/mint changes, delegates, close authorities, frozen and extended accounts [✔]
@@ -159,6 +173,6 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 1.5990 seconds
-133 examples, 0 failures
+Finished in 1.5005 seconds
+146 examples, 0 failures
 Test suite bridge-test: PASS
