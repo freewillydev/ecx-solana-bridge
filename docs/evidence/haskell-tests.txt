@@ -82,6 +82,15 @@ backup and schema protections
   does not expose canonical instructions before acknowledged coverage [✔]
   makes a consistent snapshot while the ledger is open [✔]
   refuses repointing an existing database [✔]
+native quote admission (offline RPC contracts)
+  checks the full native refund and exact net redemption without signing or locking [✔]
+  rejects owned and watched destinations before wallet funding [✔]
+  refuses unknown witness, anchor and nonstandard destination types [✔]
+  rejects invalid address bounds and malformed script responses [✔]
+  requires a safe confirmed spendable wallet output for existing change [✔]
+  does not touch locks belonging to another or interrupted payment [✔]
+  preserves a node refusal or unknown funding response without retrying or signing [✔]
+  refuses funding above the native fee ceiling without changing the quoted output [✔]
 native transaction validation (captured public-Signet transaction)
   accepts the exact recipient, change, input and fee in the recorded real payment [✔]
   rejects changed amounts, destinations, third outputs and nonowned change scripts [✔]
@@ -150,6 +159,6 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 1.5377 seconds
-125 examples, 0 failures
+Finished in 1.5990 seconds
+133 examples, 0 failures
 Test suite bridge-test: PASS

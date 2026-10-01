@@ -13,6 +13,7 @@ import Data.List (nub)
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Generics (Generic)
+import Network.HTTP.Client (Manager)
 
 -- Only this dedicated wallet's RPC is supplied. Tests can exercise the same
 -- method contract without selecting a substitute network in the application.
@@ -114,16 +115,51 @@ ownedScript call address = do
 newNativePlan :: NativeRPC -> Profile -> Int -> Amount -> Text -> Amount -> IO NativePlan
 newNativePlan call selectedProfile depth feeLimit recipient quantity = do
   require (depth>0 && depth<=1008 && units quantity>0 && units feeLimit>0 && T.length recipient<=128) "invalid_native_plan"
-  info <- call True "getaddressinfo" [toJSON recipient]
-  mine <- fieldValue "ismine" info :: IO Bool
-  watched <- parseValue (withObject "address" (\o -> o .:? "iswatchonly" .!= False)) info
-  require (not mine && not watched) "bridge_owned_destination"
-  script <- fieldValue "scriptPubKey" info
-  require (hexText script && T.length script<=200) "invalid_native_script"
+  script <- validateNativeRecipientWith call recipient
   change <- call True "getrawchangeaddress" [String "bech32"] >>= parseValue parseJSON
   changeScript <- ownedScript call change
   require (script/=changeScript) "bridge_owned_destination"
   pure (NativePlan selectedProfile recipient script change changeScript quantity depth feeLimit)
+
+data NativeQuoteCheck = NativeQuoteCheck
+  { checkedNativeRole :: !Text, checkedNativeScript :: !Text
+  , checkedNativeAmount :: !Amount, checkedNativeFee :: !Amount }
+  deriving (Eq,Show,Generic,ToJSON,FromJSON)
+
+checkNativeQuote :: Manager -> Config -> OrderRequest -> IO NativeQuoteCheck
+checkNativeQuote manager cfg request = do
+  _ <- nativeIdentity manager cfg
+  checkNativeQuoteWith (nativeCall manager cfg) cfg request
+
+-- The selected daemon applies its actual dust/fee policy. Use an EXISTING
+-- owned address for change, no input locks, no key allocation and no signer.
+-- Discard the unsigned draft: it is neither a reservation nor a payment.
+checkNativeQuoteWith :: NativeRPC -> Config -> OrderRequest -> IO NativeQuoteCheck
+checkNativeQuoteWith call cfg request = do
+  require (input request>=minInput cfg && input request<=maxInput cfg) "amount_outside_limits"
+  q <- either reject pure (makeQuote (direction request) (input request))
+  let wrapping=direction request==NativeToWrapped
+      destination=if wrapping then refund request else recipient request
+      quantity=if wrapping then gross q else net q
+      depth=nativeConfirmations cfg
+  require (depth>0 && depth<=1008 && units (maxNativeFee cfg)>0) "invalid_native_plan"
+  script <- validateNativeRecipientWith call destination
+  coins <- call True "listunspent" [toJSON depth,toJSON (9999999::Int),toJSON ([]::[Text]),Bool False
+    ,object ["maximumCount" .= (100::Int)]] >>= parseValue parseJSON :: IO [Value]
+  require (length coins<=100) "native_admission_utxo_bounds"
+  addresses <- forM coins $ parseValue $ withObject "unspent" $ \o -> do
+    safe <- o .: "safe"; spendable <- o .: "spendable"; solvable <- o .: "solvable"
+    confirmations <- o .: "confirmations"
+    address <- o .:? "address"
+    pure $ if safe && spendable && solvable && confirmations>=depth then address else Nothing
+  change <- case [a | Just a<-addresses] of a:_ -> pure a; [] -> reject "native_admission_funds_unavailable"
+  changeScript <- ownedScript call change
+  require (script/=changeScript) "bridge_owned_destination"
+  let plan=NativePlan (profile cfg) destination script change changeScript quantity depth (maxNativeFee cfg)
+  draft <- fundNativeDraftWith False call plan
+  locks <- call True "listlockunspent" [] >>= parseValue parseJSON :: IO [Outpoint]
+  require (null locks) "native_preparation_locks_require_review"
+  pure $ NativeQuoteCheck (if wrapping then "refund" else "payout") script quantity (draftFee draft)
 
 readNativePrevouts :: NativeRPC -> Int -> [NativeInput] -> IO [NativePrevout]
 readNativePrevouts call depth inputs = forM inputs $ \input -> do
@@ -142,7 +178,10 @@ readNativePrevouts call depth inputs = forM inputs $ \input -> do
   pure (NativePrevout point quantity script confirmations coinbase)
 
 fundNativeDraft :: NativeRPC -> NativePlan -> IO NativeDraft
-fundNativeDraft call plan@NativePlan{..} = do
+fundNativeDraft = fundNativeDraftWith True
+
+fundNativeDraftWith :: Bool -> NativeRPC -> NativePlan -> IO NativeDraft
+fundNativeDraftWith lockInputs call plan@NativePlan{..} = do
   -- Unknown locks may be the result of an interrupted earlier RPC. Do not
   -- discard them or quietly select a fresh set of inputs.
   locked <- call True "listlockunspent" [] >>= parseValue parseJSON :: IO [Outpoint]
@@ -150,7 +189,7 @@ fundNativeDraft call plan@NativePlan{..} = do
   funded <- call True "walletcreatefundedpsbt"
     [ toJSON ([]::[Value]),toJSON [object [Key.fromText planRecipient .= nativeNumber planAmount]]
     , toJSON (if planProfile==L2LSignetDevnet then 0::Int64 else 499999999)
-    , object ["add_inputs" .= True,"include_unsafe" .= False,"lockUnspents" .= True
+    , object ["add_inputs" .= True,"include_unsafe" .= False,"lockUnspents" .= lockInputs
       ,"replaceable" .= False,"minconf" .= planDepth,"changeAddress" .= planChange
       ,"subtractFeeFromOutputs" .= ([]::[Int]),"conf_target" .= planDepth
       ,"estimate_mode" .= ("conservative"::Text),"max_tx_weight" .= (40000::Int)]

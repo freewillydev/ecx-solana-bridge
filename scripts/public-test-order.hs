@@ -6,6 +6,7 @@ import Bridge.Config
 import Bridge.Deposit
 import Bridge.Ledger
 import Bridge.Native
+import Bridge.NativePayment (checkNativeQuote)
 import Bridge.Observer
 import Bridge.RPC
 import Bridge.Settlement
@@ -53,14 +54,15 @@ main=do
         scan<-observeOnce manager c ledger
         requireHealthy scan
         requireBalances manager c ledger
-        _<-validateNativeRecipient manager c nativeDestination
         tester<-nativeCall manager c{nativeWallet="ecx-bridge-tester"} True "getaddressinfo" [toJSON nativeDestination]
         owned<-fieldValue "ismine" tester
         require owned "refund_must_belong_to_test_wallet"
         resumeAfterChecks ledger
-        now<-epochSeconds
         order<-case existing of
-          []->createOrder ledger c now capability request
+          []->do
+            _<-checkNativeQuote manager c request
+            now<-epochSeconds
+            createOrder ledger c now capability request
           [oid]->do
             prior<-readOrder ledger capability oid
             require (Bridge.Types.request prior==request) "acceptance_request_changed"

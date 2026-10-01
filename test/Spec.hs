@@ -10,7 +10,7 @@ import Bridge.Solana (inspectTokenAccount)
 import Bridge.SolanaHelper
 import Bridge.SolanaPayment
 import qualified Data.Aeson.KeyMap as KM
-import Bridge.Native (nativeAmount,nativeNumber)
+import Bridge.Native (nativeAmount,nativeNumber,validateNativeRecipientWith)
 import Bridge.NativePayment
 import Bridge.Payment (prepareNativeWith,prepareSolanaWith)
 import Bridge.Settlement
@@ -104,6 +104,50 @@ nativeFixture = do
   fee <- fieldValue "fee" value
   decoded <- fieldValue "decoded" value >>= either (fail . T.unpack) pure . decodeNativeTx
   pure (plan,previous,fee,decoded)
+
+-- The captured bytes supply economic validation; RPC responses below are
+-- explicitly offline contracts, not evidence of a new chain transaction.
+withNativeAdmission :: (Config -> NativePlan -> IORef [Text] -> NativeRPC -> IO a) -> IO a
+withNativeAdmission action=do
+  (plan,previous,fee,_)<-nativeFixture
+  captured<-BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
+  decoded<-fieldValue "decoded" captured :: IO Value
+  prev<-case previous of [p]->pure p; _->fail "expected one captured previous output"
+  calls<-newIORef []
+  let c=cfg "/unused-native-admission-fixture"
+      call wallet method params=do
+        modifyIORef' calls (<>[method])
+        case (method,params) of
+          ("getaddressinfo",[String address]) -> do
+            wallet `shouldBe` True
+            pure $ object ["ismine" .= (address/=planRecipient plan),"scriptPubKey" .=
+              (if address==planRecipient plan then planRecipientScript plan
+                else if address==planChange plan then planChangeScript plan else prevoutScript prev)]
+          ("decodescript",[String script]) -> do
+            wallet `shouldBe` False
+            script `shouldBe` planRecipientScript plan
+            pure $ object ["type" .= ("witness_v0_keyhash"::Text)]
+          ("listunspent",[depth,_,_,unsafe,options]) -> do
+            wallet `shouldBe` True
+            depth `shouldBe` toJSON (nativeConfirmations c)
+            unsafe `shouldBe` Bool False
+            fieldValue "maximumCount" options `shouldReturn` (100::Int)
+            pure $ toJSON [object ["address" .= planChange plan,"confirmations" .= (1000::Int),"safe" .= True,"spendable" .= True,"solvable" .= True]]
+          ("listlockunspent",_) -> pure $ toJSON ([]::[Outpoint])
+          ("walletcreatefundedpsbt",[_,outputs,locktime,options,_]) -> do
+            fieldValue "lockUnspents" options `shouldReturn` False
+            fieldValue "replaceable" options `shouldReturn` False
+            fieldValue "include_unsafe" options `shouldReturn` False
+            fieldValue "changeAddress" options `shouldReturn` planChange plan
+            fieldValue "minconf" options `shouldReturn` nativeConfirmations c
+            locktime `shouldBe` toJSON (0::Int)
+            outputs `shouldBe` toJSON [object [fromString (T.unpack $ planRecipient plan) .= nativeNumber (planAmount plan)]]
+            pure $ object ["psbt" .= ("unsigned-admission-fixture"::Text),"fee" .= nativeNumber fee,"changepos" .= (0::Int)]
+          ("decodepsbt",_) -> pure $ object ["tx" .= decoded,"fee" .= nativeNumber fee]
+          ("gettxout",_) -> pure $ object ["value" .= nativeNumber (prevoutAmount prev),"confirmations" .= (1000::Int),"coinbase" .= False
+            ,"scriptPubKey" .= object ["hex" .= prevoutScript prev,"address" .= ("fixture-prevout"::Text)]]
+          _ -> expectationFailure ("unexpected native admission RPC: "<>T.unpack method) >> pure Null
+  action c plan calls call
 
 main :: IO ()
 main=hspec $ do
@@ -717,6 +761,57 @@ main=hspec $ do
       let c=cfg dir
       withLedger (dbPath c) (fingerprint c) (const $ pure ())
       withLedger (dbPath c) "other-profile" (const $ pure ()) `shouldThrow` isError "ledger_profile_or_schema_mismatch"
+  describe "native quote admission (offline RPC contracts)" $ do
+    it "checks the full native refund and exact net redemption without signing or locking" $ withNativeAdmission $ \c plan calls call -> do
+      let wrap=req{refund=planRecipient plan}
+          redeem=req{direction=WrappedToNative,input=amt 101011,recipient=planRecipient plan}
+      checkNativeQuoteWith call c wrap `shouldReturn` NativeQuoteCheck "refund" (planRecipientScript plan) (amt 100000) (amt 282)
+      checkNativeQuoteWith call c redeem `shouldReturn` NativeQuoteCheck "payout" (planRecipientScript plan) (amt 100000) (amt 282)
+      methods<-readIORef calls
+      methods `shouldSatisfy` all (`notElem` ["getnewaddress","getrawchangeaddress","lockunspent","walletprocesspsbt","finalizepsbt","sendrawtransaction"])
+      length (filter (=="walletcreatefundedpsbt") methods) `shouldBe` 2
+    it "rejects owned and watched destinations before wallet funding" $ withNativeAdmission $ \c plan calls call -> do
+      forM_ [(True,False),(False,True)] $ \(mine,watched) -> do
+        let owned wallet method params = if method=="getaddressinfo"
+              then pure $ object ["ismine" .= mine,"iswatchonly" .= watched,"scriptPubKey" .= planRecipientScript plan]
+              else call wallet method params
+        checkNativeQuoteWith owned c req{refund=planRecipient plan} `shouldThrow` isError "bridge_owned_destination"
+      readIORef calls `shouldReturn` []
+    it "refuses unknown witness, anchor and nonstandard destination types" $ withNativeAdmission $ \c plan calls call -> do
+      forM_ ["witness_unknown","anchor","nonstandard","nulldata","multisig"] $ \kind -> do
+        let unsupported wallet method params = if method=="decodescript" then pure (object ["type" .= (kind::Text)]) else call wallet method params
+        checkNativeQuoteWith unsupported c req{refund=planRecipient plan} `shouldThrow` isError "unsupported_native_destination"
+      readIORef calls >>= (`shouldSatisfy` notElem "walletcreatefundedpsbt")
+    it "rejects invalid address bounds and malformed script responses" $ withNativeAdmission $ \_ plan _ call -> do
+      forM_ ["",T.replicate 129 "x"] $ \address -> validateNativeRecipientWith call address `shouldThrow` isError "invalid_native_address"
+      forM_ ["", "0", "zz", T.replicate 202 "0"] $ \script -> do
+        let malformed _ _ _=pure $ object ["ismine" .= False,"scriptPubKey" .= (script::Text)]
+        validateNativeRecipientWith malformed (planRecipient plan) `shouldThrow` isError "invalid_native_script"
+    it "requires a safe confirmed spendable wallet output for existing change" $ withNativeAdmission $ \c plan calls call -> do
+      forM_ (["safe","spendable","solvable"]::[Text]) $ \flag -> do
+        let noFunds wallet method params = if method=="listunspent"
+              then pure $ toJSON [object ["address" .= planChange plan,"confirmations" .= (1000::Int)
+                ,"safe" .= (flag/="safe"),"spendable" .= (flag/="spendable"),"solvable" .= (flag/="solvable")]]
+              else call wallet method params
+        checkNativeQuoteWith noFunds c req{refund=planRecipient plan} `shouldThrow` isError "native_admission_funds_unavailable"
+      readIORef calls >>= (`shouldSatisfy` notElem "walletcreatefundedpsbt")
+    it "does not touch locks belonging to another or interrupted payment" $ withNativeAdmission $ \c plan calls call -> do
+      let locked wallet method params = if method=="listlockunspent"
+            then pure $ toJSON [Outpoint (T.replicate 64 "a") 0] else call wallet method params
+      checkNativeQuoteWith locked c req{refund=planRecipient plan} `shouldThrow` isError "native_preparation_locks_require_review"
+      readIORef calls >>= (`shouldSatisfy` all (`notElem` ["lockunspent","walletcreatefundedpsbt"]))
+    it "preserves a node refusal or unknown funding response without retrying or signing" $ withNativeAdmission $ \c plan calls call -> do
+      forM_ ["rpc_error_-4","rpc_transport_unknown_outcome"] $ \code -> do
+        writeIORef calls []
+        let refused wallet method params = if method=="walletcreatefundedpsbt"
+              then modifyIORef' calls (<>[method]) >> reject code else call wallet method params
+        checkNativeQuoteWith refused c req{refund=planRecipient plan} `shouldThrow` isError code
+        methods<-readIORef calls
+        length (filter (=="walletcreatefundedpsbt") methods) `shouldBe` 1
+        methods `shouldSatisfy` notElem "walletprocesspsbt"
+    it "refuses funding above the native fee ceiling without changing the quoted output" $ withNativeAdmission $ \c plan calls call -> do
+      checkNativeQuoteWith call c{maxNativeFee=amt 281} req{refund=planRecipient plan} `shouldThrow` isError "native_fee_mismatch"
+      readIORef calls >>= (`shouldSatisfy` notElem "walletprocesspsbt")
   describe "native transaction validation (captured public-Signet transaction)" $ do
     it "accepts the exact recipient, change, input and fee in the recorded real payment" $ do
       (plan,previous,fee,tx)<-nativeFixture
@@ -764,6 +859,7 @@ main=hspec $ do
                   (if address==planRecipient plan then planRecipientScript plan
                    else if address==planChange plan then planChangeScript plan else prevoutScript previousOutput)]
               ("getrawchangeaddress",_) -> pure $ toJSON (planChange plan)
+              ("decodescript",_) -> pure $ object ["type" .= ("witness_v0_keyhash"::Text)]
               ("listlockunspent",_) -> toJSON <$> readIORef locks
               ("walletcreatefundedpsbt",[_,_,_,options,_]) -> do
                 -- These responses test the RPC contract, not chain acceptance.

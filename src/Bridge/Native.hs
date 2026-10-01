@@ -39,12 +39,21 @@ nativeIdentity manager c = do
   require (peers>0) "native_no_peers"
   pure info
 validateNativeRecipient :: Manager -> Config -> Text -> IO Text
-validateNativeRecipient manager c address = do
-  require (T.length address <= 128) "invalid_native_address"
-  v <- nativeCall manager c True "getaddressinfo" [toJSON address]
+validateNativeRecipient manager c = validateNativeRecipientWith (nativeCall manager c)
+validateNativeRecipientWith :: (Bool -> Text -> [Value] -> IO Value) -> Text -> IO Text
+validateNativeRecipientWith call address = do
+  require (not (T.null address) && T.length address<=128) "invalid_native_address"
+  v <- call True "getaddressinfo" [toJSON address]
   owned <- fieldValue "ismine" v :: IO Bool
-  require (not owned) "bridge_owned_destination"
-  fieldValue "scriptPubKey" v
+  watched <- parseValue (withObject "address" (\o -> o .:? "iswatchonly" .!= False)) v
+  require (not owned && not watched) "bridge_owned_destination"
+  script <- fieldValue "scriptPubKey" v
+  require (not (T.null script) && T.length script<=200 && even (T.length script)
+    && T.all (`elem` ("0123456789abcdef"::String)) script) "invalid_native_script"
+  decoded <- call False "decodescript" [toJSON script]
+  kind <- fieldValue "type" decoded :: IO Text
+  require (kind `elem` ["pubkeyhash","scripthash","witness_v0_keyhash","witness_v0_scripthash","witness_v1_taproot"]) "unsupported_native_destination"
+  pure script
 newNativeAddress :: Manager -> Config -> Text -> IO Text
 newNativeAddress manager c order = nativeCall manager c True "getnewaddress" [toJSON ("bridge:"<>order),String "bech32"] >>= parseValue parseJSON
 nativeHistory :: Manager -> Config -> Maybe Text -> Int -> IO Value
