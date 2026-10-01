@@ -193,3 +193,23 @@ recovery/accounted-loss views and preserve instruction visibility/backup gating.
 The library compiles. Runtime order acceptance is not yet verified; native
 provisioning/issuance, observation/payment wiring and the revised connection-free
 source/refund contract still need conversion before customer use.
+
+### Native provisioning journal conversion
+
+PostgreSQL order storage now implements native allocation claims, recovered
+address recording and instruction issuance through Opaleye. Allocation replay
+returns recovery-only permission; paused/expired recovered addresses remain
+recordable without reopening the quote. Issuance retains backup coverage,
+readiness, deadline and quote/operating reservation checks plus its audit record.
+Compilation passes; real node integration and runtime provisioning acceptance
+remain before this replaces the existing worker path.
+
+### PostgreSQL provisioning orchestration
+
+The order orchestration now compiles with the existing real native/identity RPC
+transport, preserving commit-before-allocation, recovered-address lookup, backup
+callback and instruction issuance. Expiry releases quote reservations atomically
+without marking a funded order unfunded. This path remains unwired to the paying
+worker: observers/reconciliation/payment conversion, consistent 1% adapter quote
+previews and connection-free Solana Pay association are still required. No new
+addresses, deposits or payouts were performed in this checkpoint.

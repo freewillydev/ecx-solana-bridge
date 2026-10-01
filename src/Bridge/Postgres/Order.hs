@@ -1,13 +1,14 @@
 module Bridge.Postgres.Order
-  ( readSavedOrder, findSavedOrder, bindInstruction, instructionBackup, createOrder, checkIntakeReady, exposeOrder, readOrderC ) where
+  ( readSavedOrder, findSavedOrder, bindInstruction, instructionBackup, createOrder, checkIntakeReady, exposeOrder, readOrderC, claimNativeAllocation, recordNativeInstruction, issueInstruction, expireQuotes ) where
 
 import Bridge.Config
 import qualified Bridge.Postgres.Budget as Budget
 import qualified Bridge.Postgres.Ledger as Ledger
-import Control.Monad (when)
+import Control.Monad (when, forM_)
 import Data.List (nub, sortOn)
 import qualified Data.Map.Strict as M
 import Bridge.Types
+import qualified Bridge.Types as Types
 import Bridge.Postgres.Schema
 import Bridge.Postgres.Ledger (Ledger, ledgerAction, criticalSequence)
 import Data.Aeson (encode, ToJSON, FromJSON, eitherDecodeStrict')
@@ -222,3 +223,108 @@ exposeOrder ledger remote capability oid = do
         pure view
       (_,0)->pure view {depositInstruction=Nothing}
       _->reject "invalid_instruction_state"
+
+claimNativeAllocation :: Ledger -> Config -> Int64 -> Text -> Text -> IO (Bool,Text)
+claimNativeAllocation ledger cfg now capability oid = do
+  cap <- either reject pure (capabilityHash capability)
+  ledgerAction ledger $ \connection->do
+    order <- readOrderC connection cap oid
+    require (direction (request order)==NativeToWrapped && Types.deploymentFingerprint (policy order)==fingerprint cfg && depositInstruction order==Nothing) "invalid_native_provisioning_order"
+    let label="ecx-bridge:v1:"<>deploymentId cfg<>":order:"<>oid
+    saved <- O.runSelect connection $ do
+      row <- O.selectTable nativeallocationsTable
+      O.where_ (nativeallocationsOrderId row O..== O.sqlStrictText oid)
+      pure (nativeallocationsLabel row)
+      :: IO [Text]
+    case saved of
+      [old]->require (old==label) "allocation_label_mismatch" >> pure (False,label)
+      []->do
+        checkIntakeReadyC connection now
+        require (status order=="Provisioning" && now<=deadline order) "deposit_window_closed"
+        sequenceNo <- criticalSequence connection
+        _ <- O.runInsert connection O.Insert
+          {O.iTable=nativeallocationsTable,O.iRows=[NativeAllocations (O.sqlStrictText oid) (O.sqlStrictText label) (O.sqlInt8 sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+        pure (True,label)
+      _->reject "duplicate_native_allocation"
+
+recordNativeInstruction :: Ledger -> Text -> Text -> Text -> Text -> IO ()
+recordNativeInstruction ledger capability oid label address = do
+  cap <- either reject pure (capabilityHash capability)
+  ledgerAction ledger $ \connection->do
+    order <- readOrderC connection cap oid
+    saved <- O.runSelect connection $ do
+      row <- O.selectTable nativeallocationsTable
+      O.where_ (nativeallocationsOrderId row O..== O.sqlStrictText oid)
+      pure (nativeallocationsLabel row)
+      :: IO [Text]
+    require (saved==[label] && direction (request order)==NativeToWrapped && not (T.null address) && T.length address<=128) "invalid_native_allocation_result"
+    case depositInstruction order of
+      Just old->require (old==address) "instruction_is_immutable"
+      Nothing->do
+        require (status order `elem` ["Provisioning","ExpiredUnfunded"]) "order_no_longer_provisioning"
+        sequenceNo <- criticalSequence connection
+        _ <- O.runUpdate connection O.Update
+          { O.uTable=ordersTable
+          , O.uUpdateWith= \row->row {ordersInstruction=O.toNullable (O.sqlStrictText address),ordersInstructionSequence=O.toNullable (O.sqlInt8 sequenceNo),
+              ordersStatus=O.ifThenElse (ordersStatus row O..== O.sqlStrictText "Provisioning") (O.sqlStrictText "AwaitingDeposit") (ordersStatus row)}
+          , O.uWhere= \row->ordersId row O..== O.sqlStrictText oid,O.uReturning=O.rCount }
+        pure ()
+
+issueInstruction :: Ledger -> Config -> Int64 -> Text -> Text -> IO OrderView
+issueInstruction ledger cfg now capability oid = do
+  cap <- either reject pure (capabilityHash capability)
+  ledgerAction ledger $ \connection->do
+    order <- readOrderC connection cap oid
+    require (Types.deploymentFingerprint (policy order)==fingerprint cfg) "order_profile_mismatch"
+    saved <- readSavedOrder connection cap oid
+    sequenceNo <- maybe (reject "instruction_not_recorded") pure (ordersInstructionSequence saved)
+    coverage <- O.runSelect connection $ fmap deploymentBackupSequence (O.selectTable deploymentTable) :: IO [Int64]
+    require (not (backupRequired cfg) || case coverage of [covered]->covered>=sequenceNo; _->False) "backup_pending"
+    require (ordersInstructionIssued saved `elem` [0,1]) "invalid_instruction_state"
+    when (ordersInstructionIssued saved==0) $ do
+      checkIntakeReadyC connection now
+      require (status order=="AwaitingDeposit" && now<=deadline order) "deposit_window_closed"
+      held <- O.runSelect connection $ do
+        row <- O.selectTable reservationsTable
+        O.where_ (reservationsOrderId row O..== O.sqlStrictText oid)
+        pure (reservationsPhase row)
+        :: IO [Text]
+      costs <- O.runSelect connection $ do
+        row <- O.selectTable operatingreservationsTable
+        O.where_ (operatingreservationsOrderId row O..== O.sqlStrictText oid)
+        pure (operatingreservationsPhase row)
+        :: IO [Text]
+      require (held==["quote"] && costs==["quote","quote"]) "quote_reservations_unavailable"
+      _ <- O.runUpdate connection O.Update
+        {O.uTable=ordersTable,O.uUpdateWith= \row->row {ordersInstructionIssued=O.sqlInt8 1},O.uWhere= \row->ordersId row O..== O.sqlStrictText oid,O.uReturning=O.rCount}
+      _ <- O.runInsert connection O.Insert
+        {O.iTable=auditTable,O.iRows=[Audit Nothing (O.sqlStrictText "instruction_issued") (O.sqlStrictText oid)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      pure ()
+    pure order
+
+expireQuotes :: Ledger -> Int64 -> IO ()
+expireQuotes ledger now = ledgerAction ledger $ \connection->do
+  expired <- O.runSelect connection $ do
+    row <- O.selectTable ordersTable
+    O.where_ (ordersGraceDeadline row O..< O.sqlInt8 now)
+    pure (ordersId row)
+    :: IO [Text]
+  forM_ expired $ \oid->do
+    _ <- O.runUpdate connection O.Update
+      { O.uTable=reservationsTable,O.uUpdateWith= \row->row {reservationsPhase=O.sqlStrictText "released"}
+      , O.uWhere= \row->reservationsOrderId row O..== O.sqlStrictText oid O..&& reservationsPhase row O..== O.sqlStrictText "quote",O.uReturning=O.rCount }
+    _ <- O.runUpdate connection O.Update
+      { O.uTable=operatingreservationsTable,O.uUpdateWith= \row->row {operatingreservationsPhase=O.sqlStrictText "released"}
+      , O.uWhere= \row->operatingreservationsOrderId row O..== O.sqlStrictText oid O..&& operatingreservationsPhase row O..== O.sqlStrictText "quote",O.uReturning=O.rCount }
+    deposits <- O.runSelect connection $ do
+      row <- O.selectTable depositsTable
+      O.where_ (O.matchNullable (O.sqlBool False) (\value->value O..== O.sqlStrictText oid) (depositsOrderId row))
+      pure (depositsId row)
+      :: IO [Text]
+    when (null deposits) $ do
+      _ <- O.runUpdate connection O.Update
+        { O.uTable=ordersTable,O.uUpdateWith= \row->row {ordersStatus=O.sqlStrictText "ExpiredUnfunded"}
+        , O.uWhere= \row->ordersId row O..== O.sqlStrictText oid O..&&
+            (ordersStatus row O..== O.sqlStrictText "Provisioning" O..|| ordersStatus row O..== O.sqlStrictText "AwaitingDeposit")
+        , O.uReturning=O.rCount }
+      pure ()
