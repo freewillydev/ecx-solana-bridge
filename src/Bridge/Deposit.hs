@@ -1,4 +1,4 @@
-module Bridge.Deposit (solanaDepositMemo, prepareSolanaDeposit, prepareSolanaDepositWith) where
+module Bridge.Deposit (DepositStore(..), solanaDepositMemo, prepareSolanaDeposit, prepareSolanaDepositWith) where
 
 import Bridge.Config
 import Bridge.Ledger
@@ -15,21 +15,32 @@ import Data.Text (Text)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Network.HTTP.Client (Manager)
 
+class DepositStore ledger where
+  depositRead :: ledger -> Text -> Text -> IO OrderView
+  depositExpose :: ledger -> Bool -> Text -> Text -> IO OrderView
+  depositPause :: ledger -> Text -> IO ()
+  depositReadiness :: ledger -> IO Availability
+instance DepositStore Ledger where
+  depositRead = readOrder
+  depositExpose = exposeOrder
+  depositPause = pause
+  depositReadiness = readiness
+
 solanaDepositMemo :: Config -> Text -> Text
 solanaDepositMemo c oid="ecx-bridge:v1:"<>deploymentId c<>":deposit:"<>oid
 
-prepareSolanaDeposit :: Manager -> Config -> Ledger -> Text -> Text -> IO Value
+prepareSolanaDeposit :: DepositStore ledger => Manager -> Config -> ledger -> Text -> Text -> IO Value
 prepareSolanaDeposit manager c ledger capability oid = do
   -- Invalid customer authorization must not pause the whole deployment.
-  _ <- readOrder ledger capability oid
+  _ <- depositRead ledger capability oid
   (nativeIdentity manager c >> solanaIdentity manager c >> pure ())
-    `onException` pause ledger "deposit_chain_identity_unavailable"
+    `onException` depositPause ledger "deposit_chain_identity_unavailable"
   prepareSolanaDepositWith (floor <$> getPOSIXTime) (solanaCall manager c) (invokeHelper c) c ledger capability oid
 
 -- The helper returns an unsigned standard wallet transaction. Only the owner
 -- bound in the immutable order can sign it; custody never signs a deposit.
 -- A blockhash refresh may change bytes, never the amount, owner or order memo.
-prepareSolanaDepositWith :: IO Int64 -> SolanaRPC -> (HelperRequest -> IO HelperReply) -> Config -> Ledger -> Text -> Text -> IO Value
+prepareSolanaDepositWith :: DepositStore ledger => IO Int64 -> SolanaRPC -> (HelperRequest -> IO HelperReply) -> Config -> ledger -> Text -> Text -> IO Value
 prepareSolanaDepositWith clock call helper c ledger capability oid = do
   order <- checkOrder
   let customerRequest=request order
@@ -63,9 +74,9 @@ prepareSolanaDepositWith clock call helper c ledger capability oid = do
     ,"feeLamports" .= fee,"chain" .= (if profile c==CanonicalBeta then "solana:mainnet" else "solana:devnet"::Text)]
  where
   checkOrder=do
-    order <- exposeOrder ledger (backupRequired c) capability oid
+    order <- depositExpose ledger (backupRequired c) capability oid
     now <- clock
-    health <- readiness ledger
+    health <- depositReadiness ledger
     require (available health) "deposits_paused"
     require (status order=="AwaitingDeposit" && now>=0 && now<=deadline order) "deposit_window_closed"
     let customerRequest=request order

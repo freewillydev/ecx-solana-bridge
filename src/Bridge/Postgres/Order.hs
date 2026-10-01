@@ -1,5 +1,5 @@
 module Bridge.Postgres.Order
-  ( readSavedOrder, findSavedOrder, bindInstruction, instructionBackup, createOrder, checkIntakeReady, exposeOrder, readOrderC, claimNativeAllocation, recordNativeInstruction, issueInstruction, expireQuotes ) where
+  ( checkIntakeReadyC, exposeOrderC, readSavedOrder, findSavedOrder, bindInstruction, instructionBackup, createOrder, checkIntakeReady, exposeOrder, readOrderC, claimNativeAllocation, recordNativeInstruction, issueInstruction, expireQuotes ) where
 
 import Bridge.Config
 import qualified Bridge.Postgres.Budget as Budget
@@ -214,15 +214,19 @@ exposeOrder :: Ledger -> Bool -> Text -> Text -> IO OrderView
 exposeOrder ledger remote capability oid = do
   cap <- either reject pure (capabilityHash capability)
   ledgerAction ledger $ \connection->do
-    view <- readOrderC connection cap oid
-    row <- readSavedOrder connection cap oid
-    case (ordersInstructionSequence row,ordersInstructionIssued row) of
-      (Just sequenceNo,1)->do
-        coverage <- O.runSelect connection $ fmap deploymentBackupSequence (O.selectTable deploymentTable) :: IO [Int64]
-        require (not remote || case coverage of [covered]->covered>=sequenceNo; _->False) "backup_pending"
-        pure view
-      (_,0)->pure view {depositInstruction=Nothing}
-      _->reject "invalid_instruction_state"
+    exposeOrderC connection remote cap oid
+
+exposeOrderC :: PG.Connection -> Bool -> Text -> Text -> IO OrderView
+exposeOrderC connection remote cap oid = do
+  view <- readOrderC connection cap oid
+  row <- readSavedOrder connection cap oid
+  case (ordersInstructionSequence row,ordersInstructionIssued row) of
+    (Just sequenceNo,1)->do
+      coverage <- O.runSelect connection $ fmap deploymentBackupSequence (O.selectTable deploymentTable) :: IO [Int64]
+      require (not remote || case coverage of [covered]->covered>=sequenceNo; _->False) "backup_pending"
+      pure view
+    (_,0)->pure view {depositInstruction=Nothing}
+    _->reject "invalid_instruction_state"
 
 claimNativeAllocation :: Ledger -> Config -> Int64 -> Text -> Text -> IO (Bool,Text)
 claimNativeAllocation ledger cfg now capability oid = do

@@ -5,6 +5,8 @@ import Bridge.Ledger (Attempt(..),Obligation(..),Deposit(..))
 import Bridge.Settlement (PaymentStore(..),SettlementStore(..))
 import qualified Bridge.Postgres.Settlement as S
 import Bridge.Payment (PreparationStore(..))
+import Bridge.Deposit (DepositStore(..))
+import qualified Bridge.Postgres.Order as Order
 import qualified Bridge.Postgres.Preparation as P
 import Bridge.Reconciliation (CustodyStore(..),View(..))
 import qualified Bridge.Postgres.Custody as C
@@ -175,3 +177,11 @@ instance SettlementStore Store where
   settlementExpiryOrigins (Store ledger) = S.checkExpiryOrigins ledger
   settlementBroadcast (Store ledger) = S.markBroadcastIntent ledger
   settlementAuthorize (Store ledger) = S.authorizeRecordedSend ledger
+
+instance DepositStore Store where
+  depositRead (Store ledger) capability oid = do
+    cap <- either reject pure(capabilityHash capability)
+    ledgerAction ledger (\connection->Order.readOrderC connection cap oid)
+  depositExpose (Store ledger) = Order.exposeOrder ledger
+  depositPause (Store ledger) = pause ledger
+  depositReadiness (Store ledger) = readiness ledger

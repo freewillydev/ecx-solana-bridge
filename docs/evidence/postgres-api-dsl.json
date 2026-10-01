@@ -1,0 +1,23 @@
+{
+  "command": "ecx-bridge postgres-api CONFIG",
+  "database": "isolated imported PostgreSQL ledger",
+  "realChains": "L2L Signet / Solana Devnet",
+  "verifiedRoutes": [
+    "customer config",
+    "customer process health",
+    "customer readiness returns 503 while paused",
+    "operator pause",
+    "operator readiness",
+    "operator audit",
+    "operator scanners"
+  ],
+  "handlers": "pure ServerT API Plan; operation dictionary resolves to DSL before evaluation",
+  "criticalEvaluationInvocationSites": 1,
+  "safeTransactions": "RepeatableRead / ReadOnly",
+  "paymentsEnabled": false,
+  "limitations": [
+    "New customer conversions and Solana Pay remain unverified.",
+    "Original funded SQLite deployment remains active baseline.",
+    "Full database roles and component isolation remain release work."
+  ]
+}

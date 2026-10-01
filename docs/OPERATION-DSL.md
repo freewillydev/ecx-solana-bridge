@@ -2,8 +2,9 @@
 
 Accepted architecture change, 2026-10-01. This is the implementation contract for
 refactoring the existing bridge, alongside PostgreSQL/Opaleye, connection-free
-payments and 100 basis points in both directions. The current runtime has **not**
-yet been converted to this DSL; its HTTP handlers still call bridge IO directly.
+payments and 100 basis points in both directions. The PostgreSQL runtime now resolves actual Servant routes into this DSL. The
+original SQLite runtime remains the protected baseline until controlled cutover;
+full module/role isolation and remaining operator workflows are still pending.
 
 ## Source reviewed
 

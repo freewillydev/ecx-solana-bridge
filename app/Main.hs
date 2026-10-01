@@ -1,13 +1,17 @@
 module Main where
 import Bridge.Config
 import Bridge.Worker
+import qualified Bridge.Postgres.Runtime as Postgres
+import qualified Database.PostgreSQL.Simple as PG
+import System.Posix.User (getEffectiveUserName)
 import Bridge.Web
 import Bridge.Types
 import Control.Exception (catch)
 import Data.Aeson (encode,object,(.=))
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import qualified Data.Text as T
-import System.Environment (getArgs)
+import System.Environment (getArgs,lookupEnv)
+import Data.Maybe (fromMaybe)
 import System.Exit (die,exitFailure)
 import Text.Read (readMaybe)
 main :: IO ()
@@ -40,9 +44,24 @@ main = go `catch` (\(BridgeError code) -> LBS.putStrLn (encode $ object ["error"
     ["cancel-preparation",path,intent,generation,reason] -> case readMaybe generation of
       Just g | g>=0 && g<8 -> loadConfig path >>= \c -> cancelUnsigned c (T.pack intent) g (T.pack reason) >>= LBS.putStrLn . encode
       _ -> die "Invalid preparation generation (expected 0 through 7)"
+    ["postgres-api",path] -> do
+      cfg <- loadConfig path
+      settings <- postgresSettings
+      Postgres.runAPI settings cfg
     ["worker",path] -> loadConfig path >>= runWorker
     ["test-worker",path] -> loadConfig path >>= runTestWorker
     ["serve",socket,port,assets] -> case readMaybe port of
       Just p | p>=1024 && p<=65535 -> runPublic socket p assets
       _ -> die "Invalid unprivileged port"
-    _ -> die "Usage: ecx-bridge version | check-config CONFIG | doctor CONFIG | scan CONFIG | reconcile CONFIG | recover CONFIG | allocate-test-operating CONFIG SIGNATURE LAMPORTS | approve-solana-retry CONFIG SIGNATURE REASON | approve-source-recovery CONFIG OBLIGATION RESTORATION_SEQUENCE REASON | cover-source-loss CONFIG DEPOSIT LOSS_SEQUENCE FLOAT_UNITS EARNED_UNITS REASON | prepare-native-replacement CONFIG TRANSACTION FEE_UNITS REASON | cancel-native-replacement CONFIG DRAFT_SEQUENCE REASON | cancel-preparation CONFIG INTENT GENERATION REASON | worker CONFIG | test-worker CONFIG | serve CUSTOMER_SOCKET PORT ASSETS"
+    _ -> die "Usage: ecx-bridge version | check-config CONFIG | doctor CONFIG | scan CONFIG | reconcile CONFIG | recover CONFIG | allocate-test-operating CONFIG SIGNATURE LAMPORTS | approve-solana-retry CONFIG SIGNATURE REASON | approve-source-recovery CONFIG OBLIGATION RESTORATION_SEQUENCE REASON | cover-source-loss CONFIG DEPOSIT LOSS_SEQUENCE FLOAT_UNITS EARNED_UNITS REASON | prepare-native-replacement CONFIG TRANSACTION FEE_UNITS REASON | cancel-native-replacement CONFIG DRAFT_SEQUENCE REASON | cancel-preparation CONFIG INTENT GENERATION REASON | postgres-api CONFIG (PG* settings, paused test deployment) | worker CONFIG | test-worker CONFIG | serve CUSTOMER_SOCKET PORT ASSETS"
+
+postgresSettings :: IO PG.ConnectInfo
+postgresSettings = do
+  user <- getEffectiveUserName
+  host <- fromMaybe "/var/run/postgresql" <$> lookupEnv "PGHOST"
+  database <- lookupEnv "PGDATABASE" >>= maybe (die "PGDATABASE is required") pure
+  portText <- fromMaybe "5432" <$> lookupEnv "PGPORT"
+  port <- case readMaybe portText of Just n | n>0 && n<=65535->pure n; _->die "Invalid PGPORT"
+  name <- fromMaybe user <$> lookupEnv "PGUSER"
+  password <- fromMaybe "" <$> lookupEnv "PGPASSWORD"
+  pure PG.defaultConnectInfo {PG.connectHost=host,PG.connectPort=fromIntegral (port::Int),PG.connectDatabase=database,PG.connectUser=name,PG.connectPassword=password}

@@ -301,3 +301,24 @@ idempotent settlement acceptance passed and custody still matched exactly. No ne
 payment was signed/sent. New PostgreSQL preparation/settlement writes need actual
 integrated acceptance, and production API/DSL, recovery startup, refunds, backups,
 connection-free interface and installer remain unfinished.
+
+### Actual Servant API resolves operations into the severity DSL
+
+The new PostgreSQL runtime serves the existing customer/admin API types. Handlers
+construct existential operation requests and resolve them to severity/result-indexed
+DSL values; one dispatcher invokes critical evaluation. The public handler facade
+does not expose worker commands, DSL constructors or evaluators. Safe evaluation
+holds only public configuration, database connection settings and a backup flag,
+and uses Repeatable Read / Read Only transactions without signer or chain transport.
+Critical evaluation supplies the real order, deposit, observer, custody and shared
+payment workflows. Deposit hints currently use critical evaluation; there is no
+safe writable inbox capability.
+
+`postgres-api CONFIG` reads PGHOST/PGPORT/PGDATABASE/PGUSER (optional PGPASSWORD)
+and serves a paused Signet/Devnet deployment after a real scan/reconciliation.
+Actual Unix-socket config, health, readiness (503 while paused), operator pause,
+audit and scanner routes passed. Existing bridge regressions passed after storage
+interface conversion. This is an integrated API checkpoint, not a paying-worker
+cutover: the connection-free Solana Pay contract, startup/recovery, full role/module
+isolation, remaining operator functions, UI and installer are still unfinished.
+The original funded deployment was not changed.
