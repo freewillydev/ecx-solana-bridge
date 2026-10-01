@@ -1,0 +1,21 @@
+{
+  "date": "2026-10-01",
+  "scope": "Database-only PostgreSQL schema 18 accounting contract; synthetic ledger fixtures; no chain RPC or signer",
+  "database": "Dedicated ecx_source_approval_contract; isolated from funded runtime",
+  "passed": [
+    "Restores prior ready state",
+    "Restores prior paying state",
+    "Rejects stale custody before approval",
+    "Same-reason replay does not allocate sequence or change state",
+    "Changed-reason replay rejected",
+    "Changed saved work rejected without mutation",
+    "Obsolete restoration rejected without mutation",
+    "Restored states survive connection close and reopen"
+  ],
+  "limitations": [
+    "Does not establish actual chain source loss/restoration",
+    "Does not execute the full chain/custody recheck workflow",
+    "Does not establish reorg or replacement-family acceptance",
+    "New source-approval route not deployed to paying worker"
+  ]
+}

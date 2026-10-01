@@ -84,3 +84,9 @@ executable ecx-postgres-native-lock-check
   hs-source-dirs: integration
   main-is: NativeLockCheck.hs
   build-depends: base, ecx-bridge, aeson, bytestring, postgresql-simple, unix, text
+
+executable ecx-postgres-source-approval-check
+  import: settings
+  hs-source-dirs: integration
+  main-is: SourceApprovalCheck.hs
+  build-depends: base, ecx-bridge, aeson, postgresql-simple, unix, text

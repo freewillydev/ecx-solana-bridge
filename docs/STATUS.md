@@ -493,3 +493,15 @@ a real historical paid obligation and preserved every obligation/approval row.
 A successful PostgreSQL restored-source approval and real source-reorg acceptance
 are still open. The running worker retains the previously accepted native-lock
 build; this new approval route has not yet been deployed to it.
+
+## PostgreSQL source approval database acceptance — 2026-10-01
+
+The isolated source-approval contract now passes successful restoration of both
+prior ready/paying states, custody freshness refusal, idempotent replay, conflicting
+reason refusal, changed-work and obsolete-restoration rejection, and reopen. The
+program connects only to its dedicated fresh schema; it has no chain transport,
+signer or send capability. These are synthetic accounting fixtures, not a claim of
+a real source reorg. The production PostgreSQL context/record functions and schema
+triggers are exercised. Real source observer/reorg wiring, full workflow acceptance
+and deployment of the new private route remain open.
+[Evidence](evidence/postgres-source-approval-contract.json).
