@@ -81,6 +81,14 @@ os.environ["C_INCLUDE_PATH"] = str(sqlite / "include")
 # Refresh explicitly when updating pins, or populate an empty build cache.
 index = cache / "cabal/packages/hackage.haskell.org/01-index.tar"
 if not index.exists() or os.environ.get("ECX_REFRESH_INDEX") == "1":
+    cabal_config = cache / "cabal/config"
+    if not cabal_config.exists():
+        run("cabal", "user-config", "init")
+    # Use Hackage's official HTTPS content endpoint for fresh caches. Retain
+    # signed repository verification and respect an explicitly configured URL.
+    configuration = cabal_config.read_text()
+    configuration = configuration.replace("url: http://hackage.haskell.org/", "url: https://hackage-content.haskell.org/")
+    cabal_config.write_text(configuration)
     run("cabal", "update")
 build_args = [f"--builddir={cache}/dist", f"--extra-lib-dirs={sqlite}/lib", f"--extra-include-dirs={sqlite}/include", "-j" + build_jobs]
 run("cabal", "build", "all", *build_args)

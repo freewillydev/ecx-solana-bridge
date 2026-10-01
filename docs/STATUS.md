@@ -104,7 +104,7 @@ The current architecture is the approved Haskell application, two real-chain ada
 | R2 — Close recovery state transitions | Explicit covered-source resolution, proved missing-destination treatment, finalized Solana history-loss handling, and unchanged claims during ambiguous evidence | Partial; existing source/finality/capital journals are the implementation base. Follow U1. |
 | R3 — Complete restore and resume | Critical backup coverage, old-ledger/old-signer fencing, key restore, exact-byte recovery and a final resume decision; independent-provider Solana expiry, in-flight and backlog acceptance | Partial; follow U1. Remote and clean-host checks also close D1. |
 | N1 — Actual ECX betanet | Official node/provenance/checkpoint, separate funded profile, replay fields and real deposit/payout/refund | Not started; real node and test allocation required. |
-| D1 — Reproducible installation and recovery | One-line Ubuntu installation from verified pinned artifacts; service/helper isolation; retained remote backups; fresh-host/key restoration and affected fault checks | One-command source and compiled installers pass on local Ubuntu 24.04 ARM64, including separate users, sandboxed helper, real-chain doctor, repeated installation and VM reboot. Signed publication, x86-64 acceptance, remote backups and full host/key restore remain. The separate x86-64 Ubuntu 24.04 QEMU VM has booted without host mounts; its source installer is running, with acceptance still pending. |
+| D1 — Reproducible installation and recovery | One-line Ubuntu installation from verified pinned artifacts; service/helper isolation; retained remote backups; fresh-host/key restoration and affected fault checks | One-command source and compiled installers pass on local Ubuntu 24.04 ARM64, including separate users, sandboxed helper, real-chain doctor, repeated installation and VM reboot. Signed publication, x86-64 acceptance, remote backups and full host/key restore remain. The x86 Ubuntu VM is retained for installation acceptance. Compilation now runs on native Ubuntu CI; all task VMs are stopped while that build runs. |
 | S1 — Reviewable open-source test release | Frozen source and dependency/license/advisory evidence; installed-release acceptance and independent review; material findings resolved with focused regression checks | Not complete. Reproducible notice collection covers all 333 dependency entries; Bitcoin Core source notices and SQLite disclaimer excerpts are recorded with provenance; system-library notices and native applicability review remain. The completed ARM64 package covers 369 dependency notices; system-library applicability and independent review remain. See THIRD-PARTY.md. Publication and valuable-fund deployment are not implied. |
 | C1 — Remaining approved rollout | Canonical mint/reserves/identities and explicitly authorized pilot; separately authorized real market/liquidity integrations; conditional official mainnet activation | Preserved in the full plan; external facts and explicit valuable-fund authorization required. |
 
@@ -665,5 +665,20 @@ pass. The temporary contract database is removed.
 An earlier real family also settled its original member while a replacement was
 saved but unsent. These checks do not establish winner-changing reorg, every
 crash boundary, permanent source-loss resolution, remote/key restoration, actual
-supported-wallet payment or canonical-token acceptance. X86 build is active with
-one job in the sole 3-GiB task VM. [Evidence](evidence/postgres-native-family-live.json).
+supported-wallet payment or canonical-token acceptance. X86 compilation has moved to the manually dispatched native Ubuntu CI workflow;
+all local task VMs are stopped until installation acceptance. [Evidence](evidence/postgres-native-family-live.json).
+
+## Native Linux build workflow — 2026-10-01
+
+The private repository now provides a manually dispatched native Ubuntu 24.04
+x86-64 build, using the same checksum-pinned compiler/toolchain builder, frozen
+dependencies, tests and installer manifest/checksum. Read-only checkout credentials
+are not persisted; official Actions are pinned to commits. Compiled/public manifest
+artifacts are retained privately for seven days. No deployment secrets or chain
+configuration are supplied to CI. Toolchain/dependency caches avoid repeated setup.
+
+The first run is [in progress](https://github.com/ekulkisnek/ecx-solana-bridge/actions/runs/36938098748);
+this is not completed build or install evidence. Slow local compiler emulation was
+stopped with its caches preserved. All four task VMs are stopped; the required
+local product/node/PostgreSQL services remain. Local x86 installation and reboot
+acceptance follow the completed native artifact.

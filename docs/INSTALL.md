@@ -199,3 +199,14 @@ marker, two verified private backups, same-host restoration and reboot. The
 fixture was observation-only without signing material or payments; valuable-fund
 upgrade, key restoration, x86 and remote recovery remain separate gates. See
 [upgrade evidence](evidence/postgres-upgrade-arm64.json).
+
+## Native x86 build
+
+The private repository has a manually dispatched `Native Linux release` workflow
+on Ubuntu 24.04 x86-64. It runs the same pinned builder and tests, verifies the
+installer checksum and retains only compiled installer/public manifest artifacts
+for seven days. It has read-only repository permission, no deployed keys and no
+chain payment configuration. Actions are pinned to commit hashes. Toolchain and
+frozen dependency caches avoid repeating setup; the job does not run on each push.
+This replaces slow local x86 compiler emulation. Installation/reboot acceptance
+still runs in the local x86 Ubuntu VM; CI build success alone does not close it.

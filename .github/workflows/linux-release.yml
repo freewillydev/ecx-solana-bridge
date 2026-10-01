@@ -1,0 +1,57 @@
+name: Native Linux release
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-linux-release
+  cancel-in-progress: false
+jobs:
+  x86-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      ECX_BUILD_DIR: ${{ github.workspace }}/.release-build
+      ECX_BUILD_JOBS: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Restore pinned toolchains
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .release-build/tools
+            .release-build/*-linux-*.tar.xz
+            .release-build/node-source
+            .release-build/sqlite
+          key: ubuntu24-x86-tools-${{ hashFiles('deploy/toolchains.json') }}
+      - name: Restore frozen dependencies
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .release-build/cabal
+            .release-build/cargo
+            .release-build/cargo-target
+            ~/.npm
+          key: ubuntu24-x86-dependencies-${{ hashFiles('cabal.project.freeze', 'solana-helper/Cargo.lock', 'web/package-lock.json') }}
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential curl ca-certificates xz-utils pkg-config libgmp-dev libffi-dev libnuma-dev libncurses-dev zlib1g-dev libssl-dev libpq-dev python3 patchelf
+      - name: Build, test and package
+        run: ./scripts/build-release
+      - name: Verify installer checksum
+        working-directory: .release-build
+        run: sha256sum -c ecx-bridge-ubuntu-24.04-x86_64.run.sha256
+      - name: Retain private installer artifact
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ubuntu-24.04-x86_64-installer
+          path: |
+            .release-build/ecx-bridge-ubuntu-24.04-x86_64.run
+            .release-build/ecx-bridge-ubuntu-24.04-x86_64.run.sha256
+            .release-build/bundle/manifest.json
+            .release-build/bundle/dependencies.json
+          if-no-files-found: error
+          retention-days: 7
