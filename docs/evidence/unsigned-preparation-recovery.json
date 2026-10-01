@@ -1,0 +1,481 @@
+{
+  "startedUtc": "2026-10-01T07:24:48.156598+00:00",
+  "scope": "one real Signet receipt; unsigned Solana and native interruptions; full native refund",
+  "stage": "full-refund-confirmed",
+  "order": {
+    "deadline": 1790839796,
+    "depositInstruction": "tb1qjtpn2435r3p7etcn98gvm38u80jn79lcf0rktj",
+    "orderId": "39a4d1c584cd6689ee77924e81a4a917960573c5bc5b19a39e6a752a8ea8bcf6",
+    "payoutTx": null,
+    "policy": {
+      "deploymentFingerprint": "027929d80f528c8da4766560c2597c3971960bd47b4fc7c9f7648c0eba5996f8",
+      "nativeDepth": 1,
+      "solanaCommitment": "finalized"
+    },
+    "quote": {
+      "fee": "20",
+      "gross": "10000",
+      "net": "9980"
+    },
+    "request": {
+      "direction": "NativeToWrapped",
+      "idempotencyKey": "public-test-unsigned-recovery-1",
+      "input": "10000",
+      "recipient": "HcctYHWCfLGrE5WigGKHg5hR6Q1P1Gntb5PYQWSQFHXg",
+      "refund": "tb1q8frp8q5wu4lpr8f6426ndxwuagymygl9w0nn3m",
+      "sourceOwner": null
+    },
+    "status": "AwaitingDeposit"
+  },
+  "sourceTransaction": "dd3a7f894dd8de5158f5aeb6cbd4fcf29330818260ff188dc9b4a4eb721b8f1e",
+  "solanaInterrupted": {
+    "chain": "Solana",
+    "forcedExitBeforeSigner": true,
+    "generation": 0,
+    "intent": "convert:39a4d1c584cd6689ee77924e81a4a917960573c5bc5b19a39e6a752a8ea8bcf6"
+  },
+  "solanaCancellation": {
+    "cancelledPreparation": "convert:39a4d1c584cd6689ee77924e81a4a917960573c5bc5b19a39e6a752a8ea8bcf6",
+    "generation": 0,
+    "paused": true,
+    "principalAndInventoryRetained": true,
+    "signedOrSent": false
+  },
+  "nativeInterrupted": {
+    "chain": "Native",
+    "forcedExitBeforeSigner": true,
+    "generation": 0,
+    "intent": "refund:native:dd3a7f894dd8de5158f5aeb6cbd4fcf29330818260ff188dc9b4a4eb721b8f1e:0"
+  },
+  "recordedNativeInputs": [
+    {
+      "txid": "88c8c46cc3c6f34e880ffc3978c3095159059ef663c2e1573ebcf2839c3d4350",
+      "vout": 0
+    },
+    {
+      "txid": "e5e565c3d87e79dba7c0f2f8d45ad07e6449051bcfe16c69f05226ac6d7ce737",
+      "vout": 1
+    }
+  ],
+  "nativeCancellation": {
+    "cancelledPreparation": "refund:native:dd3a7f894dd8de5158f5aeb6cbd4fcf29330818260ff188dc9b4a4eb721b8f1e:0",
+    "generation": 0,
+    "paused": true,
+    "principalAndInventoryRetained": true,
+    "signedOrSent": false
+  },
+  "nativeLocksReleased": true,
+  "result": {
+    "audit": {
+      "balances": [
+        {
+          "allocation": "earned",
+          "asset": "Native",
+          "units": "20"
+        },
+        {
+          "allocation": "external",
+          "asset": "Native",
+          "units": "-1899469"
+        },
+        {
+          "allocation": "float",
+          "asset": "Native",
+          "units": "1750080"
+        },
+        {
+          "allocation": "operating",
+          "asset": "Native",
+          "units": "149369"
+        },
+        {
+          "allocation": "principal",
+          "asset": "Native",
+          "units": "0"
+        },
+        {
+          "allocation": "unallocated",
+          "asset": "Native",
+          "units": "0"
+        },
+        {
+          "allocation": "external",
+          "asset": "Sol",
+          "units": "-3491560"
+        },
+        {
+          "allocation": "operating",
+          "asset": "Sol",
+          "units": "3491560"
+        },
+        {
+          "allocation": "unallocated",
+          "asset": "Sol",
+          "units": "0"
+        },
+        {
+          "allocation": "earned",
+          "asset": "Wrapped",
+          "units": "100"
+        },
+        {
+          "allocation": "external",
+          "asset": "Wrapped",
+          "units": "-100000000014"
+        },
+        {
+          "allocation": "float",
+          "asset": "Wrapped",
+          "units": "99999999914"
+        },
+        {
+          "allocation": "principal",
+          "asset": "Wrapped",
+          "units": "0"
+        },
+        {
+          "allocation": "unallocated",
+          "asset": "Wrapped",
+          "units": "0"
+        }
+      ],
+      "events": [
+        [
+          "deposit:native:d42c6d553922668bd9176bf52b0e1b446751da7dd6d818cb97e48581856453fe:1",
+          "observed customer value"
+        ],
+        [
+          "deposit:solana:2NnCvanH599gGB7kGPJiy12LyYAjV3UYijAGoJFsQowUYZ6SZaRG6Qa8J1QXy5pdeRyX5JaXgxUDJTurupuRdkWA",
+          "observed customer value"
+        ],
+        [
+          "deposit:sol-operating:2NnCvanH599gGB7kGPJiy12LyYAjV3UYijAGoJFsQowUYZ6SZaRG6Qa8J1QXy5pdeRyX5JaXgxUDJTurupuRdkWA",
+          "observed customer value"
+        ],
+        [
+          "treasury:native:d42c6d553922668bd9176bf52b0e1b446751da7dd6d818cb97e48581856453fe:1",
+          "operator allocation of verified treasury receipt"
+        ],
+        [
+          "treasury:solana:2NnCvanH599gGB7kGPJiy12LyYAjV3UYijAGoJFsQowUYZ6SZaRG6Qa8J1QXy5pdeRyX5JaXgxUDJTurupuRdkWA",
+          "operator allocation of verified treasury receipt"
+        ],
+        [
+          "treasury:sol-operating:2NnCvanH599gGB7kGPJiy12LyYAjV3UYijAGoJFsQowUYZ6SZaRG6Qa8J1QXy5pdeRyX5JaXgxUDJTurupuRdkWA",
+          "operator allocation of verified treasury receipt"
+        ],
+        [
+          "treasury-spend:Native:b2278e8dd0be7be001a5630545ddb73c83423ee1ee7dbd0327675e27f1642bd3",
+          "verified operator spend and network costs"
+        ],
+        [
+          "treasury-spend:Solana:2GobRapeVX92w9QKpyomVvTLswXGjvkxdbvu9Azk5CCXPbujUfEshdVEccq9QGFkboaqAS1VcgiDWvB7giC9tCG3",
+          "verified operator spend and network costs"
+        ],
+        [
+          "treasury-spend:SolanaOperating:2GobRapeVX92w9QKpyomVvTLswXGjvkxdbvu9Azk5CCXPbujUfEshdVEccq9QGFkboaqAS1VcgiDWvB7giC9tCG3",
+          "verified operator spend and network costs"
+        ],
+        [
+          "treasury-spend:Solana:4kjhetrGow3ty6446oBCzSstVUtp6GGPyWeJcB63sZyKNK8eoosHvEwww6h6cQ9dpLZXK2tf5aBJHC8FrPVZE8aD",
+          "verified operator spend and network costs"
+        ],
+        [
+          "treasury-spend:SolanaOperating:4kjhetrGow3ty6446oBCzSstVUtp6GGPyWeJcB63sZyKNK8eoosHvEwww6h6cQ9dpLZXK2tf5aBJHC8FrPVZE8aD",
+          "verified operator spend and network costs"
+        ],
+        [
+          "deposit:native:e5e565c3d87e79dba7c0f2f8d45ad07e6449051bcfe16c69f05226ac6d7ce737:1",
+          "observed customer value"
+        ],
+        [
+          "settlement:35u82cFNK2RZsiFpSYPGr26UkWP8FH4CgStxNB8LJSuVfvAcbAfpT5nWnG6BkWeNTVPSTK88k5NKbEaEizGn9Yip",
+          "successful finalized payout"
+        ],
+        [
+          "network-fee:35u82cFNK2RZsiFpSYPGr26UkWP8FH4CgStxNB8LJSuVfvAcbAfpT5nWnG6BkWeNTVPSTK88k5NKbEaEizGn9Yip",
+          "network-fee"
+        ],
+        [
+          "deposit:solana:r3SVnxiooDr24BqMwoo7DYsmLxazreNBpwV4BNE9HTUbMLFj99bnKZ68tN3VmHgsAi6uDGX7LaLoSx5HjWHTFsK",
+          "observed customer value"
+        ],
+        [
+          "settlement:2XMrZrQBMt8b6gZbMRHx4FtfsLm1zc1xQB716dwAC5QdgKehioAN1sy16dCFz39AP7tA2RPZ6ZQYx2kngnbTSJP",
+          "successful finalized payout"
+        ],
+        [
+          "network-fee:2XMrZrQBMt8b6gZbMRHx4FtfsLm1zc1xQB716dwAC5QdgKehioAN1sy16dCFz39AP7tA2RPZ6ZQYx2kngnbTSJP",
+          "network-fee"
+        ],
+        [
+          "deposit:solana:5BonRzFcmvDvBtahr2hAj4oGg8Bzo7Ez6oTkruRayTCvUdBH1yV39odjzDfSrGc8M7pRF24Xir5YQ2A56D7iebCj",
+          "observed customer value"
+        ],
+        [
+          "settlement:88c8c46cc3c6f34e880ffc3978c3095159059ef663c2e1573ebcf2839c3d4350",
+          "successful finalized payout"
+        ],
+        [
+          "network-fee:88c8c46cc3c6f34e880ffc3978c3095159059ef663c2e1573ebcf2839c3d4350",
+          "network-fee"
+        ],
+        [
+          "deposit:native:dd3a7f894dd8de5158f5aeb6cbd4fcf29330818260ff188dc9b4a4eb721b8f1e:0",
+          "observed customer value"
+        ],
+        [
+          "settlement:ae8e5c1d0a35eca8d055f0be7b613f448c12262d50c728521649b282209e029e",
+          "successful finalized payout"
+        ],
+        [
+          "network-fee:ae8e5c1d0a35eca8d055f0be7b613f448c12262d50c728521649b282209e029e",
+          "network-fee"
+        ]
+      ],
+      "unresolved": [
+        [
+          "convert:39a4d1c584cd6689ee77924e81a4a917960573c5bc5b19a39e6a752a8ea8bcf6",
+          "cancelled"
+        ]
+      ]
+    },
+    "balancesMatch": true,
+    "completed": true,
+    "order": {
+      "deadline": 1790839796,
+      "depositInstruction": "tb1qjtpn2435r3p7etcn98gvm38u80jn79lcf0rktj",
+      "orderId": "39a4d1c584cd6689ee77924e81a4a917960573c5bc5b19a39e6a752a8ea8bcf6",
+      "payoutTx": "ae8e5c1d0a35eca8d055f0be7b613f448c12262d50c728521649b282209e029e",
+      "policy": {
+        "deploymentFingerprint": "027929d80f528c8da4766560c2597c3971960bd47b4fc7c9f7648c0eba5996f8",
+        "nativeDepth": 1,
+        "solanaCommitment": "finalized"
+      },
+      "quote": {
+        "fee": "20",
+        "gross": "10000",
+        "net": "9980"
+      },
+      "request": {
+        "direction": "NativeToWrapped",
+        "idempotencyKey": "public-test-unsigned-recovery-1",
+        "input": "10000",
+        "recipient": "HcctYHWCfLGrE5WigGKHg5hR6Q1P1Gntb5PYQWSQFHXg",
+        "refund": "tb1q8frp8q5wu4lpr8f6426ndxwuagymygl9w0nn3m",
+        "sourceOwner": null
+      },
+      "status": "Refunded"
+    },
+    "scope": "real ledger-driven public-test order; browser signing and full recovery are separate gates"
+  },
+  "preparationHistory": [
+    [
+      "convert:39a4d1c584cd6689ee77924e81a4a917960573c5bc5b19a39e6a752a8ea8bcf6",
+      0,
+      1,
+      null
+    ],
+    [
+      "refund:native:dd3a7f894dd8de5158f5aeb6cbd4fcf29330818260ff188dc9b4a4eb721b8f1e:0",
+      0,
+      1,
+      null
+    ],
+    [
+      "refund:native:dd3a7f894dd8de5158f5aeb6cbd4fcf29330818260ff188dc9b4a4eb721b8f1e:0",
+      1,
+      0,
+      null
+    ]
+  ],
+  "settledAttempt": [
+    "ae8e5c1d0a35eca8d055f0be7b613f448c12262d50c728521649b282209e029e",
+    1,
+    "settled",
+    10000
+  ],
+  "workerCustodyAfterRestart": {
+    "checkedAt": 1790840428,
+    "checkedRevision": 2017,
+    "lastError": null,
+    "report": {
+      "assets": [
+        {
+          "asset": "Native",
+          "booked": "1899469",
+          "difference": "0",
+          "expected": "1899469",
+          "inFlight": "0",
+          "observed": "1899469"
+        },
+        {
+          "asset": "Sol",
+          "booked": "3491560",
+          "difference": "0",
+          "expected": "3491560",
+          "inFlight": "0",
+          "observed": "3491560"
+        },
+        {
+          "asset": "Wrapped",
+          "booked": "100000000014",
+          "difference": "0",
+          "expected": "100000000014",
+          "inFlight": "0",
+          "observed": "100000000014"
+        }
+      ],
+      "inFlightEffects": [],
+      "matches": true,
+      "nativeBlock": "00000165a0ee33b643dc1255237c0fe85ff6aedc9a271d31780cee04ef8b6da5",
+      "nativeHeight": 16421,
+      "solanaSlot": 506198617
+    },
+    "revision": 2017
+  },
+  "customerReadinessStatus": 503,
+  "applicationSha256": "cc42ffbe3031c4e4b1faa957b0d6c8a1e9a05605303f0ddbeb25118b7062ba95",
+  "finishedUtc": "2026-10-01T07:40:28.724411+00:00",
+  "priorFinancialAndBindingRowsPreserved": true,
+  "comparisonExcludesOnlyRefreshingDepositAnchorsAndConfirmations": true,
+  "completedCancellationAndPaymentReplayChangedNoFinancialRows": true,
+  "criticalSequenceAfterReplay": 25,
+  "ordersByStatusAfterReplay": [
+    [
+      "ExpiredUnfunded",
+      2
+    ],
+    [
+      "Paid",
+      2
+    ],
+    [
+      "Refunded",
+      2
+    ]
+  ],
+  "allPaymentAndOperatingHoldsReleasedAfterRefund": true,
+  "cancellationJournal": [
+    {
+      "intent": "convert:39a4d1c584cd6689ee77924e81a4a917960573c5bc5b19a39e6a752a8ea8bcf6",
+      "generation": 0,
+      "reason": "acceptance: discard interrupted unsigned Solana request",
+      "cleanup": {
+        "chain": "Solana",
+        "draftHash": "5dd1490416bf3932e41db0843a34eb2fe8832a125b7fc7bae90ca815d1fcc685",
+        "nativeInputs": []
+      },
+      "criticalSequence": 21,
+      "completed": true
+    },
+    {
+      "intent": "refund:native:dd3a7f894dd8de5158f5aeb6cbd4fcf29330818260ff188dc9b4a4eb721b8f1e:0",
+      "generation": 0,
+      "reason": "acceptance: release exact saved unsigned native inputs",
+      "cleanup": {
+        "chain": "Native",
+        "draftHash": "d03947ed5a0097f99a479c5f1226dbfc14102cf69d9f2f8c7e3871cd7237c338",
+        "nativeInputs": [
+          {
+            "txid": "88c8c46cc3c6f34e880ffc3978c3095159059ef663c2e1573ebcf2839c3d4350",
+            "vout": 0
+          },
+          {
+            "txid": "e5e565c3d87e79dba7c0f2f8d45ad07e6449051bcfe16c69f05226ac6d7ce737",
+            "vout": 1
+          }
+        ]
+      },
+      "criticalSequence": 23,
+      "completed": true
+    }
+  ],
+  "actualUnsignedSolanaPolicy": {
+    "solPlanAmount": "9980",
+    "solPlanFeeLimit": "10000",
+    "solPlanFingerprint": "027929d80f528c8da4766560c2597c3971960bd47b4fc7c9f7648c0eba5996f8",
+    "solPlanRecent": {
+      "recentHash": "Ai5rS4TnVoGZxu3ZMPGFGrkzrpSCSrKfYcv4Y2PUJ2hV",
+      "recentLastValidHeight": 493444052,
+      "recentSlot": 506196009
+    },
+    "solPlanRecipient": "HcctYHWCfLGrE5WigGKHg5hR6Q1P1Gntb5PYQWSQFHXg",
+    "solPlanReference": "f3800ace30ff721637d0ad013a1a4c3b9087b66181b823ea7a59d629eb8db88f",
+    "solPlanRentLimit": "2100000"
+  },
+  "executionBinarySha256": {
+    "cancellationApplication": "7ccee7db8320c9b7d5919dce5d2881b0160a41a602d131a7e7000e3411e909e9",
+    "preparationAndSettlementProbe": "fb1c8b7f229427d8ea522590fbca397ca62a86aed2d8d68f79fedd09d4de87d7",
+    "finalWorker": "5de00c83a72964d1770c89443ea9efce0e85c285bdae9286ba2a926c7fbd82f8"
+  },
+  "replayProbeSha256": "cbeb9d4725ea4cf82bede9c38fc3098955d81aa3631052bb1e2dedca7f70c071",
+  "sourceReorgGuardNote": "The final build also preserves cancelled conversions when their refund source loses eligibility. That guard has offline regression coverage; the completed-order replay and final worker use the rebuilt code. The execution hashes identify the binaries used for the earlier interruptions and cancellations.",
+  "finalWorkerCustody": {
+    "checkedAt": 1790840672,
+    "checkedRevision": 2214,
+    "lastError": null,
+    "report": {
+      "assets": [
+        {
+          "asset": "Native",
+          "booked": "1899469",
+          "difference": "0",
+          "expected": "1899469",
+          "inFlight": "0",
+          "observed": "1899469"
+        },
+        {
+          "asset": "Sol",
+          "booked": "3491560",
+          "difference": "0",
+          "expected": "3491560",
+          "inFlight": "0",
+          "observed": "3491560"
+        },
+        {
+          "asset": "Wrapped",
+          "booked": "100000000014",
+          "difference": "0",
+          "expected": "100000000014",
+          "inFlight": "0",
+          "observed": "100000000014"
+        }
+      ],
+      "inFlightEffects": [],
+      "matches": true,
+      "nativeBlock": "00000165a0ee33b643dc1255237c0fe85ff6aedc9a271d31780cee04ef8b6da5",
+      "nativeHeight": 16421,
+      "solanaSlot": 506199661
+    },
+    "revision": 2214
+  },
+  "finalScanners": {
+    "review": [],
+    "scanners": [
+      {
+        "chain": "Native",
+        "checkedAt": 1790840661,
+        "cursor": "00000165a0ee33b643dc1255237c0fe85ff6aedc9a271d31780cee04ef8b6da5",
+        "lastError": null,
+        "lastSuccess": 1790840661
+      },
+      {
+        "chain": "Solana",
+        "checkedAt": 1790840672,
+        "cursor": "5BonRzFcmvDvBtahr2hAj4oGg8Bzo7Ez6oTkruRayTCvUdBH1yV39odjzDfSrGc8M7pRF24Xir5YQ2A56D7iebCj",
+        "lastError": null,
+        "lastSuccess": 1790840672
+      },
+      {
+        "chain": "SolanaOperating",
+        "checkedAt": 1790840672,
+        "cursor": "2XMrZrQBMt8b6gZbMRHx4FtfsLm1zc1xQB716dwAC5QdgKehioAN1sy16dCFz39AP7tA2RPZ6ZQYx2kngnbTSJP",
+        "lastError": null,
+        "lastSuccess": 1790840672
+      }
+    ]
+  },
+  "finalReadinessStatus": 503,
+  "verifiedUtc": "2026-10-01T07:44:33.569437+00:00"
+}

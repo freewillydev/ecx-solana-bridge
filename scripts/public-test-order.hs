@@ -1,12 +1,13 @@
 {-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
--- Three explicitly scoped real Signet/Devnet ledger acceptance orders.
+-- Explicitly scoped real Signet/Devnet ledger acceptance orders.
 -- The client request/capability are private inputs; no browser/API gate is opened.
 import Bridge.Config
 import Bridge.Deposit
 import Bridge.Ledger
 import Bridge.Native
 import Bridge.Order (createCustomerOrder)
+import Bridge.Payment
 import Bridge.Observer
 import Bridge.RPC
 import Bridge.Reconciliation
@@ -26,12 +27,14 @@ import qualified Data.Text as T
 import Database.SQLite.Simple
 import Network.HTTP.Client (Manager)
 import System.Environment (getArgs)
+import System.Exit (ExitCode(..))
 import System.IO (hFlush,stdout)
+import System.Posix.Process (exitImmediately)
 
 main :: IO ()
 main=do
   args<-getArgs
-  (path,privateRequest,mode)<-case args of [a,b,m] | m `elem` ["prepare","transaction","run","refund","status"] -> pure(a,b,m); _->fail "public-test-order CONFIG PRIVATE_REQUEST prepare|transaction|run|refund|status"
+  (path,privateRequest,mode)<-case args of [a,b,m] | m `elem` ["prepare","transaction","run","refund","status","unsigned-solana","unsigned-native"] -> pure(a,b,m); _->fail "public-test-order CONFIG PRIVATE_REQUEST prepare|transaction|run|refund|status|unsigned-solana|unsigned-native"
   c<-loadConfig path
   require (profile c==L2LSignetDevnet && not (backupRequired c)
     && fingerprint c=="027929d80f528c8da4766560c2597c3971960bd47b4fc7c9f7648c0eba5996f8") "different_public_test_deployment"
@@ -40,15 +43,16 @@ main=do
   request<-fieldValue "request" saved
   let owner="HcctYHWCfLGrE5WigGKHg5hR6Q1P1Gntb5PYQWSQFHXg"
       wrapping=direction request==NativeToWrapped
+      recovery=idempotencyKey request=="public-test-unsigned-recovery-1"
       nativeDestination=if wrapping then refund request else recipient request
   require (units (input request)==10000 && if wrapping
-    then recipient request==owner && idempotencyKey request=="public-test-wrap-1" && sourceOwner request==Nothing
+    then recipient request==owner && idempotencyKey request `elem` ["public-test-wrap-1","public-test-unsigned-recovery-1"] && sourceOwner request==Nothing
     else refund request==owner && sourceOwner request==Just owner && idempotencyKey request `elem` ["public-test-redeem-1","public-test-redeem-2"]) "unexpected_public_test_order"
   manager<-newRpcManager
   withLedger (dbPath c) (fingerprint c) $ \ledger -> (do
     orders<-ledgerAction ledger $ \db -> query_ db "SELECT id,idempotency_key,status FROM orders" :: IO [(Text,Text,Text)]
-    require (length orders<=5 && all (\(_,key,st)->
-      (key `elem` ["public-test-wrap-1","public-test-redeem-1","public-test-redeem-2"]
+    require (length orders<=6 && all (\(_,key,st)->
+      (key `elem` ["public-test-wrap-1","public-test-redeem-1","public-test-redeem-2","public-test-unsigned-recovery-1"]
         && (key==idempotencyKey request || st `elem` ["Paid","Refunded"]))
       || (key `elem` ["provision-wrap-1","provision-redeem-1"] && st=="ExpiredUnfunded")) orders) "only_sequential_acceptance_orders"
     let existing=[oid | (oid,key,_)<-orders,key==idempotencyKey request]
@@ -72,6 +76,30 @@ main=do
             requireBalances manager c ledger
             resumeAfterChecks ledger
             prepareSolanaDeposit manager c ledger capability oid >>= output
+          "unsigned-solana"->do
+            require (recovery && wrapping) "only_unsigned_recovery_order"
+            observeOnce manager c ledger >>= requireHealthy
+            requireBalances manager c ledger
+            ob<-oneObligation ledger oid "conversion"
+            requireNoPreparation ledger ob
+            resumeAfterChecks ledger
+            let stop _=interruptPreparation ledger ob "Solana"
+            _<-prepareSolanaWith (solanaCall manager c) stop c ledger ob
+            reject "expected_interruption"
+          "unsigned-native"->do
+            require (recovery && wrapping) "only_unsigned_recovery_order"
+            observeOnce manager c ledger >>= requireHealthy
+            requireBalances manager c ledger
+            ob<-oneObligation ledger oid "conversion"
+            prior<-preparationCancellation ledger (obligationId ob) 0
+            require (case prior of Just (_,_,True)->True; _->False) "cancel_unsigned_solana_first"
+            refundOb<-createRefund ledger (obligationDeposit ob)
+            requireNoPreparation ledger refundOb
+            resumeAfterChecks ledger
+            let stop wallet method params=if method=="walletprocesspsbt"
+                  then interruptPreparation ledger refundOb "Native" else nativeCall manager c wallet method params
+            _<-prepareNativeWith stop c ledger refundOb
+            reject "expected_interruption"
           "refund"->do
             -- The first redemption was observed after its immutable deadline.
             -- Preserve that exception and return its principal to the bound owner.
@@ -92,6 +120,20 @@ main=do
 
 output :: ToJSON a => a -> IO ()
 output value=LBS.putStrLn (encode value) >> hFlush stdout
+oneObligation :: Ledger -> Text -> Text -> IO Obligation
+oneObligation ledger oid kind=do
+  rows<-filter (\o->obligationOrder o==oid && obligationKind o==kind) <$> readyObligations ledger
+  case rows of [ob]->pure ob; _->reject "expected_one_ready_test_obligation"
+requireNoPreparation :: Ledger -> Obligation -> IO ()
+requireNoPreparation ledger ob=do
+  rows<-ledgerAction ledger $ \db->query db "SELECT generation FROM preparations WHERE intent_id=?" (Only $ obligationId ob) :: IO [Only Int]
+  require (null rows) "interruption_must_not_repeat"
+interruptPreparation :: Ledger -> Obligation -> Text -> IO a
+interruptPreparation ledger ob chain=do
+  saved<-filter ((==obligationId ob).obligationId.preparationObligation) <$> pendingPreparations ledger
+  require (case saved of [p]->preparationGeneration p==0 && preparationDraft p/=Nothing; _->False) "unsigned_draft_not_saved"
+  output $ object ["forcedExitBeforeSigner" .= True,"intent" .= obligationId ob,"generation" .= (0::Int),"chain" .= chain]
+  exitImmediately (ExitFailure 75)
 requireHealthy :: Value -> IO ()
 requireHealthy scan=do
   reviews<-fieldValue "review" scan :: IO [Value]

@@ -1,4 +1,4 @@
-module Bridge.Worker (runWorker, runWorkerWith, scanOnce, reconcileOnce, approveRetry, doctor) where
+module Bridge.Worker (runWorker, runWorkerWith, scanOnce, reconcileOnce, approveRetry, cancelUnsigned, doctor) where
 
 import Bridge.API
 import Control.Monad.IO.Class (liftIO)
@@ -8,6 +8,7 @@ import Bridge.Native
 import Bridge.Observer
 import Bridge.RPC
 import Bridge.Reconciliation
+import Bridge.Recovery
 import Bridge.Solana
 import Bridge.Settlement
 import Bridge.Types
@@ -71,6 +72,10 @@ approveRetry c txid reason = withLedger (dbPath c) (fingerprint c) $ \ledger -> 
   manager <- newRpcManager
   approveSolanaRetry manager c ledger txid reason
   pure $ object ["approvedRetryOf" .= txid,"paused" .= True,"signedOrSent" .= False]
+cancelUnsigned :: Config -> Text -> Int -> Text -> IO Value
+cancelUnsigned c intent generation reason = withLedger (dbPath c) (fingerprint c) $ \ledger -> do
+  manager <- newRpcManager
+  cancelPreparation manager c ledger intent generation reason
 customerServer :: Config -> Ledger -> Server CustomerAPI
 customerServer c ledger =
   configView :<|> create :<|> get :<|> transaction :<|> hint :<|> health :<|> ready

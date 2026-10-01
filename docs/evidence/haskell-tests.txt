@@ -1,3 +1,16 @@
+Build profile: -w ghc-9.14.1 -O1
+In order, the following will be built (use -v for more details):
+ - ecx-bridge-0.1.0.0 (lib) (configuration changed)
+ - ecx-bridge-0.1.0.0 (test:bridge-test) (configuration changed)
+Configuring library for ecx-bridge-0.1.0.0...
+Preprocessing library for ecx-bridge-0.1.0.0...
+Building library for ecx-bridge-0.1.0.0...
+[18 of 25] Compiling Bridge.Recovery  ( src/Bridge/Recovery.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Recovery.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Recovery.dyn_o ) [Source file changed]
+Configuring test suite 'bridge-test' for ecx-bridge-0.1.0.0...
+Preprocessing test suite 'bridge-test' for ecx-bridge-0.1.0.0...
+Building test suite 'bridge-test' for ecx-bridge-0.1.0.0...
+[2 of 2] Linking ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test [Library changed]
+Running 1 test suites...
 Test suite bridge-test: RUNNING...
 
 exact amounts
@@ -42,6 +55,22 @@ Solana history pagination (transport contract tests)
   rejects an empty/truncated history without the known anchor [✔]
   detects repeated provider pages instead of accepting a false cursor [✔]
   rejects a nonfinalized signature-history response [✔]
+unsigned cancellation ledger invariants (offline fixtures)
+  retains principal, inventory, policy, draft and fees, and excludes late callbacks [✔]
+  atomically transfers the retained fee hold into a new generation and rejects stale replies [✔]
+  releases the unused conversion fee once when a cancelled conversion becomes a full refund [✔]
+  cannot cancel any generation with a signed, broadcast or settled attempt [✔]
+  keeps a source that loses eligibility during cleanup in review [✔]
+  keeps an abandoned conversion cancelled when its refund source loses eligibility [✔]
+  bounds repeated cancellation generations instead of growing an unbounded retry chain [✔]
+unsigned preparation recovery (offline RPC contracts)
+  requires no locks when funding was interrupted before a draft could be saved [✔]
+  journals exact native cleanup, unlocks only saved inputs and does not sign or send [✔]
+  keeps a lost unlock response pending and completes on reopen without blanket unlocking [✔]
+  refuses foreign locks and preserves the unfinished cleanup request [✔]
+  does not cancel after a failed, stale or raced custody check [✔]
+  rejects a changed saved PSBT before any wallet unlock [✔]
+  cancels an unsigned Solana request without a signer, a replacement or a signed-expiry proof [✔]
 signed intent and settlement invariants
   reserves the destination and fee budget before signing, without allowing a refund race [✔]
   retains an immutable unsigned draft after interruption and restart [✔]
@@ -111,7 +140,7 @@ native transaction validation (captured public-Signet transaction)
   computes fees from verified prevouts and rejects unconfirmed or duplicate inputs [✔]
   enforces separate Signet and ECX locktime rules (pure mutation checks, not ECX acceptance) [✔]
   refuses a corrupted saved draft before invoking the wallet signer [✔]
-  stores the draft before signing and reuses a recorded attempt (RPC contract test) [✔]
+  stores the draft before locking/signing and reuses a recorded attempt (RPC contract test) [✔]
   retains preparation and pauses if a funding response is lost (RPC contract test) [✔]
 Solana preparation (SDK fixtures and RPC contract tests)
   binds the helper protocol, message, memo, signature and custody account [✔]
@@ -202,6 +231,9 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 2.4053 seconds
-174 examples, 0 failures
+Finished in 3.0251 seconds
+188 examples, 0 failures
 Test suite bridge-test: PASS
+Test suite logged to: /Volumes/Crucial
+X9/CodexBuilds/ecx-bridge-20260930/workspace-b/outputs/ecx-bridge/./../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log
+1 of 1 test suites (1 of 1 test cases) passed.

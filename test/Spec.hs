@@ -4,6 +4,7 @@ import Bridge.Types
 import Bridge.Config
 import Bridge.Ledger
 import Bridge.Reconciliation
+import Bridge.Recovery
 import Bridge.Budget
 import Bridge.SolanaMessage
 import Bridge.SolanaDeposit
@@ -13,7 +14,7 @@ import Bridge.SolanaPayment
 import qualified Data.Aeson.KeyMap as KM
 import Bridge.Native (nativeAmount,nativeNumber,validateNativeRecipientWith)
 import Bridge.NativePayment
-import Bridge.Payment (prepareNativeWith,prepareSolanaWith)
+import Bridge.Payment (prepareNativeWith,prepareSolanaWith,payoutReference)
 import Bridge.Settlement
 import Bridge.Deposit
 import Bridge.Admission
@@ -67,7 +68,9 @@ withDir action=do
   ident <- T.take 12 <$> randomId
   bracket (let p=base</>("ecx-test-"<>T.unpack ident) in createDirectory p >> pure p) removePathForcibly action
 withFunded :: (Ledger -> Config -> IO a) -> IO a
-withFunded action=withDir $ \dir -> let c=cfg dir in withLedger (dbPath c) (fingerprint c) $ \l -> do
+withFunded action=withDir $ \dir -> withFundedAt dir action
+withFundedAt :: FilePath -> (Ledger -> Config -> IO a) -> IO a
+withFundedAt dir action=let c=cfg dir in withLedger (dbPath c) (fingerprint c) $ \l -> do
   fundAllocation l "fixture-wrapped-float" Wrapped "float" (amt 1000000)
   fundAllocation l "fixture-native-float" Native "float" (amt 1000000)
   fundAllocation l "fixture-sol-fees" Sol "operating" (amt 100000)
@@ -97,7 +100,19 @@ fundOrder l c=do
 testAttempt :: Ledger -> Config -> Obligation -> Text -> Text -> Text -> Text -> Int64 -> Maybe Text -> IO ()
 testAttempt l c ob chain txid bytes policy limit point = do
   beginPreparation l c ob chain limit "{\"fixture\":true}"
-  storeAttempt l ob chain txid bytes policy limit point
+  generation <- activePreparationGeneration l (obligationId ob)
+  storeAttempt l ob chain txid bytes policy limit point generation
+
+fixtureJson :: ToJSON a => a -> Text
+fixtureJson=TE.decodeUtf8 . LBS.toStrict . encode
+
+-- Ledger-only cancellation fixture; chain cleanup is tested separately below.
+cancelFixture :: Ledger -> Preparation -> IO ()
+cancelFixture l p=do
+  pause l "offline-cancellation"
+  freshScans l 100
+  beginPreparationCancellation l p 100 "offline cancellation" (object ["offline" .= True])
+  finishPreparationCancellation l p
 
 nativeFixture :: IO (NativePlan,[NativePrevout],Amount,NativeTx)
 nativeFixture = do
@@ -151,6 +166,51 @@ withNativeAdmission action=do
             ,"scriptPubKey" .= object ["hex" .= prevoutScript prev,"address" .= ("fixture-prevout"::Text)]]
           _ -> expectationFailure ("unexpected native admission RPC: "<>T.unpack method) >> pure Null
   action c plan calls call
+
+withNativeCancellation :: (Ledger -> Config -> Preparation -> IORef [Outpoint] -> PaymentTransport -> IO a) -> IO a
+withNativeCancellation action=withDir $ \dir -> withNativeCancellationAt dir action
+withNativeCancellationAt :: FilePath -> (Ledger -> Config -> Preparation -> IORef [Outpoint] -> PaymentTransport -> IO a) -> IO a
+withNativeCancellationAt=withNativeCancellationDraft True
+withNativeCancellationDraft :: Bool -> FilePath -> (Ledger -> Config -> Preparation -> IORef [Outpoint] -> PaymentTransport -> IO a) -> IO a
+withNativeCancellationDraft saveDraft dir action=withFundedAt dir $ \l original -> do
+  let c=expiryConfig original
+      did="native:"<>T.replicate 64 "a"<>":0"
+  (plan,previous,fee,tx)<-nativeFixture
+  captured<-BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
+  decoded<-fieldValue "decoded" captured :: IO Value
+  o<-createOrder l c 100 cap req{refund=planRecipient plan}
+  bindInstruction l (orderId o) "fixture-address"
+  observeDeposit l (Deposit did (Just $ orderId o) Native (amt 100000) (T.replicate 64 "b") 1 True 100) "cursor"
+  ob<-createRefund l did
+  beginPreparation l c ob "Native" (units $ planFeeLimit plan) (fixtureJson plan)
+  when saveDraft $ storeDraft l (obligationId ob) (fixtureJson $ NativeDraft "offline-psbt" tx previous fee) 0
+  [p]<-pendingPreparations l
+  setupCustodyScans l c
+  pause l "offline-unsigned-interruption"
+  let wanted=map nativeOutpoint $ nativeInputs tx
+  locks<-newIORef (if saveDraft then wanted else [])
+  let base=custodyContract c (1200000,1000000,100000) []
+      native wallet method params=case (method,params) of
+        ("gettransaction",_) -> do
+          source<-sourceNativeContract 1 wallet method params
+          pure $ setPath ["decoded","vout"] (toJSON [object ["n" .= (0::Int),"value" .= nativeNumber (amt 100000)
+            ,"scriptPubKey" .= object ["hex" .= ("0014"<>T.replicate 40 "1")]]]) source
+        ("getaddressinfo",_) -> sourceNativeContract 1 wallet method params
+        ("getblockheader",_) -> sourceNativeContract 1 wallet method params
+        ("getblockhash",[height]) | height==toJSON (123::Int) -> sourceNativeContract 1 wallet method params
+        ("decodepsbt",[String "offline-psbt"]) -> pure $ object ["tx" .= decoded,"fee" .= nativeNumber fee]
+        ("listlockunspent",[]) -> toJSON <$> readIORef locks
+        ("lockunspent",[Bool True,value]) -> do
+          wallet `shouldBe` True
+          points<-parseValue parseJSON value :: IO [Outpoint]
+          points `shouldSatisfy` (not . null)
+          points `shouldSatisfy` all (`elem` wanted)
+          readIORef locks `shouldReturn` points
+          preparationCancellation l (obligationId ob) 0 >>= (`shouldSatisfy` maybe False (\(_,_,done)->not done))
+          writeIORef locks []
+          pure (Bool True)
+        _ -> paymentNative base wallet method params
+  action l c p locks base{paymentNative=native}
 
 main :: IO ()
 main=hspec $ do
@@ -425,6 +485,245 @@ main=hspec $ do
     it "rejects a nonfinalized signature-history response" $ do
       let value=object ["signature" .= base58 (BS.replicate 64 1),"slot" .= (10::Int),"confirmationStatus" .= ("confirmed"::Text),"err" .= Null]
       (parseEither parseJSON value::Either String SignatureInfo) `shouldSatisfy` either (const True) (const False)
+  describe "unsigned cancellation ledger invariants (offline fixtures)" $ do
+    it "retains principal, inventory, policy, draft and fees, and excludes late callbacks" $ withFunded $ \l c -> do
+      (o,ob)<-fundOrder l c
+      beginPreparation l c ob "Solana" 5000 "fixture-policy"
+      storeDraft l (obligationId ob) "fixture-draft" 0
+      [p]<-pendingPreparations l
+      balance<-ledgerAction l (\db->query_ db "SELECT event_id,asset,account,delta FROM postings ORDER BY id" :: IO [(Text,Text,Text,Int64)])
+      free<-ledgerAction l (\db->freeInventory db Wrapped)
+      fees<-ledgerAction l (\db->freeOperating db "Sol")
+      let cleanup=object ["offline" .= True]
+      beginPreparationCancellation l p 100 "operator cancel" cleanup `shouldThrow` isError "pause_before_operator_action"
+      pause l "operator-action"
+      beginPreparationCancellation l p 100 "operator cancel" cleanup `shouldThrow` isError "custody_not_reconciled"
+      freshScans l 100
+      beginPreparationCancellation l p 100 "operator cancel" cleanup
+      beginPreparationCancellation l p 100 "operator cancel" cleanup
+      beginPreparationCancellation l p 100 "changed reason" cleanup `shouldThrow` isError "preparation_cancellation_conflict"
+      storeDraft l (obligationId ob) "fixture-draft" 0 `shouldThrow` isError "preparation_cancellation_pending"
+      storeAttempt l ob "Solana" "late-signature" "late-bytes" "{}" 5000 Nothing 0 `shouldThrow` isError "preparation_cancellation_pending"
+      createRefund l (obligationDeposit ob) `shouldThrow` isError "refund_would_race_payment"
+      finishPreparationCancellation l p
+      critical<-ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64])
+      finishPreparationCancellation l p
+      ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64]) `shouldReturn` critical
+      available <$> readiness l `shouldReturn` False
+      pendingPreparations l `shouldReturn` []
+      pendingAttempts l `shouldReturn` []
+      readyObligations l `shouldReturn` [ob]
+      status <$> readOrder l cap (orderId o) `shouldReturn` "Ready"
+      ledgerAction l (\db->query_ db "SELECT event_id,asset,account,delta FROM postings ORDER BY id" :: IO [(Text,Text,Text,Int64)]) `shouldReturn` balance
+      ledgerAction l (\db->freeInventory db Wrapped) `shouldReturn` free
+      ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` fees
+      ledgerAction l (\db->query_ db "SELECT policy_json,draft_json,cancelled FROM preparations" :: IO [(Text,Text,Bool)])
+        `shouldReturn` [("fixture-policy","fixture-draft",True)]
+      ledgerAction l (\db->query_ db "SELECT phase FROM reservations" :: IO [Only Text]) `shouldReturn` [Only "obligation"]
+    it "atomically transfers the retained fee hold into a new generation and rejects stale replies" $ withFunded $ \l c -> do
+      (_,ob)<-fundOrder l c
+      beginPreparation l c ob "Solana" 5000 "fixture-policy"
+      [p]<-pendingPreparations l
+      cancelFixture l p
+      fees<-ledgerAction l (\db->freeOperating db "Sol")
+      resumeAfterChecks l
+      beginPreparation l c{maxSolDailyCost=amt 1} ob "Solana" 5000 "new-policy" `shouldThrow` isError "operating_daily_limit"
+      ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` fees
+      ledgerAction l (\db->query_ db "SELECT amount,released FROM fee_reservations" :: IO [(Int64,Bool)]) `shouldReturn` [(5000,False)]
+      beginPreparation l c ob "Solana" 5000 "new-policy"
+      activePreparationGeneration l (obligationId ob) `shouldReturn` 1
+      storeDraft l (obligationId ob) "old-draft" 0 `shouldThrow` isError "preparation_generation_changed"
+      storeAttempt l ob "Solana" "old-signature" "old-bytes" "{}" 5000 Nothing 0 `shouldThrow` isError "preparation_generation_changed"
+      storeDraft l (obligationId ob) "new-draft" 1
+      [next]<-pendingPreparations l
+      storeAttempt l ob "Solana" "new-signature" "new-bytes" "{}" 5000 Nothing 1
+      ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` fees
+      [attempt]<-pendingAttempts l
+      recordSolanaExpiry l attempt "offline expiry proof"
+      ledgerAction l (\db->query_ db "SELECT generation,cancelled,retired_txid FROM preparations ORDER BY generation" :: IO [(Int,Bool,Maybe Text)])
+        `shouldReturn` [(0,True,Nothing),(1,False,Just "new-signature")]
+      pause l "operator-action"
+      freshScans l 100
+      beginPreparationCancellation l next 100 "cancel expired signature" (object ["offline" .= True])
+        `shouldThrow` isError "preparation_cancellation_not_expected"
+    it "releases the unused conversion fee once when a cancelled conversion becomes a full refund" $ withFunded $ \l c -> do
+      (_,ob)<-fundOrder l c
+      beginPreparation l c ob "Solana" 5000 "fixture-policy"
+      [p]<-pendingPreparations l
+      cancelFixture l p
+      refundOb<-createRefund l (obligationDeposit ob)
+      createRefund l (obligationDeposit ob) `shouldReturn` refundOb
+      obligationAmount refundOb `shouldBe` units (input req)
+      ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` 100000
+      ledgerAction l (\db->freeInventory db Wrapped) `shouldReturn` 1000000
+      ledgerAction l (\db->query_ db "SELECT amount,released FROM fee_reservations" :: IO [(Int64,Bool)]) `shouldReturn` [(5000,True)]
+      resumeAfterChecks l
+      beginPreparation l c ob "Solana" 5000 "revived" `shouldThrow` isError "obligation_not_ready"
+      beginPreparation l c refundOb "Native" 1000 "refund-policy"
+      ledgerAction l (\db->freeOperating db "Native") `shouldReturn` 99000
+    it "cannot cancel any generation with a signed, broadcast or settled attempt" $ withFunded $ \l c -> do
+      (_,ob)<-fundOrder l c
+      beginPreparation l c ob "Solana" 5000 "fixture-policy"
+      [p]<-pendingPreparations l
+      storeAttempt l ob "Solana" "recorded" "bytes" "{}" 5000 Nothing 0
+      let refuse=do
+            pause l "operator-action"
+            freshScans l 100
+            beginPreparationCancellation l p 100 "cancel signed" (object ["offline" .= True])
+              `shouldThrow` isError "preparation_cancellation_not_expected"
+      refuse
+      ledgerAction l $ \db->execute_ db "UPDATE deployment SET paused=0"
+      _<-markBroadcastIntent l "recorded"
+      refuse
+      recordSettlement l "recorded" (PaymentCosts (amt 1) (amt 0)) "offline settlement"
+      refuse
+      preparationCancellation l (obligationId ob) 0 `shouldReturn` Nothing
+    it "keeps a source that loses eligibility during cleanup in review" $ withFunded $ \l c -> do
+      (o,ob)<-fundOrder l c
+      beginPreparation l c ob "Solana" 5000 "fixture-policy"
+      [p]<-pendingPreparations l
+      pause l "operator-action"
+      freshScans l 100
+      beginPreparationCancellation l p 100 "cancel" (object ["offline" .= True])
+      refreshDeposit l (Deposit (obligationDeposit ob) (Just $ orderId o) Native (input req) "fixture-anchor" 0 False 100)
+      finishPreparationCancellation l p
+      readyObligations l `shouldReturn` []
+      status <$> readOrder l cap (orderId o) `shouldReturn` "NeedsReview"
+      ledgerAction l (\db->freeInventory db Wrapped) `shouldReturn` 900200
+    it "keeps an abandoned conversion cancelled when its refund source loses eligibility" $ withFunded $ \l c -> do
+      (o,ob)<-fundOrder l c
+      beginPreparation l c ob "Solana" 5000 "fixture-policy"
+      [p]<-pendingPreparations l
+      cancelFixture l p
+      refundOb<-createRefund l (obligationDeposit ob)
+      refreshDeposit l (Deposit (obligationDeposit ob) (Just $ orderId o) Native (input req) "fixture-anchor" 0 False 100)
+      ledgerAction l (\db->query_ db "SELECT kind,status FROM obligations ORDER BY kind" :: IO [(Text,Text)])
+        `shouldReturn` [("conversion","cancelled"),("refund","review")]
+      ledgerAction l (\db->query_ db "SELECT eligible FROM deposits" :: IO [Only Bool]) `shouldReturn` [Only False]
+      readyObligations l `shouldReturn` []
+      available <$> readiness l `shouldReturn` False
+      beginPreparation l c refundOb "Native" 1000 "refund-policy" `shouldThrow` isError "payouts_paused"
+    it "bounds repeated cancellation generations instead of growing an unbounded retry chain" $ withFunded $ \l c -> do
+      (_,ob)<-fundOrder l c
+      forM_ [0..7::Int] $ \g->do
+        beginPreparation l c ob "Solana" 5000 "fixture-policy"
+        [p]<-pendingPreparations l
+        preparationGeneration p `shouldBe` g
+        cancelFixture l p
+        resumeAfterChecks l
+      beginPreparation l c ob "Solana" 5000 "fixture-policy" `shouldThrow` isError "preparation_retry_not_authorized"
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM preparations" :: IO [Only Int]) `shouldReturn` [Only 8]
+  describe "unsigned preparation recovery (offline RPC contracts)" $ do
+    it "requires no locks when funding was interrupted before a draft could be saved" $ withDir $ \dir ->
+      withNativeCancellationDraft False dir $ \l c p locks transport -> do
+        let intent=obligationId (preparationObligation p)
+        writeIORef locks [Outpoint (T.replicate 64 "f") 0]
+        cancelPreparationWith (pure 100) transport c l intent 0 "lost funding response" `shouldThrow` isError "native_preparation_locks_require_review"
+        map preparationDraft <$> pendingPreparations l `shouldReturn` [Nothing]
+        -- Simulate the daemon restarting and losing its memory-only locks.
+        writeIORef locks []
+        _<-cancelPreparationWith (pure 100) transport c l intent 0 "lost funding response"
+        pendingPreparations l `shouldReturn` []
+    it "journals exact native cleanup, unlocks only saved inputs and does not sign or send" $ withNativeCancellation $ \l c p locks transport -> do
+      let intent=obligationId (preparationObligation p)
+      before<-ledgerAction l (\db->query_ db "SELECT event_id,asset,account,delta FROM postings ORDER BY id" :: IO [(Text,Text,Text,Int64)])
+      result<-cancelPreparationWith (pure 100) transport c l intent 0 "abandoned unsigned payment"
+      fieldValue "signedOrSent" result `shouldReturn` False
+      readIORef locks `shouldReturn` []
+      pendingPreparations l `shouldReturn` []
+      pendingAttempts l `shouldReturn` []
+      ledgerAction l (\db->query_ db "SELECT event_id,asset,account,delta FROM postings ORDER BY id" :: IO [(Text,Text,Text,Int64)]) `shouldReturn` before
+      available <$> readiness l `shouldReturn` False
+      let noIO=transport{paymentIdentity=expectationFailure "completed cancellation repeated chain IO"}
+      cancelPreparationWith (pure 100) noIO c l intent 0 "abandoned unsigned payment" `shouldReturn` result
+      cancelPreparationWith (pure 100) noIO c l intent 0 "different reason" `shouldThrow` isError "preparation_cancellation_conflict"
+      resumeAfterChecks l
+      beginPreparation l c (preparationObligation p) "Native" (preparationFeeLimit p) (preparationPolicy p)
+      pause l "operator-action"
+      cancelPreparationWith (pure 100) noIO c l intent 0 "abandoned unsigned payment" `shouldReturn` result
+      map preparationGeneration <$> pendingPreparations l `shouldReturn` [1]
+    it "keeps a lost unlock response pending and completes on reopen without blanket unlocking" $ withDir $ \dir -> do
+      -- The reopened ledger and the RPC wallet state are independent fixtures.
+      saved<-newIORef Nothing
+      withNativeCancellationAt dir $ \l c p locks transport -> do
+        let intent=obligationId (preparationObligation p)
+            lost wallet method params=do
+              result<-paymentNative transport wallet method params
+              if method=="lockunspent" then reject "offline_lost_unlock_response" else pure result
+        cancelPreparationWith (pure 100) transport{paymentNative=lost} c l intent 0 "retry cleanup"
+          `shouldThrow` isError "offline_lost_unlock_response"
+        readIORef locks `shouldReturn` []
+        preparationCancellation l intent 0 >>= (`shouldSatisfy` maybe False (\(_,_,done)->not done))
+        map preparationGeneration <$> pendingPreparations l `shouldReturn` [0]
+        createRefund l (obligationDeposit $ preparationObligation p) `shouldReturn` preparationObligation p
+        readyObligations l `shouldReturn` []
+        writeIORef saved (Just (c,p,locks,transport))
+      Just (c,p,locks,transport)<-readIORef saved
+      withLedger (dbPath c) (fingerprint c) $ \l -> do
+        setupCustodyScans l c
+        let noUnlock wallet method params=if method=="lockunspent" then expectationFailure "empty unlock would clear all locks" >> pure Null
+              else paymentNative transport wallet method params
+        _<-cancelPreparationWith (pure 100) transport{paymentNative=noUnlock} c l (obligationId $ preparationObligation p) 0 "retry cleanup"
+        readIORef locks `shouldReturn` []
+        pendingPreparations l `shouldReturn` []
+        available <$> readiness l `shouldReturn` False
+    it "refuses foreign locks and preserves the unfinished cleanup request" $ withNativeCancellation $ \l c p locks transport -> do
+      let unknown=Outpoint (T.replicate 64 "f") 3
+          intent=obligationId (preparationObligation p)
+      modifyIORef' locks (<>[unknown])
+      before<-readIORef locks
+      cancelPreparationWith (pure 100) transport c l intent 0 "cancel known inputs" `shouldThrow` isError "native_preparation_locks_require_review"
+      readIORef locks `shouldReturn` before
+      preparationCancellation l intent 0 >>= (`shouldSatisfy` maybe False (\(_,_,done)->not done))
+      ledgerAction l (\db->query_ db "SELECT resolved FROM intents" :: IO [Only Bool]) `shouldReturn` [Only False]
+    it "does not cancel after a failed, stale or raced custody check" $ withNativeCancellation $ \l c p locks transport -> do
+      before<-readIORef locks
+      let intent=obligationId (preparationObligation p)
+          changed wallet method params=do
+            result<-paymentNative transport wallet method params
+            pure $ if method=="getbalances" then setPath ["mine","trusted"] (toJSON $ nativeNumber $ amt 1) result else result
+      cancelPreparationWith (pure 100) transport{paymentNative=changed} c l intent 0 "unsafe cleanup"
+        `shouldThrow` isError "custody_not_reconciled"
+      readIORef locks `shouldReturn` before
+      preparationCancellation l intent 0 `shouldReturn` Nothing
+      cancelPreparationWith (pure 161) transport c l intent 0 "unsafe cleanup"
+        `shouldThrow` isError "custody_not_reconciled"
+      readIORef locks `shouldReturn` before
+      let raced wallet method params=do
+            result<-paymentNative transport wallet method params
+            when (method=="decodepsbt") $ fundAllocation l "concurrent-custody-change" Native "float" (amt 1)
+            pure result
+      cancelPreparationWith (pure 100) transport{paymentNative=raced} c l intent 0 "unsafe cleanup"
+        `shouldThrow` isError "custody_not_reconciled"
+      readIORef locks `shouldReturn` before
+      preparationCancellation l intent 0 `shouldReturn` Nothing
+    it "rejects a changed saved PSBT before any wallet unlock" $ withNativeCancellation $ \l c p locks transport -> do
+      before<-readIORef locks
+      let changed wallet method params=do
+            result<-paymentNative transport wallet method params
+            pure $ if method=="decodepsbt" then setPath ["tx","locktime"] (toJSON (1::Int)) result else result
+      cancelPreparationWith (pure 100) transport{paymentNative=changed} c l (obligationId $ preparationObligation p) 0 "changed draft"
+        `shouldThrow` isError "native_psbt_changed"
+      readIORef locks `shouldReturn` before
+      preparationCancellation l (obligationId $ preparationObligation p) 0 `shouldReturn` Nothing
+    it "cancels an unsigned Solana request without a signer, a replacement or a signed-expiry proof" $ withSolanaLedger $ \l original plan _ -> do
+      let c=expiryConfig original
+      (_,ob)<-fundSolanaOrder l c plan
+      let savedPlan=plan{solPlanReference=payoutReference c ob}
+          limit=units $ either (error . T.unpack) id (solanaOperatingLimit savedPlan)
+      beginPreparation l c ob "Solana" limit (fixtureJson savedPlan)
+      storeDraft l (obligationId ob) (fixtureJson $ solanaPayoutRequest c savedPlan) 0
+      setupCustodyScans l c
+      pause l "unsigned-blockhash-expired"
+      let base=custodyContract c (10004,10000,3000000) []
+          native wallet method params=if method `elem` ["gettransaction","getaddressinfo","getblockheader"] || method=="getblockhash" && params==[toJSON (123::Int)]
+            then sourceNativeContract 1 wallet method params else paymentNative base wallet method params
+          transport=base{paymentNative=native}
+      _<-cancelPreparationWith (pure 100) transport c l (obligationId ob) 0 "discard expired unsigned request"
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM solana_expiries" :: IO [Only Int]) `shouldReturn` [Only 0]
+      ledgerAction l (\db->query_ db "SELECT amount,released FROM fee_reservations" :: IO [(Int64,Bool)]) `shouldReturn` [(limit,False)]
+      pendingAttempts l `shouldReturn` []
+      readyObligations l `shouldReturn` [ob]
   describe "signed intent and settlement invariants" $ do
     it "reserves the destination and fee budget before signing, without allowing a refund race" $ withFunded $ \l c -> do
       (o,ob)<-fundOrder l c
@@ -452,9 +751,9 @@ main=hspec $ do
         resumeAfterChecks l
         (_,ob)<-fundOrder l c
         beginPreparation l c ob "Solana" 5000 "fixture-policy"
-        storeDraft l (obligationId ob) "fixture-unsigned-draft"
-        storeDraft l (obligationId ob) "fixture-unsigned-draft"
-        storeDraft l (obligationId ob) "different-draft" `shouldThrow` isError "preparation_draft_conflict"
+        storeDraft l (obligationId ob) "fixture-unsigned-draft" 0
+        storeDraft l (obligationId ob) "fixture-unsigned-draft" 0
+        storeDraft l (obligationId ob) "different-draft" 0 `shouldThrow` isError "preparation_draft_conflict"
       withLedger (dbPath c) (fingerprint c) $ \l -> do
         map preparationDraft <$> pendingPreparations l `shouldReturn` [Just "fixture-unsigned-draft"]
         pendingAttempts l `shouldReturn` []
@@ -463,7 +762,7 @@ main=hspec $ do
         createRefund l "fixture-tx:0" `shouldThrow` isError "refund_would_race_payment"
     it "cannot store signed bytes without a prior durable preparation" $ withFunded $ \l c -> do
       (_,ob)<-fundOrder l c
-      storeAttempt l ob "Solana" "signature" "bytes" "{}" 5000 Nothing `shouldThrow` isError "payment_not_prepared"
+      storeAttempt l ob "Solana" "signature" "bytes" "{}" 5000 Nothing 0 `shouldThrow` isError "payment_not_prepared"
       pendingAttempts l `shouldReturn` []
     it "retains exact bytes across restart and starts paused" $ withDir $ \dir -> do
       let c=cfg dir
@@ -1027,7 +1326,7 @@ main=hspec $ do
       let draft=NativeDraft "unused-transport-fixture" tx{nativeLocktime=1} previous fee
           unexpected _ _ _=expectationFailure "unexpected wallet RPC" >> pure Null
       signNativeDraft unexpected plan draft `shouldThrow` isError "native_replay_policy_mismatch"
-    it "stores the draft before signing and reuses a recorded attempt (RPC contract test)" $ withFunded $ \l c -> do
+    it "stores the draft before locking/signing and reuses a recorded attempt (RPC contract test)" $ withFunded $ \l c -> do
       captured<-BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
       (plan,previous,fee,tx)<-nativeFixture
       previousOutput<-case previous of [p]->pure p; _->fail "expected one captured previous output"
@@ -1051,16 +1350,23 @@ main=hspec $ do
               ("walletcreatefundedpsbt",[_,_,_,options,_]) -> do
                 -- These responses test the RPC contract, not chain acceptance.
                 fieldValue "replaceable" options `shouldReturn` False
-                fieldValue "lockUnspents" options `shouldReturn` True
+                fieldValue "lockUnspents" options `shouldReturn` False
                 fieldValue "minconf" options `shouldReturn` planDepth plan
-                writeIORef locks (map nativeOutpoint $ nativeInputs tx)
                 pure $ object ["psbt" .= ("rpc-contract-psbt"::Text),"fee" .= nativeNumber fee,"changepos" .= (0::Int)]
               ("decodepsbt",_) -> pure $ object ["tx" .= (decoded::Value),"fee" .= nativeNumber fee]
               ("gettxout",_) -> pure $ object ["value" .= nativeNumber (prevoutAmount previousOutput),"confirmations" .= (1000::Int),"coinbase" .= False,"scriptPubKey" .= object ["hex" .= prevoutScript previousOutput,"address" .= ("rpc-contract-source"::Text)]]
+              ("lockunspent",[Bool False,points]) -> do
+                saved<-pendingPreparations l
+                length saved `shouldBe` 1
+                map preparationDraft saved `shouldSatisfy` all (/=Nothing)
+                points `shouldBe` toJSON (map nativeOutpoint $ nativeInputs tx)
+                writeIORef locks (map nativeOutpoint $ nativeInputs tx)
+                pure (Bool True)
               ("walletprocesspsbt",_) -> do
                 saved<-pendingPreparations l
                 length saved `shouldBe` 1
                 map preparationDraft saved `shouldSatisfy` all (/=Nothing)
+                readIORef locks `shouldReturn` map nativeOutpoint (nativeInputs tx)
                 pendingAttempts l `shouldReturn` []
                 pure $ object ["complete" .= True,"psbt" .= ("rpc-contract-signed-psbt"::Text)]
               ("finalizepsbt",_) -> pure $ object ["complete" .= True,"hex" .= raw]
@@ -1083,10 +1389,15 @@ main=hspec $ do
       let call _ method _=case method of
             "getaddressinfo" -> pure $ object ["ismine" .= False,"scriptPubKey" .= planRecipientScript plan]
             _ -> reject "unused"
-      -- Persisting an unsigned draft may be interrupted after node-side locks.
-      -- The ledger must still prevent another payment/refund without recovery.
+      -- Losing funding cannot orphan an advisory lock. The unresolved ledger
+      -- intent still prevents another payment/refund without explicit recovery.
       beginPreparation l c ob "Native" 1000 (TE.decodeUtf8 $ LBS.toStrict $ encode plan)
-      let lost _ method _=if method=="listlockunspent" then pure (toJSON ([]::[Outpoint])) else reject "simulated_lost_funding_reply"
+      let lost _ method params=case (method,params) of
+            ("listlockunspent",[]) -> pure (toJSON ([]::[Outpoint]))
+            ("walletcreatefundedpsbt",[_,_,_,options,_]) -> do
+              fieldValue "lockUnspents" options `shouldReturn` False
+              reject "simulated_lost_funding_reply"
+            _ -> expectationFailure "unexpected signing or wallet mutation" >> pure Null
       prepareNativeWith lost c l ob `shouldThrow` isError "simulated_lost_funding_reply"
       map preparationDraft <$> pendingPreparations l `shouldReturn` [Nothing]
       available <$> readiness l `shouldReturn` False

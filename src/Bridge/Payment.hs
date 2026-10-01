@@ -53,30 +53,35 @@ prepareNativeWith call c ledger obligation = prepare `onException` pause ledger 
         state <- readiness ledger
         require (available state) "payouts_paused"
         preparations <- filter ((==obligationId obligation) . obligationId . preparationObligation) <$> pendingPreparations ledger
-        (plan,savedDraft) <- case preparations of
+        (plan,savedDraft,generation) <- case preparations of
           [] -> do
             limits <- ledgerAction ledger $ \db -> orderCostLimits db (obligationOrder obligation)
             plan <- newNativePlan call (profile c) (nativeDepth policy) (savedNativeFee limits) (obligationRecipient obligation) quantity
             beginPreparation ledger c obligation "Native" (units $ planFeeLimit plan) (json plan)
-            pure (plan,Nothing)
+            g <- activePreparationGeneration ledger (obligationId obligation)
+            pure (plan,Nothing,g)
           [p] -> do
             plan <- stored (preparationPolicy p)
             require (preparationObligation p==obligation && preparationChain p=="Native" && preparationFeeLimit p==units (planFeeLimit plan)) "invalid_saved_payment"
-            pure (plan,preparationDraft p)
+            pure (plan,preparationDraft p,preparationGeneration p)
           _ -> reject "duplicate_preparation"
         validateSaved quantity policy plan
+        activePreparationGeneration ledger (obligationId obligation) >>= \g ->
+          require (g==generation) "preparation_generation_changed"
         draft <- case savedDraft of
           Just value -> stored value
           Nothing -> do
-            value <- fundNativeDraft call plan
-            storeDraft ledger (obligationId obligation) (json value)
+            -- No wallet lock can be orphaned by losing the funding response.
+            -- signNativeDraft locks the recorded inputs after storeDraft commits.
+            value <- fundNativeDraftWith False call plan
+            storeDraft ledger (obligationId obligation) (json value) generation
             pure value
         signed <- signNativeDraft call plan draft
         let txid=nativeTxid (signedNativeTransaction signed)
             points=map nativeOutpoint (nativeInputs $ signedNativeTransaction signed)
         first <- case points of point:_ -> pure point; [] -> reject "native_input_mismatch"
         storeAttempt ledger obligation "Native" txid (signedNativeBytes signed) (json signed)
-          (units $ planFeeLimit plan) (Just $ outpointTxid first<>":"<>T.pack (show $ outpointVout first))
+          (units $ planFeeLimit plan) (Just $ outpointTxid first<>":"<>T.pack (show $ outpointVout first)) generation
         pure txid
       _ -> reject "multiple_initial_native_attempts"
   validateSaved quantity policy plan = require
@@ -123,7 +128,7 @@ prepareSolanaWith call helper c ledger obligation = prepare `onException` pause 
         state <- readiness ledger
         require (available state) "payouts_paused"
         preparations <- filter ((==obligationId obligation) . obligationId . preparationObligation) <$> pendingPreparations ledger
-        (plan,savedDraft) <- case preparations of
+        (plan,savedDraft,generation) <- case preparations of
           [] -> do
             limits <- ledgerAction ledger $ \db -> orderCostLimits db (obligationOrder obligation)
             recent <- getRecentBlockhash call
@@ -131,18 +136,21 @@ prepareSolanaWith call helper c ledger obligation = prepare `onException` pause 
                   (payoutReference c obligation) recent (savedSolanaFee limits) (savedSolanaRent limits)
             limit <- either reject pure (solanaOperatingLimit plan)
             beginPreparation ledger c obligation "Solana" (units limit) (json plan)
-            pure (plan,Nothing)
+            g <- activePreparationGeneration ledger (obligationId obligation)
+            pure (plan,Nothing,g)
           [p] -> do
             plan <- stored (preparationPolicy p)
             limit <- either reject pure (solanaOperatingLimit plan)
             require (preparationObligation p==obligation && preparationChain p=="Solana"
               && preparationFeeLimit p==units limit) "invalid_saved_payment"
-            pure (plan,preparationDraft p)
+            pure (plan,preparationDraft p,preparationGeneration p)
           _ -> reject "duplicate_preparation"
         validateSaved quantity plan
+        activePreparationGeneration ledger (obligationId obligation) >>= \g ->
+          require (g==generation) "preparation_generation_changed"
         let request=solanaPayoutRequest c plan
         case savedDraft of
-          Nothing -> storeDraft ledger (obligationId obligation) (json request)
+          Nothing -> storeDraft ledger (obligationId obligation) (json request) generation
           Just value -> stored value >>= \old -> require (old==request) "saved_solana_request_mismatch"
         -- The immutable order/preparation supplies these ceilings. Current
         -- aggregate daily caps were checked by beginPreparation above.
@@ -150,7 +158,7 @@ prepareSolanaWith call helper c ledger obligation = prepare `onException` pause 
         let reply=signedSolanaReply signed
         signature <- maybe (reject "helper_signature_missing") pure (replySignature reply)
         limit <- either reject pure (solanaOperatingLimit plan)
-        storeAttempt ledger obligation "Solana" signature (replyTransaction reply) (json signed) (units limit) Nothing
+        storeAttempt ledger obligation "Solana" signature (replyTransaction reply) (json signed) (units limit) Nothing generation
         pure signature
       _ -> reject "multiple_initial_solana_attempts"
   validateSaved quantity plan = require

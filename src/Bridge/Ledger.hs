@@ -9,7 +9,8 @@ module Bridge.Ledger
   , ChainEvent(..), ScanBatch(..), commitScan, recordScanFailure, scannerHealth, custodyHealth
   , lookupInstruction, maximumNativeDepth, pendingVerification
   , Obligation(..), readyObligations, Attempt(..), storeAttempt, markBroadcastIntent, authorizeRecordedSend
-  , Preparation(..), beginPreparation, storeDraft, pendingPreparations
+  , Preparation(..), beginPreparation, storeDraft, pendingPreparations, activePreparationGeneration
+  , preparationCancellation, beginPreparationCancellation, finishPreparationCancellation, checkCustodyFresh
   , pendingAttempts, PaymentCosts(..), recordSettlement, createRefund, recordFailedSolana, recordSolanaExpiry, recordSolanaRetryApproval, requireBackup, addHint, auditExport, auditExportWithBudget
   ) where
 
@@ -42,7 +43,7 @@ import Text.Read (readMaybe)
 -- All financial mutations are serialized and committed before external IO.
 newtype Ledger = Ledger (MVar Connection)
 schemaVersion :: Int
-schemaVersion = 9
+schemaVersion = 10
 sqliteIdentity :: Connection -> IO Value
 sqliteIdentity c = do
   versions <- query_ c "SELECT sqlite_version(),sqlite_source_id()" :: IO [(Text,Text)]
@@ -92,8 +93,10 @@ withLedger path identity action = do
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/007.sql"))) $ execute_ c . fromString . T.unpack
     when (meta `elem` [[(v,identity)] | v<-[1..7]]) $ withTransaction c $
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/008.sql"))) $ execute_ c . fromString . T.unpack
-    when (meta/=[(schemaVersion,identity)]) $ withTransaction c $
+    when (meta `elem` [[(v,identity)] | v<-[1..8]]) $ withTransaction c $
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/009.sql"))) $ execute_ c . fromString . T.unpack
+    when (meta/=[(schemaVersion,identity)]) $ withTransaction c $
+      forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/010.sql"))) $ execute_ c . fromString . T.unpack
     -- Restart is quarantined until external identities and unresolved attempts are checked.
     execute_ c "UPDATE deployment SET paused=1,pause_reason='restart_requires_reconciliation'"
     execute_ c "UPDATE custody_check SET revision=revision+1"
@@ -352,6 +355,11 @@ checkIntakeReadyC c now = do
   require (map (\(chain,_,_,_)->chain) scans==["Native","Solana","SolanaOperating"]
     && all (\(_,success,err,anchor)->err==Nothing && not (T.null anchor)
       && maybe False (\t->t>=0 && t<=now && toInteger now-toInteger t<=60) success) scans) "scanners_not_fresh"
+  checkCustodyFreshC c now
+checkCustodyFresh :: Ledger -> Int64 -> IO ()
+checkCustodyFresh l now = ledgerAction l $ \c -> checkCustodyFreshC c now
+checkCustodyFreshC :: Connection -> Int64 -> IO ()
+checkCustodyFreshC c now = do
   checks <- query_ c "SELECT revision,checked_revision,checked_at,last_error FROM custody_check" :: IO [(Int64,Maybe Int64,Maybe Int64,Maybe Text)]
   require (case checks of
     [(revision,Just checked,Just at,Nothing)] -> revision==checked && at>=0 && at<=now && toInteger now-toInteger at<=60
@@ -569,7 +577,7 @@ observeDepositC c Deposit{..} = do
         allocated <- query c "SELECT allocated FROM deposits WHERE id=?" (Only depositId) :: IO [Only Bool]
         when (allocated == [Only True]) $ do
           execute_ c "UPDATE deployment SET paused=1,pause_reason='source_reorg_review'"
-          execute c "UPDATE obligations SET status='review' WHERE deposit_id=? AND status<>'paid'" (Only depositId)
+          execute c "UPDATE obligations SET status='review' WHERE deposit_id=? AND status NOT IN('paid','cancelled')" (Only depositId)
     _ -> reject "duplicate_deposit"
 checkpoint :: Connection -> Text -> Text -> IO ()
 checkpoint c chain anchor = execute c "INSERT INTO checkpoints(chain,anchor) VALUES(?,?) ON CONFLICT(chain) DO UPDATE SET anchor=excluded.anchor" (chain,anchor)
@@ -613,9 +621,9 @@ instance FromRow Attempt where fromRow = Attempt <$> field <*> field <*> field <
 data Preparation = Preparation
   { preparationObligation :: !Obligation, preparationChain :: !Text
   , preparationFeeLimit :: !Int64, preparationPolicy :: !Text
-  , preparationDraft :: !(Maybe Text)
+  , preparationDraft :: !(Maybe Text), preparationGeneration :: !Int
   } deriving (Eq,Show)
-instance FromRow Preparation where fromRow = Preparation <$> fromRow <*> field <*> field <*> field <*> field
+instance FromRow Preparation where fromRow = Preparation <$> fromRow <*> field <*> field <*> field <*> field <*> field
 
 checkObligation :: Connection -> Obligation -> Text -> IO ()
 checkObligation c obligation chain = do
@@ -627,9 +635,12 @@ beginPreparation :: Ledger -> Config -> Obligation -> Text -> Int64 -> Text -> I
 beginPreparation l cfg obligation chain feeLimit policy = ledgerAction l $ \c -> do
   checkObligation c obligation chain
   require (feeLimit>=0 && not (T.null policy) && T.length policy<=16384) "invalid_preparation"
-  existing <- query c "SELECT i.chain,f.amount,p.policy_json FROM intents i JOIN preparations p ON p.intent_id=i.id JOIN fee_reservations f ON f.intent_id=i.id WHERE i.id=? AND i.resolved=0 AND p.retired_txid IS NULL" (Only $ obligationId obligation) :: IO [(Text,Int64,Text)]
+  existing <- query c "SELECT i.chain,f.amount,p.policy_json FROM intents i JOIN preparations p ON p.intent_id=i.id JOIN fee_reservations f ON f.intent_id=i.id WHERE i.id=? AND i.resolved=0 AND p.retired_txid IS NULL AND p.cancelled=0" (Only $ obligationId obligation) :: IO [(Text,Int64,Text)]
   case existing of
-    [(oldChain,oldLimit,oldPolicy)] -> require ((oldChain,oldLimit,oldPolicy)==(chain,feeLimit,policy)) "preparation_conflict"
+    [(oldChain,oldLimit,oldPolicy)] -> do
+      require ((oldChain,oldLimit,oldPolicy)==(chain,feeLimit,policy)) "preparation_conflict"
+      _ <- activePreparationGenerationC c (obligationId obligation)
+      pure ()
     [] -> do
       health <- query_ c "SELECT paused FROM deployment" :: IO [Only Bool]
       require (health==[Only False]) "payouts_paused"
@@ -640,49 +651,131 @@ beginPreparation l cfg obligation chain feeLimit policy = ledgerAction l $ \c ->
       busy <- query c "SELECT id FROM intents WHERE chain=? AND resolved=0" (Only chain) :: IO [Only Text]
       require (null busy) "destination_payment_unresolved"
       let feeAsset = if chain=="Native" then "Native" else "Sol"
-      transferOrderCosts c cfg (obligationOrder obligation) (obligationKind obligation) feeAsset feeLimit
       old <- query c "SELECT chain,resolved FROM intents WHERE id=?" (Only $ obligationId obligation) :: IO [(Text,Bool)]
       generation <- case old of
-        [] -> do
-          execute c "INSERT INTO intents(id,obligation_id,chain) VALUES(?,?,?)" (obligationId obligation,obligationId obligation,chain)
-          execute c "INSERT INTO fee_reservations(intent_id,asset,amount) VALUES(?,?,?)" (obligationId obligation,feeAsset,feeLimit)
-          pure (0::Int)
-        [("Solana",True)] | chain=="Solana" -> do
-          prior <- query c "SELECT generation,retired_txid FROM preparations WHERE intent_id=? ORDER BY generation" (Only $ obligationId obligation) :: IO [(Int,Maybe Text)]
+        [] -> pure (0::Int)
+        [(previousChain,True)] | previousChain==chain -> do
+          prior <- query c "SELECT generation,retired_txid,cancelled FROM preparations WHERE intent_id=? ORDER BY generation" (Only $ obligationId obligation) :: IO [(Int,Maybe Text,Bool)]
           unresolved <- query c "SELECT a.txid FROM attempts a LEFT JOIN solana_expiries e ON e.txid=a.txid WHERE a.intent_id=? AND e.txid IS NULL" (Only $ obligationId obligation) :: IO [Only Text]
-          require (not (null prior) && length prior<8 && all ((/=Nothing).snd) prior && null unresolved) "solana_retry_not_authorized"
-          approved <- query c "SELECT expired_txid FROM solana_retry_approvals WHERE expired_txid=?" (Only $ snd $ last prior) :: IO [Only Text]
-          require (map (\(Only tx)->Just tx) approved==[snd $ last prior]) "solana_retry_not_authorized"
+          require (not (null prior) && length prior<8 && map (\(g,_,_)->g) prior==[0..length prior-1]
+            && all (\(_,tx,cancelled)->tx/=Nothing || cancelled) prior && null unresolved) "preparation_retry_not_authorized"
           released <- query c "SELECT released FROM fee_reservations WHERE intent_id=?" (Only $ obligationId obligation) :: IO [Only Bool]
-          require (released==[Only True]) "solana_retry_fee_hold_conflict"
-          execute c "UPDATE intents SET resolved=0 WHERE id=?" (Only $ obligationId obligation)
-          execute c "UPDATE fee_reservations SET amount=?,released=0 WHERE intent_id=?" (feeLimit,obligationId obligation)
-          pure (1+maximum (map fst prior))
+          case last prior of
+            (g,Nothing,True) -> do
+              completed <- query c "SELECT completed FROM preparation_cancellations WHERE intent_id=? AND generation=?" (obligationId obligation,g) :: IO [Only Bool]
+              require (completed==[Only True] && released==[Only False]) "preparation_cancellation_not_complete"
+            (_,Just tx,False) -> do
+              approved <- query c "SELECT expired_txid FROM solana_retry_approvals WHERE expired_txid=?" (Only tx) :: IO [Only Text]
+              require (chain=="Solana" && approved==[Only tx]) "solana_retry_not_authorized"
+              require (released==[Only True]) "solana_retry_fee_hold_conflict"
+            _ -> reject "preparation_retry_not_authorized"
+          -- Retained unused fees transfer atomically into the next generation.
+          execute c "UPDATE fee_reservations SET released=1 WHERE intent_id=?" (Only $ obligationId obligation)
+          pure (length prior)
         _ -> reject "previous_intent_not_resolved"
+      transferOrderCosts c cfg (obligationOrder obligation) (obligationKind obligation) feeAsset feeLimit
+      if null old then do
+        execute c "INSERT INTO intents(id,obligation_id,chain) VALUES(?,?,?)" (obligationId obligation,obligationId obligation,chain)
+        execute c "INSERT INTO fee_reservations(intent_id,asset,amount) VALUES(?,?,?)" (obligationId obligation,feeAsset,feeLimit)
+      else do
+        execute c "UPDATE intents SET resolved=0 WHERE id=?" (Only $ obligationId obligation)
+        execute c "UPDATE fee_reservations SET amount=?,released=0 WHERE intent_id=?" (feeLimit,obligationId obligation)
       execute c "INSERT INTO preparations(intent_id,generation,policy_json) VALUES(?,?,?)" (obligationId obligation,generation,policy)
       execute c "UPDATE obligations SET status='paying' WHERE id=?" (Only $ obligationId obligation)
       execute c "UPDATE reservations SET phase='payment' WHERE order_id=? AND phase='obligation'" (Only $ obligationOrder obligation)
       execute c "UPDATE orders SET status='Preparing' WHERE id=? AND status<>'Paid'" (Only $ obligationOrder obligation)
     _ -> reject "duplicate_preparation"
 
-storeDraft :: Ledger -> Text -> Text -> IO ()
-storeDraft l intent draft = ledgerAction l $ \c -> do
+activePreparationGeneration :: Ledger -> Text -> IO Int
+activePreparationGeneration l intent = ledgerAction l $ \c -> activePreparationGenerationC c intent
+activePreparationGenerationC :: Connection -> Text -> IO Int
+activePreparationGenerationC c intent = do
+  rows <- query c "SELECT p.generation FROM preparations p JOIN intents i ON i.id=p.intent_id WHERE i.id=? AND i.resolved=0 AND p.retired_txid IS NULL AND p.cancelled=0" (Only intent) :: IO [Only Int]
+  generation <- case rows of [Only g]->pure g; _->reject "preparation_not_found"
+  cancelling <- query c "SELECT generation FROM preparation_cancellations WHERE intent_id=? AND generation=?" (intent,generation) :: IO [Only Int]
+  require (null cancelling) "preparation_cancellation_pending"
+  pure generation
+
+storeDraft :: Ledger -> Text -> Text -> Int -> IO ()
+storeDraft l intent draft generation = ledgerAction l $ \c -> do
   require (not (T.null draft) && T.length draft<=200000) "invalid_preparation_draft"
-  rows <- query c "SELECT p.draft_json FROM preparations p JOIN intents i ON i.id=p.intent_id WHERE p.intent_id=? AND i.resolved=0 AND p.retired_txid IS NULL" (Only intent) :: IO [Only (Maybe Text)]
+  actual <- activePreparationGenerationC c intent
+  require (actual==generation) "preparation_generation_changed"
+  rows <- query c "SELECT draft_json FROM preparations WHERE intent_id=? AND generation=?" (intent,generation) :: IO [Only (Maybe Text)]
   case rows of
-    [Only Nothing] -> execute c "UPDATE preparations SET draft_json=? WHERE intent_id=? AND retired_txid IS NULL" (draft,intent)
+    [Only Nothing] -> execute c "UPDATE preparations SET draft_json=? WHERE intent_id=? AND generation=?" (draft,intent,generation)
     [Only (Just old)] -> require (draft==old) "preparation_draft_conflict"
     _ -> reject "preparation_not_found"
 
 pendingPreparations :: Ledger -> IO [Preparation]
-pendingPreparations l = ledgerAction l $ \c -> query_ c "SELECT o.id,o.order_id,o.deposit_id,o.kind,o.asset,o.amount,o.recipient,i.chain,f.amount,p.policy_json,p.draft_json FROM preparations p JOIN intents i ON i.id=p.intent_id JOIN obligations o ON o.id=i.obligation_id JOIN fee_reservations f ON f.intent_id=i.id WHERE i.resolved=0 AND p.retired_txid IS NULL AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.intent_id=i.id AND a.preparation_generation=p.generation) ORDER BY i.rowid"
+pendingPreparations l = ledgerAction l pendingPreparationsC
+pendingPreparationsC :: Connection -> IO [Preparation]
+pendingPreparationsC c = query_ c "SELECT o.id,o.order_id,o.deposit_id,o.kind,o.asset,o.amount,o.recipient,i.chain,f.amount,p.policy_json,p.draft_json,p.generation FROM preparations p JOIN intents i ON i.id=p.intent_id JOIN obligations o ON o.id=i.obligation_id JOIN fee_reservations f ON f.intent_id=i.id WHERE i.resolved=0 AND p.retired_txid IS NULL AND p.cancelled=0 AND NOT EXISTS (SELECT 1 FROM attempts a WHERE a.intent_id=i.id AND a.preparation_generation=p.generation) ORDER BY i.rowid"
 
-storeAttempt :: Ledger -> Obligation -> Text -> Text -> Text -> Text -> Int64 -> Maybe Text -> IO ()
-storeAttempt l obligation chain txid bytes policy feeLimit commonInput = ledgerAction l $ \c -> do
+preparationCancellation :: Ledger -> Text -> Int -> IO (Maybe (Text,Text,Bool))
+preparationCancellation l intent generation = ledgerAction l $ \c -> do
+  rows <- query c "SELECT reason,cleanup_json,completed FROM preparation_cancellations WHERE intent_id=? AND generation=?" (intent,generation)
+  case rows of []->pure Nothing; [row]->pure (Just row); _->reject "duplicate_preparation_cancellation"
+
+-- Journal the exact generation and cleanup BEFORE unlocking any wallet inputs.
+-- A pending cancellation excludes late draft/signature callbacks atomically.
+beginPreparationCancellation :: Ledger -> Preparation -> Int64 -> Text -> Value -> IO ()
+beginPreparationCancellation l preparation now reason cleanup = ledgerAction l $ \c -> do
+  let intent=obligationId $ preparationObligation preparation
+      generation=preparationGeneration preparation
+      encoded=jsonText cleanup
+  require (not (T.null $ T.strip reason) && T.length reason<=512 && cleanup/=Null && T.length encoded<=32768) "invalid_preparation_cancellation"
+  state <- query_ c "SELECT paused FROM deployment" :: IO [Only Bool]
+  require (state==[Only True]) "pause_before_operator_action"
+  old <- query c "SELECT reason,cleanup_json FROM preparation_cancellations WHERE intent_id=? AND generation=?" (intent,generation) :: IO [(Text,Text)]
+  case old of
+    [(r,proof)] -> require ((r,proof)==(reason,encoded)) "preparation_cancellation_conflict"
+    [] -> do
+      checkCustodyFreshC c now
+      current <- pendingPreparationsC c
+      require (preparation `elem` current) "preparation_cancellation_not_expected"
+      seqNo <- criticalSequence c
+      execute c "INSERT INTO preparation_cancellations(intent_id,generation,reason,cleanup_json,critical_sequence) VALUES(?,?,?,?,?)" (intent,generation,reason,encoded,seqNo)
+      execute c "INSERT INTO audit(action,detail) VALUES('preparation_cancellation_requested',?)" (Only $ intent<>":"<>T.pack(show generation))
+    _ -> reject "duplicate_preparation_cancellation"
+
+finishPreparationCancellation :: Ledger -> Preparation -> IO ()
+finishPreparationCancellation l preparation = ledgerAction l $ \c -> do
+  let ob=preparationObligation preparation
+      intent=obligationId ob
+      generation=preparationGeneration preparation
+  state <- query_ c "SELECT paused FROM deployment" :: IO [Only Bool]
+  require (state==[Only True]) "pause_before_operator_action"
+  rows <- query c "SELECT completed FROM preparation_cancellations WHERE intent_id=? AND generation=?" (intent,generation) :: IO [Only Bool]
+  case rows of
+    [Only True] -> pure ()
+    [Only False] -> do
+      current <- pendingPreparationsC c
+      require (preparation `elem` current) "preparation_cancellation_not_expected"
+      held <- query c "SELECT amount,released FROM fee_reservations WHERE intent_id=?" (Only intent) :: IO [(Int64,Bool)]
+      require (held==[(preparationFeeLimit preparation,False)]) "preparation_fee_hold_missing"
+      source <- query c "SELECT eligible FROM deposits WHERE id=?" (Only $ obligationDeposit ob) :: IO [Only Bool]
+      eligible <- case source of [Only ready]->pure ready; _->reject "deposit_not_found"
+      _ <- criticalSequence c
+      execute c "UPDATE preparation_cancellations SET completed=1 WHERE intent_id=? AND generation=?" (intent,generation)
+      execute c "UPDATE preparations SET cancelled=1 WHERE intent_id=? AND generation=?" (intent,generation)
+      execute c "UPDATE intents SET resolved=1 WHERE id=?" (Only intent)
+      execute c "UPDATE obligations SET status=? WHERE id=?" (if eligible then "ready"::Text else "review",intent)
+      execute c "UPDATE orders SET status=? WHERE id=? AND status<>'Paid'" (if eligible then "Ready"::Text else "NeedsReview",obligationOrder ob)
+      execute c "UPDATE reservations SET phase='obligation' WHERE order_id=? AND phase='payment'" (Only $ obligationOrder ob)
+      -- No fee has been spent. Retain this allowance, source principal and
+      -- destination inventory until a new preparation or safe refund uses them.
+      execute c "INSERT INTO audit(action,detail) VALUES('preparation_cancellation_completed',?)" (Only $ intent<>":"<>T.pack(show generation))
+    _ -> reject "preparation_cancellation_not_expected"
+
+storeAttempt :: Ledger -> Obligation -> Text -> Text -> Text -> Text -> Int64 -> Maybe Text -> Int -> IO ()
+storeAttempt l obligation chain txid bytes policy feeLimit commonInput expectedGeneration = ledgerAction l $ \c -> do
   checkObligation c obligation chain
   require (not (T.null bytes) && T.length bytes <= 200000 && not (T.null policy) && T.length policy<=32768 && feeLimit>=0) "invalid_attempt"
-  prepared <- query c "SELECT f.amount,p.generation FROM intents i JOIN preparations p ON p.intent_id=i.id JOIN fee_reservations f ON f.intent_id=i.id WHERE i.id=? AND i.resolved=0 AND f.released=0 AND p.retired_txid IS NULL" (Only $ obligationId obligation) :: IO [(Int64,Int)]
+  prepared <- query c "SELECT f.amount,p.generation FROM intents i JOIN preparations p ON p.intent_id=i.id JOIN fee_reservations f ON f.intent_id=i.id WHERE i.id=? AND i.resolved=0 AND f.released=0 AND p.retired_txid IS NULL AND p.cancelled=0" (Only $ obligationId obligation) :: IO [(Int64,Int)]
   generation <- case prepared of [(limit,g)] | limit==feeLimit -> pure g; _ -> reject "payment_not_prepared"
+  require (generation==expectedGeneration) "preparation_generation_changed"
+  _ <- activePreparationGenerationC c (obligationId obligation)
   ds <- query c "SELECT eligible FROM deposits WHERE id=?" (Only $ obligationDeposit obligation) :: IO [Only Bool]
   require (ds==[Only True]) "source_not_eligible"
   state <- query c "SELECT status FROM obligations WHERE id=?" (Only $ obligationId obligation) :: IO [Only Text]
@@ -720,11 +813,11 @@ recordSolanaExpiry l attempt proof = ledgerAction l $ \c -> do
     [] -> do
       current <- query c "SELECT a.txid,a.intent_id,i.chain,a.signed_bytes,a.policy_json,a.fee_limit,a.state,a.critical_sequence FROM attempts a JOIN intents i ON i.id=a.intent_id WHERE i.id=? AND i.resolved=0 AND NOT EXISTS(SELECT 1 FROM solana_expiries e WHERE e.txid=a.txid)" (Only $ attemptIntent attempt)
       require (current==[attempt]) "expiry_attempt_changed"
-      generation <- query c "SELECT p.generation FROM preparations p JOIN attempts a ON a.intent_id=p.intent_id AND a.preparation_generation=p.generation WHERE a.txid=? AND p.retired_txid IS NULL" (Only $ attemptId attempt) :: IO [Only Int]
+      generation <- query c "SELECT p.generation FROM preparations p JOIN attempts a ON a.intent_id=p.intent_id AND a.preparation_generation=p.generation WHERE a.txid=? AND p.retired_txid IS NULL AND p.cancelled=0" (Only $ attemptId attempt) :: IO [Only Int]
       require (length generation==1) "expiry_preparation_missing"
       seqNo <- criticalSequence c
       execute c "INSERT INTO solana_expiries(txid,proof_json,critical_sequence) VALUES(?,?,?)" (attemptId attempt,proof,seqNo)
-      execute c "UPDATE preparations SET retired_txid=? WHERE intent_id=? AND retired_txid IS NULL" (attemptId attempt,attemptIntent attempt)
+      execute c "UPDATE preparations SET retired_txid=? WHERE intent_id=? AND retired_txid IS NULL AND cancelled=0" (attemptId attempt,attemptIntent attempt)
       execute c "UPDATE attempts SET state='review',observation_json=? WHERE txid=?" (proof,attemptId attempt)
       execute c "UPDATE fee_reservations SET released=1 WHERE intent_id=?" (Only $ attemptIntent attempt)
       execute c "UPDATE intents SET resolved=1 WHERE id=?" (Only $ attemptIntent attempt)
@@ -826,7 +919,14 @@ auditExportWithBudget l cfg = ledgerAction l $ \c -> do
   audit <- auditExportC c
   budget <- operatingBudget c cfg
   custody <- custodyHealthC c
-  case audit of Object fields -> pure $ Object (KM.insert "custodyReconciliation" custody $ KM.insert "operatingBudget" budget fields); _ -> reject "invalid_audit_export"
+  preparations <- pendingPreparationsC c
+  cancelling <- query_ c "SELECT intent_id,generation FROM preparation_cancellations WHERE completed=0" :: IO [(Text,Int)]
+  let recoveries=toJSON [object ["intent" .= obligationId (preparationObligation p),"generation" .= preparationGeneration p
+        ,"chain" .= preparationChain p,"hasDraft" .= (preparationDraft p/=Nothing)
+        ,"cancellationPending" .= ((obligationId $ preparationObligation p,preparationGeneration p) `elem` cancelling)] | p<-preparations]
+  case audit of
+    Object fields -> pure $ Object (KM.insert "unsignedPreparations" recoveries $ KM.insert "custodyReconciliation" custody $ KM.insert "operatingBudget" budget fields)
+    _ -> reject "invalid_audit_export"
 custodyHealth :: Ledger -> IO Value
 custodyHealth l = ledgerAction l custodyHealthC
 custodyHealthC :: Connection -> IO Value
@@ -867,6 +967,7 @@ createRefund l did = ledgerAction l $ \c -> do
               -- Preserve the cancelled conversion and its source binding. A partial
               -- unique index allows exactly one active allocation of the deposit.
               execute c "UPDATE obligations SET status='cancelled' WHERE id=?" (Only oldId)
+              execute c "UPDATE fee_reservations SET released=1 WHERE intent_id=? AND EXISTS(SELECT 1 FROM intents i WHERE i.id=fee_reservations.intent_id AND i.resolved=1) AND EXISTS(SELECT 1 FROM preparation_cancellations p WHERE p.intent_id=fee_reservations.intent_id AND p.completed=1)" (Only oldId)
             _ -> reject "duplicate_obligation"
           req <- fromText r
           require (asset==T.pack (show $ sourceAsset $ direction req)) "unsupported_refund_asset"
