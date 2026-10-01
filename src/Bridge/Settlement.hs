@@ -4,12 +4,14 @@ module Bridge.Settlement
   , recheckSourceWith, observeNativePayment, observeSolanaPayment, solanaExpiryEvidence, PaymentObservation(..)
   , approveSolanaRetry, approveSolanaRetryWith
   , SavedPayment(..), readSavedPayment, readNativePayment, activeNativeBlock
+  , paymentAttemptGroups, readSavedNativeFamily, activeFamilyPayment
   ) where
 
 import Bridge.Config
 import Bridge.Ledger
 import Bridge.Native
 import Bridge.NativePayment
+import Bridge.NativeReplacement
 import Bridge.Observer (collectSignatures,SignatureInfo(..))
 import Bridge.Payment
 import Bridge.RPC
@@ -19,7 +21,7 @@ import Bridge.SolanaHelper
 import Bridge.SolanaPayment
 import Bridge.Types
 import Control.Exception (IOException,catch,onException,try)
-import Control.Monad (forM_,when)
+import Control.Monad (forM,forM_,when,unless)
 import Data.Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
@@ -273,6 +275,40 @@ readSavedPayment transport c ledger attempt = do
     _ -> reject "wrong_destination_chain"
   pure (ob,payment)
 
+-- Capacity is one intent per chain. Mutually exclusive native members share
+-- that slot, but independent native intents and multiple Solana attempts do not.
+paymentAttemptGroups :: [Attempt] -> Either Text [[Attempt]]
+paymentAttemptGroups attempts=do
+  let chains=nub $ map attemptChain attempts
+      groups=[filter ((==chain).attemptChain) attempts | chain<-chains]
+  unless (length attempts<=9 && all (`elem` ["Native","Solana"]) chains
+    && length (nub $ map attemptId attempts)==length attempts
+    && all (\xs->length (nub $ map attemptIntent xs)==1
+      && case xs of a:_->length xs<=if attemptChain a=="Native" then 8 else 1; []->False) groups) (Left "recovery_attempt_bounds")
+  pure groups
+
+-- Lineage is checked in the ledger before the RPC reader accepts any conflict
+-- as belonging to this family. An arbitrary same-intent row is not authority.
+readSavedNativeFamily :: PaymentTransport -> Config -> Ledger -> [Attempt] -> IO ([(Attempt,NativeSigned)],NativeFamilyView)
+readSavedNativeFamily transport c ledger expected=do
+  first <- case expected of a:_->pure a; _->reject "native_replacement_family_bounds"
+  family <- nativeFamilyAttempts ledger (attemptIntent first)
+  require (family==expected) "native_replacement_family_changed"
+  signed <- forM family $ \attempt->do
+    (_,payment) <- readSavedPayment transport c ledger attempt
+    case payment of NativePayment s->pure(attempt,s); _->reject "wrong_destination_chain"
+  view <- readNativeFamilyWith (paymentNative transport) c (map snd signed)
+  forM_ (familyWallet view) $ \(txid,seen)->when (seen/=Nothing) $ do
+    require (any (\a->attemptId a==txid && attemptState a `elem` ["broadcast_intent","settled"]) family) "unrecorded_broadcast_observed"
+  pure(signed,view)
+
+activeFamilyPayment :: [(Attempt,NativeSigned)] -> NativeFamilyView -> IO (Maybe (Attempt,NativeSigned,Int,Value))
+activeFamilyPayment family view=case familyActive view of
+  Nothing->pure Nothing
+  Just (txid,depth,value)->case [(a,s) | (a,s)<-family,attemptId a==txid] of
+    [(attempt,signed)]->pure $ Just (attempt,signed,depth,value)
+    _->reject "native_family_spender_unavailable"
+
 -- Reconcile only already-recorded attempts. This path never invokes signing,
 -- backup or send, even if the deployment happens to be available.
 reconcilePayments :: Manager -> Config -> Ledger -> IO Value
@@ -282,23 +318,29 @@ reconcilePayments manager c = reconcilePaymentsWith
 reconcilePaymentsWith :: PaymentTransport -> Config -> Ledger -> IO Value
 reconcilePaymentsWith transport c ledger = do
   attempts <- pendingAttempts ledger
-  let bounded=length attempts<=2 && length (nub $ map attemptChain attempts)==length attempts
-  when (not bounded) $ pause ledger "recovery_attempt_bounds"
-  require bounded "recovery_attempt_bounds"
-  reports <- mapM reconcile attempts
+  groups <- case paymentAttemptGroups attempts of
+    Left code->pause ledger code >> reject code
+    Right groups->pure groups
+  reports <- mapM (reconcile.last) groups
   pure $ object ["attempts" .= reports,"signedOrSent" .= False]
  where
   reconcile attempt = do
     outcome <- try (reconcileRecordedAttempt transport c ledger attempt
       `catch` (\(_::IOException)->reject "payment_observation_io_unavailable")) :: IO (Either BridgeError (Either Text (Obligation,SavedPayment)))
     case outcome of
-      Right result -> pure $ report attempt (either id (const "unseen") result) Nothing
+      Right result -> do
+        txid <- case result of
+          Left "settled"->do
+            winners <- ledgerAction ledger $ \db->query db "SELECT txid FROM attempts WHERE intent_id=? AND state='settled'" (Only $ attemptIntent attempt) :: IO [Only Text]
+            case winners of [Only winner]->pure winner; _->reject "settled_payment_missing"
+          _->pure $ attemptId attempt
+        pure $ report txid attempt (either id (const "unseen") result) Nothing
       Left (BridgeError code) -> do
         health <- readiness ledger
         let reason="payment_recovery:"<>code
         when (health/=Availability False reason) $ pause ledger reason
-        pure $ report attempt "requires_review" (Just code)
-  report attempt state failure = object ["transaction" .= attemptId attempt,"chain" .= attemptChain attempt
+        pure $ report (attemptId attempt) attempt "requires_review" (Just code)
+  report txid attempt state failure = object ["transaction" .= txid,"chain" .= attemptChain attempt
     ,"outcome" .= (state::Text),"error" .= (failure::Maybe Text)]
 
 -- A Right result means the same saved transaction is unseen and has no proven
@@ -307,23 +349,40 @@ reconcileRecordedAttempt :: PaymentTransport -> Config -> Ledger -> Attempt -> I
 reconcileRecordedAttempt transport c ledger attempt = do
   paymentIdentity transport
   (ob,payment) <- readSavedPayment transport c ledger attempt
-  observation <- case payment of
-    NativePayment signed -> observeNativePayment (paymentNative transport) signed
-    SolanaPayment signed -> observeSolanaPayment (paymentSolana transport) c signed
-  case observation of
-    PaymentConfirmed costs proof -> recorded >> recordSettlement ledger (attemptId attempt) costs proof >> pure (Left "settled")
-    PaymentFailed fee proof -> recorded >> recordFailedSolana ledger (attemptId attempt) (units fee) proof >> pure (Left "failed")
-    PaymentWaiting -> recorded >> pure (Left "confirming")
-    PaymentUnseen -> do
-      expiry <- case payment of
-        NativePayment _ -> pure Nothing
-        SolanaPayment signed -> solanaExpiryEvidence transport c signed
-      case expiry of
-        Just proof -> do
-          checkExpiryOrigins ledger c
-          recordSolanaExpiry ledger attempt proof
-          pure (Left "expired")
-        Nothing -> pure (Right (ob,payment))
+  family <- if attemptChain attempt=="Native" then nativeFamilyAttempts ledger (attemptIntent attempt) else pure [attempt]
+  if length family>1 then do
+    require (attempt `elem` family) "native_replacement_family_changed"
+    (members,view) <- readSavedNativeFamily transport c ledger family
+    current <- activeFamilyPayment members view
+    case current of
+      Just (winner,signed,depth,value) | depth>=planDepth (signedNativePlan signed)->do
+        anchor <- fieldValue "blockhash" value
+        height <- activeNativeBlock (paymentNative transport) anchor (planDepth $ signedNativePlan signed)
+        require (attemptState winner=="broadcast_intent") "unrecorded_broadcast_observed"
+        recordSettlement ledger (attemptId winner) (PaymentCosts (signedNativeFee signed) zero) $ json $ object
+          ["txid" .= attemptId winner,"blockhash" .= anchor,"height" .= height,"requiredDepth" .= planDepth (signedNativePlan signed)]
+        pure (Left "settled")
+      Just (active,_,depth,_) | depth>0 || attemptId active==attemptId attempt->pure (Left "confirming")
+      _ | last family/=attempt->pure (Left "superseded")
+      _->pure (Right (ob,payment))
+   else do
+    observation <- case payment of
+      NativePayment signed -> observeNativePayment (paymentNative transport) signed
+      SolanaPayment signed -> observeSolanaPayment (paymentSolana transport) c signed
+    case observation of
+      PaymentConfirmed costs proof -> recorded >> recordSettlement ledger (attemptId attempt) costs proof >> pure (Left "settled")
+      PaymentFailed fee proof -> recorded >> recordFailedSolana ledger (attemptId attempt) (units fee) proof >> pure (Left "failed")
+      PaymentWaiting -> recorded >> pure (Left "confirming")
+      PaymentUnseen -> do
+        expiry <- case payment of
+          NativePayment _ -> pure Nothing
+          SolanaPayment signed -> solanaExpiryEvidence transport c signed
+        case expiry of
+          Just proof -> do
+            checkExpiryOrigins ledger c
+            recordSolanaExpiry ledger attempt proof
+            pure (Left "expired")
+          Nothing -> pure (Right (ob,payment))
  where
   recorded=require (attemptState attempt=="broadcast_intent") "unrecorded_broadcast_observed"
 
@@ -393,7 +452,8 @@ paymentPass manager c ledger backup = work `onException` pause ledger "payment_r
   transport=realPaymentTransport manager c backup
   work=do
     attempts <- pendingAttempts ledger
-    forM_ attempts $ \attempt -> settleAttemptWith transport c ledger attempt >> pure ()
+    groups <- either reject pure (paymentAttemptGroups attempts)
+    forM_ groups $ \family -> settleAttemptWith transport c ledger (last family) >> pure ()
     ready <- readyObligations ledger
     forM_ ready $ \ob -> do
       health <- readiness ledger

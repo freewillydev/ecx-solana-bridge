@@ -1,8 +1,17 @@
 Build profile: -w ghc-9.14.1 -O1
 In order, the following will be built (use -v for more details):
- - ecx-bridge-0.1.0.0 (test:bridge-test) (first run)
+ - ecx-bridge-0.1.0.0 (lib) (configuration changed)
+ - ecx-bridge-0.1.0.0 (test:bridge-test) (configuration changed)
+Configuring library for ecx-bridge-0.1.0.0...
+Preprocessing library for ecx-bridge-0.1.0.0...
+Building library for ecx-bridge-0.1.0.0...
+[17 of 27] Compiling Bridge.Settlement ( src/Bridge/Settlement.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Settlement.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Settlement.dyn_o ) [Source file changed]
+[18 of 27] Compiling Bridge.Reorg     ( src/Bridge/Reorg.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Reorg.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Reorg.dyn_o ) [Bridge.Settlement changed]
+Configuring test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Preprocessing test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Building test suite 'bridge-test' for ecx-bridge-0.1.0.0...
+[1 of 1] Compiling Main             ( test/Spec.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test-tmp/Main.o ) [Source file changed]
+[2 of 2] Linking ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test [Objects changed]
 Running 1 test suites...
 Test suite bridge-test: RUNNING...
 
@@ -91,6 +100,36 @@ durable native replacement drafts (offline recovery contracts)
   bounds repeated cancelled decisions without multiplying the fee hold [✔]
   rolls back draft insertion and critical sequence on database failure [✔]
   makes the draft immutable and keeps it after a failed cancellation [✔]
+native payment families (offline lineage and RPC contracts)
+  retains immutable lineage and one maximum fee hold; a signed draft cannot be cancelled [✔]
+  settles member 0 once, including after reopening [✔]
+  settles member 1 once, including after reopening [✔]
+  normalizes only the mempool effect of member 0 [✔]
+  normalizes only the mempool effect of member 1 [✔]
+  retains evicted family bytes and restores one shared lock set without any outgoing effect [✔]
+  keeps all funds when a signed-only member is observed on chain [✔]
+  rejects an unrelated walletconflicts member [✔]
+  rejects an unrelated mempoolconflicts member [✔]
+  rejects a spender outside the immutable family [✔]
+  cannot infer an absent family effect when its inputs are spent on an unknown chain payment [✔]
+  refuses contradictory proof that both shared-input members confirmed [✔]
+  discards a family view that changes between its two observations [✔]
+  requires backup of the newest BroadcastIntent and prevents sending an older member [✔]
+  rejects a signature callback after cancelled work [✔]
+  rejects a signature callback after changed hold work [✔]
+  rolls back the member, signed bytes and sequence if its critical audit write fails [✔]
+  blocks a new send while an unsigned replacement decision is outstanding [✔]
+  does not accept a plausible sibling with no durable operator lineage [✔]
+  retains review when a losing wallet record lacks its alleged confirmed winner [✔]
+  retains the booked winner through finality loss and refuses a changed winner without compensation [✔]
+  refuses signing context when the original common input binding is missing [✔]
+  keeps a subsequently observed unrecorded sibling quarantined in an older ledger [✔]
+native replacement signing (offline daemon contracts)
+  signs the saved template once, persists it before any broadcast decision and reuses it on replay [✔]
+  keeps the original when the signer is rejected [✔]
+  keeps the original when the signer is lost reply [✔]
+  cannot persist a late signature after cancellation while the signer is running [✔]
+  rechecks the bound source after signing and retains all funds if it lost eligibility [✔]
 one economic settlement per intent (offline competing callbacks)
   books only the older winner and preserves it across restart [✔]
   books only the newer winner and preserves it across restart [✔]
@@ -360,8 +399,8 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 7.5681 seconds
-314 examples, 0 failures
+Finished in 8.2510 seconds
+342 examples, 0 failures
 Test suite bridge-test: PASS
 Test suite logged to: /Volumes/Crucial
 X9/CodexBuilds/ecx-bridge-20260930/workspace-b/outputs/ecx-bridge/./../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log

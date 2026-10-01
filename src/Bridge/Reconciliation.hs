@@ -16,7 +16,6 @@ import Control.Monad (forM_,when)
 import Data.Aeson hiding (decode)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
-import Data.List (nub)
 import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -119,8 +118,8 @@ inspectCustodyWith clock transport c ledger inspectLosses=do
   paymentIdentity transport
   before <- nativeBalance native
   attempts <- pendingAttempts ledger
-  require (length attempts<=2 && length (nub $ map attemptChain attempts)==length attempts) "custody_attempt_bounds"
-  effects <- concat <$> mapM (pendingEffect transport c ledger) attempts
+  groups <- either (const $ reject "custody_attempt_bounds") pure (paymentAttemptGroups attempts)
+  effects <- concat <$> mapM (pendingFamilyEffect transport c ledger) groups
   (slot,wrapped,sol) <- solanaBalances (paymentSolana transport) c ledger view
   case paymentVerifier transport of
     Nothing->require (profile c/=CanonicalBeta && solanaVerifierRpc c==Nothing) "independent_rpc_required"
@@ -215,6 +214,30 @@ solanaBalances call c ledger view=do
 
 -- Normalize only verified effects of the immutable saved payment. Unsigned
 -- preparations and unseen signatures have no outgoing effect.
+pendingFamilyEffect :: PaymentTransport -> Config -> Ledger -> [Attempt] -> IO [(Text,Text,Integer)]
+pendingFamilyEffect transport c ledger [attempt]=pendingEffect transport c ledger attempt
+pendingFamilyEffect transport c ledger attempts=do
+  (members,view) <- readSavedNativeFamily transport c ledger attempts
+  active <- activeFamilyPayment members view
+  case active of
+    Nothing->pure []
+    Just (attempt,signed,depth,value)->nativeObservedEffect ledger attempt signed depth value
+
+nativeObservedEffect :: Ledger -> Attempt -> NativeSigned -> Int -> Value -> IO [(Text,Text,Integer)]
+nativeObservedEffect ledger attempt signed confirmations value=do
+  require (attemptState attempt=="broadcast_intent") "unrecorded_broadcast_observed"
+  let txid=attemptId attempt
+  (kind,anchor,proof) <- eventProof ledger "Native" txid
+  actualAnchor <- parseValue (withObject "transaction" (.:? "blockhash")) value
+  oldDepth <- fieldValue "confirmations" proof
+  net <- fieldValue "walletNetUnits" proof
+  fee <- fieldValue "feeUnits" proof
+  let n=toInteger $ units $ planAmount $ signedNativePlan signed
+      cost=toInteger $ units $ signedNativeFee signed
+  require (kind=="outgoing" && anchor==maybe "unconfirmed" id actualAnchor && oldDepth==confirmations
+    && net==T.pack(show $ negate n) && fee==signedNativeFee signed) "custody_payment_observation_mismatch"
+  pure [(txid,"Native",negate $ n+cost)]
+
 pendingEffect :: PaymentTransport -> Config -> Ledger -> Attempt -> IO [(Text,Text,Integer)]
 pendingEffect transport c ledger attempt=do
   (_,payment) <- readSavedPayment transport c ledger attempt
@@ -237,16 +260,7 @@ pendingEffect transport c ledger attempt=do
             mempool <- native False "getmempoolentry" [toJSON txid]
             size <- fieldValue "vsize" mempool :: IO Int
             require (size>0) "native_mempool_evidence_invalid"
-          (kind,anchor,proof) <- eventProof ledger "Native" txid
-          actualAnchor <- parseValue (withObject "transaction" (.:? "blockhash")) value
-          oldDepth <- fieldValue "confirmations" proof
-          net <- fieldValue "walletNetUnits" proof
-          fee <- fieldValue "feeUnits" proof
-          let n=toInteger $ units $ planAmount $ signedNativePlan signed
-              cost=toInteger $ units $ signedNativeFee signed
-          require (kind=="outgoing" && anchor==maybe "unconfirmed" id actualAnchor && oldDepth==confirmations
-            && net==T.pack(show $ negate n) && fee==signedNativeFee signed) "custody_payment_observation_mismatch"
-          pure [(txid,"Native",negate $ n+cost)]
+          nativeObservedEffect ledger attempt signed confirmations value
     SolanaPayment signed->do
       proof <- paymentSolana transport "getTransaction" [toJSON txid,object
         ["commitment" .= ("finalized"::Text),"encoding" .= ("json"::Text),"maxSupportedTransactionVersion" .= (0::Int)]]

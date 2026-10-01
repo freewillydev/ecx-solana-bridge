@@ -2,7 +2,8 @@
 module Bridge.Recovery
   ( recoverDeployment, reconcileNativeLocks, reconcileNativeLocksWith
   , cancelPreparation, cancelPreparationWith, approveSourceRecovery, approveSourceRecoveryWith
-  , coverSourceLoss, coverSourceLossWith, prepareNativeReplacement, prepareNativeReplacementWith ) where
+  , coverSourceLoss, coverSourceLossWith, prepareNativeReplacement, prepareNativeReplacementWith
+  , signNativeReplacementWith ) where
 
 import Bridge.Config
 import Bridge.Ledger
@@ -98,8 +99,12 @@ prepareNativeReplacementWith clock transport c ledger parent fee reason=do
       paymentIdentity transport
       (ob,payment) <- readSavedPayment transport c ledger expected
       signed <- case payment of NativePayment s->pure s; _->reject "wrong_destination_chain"
+      attempts <- nativeFamilyAttempts ledger (attemptIntent expected)
+      family <- if attempts==[expected] then pure [signed] else do
+        (members,_) <- readSavedNativeFamily transport c ledger attempts
+        pure (map snd members)
       recheckSourceWith transport c ledger ob
-      draft <- draftNativeReplacementWith (paymentNative transport) c [signed] fee
+      draft <- draftNativeReplacementWith (paymentNative transport) c family fee
       -- The original can confirm during drafting. Reconcile it and reject a
       -- stale parent before committing an operator decision for new work.
       payments <- reconcilePaymentsWith transport c ledger
@@ -113,6 +118,36 @@ prepareNativeReplacementWith clock transport c ledger parent fee reason=do
       pure(sequenceNo,False)
   pure $ object ["parentTransaction" .= parent,"draftSequence" .= sequenceNo,"fee" .= fee
     ,"cancelled" .= cancelled,"paused" .= True,"signedOrSent" .= False]
+
+-- Signing is an explicit call, never a paused-worker task. The command/send
+-- entry point remains gated until family reorg compensation is integrated.
+signNativeReplacementWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> Int64 -> IO Attempt
+signNativeReplacementWith clock transport c ledger sequenceNo=do
+  previous <- nativeReplacementMember ledger sequenceNo
+  case previous of
+    Just member->pure member
+    Nothing->do
+      (expected,draft) <- nativeReplacementSigningContext ledger c sequenceNo
+      paymentIdentity transport
+      (members,_) <- readSavedNativeFamily transport c ledger expected
+      (ob,_) <- readSavedPayment transport c ledger (last expected)
+      recheckSourceWith transport c ledger ob
+      reconcile
+      _ <- nativeReplacementSigningContext ledger c sequenceNo
+      signed <- signNativeReplacementDraftWith (paymentNative transport) c (map snd members) draft
+      recheckSourceWith transport c ledger ob
+      reconcile
+      now <- clock
+      recordNativeReplacementMember ledger c sequenceNo expected signed now
+ where
+  reconcile=do
+    payments <- reconcilePaymentsWith transport c ledger
+    outcomes <- fieldValue "attempts" payments :: IO [Value]
+    failures <- mapM (fieldValue "error") outcomes :: IO [Maybe Text]
+    require (all (==Nothing) failures) "native_replacement_payment_requires_review"
+    _ <- reconcileCustodyWith clock transport c ledger
+    now <- clock
+    checkCustodyFresh ledger now
 
 coverSourceLoss :: Manager -> Config -> Ledger -> Text -> Int64 -> LossCapital -> Text -> IO Value
 coverSourceLoss manager c ledger did recovery capital reason=do
@@ -188,6 +223,14 @@ reconcileNativeLocksWith transport c ledger=do
         spent <- recordedNativeSpend a signed
         if spent then verifyOnly "spent_by_recorded_payment" (map nativeOutpoint $ nativeInputs $ signedNativeTransaction signed)
           else restore (attemptId a) (signedNativePlan signed) (signedNativeTransaction signed) (signedNativePrevouts signed)
+      ([],family) | length family>1->do
+        _ <- either reject pure (paymentAttemptGroups family)
+        (members,view) <- readSavedNativeFamily transport c ledger family
+        (first,signed) <- case members of m:_->pure m; _->reject "native_lock_recovery_bounds"
+        let points=map nativeOutpoint $ nativeInputs $ signedNativeTransaction signed
+        case familyActive view of
+          Just _->verifyOnly "spent_by_recorded_family" points
+          Nothing->restore (attemptId first) (signedNativePlan signed) (signedNativeTransaction signed) (signedNativePrevouts signed)
       _->reject "native_lock_recovery_bounds"
   verifyOnly state points=do
     locked <- ownedNativeLocks call points

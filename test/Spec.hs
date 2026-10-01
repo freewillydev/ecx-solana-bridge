@@ -240,8 +240,10 @@ withNativeLockRecoveryAt draft dir action=withNativeCancellationDraft draft dir 
 saveNativeFixtureAttempt :: Ledger -> Preparation -> IO Attempt
 saveNativeFixtureAttempt l p=do
   signed<-nativeSignedFixture
+  point<-case nativeInputs (signedNativeTransaction signed) of first:_->pure $ nativeOutpoint first; _->fail "missing captured input"
   storeAttempt l (preparationObligation p) "Native" (nativeTxid $ signedNativeTransaction signed)
-    (signedNativeBytes signed) (fixtureJson signed) (units $ planFeeLimit $ signedNativePlan signed) Nothing (preparationGeneration p)
+    (signedNativeBytes signed) (fixtureJson signed) (units $ planFeeLimit $ signedNativePlan signed)
+    (Just $ outpointTxid point<>":"<>T.pack(show $ outpointVout point)) (preparationGeneration p)
   [attempt]<-pendingAttempts l
   pure attempt
 
@@ -286,6 +288,110 @@ withReplacementDraftAt dir action=withNativeReplacementContract $ \_ original dr
     commitScan l (ScanBatch "Native" (nativeCheckpointHash c) previous custodyNativeTip 100 []
       [ChainEvent txid "outgoing" "unconfirmed" (object ["confirmations" .= (0::Int),"walletNetUnits" .= ("-100000"::Text),"feeUnits" .= signedNativeFee original])])
     action l c parent draft custody{paymentNative=native}
+
+-- The second member uses the captured unsigned replacement TEMPLATE with an
+-- explicit non-sendable byte stub. RPC responses below model outcomes only;
+-- these tests are not cryptographic/signing or live replacement acceptance.
+replacementFixtureSigned :: NativeSigned -> NativeDraft -> NativeSigned
+replacementFixtureSigned original draft=original{signedNativeBytes="00",signedNativeTransaction=draftTransaction draft
+  ,signedNativePrevouts=draftPrevouts draft,signedNativeFee=draftFee draft}
+
+withReplacementSignerAt :: FilePath -> (Ledger -> Config -> Attempt -> NativeDraft -> Int64 -> PaymentTransport -> IORef [(Text,[Value])] -> IO a) -> IO a
+withReplacementSignerAt dir action=withReplacementDraftAt dir $ \l c parent draft originalTransport->do
+  captured<-BS.readFile "test/fixtures/native-signet-replacement-draft.json" >>= either fail pure . eitherDecodeStrict'
+  decoded<-fieldValue "decoded" captured >>= fieldValue "tx" :: IO Value
+  result<-prepareNativeReplacementWith (pure 100) originalTransport c l (attemptId parent) (draftFee draft) "offline signing decision"
+  sequenceNo<-fieldValue "draftSequence" result
+  calls<-newIORef []
+  let native wallet method params=do
+        modifyIORef' calls (<>[(method,params)])
+        case (method,params) of
+          ("walletprocesspsbt",[psbt,Bool True,String "ALL",Bool True])->do
+            psbt `shouldBe` toJSON (draftPsbt draft)
+            pure $ object ["complete" .= True,"psbt" .= ("offline-signed-psbt"::Text)]
+          ("finalizepsbt",[String "offline-signed-psbt",Bool True])->pure $ object ["complete" .= True,"hex" .= ("00"::Text)]
+          ("decoderawtransaction",[String "00"])->pure decoded
+          ("testmempoolaccept",[raw])->do
+            raw `shouldBe` toJSON ["00"::Text]
+            pure $ toJSON [object ["txid" .= nativeTxid (draftTransaction draft),"allowed" .= True
+              ,"fees" .= object ["base" .= nativeNumber (draftFee draft)]]]
+          _->paymentNative originalTransport wallet method params
+  action l c parent draft sequenceNo originalTransport{paymentNative=native} calls
+
+withNativeFamilyAt :: FilePath -> (Ledger -> Config -> [Attempt] -> [NativeSigned] -> IORef (Maybe (Int,Int)) -> PaymentTransport -> IORef [(Text,[Value])] -> IO a) -> IO a
+withNativeFamilyAt dir action=withReplacementDraftAt dir $ \l c parent draft originalTransport->do
+  original<-nativeSignedFixture
+  old<-BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
+  oldDecoded<-fieldValue "decoded" old :: IO Value
+  replacement<-BS.readFile "test/fixtures/native-signet-replacement-draft.json" >>= either fail pure . eitherDecodeStrict'
+  newDecoded<-fieldValue "decoded" replacement >>= fieldValue "tx"
+  result<-prepareNativeReplacementWith (pure 100) originalTransport c l (attemptId parent) (draftFee draft) "offline family decision"
+  sequenceNo<-fieldValue "draftSequence" result
+  _<-reconcileCustodyWith (pure 100) originalTransport c l
+  let newer=replacementFixtureSigned original draft
+  member<-recordNativeReplacementMember l c sequenceNo [parent] newer 100
+  markNativeFixtureBroadcast l member
+  attempts<-pendingAttempts l
+  let signed=[original,newer]
+      txid s=nativeTxid $ signedNativeTransaction s
+      position=object ["hash" .= custodyNativeTip,"height" .= (16010::Int)]
+      points=map nativeOutpoint $ nativeInputs $ signedNativeTransaction original
+  mode<-newIORef $ Just (1,0)
+  calls<-newIORef []
+  locks<-newIORef ([]::[Outpoint])
+  let native wallet method params=do
+        modifyIORef' calls (<>[(method,params)])
+        selected<-readIORef mode
+        let active=case selected of Just (i,n)->Just (signed!!i,n); Nothing->Nothing
+            quantity=case active of Just (s,_)->1200000-100000-toInteger (units $ signedNativeFee s); Nothing->1200000
+            balance=custodyContract c (quantity,1000000,100000) []
+            winnerAnchor=case active of Just (_,1)->custodyNativeTip; _->T.replicate 64 "d"
+        case (method,params) of
+          ("decoderawtransaction",[raw]) | raw==toJSON (signedNativeBytes newer)->pure newDecoded
+          ("gettransaction",[wanted,Bool False,Bool True]) | wanted `elem` map (toJSON.txid) signed->do
+            let (s,decoded)=if wanted==toJSON (txid original) then (original,oldDecoded) else (newer,newDecoded)
+                depth=case active of Just (winner,n) | txid winner==txid s->n; Just (_,n) | n>0->negate n; _->0
+                conflicts=case active of Just (winner,n) | n>0 && txid winner/=txid s->[txid winner]; _->[]
+                mempool=case active of Just (winner,0) | txid winner/=txid s->[txid winner]; _->[]
+            pure $ object $ ["txid" .= txid s,"hex" .= signedNativeBytes s,"decoded" .= decoded
+              ,"fee" .= scientific (negate $ toInteger $ units $ signedNativeFee s) (-8),"confirmations" .= depth
+              ,"walletconflicts" .= conflicts,"mempoolconflicts" .= mempool,"lastprocessedblock" .= position]
+              <>["blockhash" .= winnerAnchor | depth>0]
+          ("gettxspendingprevout",[_])->pure $ toJSON [object $ ["txid" .= outpointTxid p,"vout" .= outpointVout p]
+            <>case active of Just (s,0)->["spendingtxid" .= txid s]; _->[] | p<-points]
+          ("gettxout",[tx,index,Bool includeMempool])->case active of
+            Just (_,n) | n>0 || includeMempool->pure Null
+            _->paymentNative originalTransport wallet method [tx,index,Bool False]
+          ("getmempoolentry",[wanted])->case active of
+            Just (s,0) | wanted==toJSON (txid s)->pure $ object ["vsize" .= (141::Int)]
+            _->reject "rpc_error_-5"
+          ("getblockheader",[anchor]) | anchor==toJSON winnerAnchor->case active of
+            Just (_,n) | n>0->pure $ object ["hash" .= winnerAnchor,"height" .= (16011-n),"confirmations" .= n]
+            _->reject "unexpected_family_block"
+          ("getblockhash",[height]) | Just (_,n)<-active,n>0,height==toJSON (16011-n)->pure $ toJSON winnerAnchor
+          ("getbalances",[])->paymentNative balance wallet method params >>= pure . setPath ["lastprocessedblock","height"] (toJSON (16010::Int))
+          ("listlockunspent",[])->toJSON <$> readIORef locks
+          ("lockunspent",[Bool False,value])->do
+            requested<-parseValue parseJSON value
+            requested `shouldSatisfy` (not . null)
+            requested `shouldSatisfy` all (`elem` points)
+            modifyIORef' locks (<>requested)
+            pure (Bool True)
+          _->paymentNative originalTransport wallet method params
+      transport=originalTransport{paymentNative=native}
+  scanFamilyFixture l c signed (Just (1,0))
+  writeIORef calls []
+  action l c attempts signed mode transport calls
+
+scanFamilyFixture :: Ledger -> Config -> [NativeSigned] -> Maybe (Int,Int) -> IO ()
+scanFamilyFixture l c members position=do
+  previous<-readCheckpoint l "Native"
+  let events=[let depth=case position of Just (winner,n) | winner==i->n; Just (_,n) | n>0->negate n; _->0
+                  anchor=if depth<=0 then "unconfirmed" else if depth==1 then custodyNativeTip else T.replicate 64 "d"
+              in ChainEvent (nativeTxid $ signedNativeTransaction s) "outgoing" anchor
+                (object ["confirmations" .= depth,"walletNetUnits" .= ("-100000"::Text),"feeUnits" .= signedNativeFee s])
+             | (i,s)<-zip [0..] members]
+  commitScan l (ScanBatch "Native" (nativeCheckpointHash c) previous custodyNativeTip 100 [] events)
 
 -- Captured native transaction, local financial fixture, and explicit RPC
 -- responses. No alternate chain is selected or contacted by these tests.
@@ -1364,6 +1470,294 @@ main=hspec $ do
       withLedger (dbPath c) (fingerprint c) $ \l->do
         nativeReplacementDecision l (attemptId parent) (draftFee draft) "review" `shouldReturn` Just (sequenceNo,False)
         ledgerAction l (\db->execute_ db "DELETE FROM native_replacement_drafts") `shouldThrow` (\err->sqlError err==ErrorConstraint)
+  describe "native payment families (offline lineage and RPC contracts)" $ do
+    it "retains immutable lineage and one maximum fee hold; a signed draft cannot be cancelled" $ withDir $ \dir->withNativeFamilyAt dir $ \l c attempts members _ _ _->do
+      let original=attempts!!0; newer=attempts!!1
+      nativeFamilyAttempts l (attemptIntent original) `shouldReturn` attempts
+      [Only sequenceNo]<-ledgerAction l (\db->query_ db "SELECT draft_sequence FROM native_replacement_members" :: IO [Only Int64])
+      nativeReplacementMember l sequenceNo `shouldReturn` Just newer
+      before<-auditExport l
+      recordNativeReplacementMember l c sequenceNo [original] (members!!1) 999 `shouldReturn` newer
+      recordNativeReplacementMember l c sequenceNo [original] (members!!1){signedNativeBytes="01"} 100
+        `shouldThrow` isError "native_replacement_signature_conflict"
+      recordNativeReplacementCancellation l sequenceNo "too late" `shouldThrow` isError "native_replacement_already_signed"
+      nativeReplacementParent l c (attemptId original) `shouldThrow` isError "native_replacement_not_current"
+      ledgerAction l (\db->query_ db "SELECT amount,released FROM fee_reservations" :: IO [(Int64,Bool)]) `shouldReturn` [(1000,False)]
+      auditExport l `shouldReturn` before
+    forM_ [0,1] $ \winner->it ("settles member "<>show winner<>" once, including after reopening") $ withDir $ \dir->do
+      (c,saved,txid,transport)<-withNativeFamilyAt dir $ \l c attempts members mode transport calls->do
+        writeIORef mode $ Just (winner,1)
+        scanFamilyFixture l c members (Just (winner,1))
+        result<-reconcilePaymentsWith transport c l
+        recoveryOutcomes result `shouldReturn` ["settled"]
+        let txid=attemptId $ attempts!!winner
+            cost=units $ signedNativeFee $ members!!winner
+        (fieldValue "attempts" result >>= mapM (fieldValue "transaction")) `shouldReturn` [txid]
+        pendingAttempts l `shouldReturn` []
+        ledgerAction l (\db->query_ db "SELECT txid FROM attempts WHERE state='settled'" :: IO [Only Text]) `shouldReturn` [Only txid]
+        ledgerAction l (\db->query_ db "SELECT delta FROM postings WHERE account='operating' AND delta<0" :: IO [Only Int64]) `shouldReturn` [Only $ negate cost]
+        ledgerAction l (\db->query_ db "SELECT amount,released FROM fee_reservations" :: IO [(Int64,Bool)]) `shouldReturn` [(1000,True)]
+        custody<-reconcileCustodyWith (pure 100) transport c l
+        fieldValue "lastError" custody `shouldReturn` (Nothing::Maybe Text)
+        readIORef calls >>= \xs->map fst xs `shouldSatisfy` all (`notElem` ["walletprocesspsbt","sendrawtransaction","createpsbt"])
+        saved<-auditExport l
+        pure(c,saved,txid,transport)
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        (reconcilePaymentsWith transport c l >>= recoveryOutcomes) `shouldReturn` []
+        auditExport l `shouldReturn` saved
+        ledgerAction l (\db->query_ db "SELECT txid FROM attempts WHERE state='settled'" :: IO [Only Text]) `shouldReturn` [Only txid]
+    forM_ [0,1] $ \active->it ("normalizes only the mempool effect of member "<>show active) $ withDir $ \dir->withNativeFamilyAt dir $ \l c _ members mode transport _->do
+      writeIORef mode $ Just (active,0)
+      scanFamilyFixture l c members (Just (active,0))
+      before<-auditExport l
+      result<-reconcileCustodyWith (pure 100) transport c l
+      fieldValue "lastError" result `shouldReturn` (Nothing::Maybe Text)
+      effects<-fieldValue "report" result >>= fieldValue "inFlightEffects" :: IO [Value]
+      length effects `shouldBe` 1
+      mapM (fieldValue "transaction") effects `shouldReturn` [nativeTxid $ signedNativeTransaction $ members!!active]
+      locks<-reconcileNativeLocksWith transport c l
+      fieldValue "state" locks `shouldReturn` ("spent_by_recorded_family"::Text)
+      fieldValue "restoredInputs" locks `shouldReturn` (0::Int)
+      auditExport l `shouldReturn` before
+    it "retains evicted family bytes and restores one shared lock set without any outgoing effect" $ withDir $ \dir->withNativeFamilyAt dir $ \l c attempts members mode transport calls->do
+      writeIORef mode Nothing
+      scanFamilyFixture l c members Nothing
+      before<-auditExport l
+      result<-reconcileCustodyWith (pure 100) transport c l
+      fieldValue "lastError" result `shouldReturn` (Nothing::Maybe Text)
+      (fieldValue "report" result >>= fieldValue "inFlightEffects") `shouldReturn` ([]::[Value])
+      first<-reconcileNativeLocksWith transport c l
+      second<-reconcileNativeLocksWith transport c l
+      fieldValue "restoredInputs" first `shouldReturn` (1::Int)
+      fieldValue "restoredInputs" second `shouldReturn` (0::Int)
+      pendingAttempts l `shouldReturn` attempts
+      auditExport l `shouldReturn` before
+      readIORef calls >>= \xs->length (filter ((=="lockunspent").fst) xs) `shouldBe` 1
+    it "keeps all funds when a signed-only member is observed on chain" $ withDir $ \dir->withNativeFamilyAt dir $ \l c attempts _ _ transport _->do
+      ledgerAction l $ \db->execute db "UPDATE attempts SET state='signed' WHERE txid=?" (Only $ attemptId $ attempts!!1)
+      before<-auditExport l
+      report<-reconcilePaymentsWith transport c l
+      failures<-fieldValue "attempts" report >>= mapM (fieldValue "error") :: IO [Maybe Text]
+      failures `shouldBe` [Just "unrecorded_broadcast_observed"]
+      auditExport l `shouldReturn` before
+    forM_ ["walletconflicts","mempoolconflicts"] $ \key->it ("rejects an unrelated "<>T.unpack key<>" member") $ withDir $ \dir->withNativeFamilyAt dir $ \l c attempts _ _ transport _->do
+      let original=paymentNative transport
+          altered wallet method params=do
+            value<-original wallet method params
+            pure $ case (method,params) of
+              ("gettransaction",wanted:_) | wanted==toJSON (attemptId $ attempts!!0)->setPath [Key.fromText key] (toJSON [T.replicate 64 "f"]) value
+              _->value
+      before<-auditExport l
+      result<-reconcileCustodyWith (pure 100) transport{paymentNative=altered} c l
+      fieldValue "lastError" result `shouldReturn` Just ("native_family_unknown_conflict"::Text)
+      auditExport l `shouldReturn` before
+    it "rejects a spender outside the immutable family" $ withDir $ \dir->withNativeFamilyAt dir $ \l c _ _ _ transport _->do
+      let original=paymentNative transport
+          altered wallet method params=do
+            value<-original wallet method params
+            if method=="gettxspendingprevout" then do
+              points<-parseValue parseJSON value :: IO [Value]
+              pure $ toJSON $ map (setPath ["spendingtxid"] $ toJSON $ T.replicate 64 "f") points
+             else pure value
+      result<-reconcileCustodyWith (pure 100) transport{paymentNative=altered} c l
+      fieldValue "lastError" result `shouldReturn` Just ("native_family_unknown_spender"::Text)
+    it "cannot infer an absent family effect when its inputs are spent on an unknown chain payment" $ withDir $ \dir->withNativeFamilyAt dir $ \l c _ _ mode transport _->do
+      writeIORef mode Nothing
+      let original=paymentNative transport
+          unavailable wallet method params=if method=="gettxout" then pure Null else original wallet method params
+      result<-reconcileCustodyWith (pure 100) transport{paymentNative=unavailable} c l
+      fieldValue "lastError" result `shouldReturn` Just ("native_input_unavailable"::Text)
+    it "refuses contradictory proof that both shared-input members confirmed" $ withDir $ \dir->withNativeFamilyAt dir $ \l c attempts members mode transport _->do
+      writeIORef mode $ Just (1,1)
+      scanFamilyFixture l c members (Just (1,1))
+      let original=paymentNative transport
+          altered wallet method params=do
+            value<-original wallet method params
+            pure $ case (method,params) of
+              ("gettransaction",wanted:_) | wanted==toJSON (attemptId $ attempts!!0)->
+                setPath ["blockhash"] (toJSON custodyNativeTip) $ setPath ["confirmations"] (toJSON (1::Int)) value
+              _->value
+      before<-auditExport l
+      report<-reconcilePaymentsWith transport{paymentNative=altered} c l
+      (fieldValue "attempts" report >>= mapM (fieldValue "error")) `shouldReturn` [Just ("native_family_multiple_winners"::Text)]
+      auditExport l `shouldReturn` before
+    it "discards a family view that changes between its two observations" $ withDir $ \dir->withNativeFamilyAt dir $ \l c _ _ mode transport _->do
+      walletReads<-newIORef (0::Int)
+      let original=paymentNative transport
+          altered wallet method params=do
+            value<-original wallet method params
+            when (method=="getwalletinfo") $ do
+              modifyIORef' walletReads (+1)
+              n<-readIORef walletReads
+              when (n==2) $ writeIORef mode $ Just (0,0)
+            pure value
+      before<-auditExport l
+      report<-reconcilePaymentsWith transport{paymentNative=altered} c l
+      (fieldValue "attempts" report >>= mapM (fieldValue "error")) `shouldReturn` [Just ("native_family_view_changed"::Text)]
+      auditExport l `shouldReturn` before
+    it "requires backup of the newest BroadcastIntent and prevents sending an older member" $ withDir $ \dir->withNativeFamilyAt dir $ \l _ attempts _ _ _ _->do
+      let original=attempts!!0; newer=attempts!!1
+      ledgerAction l $ \db->execute_ db "UPDATE deployment SET paused=0"
+      markBroadcastIntent l (attemptId original) `shouldThrow` isError "native_replacement_not_current"
+      authorizeRecordedSend l False (attemptId original) `shouldThrow` isError "native_replacement_not_current"
+      sequenceNo<-markBroadcastIntent l (attemptId newer)
+      authorizeRecordedSend l True (attemptId newer) `shouldThrow` isError "backup_pending"
+      acknowledgeBackup l sequenceNo "offline family snapshot"
+      authorizeRecordedSend l True (attemptId newer) `shouldReturn` newer
+    forM_ [("cancelled","native_replacement_not_unsigned"),("changed hold","native_replacement_work_changed")]
+      $ \(condition,code)->it ("rejects a signature callback after "<>T.unpack condition<>" work") $ withDir $ \dir->withReplacementDraftAt dir $ \l c parent draft transport->do
+        original<-nativeSignedFixture
+        result<-prepareNativeReplacementWith (pure 100) transport c l (attemptId parent) (draftFee draft) "late callback test"
+        sequenceNo<-fieldValue "draftSequence" result
+        if condition=="cancelled" then recordNativeReplacementCancellation l sequenceNo "withdraw unsigned decision"
+          else ledgerAction l $ \db->execute_ db "UPDATE fee_reservations SET amount=amount+1"
+        assumeSourceApprovalCustody l
+        before<-auditExport l
+        recordNativeReplacementMember l c sequenceNo [parent] (replacementFixtureSigned original draft) 100 `shouldThrow` isError code
+        pendingAttempts l `shouldReturn` [parent]
+        auditExport l `shouldReturn` before
+    it "rolls back the member, signed bytes and sequence if its critical audit write fails" $ withDir $ \dir->do
+      (c,parent,before,sequenceNo)<-withReplacementDraftAt dir $ \l c parent draft transport->do
+        original<-nativeSignedFixture
+        result<-prepareNativeReplacementWith (pure 100) transport c l (attemptId parent) (draftFee draft) "failure test"
+        draftSequence<-fieldValue "draftSequence" result
+        assumeSourceApprovalCustody l
+        before<-auditExport l
+        [Only sequenceNo]<-ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64])
+        ledgerAction l $ \db->execute_ db "CREATE TRIGGER fail_member_audit BEFORE INSERT ON audit WHEN NEW.action='native_replacement_signed' BEGIN SELECT RAISE(ABORT,'offline_member_failure'); END"
+        recordNativeReplacementMember l c draftSequence [parent] (replacementFixtureSigned original draft) 100 `shouldThrow` (\err->sqlError err==ErrorConstraint)
+        pure(c,parent,before,sequenceNo)
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        pendingAttempts l `shouldReturn` [parent]
+        auditExport l `shouldReturn` before
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM native_replacement_members" :: IO [Only Int]) `shouldReturn` [Only 0]
+        ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64]) `shouldReturn` [Only sequenceNo]
+    it "blocks a new send while an unsigned replacement decision is outstanding" $ withDir $ \dir->withReplacementDraftAt dir $ \l c parent draft transport->do
+      result<-prepareNativeReplacementWith (pure 100) transport c l (attemptId parent) (draftFee draft) "unsigned send fence"
+      sequenceNo<-fieldValue "draftSequence" result
+      markBroadcastIntent l (attemptId parent) `shouldThrow` isError "native_replacement_draft_pending"
+      recordNativeReplacementCancellation l sequenceNo "keep original payment"
+      markBroadcastIntent l (attemptId parent) `shouldReturn` maybe 0 id (attemptSequence parent)
+    it "does not accept a plausible sibling with no durable operator lineage" $ withDir $ \dir->withReplacementDraftAt dir $ \l c parent draft transport->do
+      original<-nativeSignedFixture
+      let sibling=replacementFixtureSigned original draft
+          txid=nativeTxid $ signedNativeTransaction sibling
+      ledgerAction l $ \db->execute db "INSERT INTO attempts(txid,intent_id,signed_bytes,policy_json,fee_limit,state,critical_sequence,preparation_generation) SELECT ?,intent_id,?,?,fee_limit,state,critical_sequence,preparation_generation FROM attempts WHERE txid=?"
+        (txid,signedNativeBytes sibling,fixtureJson sibling,attemptId parent)
+      attempts<-pendingAttempts l
+      before<-auditExport l
+      readSavedNativeFamily transport c l attempts `shouldThrow` isError "native_replacement_lineage_missing"
+      auditExport l `shouldReturn` before
+    it "retains review when a losing wallet record lacks its alleged confirmed winner" $ withDir $ \dir->withNativeFamilyAt dir $ \l c attempts members mode transport _->do
+      writeIORef mode $ Just (1,1)
+      scanFamilyFixture l c members (Just (1,1))
+      let original=paymentNative transport
+          missing wallet method params=case (method,params) of
+            ("gettransaction",wanted:_) | wanted==toJSON (attemptId $ attempts!!1)->reject "rpc_error_-5"
+            _->original wallet method params
+      before<-auditExport l
+      report<-reconcilePaymentsWith transport{paymentNative=missing} c l
+      (fieldValue "attempts" report >>= mapM (fieldValue "error")) `shouldReturn` [Just ("native_family_conflict_not_proven"::Text)]
+      auditExport l `shouldReturn` before
+    it "retains the booked winner through finality loss and refuses a changed winner without compensation" $ withDir $ \dir->withNativeFamilyAt dir $ \l c attempts members mode transport _->do
+      writeIORef mode $ Just (1,1)
+      scanFamilyFixture l c members (Just (1,1))
+      (reconcilePaymentsWith transport c l >>= recoveryOutcomes) `shouldReturn` ["settled"]
+      before<-auditExport l
+      writeIORef mode $ Just (1,0)
+      scanFamilyFixture l c members (Just (1,0))
+      confirming<-reconcileNativeSettlementsWith transport c l
+      (fieldValue "payments" confirming >>= mapM (fieldValue "state")) `shouldReturn` ["confirming"::Text]
+      writeIORef mode $ Just (0,1)
+      scanFamilyFixture l c members (Just (0,1))
+      changed<-reconcileNativeSettlementsWith transport c l
+      (fieldValue "payments" changed >>= mapM (fieldValue "error")) `shouldReturn` [Just ("native_family_winner_changed"::Text)]
+      result<-reconcileCustodyWith (pure 100) transport c l
+      fieldValue "lastError" result `shouldReturn` Just ("native_settlement_requires_review"::Text)
+      pendingAttempts l `shouldReturn` []
+      ledgerAction l (\db->query_ db "SELECT txid FROM attempts WHERE state='settled'" :: IO [Only Text]) `shouldReturn` [Only $ attemptId $ attempts!!1]
+      writeIORef mode $ Just (1,1)
+      scanFamilyFixture l c members (Just (1,1))
+      restored<-reconcileNativeSettlementsWith transport c l
+      (fieldValue "payments" restored >>= mapM (fieldValue "state")) `shouldReturn` ["reconfirmed"::Text]
+      auditExport l `shouldReturn` before
+    it "refuses signing context when the original common input binding is missing" $ withDir $ \dir->withReplacementDraftAt dir $ \l c parent draft transport->do
+      ledgerAction l $ \db->execute_ db "UPDATE intents SET common_input=NULL"
+      result<-prepareNativeReplacementWith (pure 100) transport c l (attemptId parent) (draftFee draft) "invalid common input"
+      sequenceNo<-fieldValue "draftSequence" result
+      nativeReplacementSigningContext l c sequenceNo `shouldThrow` isError "native_replacement_common_input_changed"
+    it "keeps a subsequently observed unrecorded sibling quarantined in an older ledger" $ withDir $ \dir->withReplacementDraftAt dir $ \l c _ draft _->do
+      previous<-readCheckpoint l "Native"
+      let txid=nativeTxid $ draftTransaction draft
+      commitScan l (ScanBatch "Native" (nativeCheckpointHash c) previous custodyNativeTip 100 []
+        [ChainEvent txid "outgoing" custodyNativeTip (object ["confirmations" .= (1::Int),"walletNetUnits" .= ("-100000"::Text),"feeUnits" .= draftFee draft])])
+      ledgerAction l (\db->query db "SELECT needs_review FROM chain_events WHERE event_id=?" (Only txid) :: IO [Only Bool]) `shouldReturn` [Only True]
+      length <$> pendingAttempts l `shouldReturn` 1
+      available <$> readiness l `shouldReturn` False
+  describe "native replacement signing (offline daemon contracts)" $ do
+    it "signs the saved template once, persists it before any broadcast decision and reuses it on replay" $ withDir $ \dir->withReplacementSignerAt dir $ \l c parent draft sequenceNo transport calls->do
+      before<-auditExport l
+      member<-signNativeReplacementWith (pure 100) transport c l sequenceNo
+      attemptId member `shouldBe` nativeTxid (draftTransaction draft)
+      attemptState member `shouldBe` "signed"
+      attemptBytes member `shouldBe` "00"
+      attemptSequence member `shouldBe` Nothing
+      nativeFamilyAttempts l (attemptIntent parent) `shouldReturn` [parent,member]
+      nativeReplacementMember l sequenceNo `shouldReturn` Just member
+      signNativeReplacementWith (pure 100) transport{paymentIdentity=expectationFailure "replay contacted chain"} c l sequenceNo `shouldReturn` member
+      auditExport l `shouldReturn` before
+      requests<-readIORef calls
+      length (filter ((=="walletprocesspsbt").fst) requests) `shouldBe` 1
+      map fst requests `shouldSatisfy` all (`notElem` ["sendrawtransaction","getrawchangeaddress","walletcreatefundedpsbt"])
+      let methods=map fst requests
+      (elemIndex "walletprocesspsbt" methods,elemIndex "testmempoolaccept" methods) `shouldSatisfy` \case
+        (Just signed,Just checked)->signed<checked; _->False
+    forM_ ["rejected","lost reply"] $ \failure->it ("keeps the original when the signer is "<>T.unpack failure) $ withDir $ \dir->withReplacementSignerAt dir $ \l c parent _ sequenceNo transport calls->do
+      let original=paymentNative transport
+          altered wallet method params
+            | failure=="lost reply" && method=="walletprocesspsbt"=reject "offline_lost_signer_reply"
+            | failure=="rejected" && method=="testmempoolaccept"=do
+                result<-original wallet method params
+                values<-parseValue parseJSON result :: IO [Value]
+                pure $ toJSON $ map (setPath ["allowed"] $ Bool False) values
+            | otherwise=original wallet method params
+      before<-auditExport l
+      signNativeReplacementWith (pure 100) transport{paymentNative=altered} c l sequenceNo
+        `shouldThrow` isError (if failure=="rejected" then "native_transaction_not_accepted" else "offline_lost_signer_reply")
+      nativeReplacementMember l sequenceNo `shouldReturn` Nothing
+      pendingAttempts l `shouldReturn` [parent]
+      auditExport l `shouldReturn` before
+      readIORef calls >>= \requests->map fst requests `shouldSatisfy` all (/="sendrawtransaction")
+    it "cannot persist a late signature after cancellation while the signer is running" $ withDir $ \dir->withReplacementSignerAt dir $ \l c parent _ sequenceNo transport _->do
+      let original=paymentNative transport
+          altered wallet method params=do
+            result<-original wallet method params
+            when (method=="walletprocesspsbt") $ recordNativeReplacementCancellation l sequenceNo "cancel concurrent signing"
+            pure result
+      before<-auditExport l
+      signNativeReplacementWith (pure 100) transport{paymentNative=altered} c l sequenceNo `shouldThrow` isError "native_replacement_not_unsigned"
+      nativeReplacementMember l sequenceNo `shouldReturn` Nothing
+      pendingAttempts l `shouldReturn` [parent]
+      auditExport l `shouldReturn` before
+    it "rechecks the bound source after signing and retains all funds if it lost eligibility" $ withDir $ \dir->withReplacementSignerAt dir $ \l c parent _ sequenceNo transport _->do
+      signed<-newIORef False
+      let original=paymentNative transport
+          altered wallet method params=do
+            result<-original wallet method params
+            when (method=="finalizepsbt") $ writeIORef signed True
+            done<-readIORef signed
+            pure $ case (method,params) of
+              ("gettransaction",wanted:_) | done && wanted/=toJSON (attemptId parent)->setPath ["confirmations"] (toJSON (0::Int)) result
+              _->result
+      before<-auditExport l
+      signNativeReplacementWith (pure 100) transport{paymentNative=altered} c l sequenceNo `shouldThrow` isError "source_not_eligible"
+      nativeReplacementMember l sequenceNo `shouldReturn` Nothing
+      pendingAttempts l `shouldReturn` [parent]
+      after<-auditExport l
+      forM_ ["balances","events"] $ \key->do
+        saved<-fieldValue key before :: IO Value
+        fieldValue key after `shouldReturn` saved
+      ledgerAction l (\db->query db "SELECT status FROM obligations WHERE id=?" (Only $ attemptIntent parent) :: IO [Only Text]) `shouldReturn` [Only "review"]
   describe "one economic settlement per intent (offline competing callbacks)" $ do
     forM_ [False,True] $ \newer->it ("books only the "<>(if newer then "newer" else "older")<>" winner and preserves it across restart") $ withDir $ \dir->do
       (c,winner,loser,cost,proof,snapshot)<-withCompetingNativeAt dir $ \l c original other->do

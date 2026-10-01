@@ -162,9 +162,12 @@ checkNativeQuoteWith call cfg request = do
   pure $ NativeQuoteCheck (if wrapping then "refund" else "payout") script quantity (draftFee draft)
 
 readNativePrevouts :: NativeRPC -> Int -> [NativeInput] -> IO [NativePrevout]
-readNativePrevouts call depth inputs = forM inputs $ \input -> do
+readNativePrevouts = readNativePrevoutsWith True
+
+readNativePrevoutsWith :: Bool -> NativeRPC -> Int -> [NativeInput] -> IO [NativePrevout]
+readNativePrevoutsWith includeMempool call depth inputs = forM inputs $ \input -> do
   let point= nativeOutpoint input
-  value <- call False "gettxout" [toJSON (outpointTxid point),toJSON (outpointVout point),Bool True]
+  value <- call False "gettxout" [toJSON (outpointTxid point),toJSON (outpointVout point),Bool includeMempool]
   require (value/=Null) "native_input_unavailable"
   quantity <- fieldValue "value" value >>= either reject pure . nativeAmount
   confirmations <- fieldValue "confirmations" value
@@ -219,6 +222,12 @@ signNativeDraft call plan draft = do
   -- Reapply advisory locks, including after a daemon restart. Signing does
   -- not authorize sending; the caller must save the exact result to its ledger.
   _ <- restoreNativeInputLocks call (map nativeOutpoint $ nativeInputs unsigned)
+  signNativeTemplate call plan draft current
+
+-- Both original and replacement adapters validate the saved PSBT and current
+-- input ownership before invoking this shared daemon signer. It never sends.
+signNativeTemplate :: NativeRPC -> NativePlan -> NativeDraft -> [NativePrevout] -> IO NativeSigned
+signNativeTemplate call plan draft current=do
   signed <- call True "walletprocesspsbt" [toJSON (draftPsbt draft),Bool True,String "ALL",Bool True]
   complete <- fieldValue "complete" signed
   require complete "native_signing_incomplete"
@@ -231,7 +240,7 @@ signNativeDraft call plan draft = do
   require (T.length bytes<=200000 && hexText bytes) "invalid_native_signed_bytes"
   final <- call False "decoderawtransaction" [toJSON bytes] >>= either reject pure . decodeNativeTx
   either reject pure (validateNativeTx plan current (draftFee draft) final)
-  require (sameNativeTemplate unsigned final) "native_signed_template_changed"
+  require (sameNativeTemplate (draftTransaction draft) final) "native_signed_template_changed"
   let result=NativeSigned bytes final plan current (draftFee draft)
   checkNativeAcceptance call result
   pure result

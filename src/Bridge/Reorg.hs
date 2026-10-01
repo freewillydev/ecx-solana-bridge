@@ -4,13 +4,14 @@ module Bridge.Reorg (reconcileNativeSettlements,reconcileNativeSettlementsWith,r
 import Bridge.Config
 import Bridge.Ledger
 import Bridge.Native (nativeIdentity,nativeAmount)
-import Bridge.NativePayment (ownedScript,transactionId)
+import Bridge.NativePayment (ownedScript,transactionId,signedNativePlan,planDepth,signedNativeFee)
 import Bridge.RPC
 import Bridge.Settlement
 import Bridge.Types
 import Control.Exception (IOException,catch,try)
 import Control.Monad (when,filterM)
 import Data.Aeson
+import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -175,7 +176,21 @@ reconcileNativeSettlementsWith transport c ledger=do
     require (name==nativeWallet c && descriptors && scanning==Bool False) "native_wallet_not_ready"
     (_,saved) <- readSavedPayment transport c ledger attempt
     payment <- case saved of NativePayment value->pure value; _->reject "wrong_destination_chain"
-    observeNativePayment (paymentNative transport) payment >>= \case
+    family <- nativeFamilyAttempts ledger (attemptIntent attempt)
+    observation <- if length family==1 then observeNativePayment (paymentNative transport) payment else do
+      (members,view) <- readSavedNativeFamily transport c ledger family
+      active <- activeFamilyPayment members view
+      case active of
+        Just (winner,signed,depth,value)->do
+          require (attemptId winner==attemptId attempt) "native_family_winner_changed"
+          if depth<planDepth (signedNativePlan signed) then pure PaymentWaiting else do
+            anchor <- fieldValue "blockhash" value
+            height <- activeNativeBlock (paymentNative transport) anchor (planDepth $ signedNativePlan signed)
+            noRent <- either reject pure (amount 0)
+            pure $ PaymentConfirmed (PaymentCosts (signedNativeFee signed) noRent) $ TE.decodeUtf8 $ LBS.toStrict $ encode $ object
+              ["txid" .= attemptId winner,"blockhash" .= anchor,"height" .= height,"requiredDepth" .= planDepth (signedNativePlan signed)]
+        Nothing->pure PaymentUnseen
+    case observation of
       PaymentConfirmed costs proof->pure $ NativeSettlementReconfirmed costs proof
       PaymentWaiting->pure NativeSettlementConfirming
       PaymentUnseen->pure $ NativeSettlementUnavailable "native_settled_payment_unseen"
