@@ -3,7 +3,10 @@ module Bridge.Native where
 import Bridge.Config
 import Bridge.RPC
 import Bridge.Types
+import Control.Exception (catch,throwIO)
 import Data.Aeson
+import qualified Data.Aeson.Key as K
+import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import Data.Int (Int64)
@@ -54,8 +57,58 @@ validateNativeRecipientWith call address = do
   kind <- fieldValue "type" decoded :: IO Text
   require (kind `elem` ["pubkeyhash","scripthash","witness_v0_keyhash","witness_v0_scripthash","witness_v1_taproot"]) "unsupported_native_destination"
   pure script
-newNativeAddress :: Manager -> Config -> Text -> IO Text
-newNativeAddress manager c order = nativeCall manager c True "getnewaddress" [toJSON ("bridge:"<>order),String "bech32"] >>= parseValue parseJSON
+nativeWalletReadyWith :: (Bool -> Text -> [Value] -> IO Value) -> Config -> Int64 -> IO ()
+nativeWalletReadyWith call c now = do
+  wallet <- call True "getwalletinfo" []
+  name <- fieldValue "walletname" wallet
+  descriptors <- fieldValue "descriptors" wallet
+  keys <- fieldValue "private_keys_enabled" wallet
+  external <- fieldValue "external_signer" wallet
+  scanning <- fieldValue "scanning" wallet :: IO Value
+  unlocked <- parseValue (withObject "wallet" (.:? "unlocked_until")) wallet :: IO (Maybe Int64)
+  require (name==nativeWallet c && descriptors && keys && not external && scanning==Bool False
+    && maybe True (>now) unlocked) "native_wallet_not_ready"
+
+-- A durable ledger claim supplies fresh=True exactly once. Recovery only reads
+-- the saved label; absent/ambiguous evidence never permits a second allocation.
+recoverNativeAddressWith :: (Bool -> Text -> [Value] -> IO Value) -> Config -> Int64 -> Bool -> Text -> IO Text
+recoverNativeAddressWith call c now fresh label = do
+  require (not (T.null label) && T.length label<=160) "invalid_allocation_label"
+  nativeWalletReadyWith call c now
+  prior <- lookupLabel
+  address <- case prior of
+    Just a -> pure a
+    Nothing -> do
+      require fresh "native_allocation_unresolved"
+      a <- call True "getnewaddress" [toJSON label,String "bech32"] >>= parseValue parseJSON
+      saved <- lookupLabel
+      require (saved==Just a) "native_allocation_label_mismatch"
+      pure a
+  require (not (T.null address) && T.length address<=128) "invalid_native_address"
+  info <- call True "getaddressinfo" [toJSON address]
+  actual <- fieldValue "address" info
+  owned <- fieldValue "ismine" info
+  solvable <- fieldValue "solvable" info
+  change <- fieldValue "ischange" info
+  labels <- fieldValue "labels" info
+  script <- fieldValue "scriptPubKey" info :: IO Text
+  require (actual==address && owned && solvable && not change && labels==[label]
+    && T.length script==44 && "0014" `T.isPrefixOf` script
+    && T.all (`elem` ("0123456789abcdef"::String)) script) "native_allocation_policy_mismatch"
+  pure address
+ where
+  lookupLabel = do
+    result <- (Just <$> call True "getaddressesbylabel" [toJSON label]) `catch` missingLabel
+    case result of
+      Nothing -> pure Nothing
+      Just (Object entries) -> case KM.toList entries of
+        [(address,entry)] -> do
+          purpose <- fieldValue "purpose" entry :: IO Text
+          require (purpose=="receive") "native_allocation_policy_mismatch"
+          pure (Just $ K.toText address)
+        _ -> reject "native_allocation_ambiguous"
+      _ -> reject "native_allocation_ambiguous"
+  missingLabel e@(BridgeError code) = if code=="rpc_error_-11" then pure Nothing else throwIO e
 nativeHistory :: Manager -> Config -> Maybe Text -> Int -> IO Value
 nativeHistory manager c anchor depth = nativeCall manager c True "listsinceblock" [maybe Null toJSON anchor,toJSON depth,Bool False,Bool True]
 nativeAmount :: Scientific -> Either Text Amount

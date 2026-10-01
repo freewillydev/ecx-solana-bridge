@@ -1,0 +1,185 @@
+{
+  "recordedUtc": "2026-10-01T06:02:24.890586+00:00",
+  "before": {
+    "schema": 7,
+    "criticalSequence": 15,
+    "financialTables": {
+      "orders": {
+        "rows": 3,
+        "sha256": "5ffb64dcc0bea4300c6da2ccd205a85a7750d8f4ef3b12eddfbb021cfbbcb2e2"
+      },
+      "events": {
+        "rows": 20,
+        "sha256": "942a8a914ff539a9993bbfe24a08e9c811f9c46fdd3c9ff7d068c88aee781875"
+      },
+      "deposits": {
+        "rows": 6,
+        "sha256": "5d62acba2d5793926f477436299916b865e372bc15e240e61e73e914d18be129"
+      },
+      "obligations": {
+        "rows": 3,
+        "sha256": "1bc88d2d2102e0ae3dc81677a7a0a9bc470ea314462c34cbb49f14ea6608a54d"
+      },
+      "postings": {
+        "rows": 48,
+        "sha256": "bffdc1fe3b9cef29dbe699b649cd088045c5664426f0354115faf9afdeae0bf7"
+      },
+      "intents": {
+        "rows": 3,
+        "sha256": "6f5ee38bdc1519522ed8a4cedd58bca0e780989394f3abb74f73957f7126a22f"
+      },
+      "attempts": {
+        "rows": 4,
+        "sha256": "8201814ef3fb009715eb21a1b8b41bcd48bf3c8fc5e9efc0e2b466029f9d4ca9"
+      },
+      "reservations": {
+        "rows": 3,
+        "sha256": "25c3156967b8626c5cd88936e7a16b7db253d6d79fd1a59d5659f30b8d218e05"
+      },
+      "fee_reservations": {
+        "rows": 3,
+        "sha256": "600875c3d538662847114c75605bcc223e4f9c9118c765211a24144002a8f38d"
+      },
+      "preparations": {
+        "rows": 4,
+        "sha256": "531e92a16bb6804112d5bfeecdb945e499614e8f3f9686e4d0bac2468c10e639"
+      },
+      "solana_expiries": {
+        "rows": 1,
+        "sha256": "8d8d8a25332b2024be421ac2076381ac93d8355dd8408a09d917743b7edcaf51"
+      },
+      "solana_retry_approvals": {
+        "rows": 0,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "treasury_allocations": {
+        "rows": 3,
+        "sha256": "d6e01e1094d94bdf9a03ad8b3dc22c2a29343686c938a6508483c7d79a20f180"
+      },
+      "treasury_spends": {
+        "rows": 5,
+        "sha256": "1c67c2a9c0301948501a5486e09d4f45b079718c61a204e9c7abab282eba508b"
+      },
+      "order_cost_limits": {
+        "rows": 0,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "operating_reservations": {
+        "rows": 0,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "operating_costs": {
+        "rows": 6,
+        "sha256": "67d2f33ff7185a6f53e01321ab080344f8ab225c46fcef61153a48a6f65ad973"
+      }
+    }
+  },
+  "after": {
+    "schema": 8,
+    "criticalSequence": 15,
+    "financialTables": {
+      "orders": {
+        "rows": 3,
+        "sha256": "5ffb64dcc0bea4300c6da2ccd205a85a7750d8f4ef3b12eddfbb021cfbbcb2e2"
+      },
+      "events": {
+        "rows": 20,
+        "sha256": "942a8a914ff539a9993bbfe24a08e9c811f9c46fdd3c9ff7d068c88aee781875"
+      },
+      "deposits": {
+        "rows": 6,
+        "sha256": "5d62acba2d5793926f477436299916b865e372bc15e240e61e73e914d18be129"
+      },
+      "obligations": {
+        "rows": 3,
+        "sha256": "1bc88d2d2102e0ae3dc81677a7a0a9bc470ea314462c34cbb49f14ea6608a54d"
+      },
+      "postings": {
+        "rows": 48,
+        "sha256": "bffdc1fe3b9cef29dbe699b649cd088045c5664426f0354115faf9afdeae0bf7"
+      },
+      "intents": {
+        "rows": 3,
+        "sha256": "6f5ee38bdc1519522ed8a4cedd58bca0e780989394f3abb74f73957f7126a22f"
+      },
+      "attempts": {
+        "rows": 4,
+        "sha256": "8201814ef3fb009715eb21a1b8b41bcd48bf3c8fc5e9efc0e2b466029f9d4ca9"
+      },
+      "reservations": {
+        "rows": 3,
+        "sha256": "25c3156967b8626c5cd88936e7a16b7db253d6d79fd1a59d5659f30b8d218e05"
+      },
+      "fee_reservations": {
+        "rows": 3,
+        "sha256": "600875c3d538662847114c75605bcc223e4f9c9118c765211a24144002a8f38d"
+      },
+      "preparations": {
+        "rows": 4,
+        "sha256": "531e92a16bb6804112d5bfeecdb945e499614e8f3f9686e4d0bac2468c10e639"
+      },
+      "solana_expiries": {
+        "rows": 1,
+        "sha256": "8d8d8a25332b2024be421ac2076381ac93d8355dd8408a09d917743b7edcaf51"
+      },
+      "solana_retry_approvals": {
+        "rows": 0,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "treasury_allocations": {
+        "rows": 3,
+        "sha256": "d6e01e1094d94bdf9a03ad8b3dc22c2a29343686c938a6508483c7d79a20f180"
+      },
+      "treasury_spends": {
+        "rows": 5,
+        "sha256": "1c67c2a9c0301948501a5486e09d4f45b079718c61a204e9c7abab282eba508b"
+      },
+      "order_cost_limits": {
+        "rows": 0,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "operating_reservations": {
+        "rows": 0,
+        "sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+      },
+      "operating_costs": {
+        "rows": 6,
+        "sha256": "67d2f33ff7185a6f53e01321ab080344f8ab225c46fcef61153a48a6f65ad973"
+      }
+    }
+  },
+  "existingFinancialRowsPreserved": true,
+  "previouslyBoundInstructionsPreserved": 3,
+  "newNativeAllocations": 0,
+  "privateSnapshotRetained": true,
+  "ordersCreated": 0,
+  "broadcast": false,
+  "applicationSha256": "a84f00f98e9bd279e9bc3f76301451a9a89ccc14bb3a3aaae9f9c24883e8e0f6",
+  "scope": "Schema upgrade and actual scanner readback only; no new order or address allocated.",
+  "scannersAfterRestart": {
+    "review": [],
+    "scanners": [
+      {
+        "chain": "Native",
+        "checkedAt": 1790834544,
+        "cursor": "0000026e029debad702b27545550cc6ba71693e62c0af3d1429c6e8b4e15eb59",
+        "lastError": null,
+        "lastSuccess": 1790834544
+      },
+      {
+        "chain": "Solana",
+        "checkedAt": 1790834545,
+        "cursor": "5BonRzFcmvDvBtahr2hAj4oGg8Bzo7Ez6oTkruRayTCvUdBH1yV39odjzDfSrGc8M7pRF24Xir5YQ2A56D7iebCj",
+        "lastError": null,
+        "lastSuccess": 1790834545
+      },
+      {
+        "chain": "SolanaOperating",
+        "checkedAt": 1790834544,
+        "cursor": "2XMrZrQBMt8b6gZbMRHx4FtfsLm1zc1xQB716dwAC5QdgKehioAN1sy16dCFz39AP7tA2RPZ6ZQYx2kngnbTSJP",
+        "lastError": null,
+        "lastSuccess": 1790834544
+      }
+    ]
+  }
+}

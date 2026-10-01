@@ -1,13 +1,13 @@
 {
-  "recordedUtc": "2026-10-01T05:44:20.430465+00:00",
+  "recordedUtc": "2026-10-01T06:13:13.067066+00:00",
   "platform": "macOS arm64",
   "haskell": {
-    "examples": 146,
+    "examples": 160,
     "propertyCases": 100,
     "failures": 0,
     "sqliteVersion": "3.53.4",
     "evidence": "haskell-tests.txt",
-    "ledgerSchema": 7
+    "ledgerSchema": 8
   },
   "rust": {
     "unitTests": 7,
@@ -204,6 +204,31 @@
     "broadcast": false,
     "ordersCreated": 0,
     "customerHttpEnabled": false,
-    "generalProvisioningComplete": false
+    "generalProvisioningComplete": false,
+    "generalProvisioningScope": "Order coordinator implemented and exercised through scoped command-line clients; customer HTTP intake remains disabled.",
+    "orderCoordinatorImplemented": true
+  },
+  "orderProvisioning": {
+    "schemaVersion": 8,
+    "upgrade": "provisioning-upgrade.json",
+    "realAcceptance": "order-provisioning.json",
+    "existingFinancialRowsPreserved": true,
+    "allocationClaimBeforeRpc": true,
+    "nativeReplyLossRecovered": true,
+    "actualProcessExitAfterAllocation": true,
+    "sameAddressAndDeadlineOnRetry": true,
+    "recordedInstructionsHiddenUntilIssued": true,
+    "freshScannerMaximumAgeSeconds": 60,
+    "backupAndDeadlineRecheckedBeforeIssue": true,
+    "concurrencyPauseAndBackupFailureContractTests": true,
+    "newOrders": 2,
+    "newNativeAddresses": 1,
+    "bothNewQuotesExpiredUnfunded": true,
+    "allQuoteHoldsReleased": true,
+    "newPayments": 0,
+    "newMonetaryPostings": 0,
+    "criticalSequence": 18,
+    "publicHttpEnabled": false,
+    "fullStartupRecoveryComplete": false
   }
 }

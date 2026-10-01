@@ -114,6 +114,21 @@ unsigned customer deposits (SDK fixture and offline RPC contracts)
   requires instruction backup coverage before invoking the helper [✔]
   rechecks deadline and pause state after RPC without losing the quote [✔]
   rejects unauthorized access and insufficient user fee funds without signing [✔]
+recoverable order provisioning (offline RPC contracts)
+  records and issues one address after admission, then reuses it while paused [✔]
+  rejects failed admission before storing an order or allocating an address [✔]
+  stops new orders when scans become stale or fail during admission [✔]
+  recovers a lost getnewaddress reply using the saved label without repeating allocation [✔]
+  does not allocate again when a claimed address is still absent [✔]
+  never treats malformed or ambiguous label reads as permission to allocate [✔]
+  keeps an invalid address reply hidden until its wallet binding can be verified [✔]
+  retains the allocation claim across closing and reopening the actual SQLite ledger [✔]
+  prevents duplicate addresses and reservations under concurrent request retries [✔]
+  records the address but hides it if intake pauses during the node call [✔]
+  requires actual backup acknowledgment before first exposure and rechecks the deadline after backup [✔]
+  recovers a late address without reopening an expired quote or exposing it [✔]
+  binds a deterministic redemption memo without allocating a native address [✔]
+  refuses an idempotency conflict before chain checks or allocation [✔]
 Solana quote admission (offline official-SDK and RPC contracts)
   checks the exact net payout using only unsigned messages [✔]
   admits an unfunded wrap recipient and missing ATA within the rent ceiling [✔]
@@ -173,6 +188,6 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 1.5005 seconds
-146 examples, 0 failures
+Finished in 1.7298 seconds
+160 examples, 0 failures
 Test suite bridge-test: PASS

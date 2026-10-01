@@ -34,6 +34,7 @@ runWorker c = do
   manager <- newRpcManager
   runWorkerWith c $ \ledger -> forever $ do
     _ <- observeOnce manager c ledger
+    epochSeconds >>= expireQuotes ledger
     when implementationReady $ do
       result <- try (paymentPass manager c ledger (const $ reject "critical_backup_not_configured")
         `catch` ioFailure) :: IO (Either BridgeError ())

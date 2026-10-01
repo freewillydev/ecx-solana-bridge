@@ -3,11 +3,10 @@
 -- Three explicitly scoped real Signet/Devnet ledger acceptance orders.
 -- The client request/capability are private inputs; no browser/API gate is opened.
 import Bridge.Config
-import Bridge.Admission (checkSolanaQuote)
 import Bridge.Deposit
 import Bridge.Ledger
 import Bridge.Native
-import Bridge.NativePayment (checkNativeQuote)
+import Bridge.Order (createCustomerOrder)
 import Bridge.Observer
 import Bridge.RPC
 import Bridge.Settlement
@@ -47,8 +46,10 @@ main=do
   manager<-newRpcManager
   withLedger (dbPath c) (fingerprint c) $ \ledger -> (do
     orders<-ledgerAction ledger $ \db -> query_ db "SELECT id,idempotency_key,status FROM orders" :: IO [(Text,Text,Text)]
-    require (length orders<=3 && all (\(_,key,st)->key `elem` ["public-test-wrap-1","public-test-redeem-1","public-test-redeem-2"]
-      && (key==idempotencyKey request || st `elem` ["Paid","Refunded"])) orders) "only_sequential_acceptance_orders"
+    require (length orders<=5 && all (\(_,key,st)->
+      (key `elem` ["public-test-wrap-1","public-test-redeem-1","public-test-redeem-2"]
+        && (key==idempotencyKey request || st `elem` ["Paid","Refunded"]))
+      || (key `elem` ["provision-wrap-1","provision-redeem-1"] && st=="ExpiredUnfunded")) orders) "only_sequential_acceptance_orders"
     let existing=[oid | (oid,key,_)<-orders,key==idempotencyKey request]
     case mode of
       "prepare" -> do
@@ -59,22 +60,7 @@ main=do
         owned<-fieldValue "ismine" tester
         require owned "refund_must_belong_to_test_wallet"
         resumeAfterChecks ledger
-        order<-case existing of
-          []->do
-            _<-checkNativeQuote manager c request
-            _<-checkSolanaQuote manager c request
-            now<-epochSeconds
-            createOrder ledger c now capability request
-          [oid]->do
-            prior<-readOrder ledger capability oid
-            require (Bridge.Types.request prior==request) "acceptance_request_changed"
-            pure prior
-          _->reject "duplicate_acceptance_order"
-        case depositInstruction order of
-          Nothing->if wrapping then newNativeAddress manager c (orderId order) >>= bindInstruction ledger (orderId order)
-            else bindInstruction ledger (orderId order) (solanaDepositMemo c $ orderId order)
-          Just _->pure ()
-        exposeOrder ledger False capability (orderId order) >>= output
+        createCustomerOrder manager c ledger (const $ reject "unexpected_remote_backup") capability request >>= output
       _ -> do
         oid<-case existing of [i]->pure i; _->reject "prepare_order_first"
         case mode of

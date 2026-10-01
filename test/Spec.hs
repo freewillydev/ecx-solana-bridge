@@ -16,6 +16,7 @@ import Bridge.Payment (prepareNativeWith,prepareSolanaWith)
 import Bridge.Settlement
 import Bridge.Deposit
 import Bridge.Admission
+import Bridge.Order
 import Bridge.RPC
 import Bridge.API
 import Bridge.Worker
@@ -745,10 +746,13 @@ main=hspec $ do
         resumeAfterChecks l `shouldThrow` isError "legacy_order_cost_review_required"
         available <$> readiness l `shouldReturn` False
     it "does not expose canonical instructions before acknowledged coverage" $ withFunded $ \l c -> do
+      freshScans l 100
       o<-createOrder l c 100 cap req
       bindInstruction l (orderId o) "fixture-address"
-      exposeOrder l True cap (orderId o) `shouldThrow` isError "backup_pending"
+      depositInstruction <$> exposeOrder l True cap (orderId o) `shouldReturn` Nothing
+      issueInstruction l c{backupRequired=True} 100 cap (orderId o) `shouldThrow` isError "backup_pending"
       acknowledgeBackup l 1 (T.replicate 64 "b")
+      _<-issueInstruction l c{backupRequired=True} 100 cap (orderId o)
       depositInstruction <$> exposeOrder l True cap (orderId o) `shouldReturn` Just "fixture-address"
       acknowledgeBackup l 99 "bad" `shouldThrow` isError "invalid_backup_coverage"
     it "makes a consistent snapshot while the ledger is open" $ withFunded $ \l c -> do
@@ -1057,6 +1061,133 @@ main=hspec $ do
       prepareSolanaDepositWith (pure 100) poor helper c l cap (orderId order) `shouldThrow` isError "insufficient_deposit_fee_sol"
       available <$> readiness l `shouldReturn` True
       pendingAttempts l `shouldReturn` []
+  describe "recoverable order provisioning (offline RPC contracts)" $ do
+    it "records and issues one address after admission, then reuses it while paused" $ withProvisioning $ \l c transport count -> do
+      order<-createCustomerOrderWith transport c l cap req
+      depositInstruction order `shouldBe` Just "fixture-receive-1"
+      readIORef count `shouldReturn` 1
+      pause l "fixture-paused"
+      let noChecks=transport{orderAdmission=const $ reject "unexpected_admission",orderIdentity=reject "unexpected_identity"}
+      createCustomerOrderWith noChecks c{maxInput=amt 2,maxSolFee=amt 1} l cap req `shouldReturn` order
+      depositInstruction <$> exposeOrder l False cap (orderId order) `shouldReturn` depositInstruction order
+      changed<-try (ledgerAction l $ \db -> execute_ db "UPDATE orders SET instruction='replacement'") :: IO (Either SomeException ())
+      changed `shouldSatisfy` either (const True) (const False)
+    it "rejects failed admission before storing an order or allocating an address" $ withProvisioning $ \l c transport count -> do
+      createCustomerOrderWith transport{orderAdmission=const $ reject "fixture_admission_failed"} c l cap req
+        `shouldThrow` isError "fixture_admission_failed"
+      findOrder l c cap req `shouldReturn` Nothing
+      readIORef count `shouldReturn` 0
+    it "stops new orders when scans become stale or fail during admission" $ withProvisioning $ \l c transport count -> do
+      createCustomerOrderWith transport{orderClock=pure 161} c l cap req `shouldThrow` isError "scanners_not_fresh"
+      let stop=transport{orderAdmission=const $ recordScanFailure l "Solana" 100 "fixture-outage"}
+      createCustomerOrderWith stop c l cap req `shouldThrow` isError "intake_paused"
+      findOrder l c cap req `shouldReturn` Nothing
+      readIORef count `shouldReturn` 0
+    it "recovers a lost getnewaddress reply using the saved label without repeating allocation" $ withProvisioning $ \l c transport count -> do
+      let lost wallet method params=do
+            result<-orderNative transport wallet method params
+            if method=="getnewaddress" then reject "rpc_transport_unknown_outcome" else pure result
+      createCustomerOrderWith transport{orderNative=lost} c l cap req `shouldThrow` isError "rpc_transport_unknown_outcome"
+      prior<-findOrder l c cap req >>= maybe (fail "missing durable order") pure
+      status prior `shouldBe` "Provisioning"
+      depositInstruction <$> exposeOrder l False cap (orderId prior) `shouldReturn` Nothing
+      recovered<-createCustomerOrderWith transport c l cap req
+      orderId recovered `shouldBe` orderId prior
+      deadline recovered `shouldBe` deadline prior
+      depositInstruction recovered `shouldBe` Just "fixture-receive-1"
+      readIORef count `shouldReturn` 1
+    it "does not allocate again when a claimed address is still absent" $ withProvisioning $ \l c transport count -> do
+      let lost wallet method params=if method=="getnewaddress" then reject "rpc_transport_unknown_outcome" else orderNative transport wallet method params
+      createCustomerOrderWith transport{orderNative=lost} c l cap req `shouldThrow` isError "rpc_transport_unknown_outcome"
+      createCustomerOrderWith transport c l cap req `shouldThrow` isError "native_allocation_unresolved"
+      readIORef count `shouldReturn` 0
+    it "never treats malformed or ambiguous label reads as permission to allocate" $ withProvisioning $ \l c transport count -> do
+      let values=[Null,object [],object ["one" .= object ["purpose" .= ("receive"::Text)],"two" .= object ["purpose" .= ("receive"::Text)]]]
+      forM_ (zip [1::Int ..] values) $ \(i,value) -> do
+        let bad wallet method params=if method=="getaddressesbylabel" then pure value else orderNative transport wallet method params
+        createCustomerOrderWith transport{orderNative=bad} c l cap req{idempotencyKey="ambiguous-"<>T.pack(show i)}
+          `shouldThrow` isError "native_allocation_ambiguous"
+      readIORef count `shouldReturn` 0
+    it "keeps an invalid address reply hidden until its wallet binding can be verified" $ withProvisioning $ \l c transport count -> do
+      let bad wallet method params=do
+            value<-orderNative transport wallet method params
+            pure (if method=="getaddressinfo" then setPath ["ismine"] (Bool False) value else value)
+      createCustomerOrderWith transport{orderNative=bad} c l cap req `shouldThrow` isError "native_allocation_policy_mismatch"
+      prior<-findOrder l c cap req >>= maybe (fail "missing order") pure
+      depositInstruction <$> exposeOrder l False cap (orderId prior) `shouldReturn` Nothing
+      _<-createCustomerOrderWith transport c l cap req
+      readIORef count `shouldReturn` 1
+    it "retains the allocation claim across closing and reopening the actual SQLite ledger" $ withDir $ \dir -> do
+      let c=cfg dir
+      (transport,count)<-provisioningTransport c
+      let lost wallet method params=do
+            value<-orderNative transport wallet method params
+            if method=="getnewaddress" then reject "rpc_transport_unknown_outcome" else pure value
+      prior<-withLedger (dbPath c) (fingerprint c) $ \l -> do
+        fundAllocation l "provisioning-tokens" Wrapped "float" (amt 1000000)
+        fundAllocation l "provisioning-sol" Sol "operating" (amt 100000)
+        fundAllocation l "provisioning-native" Native "operating" (amt 100000)
+        freshScans l 100
+        resumeAfterChecks l
+        createCustomerOrderWith transport{orderNative=lost} c l cap req `shouldThrow` isError "rpc_transport_unknown_outcome"
+        findOrder l c cap req >>= maybe (fail "missing durable order") pure
+      withLedger (dbPath c) (fingerprint c) $ \l -> do
+        available <$> readiness l `shouldReturn` False
+        resumeAfterChecks l
+        restored<-createCustomerOrderWith transport c l cap req
+        orderId restored `shouldBe` orderId prior
+        deadline restored `shouldBe` deadline prior
+        readIORef count `shouldReturn` 1
+    it "prevents duplicate addresses and reservations under concurrent request retries" $ withProvisioning $ \l c transport count -> do
+      let run=try (createCustomerOrderWith transport c l cap req) :: IO (Either BridgeError OrderView)
+      results<-mapConcurrently (const run) [1..20::Int]
+      length [o | Right o<-results] `shouldSatisfy` (>0)
+      readIORef count `shouldReturn` 1
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM orders" :: IO [Only Int]) `shouldReturn` [Only 1]
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM reservations" :: IO [Only Int]) `shouldReturn` [Only 1]
+    it "records the address but hides it if intake pauses during the node call" $ withProvisioning $ \l c transport count -> do
+      let stopping wallet method params=do
+            result<-orderNative transport wallet method params
+            when (method=="getnewaddress") $ pause l "fixture-pause-during-allocation"
+            pure result
+      createCustomerOrderWith transport{orderNative=stopping} c l cap req `shouldThrow` isError "intake_paused"
+      order<-findOrder l c cap req >>= maybe (fail "missing order") pure
+      depositInstruction order `shouldBe` Just "fixture-receive-1"
+      depositInstruction <$> exposeOrder l False cap (orderId order) `shouldReturn` Nothing
+      readIORef count `shouldReturn` 1
+    it "requires actual backup acknowledgment before first exposure and rechecks the deadline after backup" $ withProvisioning $ \l c transport count -> do
+      let canonical=c{backupRequired=True}
+      createCustomerOrderWith transport canonical l cap req `shouldThrow` isError "backup_pending"
+      prior<-findOrder l c cap req >>= maybe (fail "missing order") pure
+      depositInstruction <$> exposeOrder l True cap (orderId prior) `shouldReturn` Nothing
+      now<-newIORef (100::Int64)
+      let delayed=transport{orderClock=readIORef now,orderBackup= \n->acknowledgeBackup l n "fixture-backup" >> writeIORef now 401 >> freshScans l 401}
+      createCustomerOrderWith delayed canonical l cap req `shouldThrow` isError "deposit_window_closed"
+      depositInstruction <$> exposeOrder l True cap (orderId prior) `shouldReturn` Nothing
+      readIORef count `shouldReturn` 1
+    it "recovers a late address without reopening an expired quote or exposing it" $ withProvisioning $ \l c transport count -> do
+      let lost wallet method params=do
+            result<-orderNative transport wallet method params
+            if method=="getnewaddress" then reject "rpc_transport_unknown_outcome" else pure result
+      createCustomerOrderWith transport{orderNative=lost} c l cap req `shouldThrow` isError "rpc_transport_unknown_outcome"
+      freshScans l 1001
+      createCustomerOrderWith transport{orderClock=pure 1001} c l cap req `shouldThrow` isError "deposit_window_closed"
+      order<-findOrder l c cap req >>= maybe (fail "missing order") pure
+      status order `shouldBe` "ExpiredUnfunded"
+      depositInstruction order `shouldBe` Just "fixture-receive-1"
+      depositInstruction <$> exposeOrder l False cap (orderId order) `shouldReturn` Nothing
+      ledgerAction l (\db->freeInventory db Wrapped) `shouldReturn` 1000000
+      readIORef count `shouldReturn` 1
+    it "binds a deterministic redemption memo without allocating a native address" $ withProvisioning $ \l c transport count -> do
+      let redeem=OrderRequest WrappedToNative (amt 10000) "fixture-native-recipient" "fixture-solana-owner" (Just "fixture-solana-owner") "redemption-provision"
+      order<-createCustomerOrderWith transport c l cap redeem
+      depositInstruction order `shouldBe` Just (solanaDepositMemo c $ orderId order)
+      readIORef count `shouldReturn` 0
+    it "refuses an idempotency conflict before chain checks or allocation" $ withProvisioning $ \l c transport count -> do
+      _<-createCustomerOrderWith transport c l cap req
+      let noChecks=transport{orderAdmission=const $ reject "unexpected_admission",orderIdentity=reject "unexpected_identity"}
+      createCustomerOrderWith noChecks c l cap req{recipient="changed"} `shouldThrow` isError "idempotency_conflict"
+      readIORef count `shouldReturn` 1
   describe "Solana quote admission (offline official-SDK and RPC contracts)" $ do
     it "checks the exact net payout using only unsigned messages" $ withSolanaAdmission $ \c request call helper -> do
       result<-checkSolanaQuoteWith call helper c request
@@ -1564,6 +1695,46 @@ solanaFixture=do
 contextContract :: Value -> Value
 contextContract value=object ["context" .= object ["slot" .= (100::Int)],"value" .= value]
 
+freshScans :: Ledger -> Int64 -> IO ()
+freshScans ledger now=forM_ ["Native","Solana","SolanaOperating"] $ \chain -> do
+  previous<-readCheckpoint ledger chain
+  commitScan ledger (ScanBatch chain "fixture-scan-origin" previous "fixture-scan-tip" now [] [])
+
+withProvisioning :: (Ledger -> Config -> OrderTransport -> IORef Int -> IO a) -> IO a
+withProvisioning action=withFunded $ \l c -> do
+  freshScans l 100
+  (transport,count)<-provisioningTransport c
+  action l c transport count
+
+-- In-memory RPC contracts exercise sequencing, never chain acceptance. Runtime
+-- construction uses the configured real node and both real admission adapters.
+provisioningTransport :: Config -> IO (OrderTransport,IORef Int)
+provisioningTransport c=do
+  count<-newIORef (0::Int)
+  addresses<-newIORef ([]::[(Text,Text)])
+  let native wallet method params=do
+        wallet `shouldBe` True
+        case (method,params) of
+          ("getwalletinfo",[]) -> pure $ object ["walletname" .= nativeWallet c,"descriptors" .= True
+            ,"private_keys_enabled" .= True,"external_signer" .= False,"scanning" .= False]
+          ("getaddressesbylabel",[String allocationLabel]) -> do
+            entries<-readIORef addresses
+            let found=[address | (l,address)<-entries,l==allocationLabel]
+            if null found then reject "rpc_error_-11" else pure $ object
+              [fromString (T.unpack address) .= object ["purpose" .= ("receive"::Text)] | address<-found]
+          ("getnewaddress",[String allocationLabel,String "bech32"]) -> do
+            n<-atomicModifyIORef' count (\old->(old+1,old+1))
+            let address="fixture-receive-"<>T.pack(show n)
+            atomicModifyIORef' addresses (\old->((allocationLabel,address):old,()))
+            pure (toJSON address)
+          ("getaddressinfo",[String address]) -> do
+            entries<-readIORef addresses
+            let labels=[allocationLabel | (allocationLabel,a)<-entries,a==address]
+            pure $ object ["address" .= address,"labels" .= labels,"ismine" .= True,"solvable" .= True
+              ,"ischange" .= False,"scriptPubKey" .= ("0014"<>T.replicate 40 "1")]
+          _ -> expectationFailure ("unexpected provisioning RPC: "<>T.unpack method) >> pure Null
+  pure (OrderTransport (pure 100) (const $ pure ()) (pure ()) native (const $ pure ()),count)
+
 -- Generated by the pinned SDK test, with public deterministic codec keys.
 -- These values are offline contract inputs, not a private validator or funding.
 withSolanaAdmission :: (Config -> OrderRequest -> SolanaRPC -> (HelperRequest -> IO HelperReply) -> IO a) -> IO a
@@ -1784,6 +1955,8 @@ withDepositFixture action=withDir $ \dir -> do
     resumeAfterChecks l
     created<-createOrder l c 100 cap depositRequest
     bindInstruction l (orderId created) (solanaDepositMemo c $ orderId created)
+    freshScans l 100
+    _<-issueInstruction l c 100 cap (orderId created)
     order<-readOrder l cap (orderId created)
     let call method _=case method of
           "getLatestBlockhash"->pure $ contextContract $ object ["blockhash" .= hash,"lastValidBlockHeight" .= (1000::Int)]
