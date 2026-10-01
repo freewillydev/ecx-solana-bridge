@@ -341,33 +341,79 @@ remaining audit items explicitly listed. No unfinished core path is hidden behin
 
 Checkpoint: evidence-backed release readiness, with material findings resolved.
 
+### Immediate execution order from the current implementation
+
+The PostgreSQL schema, historical import comparison and replay of the real chain
+scanners already have evidence. The standalone DSL integration also compiles.
+Those checkpoints are not the complete product: the production payment worker,
+Servant handlers, connection-free interface and installer still need conversion.
+Do not restart the schema/dependency investigation or repeat historical import
+acceptance unless a subsequent change invalidates it.
+
+1. Finish the in-progress custody module enough to compile and feed the existing
+   reconciliation workflow. Carry over saved-payment and in-flight accounting
+   checks; do not independently redesign reconciliation.
+2. Port the remaining payment journal, settlement and required recovery storage
+   operations as one coherent batch. Reuse the existing signing, RPC and payment
+   algorithms. Compile the entire worker against PostgreSQL, rather than building
+   a separate acceptance executable for every converted module.
+3. Wire the production worker and actual Servant API to the severity DSL. Enforce
+   the safe/critical capability boundary and single critical dispatch site now;
+   postpone exhaustive negative-test matrices to the audit phase.
+4. Wire one complete customer path in each direction: 1% quote, order creation,
+   native instructions or Solana Pay request, observed receipt, payout, status and
+   saved-order reload. Replace the wallet-connection interface in this same batch.
+5. Run a bounded real Signet/Devnet acceptance of both directions and restart,
+   using the actual customer API and interface. Resolve failures that prevent these
+   flows; put unrelated findings into the audit backlog.
+6. Finish setup, diagnostics, trading links and the PostgreSQL installer together.
+   Prove one clean Ubuntu installation and restart before rebuilding the second
+   architecture. Complete the minimum operator/customer instructions needed to
+   use this build.
+7. Declare the integrated development build complete only when both customer
+   flows and installation work. Then audit each piece systematically under Phase
+   D, complete platform coverage and apply the release gates.
+
+Historical import testing does not authorize switching the funded deployment.
+The switch still requires stopping its worker, a final consistent snapshot,
+comparison and custody reconciliation. Until then, keep integration work isolated
+and never run two paying workers against the same custody.
+
 ### Development rules that prevent churn
 
-- Maintain one short integration checklist and one separate audit backlog. Every
-  task must either unblock the next working flow or address a concrete finding.
-- Keep one implementation of each workflow. Avoid parallel old/new runtime paths
-  except the temporary, isolated migration/import boundary.
-- Prefer existing checked code and concrete types. Introduce abstraction only when
-  needed to enforce the requested DSL/capability boundary or remove real duplication.
-- Run compilation and targeted checks after each coherent change. Run the existing
-  financial regression suite at shared-boundary milestones. Defer exhaustive new
-  edge-case matrices, documentation polish, notice refreshes and full platform
-  rebuilds until the relevant product checkpoint works.
-- Do not keep adding tests that restate implementation, repeat already-passing
-  acceptance without a relevant change, or turn hypothetical concerns into new
-  infrastructure. Record concerns for the audit phase with their affected component.
-- Stop polishing a component once it meets the next integration checkpoint. Report
-  progress by working customer flows and installability, not lines, test counts or
-  unsupported percentage estimates.
-- Preserve essential protections during construction: private secrets, integer
-  accounting, immutable saved terms, receipt uniqueness, one economic settlement,
-  committed signed-byte journaling, authorization restrictions and fail-closed
-  handling of uncertain effects. Deep audit may wait; these cannot be removed to
-  make a demonstration pass.
-- Keep the existing funded deployment intact while the new path is built. Never
-  run two paying workers against the same custody. Use separate configured custody
-  for a fresh paying deployment, or stop the old worker before a controlled switch.
+- Use one product checklist: PostgreSQL worker, production DSL/API, wrap, unwrap,
+  interface/reload, setup and installer. Use a separate audit backlog. A task must
+  advance one of these deliverables or fix a demonstrated integration failure.
+- Set contracts once at shared boundaries: domain types, stored records, DSL
+  result/severity, adapter inputs/outputs and public API. Change both ends together
+  when necessary. Compile all consumers before considering a boundary converted.
+- Keep one implementation of each workflow. Temporary legacy paths exist only to
+  preserve the baseline and import it; do not build parallel product architectures.
+- Prefer existing checked code and concrete types. Add abstraction only for the
+  requested capability boundary or an actual repeated workflow. Do not introduce
+  generic frameworks, new services or alternative adapter designs.
+- Batch related storage conversions, then compile the complete application. Do
+  not make a bespoke executable, evidence report or extensive test suite for each
+  small module. Keep existing financial regressions at integration milestones.
+- During construction check compilation, real component compatibility and the
+  financial invariants needed to run the next flow safely. Defer broad failure
+  injection, rare-case matrices, exhaustive export reviews, documentation polish,
+  notice refreshes and repeated platform builds to Phase D.
+- Stop work on a component once the next integrated flow can use it. Record each
+  deferred finding briefly with its component, consequence and verification task;
+  do not expand a hypothetical concern into a new implementation project.
+- Re-run passed checks only when a relevant change invalidates their evidence.
+  Fix concrete failures in coherent batches and test affected consumers together.
+- Preserve essential protections: private secrets, integer accounting, immutable
+  saved terms, receipt uniqueness, one economic settlement, committed signed-byte
+  journaling, authorization and fail-closed handling of uncertain effects. These
+  are implementation requirements, not optional post-build audit work.
+- Report progress by working customer flows and installability. Distinguish
+  implemented, integrated, verified and audited; do not claim an unfinished core
+  path is merely an audit item or claim security from a successful demonstration.
 
-The objective is rapid integration followed by systematic audit, not auditing an
-unfinished collection of parts. No architecture eliminates debugging, but early
-compilation of the real seams and reuse of proven domain logic reduce mismatches.
+The development finish line is a usable integrated test-network product, not a
+series of individually polished modules. The release finish line remains the
+completed audit and release gates. Debugging cannot be eliminated in advance;
+compiling real interfaces early and converting existing workflows together keeps
+mismatches from accumulating.

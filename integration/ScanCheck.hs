@@ -5,6 +5,11 @@ import Bridge.RPC (newRpcManager)
 import Bridge.Types (require)
 import Bridge.Postgres.Ledger (withLedger, readiness)
 import qualified Bridge.Postgres.Observer as Observer
+import qualified Bridge.Postgres.Custody as Custody
+import Bridge.Observer (epochSeconds)
+import Bridge.Settlement (realPaymentTransport)
+import qualified Bridge.Postgres.Reconciliation as Reconciliation
+import Bridge.Types (reject)
 import Data.Aeson (encode, object, (.=))
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import qualified Database.PostgreSQL.Simple as PG
@@ -24,6 +29,9 @@ main = getArgs >>= \case
     manager <- newRpcManager
     withLedger settings (fingerprint cfg) $ \ledger->do
       health <- Observer.observeOnce manager cfg ledger
+      now <- epochSeconds
+      snapshot <- Custody.readSnapshot cfg ledger now False
+      reconciliation <- Reconciliation.reconcileCustodyWith epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_reconciliation_backup")) cfg ledger
       paused <- readiness ledger
-      LBS.putStrLn (encode (object ["scannerHealth" .= health,"readiness" .= paused,"paymentsEnabled" .= False]))
+      LBS.putStrLn (encode (object ["scannerHealth" .= health,"readiness" .= paused,"paymentsEnabled" .= False,"custodyRevision" .= Custody.revision snapshot,"bookedCustody" .= Custody.totals snapshot,"custodyReconciliation" .= reconciliation]))
   _->die "Usage: ecx-postgres-scan-check PRIVATE_CONFIG ecx_bridge_import"

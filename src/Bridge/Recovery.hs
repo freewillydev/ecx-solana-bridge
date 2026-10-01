@@ -12,7 +12,7 @@ import Bridge.NativePayment
 import Bridge.NativeReplacement
 import Bridge.Observer (epochSeconds,observeOnce)
 import Bridge.Payment (payoutReference)
-import Bridge.Reconciliation
+import Bridge.Reconciliation hiding (custodyProof)
 import Bridge.Reorg
 import Bridge.RPC
 import Bridge.Settlement

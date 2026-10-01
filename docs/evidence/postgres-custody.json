@@ -1,0 +1,34 @@
+{
+  "network": "real L2L Signet / Solana Devnet",
+  "database": "isolated imported PostgreSQL ledger",
+  "revision": 23976,
+  "matches": true,
+  "assets": {
+    "Native": {
+      "booked": 1879346,
+      "observed": 1879346,
+      "difference": 0
+    },
+    "Wrapped": {
+      "booked": 100000020034,
+      "observed": 100000020034,
+      "difference": 0
+    },
+    "Sol": {
+      "booked": 103486560,
+      "observed": 103486560,
+      "difference": 0
+    }
+  },
+  "inFlightEffects": [],
+  "nativeHeight": 16484,
+  "solanaSlot": 506361749,
+  "paymentsEnabled": false,
+  "regressionExamples": 367,
+  "regressionFailures": 0,
+  "limitations": [
+    "No new payment was prepared, signed or sent.",
+    "Current imported state has no pending effects; live PostgreSQL in-flight acceptance remains.",
+    "Production API, paying worker and installer conversion remain."
+  ]
+}

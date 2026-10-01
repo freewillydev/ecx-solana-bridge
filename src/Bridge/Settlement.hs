@@ -3,7 +3,7 @@ module Bridge.Settlement
   ( PaymentTransport(..), realPaymentTransport, paymentPass, settleAttemptWith, reconcilePayments, reconcilePaymentsWith
   , recheckSourceWith, observeNativePayment, observeSolanaPayment, solanaExpiryEvidence, PaymentObservation(..)
   , approveSolanaRetry, approveSolanaRetryWith
-  , SavedPayment(..), readSavedPayment, readNativePayment, activeNativeBlock
+  , PaymentStore(..), SavedPayment(..), readSavedPayment, readNativePayment, activeNativeBlock
   , paymentAttemptGroups, readSavedNativeFamily, activeFamilyPayment
   ) where
 
@@ -243,12 +243,25 @@ recheckSourceWith transport c ledger ob = do
   refreshDeposit ledger refreshed
   require (depositEligible refreshed) "source_not_eligible"
 
+-- Storage boundary shared by immutable saved-payment verification. The chain
+-- validation below stays identical across the migration.
+class PaymentStore ledger where
+  paymentObligation :: ledger -> Text -> IO Obligation
+  paymentSourceContext :: ledger -> Obligation -> IO (Deposit,OrderRequest,PolicySnapshot,Text)
+  paymentNativeFamily :: ledger -> Text -> IO [Attempt]
+
+instance PaymentStore Ledger where
+  paymentObligation ledger oid = do
+    rows <- ledgerAction ledger $ \db -> query db "SELECT id,order_id,deposit_id,kind,asset,amount,recipient FROM obligations WHERE id=?" (Only oid)
+    case rows of [ob]->pure ob; _->reject "obligation_not_found"
+  paymentSourceContext = sourceContext
+  paymentNativeFamily = nativeFamilyAttempts
+
 data SavedPayment = NativePayment NativeSigned | SolanaPayment SolanaSigned
-readSavedPayment :: PaymentTransport -> Config -> Ledger -> Attempt -> IO (Obligation,SavedPayment)
+readSavedPayment :: PaymentStore ledger => PaymentTransport -> Config -> ledger -> Attempt -> IO (Obligation,SavedPayment)
 readSavedPayment transport c ledger attempt = do
-  rows <- ledgerAction ledger $ \db -> query db "SELECT id,order_id,deposit_id,kind,asset,amount,recipient FROM obligations WHERE id=?" (Only $ attemptIntent attempt)
-  ob <- case rows of [o] -> pure o; _ -> reject "obligation_not_found"
-  (_,_,policy,_) <- sourceContext ledger ob
+  ob <- paymentObligation ledger (attemptIntent attempt)
+  (_,_,policy,_) <- paymentSourceContext ledger ob
   require (deploymentFingerprint policy==fingerprint c) "payment_profile_mismatch"
   payment <- case attemptChain attempt of
     "Native" -> do
@@ -289,10 +302,10 @@ paymentAttemptGroups attempts=do
 
 -- Lineage is checked in the ledger before the RPC reader accepts any conflict
 -- as belonging to this family. An arbitrary same-intent row is not authority.
-readSavedNativeFamily :: PaymentTransport -> Config -> Ledger -> [Attempt] -> IO ([(Attempt,NativeSigned)],NativeFamilyView)
+readSavedNativeFamily :: PaymentStore ledger => PaymentTransport -> Config -> ledger -> [Attempt] -> IO ([(Attempt,NativeSigned)],NativeFamilyView)
 readSavedNativeFamily transport c ledger expected=do
   first <- case expected of a:_->pure a; _->reject "native_replacement_family_bounds"
-  family <- nativeFamilyAttempts ledger (attemptIntent first)
+  family <- paymentNativeFamily ledger (attemptIntent first)
   require (family==expected) "native_replacement_family_changed"
   signed <- forM family $ \attempt->do
     (_,payment) <- readSavedPayment transport c ledger attempt

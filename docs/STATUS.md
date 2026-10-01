@@ -272,3 +272,17 @@ observer successfully: native, token and operating SOL scanners all recorded fre
 success, no errors and no review events. It remained paused pending reconciliation;
 no payout engine, signer, address allocation or broadcast was invoked. The original
 funded worker was unchanged. [Evidence](evidence/postgres-real-scan.json).
+
+### PostgreSQL custody integrated with shared transaction verification
+
+The real imported ledger now passes the existing custody reconciliation algorithm
+through typed Opaleye storage: Native 1,879,346, Wrapped 100,000,020,034 and Sol
+103,486,560 base units all match real chain balances exactly. Snapshot validation
+retains saved settlement evidence, history freshness, source reviews and balanced
+journals. Shared saved-payment verification now accepts the PostgreSQL storage
+boundary, including native family lineage and in-flight effect normalization.
+There were no pending effects in this run; that path still needs integrated live
+acceptance after payment writes are ported. The existing 367 regression examples
+passed. No signing or sending occurred and the imported deployment stays paused.
+[Evidence](evidence/postgres-custody.json). Next: payment preparation, journal and
+settlement writes, then the production worker/API and connection-free interface.
