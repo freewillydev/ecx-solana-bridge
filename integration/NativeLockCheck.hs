@@ -56,14 +56,14 @@ main = do
     let store=Store ledger
     case mode of
       "stage"->(do
+        paymentIdentity fullTransport
+        _ <- Observer.observeOnce manager cfg ledger
         ob <- paymentObligation store intent
         require (D.obligationAsset ob=="Native") "native_obligation_required"
         attempts <- preparationAttempts store
         require (null [a | a<-attempts,D.attemptIntent a==intent]) "acceptance_attempt_already_exists"
         pending <- preparationPending store
         require (null pending) "acceptance_other_preparation_exists"
-        paymentIdentity fullTransport
-        _ <- Observer.observeOnce manager cfg ledger
         _ <- reconcilePaymentsWith fullTransport cfg store
         _ <- Reconciliation.reconcileCustodyWith epochSeconds fullTransport cfg ledger
         now <- epochSeconds

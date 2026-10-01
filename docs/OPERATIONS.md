@@ -54,7 +54,9 @@ exact current work; a rejection requires investigation, not direct ledger editin
 The CLI `scan`, `reconcile`, `recover`, `approve-source-recovery`,
 `cover-source-loss` and native replacement commands still target the legacy SQLite
 implementation. **Do not run those against the PostgreSQL deployment.** Porting the
-remaining recovery workflows is unfinished. `postgres-init` is offline maintenance;
+remaining source/reorg/replacement workflows is unfinished. Native advisory-input
+lock recovery now runs in the PostgreSQL worker and has actual unsigned-draft
+node-restart acceptance; it is not an operator command. `postgres-init` is offline maintenance;
 `postgres-test-worker` is the explicit public-test payment runtime. Do not run a
 second worker against the same custody accounts under another database.
 

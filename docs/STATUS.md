@@ -454,3 +454,24 @@ task-owned native node with its existing arguments, confirm locks were lost, inv
 `verify` twice and compare preserved records and one restoration audit event. Use
 the ordinary typed cancellation/recovery path before restarting the paying worker.
 No new order/deposit or node restart was performed in this driver preparation.
+
+## Real PostgreSQL native-lock restart acceptance — 2026-10-01
+
+The pending-input test is now executed. A real 10,000-unit reference-bearing Devnet
+deposit funded an actual 1% unwrap order. The development driver preserved its
+unsigned native draft before the signer, with intake paused and no signed attempt.
+The task-owned real Signet daemon restarted with its original binary, arguments
+and wallet. Both advisory locks were absent after restart. PostgreSQL recovery
+restored the exact two saved inputs, then restored zero more on replay. All 36
+compared tables excluding audit/deployment remained identical, including the
+critical sequence and signed-attempt records; one restoration audit event exists.
+
+The updated production worker then handled the private typed cancellation, kept
+the original principal/inventory, resumed after checks and broadcast exactly one
+generation-one native payout for 9,900 units with a 141-unit network fee. Its
+confirmation remains pending at this checkpoint. The original generation-zero
+draft and cancellation history are retained. All fourteen prior order statuses
+remain unchanged. The local interface is running again; no test VM was started.
+[Evidence](evidence/postgres-native-lock-restart.json). This supersedes the earlier
+idle-only limitation for the unsigned PostgreSQL node-restart case, not the
+remaining signed/family/reorg or fresh-host recovery gates.
