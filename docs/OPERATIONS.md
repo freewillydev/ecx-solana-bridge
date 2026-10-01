@@ -48,7 +48,10 @@ For an offline maintenance snapshot stop the worker service and confirm it is
 inactive. `/resume` is a private POST that rechecks readiness; it is not a way to
 bypass custody/history errors. Private POST operations also include `/refund`
 (`depositId`), `/retry-solana` (`transaction`, `reason`) and `/cancel-preparation`
-(`intent`, `generation`, `cancellationReason`). Their typed evaluators validate the
+(`intent`, `generation`, `cancellationReason`). Latest source also adds
+`/approve-source-recovery` (`obligation`, `restorationSequence`, `approvalReason`);
+its PostgreSQL positive/reorg acceptance and deployment are still pending.
+Their typed evaluators validate the
 exact current work; a rejection requires investigation, not direct ledger editing.
 
 The CLI `scan`, `reconcile`, `recover`, `approve-source-recovery`,

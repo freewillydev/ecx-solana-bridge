@@ -1,0 +1,17 @@
+{
+  "date": "2026-10-01",
+  "implemented": "Typed operator DSL; shared source approval workflow; PostgreSQL/Opaleye atomic record",
+  "checks": {
+    "build": true,
+    "haskellExamples": 371,
+    "failures": 0,
+    "isolatedPostgresPaidObligationApprovalRefused": true,
+    "obligationsAndApprovalsUnchanged": true,
+    "signedOrSent": false
+  },
+  "limitations": [
+    "Successful restored-source PostgreSQL approval not yet executed",
+    "Real source-reorg acceptance not yet executed",
+    "Running worker not switched to this build"
+  ]
+}

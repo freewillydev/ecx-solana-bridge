@@ -1,7 +1,14 @@
-module Bridge.Postgres.Source (recordSourceCheckC, sourceWorkHashC) where
+module Bridge.Postgres.Source (recordSourceCheckC, sourceWorkHashC, recoveryApproval, recoveryObligation, recoveryRecord) where
 
 import Bridge.Types
-import Bridge.Ledger (SourceCheck(..))
+import Bridge.Ledger (SourceCheck(..),Obligation(..))
+import Bridge.Postgres.Ledger (Ledger,ledgerAction)
+import Bridge.Postgres.Cancellation (freshC)
+import Bridge.RPC (fieldValue)
+import Data.Int (Int64)
+import Data.Aeson (object,(.=),eitherDecodeStrict')
+import qualified Data.Aeson.KeyMap as KM
+import Data.Maybe (catMaybes)
 import Bridge.Postgres.Schema
 import Bridge.Postgres.Ledger (criticalSequence, posting)
 import Control.Monad (when, forM_)
@@ -107,3 +114,92 @@ matching predicate query = do
 
 hashJson :: ToJSON a => a -> Text
 hashJson = digest . LBS.toStrict . encode
+
+-- Restored source approval retains the exact suspended work and original state.
+-- All final checks and the approval write share one PostgreSQL transaction.
+recoveryApprovalC :: PG.Connection -> Text -> Int64 -> IO (Maybe Text)
+recoveryApprovalC c intent restoration = do
+  rows <- O.runSelect c $ do
+    row <- O.selectTable sourcerecoveryapprovalsTable
+    O.where_ (sourcerecoveryapprovalsObligationId row O..== O.sqlStrictText intent O..&& sourcerecoveryapprovalsRestorationSequence row O..== O.sqlInt8 restoration)
+    pure(sourcerecoveryapprovalsReason row)
+    :: IO [Text]
+  case rows of []->pure Nothing; [reason]->pure(Just reason); _->reject "duplicate_source_approval"
+recoveryApproval :: Ledger -> Text -> Int64 -> IO (Maybe Text)
+recoveryApproval ledger intent restoration = ledgerAction ledger (\c->recoveryApprovalC c intent restoration)
+
+recoveryContextC :: PG.Connection -> Text -> Int64 -> IO (Obligation,Text,Int64,Text)
+recoveryContextC c intent restoration = do
+  rows <- O.runSelect c $ do
+    ob <- O.selectTable obligationsTable
+    deposit <- O.selectTable depositsTable
+    O.where_ (obligationsId ob O..== O.sqlStrictText intent O..&& obligationsDepositId ob O..== depositsId deposit)
+    pure(ob,deposit)
+    :: IO [(Obligations,Deposits)]
+  (ob,deposit) <- case rows of [pair]->pure pair; _->reject "source_approval_not_expected"
+  history <- O.runSelect c $ do
+    row <- O.selectTable sourcerecoveriesTable
+    O.where_ (sourcerecoveriesDepositId row O..== O.sqlStrictText (depositsId deposit))
+    pure row
+    :: IO [SourceRecoveries]
+  require (obligationsStatus ob=="review" && depositsEligible deposit==1 && case reverse(sortOn sourcerecoveriesId history) of
+    current:_->sourcerecoveriesState current=="restored" && sourcerecoveriesShortfall current==0 && sourcerecoveriesCriticalSequence current==restoration
+    _->False) "source_approval_not_expected"
+  approvals <- O.runSelect c $ do
+    row <- O.selectTable sourcerecoveryapprovalsTable
+    O.where_ (sourcerecoveryapprovalsObligationId row O..== O.sqlStrictText intent)
+    pure(sourcerecoveryapprovalsCriticalSequence row)
+    :: IO [Int64]
+  let cutoff=maximum(0:approvals)
+      eligible=[row | row<-reverse(sortOn sourcerecoveriesId history),sourcerecoveriesCriticalSequence row>cutoff,sourcerecoveriesCriticalSequence row<restoration]
+  reviews <- mapM (\row->do
+    evidence <- either (const $ reject "invalid_source_recovery_evidence") pure (eitherDecodeStrict' $ TE.encodeUtf8 $ sourcerecoveriesEvidenceJson row)
+    case evidence of
+      Object fields | KM.lookup "reason" fields==Just(String "source_eligibility_lost")->do
+        entries <- fieldValue "reviewedObligations" evidence :: IO [Value]
+        matches <- fmap catMaybes $ mapM (\entry->do
+          target <- fieldValue "intent" entry
+          if target/=intent then pure Nothing else do
+            previous <- fieldValue "previousStatus" entry
+            expected <- fieldValue "workHash" entry
+            pure(Just(sourcerecoveriesCriticalSequence row,previous,expected))) entries
+        case matches of []->pure Nothing; [match]->pure(Just match); _->reject "source_review_context_missing"
+      _->pure Nothing) eligible
+  (loss,previous,expected) <- case catMaybes reviews of
+    match@(_,state,_):_ | state `elem` ["ready","paying"]->pure match
+    _->reject "source_review_context_missing"
+  actual <- sourceWorkHashC c intent
+  require (actual==expected) "source_review_work_changed"
+  cancellations <- O.runSelect c $ do
+    row <- O.selectTable preparationcancellationsTable
+    O.where_ (preparationcancellationsIntentId row O..== O.sqlStrictText intent O..&& preparationcancellationsCompleted row O..== O.sqlInt8 0)
+    pure(preparationcancellationsGeneration row)
+    :: IO [Int64]
+  require (null cancellations) "preparation_cancellation_pending"
+  pure(Obligation (obligationsId ob) (obligationsOrderId ob) (obligationsDepositId ob) (obligationsKind ob) (obligationsAsset ob) (obligationsAmount ob) (obligationsRecipient ob),previous,loss,actual)
+
+recoveryObligation :: Ledger -> Text -> Int64 -> IO Obligation
+recoveryObligation ledger intent restoration = ledgerAction ledger $ \c->do
+  (ob,_,_,_) <- recoveryContextC c intent restoration
+  pure ob
+
+recoveryRecord :: Ledger -> Text -> Int64 -> Int64 -> Text -> IO ()
+recoveryRecord ledger intent restoration now reason = ledgerAction ledger $ \c->do
+  require (restoration>0 && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_source_approval"
+  states <- O.runSelect c (fmap deploymentPaused $ O.selectTable deploymentTable) :: IO [Int64]
+  require (states==[1]) "pause_before_operator_action"
+  old <- recoveryApprovalC c intent restoration
+  case old of
+    Just previous->require(previous==reason) "source_approval_conflict"
+    Nothing->do
+      (_,previous,loss,workHash) <- recoveryContextC c intent restoration
+      freshC c now
+      checks <- O.runSelect c (O.selectTable custodycheckTable) :: IO [CustodyCheck]
+      let proof=TE.decodeUtf8 $ LBS.toStrict $ encode $ object
+            ["custody" .= [(custodycheckRevision row,custodycheckCheckedAt row,custodycheckReportJson row) | row<-checks],"sourceRestoration" .= restoration]
+      require (T.length proof<=32768) "source_approval_evidence_too_large"
+      sequenceNo <- criticalSequence c
+      _ <- O.runInsert c O.Insert {O.iTable=sourcerecoveryapprovalsTable,O.iRows=[SourceRecoveryApprovals (O.sqlStrictText intent) (O.sqlInt8 restoration) (O.sqlInt8 loss) (O.sqlStrictText previous) (O.sqlStrictText workHash) (O.sqlStrictText reason) (O.sqlStrictText proof) (O.sqlInt8 sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      _ <- O.runUpdate c O.Update {O.uTable=obligationsTable,O.uUpdateWith= \row->row {obligationsStatus=O.sqlStrictText previous},O.uWhere= \row->obligationsId row O..== O.sqlStrictText intent,O.uReturning=O.rCount}
+      _ <- O.runInsert c O.Insert {O.iTable=auditTable,O.iRows=[Audit Nothing (O.sqlStrictText "source_recovery_approved") (O.sqlStrictText intent)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      pure ()

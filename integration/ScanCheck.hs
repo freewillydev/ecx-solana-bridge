@@ -4,7 +4,9 @@ import Bridge.Config
 import Bridge.RPC (newRpcManager)
 import Bridge.Native (nativeIdentity)
 import Bridge.Recovery (reconcileNativeLocksWith)
-import Bridge.Types (require)
+import Bridge.Types (require,BridgeError(..))
+import Control.Exception (try)
+import qualified Bridge.Postgres.Source as Source
 import Bridge.Postgres.Ledger (withLedger, readiness)
 import qualified Bridge.Postgres.Observer as Observer
 import qualified Bridge.Postgres.Custody as Custody
@@ -35,6 +37,29 @@ import System.Posix.User (getEffectiveUserName)
 -- Native lock recovery may restore advisory locks from durable saved records.
 main :: IO ()
 main = getArgs >>= \case
+  ["source-approval-refusal",configPath,database]->do
+    require (database=="ecx_bridge_import") "isolated_import_database_required"
+    cfg <- loadConfig configPath
+    user <- getEffectiveUserName
+    let settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectDatabase=database,PG.connectUser=user}
+    withLedger settings (fingerprint cfg) $ \ledger->do
+      saved <- ledgerAction ledger $ \c->do
+        rows <- O.runSelect c (O.selectTable obligationsTable) :: IO [Obligations]
+        approvals <- O.runSelect c (O.selectTable sourcerecoveryapprovalsTable) :: IO [SourceRecoveryApprovals]
+        pure(rows,approvals)
+      target <- case [obligationsId row | row<-fst saved,obligationsStatus row=="paid"] of
+        oid:_->pure oid
+        _->reject "historical_paid_obligation_required"
+      now <- epochSeconds
+      outcome <- try (Source.recoveryRecord ledger target 1 now "invalid approval of paid obligation") :: IO(Either BridgeError ())
+      require (case outcome of Left(BridgeError "source_approval_not_expected")->True; _->False) "source_approval_refusal_failed"
+      after <- ledgerAction ledger $ \c->do
+        rows <- O.runSelect c (O.selectTable obligationsTable) :: IO [Obligations]
+        approvals <- O.runSelect c (O.selectTable sourcerecoveryapprovalsTable) :: IO [SourceRecoveryApprovals]
+        pure(rows,approvals)
+      require (saved==after) "source_approval_refusal_mutated_work"
+      LBS.putStrLn(encode(object["paidObligationApprovalRefused" .= True,"obligationsAndApprovalsUnchanged" .= True,"signedOrSent" .= False]))
+
   ["native-locks",configPath,database]->do
     require (database=="ecx_bridge_import") "isolated_import_database_required"
     cfg <- loadConfig configPath

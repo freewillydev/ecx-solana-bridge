@@ -5,6 +5,7 @@ import Bridge.Types (Availability)
 import Data.Aeson (FromJSON)
 import qualified Data.Aeson
 import Data.Text (Text)
+import Data.Int (Int64)
 import GHC.Generics (Generic)
 import Bridge.Operation
 import qualified Data.Text as T
@@ -22,9 +23,11 @@ customerServer = safe PublicConfig
 data RefundRequest = RefundRequest { depositId :: Text } deriving (Generic,FromJSON)
 data RetryRequest = RetryRequest { transaction :: Text, reason :: Text } deriving (Generic,FromJSON)
 data CancelRequest = CancelRequest { intent :: Text, generation :: Int, cancellationReason :: Text } deriving (Generic,FromJSON)
+data SourceRecoveryRequest = SourceRecoveryRequest { obligation :: Text, restorationSequence :: Int64, approvalReason :: Text } deriving (Generic,FromJSON)
 type OperatorAPI = AdminAPI :<|> "refund" :> ReqBody '[JSON] RefundRequest :> Post '[JSON] Data.Aeson.Value
   :<|> "retry-solana" :> ReqBody '[JSON] RetryRequest :> Post '[JSON] Data.Aeson.Value
   :<|> "cancel-preparation" :> ReqBody '[JSON] CancelRequest :> Post '[JSON] Data.Aeson.Value
+  :<|> "approve-source-recovery" :> ReqBody '[JSON] SourceRecoveryRequest :> Post '[JSON] Data.Aeson.Value
   :<|> "resume" :> Post '[JSON] Availability
 operatorAPI :: Proxy OperatorAPI
 operatorAPI = Proxy
@@ -36,4 +39,5 @@ adminServer = (safe Readiness
   :<|> (\request->operator(RefundDeposit(depositId request)))
   :<|> (\request->operator(ApproveSolanaRetry(transaction request)(reason request)))
   :<|> (\request->operator(CancelPreparation(intent request)(generation request)(cancellationReason request)))
+  :<|> (\request->operator(ApproveSourceRecovery(obligation request)(restorationSequence request)(approvalReason request)))
   :<|> operator Resume

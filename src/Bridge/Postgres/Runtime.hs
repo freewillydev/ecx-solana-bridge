@@ -16,7 +16,7 @@ import qualified Bridge.Ledger as Domain
 import Bridge.Postgres.PaymentStore (Store(..))
 import Bridge.Settlement (realPaymentTransport,paymentPass,reconcilePaymentsWith,PaymentTransport(..),approveSolanaRetryWith)
 import qualified Bridge.Postgres.Startup as Startup
-import Bridge.Recovery (cancelPreparationWith,reconcileNativeLocksWith)
+import Bridge.Recovery (cancelPreparationWith,reconcileNativeLocksWith,approveSourceRecoveryWith)
 import Bridge.Native (nativeIdentity)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar,newMVar,withMVar)
@@ -138,6 +138,7 @@ evalCritical (CriticalContext manager cfg ledger) plan = case plan of
     ApproveSolanaRetry txid reason->do
       approveSolanaRetryWith (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) txid reason
       pure(object["approvedRetryOf" .= txid,"signedOrSent" .= False])
+    ApproveSourceRecovery intent restoration reason->approveSourceRecoveryWith epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) intent restoration reason
     RefundDeposit did->do
       obligation <- Refund.createRefund ledger did
       pure(object["obligation" .= Domain.obligationId obligation,"recipient" .= Domain.obligationRecipient obligation,"amount" .= T.pack(show $ Domain.obligationAmount obligation)])

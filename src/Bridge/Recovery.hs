@@ -1,7 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.Recovery
   ( recoverDeployment, NativeLockStore(..), reconcileNativeLocks, reconcileNativeLocksWith
-  , CancellationStore(..), cancelPreparation, cancelPreparationWith, approveSourceRecovery, approveSourceRecoveryWith
+  , CancellationStore(..), cancelPreparation, cancelPreparationWith, SourceRecoveryStore(..), approveSourceRecovery, approveSourceRecoveryWith
   , coverSourceLoss, coverSourceLossWith, prepareNativeReplacement, prepareNativeReplacementWith
   , signNativeReplacementWith ) where
 
@@ -54,16 +54,27 @@ approveSourceRecovery manager c ledger intent restoration reason=do
   approveSourceRecoveryWith epochSeconds
     (realPaymentTransport manager c (const $ reject "unexpected_source_approval_backup")) c ledger intent restoration reason
 
-approveSourceRecoveryWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> Text -> Int64 -> Text -> IO Value
+class (SettlementStore ledger,CustodyStore ledger) => SourceRecoveryStore ledger where
+  recoveryApproval :: ledger -> Text -> Int64 -> IO (Maybe Text)
+  recoveryObligation :: ledger -> Text -> Int64 -> IO Obligation
+  recoveryRecord :: ledger -> Text -> Int64 -> Int64 -> Text -> IO ()
+  recoveryReconcile :: IO Int64 -> PaymentTransport -> Config -> ledger -> IO Value
+instance SourceRecoveryStore Ledger where
+  recoveryApproval = sourceRecoveryApproval
+  recoveryObligation = sourceRecoveryObligation
+  recoveryRecord = recordSourceRecoveryApproval
+  recoveryReconcile = reconcileCustodyWith
+
+approveSourceRecoveryWith :: SourceRecoveryStore ledger => IO Int64 -> PaymentTransport -> Config -> ledger -> Text -> Int64 -> Text -> IO Value
 approveSourceRecoveryWith clock transport c ledger intent restoration reason=do
   require (restoration>0 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_source_approval"
-  health <- readiness ledger
+  health <- preparationReadiness ledger
   require (not $ available health) "pause_before_operator_action"
-  previous <- sourceRecoveryApproval ledger intent restoration
+  previous <- recoveryApproval ledger intent restoration
   case previous of
     Just old->require (old==reason) "source_approval_conflict"
     Nothing->do
-      ob <- sourceRecoveryObligation ledger intent restoration
+      ob <- recoveryObligation ledger intent restoration
       paymentIdentity transport
       recheckSourceWith transport c ledger ob
       -- A saved payment may have finalized or expired since the source was
@@ -72,9 +83,9 @@ approveSourceRecoveryWith clock transport c ledger intent restoration reason=do
       attempts <- fieldValue "attempts" payments :: IO [Value]
       failures <- mapM (fieldValue "error") attempts :: IO [Maybe Text]
       require (all (==Nothing) failures) "source_approval_payment_requires_review"
-      _ <- reconcileCustodyWith clock transport c ledger
+      _ <- recoveryReconcile clock transport c ledger
       now <- clock
-      recordSourceRecoveryApproval ledger intent restoration now reason
+      recoveryRecord ledger intent restoration now reason
   pure $ object ["approvedSourceRecovery" .= intent,"restorationSequence" .= restoration
     ,"paused" .= True,"signedOrSent" .= False]
 

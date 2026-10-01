@@ -5,6 +5,7 @@ import Bridge.Types
 import Data.Aeson (Value)
 import Data.Kind (Type)
 import Data.Text (Text)
+import Data.Int (Int64)
 
 data Severity = Safe | Critical
 class Operation (s :: Severity) (op :: Type -> Type) | op -> s where
@@ -29,6 +30,7 @@ data OperatorOperation a where
   CancelPreparation :: Text -> Int -> Text -> OperatorOperation Value
   Resume :: OperatorOperation Availability
   ApproveSolanaRetry :: Text -> Text -> OperatorOperation Value
+  ApproveSourceRecovery :: Text -> Int64 -> Text -> OperatorOperation Value
   RefundDeposit :: Text -> OperatorOperation Value
 
 data WorkerOperation a where

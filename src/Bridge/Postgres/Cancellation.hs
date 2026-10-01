@@ -1,4 +1,4 @@
-module Bridge.Postgres.Cancellation (readCancellation,checkFresh,begin,finish) where
+module Bridge.Postgres.Cancellation (readCancellation,checkFresh,freshC,begin,finish) where
 import Bridge.Types
 import Bridge.Ledger (Preparation(..),Obligation(..))
 import Bridge.Postgres.Ledger

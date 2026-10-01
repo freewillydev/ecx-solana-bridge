@@ -46,10 +46,26 @@
     "principalAndInventoryRetained": true,
     "resumePassed": true,
     "generationOnePayout": "b5dded985fc92e406aa66b65da71bcc7b84054d0d6b8e674c431afae18f35397",
-    "payoutStatus": "broadcast_intent"
+    "payoutStatus": "Paid",
+    "networkFee": "141",
+    "accountRent": "0",
+    "confirmedBlockHash": "000002a1d778627cb0415f683053bda4d483070bbe6c9efd726b35ed984503de",
+    "confirmedHeight": 16503,
+    "settledAttemptCount": 1,
+    "unresolvedIntents": 0
   },
   "limitations": [
     "Dedicated tester acceptance, not supported customer-wallet signing",
     "Source reorg, replacement families and remote host/key restore remain separate gates"
-  ]
+  ],
+  "finalRuntime": {
+    "ready": true,
+    "custodyRevisionMatched": true,
+    "custodyError": null,
+    "scannerErrors": {
+      "Native": null,
+      "Solana": null,
+      "SolanaOperating": null
+    }
+  }
 }
