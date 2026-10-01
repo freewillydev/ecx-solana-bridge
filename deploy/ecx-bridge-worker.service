@@ -1,6 +1,7 @@
 [Unit]
 Description=ECX bridge private worker
-After=network-online.target ecx-bridge-node.service
+After=network-online.target ecx-bridge-node.service ecx-bridge-postgres.service
+Requires=ecx-bridge-postgres.service
 Wants=network-online.target
 
 [Service]
@@ -9,7 +10,8 @@ User=ecx-worker
 Group=ecx-api
 SupplementaryGroups=ecx-worker ecx-node
 UMask=0077
-ExecStart=/opt/ecx-bridge/current/bin/ecx-bridge worker /etc/ecx-bridge/worker.json
+EnvironmentFile=/etc/ecx-bridge/postgres.env
+ExecStart=/opt/ecx-bridge/current/bin/ecx-bridge postgres-api /etc/ecx-bridge/worker.json
 Restart=on-failure
 RestartSec=5
 RuntimeDirectory=ecx-bridge

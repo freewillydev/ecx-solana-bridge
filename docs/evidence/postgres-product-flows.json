@@ -1,0 +1,63 @@
+{
+  "date": "2026-10-01",
+  "networks": [
+    "L2LSignet",
+    "SolanaDevnet"
+  ],
+  "database": "PostgreSQL",
+  "customerAPIOrders": [
+    {
+      "direction": "wrap",
+      "orderId": "8913f1bed11fe907ffc46411cc1078a7d5cb81a2ea151049c8620b0062928e3c",
+      "status": "Paid",
+      "payout": "66bHQ9VVW7TFfB2qDp4K44nQaEcDyw7W6cYa5yL6kuZxQJfhmTT4M8j7jYZVQgx3wytr9QtYUf3AMcD38qWykt9t",
+      "quote": {
+        "fee": "100",
+        "gross": "10000",
+        "net": "9900"
+      }
+    },
+    {
+      "direction": "redeem",
+      "orderId": "e23a9964652f7972f0b7c7511ec77a7f929dafb93c8f5fad7469d19ab65db314",
+      "status": "Paid",
+      "payout": "af709f71a9b796562a68d584eb42898b100232c2be6770ab210a9a0f2da1e026",
+      "quote": {
+        "fee": "100",
+        "gross": "10000",
+        "net": "9900"
+      }
+    },
+    {
+      "direction": "refund",
+      "orderId": "deafa432720ed1f9bc7bc788534a0da7391bfbbd19894dc5d06f3681b722c214",
+      "status": "Refunded",
+      "payout": "2KYxciYwsTa3bfGStRnAk3NZewZg5YendHMMYaNDijsJcGQVUpyEfJEcSjr8UFurR3BYownubVMvkTn5fXPfUZWe",
+      "quote": {
+        "fee": "100",
+        "gross": "10000",
+        "net": "9900"
+      }
+    }
+  ],
+  "comparisonTables": 15,
+  "financialRowsUnchanged": true,
+  "criticalSequenceUnchanged": true,
+  "readyAfterRestart": true,
+  "actualBrowserWalletVerified": false,
+  "refundOwnerVerifiedFromSolanaPayEvidence": true,
+  "refundPrincipalUnits": "10000",
+  "explicitExpiredRetryVerified": true,
+  "unsignedCancellationVerified": true,
+  "privateDumpValidated": true,
+  "browserInterface": {
+    "invalidAmountRejected": true,
+    "connectionFreeQuoteCreated": true,
+    "feeBps": 100,
+    "depositAddressAndQRShown": true,
+    "savedOrderSurvivedReload": true,
+    "temporaryTabClosed": true,
+    "orderId": "135dcae02aefd49521998b9083330a2501cbdeee65ea14cdd80a3fa3acab0ab0",
+    "funded": false
+  }
+}

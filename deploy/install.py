@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install a locally built, reviewed release. Never initializes or replaces a ledger."""
+"""Install a reviewed release and initialize an empty ledger; preserve existing state."""
 import argparse
 import fcntl
 import grp
@@ -70,6 +70,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle", type=Path)
     parser.add_argument("--config-dir", type=Path, help="private directory containing worker.json, helper.json and optional signer.json")
+    parser.add_argument("--legacy-snapshot", type=Path, help="consistent final SQLite snapshot; old worker must be stopped")
     parser.add_argument("--with-signet", action="store_true", help="install/start a dedicated real L2L public Signet node")
     parser.add_argument("--test-worker", action="store_true", help="enable payments only for the public Signet/Devnet profile")
     args = parser.parse_args()
@@ -83,6 +84,7 @@ def main():
 
 
 def install(args):
+    import postgres
     # Snapshot unprivileged build output, then verify the root-owned copy before using it.
     mkdir("/opt/ecx-bridge/releases", 0o755)
     with tempfile.TemporaryDirectory(prefix=".stage-", dir="/opt/ecx-bridge/releases") as tmp:
@@ -170,9 +172,12 @@ def install(args):
     for name in ("ecx-bridge-worker.service", "ecx-bridge-web.service", "ecx-bridge-node.service"):
         dest = Path("/etc/systemd/system") / name
         keep_file(dest, (target / "deploy" / name).read_bytes(), 0o644)
+    postgres.install(target, config, mkdir, keep_file, args.legacy_snapshot)
+    for name in ("ecx-bridge-backup.service", "ecx-bridge-backup.timer"):
+        keep_file(Path("/etc/systemd/system") / name, (target / "deploy" / name).read_bytes(), 0o644)
     if args.test_worker:
         mkdir("/etc/systemd/system/ecx-bridge-worker.service.d", 0o755)
-        keep_file("/etc/systemd/system/ecx-bridge-worker.service.d/test.conf", b"[Service]\nExecStart=\nExecStart=/opt/ecx-bridge/current/bin/ecx-bridge test-worker /etc/ecx-bridge/worker.json\n", 0o644)
+        keep_file("/etc/systemd/system/ecx-bridge-worker.service.d/test.conf", b"[Service]\nExecStart=\nExecStart=/opt/ecx-bridge/current/bin/ecx-bridge postgres-test-worker /etc/ecx-bridge/worker.json\n", 0o644)
     run("systemctl", "daemon-reload")
     run("runuser", "-u", "ecx-worker", "--", "/opt/ecx-bridge/libexec/bwrap", "--unshare-all", "--ro-bind", "/", "/", "--", "/usr/bin/true")
     run("systemd-analyze", "verify", "/etc/systemd/system/ecx-bridge-worker.service", "/etc/systemd/system/ecx-bridge-web.service", "/etc/systemd/system/ecx-bridge-node.service")
@@ -195,6 +200,7 @@ def install(args):
                 else:
                     run(*cli, "-named", "createwallet", "wallet_name=" + wallet, "descriptors=true", "load_on_startup=true", stdout=subprocess.DEVNULL)
     if config.exists():
+        run("systemctl", "enable", "--now", "ecx-bridge-backup.timer")
         run("systemctl", "enable", "--now", "ecx-bridge-worker.service", "ecx-bridge-web.service")
         for _ in range(30):
             try:

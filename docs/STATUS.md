@@ -1,8 +1,24 @@
 # Implementation status — 2026-10-01
 
-**The local public-test product is the active delivery milestone.** The customer API is connected to the existing ledger and payment engine through the explicit `test-worker` command, restricted to real L2L Signet / Solana Devnet. The thin interface now has deposit instructions, saved orders, automatic status updates and explorer links. The canonical `implementationReady` gate remains false. The user explicitly prioritized this usable local product before additional recovery cases; the eventual release requirements remain below.
+**The PostgreSQL local public-test product is now the active runtime.** The
+SQLite baseline was stopped and its final snapshot imported with every record
+compared. Both new 1% customer conversions completed through the actual API and
+worker on real L2L Signet / Solana Devnet. The wrap needed one explicit approved
+retry after a proven expired attempt; its original signed bytes remain recorded.
 
-The preserved-ledger startup upgraded schema 17→18, retained all eight prior orders, seven signed attempts and financial/binding/source/finality records, and enabled public-test intake with healthy scanners and matched custody. [Launch evidence](evidence/local-product-launch.json). Both customer-API transfers are now `Paid`: 10,000 native units → 9,980 Devnet token units; 10,000 token units → 9,900 native units. The ordinary test worker performed both payouts automatically. A clean launcher restart preserved every financial row and both authenticated order views. [Transfer/restart evidence](evidence/local-product-transfers.json). The live ledger is schema 18, critical sequence 53, with ten terminal orders and nine saved signed attempts. An additional 0.1 Devnet SOL operating receipt has been finalized and allocated exactly once; all prior financial rows and orders survived replay/restart. [Funding evidence](evidence/local-operating-funding.json). Browser automation could not verify its administrator policy, so the new interface has not yet passed a fresh browser or wallet acceptance check.
+The connection-free full refund completed. Its owner was derived from verified
+Solana Pay evidence. After a rate limit interrupted unsigned preparation, the
+PostgreSQL cancellation path retained principal, inventory and history; the next
+generation returned all 10,000 units. A clean restart preserved financial rows,
+critical sequence and terminal customer statuses. See
+[PostgreSQL product evidence](evidence/postgres-product-flows.json). Installer
+code now provisions private PostgreSQL, read/write roles, typed initialization,
+explicit legacy import and private dump backups. Revised Ubuntu acceptance, full
+recovery/audit, actual supported-wallet browser acceptance and canonical deployment
+remain open. Canonical `implementationReady` remains false.
+
+Earlier SQLite launch/transfer/restart evidence below is historical baseline
+coverage. It does not prove the revised PostgreSQL installer or full recovery.
 
 ## Verified locally
 

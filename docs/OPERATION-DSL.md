@@ -3,8 +3,9 @@
 Accepted architecture change, 2026-10-01. This is the implementation contract for
 refactoring the existing bridge, alongside PostgreSQL/Opaleye, connection-free
 payments and 100 basis points in both directions. The PostgreSQL runtime now resolves actual Servant routes into this DSL. The
-original SQLite runtime remains the protected baseline until controlled cutover;
-full module/role isolation and remaining operator workflows are still pending.
+local paying deployment has completed its controlled PostgreSQL cutover. Safe
+connections can use a separate SELECT-only role; full component isolation and
+remaining operator/recovery workflows still require completion and audit.
 
 ## Source reviewed
 
@@ -167,6 +168,14 @@ Read authorization and HTTP error mapping happen centrally without adding a
 catch-all exception handler that hides unknown financial outcomes.
 
 ## Separate interpreters and one critical evaluation site
+
+The current implementation is in `Bridge.Postgres.Runtime`: safe evaluation uses
+its own read-only connection, while customer, operator and worker plans pass
+through one critical evaluator call under a single workflow gate. The gate covers
+RPC calls as well as individual ledger transactions, preventing scanner updates
+from interleaving with admission or settlement. Safe reads remain concurrent.
+The module names below describe the intended capability separation; splitting
+the existing runtime into more modules is not required to deliver the product.
 
 `Bridge.Operation` defines the closed grammar, dictionaries and existential
 packages. It has no imports of ledger IO, signer modules, chain transports or

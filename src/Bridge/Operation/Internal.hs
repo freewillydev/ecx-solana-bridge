@@ -26,6 +26,9 @@ data CustomerOperation a where
 
 data OperatorOperation a where
   Pause :: Text -> OperatorOperation Availability
+  CancelPreparation :: Text -> Int -> Text -> OperatorOperation Value
+  Resume :: OperatorOperation Availability
+  ApproveSolanaRetry :: Text -> Text -> OperatorOperation Value
   RefundDeposit :: Text -> OperatorOperation Value
 
 data WorkerOperation a where

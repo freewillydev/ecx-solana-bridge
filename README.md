@@ -4,11 +4,11 @@ An inventory-backed bridge between native ECX-family networks and a wrapped Sola
 
 **Current milestone: a working local public-test bridge using real L2L Signet and Solana Devnet.** Both conversion directions have completed through the customer HTTP API and running worker, and a clean restart preserved the ledger and completed orders. This is a development implementation: browser-wallet acceptance, complete recovery, actual ECX betanet deployment and independent security review remain unfinished. Canonical intake is disabled.
 
-The project follows the later requirements in the original ECX discussion: an operator-run wrapping/redemption service, **0.20% to wrap and 1% to redeem**, and separate Solana liquidity that can eventually be traded through Jupiter. The bridge is the conversion service; a DEX pool supplies market trading and price discovery. There is no custom blockchain, Solana token program or AMM implementation here.
+The project follows the later requirements in the original ECX discussion: an operator-run wrapping/redemption service, **1% to wrap and 1% to redeem for new orders**, and separate Solana liquidity that can eventually be traded through Jupiter. The bridge is the conversion service; a DEX pool supplies market trading and price discovery. There is no custom blockchain, Solana token program or AMM implementation here.
 
-## Approved next revision
+## Current integrated revision
 
-The [integrated implementation plan](docs/IMPLEMENTATION-PLAN.md) targets a connection-free interface, 1% fees in both directions, PostgreSQL/Opaleye throughout the database layer, and Servant handlers that produce a severity-indexed DSL for separate safe and critical evaluation. These changes are planned; the runtime architecture and fee descriptions below describe the current baseline.
+The [integrated implementation plan](docs/IMPLEMENTATION-PLAN.md) targets a connection-free interface, 1% fees in both directions, PostgreSQL/Opaleye throughout the database layer, and Servant handlers that produce a severity-indexed DSL for separate safe and critical evaluation. The local PostgreSQL paying runtime and both new 1% customer flows are working. Historical orders keep their original terms. The revised installer and remaining recovery workflows are being completed; deep auditing follows integrated acceptance.
 
 ## What the bridge does
 
@@ -16,8 +16,8 @@ The operator holds inventory on both chains. A confirmed native deposit authoriz
 
 | Direction | Customer sends | Bridge pays | Bridge fee |
 | --- | --- | --- | --- |
-| Native → wrapped | Native coins to an order-specific address | Wrapped SPL tokens to the bound Solana wallet | 20 basis points |
-| Wrapped → native | Wrapped SPL tokens with an order-bound memo | Native coins to the bound native address | 100 basis points |
+| Native → wrapped | Native coins to an order-specific address | Wrapped SPL tokens to the bound Solana wallet | 100 basis points |
+| Wrapped → native | Wrapped SPL tokens through an order-bound Solana Pay request | Native coins to the bound native address | 100 basis points |
 
 Both assets use eight decimal places. All API amounts are decimal strings in integer base units. For input `g`, the fee is `ceil(g × basisPoints / 10000)` and the payout is `g − fee`. Network fees and permitted recipient ATA rent are separately reserved operator costs; they do not silently change the quoted net amount. Orders preserve their original amount, destinations, fee policy and deadlines.
 
@@ -25,15 +25,16 @@ The bridge needs funded inventory and operating budgets on both sides. Low inven
 
 ## Architecture
 
-One Haskell application provides the financial engine and typed Servant API, with two real-chain adapters, one SQLite ledger and a thin browser interface. The same executable runs as a private worker or a public web proxy. A small Rust helper handles a fixed Solana transaction format using official SDK/SPL interface crates.
+One Haskell application provides the financial engine and typed Servant API, with two real-chain adapters, one PostgreSQL ledger accessed with Opaleye and a thin browser interface. The same executable runs as a private worker or a public web proxy. A small Rust helper handles a fixed Solana transaction format using official SDK/SPL interface crates.
 
 ```mermaid
 flowchart LR
-    Browser[Thin browser UI / Wallet Standard] --> Web[Loopback web proxy]
+    Browser[Connection-free browser UI / Solana Pay] --> Web[Loopback web proxy]
     Client[Customer HTTP client] --> Web
     Web -->|Customer Unix socket| Worker[Haskell worker / Servant API]
     Operator[Private operator commands] --> Worker
-    Worker --> Ledger[(Private SQLite ledger)]
+    Worker --> Dispatcher[Severity-indexed DSL dispatcher]
+    Dispatcher --> Ledger[(Private PostgreSQL ledger)]
     Worker --> Native[Native adapter / dedicated daemon wallet]
     Worker --> Solana[Solana RPC adapter]
     Worker --> Helper[Sandboxed Rust Solana helper]
@@ -45,19 +46,19 @@ flowchart LR
 
 | Component | Responsibility and access |
 | --- | --- |
-| `ecx-bridge worker` | Exclusively owns the ledger; scans and reconciles while intake is paused. Serves separate customer and administrator Unix sockets. |
-| `ecx-bridge test-worker` | Uses the same engine and explicitly enables automatic intake/payouts only for the real L2L Signet / Solana Devnet public-test profile with backups not required. It is not a canonical deployment mode. |
+| `ecx-bridge postgres-api` | Exclusively owns the ledger; scans and reconciles while intake is paused. Serves separate customer and administrator Unix sockets. |
+| `ecx-bridge postgres-test-worker` | Uses the same engine and explicitly enables automatic intake/payouts only for the real L2L Signet / Solana Devnet public-test profile with backups not required. It is not a canonical deployment mode. |
 | `ecx-bridge serve` | Serves static assets and proxies only the typed customer API. Binds to loopback and receives no signer or database path. Administrator routes are excluded. |
 | Native daemon wallet | Generates deposit addresses, funds/signs PSBTs and provides native chain/wallet evidence. RPC stays private and uses a cookie. |
 | `ecx-solana-helper` | Constructs or signs only supported transactions under fixed mint/custody configuration. It has no RPC client. Unsigned previews do not read the signer. |
-| Browser | Displays quotes/deposits/status, discovers Wallet Standard wallets and requests customer signatures. No frontend framework or Node server runs in production. |
+| Browser | Displays quotes/deposits/status and opens standard payment requests in the customer wallet. No frontend framework or Node server runs in production. |
 
 Ubuntu services separate the worker, web and native-node users. Private file permissions protect the ledger, configuration, keys and RPC cookie. The helper runs through a restricted filesystem/network namespace with a scoped AppArmor policy. These boundaries have ARM64 installation evidence; they do not make a hot wallet immune to host compromise. The bridge runtime must not hold the mint-authority key or LP/backing keys.
 
 ### Durable financial workflow
 
 1. **Admit and reserve.** Verify real chain identities, destinations, inventory, customer balances where relevant, fees/rent and operating limits. Save immutable quote terms and reservations.
-2. **Bind the deposit.** Save a native address allocation claim before exposing the address, or bind an exact Solana source owner and memo. Repeated requests retain the same order and instructions.
+2. **Bind the deposit.** Save a native address allocation claim before exposing the address, or bind a Solana Pay reference and derive refund ownership from verified payment evidence. Repeated requests retain the same order and instructions.
 3. **Observe and verify.** Scan native wallet history and separate finalized Solana token/SOL histories. Save evidence and cursors atomically, then require the order's confirmation/finality policy.
 4. **Prepare and sign.** Reserve operating costs and persist the exact preparation request/draft before signing. Validate the resulting transaction independently and save its exact signed bytes.
 5. **Authorize and send.** Recheck the source, journal broadcast intent and enforce required backup coverage. Retries use the saved bytes. An uncertain send response is not permission to construct a second payment.
@@ -79,13 +80,13 @@ Exclusive worker ownership, immutable attempts, generation fencing, input-lock r
 | `Reconciliation.hs`, `Recovery.hs`, `Reorg.hs`, `NativeReplacement.hs`, `Backup.hs` | Custody checks, pause/recovery, source/finality loss, replacement families and backup barriers |
 | `API.hs`, `Web.hs`, `Worker.hs`, `app/Main.hs` | Shared Servant contract, customer proxy, worker and CLI entry points |
 | `solana-helper/` | Fixed official-SDK helper and separate real-Devnet setup/test clients |
-| `web/` | HTML/CSS/TypeScript interface and Wallet Standard integration |
+| `web/` | HTML/CSS/TypeScript interface and Solana Pay QR/payment links |
 | `deploy/`, `scripts/install`, `scripts/build-release` | Pinned Linux build, packaged runtime, installer, systemd services and helper sandbox |
 | `test/`, `docs/evidence/` | Regression contracts and recorded real-network/host acceptance |
 
 ## Build and installation
 
-The tested dependency boundary is GHC **9.14.1**, Cabal **3.16.1.0**, Rust **1.97.1**, SQLite **3.53.4**, Node **25.4.0** and Bitcoin Core **30.2**. Cabal, Cargo and npm dependency graphs are locked. Linux upstream toolchain URLs/checksums are in [`deploy/toolchains.json`](deploy/toolchains.json). The application checks the actual SQLite source identity at startup.
+The tested dependency boundary is GHC **9.14.1**, Cabal **3.16.1.0**, Rust **1.97.1**, SQLite **3.53.4**, Node **25.4.0** and Bitcoin Core **30.2**. Cabal, Cargo and npm dependency graphs are locked. Linux upstream toolchain URLs/checksums are in [`deploy/toolchains.json`](deploy/toolchains.json). The legacy importer retains SQLite compatibility; the active PostgreSQL worker uses libpq/PostgreSQL 16.
 
 On Ubuntu 24.04, from a reviewed checkout, run as a normal sudo-enabled user:
 
@@ -102,7 +103,7 @@ sha256sum -c ecx-bridge-ubuntu-24.04-aarch64.run.sha256
 sh ecx-bridge-ubuntu-24.04-aarch64.run --with-signet --config-dir /absolute/private/setup
 ```
 
-Target hosts need no compiler or Node installation. Default worker mode observes with intake paused; `--test-worker` explicitly enables the funded public-test mode. Use the package matching the server CPU. **Ubuntu ARM64 installation has passed clean-VM acceptance; x86-64 build/acceptance is underway and is not yet verified.** The locally built installers are checksummed, not signed published releases; no public download endpoint exists yet.
+Target hosts need no compiler or Node installation. Default worker mode observes with intake paused; `--test-worker` explicitly enables the funded public-test mode. Use the package matching the server CPU. **The previous SQLite ARM64 package passed clean-VM acceptance. The revised PostgreSQL installer still needs integrated Ubuntu acceptance on both architectures.** The locally built installers are checksummed, not signed published releases; no public download endpoint exists yet.
 
 Repeated installation of the same release/configuration preserves services and the ledger. Different releases/configuration are refused rather than silently upgrading a funded deployment. The web endpoint binds to `127.0.0.1:8080`; remote access uses an SSH tunnel unless a separately configured TLS proxy is provided. No public firewall port or native RPC endpoint is opened.
 
@@ -111,7 +112,8 @@ See [`docs/INSTALL.md`](docs/INSTALL.md) for exact paths, users, configuration a
 For an already configured local public-test environment:
 
 ```sh
-./scripts/start-local /absolute/private/config.json --binary /absolute/path/to/ecx-bridge
+PGHOST=/private/socket PGPORT=29436 PGDATABASE=ecx_bridge PGUSER=YOUR_DB_ROLE \
+  ./scripts/start-local /absolute/private/config.json --postgres --binary /absolute/path/to/ecx-bridge
 ```
 
 The local launcher serves `http://127.0.0.1:61734` and accepts only the public-test profile. For source checks with the pinned tools and matching SQLite available:
@@ -124,9 +126,9 @@ The local launcher serves `http://127.0.0.1:61734` and accepts only the public-t
 
 | Checkpoint | Evidence and limits |
 | --- | --- |
-| Financial/state contracts | 367 Haskell examples plus 100 generated arithmetic cases; [`test output`](docs/evidence/haskell-tests.txt). These tests do not substitute for real-chain acceptance. |
+| Financial/state contracts | 368 Haskell examples plus 100 generated arithmetic cases; [`test output`](docs/evidence/haskell-tests.txt). These tests do not substitute for real-chain acceptance. |
 | Helper and installer contracts | Seven Rust tests and eight installer tests; [`Linux build output`](docs/evidence/linux-installer-build.txt). |
-| Browser source | Strict TypeScript checking and asset build pass. Actual current browser-wallet signing/reload acceptance is pending. |
+| Browser source | Strict TypeScript checking and asset build pass. Actual supported-wallet Solana Pay and browser reload acceptance is pending. |
 | Automatic real-chain round trips | Both customer-API orders paid by the running test worker; custody matched. Deposits used dedicated native/official-SDK tester clients, not browser extensions. [`Transfer/restart evidence`](docs/evidence/local-product-transfers.json). |
 | Restart preservation | Financial rows and completed authenticated order views survived a clean launcher restart. Same evidence above. |
 | Real refund and expired Solana attempt | Full late-deposit refund and a retained expired attempt followed by one proven replacement; [`evidence`](docs/evidence/late-ledger-refund.json). Canonical independent-provider acceptance remains separate. |
@@ -137,7 +139,9 @@ The current public-test mint is independently created Devnet test inventory, **n
 
 ## Remaining challenges and delivery sequence
 
-These checkpoints retain the full scope. They are not equal-sized percentages; [`docs/STATUS.md`](docs/STATUS.md) is the detailed evidence/backlog record.
+The [current implementation plan](docs/IMPLEMENTATION-PLAN.md) orders delivery as
+complete runtime/customer flows, one-command installation, then bounded audits.
+The following inventory retains the broader release scope. These are not equal-sized percentages; [`docs/STATUS.md`](docs/STATUS.md) is the detailed evidence/backlog record.
 
 | Order | Remaining work | Why it matters |
 | --- | --- | --- |

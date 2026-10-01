@@ -1,7 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.Recovery
   ( recoverDeployment, reconcileNativeLocks, reconcileNativeLocksWith
-  , cancelPreparation, cancelPreparationWith, approveSourceRecovery, approveSourceRecoveryWith
+  , CancellationStore(..), cancelPreparation, cancelPreparationWith, approveSourceRecovery, approveSourceRecoveryWith
   , coverSourceLoss, coverSourceLossWith, prepareNativeReplacement, prepareNativeReplacementWith
   , signNativeReplacementWith ) where
 
@@ -11,7 +11,7 @@ import Bridge.Native (nativeAmount,nativeIdentity)
 import Bridge.NativePayment
 import Bridge.NativeReplacement
 import Bridge.Observer (epochSeconds,observeOnce)
-import Bridge.Payment (payoutReference)
+import Bridge.Payment (payoutReference,PreparationStore(..))
 import Bridge.Reconciliation hiding (custodyProof)
 import Bridge.Reorg
 import Bridge.RPC
@@ -271,23 +271,36 @@ cancelPreparation manager c ledger intent generation reason=do
   cancelPreparationWith epochSeconds
     (realPaymentTransport manager c (const $ reject "unexpected_cancellation_backup")) c ledger intent generation reason
 
-cancelPreparationWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> Text -> Int -> Text -> IO Value
+class (SettlementStore ledger,CustodyStore ledger) => CancellationStore ledger where
+  cancellationReconcile :: IO Int64 -> PaymentTransport -> Config -> ledger -> IO Value
+  cancellationRead :: ledger -> Text -> Int -> IO (Maybe(Text,Text,Bool))
+  cancellationCheckFresh :: ledger -> Int64 -> IO ()
+  cancellationBegin :: ledger -> Preparation -> Int64 -> Text -> Value -> IO ()
+  cancellationFinish :: ledger -> Preparation -> IO ()
+instance CancellationStore Ledger where
+  cancellationReconcile = reconcileCustodyWith
+  cancellationRead = preparationCancellation
+  cancellationCheckFresh = checkCustodyFresh
+  cancellationBegin = beginPreparationCancellation
+  cancellationFinish = finishPreparationCancellation
+
+cancelPreparationWith :: CancellationStore ledger => IO Int64 -> PaymentTransport -> Config -> ledger -> Text -> Int -> Text -> IO Value
 cancelPreparationWith clock transport c ledger intent generation reason=do
   require (generation>=0 && generation<8 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_preparation_cancellation"
-  state <- readiness ledger
+  state <- preparationReadiness ledger
   require (not $ available state) "pause_before_operator_action"
-  old <- preparationCancellation ledger intent generation
+  old <- cancellationRead ledger intent generation
   case old of
     Just (previous,_,_) -> require (previous==reason) "preparation_cancellation_conflict"
     Nothing -> pure ()
   case old of
     Just (_,_,True) -> pure result
     _ -> do
-      rows <- filter (\p -> obligationId (preparationObligation p)==intent && preparationGeneration p==generation) <$> pendingPreparations ledger
+      rows <- filter (\p -> obligationId (preparationObligation p)==intent && preparationGeneration p==generation) <$> preparationPending ledger
       preparation <- case rows of [p]->pure p; _->reject "preparation_cancellation_not_expected"
       paymentIdentity transport
       recheckSourceWith transport c ledger (preparationObligation preparation)
-      _ <- reconcileCustodyWith clock transport c ledger
+      _ <- cancellationReconcile clock transport c ledger
       expected <- cleanupPlan (paymentNative transport) c ledger preparation
       -- Even a retry must match the same immutable policy/draft and pass the
       -- current custody check; a lost response is never evidence of cleanup.
@@ -295,12 +308,12 @@ cancelPreparationWith clock transport c ledger intent generation reason=do
         Just (_,encoded,False) -> stored encoded >>= \saved -> require (saved==expected) "preparation_cancellation_conflict"
         _ -> pure ()
       now <- clock
-      checkCustodyFresh ledger now
-      beginPreparationCancellation ledger preparation now reason expected
+      cancellationCheckFresh ledger now
+      cancellationBegin ledger preparation now reason expected
       when (preparationChain preparation=="Native") $ do
         inputs <- fieldValue "nativeInputs" expected
         cleanupLocks (paymentNative transport) inputs
-      finishPreparationCancellation ledger preparation
+      cancellationFinish ledger preparation
       pure result
  where
   result=object ["cancelledPreparation" .= intent,"generation" .= generation,"paused" .= True
@@ -308,11 +321,10 @@ cancelPreparationWith clock transport c ledger intent generation reason=do
 
 -- Reconstruct cleanup from the saved economic policy, not from caller-supplied
 -- outpoints. A stale Solana blockhash is harmless here: no signed attempt exists.
-preparationPolicyFor :: Config -> Ledger -> Preparation -> IO PolicySnapshot
+preparationPolicyFor :: PreparationStore ledger => Config -> ledger -> Preparation -> IO PolicySnapshot
 preparationPolicyFor c ledger p=do
   let ob=preparationObligation p
-  policies <- ledgerAction ledger $ \db -> query db "SELECT policy_json FROM orders WHERE id=?" (Only $ obligationOrder ob) :: IO [Only Text]
-  policy <- case policies of [Only text]->stored text; _->reject "order_not_found"
+  policy <- preparationOrderPolicy ledger (obligationOrder ob)
   require (deploymentFingerprint policy==fingerprint c && solanaCommitment policy=="finalized") "payment_profile_mismatch"
   pure policy
 
@@ -334,7 +346,7 @@ readNativePreparation call c p policy=do
     pure saved) (preparationDraft p)
   pure (plan,draft)
 
-cleanupPlan :: NativeRPC -> Config -> Ledger -> Preparation -> IO Value
+cleanupPlan :: PreparationStore ledger => NativeRPC -> Config -> ledger -> Preparation -> IO Value
 cleanupPlan call c ledger p=do
   let ob=preparationObligation p
   policy <- preparationPolicyFor c ledger p

@@ -1,0 +1,30 @@
+[Unit]
+Description=ECX bridge private PostgreSQL ledger
+After=local-fs.target
+
+[Service]
+Type=simple
+User=postgres
+Group=ecx-worker
+ExecStart=/usr/lib/postgresql/16/bin/postgres -D /var/lib/ecx-postgres/data -c config_file=/etc/ecx-bridge/postgresql.conf
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGINT
+TimeoutStopSec=120
+Restart=on-failure
+RestartSec=5
+RuntimeDirectory=ecx-postgres
+RuntimeDirectoryMode=0770
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ecx-postgres /run/ecx-postgres
+RestrictAddressFamilies=AF_UNIX
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

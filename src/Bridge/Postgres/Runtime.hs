@@ -14,10 +14,12 @@ import qualified Bridge.Postgres.Server as Server
 import qualified Bridge.Postgres.Refund as Refund
 import qualified Bridge.Ledger as Domain
 import Bridge.Postgres.PaymentStore (Store(..))
-import Bridge.Settlement (realPaymentTransport,paymentPass,reconcilePaymentsWith,PaymentTransport(..))
+import Bridge.Settlement (realPaymentTransport,paymentPass,reconcilePaymentsWith,PaymentTransport(..),approveSolanaRetryWith)
 import qualified Bridge.Postgres.Startup as Startup
+import Bridge.Recovery (cancelPreparationWith)
 import Bridge.NativePayment (ownedNativeLocks)
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar (MVar,newMVar,withMVar)
 import Control.Monad (forever,when)
 import Control.Exception (IOException,catch)
 import qualified Bridge.SolanaPay as Pay
@@ -31,6 +33,8 @@ import Control.Exception (bracket,try)
 import Data.Aeson (Value(..),object,(.=),toJSON,encode)
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Map.Strict as M
+import System.Environment (lookupEnv)
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.HTTP.Client (Manager)
@@ -43,7 +47,7 @@ import Servant
 data SafeContext = SafeContext PG.ConnectInfo Value Bool
 data CriticalContext = CriticalContext Manager Config Ledger
 
-data Runtime = Runtime SafeContext CriticalContext
+data Runtime = Runtime SafeContext CriticalContext (MVar ())
 
 bearer :: Text -> IO Text
 bearer header = do
@@ -126,6 +130,14 @@ evalCritical (CriticalContext manager cfg ledger) plan = case plan of
       pure(object["accepted" .= True,"authorization" .= ("independent_chain_evidence_required"::Text)])
   OperatorDSL operation->case operation of
     Pause reason->pause ledger reason >> readiness ledger
+    CancelPreparation intent generation reason->cancelPreparationWith epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) intent generation reason
+    Resume->do
+      now <- epochSeconds
+      Startup.resumeAfterChecks cfg ledger now
+      readiness ledger
+    ApproveSolanaRetry txid reason->do
+      approveSolanaRetryWith (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) txid reason
+      pure(object["approvedRetryOf" .= txid,"signedOrSent" .= False])
     RefundDeposit did->do
       obligation <- Refund.createRefund ledger did
       pure(object["obligation" .= Domain.obligationId obligation,"recipient" .= Domain.obligationRecipient obligation,"amount" .= T.pack(show $ Domain.obligationAmount obligation)])
@@ -153,12 +165,16 @@ evalCritical (CriticalContext manager cfg ledger) plan = case plan of
 -- The sole production invocation of critical evaluation. Routes have already
 -- resolved their existential operation to a typed DSL, without performing IO.
 evaluate :: Runtime -> Plan a -> IO a
-evaluate (Runtime safeContext criticalContext) plan = case plan of
+evaluate (Runtime safeContext criticalContext gate) plan = case plan of
   SafePlan dsl->evalSafe safeContext dsl
   CustomerPlan dsl->critical dsl
   OperatorPlan dsl->critical dsl
   WorkerPlan dsl->critical dsl
- where critical = evalCritical criticalContext
+ -- A critical workflow can include RPC calls between ledger transactions.
+ -- Keep scanning, admission and payment workflows from interleaving; otherwise
+ -- a request's sampled time can precede a newer custody certificate after it
+ -- waits for the ledger. Safe reads retain their independent connections.
+ where critical dsl = withMVar gate (\_->evalCritical criticalContext dsl)
 
 interpret :: Runtime -> Plan a -> Handler a
 interpret runtime plan = do
@@ -181,10 +197,19 @@ runRuntime paying settings cfg = do
   require (profile cfg==L2LSignetDevnet && not(backupRequired cfg)) "public_test_profile_required"
   withLedger settings (fingerprint cfg) $ \ledger->do
     manager <- newRpcManager
-    let public=object["profile" .= profile cfg,"deployment" .= deploymentId cfg,"mint" .= mint cfg,"custodyOwner" .= custodyOwner cfg,"decimals" .= (8::Int),"minInput" .= minInput cfg,"maxInput" .= maxInput cfg,"feesBps" .= object["NativeToWrapped" .= (100::Int),"WrappedToNative" .= (100::Int)],"intakeEnabled" .= paying,"implementationReady" .= False]
-        runtime=Runtime (SafeContext settings public (backupRequired cfg)) (CriticalContext manager cfg ledger)
-    _ <- evaluate runtime (worker ScanAndReconcile)
-    when paying (evaluate runtime (worker StartPayments))
+    gate <- newMVar ()
+    readUser <- fromMaybe (PG.connectUser settings) <$> lookupEnv "PGREADUSER"
+    let readSettings=settings {PG.connectUser=readUser}
+        public=object["profile" .= profile cfg,"deployment" .= deploymentId cfg,"mint" .= mint cfg,"custodyOwner" .= custodyOwner cfg,"decimals" .= (8::Int),"minInput" .= minInput cfg,"maxInput" .= maxInput cfg,"feesBps" .= object["NativeToWrapped" .= (100::Int),"WrappedToNative" .= (100::Int)],"intakeEnabled" .= paying,"implementationReady" .= False]
+        runtime=Runtime (SafeContext readSettings public (backupRequired cfg)) (CriticalContext manager cfg ledger) gate
+    let checked action = do
+          outcome <- try (action `catch` (\(_::IOException)->reject "postgres_worker_io_unavailable")) :: IO (Either BridgeError ())
+          case outcome of
+            Right ()->pure ()
+            Left(BridgeError reason)->evaluate runtime (operator(Pause reason)) >> pure ()
+    checked $ do
+      _ <- evaluate runtime (worker ScanAndReconcile)
+      when paying (evaluate runtime (worker StartPayments))
     customerApp <- securityBoundary (serve customerAPI (hoistServer customerAPI (interpret runtime) Server.customerServer))
     adminApp <- securityBoundary (serve Server.operatorAPI (hoistServer Server.operatorAPI (interpret runtime) Server.adminServer))
     let api=concurrently_ (runUnix (customerSocket cfg) 0o660 customerApp) (runUnix (adminSocket cfg) 0o600 adminApp)

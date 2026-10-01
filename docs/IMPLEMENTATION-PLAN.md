@@ -135,6 +135,9 @@ promise perfect security or zero debugging. A hot wallet retains material risk.
 
 ## Construction rules: what runs now and what waits
 
+Run at most one test VM at a time, with one build job by default. Shut it down
+when its acceptance/build is finished; do not keep idle architecture VMs running.
+
 During construction, check that the whole application compiles, real interfaces
 fit, the next customer flow works, and its necessary financial protections hold.
 Run existing relevant regressions at integration milestones. Do not create a

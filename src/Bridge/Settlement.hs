@@ -262,6 +262,9 @@ instance PaymentStore Ledger where
   paymentNativeFamily = nativeFamilyAttempts
 
 class (PaymentStore ledger, PreparationStore ledger) => SettlementStore ledger where
+  settlementRetryReasons :: ledger -> Text -> IO [Text]
+  settlementRetryAttempts :: ledger -> Text -> IO [Attempt]
+  settlementRecordRetry :: ledger -> Text -> Text -> Text -> IO ()
   settlementWinner :: ledger -> Text -> IO Text
   settlementReady :: ledger -> IO [Obligation]
   settlementBusy :: ledger -> Text -> IO Bool
@@ -274,6 +277,9 @@ class (PaymentStore ledger, PreparationStore ledger) => SettlementStore ledger w
   settlementAuthorize :: ledger -> Bool -> Text -> IO Attempt
 
 instance SettlementStore Ledger where
+  settlementRetryReasons ledger txid = ledgerAction ledger $ \db -> map fromOnly <$> (query db "SELECT reason FROM solana_retry_approvals WHERE expired_txid=?" (Only txid) :: IO [Only Text])
+  settlementRetryAttempts ledger txid = ledgerAction ledger $ \db -> query db "SELECT a.txid,a.intent_id,i.chain,a.signed_bytes,a.policy_json,a.fee_limit,a.state,a.critical_sequence FROM attempts a JOIN intents i ON i.id=a.intent_id JOIN obligations o ON o.id=i.obligation_id JOIN solana_expiries e ON e.txid=a.txid WHERE a.txid=? AND i.resolved=1 AND a.state='review' AND o.status='review' AND a.preparation_generation=(SELECT MAX(generation) FROM preparations WHERE intent_id=i.id)" (Only txid)
+  settlementRecordRetry = recordSolanaRetryApproval
   settlementWinner ledger intent = ledgerAction ledger $ \db->do
     rows <- query db "SELECT txid FROM attempts WHERE intent_id=? AND state='settled'" (Only intent) :: IO [Only Text]
     case rows of [Only winner]->pure winner; _->reject "settled_payment_missing"
@@ -468,24 +474,24 @@ approveSolanaRetry manager c=approveSolanaRetryWith (realPaymentTransport manage
 -- Private operator command only. Revalidate the saved signed message, source,
 -- immutable origins and complete expiry evidence before journaling permission.
 -- It neither signs, broadcasts nor resumes a paused worker.
-approveSolanaRetryWith :: PaymentTransport -> Config -> Ledger -> Text -> Text -> IO ()
+approveSolanaRetryWith :: SettlementStore ledger => PaymentTransport -> Config -> ledger -> Text -> Text -> IO ()
 approveSolanaRetryWith transport c ledger txid reason=do
-  prior <- ledgerAction ledger $ \db -> query db "SELECT reason FROM solana_retry_approvals WHERE expired_txid=?" (Only txid) :: IO [Only Text]
+  prior <- settlementRetryReasons ledger txid
   case prior of
-    [Only old] -> require (old==reason) "retry_approval_conflict"
+    [old] -> require (old==reason) "retry_approval_conflict"
     [] -> do
       require (not (T.null $ T.strip reason) && T.length reason<=512) "invalid_retry_approval"
-      health <- readiness ledger
+      health <- preparationReadiness ledger
       require (not $ available health) "pause_before_operator_action"
-      rows <- ledgerAction ledger $ \db -> query db "SELECT a.txid,a.intent_id,i.chain,a.signed_bytes,a.policy_json,a.fee_limit,a.state,a.critical_sequence FROM attempts a JOIN intents i ON i.id=a.intent_id JOIN obligations o ON o.id=i.obligation_id JOIN solana_expiries e ON e.txid=a.txid WHERE a.txid=? AND i.resolved=1 AND a.state='review' AND o.status='review' AND a.preparation_generation=(SELECT MAX(generation) FROM preparations WHERE intent_id=i.id)" (Only txid)
+      rows <- settlementRetryAttempts ledger txid
       attempt <- case rows of [a]->pure a; _->reject "solana_retry_not_expected"
       paymentIdentity transport
       (ob,payment) <- readSavedPayment transport c ledger attempt
       signed <- case payment of SolanaPayment s->pure s; _->reject "wrong_destination_chain"
-      checkExpiryOrigins ledger c
+      settlementExpiryOrigins ledger c
       recheckSourceWith transport c ledger ob
       proof <- solanaExpiryEvidence transport c signed >>= maybe (reject "solana_expiry_not_proven") pure
-      recordSolanaRetryApproval ledger txid reason proof
+      settlementRecordRetry ledger txid reason proof
     _ -> reject "duplicate_retry_approval"
 
 -- One bounded pass; the database owns the queue across restarts. Reconciliation

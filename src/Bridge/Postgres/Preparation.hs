@@ -1,5 +1,5 @@
 module Bridge.Postgres.Preparation
-  ( orderPolicy, costLimits, begin, active, storeDraft, storeAttempt, pending ) where
+  ( orderPolicy, costLimits, begin, active, storeDraft, storeAttempt, pending, pendingC ) where
 
 import Bridge.Config
 import Bridge.Types
@@ -145,7 +145,10 @@ storeAttempt ledger expected chain txid bytes policy limit common generation = l
   orderStatus c (obligationOrder expected) "Paying"
 
 pending :: Ledger -> IO [Preparation]
-pending ledger = ledgerAction ledger $ \c->do
+pending ledger = ledgerAction ledger pendingC
+
+pendingC :: PG.Connection -> IO [Preparation]
+pendingC c = do
   rows <- O.runSelect c $ do
     p <- O.selectTable preparationsTable
     i <- O.selectTable intentsTable

@@ -3,12 +3,17 @@ module Bridge.Postgres.PaymentStore (Store(..), pendingAttempts) where
 import Bridge.Types
 import Bridge.Ledger (Attempt(..),Obligation(..),Deposit(..))
 import Bridge.Settlement (PaymentStore(..),SettlementStore(..))
+import Control.Exception (IOException,catch,try)
+import Data.Aeson (Value,object,(.=))
 import qualified Bridge.Postgres.Settlement as S
+import qualified Bridge.Postgres.Retry as Retry
+import Bridge.Recovery (CancellationStore(..))
+import qualified Bridge.Postgres.Cancellation as Cancellation
 import Bridge.Payment (PreparationStore(..))
 import Bridge.Deposit (DepositStore(..))
 import qualified Bridge.Postgres.Order as Order
 import qualified Bridge.Postgres.Preparation as P
-import Bridge.Reconciliation (CustodyStore(..),View(..))
+import Bridge.Reconciliation (CustodyStore(..),View(..),inspectCustodyWith)
 import qualified Bridge.Postgres.Custody as C
 import qualified Bridge.Postgres.Observation as Observation
 import Data.Int (Int64)
@@ -156,6 +161,9 @@ instance PreparationStore Store where
   preparationStoreAttempt (Store ledger) = P.storeAttempt ledger
 
 instance SettlementStore Store where
+  settlementRetryReasons (Store ledger) = Retry.reasons ledger
+  settlementRetryAttempts (Store ledger) = Retry.candidates ledger
+  settlementRecordRetry (Store ledger) = Retry.recordApproval ledger
   settlementWinner (Store ledger) intent = ledgerAction ledger $ \connection->do
     rows <- O.runSelect connection $ do
       row <- O.selectTable attemptsTable
@@ -192,3 +200,20 @@ instance DepositStore Store where
   depositExpose (Store ledger) = Order.exposeOrder ledger
   depositPause (Store ledger) = pause ledger
   depositReadiness (Store ledger) = readiness ledger
+
+instance CancellationStore Store where
+  cancellationReconcile clock transport cfg store@(Store ledger) = do
+    expected <- custodyRevision store
+    result <- try (inspectCustodyWith clock transport cfg store False `catch` (\(_::IOException)->reject "custody_rpc_unavailable")) :: IO (Either BridgeError (Int64,Int64,Bool,Value))
+    case result of
+      Right (revision,at,matches,report)->do
+        C.recordCheck ledger revision at (if matches then Nothing else Just "custody_balance_mismatch") (Just report)
+        pure(object["matches" .= matches])
+      Left(BridgeError code)->do
+        at <- clock
+        C.recordCheck ledger expected at (Just code) Nothing
+        pure(object["matches" .= False,"error" .= code])
+  cancellationRead (Store ledger) = Cancellation.readCancellation ledger
+  cancellationCheckFresh (Store ledger) = Cancellation.checkFresh ledger
+  cancellationBegin (Store ledger) = Cancellation.begin ledger
+  cancellationFinish (Store ledger) = Cancellation.finish ledger

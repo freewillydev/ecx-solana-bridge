@@ -1,8 +1,10 @@
 # Ubuntu installer
 
 This installer targets Ubuntu 24.04 on ARM64 or x86-64. It installs the bridge,
-fixed Solana helper, exact SQLite runtime, browser assets, systemd units and an
+fixed Solana helper, a private PostgreSQL 16 ledger, browser assets, systemd units and an
 optional dedicated **real L2L public Signet** node. No simulated chain is offered.
+The revised PostgreSQL package is being verified in local Ubuntu VMs. Earlier
+installer evidence covers the SQLite baseline, not this replacement.
 ARM64 acceptance is performed in a separate Ubuntu VM on the development Mac;
 see the installation evidence for the checks actually completed. x86-64 requires
 its own acceptance run before claiming support has been verified there.
@@ -66,7 +68,14 @@ the configured descriptor wallet in this dedicated node. It does not replace an
 existing wallet. Synchronization proceeds against the real public network;
 checkpoint validation remains the application's responsibility.
 
-Default mode starts the observation-only worker and keeps intake paused. For an
+`dbPath` remains a legacy configuration field for compatibility; the PostgreSQL
+worker does not open it. Database settings live in the private `postgres.env`,
+using `/run/ecx-postgres`, port 29436 and database `ecx_bridge`. PostgreSQL listens
+only on its private Unix socket. Peer mapping gives the worker a restricted
+`ecx_worker` role and safe evaluation a SELECT-only `ecx_read` role. The dedicated
+cluster is separate from any system PostgreSQL cluster.
+
+Default mode starts the PostgreSQL observation-only worker and keeps intake paused. For an
 already configured and funded public Signet/Devnet deployment, pass
 `--test-worker` explicitly. That mode requires the custody signer and rejects
 other profiles. Its normal reconciliation gates still apply. Do not install a
@@ -80,7 +89,7 @@ for remote access; a public domain/TLS reverse proxy is a separate configuration
 The installer does not open firewall ports or expose native RPC.
 
 ```sh
-systemctl status ecx-bridge-worker ecx-bridge-web ecx-bridge-node
+systemctl status ecx-bridge-worker ecx-bridge-web ecx-bridge-node ecx-bridge-postgres
 curl -fsS http://127.0.0.1:8080/healthz
 curl -i http://127.0.0.1:8080/readyz
 sudo journalctl -u ecx-bridge-worker -u ecx-bridge-web -n 50
@@ -103,3 +112,19 @@ and does not restart active services. Different configuration is refused. A
 different release is also refused rather than automatically migrating a funded
 ledger. Back up and review upgrades separately. Full host-loss restore, release
 signing/publication and independent security review are separate unfinished gates.
+
+## Existing ledger and backups
+
+An existing SQLite ledger is not automatically replaced. Stop its worker, take a
+consistent final snapshot, preserve it privately, then supply
+`--legacy-snapshot /absolute/private/final.sqlite` during reviewed installation.
+The importer requires an empty PostgreSQL destination and compares every record
+before committing. Repeat installation with the same import requires its recorded
+source digest and comparison report. After new external effects, the old snapshot
+is no longer a safe rollback state. Never run two paying workers for one custody.
+
+The hourly `ecx-bridge-backup.timer` creates consistent custom-format PostgreSQL
+dumps under `/var/lib/ecx-bridge/private/backups`, validates the archive inventory
+and records a digest. These local files do not acknowledge remote durability or
+replace the valuable-fund backup barrier. Keep keys and off-host journal backups
+protected. A full clean-host restore rehearsal remains a release acceptance task.

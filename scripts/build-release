@@ -62,7 +62,10 @@ os.environ["PATH"] = f"{tools}/bin:{node}/bin:" + os.environ["PATH"]
 os.environ["CARGO_HOME"] = str(cache / "cargo")
 os.environ["CARGO_TARGET_DIR"] = str(cache / "cargo-target")
 os.environ["CABAL_DIR"] = str(cache / "cabal")
-os.environ["CARGO_BUILD_JOBS"] = "2"
+build_jobs = os.environ.get("ECX_BUILD_JOBS", "1")
+if build_jobs not in ("1", "2"):
+    raise ValueError("ECX_BUILD_JOBS must be 1 or 2")
+os.environ["CARGO_BUILD_JOBS"] = build_jobs
 sqlite = cache / "sqlite"
 if not (sqlite / "bin/sqlite3").exists():
     source = fetch("sqlite")
@@ -75,7 +78,7 @@ os.environ["PKG_CONFIG_PATH"] = str(sqlite / "lib/pkgconfig")
 os.environ["LIBRARY_PATH"] = str(sqlite / "lib")
 os.environ["C_INCLUDE_PATH"] = str(sqlite / "include")
 run("cabal", "update")
-build_args = [f"--builddir={cache}/dist", f"--extra-lib-dirs={sqlite}/lib", f"--extra-include-dirs={sqlite}/include", "-j2"]
+build_args = [f"--builddir={cache}/dist", f"--extra-lib-dirs={sqlite}/lib", f"--extra-include-dirs={sqlite}/include", "-j" + build_jobs]
 run("cabal", "build", "all", *build_args)
 run("cabal", "test", "all", "--test-show-details=direct", *build_args)
 run("cargo", "test", "--locked", "--manifest-path", "solana-helper/Cargo.toml", "--all-targets")
@@ -88,7 +91,7 @@ binary = subprocess.check_output(["cabal", "list-bin", "exe:ecx-bridge", f"--bui
 bundle = cache / "bundle"
 if bundle.exists():
     shutil.rmtree(bundle)
-for directory in ("bin", "lib", "web/dist", "deploy", "config"):
+for directory in ("bin", "lib", "web/dist", "deploy", "config", "migrations/postgresql", "scripts"):
     (bundle / directory).mkdir(parents=True, exist_ok=True)
 shutil.copy2(binary, bundle / "bin/ecx-bridge")
 shutil.copy2(cache / "cargo-target/release/ecx-solana-helper", bundle / "bin/ecx-solana-helper")
@@ -102,6 +105,8 @@ for path in (root / "web").iterdir():
 shutil.copytree(root / "web/dist", bundle / "web/dist", dirs_exist_ok=True)
 shutil.copytree(root / "deploy", bundle / "deploy", ignore=shutil.ignore_patterns("__pycache__"), dirs_exist_ok=True)
 shutil.copy2(root / "config/l2l-devnet.example.json", bundle / "config/l2l-devnet.example.json")
+shutil.copytree(root / "migrations/postgresql", bundle / "migrations/postgresql", dirs_exist_ok=True)
+shutil.copy2(root / "scripts/import-legacy-ledger", bundle / "scripts/import-legacy-ledger")
 shutil.copy2(root / "LICENSE", bundle / "LICENSE")
 shutil.copy2(root / "docs/dependencies.json", bundle / "dependencies.json")
 # Collect against this architecture's actual build, rather than copying another
@@ -146,7 +151,7 @@ tail -n +@LINE@ "$0" > "$task_dir/release.tar.gz"
 printf '%s  %s\n' '@HASH@' "$task_dir/release.tar.gz" | sha256sum -c -
 tar -xzf "$task_dir/release.tar.gz" -C "$task_dir"
 sudo apt-get update
-sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 bubblewrap apparmor ca-certificates libgmp10 libnuma1 libffi8 libtinfo6 zlib1g
+sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 bubblewrap apparmor ca-certificates libgmp10 libnuma1 libffi8 libtinfo6 zlib1g libpq5 postgresql-16 postgresql-client-16
 sudo python3 "$task_dir/release/deploy/install.py" "$task_dir/release" "$@"
 exit 0
 '''

@@ -10,6 +10,6 @@ fi
 [ "$ID:$VERSION_ID" = ubuntu:24.04 ] || { echo 'Ubuntu 24.04 required.' >&2; exit 1; }
 [ "$(id -u)" != 0 ] || { echo 'Run as your normal sudo-enabled user, not root.' >&2; exit 1; }
 sudo apt-get update
-sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential curl ca-certificates xz-utils pkg-config libgmp-dev libffi-dev libnuma-dev libncurses-dev zlib1g-dev libssl-dev python3 patchelf bubblewrap apparmor
+sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential curl ca-certificates xz-utils pkg-config libgmp-dev libffi-dev libnuma-dev libncurses-dev zlib1g-dev libssl-dev libpq-dev postgresql-16 postgresql-client-16 python3 patchelf bubblewrap apparmor
 ./scripts/build-release
 sudo python3 deploy/install.py "${ECX_BUILD_DIR:-$PWD/.release-build}/bundle" "$@"
