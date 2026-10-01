@@ -1,0 +1,126 @@
+{
+  "network": "public L2L Signet / Solana Devnet",
+  "scope": "Schema 14 to 15 real-ledger migration, unique settlement-winner index, completed recovery replay and paused worker restart",
+  "startedUtc": "2026-10-01T11:38:35.274587+00:00",
+  "applicationSha256": "0e8cf5767d5d2c9a45312471c640d8f0018f1bc3e7524a31d32a601ccc92951e",
+  "stage": "complete",
+  "upgradeCustody": {
+    "checkedAt": 1790854717,
+    "checkedRevision": 10148,
+    "lastError": null,
+    "report": {
+      "assets": [
+        {
+          "asset": "Native",
+          "booked": "1879387",
+          "difference": "0",
+          "expected": "1879387",
+          "inFlight": "0",
+          "observed": "1879387"
+        },
+        {
+          "asset": "Sol",
+          "booked": "3491560",
+          "difference": "0",
+          "expected": "3491560",
+          "inFlight": "0",
+          "observed": "3491560"
+        },
+        {
+          "asset": "Wrapped",
+          "booked": "100000020014",
+          "difference": "0",
+          "expected": "100000020014",
+          "inFlight": "0",
+          "observed": "100000020014"
+        }
+      ],
+      "inFlightEffects": [],
+      "matches": true,
+      "nativeBlock": "000002f5fb4d4309f769fced2e7990acdbcc6ebba28ce6a57e60975d85d2ad19",
+      "nativeHeight": 16444,
+      "solanaSlot": 506259616
+    },
+    "revision": 10148
+  },
+  "uniqueWinnerIndex": true,
+  "completedReplayFinanciallyUnchanged": true,
+  "schema": 15,
+  "criticalSequence": 47,
+  "orders": 8,
+  "signedAttempts": 7,
+  "financialAndBindingRowsPreserved": true,
+  "sourceJournalPreserved": true,
+  "newCapitalAllocations": 0,
+  "newSignedAttempts": 0,
+  "newMonetaryPostings": 0,
+  "finalCustody": {
+    "checkedAt": 1790854733,
+    "checkedRevision": 10168,
+    "lastError": null,
+    "report": {
+      "assets": [
+        {
+          "asset": "Native",
+          "booked": "1879387",
+          "difference": "0",
+          "expected": "1879387",
+          "inFlight": "0",
+          "observed": "1879387"
+        },
+        {
+          "asset": "Sol",
+          "booked": "3491560",
+          "difference": "0",
+          "expected": "3491560",
+          "inFlight": "0",
+          "observed": "3491560"
+        },
+        {
+          "asset": "Wrapped",
+          "booked": "100000020014",
+          "difference": "0",
+          "expected": "100000020014",
+          "inFlight": "0",
+          "observed": "100000020014"
+        }
+      ],
+      "inFlightEffects": [],
+      "matches": true,
+      "nativeBlock": "000002f5fb4d4309f769fced2e7990acdbcc6ebba28ce6a57e60975d85d2ad19",
+      "nativeHeight": 16444,
+      "solanaSlot": 506259683
+    },
+    "revision": 10168
+  },
+  "scanners": {
+    "review": [],
+    "scanners": [
+      {
+        "chain": "Native",
+        "checkedAt": 1790854731,
+        "cursor": "000002f5fb4d4309f769fced2e7990acdbcc6ebba28ce6a57e60975d85d2ad19",
+        "lastError": null,
+        "lastSuccess": 1790854731
+      },
+      {
+        "chain": "Solana",
+        "checkedAt": 1790854732,
+        "cursor": "3dArKVRqpyuXLNfcUXzsfyfA29ZoPKqoZXmkoBXETez8WYnCec8tB4bfGMgn5wHKG1V6vF8neYVCM33KY7vf2rik",
+        "lastError": null,
+        "lastSuccess": 1790854732
+      },
+      {
+        "chain": "SolanaOperating",
+        "checkedAt": 1790854733,
+        "cursor": "2XMrZrQBMt8b6gZbMRHx4FtfsLm1zc1xQB716dwAC5QdgKehioAN1sy16dCFz39AP7tA2RPZ6ZQYx2kngnbTSJP",
+        "lastError": null,
+        "lastSuccess": 1790854733
+      }
+    ]
+  },
+  "publicStatus": "Paid",
+  "readiness": 503,
+  "finishedUtc": "2026-10-01T11:38:54.010022+00:00",
+  "limitations": "This live check verifies the real-ledger migration, unique winner index, unchanged completed recovery replay and restarted real-chain custody checks. Competing callbacks, concurrency, fee-hold refusal and winner-write rollback have offline ledger coverage. No new payment, signed attempt or replacement family was created. Full native family authorization, signing/sending, observation, reorg accounting and restore/resume remain separate requirements."
+}

@@ -49,7 +49,7 @@ import Text.Read (readMaybe)
 -- checks integrity and always starts paused; no caller can clear the fence.
 newtype Ledger = Ledger (MVar (Maybe Connection))
 schemaVersion :: Int
-schemaVersion = 14
+schemaVersion = 15
 sqliteIdentity :: Connection -> IO Value
 sqliteIdentity c = do
   versions <- query_ c "SELECT sqlite_version(),sqlite_source_id()" :: IO [(Text,Text)]
@@ -130,6 +130,8 @@ withLedger path identity action = do
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/013.sql"))) $ execute_ c . fromString . T.unpack
     when (meta `elem` [[(v,identity)] | v<-[1..13]]) $ withTransaction c $
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/014.sql"))) $ execute_ c . fromString . T.unpack
+    when (meta `elem` [[(v,identity)] | v<-[1..14]]) $ withTransaction c $
+      forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/015.sql"))) $ execute_ c . fromString . T.unpack
     -- Restart is quarantined until external identities and unresolved attempts are checked.
     execute_ c "UPDATE deployment SET paused=1,pause_reason='restart_requires_reconciliation'"
     execute_ c "UPDATE custody_check SET revision=revision+1"
@@ -1168,6 +1170,10 @@ recordSettlement l txid costs evidence = ledgerAction l $ \c -> do
       require (old==[Only saved]) "settlement_evidence_conflict"
     [("broadcast_intent",limit,intent,oid,src,g,dst,n,qj,kind)] -> do
       require (units (networkFee costs)>0 && actualCost<=toInteger limit && (dst/="Native" || units (accountRent costs)==0)) "settlement_fee_or_evidence_invalid"
+      context <- query c "SELECT o.status,f.asset,f.amount FROM intents i JOIN obligations o ON o.id=i.obligation_id JOIN fee_reservations f ON f.intent_id=i.id WHERE i.id=? AND i.resolved=0 AND f.released=0 AND NOT EXISTS(SELECT 1 FROM attempts winner WHERE winner.intent_id=i.id AND winner.state='settled')" (Only intent) :: IO [(Text,Text,Int64)]
+      require (case context of
+        [(state,asset,held)]->state `elem` ["paying","review"] && asset==(if dst=="Native" then "Native" else "Sol") && held>=limit
+        _->False) "payment_intent_not_settleable"
       q <- fromText qj
       source <- parseAsset src; dest <- parseAsset dst
       let feeAsset = if dest==Native then Native else Sol

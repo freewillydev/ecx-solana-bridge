@@ -1,10 +1,8 @@
 Build profile: -w ghc-9.14.1 -O1
 In order, the following will be built (use -v for more details):
- - ecx-bridge-0.1.0.0 (test:bridge-test) (file test/Spec.hs changed)
+ - ecx-bridge-0.1.0.0 (test:bridge-test) (first run)
 Preprocessing test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Building test suite 'bridge-test' for ecx-bridge-0.1.0.0...
-[1 of 1] Compiling Main             ( test/Spec.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test-tmp/Main.o ) [Source file changed]
-[2 of 2] Linking ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test [Objects changed]
 Running 1 test suites...
 Test suite bridge-test: RUNNING...
 
@@ -81,6 +79,17 @@ signed intent and settlement invariants
   keeps earned fees out of available source float and settles once [✔]
   cannot authorize a first send after loss of source eligibility [✔]
   rechecks backup coverage and source eligibility after a recorded broadcast intent [✔]
+one economic settlement per intent (offline competing callbacks)
+  books only the older winner and preserves it across restart [✔]
+  books only the newer winner and preserves it across restart [✔]
+  serializes concurrent confirmations into exactly one payout and one network cost [✔]
+  refuses a callback with a released fee hold [✔]
+  refuses a callback with a wrong fee asset [✔]
+  refuses a callback with a resolved intent [✔]
+  refuses a callback with a cancelled obligation [✔]
+  cannot pay a second member after accidental reopening of the paid intent [✔]
+  enforces the unique winner in SQLite and preserves the earlier result after reopening [✔]
+  rolls back money and winner selection together if recording the winner fails [✔]
 bounded rate-limit recovery (offline transport contracts)
   retries read-only requests with bounded waits and honors numeric Retry-After [✔]
   does not retry sends, wallet mutations, unknown methods, or indefinite throttling [✔]
@@ -339,8 +348,8 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 6.4024 seconds
-293 examples, 0 failures
+Finished in 6.5814 seconds
+303 examples, 0 failures
 Test suite bridge-test: PASS
 Test suite logged to: /Volumes/Crucial
 X9/CodexBuilds/ecx-bridge-20260930/workspace-b/outputs/ecx-bridge/./../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log

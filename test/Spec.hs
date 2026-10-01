@@ -253,6 +253,17 @@ markNativeFixtureBroadcast l attempt=do
   _<-markBroadcastIntent l (attemptId attempt)
   pause l "offline-native-restart"
 
+-- Ledger-only fault setup: inject a competing callback record. The second
+-- record is deliberately not a signed transaction, and no adapter may send it.
+-- This tests the accounting boundary before family creation is enabled.
+withCompetingNativeAt :: FilePath -> (Ledger -> Config -> Text -> Text -> IO a) -> IO a
+withCompetingNativeAt dir action=withNativeLockRecoveryAt True dir $ \l c p _ _ _->do
+  original<-saveNativeFixtureAttempt l p
+  markNativeFixtureBroadcast l original
+  let other="offline-competing-native-callback"
+  ledgerAction l $ \db->execute db "INSERT INTO attempts(txid,intent_id,signed_bytes,policy_json,fee_limit,state,critical_sequence,preparation_generation) SELECT ?,intent_id,'offline-not-signed','offline-ledger-only',fee_limit,state,critical_sequence,preparation_generation FROM attempts WHERE txid=?" (other,attemptId original)
+  action l c (attemptId original) other
+
 -- Captured native transaction, local financial fixture, and explicit RPC
 -- responses. No alternate chain is selected or contacted by these tests.
 withNativeSettlementAt :: FilePath -> (Ledger -> Config -> Attempt -> NativeSigned -> IORef (Maybe Value) -> IORef Text -> PaymentTransport -> IO a) -> IO a
@@ -1207,6 +1218,77 @@ main=hspec $ do
       markBroadcastIntent l "tx" `shouldReturn` sequenceNumber
       authorizeRecordedSend l True "tx" `shouldThrow` isError "source_not_eligible"
       length <$> pendingAttempts l `shouldReturn` 1
+  describe "one economic settlement per intent (offline competing callbacks)" $ do
+    forM_ [False,True] $ \newer->it ("books only the "<>(if newer then "newer" else "older")<>" winner and preserves it across restart") $ withDir $ \dir->do
+      (c,winner,loser,cost,proof,snapshot)<-withCompetingNativeAt dir $ \l c original other->do
+        let winner=if newer then other else original
+            loser=if newer then original else other
+            cost=PaymentCosts (amt $ if newer then 382 else 282) (amt 0)
+            proof="offline-confirmed:"<>winner
+        before<-auditExport l
+        ledgerAction l (\db->query_ db "SELECT amount,released FROM fee_reservations" :: IO [(Int64,Bool)]) `shouldReturn` [(1000,False)]
+        recordSettlement l winner cost proof
+        saved<-auditExport l
+        saved `shouldNotBe` before
+        recordSettlement l loser (PaymentCosts (amt 400) (amt 0)) "contradictory offline callback" `shouldThrow` isError "payment_intent_not_settleable"
+        recordSettlement l winner cost proof
+        auditExport l `shouldReturn` saved
+        pendingAttempts l `shouldReturn` []
+        ledgerAction l (\db->query_ db "SELECT txid FROM attempts WHERE state='settled'" :: IO [Only Text]) `shouldReturn` [Only winner]
+        ledgerAction l (\db->query_ db "SELECT payout_tx FROM orders" :: IO [Only Text]) `shouldReturn` [Only winner]
+        ledgerAction l (\db->query db "SELECT delta FROM postings WHERE event_id=? AND account='operating'" (Only $ "network-fee:"<>winner) :: IO [Only Int64]) `shouldReturn` [Only $ negate $ units $ networkFee cost]
+        pure(c,winner,loser,cost,proof,saved)
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        recordSettlement l loser (PaymentCosts (amt 400) (amt 0)) "late offline callback" `shouldThrow` isError "payment_intent_not_settleable"
+        recordSettlement l winner cost proof
+        auditExport l `shouldReturn` snapshot
+    it "serializes concurrent confirmations into exactly one payout and one network cost" $ withDir $ \dir->withCompetingNativeAt dir $ \l _ original other->do
+      outcomes<-mapConcurrently (\txid->try (recordSettlement l txid (PaymentCosts (amt 300) (amt 0)) ("offline:"<>txid)) :: IO (Either BridgeError ())) [original,other]
+      length [() | Right ()<-outcomes] `shouldBe` 1
+      [code | Left (BridgeError code)<-outcomes] `shouldBe` ["payment_intent_not_settleable"]
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM events WHERE id LIKE 'settlement:%'" :: IO [Only Int]) `shouldReturn` [Only 1]
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM events WHERE id LIKE 'network-fee:%'" :: IO [Only Int]) `shouldReturn` [Only 1]
+    forM_ [("released fee hold","UPDATE fee_reservations SET released=1")
+          ,("wrong fee asset","UPDATE fee_reservations SET asset='Sol'")
+          ,("resolved intent","UPDATE intents SET resolved=1")
+          ,("cancelled obligation","UPDATE obligations SET status='cancelled'")] $ \(caseName,sql)->
+      it ("refuses a callback with a "<>caseName) $ withDir $ \dir->withCompetingNativeAt dir $ \l _ original _->do
+        ledgerAction l $ \db->execute_ db sql
+        before<-auditExport l
+        recordSettlement l original (PaymentCosts (amt 282) (amt 0)) "offline proof" `shouldThrow` isError "payment_intent_not_settleable"
+        auditExport l `shouldReturn` before
+    it "cannot pay a second member after accidental reopening of the paid intent" $ withDir $ \dir->withCompetingNativeAt dir $ \l _ original other->do
+      recordSettlement l original (PaymentCosts (amt 282) (amt 0)) "offline original proof"
+      ledgerAction l $ \db->do
+        execute_ db "UPDATE intents SET resolved=0"
+        execute_ db "UPDATE obligations SET status='paying'"
+        execute_ db "UPDATE fee_reservations SET released=0"
+      before<-auditExport l
+      recordSettlement l other (PaymentCosts (amt 382) (amt 0)) "offline duplicate" `shouldThrow` isError "payment_intent_not_settleable"
+      auditExport l `shouldReturn` before
+    it "enforces the unique winner in SQLite and preserves the earlier result after reopening" $ withDir $ \dir->do
+      (c,winner,saved)<-withCompetingNativeAt dir $ \l c original other->do
+        recordSettlement l original (PaymentCosts (amt 282) (amt 0)) "offline original proof"
+        snapshot<-auditExport l
+        ledgerAction l (\db->execute db "UPDATE attempts SET state='settled' WHERE txid=?" (Only other))
+          `shouldThrow` (\err->sqlError err==ErrorConstraint)
+        readiness l `shouldThrow` isError "ledger_requires_reopen"
+        pure(c,original,snapshot)
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        auditExport l `shouldReturn` saved
+        ledgerAction l (\db->query_ db "SELECT txid FROM attempts WHERE state='settled'" :: IO [Only Text]) `shouldReturn` [Only winner]
+    it "rolls back money and winner selection together if recording the winner fails" $ withDir $ \dir->do
+      (c,other,saved)<-withCompetingNativeAt dir $ \l c original other->do
+        before<-auditExport l
+        ledgerAction l $ \db->execute_ db "CREATE TRIGGER fail_winner BEFORE UPDATE OF state ON attempts WHEN NEW.state='settled' BEGIN SELECT RAISE(ABORT,'offline_winner_failure'); END"
+        recordSettlement l original (PaymentCosts (amt 282) (amt 0)) "offline original proof" `shouldThrow` (\err->sqlError err==ErrorConstraint)
+        pure(c,other,before)
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        auditExport l `shouldReturn` saved
+        ledgerAction l (\db->query_ db "SELECT amount,released FROM fee_reservations" :: IO [(Int64,Bool)]) `shouldReturn` [(1000,False)]
+        ledgerAction l $ \db->execute_ db "DROP TRIGGER fail_winner"
+        recordSettlement l other (PaymentCosts (amt 382) (amt 0)) "offline verified later callback"
+        ledgerAction l (\db->query_ db "SELECT txid FROM attempts WHERE state='settled'" :: IO [Only Text]) `shouldReturn` [Only other]
   describe "bounded rate-limit recovery (offline transport contracts)" $ do
     it "retries read-only requests with bounded waits and honors numeric Retry-After" $ do
       calls<-newIORef (0::Int)
