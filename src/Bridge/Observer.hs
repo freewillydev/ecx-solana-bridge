@@ -1,11 +1,12 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.Observer
   ( observeOnce, observeNative, observeSolana, observeSolanaOperating, observerLoop
-  , SignatureInfo(..), collectSignatures, epochSeconds
+  , ObserverLedger(..), SignatureInfo(..), collectSignatures, epochSeconds
   ) where
 
 import Bridge.Config
-import Bridge.Ledger
+import Bridge.Ledger (Ledger, Deposit(..), ScanBatch(..), ChainEvent(..))
+import qualified Bridge.Ledger as Legacy
 import Bridge.Native
 import Bridge.RPC
 import Bridge.Solana
@@ -27,6 +28,31 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Database.SQLite.Simple
 import Network.HTTP.Client (Manager)
 
+-- Storage changes do not replace or duplicate chain decoding. Both ledgers use
+-- the same real RPC identities, history/finality checks and receipt validation.
+class ObserverLedger ledger where
+  observerReadCheckpoint :: ledger -> Text -> IO (Maybe Text)
+  observerMaximumNativeDepth :: ledger -> Int -> IO Int
+  observerCommitScan :: ledger -> ScanBatch -> IO ()
+  observerLookupInstruction :: ledger -> Text -> IO (Maybe (Text,OrderRequest,PolicySnapshot))
+  observerPendingVerification :: ledger -> IO [Text]
+  observerRecordScanFailure :: ledger -> Text -> Int64 -> Text -> IO ()
+  observerScannerHealth :: ledger -> IO Value
+  observerPromoteObserved :: ledger -> IO ()
+
+instance ObserverLedger Ledger where
+  observerReadCheckpoint = Legacy.readCheckpoint
+  observerMaximumNativeDepth = Legacy.maximumNativeDepth
+  observerCommitScan = Legacy.commitScan
+  observerLookupInstruction = Legacy.lookupInstruction
+  observerPendingVerification = Legacy.pendingVerification
+  observerRecordScanFailure = Legacy.recordScanFailure
+  observerScannerHealth = Legacy.scannerHealth
+  observerPromoteObserved ledger = do
+    candidates <- Legacy.ledgerAction ledger $ \db -> query_ db "SELECT d.id FROM deposits d JOIN orders o ON o.id=d.order_id WHERE d.eligible=1 AND d.allocated=0 AND o.status IN('Provisioning','AwaitingDeposit') ORDER BY d.first_seen,d.id LIMIT 1000" :: IO [Only Text]
+    now <- epochSeconds
+    forM_ candidates $ \(Only did)->Legacy.promoteDeposit ledger now did >> pure ()
+
 epochSeconds :: IO Int64
 epochSeconds = floor <$> getPOSIXTime
 
@@ -36,7 +62,7 @@ optionalField key = parseValue (withObject "RPC object" (.:? key))
 isHash :: Text -> Bool
 isHash value = T.length value==64 && T.all (`elem` ("0123456789abcdef"::String)) value
 
-observeNative :: Manager -> Config -> Ledger -> IO ()
+observeNative :: ObserverLedger ledger => Manager -> Config -> ledger -> IO ()
 observeNative manager c ledger = do
   info <- nativeIdentity manager c
   wallet <- nativeCall manager c True "getwalletinfo" []
@@ -50,13 +76,13 @@ observeNative manager c ledger = do
   walletHash <- fieldValue "hash" processed :: IO Text
   activeHash <- nativeCall manager c False "getblockhash" [toJSON height] >>= parseValue parseJSON
   require (height>=tip && walletHash==activeHash) "native_wallet_behind_chain"
-  previous <- readCheckpoint ledger "Native"
+  previous <- observerReadCheckpoint ledger "Native"
   when (previous==Nothing) $ do
     born <- fieldValue "birthtime" wallet :: IO Int64
     header <- nativeCall manager c False "getblockheader" [toJSON (nativeCheckpointHash c)]
     checkpointTime <- fieldValue "time" header :: IO Int64
     require (born>=checkpointTime) "native_wallet_predates_scan_origin"
-  depth <- maximumNativeDepth ledger (nativeConfirmations c)
+  depth <- observerMaximumNativeDepth ledger (nativeConfirmations c)
   history <- nativeHistory manager c (Just $ maybe (nativeCheckpointHash c) id previous) depth
   current <- fieldValue "transactions" history :: IO [Value]
   removed <- fieldValue "removed" history :: IO [Value]
@@ -70,7 +96,7 @@ observeNative manager c ledger = do
   now <- epochSeconds
   let deposits=concatMap fst observations
       events=concatMap snd observations
-  commitScan ledger (ScanBatch "Native" (nativeCheckpointHash c) previous next now deposits events)
+  observerCommitScan ledger (ScanBatch "Native" (nativeCheckpointHash c) previous next now deposits events)
  where
   readTransaction txid = do
     value <- nativeCall manager c True "gettransaction" [toJSON txid,Bool False,Bool True]
@@ -108,7 +134,7 @@ observeNative manager c ledger = do
         script <- fieldValue "scriptPubKey" addressInfo :: IO Text
         outputScript <- fieldValue "scriptPubKey" output >>= fieldValue "hex"
         require (owned && script==outputScript) "native_output_script_mismatch"
-        binding <- if category=="receive" then lookupInstruction ledger address else pure Nothing
+        binding <- if category=="receive" then observerLookupInstruction ledger address else pure Nothing
         (order,required) <- case binding of
           Nothing -> pure (Nothing,if category=="receive" then nativeConfirmations c else max 101 (nativeConfirmations c))
           Just (oid,request,policy) -> do
@@ -162,21 +188,21 @@ collectSignatures origin previous fetch = go Nothing [] Set.empty 0
       (prefix,anchor:_) -> pure (reverse $ accumulated<>prefix<>[anchor])
       (_,[]) -> go (Just $ last ids) combined (Set.union seen $ Set.fromList ids) (pages+1::Int)
 
-observeSolana :: Manager -> Config -> Ledger -> IO ()
+observeSolana :: ObserverLedger ledger => Manager -> Config -> ledger -> IO ()
 observeSolana manager c ledger = do
   _ <- solanaIdentity manager c
   origin <- maybe (reject "solana_history_start_required") pure (solanaHistoryStart c)
-  previous <- readCheckpoint ledger "Solana"
+  previous <- observerReadCheckpoint ledger "Solana"
   history <- collectSignatures origin previous $ \before ->
     solanaHistory manager c before Nothing >>= parseValue parseJSON
-  pending <- pendingVerification ledger
+  pending <- observerPendingVerification ledger
   let historyIds=map historySignature history
       work=[(historySignature h,Just h) | h<-history] <> [(sig,Nothing) | sig<-pending,sig `notElem` historyIds]
   require (length work<=1000) "solana_verification_backlog"
   observations <- mapM readTransaction work
   now <- epochSeconds
   let next=historySignature (last history) -- collectSignatures is nonempty
-  commitScan ledger (ScanBatch "Solana" origin previous next now (concatMap fst observations) (map snd observations))
+  observerCommitScan ledger (ScanBatch "Solana" origin previous next now (concatMap fst observations) (map snd observations))
  where
   readTransaction (sig,history) = do
     result <- try (finalizedTransaction manager c sig) :: IO (Either BridgeError Value)
@@ -200,7 +226,7 @@ observeSolana manager c ledger = do
             else if effectDelta effect<0 || effectClosed effect then pure ([],ChainEvent sig "outgoing" anchor (evidence (Just effect) "custody_decreased"))
             else if effectDelta effect==0 then pure ([],ChainEvent sig "reference" anchor (evidence (Just effect) "no_token_change"))
             else do
-              binding <- maybe (pure Nothing) (lookupInstruction ledger) (transactionMemo value)
+              binding <- maybe (pure Nothing) (observerLookupInstruction ledger) (transactionMemo value)
               authorized <- case binding of
                 Just (oid,request,_) | direction request==WrappedToNative,Just owner<-sourceOwner request -> do
                   let memo=maybe "" id (transactionMemo value)
@@ -234,11 +260,11 @@ observeSolana manager c ledger = do
           Right secondary | secondary==primary -> "verified"
           _ -> "disputed"
 
-observeSolanaOperating :: Manager -> Config -> Ledger -> IO ()
+observeSolanaOperating :: ObserverLedger ledger => Manager -> Config -> ledger -> IO ()
 observeSolanaOperating manager c ledger = do
   _ <- solanaIdentity manager c
   origin <- maybe (reject "solana_operating_history_start_required") pure (solanaOperatingHistoryStart c)
-  previous <- readCheckpoint ledger "SolanaOperating"
+  previous <- observerReadCheckpoint ledger "SolanaOperating"
   history <- collectSignatures origin previous $ \before ->
     solanaAddressHistory manager c (custodyOwner c) before Nothing >>= parseValue parseJSON
   observations <- forM history $ \h -> do
@@ -270,27 +296,24 @@ observeSolanaOperating manager c ledger = do
                   ,"failed" .= lamportFailed effect,"rpcPayloadHash" .= digest (LBS.toStrict $ encode value)]
             pure (receipts,ChainEvent sig kind anchor evidence)
   now <- epochSeconds
-  commitScan ledger (ScanBatch "SolanaOperating" origin previous (historySignature $ last history) now
+  observerCommitScan ledger (ScanBatch "SolanaOperating" origin previous (historySignature $ last history) now
     (concatMap fst observations) (map snd observations))
 
-promoteObserved :: Ledger -> IO ()
-promoteObserved ledger = do
-  candidates <- ledgerAction ledger $ \db -> query_ db "SELECT d.id FROM deposits d JOIN orders o ON o.id=d.order_id WHERE d.eligible=1 AND d.allocated=0 AND o.status IN('Provisioning','AwaitingDeposit') ORDER BY d.first_seen,d.id LIMIT 1000" :: IO [Only Text]
-  now <- epochSeconds
-  forM_ candidates $ \(Only did) -> promoteDeposit ledger now did >> pure ()
+promoteObserved :: ObserverLedger ledger => ledger -> IO ()
+promoteObserved = observerPromoteObserved
 
-observeOnce :: Manager -> Config -> Ledger -> IO Value
+observeOnce :: ObserverLedger ledger => Manager -> Config -> ledger -> IO Value
 observeOnce manager c ledger = do
   forM_ [("Native",observeNative manager c ledger),("Solana",observeSolana manager c ledger)
     ,("SolanaOperating",observeSolanaOperating manager c ledger)] $ \(chain,scan) -> do
     result <- try (scan `catch` (\(_::IOException) -> reject "observer_io_unavailable")) :: IO (Either BridgeError ())
     case result of
       Right () -> pure ()
-      Left (BridgeError code) -> epochSeconds >>= \now -> recordScanFailure ledger chain now code
+      Left (BridgeError code) -> epochSeconds >>= \now -> observerRecordScanFailure ledger chain now code
   promoteObserved ledger
-  scannerHealth ledger
+  observerScannerHealth ledger
 
-observerLoop :: Manager -> Config -> Ledger -> IO ()
+observerLoop :: ObserverLedger ledger => Manager -> Config -> ledger -> IO ()
 observerLoop manager c ledger = forever $ do
   _ <- observeOnce manager c ledger
   threadDelay 15000000

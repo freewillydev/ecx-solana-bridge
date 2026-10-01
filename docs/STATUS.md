@@ -243,3 +243,14 @@ preserves prior success, audits changed errors and pauses the deployment. The
 existing economic evidence decoder is reused. The library compiles; adapter wiring,
 real scan replay, custody reconciliation and payment conversion remain before
 cutover. This checkpoint does not change the running funded worker.
+
+### Shared real-chain observer wired to PostgreSQL storage
+
+The existing observer now uses a narrow storage interface; both backends retain
+exactly the same real RPC identity, history, decoding and finality logic. The
+PostgreSQL implementation supplies checkpoints, instruction/policy lookups,
+evidence commits, pending verification, promotion and scanner health. Eligible
+exact deposits become reserved conversion obligations through typed transactions.
+The full existing bridge-test suite passes after the shared observer refactor.
+Actual PostgreSQL-backed chain replay, custody reconciliation and paying-worker
+wiring remain incomplete; no live funds were moved.

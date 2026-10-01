@@ -19,7 +19,7 @@ common settings
 library
   import: settings
   hs-source-dirs: src
-  exposed-modules: Bridge.Postgres.Source, Bridge.Postgres.Observation, Bridge.Postgres.Provisioning, Bridge.Postgres.Order, Bridge.Postgres.Budget, Bridge.Postgres.Ledger, Bridge.Postgres.Schema, Bridge.Types, Bridge.Config, Bridge.Budget, Bridge.Ledger, Bridge.Reconciliation, Bridge.Recovery, Bridge.Reorg, Bridge.RPC, Bridge.Native, Bridge.NativePayment, Bridge.NativeReplacement, Bridge.Payment, Bridge.Settlement, Bridge.Deposit, Bridge.Order, Bridge.Admission, Bridge.Solana, Bridge.SolanaHelper, Bridge.SolanaPayment, Bridge.SolanaMessage, Bridge.SolanaDeposit, Bridge.Observer, Bridge.Process, Bridge.Backup, Bridge.API, Bridge.Web, Bridge.Worker
+  exposed-modules: Bridge.Postgres.Observer, Bridge.Postgres.Source, Bridge.Postgres.Observation, Bridge.Postgres.Provisioning, Bridge.Postgres.Order, Bridge.Postgres.Budget, Bridge.Postgres.Ledger, Bridge.Postgres.Schema, Bridge.Types, Bridge.Config, Bridge.Budget, Bridge.Ledger, Bridge.Reconciliation, Bridge.Recovery, Bridge.Reorg, Bridge.RPC, Bridge.Native, Bridge.NativePayment, Bridge.NativeReplacement, Bridge.Payment, Bridge.Settlement, Bridge.Deposit, Bridge.Order, Bridge.Admission, Bridge.Solana, Bridge.SolanaHelper, Bridge.SolanaPayment, Bridge.SolanaMessage, Bridge.SolanaDeposit, Bridge.Observer, Bridge.Process, Bridge.Backup, Bridge.API, Bridge.Web, Bridge.Worker
   build-depends:
     base >=4.20 && <4.23, aeson >=2.2 && <2.4, async >=2.2 && <2.3,
     base16-bytestring >=1 && <1.1, base58-bytestring >=0.1 && <0.2,

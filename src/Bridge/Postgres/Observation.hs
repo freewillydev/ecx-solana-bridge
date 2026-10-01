@@ -1,5 +1,5 @@
 module Bridge.Postgres.Observation
-  ( recordScan, readCheckpoint, lookupInstruction, maximumNativeDepth, commitScan, recordScanFailure ) where
+  ( recordScan, readCheckpoint, lookupInstruction, maximumNativeDepth, commitScan, recordScanFailure, promoteDeposit ) where
 
 import Bridge.Types
 import Bridge.Ledger (Deposit(..), SourceCheck(..), ScanBatch(..), ChainEvent(..), economicOutflow)
@@ -275,3 +275,45 @@ recordScanFailure ledger chain now code = ledgerAction ledger $ \connection->do
 
 jsonText :: ToJSON a => a -> Text
 jsonText = TE.decodeUtf8 . LBS.toStrict . encode
+
+promoteDeposit :: Ledger -> Int64 -> Text -> IO Bool
+promoteDeposit ledger now did = ledgerAction ledger $ \connection->do
+  deposits <- O.runSelect connection $ do
+    row <- O.selectTable depositsTable
+    O.where_ (depositsId row O..== O.sqlStrictText did)
+    pure row
+    :: IO [Deposits]
+  case deposits of
+    [deposit] | depositsOrderId deposit==Nothing || depositsAllocated deposit==1 || depositsEligible deposit==0 ->pure False
+    [deposit] | Just oid<-depositsOrderId deposit, depositsEligible deposit==1, depositsAllocated deposit==0 ->do
+      orders <- O.runSelect connection $ do
+        row <- O.selectTable ordersTable
+        O.where_ (ordersId row O..== O.sqlStrictText oid)
+        pure row
+        :: IO [Orders]
+      order <- case orders of [row]->pure row; _->reject "order_not_found"
+      req <- decodeSaved (ordersRequestJson order)
+      quote <- decodeSaved (ordersQuoteJson order)
+      previous <- O.runSelect connection $ do
+        row <- O.selectTable obligationsTable
+        O.where_ (obligationsOrderId row O..== O.sqlStrictText oid O..&& obligationsKind row O..== O.sqlStrictText "conversion")
+        pure (obligationsId row)
+        :: IO [Text]
+      let exact=depositsAmount deposit==units (gross quote) && depositsAsset deposit==T.pack (show (sourceAsset (direction req)))
+      if not exact || not (null previous) || now>ordersGraceDeadline order || depositsFirstSeen deposit>ordersDeadline order then do
+        _ <- O.runUpdate connection O.Update {O.uTable=ordersTable,O.uUpdateWith= \row->row {ordersStatus=O.sqlStrictText "NeedsReview"},O.uWhere= \row->ordersId row O..== O.sqlStrictText oid O..&& ordersStatus row O../= O.sqlStrictText "Paid",O.uReturning=O.rCount}
+        pure False
+      else do
+        holds <- O.runSelect connection $ do
+          row <- O.selectTable reservationsTable
+          O.where_ (reservationsOrderId row O..== O.sqlStrictText oid)
+          pure (reservationsPhase row)
+          :: IO [Text]
+        require (holds==["quote"]) "reservation_not_provisional"
+        _ <- O.runInsert connection O.Insert {O.iTable=obligationsTable,O.iRows=[Obligations (O.sqlStrictText ("convert:"<>oid)) (O.sqlStrictText oid) (O.sqlStrictText did) (O.sqlStrictText "conversion") (O.sqlStrictText (T.pack (show (destinationAsset (direction req))))) (O.sqlInt8 (units (net quote))) (O.sqlStrictText (recipient req)) (O.sqlStrictText "ready")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+        _ <- O.runUpdate connection O.Update {O.uTable=depositsTable,O.uUpdateWith= \row->row {depositsAllocated=O.sqlInt8 1},O.uWhere= \row->depositsId row O..== O.sqlStrictText did,O.uReturning=O.rCount}
+        _ <- O.runUpdate connection O.Update {O.uTable=reservationsTable,O.uUpdateWith= \row->row {reservationsPhase=O.sqlStrictText "obligation"},O.uWhere= \row->reservationsOrderId row O..== O.sqlStrictText oid,O.uReturning=O.rCount}
+        _ <- O.runUpdate connection O.Update {O.uTable=operatingreservationsTable,O.uUpdateWith= \row->row {operatingreservationsPhase=O.sqlStrictText "obligation"},O.uWhere= \row->operatingreservationsOrderId row O..== O.sqlStrictText oid O..&& operatingreservationsPhase row O..== O.sqlStrictText "quote",O.uReturning=O.rCount}
+        _ <- O.runUpdate connection O.Update {O.uTable=ordersTable,O.uUpdateWith= \row->row {ordersStatus=O.sqlStrictText "Ready"},O.uWhere= \row->ordersId row O..== O.sqlStrictText oid,O.uReturning=O.rCount}
+        pure True
+    _->reject "deposit_not_found"
