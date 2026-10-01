@@ -173,3 +173,23 @@ postings. A dedicated local database contract passed balanced write, unbalanced
 rejection, sequence increment, competing-worker refusal and close/reopen checks.
 Financial workflow conversion is still underway; this is not customer conversion
 or real-chain acceptance. [Evidence](evidence/postgres-journal.json).
+
+### Budget and order-storage conversion in progress
+
+The PostgreSQL budget module now uses typed Opaleye queries for operating holds,
+allocations, rolling spent costs, high-water accounting time, daily limits,
+quote cost reservations and transfer to payment costs. Order storage now has
+capability-checked reads, saved idempotency matching, immutable instruction binding
+and backup-coverage lookup. Both modules compile. These are internal building
+blocks: public recovery-aware order views, full admission/provisioning and worker
+wiring are still incomplete; no customer flow has switched to PostgreSQL yet.
+
+### PostgreSQL admission and recovery-aware views
+
+Order admission now has a typed transaction for idempotency, 1% saved quotes in
+both directions, queue/inventory limits, operating reservations and scanner/custody
+freshness. Recovery-aware order views use typed projections of the existing latest
+recovery/accounted-loss views and preserve instruction visibility/backup gating.
+The library compiles. Runtime order acceptance is not yet verified; native
+provisioning/issuance, observation/payment wiring and the revised connection-free
+source/refund contract still need conversion before customer use.
