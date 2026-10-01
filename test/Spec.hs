@@ -333,6 +333,38 @@ sourceRestoration l source=do
 assumeSourceApprovalCustody :: Ledger -> IO ()
 assumeSourceApprovalCustody l=ledgerAction l $ \db->execute_ db "UPDATE custody_check SET checked_revision=revision,checked_at=100,last_error=NULL,report_json='{\"offlineFixture\":true}'"
 
+sourceLossEvidence :: Ledger -> Config -> Deposit -> PaymentTransport -> IO (Int64,Value)
+sourceLossEvidence l c source transport=do
+  _<-reconcileNativeSourcesWith transport c l
+  [Only sequenceNo]<-ledgerAction l $ \db->query db "SELECT critical_sequence FROM source_recovery_state WHERE deposit_id=? AND state='missing'" (Only $ depositId source)
+  proof<-inspectNativeSourceWith transport c l source >>= \case SourceMissing p->pure p; _->fail "fixture source not missing"
+  pure(sequenceNo,proof)
+
+-- Only the ledger contract tests use this modeled check. The coordinator tests
+-- below use the actual custody algorithm with explicit RPC response fixtures.
+lossCustodyFixture :: Ledger -> Value -> IO Value
+lossCustodyFixture l sourceProof=do
+  [Only revision]<-ledgerAction l (\db->query_ db "SELECT revision FROM custody_check" :: IO [Only Int64])
+  block<-fieldValue "nodeBlock" sourceProof :: IO Text
+  height<-fieldValue "nodeHeight" sourceProof :: IO Int64
+  pure $ object ["revision" .= revision,"checkedAt" .= (100::Int),"report" .= object
+    ["matches" .= True,"nativeBlock" .= block,"nativeHeight" .= height,"offlineFixture" .= True]]
+
+lossCustodyTransport :: Ledger -> Config -> IORef (Maybe Value) -> PaymentTransport -> Integer -> IO PaymentTransport
+lossCustodyTransport l c wallet sourceTransport nativeUnits=do
+  setupCustodyScans l c
+  value<-readIORef wallet >>= maybe (fail "fixture wallet missing") pure
+  position<-fieldValue "lastprocessedblock" value
+  block<-fieldValue "hash" position
+  previous<-readCheckpoint l "Native"
+  commitScan l (ScanBatch "Native" (nativeCheckpointHash c) previous block 100 [] [])
+  let custody=custodyContract c (nativeUnits,1000000,100000) []
+      native selected method params=case method of
+        "getbalances"->setPath ["lastprocessedblock"] position <$> paymentNative custody selected method params
+        "listsinceblock"->setPath ["lastblock"] (String block) <$> paymentNative custody selected method params
+        _->paymentNative sourceTransport selected method params
+  pure custody{paymentNative=native}
+
 -- The captured bytes supply economic validation; RPC responses below are
 -- explicitly offline contracts, not evidence of a new chain transaction.
 withNativeAdmission :: (Config -> NativePlan -> IORef [Text] -> NativeRPC -> IO a) -> IO a
@@ -2192,6 +2224,198 @@ main=hspec $ do
           sourceRecoveryApproval l (obligationId ob) restored `shouldReturn` Just "checked source and custody"
         else action `shouldThrow` isError (if scenario=="identity" then "wrong_chain" else "custody_not_reconciled")
         available <$> readiness l `shouldReturn` False
+  describe "operator funding of proved source losses (offline contracts)" $ do
+    forM_ ["ready","unsigned","signed","broadcast","paid"] $ \stage->
+      it ("covers a deficit with free capital without altering customer work: "<>T.unpack stage) $ withNativeSource $ \l c source wallet transport->do
+        fundAllocation l "offline-earned-capital" Native "earned" (amt 10000)
+        fundAllocation l "offline-protected-backing" Native "backing" (amt 500000)
+        fundAllocation l "offline-protected-lp" Native "lp" (amt 500000)
+        ob<-sourceObligation l source
+        when (stage=="unsigned") $ beginPreparation l c ob "Solana" 5000 "offline-policy"
+        when (stage `elem` ["signed","broadcast","paid"]) $ sourceAttempt l c ob
+        when (stage `elem` ["broadcast","paid"]) $ markBroadcastIntent l "offline-source-payout" >> pure ()
+        when (stage=="paid") $ recordSettlement l "offline-source-payout" (PaymentCosts (amt 5000) (amt 0)) "offline-finalized-payment"
+        lost<-changeSource l c source wallet (-1)
+        (loss,proof)<-sourceLossEvidence l c lost transport
+        custody<-lossCustodyFixture l proof
+        balancesBefore<-mapM (sourceBalance l) ["float","earned","principal","backing","lp","operating"]
+        attempts<-pendingAttempts l
+        preparations<-pendingPreparations l
+        holds<-ledgerAction l (\db->query_ db "SELECT asset,amount,phase FROM reservations" :: IO [(Text,Int64,Text)])
+        let capital=LossCapital (amt 6000) (amt 4000)
+        recordSourceLossCover l lost loss 100 capital "operator loss allocation" proof custody
+        balancesAfter<-mapM (sourceBalance l) ["float","earned","principal","backing","lp","operating"]
+        balancesAfter `shouldBe` zipWith (-) balancesBefore [6000,4000,0,0,0,0]
+        sourceBalance l "source_deficit" `shouldReturn` 0
+        pendingAttempts l `shouldReturn` attempts
+        pendingPreparations l `shouldReturn` preparations
+        ledgerAction l (\db->query_ db "SELECT asset,amount,phase FROM reservations" :: IO [(Text,Int64,Text)]) `shouldReturn` holds
+        ledgerAction l (\db->query_ db "SELECT eligible FROM deposits" :: IO [Only Bool]) `shouldReturn` [Only False]
+        status <$> readOrder l cap (obligationOrder ob) `shouldReturn` (if stage=="paid" then "Paid" else "NeedsReview")
+        available <$> readiness l `shouldReturn` False
+        before<-auditExport l
+        recordSourceLossCover l lost loss 100 capital "operator loss allocation" proof custody
+        auditExport l `shouldReturn` before
+        recordSourceLossCover l lost loss 100 capital "changed reason" proof custody `shouldThrow` isError "source_loss_cover_conflict"
+        recordSourceLossCover l lost loss 100 (LossCapital (amt 10000) (amt 0)) "operator loss allocation" proof custody `shouldThrow` isError "source_loss_cover_conflict"
+        ledgerAction l (\db->query_ db "SELECT SUM(delta) FROM postings GROUP BY asset" :: IO [Only Int64]) `shouldReturn` replicate 3 (Only 0)
+        when (stage=="ready") $ resumeAfterChecks l `shouldThrow` isError "obligations_require_review"
+        when (stage=="broadcast") $ authorizeRecordedSend l False "offline-source-payout" `shouldThrow` isError "source_not_eligible"
+    it "returns the same split once after source reappearance, preserving a new loss as a separate decision" $ withDir $ \dir->do
+      saved<-withNativeSourceAt True dir $ \l c source wallet transport->do
+        fundAllocation l "offline-earned-capital" Native "earned" (amt 4000)
+        _<-sourceObligation l source
+        lost<-changeSource l c source wallet (-1)
+        (loss,proof)<-sourceLossEvidence l c lost transport
+        custody<-lossCustodyFixture l proof
+        recordSourceLossCover l lost loss 100 (LossCapital (amt 6000) (amt 4000)) "cover episode one" proof custody
+        pure(c,source,wallet,transport,lost,loss,proof,custody)
+      let (c,source,wallet,transport,lost,loss,proof,custody)=saved
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        _<-changeSource l c source wallet 0
+        _<-reconcileNativeSourcesWith transport c l
+        sourceBalance l "float" `shouldReturn` 1000000
+        sourceBalance l "earned" `shouldReturn` 4000
+        sourceBalance l "source_deficit" `shouldReturn` 0
+        before<-auditExport l
+        recordSourceLossCover l lost loss 100 (LossCapital (amt 6000) (amt 4000)) "cover episode one" proof custody
+        _<-reconcileNativeSourcesWith transport c l
+        auditExport l `shouldReturn` before
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM source_loss_returns" :: IO [Only Int]) `shouldReturn` [Only 1]
+        repeatedLoss<-changeSource l c source wallet (-2)
+        (newLoss,newProof)<-sourceLossEvidence l c repeatedLoss transport
+        newLoss `shouldSatisfy` (>loss)
+        recordSourceLossCover l lost loss 100 (LossCapital (amt 6000) (amt 4000)) "cover episode one" proof custody
+        sourceBalance l "source_deficit" `shouldReturn` (-10000)
+        fresh<-lossCustodyFixture l newProof
+        recordSourceLossCover l repeatedLoss newLoss 100 (LossCapital (amt 10000) (amt 0)) "cover episode two" newProof fresh
+        sourceBalance l "float" `shouldReturn` 990000
+        _<-changeSource l c source wallet 2
+        _<-reconcileNativeSourcesWith transport c l
+        sourceBalance l "float" `shouldReturn` 1000000
+        sourceBalance l "earned" `shouldReturn` 4000
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM source_loss_returns" :: IO [Only Int]) `shouldReturn` [Only 2]
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM active_source_loss_covers" :: IO [Only Int]) `shouldReturn` [Only 0]
+    it "does not forgive the cover on RPC failure or cover the same outstanding loss twice" $ withNativeSource $ \l c source wallet transport->do
+      _<-sourceObligation l source
+      lost<-changeSource l c source wallet (-1)
+      (loss,proof)<-sourceLossEvidence l c lost transport
+      custody<-lossCustodyFixture l proof
+      recordSourceLossCover l lost loss 100 (LossCapital (amt 10000) (amt 0)) "cover" proof custody
+      value<-readIORef wallet
+      writeIORef wallet Nothing
+      _<-reconcileNativeSourcesWith transport c l
+      sourceBalance l "source_deficit" `shouldReturn` 0
+      sourceBalance l "float" `shouldReturn` 990000
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM accounted_source_losses" :: IO [Only Int]) `shouldReturn` [Only 0]
+      resumeAfterChecks l `shouldThrow` isError "source_reorg_requires_review"
+      writeIORef wallet value
+      (updated,newProof)<-sourceLossEvidence l c lost transport
+      updated `shouldSatisfy` (>loss)
+      fresh<-lossCustodyFixture l newProof
+      recordSourceLossCover l lost updated 100 (LossCapital (amt 10000) (amt 0)) "second allocation" newProof fresh `shouldThrow` isError "source_loss_already_covered"
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM source_loss_covers" :: IO [Only Int]) `shouldReturn` [Only 1]
+    forM_ ["float-held","earned-short","wrong-total","stale-revision","stale-time","wrong-block","wrong-output","stale-observation","available"] $ \fault->
+      it ("refuses invalid capital or stale evidence without changing allocations: "<>T.unpack fault) $ withNativeSource $ \l c source wallet transport->do
+        when (fault=="float-held") $ do
+          _<-createOrder l c 100 cap req{direction=WrappedToNative,input=amt 1006000,recipient="fixture-native-recipient",refund="fixture-solana-owner",sourceOwner=Just "fixture-solana-owner",idempotencyKey="other-native-reservation"}
+          pure ()
+        _<-sourceObligation l source
+        lost<-changeSource l c source wallet (-1)
+        (loss,proof)<-sourceLossEvidence l c lost transport
+        custody<-lossCustodyFixture l proof
+        let capital=if fault=="earned-short" then LossCapital (amt 0) (amt 10000) else LossCapital (amt $ if fault=="wrong-total" then 9999 else 10000) (amt 0)
+            sourceProof=case fault of
+              "wrong-output"->setPath ["output"] (Number 99) proof
+              "stale-observation"->setPath ["observationHash"] (String "stale") proof
+              _->proof
+            custodyProof=case fault of
+              "stale-revision"->setPath ["revision"] (Number 0) custody
+              "wrong-block"->setPath ["report","nativeBlock"] (String "other") custody
+              _->custody
+            expected=case fault of
+              "float-held"->"insufficient_loss_capital"
+              "earned-short"->"insufficient_loss_capital"
+              "wrong-total"->"source_loss_allocation_mismatch"
+              "wrong-block"->"source_loss_custody_view_changed"
+              "wrong-output"->"source_loss_not_proven"
+              "stale-observation"->"source_recovery_scan_not_current"
+              "available"->"pause_before_operator_action"
+              _->"source_loss_custody_not_current"
+        when (fault=="available") $ ledgerAction l $ \db->execute_ db "UPDATE deployment SET paused=0"
+        before<-auditExport l
+        recordSourceLossCover l lost loss (if fault=="stale-time" then 161 else 100) capital "cover" sourceProof custodyProof `shouldThrow` isError expected
+        auditExport l `shouldReturn` before
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM source_loss_covers" :: IO [Only Int]) `shouldReturn` [Only 0]
+    forM_ ["healthy","shortfall","unavailable"] $ \scenario->
+      it ("requires an actual custody inspection including the recorded loss: "<>T.unpack scenario) $ withNativeSource $ \l original source wallet sourceTransport->do
+        let c=expiryConfig original
+        _<-sourceObligation l source
+        lost<-changeSource l c source wallet (-1)
+        (loss,_)<-sourceLossEvidence l c lost sourceTransport
+        transport<-lossCustodyTransport l c wallet sourceTransport (if scenario=="shortfall" then 1099999 else 1100000)
+        normal<-reconcileCustodyWith (pure 100) transport c l
+        fieldValue "lastError" normal `shouldReturn` Just ("source_reorg_requires_review"::Text)
+        when (scenario=="unavailable") $ writeIORef wallet Nothing
+        let action=coverSourceLossWith (pure 100) transport c l (depositId lost) loss (LossCapital (amt 10000) (amt 0)) "checked loss"
+        if scenario=="healthy" then do
+          inspection<-inspectSourceLossCustodyWith (pure 100) transport c l
+          fieldValue "revision" inspection >>= (\(r::Int64)->r `shouldSatisfy` (>0))
+          checkCustodyFresh l 100 `shouldThrow` isError "custody_not_reconciled"
+          _<-action
+          custody<-reconcileCustodyWith (pure 100) transport c l
+          fieldValue "lastError" custody `shouldReturn` (Nothing::Maybe Text)
+          (fieldValue "report" custody >>= fieldValue "matches") `shouldReturn` True
+          resumeAfterChecks l `shouldThrow` isError "obligations_require_review"
+        else action `shouldThrow` isError (if scenario=="shortfall" then "custody_balance_mismatch" else "rpc_error_-5")
+        available <$> readiness l `shouldReturn` False
+    it "rolls back capital and its decision together if a posting fails, and retains immutable history" $ withDir $ \dir->do
+      saved<-withNativeSourceAt True dir $ \l c source wallet transport->do
+        _<-sourceObligation l source
+        lost<-changeSource l c source wallet (-1)
+        (loss,proof)<-sourceLossEvidence l c lost transport
+        custody<-lossCustodyFixture l proof
+        before<-auditExport l
+        [Only sequenceNo]<-ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64])
+        ledgerAction l $ \db->execute_ db "CREATE TRIGGER refuse_loss_capital BEFORE INSERT ON postings WHEN NEW.account='float' BEGIN SELECT RAISE(ABORT,'offline_loss_funding_failure'); END"
+        recordSourceLossCover l lost loss 100 (LossCapital (amt 10000) (amt 0)) "cover" proof custody `shouldThrow` (\err->sqlError err==ErrorConstraint)
+        readiness l `shouldThrow` isError "ledger_requires_reopen"
+        pure(c,lost,loss,proof,before,sequenceNo)
+      let (c,lost,loss,proof,before,sequenceNo)=saved
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        auditExport l `shouldReturn` before
+        sourceLossCover l (depositId lost) loss `shouldReturn` Nothing
+        ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment") `shouldReturn` [Only sequenceNo]
+        ledgerAction l $ \db->execute_ db "DROP TRIGGER refuse_loss_capital"
+        custody<-lossCustodyFixture l proof
+        recordSourceLossCover l lost loss 100 (LossCapital (amt 10000) (amt 0)) "cover" proof custody
+        ledgerAction l (\db->execute_ db "DELETE FROM source_loss_covers") `shouldThrow` (\err->sqlError err==ErrorConstraint)
+    it "retries a failed capital return atomically after reopening without releasing the allocation twice" $ withDir $ \dir->do
+      saved<-withNativeSourceAt True dir $ \l c source wallet transport->do
+        _<-sourceObligation l source
+        lost<-changeSource l c source wallet (-1)
+        (loss,proof)<-sourceLossEvidence l c lost transport
+        custody<-lossCustodyFixture l proof
+        recordSourceLossCover l lost loss 100 (LossCapital (amt 10000) (amt 0)) "cover" proof custody
+        _<-changeSource l c source wallet 2
+        before<-auditExport l
+        ledgerAction l $ \db->execute_ db "CREATE TRIGGER refuse_loss_return BEFORE INSERT ON postings WHEN NEW.account='float' AND NEW.delta>0 BEGIN SELECT RAISE(ABORT,'offline_capital_return_failure'); END"
+        reconcileNativeSourcesWith transport c l `shouldThrow` (\err->sqlError err==ErrorConstraint)
+        pure(c,transport,before)
+      let (c,transport,before)=saved
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        auditExport l `shouldReturn` before
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM active_source_loss_covers" :: IO [Only Int]) `shouldReturn` [Only 1]
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM source_loss_returns" :: IO [Only Int]) `shouldReturn` [Only 0]
+        ledgerAction l $ \db->execute_ db "DROP TRIGGER refuse_loss_return"
+        _<-reconcileNativeSourcesWith transport c l
+        sourceBalance l "float" `shouldReturn` 1000000
+        sourceBalance l "source_deficit" `shouldReturn` 0
+        after<-auditExport l
+        _<-reconcileNativeSourcesWith transport c l
+        auditExport l `shouldReturn` after
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM source_loss_returns" :: IO [Only Int]) `shouldReturn` [Only 1]
+        ledgerAction l (\db->execute_ db "DELETE FROM source_loss_returns") `shouldThrow` (\err->sqlError err==ErrorConstraint)
   describe "native settlement finality recovery (offline RPC contracts)" $ do
     it "shows review for an additional refund while preserving the original conversion link" $ withDir $ \dir->
       withNativeSettlementAt dir $ \l _ a signed _ _ _->do

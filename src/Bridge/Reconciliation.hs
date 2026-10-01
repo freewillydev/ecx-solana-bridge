@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module Bridge.Reconciliation (reconcileCustody, reconcileCustodyWith) where
+module Bridge.Reconciliation (reconcileCustody, reconcileCustodyWith, inspectSourceLossCustodyWith) where
 
 import Bridge.Config
 import Bridge.Ledger
@@ -41,8 +41,8 @@ decode :: FromJSON a => Text -> IO a
 decode=either (const $ reject "invalid_reconciliation_evidence") pure . eitherDecodeStrict' . TE.encodeUtf8
 
 -- Integer totals avoid SQLite SUM's overflow on a valid append-only journal.
-readView :: Config -> Ledger -> Int64 -> IO View
-readView c ledger now=ledgerAction ledger $ \db -> do
+readView :: Config -> Ledger -> Int64 -> Bool -> IO View
+readView c ledger now inspectLosses=ledgerAction ledger $ \db -> do
   revisions <- query_ db "SELECT revision FROM custody_check" :: IO [Only Int64]
   revision <- case revisions of [Only r]->pure r; _->reject "custody_check_missing"
   scans <- query_ db "SELECT h.chain,h.last_success,h.last_error,p.anchor FROM scan_health h JOIN checkpoints p ON p.chain=h.chain ORDER BY h.chain" :: IO [(Text,Maybe Int64,Maybe Text,Text)]
@@ -54,9 +54,9 @@ readView c ledger now=ledgerAction ledger $ \db -> do
     ,("Solana",solanaHistoryStart c),("SolanaOperating",solanaOperatingHistoryStart c)]) "custody_scan_origin_mismatch"
   reviews <- query_ db "SELECT event_id FROM chain_events WHERE needs_review=1 LIMIT 1" :: IO [Only Text]
   require (null reviews) "chain_observations_require_review"
-  lost <- query_ db "SELECT id FROM deposits WHERE allocated=1 AND eligible=0 LIMIT 1" :: IO [Only Text]
+  lost <- query db "SELECT id FROM deposits WHERE allocated=1 AND eligible=0 AND id NOT IN(SELECT deposit_id FROM accounted_source_losses) AND (?=0 OR id NOT IN(SELECT deposit_id FROM proven_source_losses)) LIMIT 1" (Only inspectLosses) :: IO [Only Text]
   require (null lost) "source_reorg_requires_review"
-  sourceReviews <- query_ db "SELECT deposit_id FROM source_recovery_state WHERE state<>'restored' LIMIT 1" :: IO [Only Text]
+  sourceReviews <- query db "SELECT deposit_id FROM source_recovery_state WHERE state<>'restored' AND deposit_id NOT IN(SELECT deposit_id FROM accounted_source_losses) AND (?=0 OR deposit_id NOT IN(SELECT deposit_id FROM proven_source_losses)) LIMIT 1" (Only inspectLosses) :: IO [Only Text]
   require (null sourceReviews) "source_recovery_requires_review"
   nativeReviews <- query_ db "SELECT txid FROM native_payment_recovery_state WHERE state<>'reconfirmed' LIMIT 1" :: IO [Only Text]
   require (null nativeReviews) "native_settlement_requires_review"
@@ -93,44 +93,60 @@ reconcileCustodyWith clock transport c ledger=do
         execute db "UPDATE custody_check SET checked_revision=NULL,checked_at=?,last_error=?,report_json=NULL" (at,code)
   custodyHealth ledger
  where
-  native=paymentNative transport
   work=do
-    at <- clock
-    view <- readView c ledger at
-    paymentIdentity transport
-    before <- nativeBalance native
-    attempts <- pendingAttempts ledger
-    require (length attempts<=2 && length (nub $ map attemptChain attempts)==length attempts) "custody_attempt_bounds"
-    effects <- concat <$> mapM (pendingEffect transport c ledger) attempts
-    (slot,wrapped,sol) <- solanaBalances (paymentSolana transport) c ledger view
-    case paymentVerifier transport of
-      Nothing->require (profile c/=CanonicalBeta && solanaVerifierRpc c==Nothing) "independent_rpc_required"
-      Just verifier->do
-        (_,w,s) <- solanaBalances verifier c ledger view
-        require ((w,s)==(wrapped,sol)) "custody_verifier_disagreement"
-    nativeFence native c ledger view
-    after <- nativeBalance native
-    require (before==after) "custody_native_view_changed"
-    let (nativeUnits,block,height)=after
-    active <- native False "getblockhash" [toJSON height] >>= parseValue parseJSON
-    require (active==block) "custody_native_view_changed"
-    end <- clock
-    require (end>=at && toInteger end-toInteger at<=60) "custody_check_timed_out"
-    let observed=M.fromList [("Native",nativeUnits),("Wrapped",wrapped),("Sol",sol)]
-        adjustments=M.fromListWith (+) [(asset,delta) | (_,asset,delta)<-effects]
-        rows=[(asset,n,M.findWithDefault 0 asset adjustments,M.findWithDefault 0 asset observed) | (asset,n)<-M.toList $ viewTotals view]
-        matches=all (\(_,booked,delta,actual)->booked+delta>=0 && booked+delta==actual) rows
-        report=object ["matches" .= matches,"nativeBlock" .= block,"nativeHeight" .= height,"solanaSlot" .= slot
-          ,"assets" .= [object ["asset" .= asset,"booked" .= T.pack(show booked),"inFlight" .= T.pack(show delta)
-            ,"expected" .= T.pack(show $ booked+delta),"observed" .= T.pack(show actual),"difference" .= T.pack(show $ actual-booked-delta)] | (asset,booked,delta,actual)<-rows]
-          ,"inFlightEffects" .= [object ["transaction" .= txid,"asset" .= asset,"units" .= T.pack(show n)] | (txid,asset,n)<-effects]]
+    (revision,at,matches,report) <- inspectCustodyWith clock transport c ledger False
     ledgerAction ledger $ \db -> do
       current <- query_ db "SELECT revision FROM custody_check" :: IO [Only Int64]
-      require (current==[Only $ viewRevision view]) "custody_ledger_changed"
+      require (current==[Only $ revision]) "custody_ledger_changed"
       let err=if matches then Nothing else Just ("custody_balance_mismatch"::Text)
       mapM_ (recordError db) err
       execute db "UPDATE custody_check SET checked_revision=?,checked_at=?,last_error=?,report_json=?"
-        (viewRevision view,at,err,json report)
+        (revision,at,err,json report)
+
+-- This inspection checks physical custody including proved deficits, but never
+-- certifies the ordinary custody gate or ignores unavailable/unknown history.
+inspectSourceLossCustodyWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> IO Value
+inspectSourceLossCustodyWith clock transport c ledger=do
+  (revision,at,matches,report) <- inspectCustodyWith clock transport c ledger True
+    `catch` (\(_::IOException)->reject "custody_rpc_unavailable")
+  require matches "custody_balance_mismatch"
+  pure $ object ["revision" .= revision,"checkedAt" .= at,"report" .= report]
+
+inspectCustodyWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> Bool -> IO (Int64,Int64,Bool,Value)
+inspectCustodyWith clock transport c ledger inspectLosses=do
+  at <- clock
+  view <- readView c ledger at inspectLosses
+  paymentIdentity transport
+  before <- nativeBalance native
+  attempts <- pendingAttempts ledger
+  require (length attempts<=2 && length (nub $ map attemptChain attempts)==length attempts) "custody_attempt_bounds"
+  effects <- concat <$> mapM (pendingEffect transport c ledger) attempts
+  (slot,wrapped,sol) <- solanaBalances (paymentSolana transport) c ledger view
+  case paymentVerifier transport of
+    Nothing->require (profile c/=CanonicalBeta && solanaVerifierRpc c==Nothing) "independent_rpc_required"
+    Just verifier->do
+      (_,w,s) <- solanaBalances verifier c ledger view
+      require ((w,s)==(wrapped,sol)) "custody_verifier_disagreement"
+  nativeFence native c ledger view
+  after <- nativeBalance native
+  require (before==after) "custody_native_view_changed"
+  let (nativeUnits,block,height)=after
+  active <- native False "getblockhash" [toJSON height] >>= parseValue parseJSON
+  require (active==block) "custody_native_view_changed"
+  end <- clock
+  require (end>=at && toInteger end-toInteger at<=60) "custody_check_timed_out"
+  let observed=M.fromList [("Native",nativeUnits),("Wrapped",wrapped),("Sol",sol)]
+      adjustments=M.fromListWith (+) [(asset,delta) | (_,asset,delta)<-effects]
+      rows=[(asset,n,M.findWithDefault 0 asset adjustments,M.findWithDefault 0 asset observed) | (asset,n)<-M.toList $ viewTotals view]
+      matches=all (\(_,booked,delta,actual)->booked+delta>=0 && booked+delta==actual) rows
+      report=object ["matches" .= matches,"nativeBlock" .= block,"nativeHeight" .= height,"solanaSlot" .= slot
+        ,"assets" .= [object ["asset" .= asset,"booked" .= T.pack(show booked),"inFlight" .= T.pack(show delta)
+          ,"expected" .= T.pack(show $ booked+delta),"observed" .= T.pack(show actual),"difference" .= T.pack(show $ actual-booked-delta)] | (asset,booked,delta,actual)<-rows]
+        ,"inFlightEffects" .= [object ["transaction" .= txid,"asset" .= asset,"units" .= T.pack(show n)] | (txid,asset,n)<-effects]]
+  current <- ledgerAction ledger $ \db -> query_ db "SELECT revision FROM custody_check" :: IO [Only Int64]
+  require (current==[Only $ viewRevision view]) "custody_ledger_changed"
+  pure (viewRevision view,at,matches,report)
+ where native=paymentNative transport
 
 recordError :: Connection -> Text -> IO ()
 recordError db code=do

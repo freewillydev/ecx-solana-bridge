@@ -1,7 +1,8 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.Recovery
   ( recoverDeployment, reconcileNativeLocks, reconcileNativeLocksWith
-  , cancelPreparation, cancelPreparationWith, approveSourceRecovery, approveSourceRecoveryWith ) where
+  , cancelPreparation, cancelPreparationWith, approveSourceRecovery, approveSourceRecoveryWith
+  , coverSourceLoss, coverSourceLossWith ) where
 
 import Bridge.Config
 import Bridge.Ledger
@@ -73,6 +74,35 @@ approveSourceRecoveryWith clock transport c ledger intent restoration reason=do
       now <- clock
       recordSourceRecoveryApproval ledger intent restoration now reason
   pure $ object ["approvedSourceRecovery" .= intent,"restorationSequence" .= restoration
+    ,"paused" .= True,"signedOrSent" .= False]
+
+coverSourceLoss :: Manager -> Config -> Ledger -> Text -> Int64 -> LossCapital -> Text -> IO Value
+coverSourceLoss manager c ledger did recovery capital reason=do
+  _ <- recoverDeployment manager c ledger
+  coverSourceLossWith epochSeconds
+    (realPaymentTransport manager c (const $ reject "unexpected_loss_cover_backup")) c ledger did recovery capital reason
+
+coverSourceLossWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> Text -> Int64 -> LossCapital -> Text -> IO Value
+coverSourceLossWith clock transport c ledger did recovery capital reason=do
+  require (recovery>0 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_source_loss_cover"
+  health <- readiness ledger
+  require (not $ available health) "pause_before_operator_action"
+  old <- sourceLossCover ledger did recovery
+  case old of
+    Just previous->require (previous==(capital,reason)) "source_loss_cover_conflict"
+    Nothing->do
+      candidates <- nativeSourceCandidates ledger
+      require (length candidates<=1000) "source_recovery_backlog"
+      source <- case filter ((==did).depositId) candidates of [s]->pure s; _->reject "source_loss_not_proven"
+      sourceProof <- inspectNativeSourceWith transport c ledger source >>= \case
+        SourceMissing proof->pure proof
+        _->reject "source_loss_not_proven"
+      -- This separate inspection includes proved deficits but cannot make
+      -- ordinary custody readiness pass before the actual capital allocation.
+      custodyProof <- inspectSourceLossCustodyWith clock transport c ledger
+      now <- clock
+      recordSourceLossCover ledger source recovery now capital reason sourceProof custodyProof
+  pure $ object ["coveredSourceLoss" .= did,"recoverySequence" .= recovery,"capital" .= capital
     ,"paused" .= True,"signedOrSent" .= False]
 
 -- Holding saved native inputs is independent of Solana availability. This may

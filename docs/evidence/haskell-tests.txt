@@ -1,10 +1,6 @@
 Build profile: -w ghc-9.14.1 -O1
 In order, the following will be built (use -v for more details):
- - ecx-bridge-0.1.0.0 (lib) (file src/Bridge/Recovery.hs changed)
- - ecx-bridge-0.1.0.0 (test:bridge-test) (dependency rebuilt)
-Preprocessing library for ecx-bridge-0.1.0.0...
-Building library for ecx-bridge-0.1.0.0...
-[19 of 26] Compiling Bridge.Recovery  ( src/Bridge/Recovery.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Recovery.o, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Recovery.dyn_o ) [Source file changed]
+ - ecx-bridge-0.1.0.0 (test:bridge-test) (file test/Spec.hs changed)
 Preprocessing test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Building test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 [1 of 1] Compiling Main             ( test/Spec.hs, ../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test-tmp/Main.o ) [Source file changed]
@@ -196,6 +192,28 @@ operator approval of a restored source (offline contracts)
   runs real source/custody validation before operator approval: healthy [✔]
   runs real source/custody validation before operator approval: shortfall [✔]
   runs real source/custody validation before operator approval: identity [✔]
+operator funding of proved source losses (offline contracts)
+  covers a deficit with free capital without altering customer work: ready [✔]
+  covers a deficit with free capital without altering customer work: unsigned [✔]
+  covers a deficit with free capital without altering customer work: signed [✔]
+  covers a deficit with free capital without altering customer work: broadcast [✔]
+  covers a deficit with free capital without altering customer work: paid [✔]
+  returns the same split once after source reappearance, preserving a new loss as a separate decision [✔]
+  does not forgive the cover on RPC failure or cover the same outstanding loss twice [✔]
+  refuses invalid capital or stale evidence without changing allocations: float-held [✔]
+  refuses invalid capital or stale evidence without changing allocations: earned-short [✔]
+  refuses invalid capital or stale evidence without changing allocations: wrong-total [✔]
+  refuses invalid capital or stale evidence without changing allocations: stale-revision [✔]
+  refuses invalid capital or stale evidence without changing allocations: stale-time [✔]
+  refuses invalid capital or stale evidence without changing allocations: wrong-block [✔]
+  refuses invalid capital or stale evidence without changing allocations: wrong-output [✔]
+  refuses invalid capital or stale evidence without changing allocations: stale-observation [✔]
+  refuses invalid capital or stale evidence without changing allocations: available [✔]
+  requires an actual custody inspection including the recorded loss: healthy [✔]
+  requires an actual custody inspection including the recorded loss: shortfall [✔]
+  requires an actual custody inspection including the recorded loss: unavailable [✔]
+  rolls back capital and its decision together if a posting fails, and retains immutable history [✔]
+  retries a failed capital return atomically after reopening without releasing the allocation twice [✔]
 native settlement finality recovery (offline RPC contracts)
   shows review for an additional refund while preserving the original conversion link [✔]
   reopens a lost-finality review and reconfirms the same payment without another financial decision [✔]
@@ -307,8 +325,8 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 5.5274 seconds
-259 examples, 0 failures
+Finished in 6.3791 seconds
+280 examples, 0 failures
 Test suite bridge-test: PASS
 Test suite logged to: /Volumes/Crucial
 X9/CodexBuilds/ecx-bridge-20260930/workspace-b/outputs/ecx-bridge/./../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log

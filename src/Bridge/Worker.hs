@@ -1,4 +1,4 @@
-module Bridge.Worker (runWorker, runWorkerWith, scanOnce, reconcileOnce, recoverOnce, approveRetry, cancelUnsigned, approveRestoredSource, doctor) where
+module Bridge.Worker (runWorker, runWorkerWith, scanOnce, reconcileOnce, recoverOnce, approveRetry, cancelUnsigned, approveRestoredSource, coverLoss, doctor) where
 
 import Bridge.API
 import Control.Monad.IO.Class (liftIO)
@@ -83,6 +83,10 @@ approveRestoredSource :: Config -> Text -> Int64 -> Text -> IO Value
 approveRestoredSource c intent restoration reason = withLedger (dbPath c) (fingerprint c) $ \ledger -> do
   manager <- newRpcManager
   approveSourceRecovery manager c ledger intent restoration reason
+coverLoss :: Config -> Text -> Int64 -> Amount -> Amount -> Text -> IO Value
+coverLoss c did recovery fromFloat fromEarned reason = withLedger (dbPath c) (fingerprint c) $ \ledger -> do
+  manager <- newRpcManager
+  coverSourceLoss manager c ledger did recovery (LossCapital fromFloat fromEarned) reason
 customerServer :: Config -> Ledger -> Server CustomerAPI
 customerServer c ledger =
   configView :<|> create :<|> get :<|> transaction :<|> hint :<|> health :<|> ready
