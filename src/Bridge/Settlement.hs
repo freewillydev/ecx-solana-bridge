@@ -3,6 +3,7 @@ module Bridge.Settlement
   ( PaymentTransport(..), realPaymentTransport, paymentPass, settleAttemptWith
   , recheckSourceWith, observeNativePayment, observeSolanaPayment, solanaExpiryEvidence, PaymentObservation(..)
   , approveSolanaRetry, approveSolanaRetryWith
+  , SavedPayment(..), readSavedPayment, readNativePayment
   ) where
 
 import Bridge.Config
@@ -58,10 +59,25 @@ data PaymentObservation
 -- Neither a successful RPC send nor mempool membership settles a payment.
 observeNativePayment :: NativeRPC -> NativeSigned -> IO PaymentObservation
 observeNativePayment call signed = do
+  found <- readNativePayment call signed
+  case found of
+    Nothing -> pure PaymentUnseen
+    Just (confirmations,value) -> do
+      let plan=signedNativePlan signed
+      if confirmations<planDepth plan then pure PaymentWaiting else do
+        anchor <- fieldValue "blockhash" value
+        height <- activeNativeBlock call anchor (planDepth plan)
+        pure $ PaymentConfirmed (PaymentCosts (signedNativeFee signed) zero) $ json $ object
+          ["txid" .= nativeTxid (signedNativeTransaction signed),"blockhash" .= anchor,"height" .= height,"requiredDepth" .= planDepth plan]
+
+-- Shared by settlement and custody reconciliation; even an unconfirmed wallet
+-- effect must match the immutable signed bytes and exact economic template.
+readNativePayment :: NativeRPC -> NativeSigned -> IO (Maybe (Int,Value))
+readNativePayment call signed = do
   let tx=signedNativeTransaction signed; plan=signedNativePlan signed
   found <- try (call True "gettransaction" [toJSON $ nativeTxid tx,Bool False,Bool True])
   case found of
-    Left (BridgeError "rpc_error_-5") -> pure PaymentUnseen
+    Left (BridgeError "rpc_error_-5") -> pure Nothing
     Left (BridgeError code) -> reject code
     Right value -> do
       raw <- fieldValue "hex" value
@@ -73,11 +89,7 @@ observeNativePayment call signed = do
       conflicts <- fieldValue "walletconflicts" value :: IO [Text]
       confirmations <- fieldValue "confirmations" value :: IO Int
       require (confirmations>=0 && null conflicts) "native_conflict_requires_review"
-      if confirmations<planDepth plan then pure PaymentWaiting else do
-        anchor <- fieldValue "blockhash" value
-        height <- activeNativeBlock call anchor (planDepth plan)
-        pure $ PaymentConfirmed (PaymentCosts fee zero) $ json $ object
-          ["txid" .= actualId,"blockhash" .= anchor,"height" .= height,"requiredDepth" .= planDepth plan]
+      pure (Just (confirmations,value))
 
 activeNativeBlock :: NativeRPC -> Text -> Int -> IO Int64
 activeNativeBlock call anchor depth = do

@@ -1,4 +1,4 @@
-module Bridge.Worker (runWorker, runWorkerWith, scanOnce, approveRetry, doctor) where
+module Bridge.Worker (runWorker, runWorkerWith, scanOnce, reconcileOnce, approveRetry, doctor) where
 
 import Bridge.API
 import Control.Monad.IO.Class (liftIO)
@@ -7,6 +7,7 @@ import Bridge.Ledger
 import Bridge.Native
 import Bridge.Observer
 import Bridge.RPC
+import Bridge.Reconciliation
 import Bridge.Solana
 import Bridge.Settlement
 import Bridge.Types
@@ -35,6 +36,7 @@ runWorker c = do
   runWorkerWith c $ \ledger -> forever $ do
     _ <- observeOnce manager c ledger
     epochSeconds >>= expireQuotes ledger
+    _ <- reconcileCustody manager c ledger
     when implementationReady $ do
       result <- try (paymentPass manager c ledger (const $ reject "critical_backup_not_configured")
         `catch` ioFailure) :: IO (Either BridgeError ())
@@ -59,6 +61,11 @@ scanOnce :: Config -> IO Value
 scanOnce c = withLedger (dbPath c) (fingerprint c) $ \ledger -> do
   manager <- newRpcManager
   observeOnce manager c ledger
+reconcileOnce :: Config -> IO Value
+reconcileOnce c = withLedger (dbPath c) (fingerprint c) $ \ledger -> do
+  manager <- newRpcManager
+  _ <- observeOnce manager c ledger
+  reconcileCustody manager c ledger
 approveRetry :: Config -> Text -> Text -> IO Value
 approveRetry c txid reason = withLedger (dbPath c) (fingerprint c) $ \ledger -> do
   manager <- newRpcManager

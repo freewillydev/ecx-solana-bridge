@@ -81,7 +81,7 @@ retryRateLimitedRead wait methodName action = go (0::Int)
     ,"getSignatureStatuses","getTransaction","getSignaturesForAddress"
     ,"getblockchaininfo","getblockhash","getblockheader","getwalletinfo","getbalances"
     ,"getaddressinfo","getaddressesbylabel","gettransaction","listsinceblock","gettxout","listlockunspent","listunspent","decodescript"
-    ,"decoderawtransaction","decodepsbt","estimatesmartfee","getmempoolinfo"]
+    ,"decoderawtransaction","decodepsbt","estimatesmartfee","getmempoolinfo","getmempoolentry"]
   go tries=action >>= \case
     Right result -> pure result
     Left requested -> do

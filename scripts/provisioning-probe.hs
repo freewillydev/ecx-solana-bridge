@@ -7,6 +7,7 @@ import Bridge.Ledger
 import Bridge.Observer
 import Bridge.Order
 import Bridge.RPC
+import Bridge.Reconciliation
 import Bridge.Types
 import Control.Exception (finally)
 import Control.Monad (when)
@@ -75,6 +76,9 @@ main=do
         scans<-observeOnce manager c ledger
         reviews<-fieldValue "review" scans :: IO [Value]
         require (null reviews) "scanner_review_required"
+        custody<-reconcileCustody manager c ledger
+        failure<-fieldValue "lastError" custody :: IO (Maybe Text)
+        require (failure==Nothing) "custody_not_reconciled"
         resumeAfterChecks ledger
         createCustomerOrderWith transport{orderNative=nativeCall} c ledger capability request
     visible<-exposeOrder ledger False capability (orderId order)

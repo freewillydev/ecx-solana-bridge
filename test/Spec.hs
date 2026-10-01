@@ -3,6 +3,7 @@ module Main where
 import Bridge.Types
 import Bridge.Config
 import Bridge.Ledger
+import Bridge.Reconciliation
 import Bridge.Budget
 import Bridge.SolanaMessage
 import Bridge.SolanaDeposit
@@ -683,6 +684,187 @@ main=hspec $ do
         [ChainEvent "operator-sig" "outgoing" "100" (object ["delta" .= ("-96000"::Text),"feeUnits" .= amt 5000])])
       recordTreasurySpend l "SolanaOperating" "operator-sig" (object ["fixture" .= True])
         `shouldThrow` isError "treasury_spend_exceeds_free_allocation"
+  describe "continuous custody reconciliation (offline RPC contracts)" $ do
+    it "checks all three assets without resuming or changing any financial records" $ withFunded $ \l original -> do
+      let c=expiryConfig original
+      setupCustodyScans l c
+      pause l "fixture-maintenance"
+      before<-auditExport l
+      result<-reconcileCustodyWith (pure 100) (custodyContract c (1100000,1000000,100000) []) c l
+      fieldValue "lastError" result `shouldReturn` (Nothing::Maybe Text)
+      (fieldValue "report" result >>= fieldValue "matches") `shouldReturn` True
+      auditExport l `shouldReturn` before
+      available <$> readiness l `shouldReturn` False
+      resumeAfterChecks l
+      checkIntakeReady l 100
+      _<-createOrder l c 100 cap req
+      checkIntakeReady l 100 -- reservations do not alter physical custody
+      observeDeposit l (Deposit "new-receipt" Nothing Native (amt 1) "block" 0 False 100) "cursor"
+      checkIntakeReady l 100 `shouldThrow` isError "custody_not_reconciled"
+    it "pauses on either a shortfall or an unexplained surplus and deduplicates the alert" $ withFunded $ \l original -> do
+      let c=expiryConfig original
+      setupCustodyScans l c
+      forM_ [999999,1000001] $ \wrapped->do
+        result<-reconcileCustodyWith (pure 100) (custodyContract c (1100000,wrapped,100000) []) c l
+        fieldValue "lastError" result `shouldReturn` Just ("custody_balance_mismatch"::Text)
+        available <$> readiness l `shouldReturn` False
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM audit WHERE action='custody_failure'" :: IO [Only Int]) `shouldReturn` [Only 1]
+      good<-reconcileCustodyWith (pure 100) (custodyContract c (1100000,1000000,100000) []) c l
+      fieldValue "lastError" good `shouldReturn` (Nothing::Maybe Text)
+      available <$> readiness l `shouldReturn` False
+    it "rejects a journal mutation during the RPC snapshot even when the old totals match" $ withFunded $ \l original -> do
+      let c=expiryConfig original
+          transport=custodyContract c (1100000,1000000,100000) []
+          sol method params=do
+            when (method=="getMultipleAccounts") $ fundAllocation l "concurrent-receipt" Native "float" (amt 1)
+            paymentSolana transport method params
+      setupCustodyScans l c
+      result<-reconcileCustodyWith (pure 100) transport{paymentSolana=sol} c l
+      fieldValue "lastError" result `shouldReturn` Just ("custody_ledger_changed"::Text)
+      available <$> readiness l `shouldReturn` False
+    it "rejects a new Solana history head, an older balance context, and verifier disagreement" $ withFunded $ \l original -> do
+      let c=expiryConfig original
+          transport=custodyContract c (1100000,1000000,100000) []
+          wrongHead=custodyContract c (1100000,1000000,100000) [("Solana",base58 $ BS.replicate 64 9)]
+          stale method params=do
+            value<-paymentSolana transport method params
+            pure $ if method=="getMultipleAccounts" then setPath ["context","slot"] (Number 99) value else value
+          disagree=paymentSolana (custodyContract c (1100000,999999,100000) [])
+      setupCustodyScans l c
+      forM_ [(wrongHead,"custody_solana_history_advanced"),(transport{paymentSolana=stale},"solana_context_too_old")
+        ,(transport{paymentVerifier=Just disagree},"custody_verifier_disagreement")] $ \(changed,code)->do
+          result<-reconcileCustodyWith (pure 100) changed c l
+          fieldValue "lastError" result `shouldReturn` Just (code::Text)
+    it "rejects a new native history cursor or balance changing during the read" $ withFunded $ \l original -> do
+      let c=expiryConfig original
+          transport=custodyContract c (1100000,1000000,100000) []
+          advanced wallet method params=do
+            value<-paymentNative transport wallet method params
+            pure $ if method=="listsinceblock" then setPath ["lastblock"] (String $ T.replicate 64 "e") value else value
+      setupCustodyScans l c
+      first<-reconcileCustodyWith (pure 100) transport{paymentNative=advanced} c l
+      fieldValue "lastError" first `shouldReturn` Just ("custody_native_history_advanced"::Text)
+      calls<-newIORef (0::Int)
+      let racing wallet method params=do
+            value<-paymentNative transport wallet method params
+            if method/="getbalances" then pure value else do
+              n<-atomicModifyIORef' calls (\x->(x+1,x))
+              pure $ if n==0 then value else setPath ["mine","trusted"] (nativeNumber $ amt 1100001) value
+      result<-reconcileCustodyWith (pure 100) transport{paymentNative=racing} c l
+      fieldValue "lastError" result `shouldReturn` Just ("custody_native_view_changed"::Text)
+    it "does not accept equal totals with an unresolved chain review flag" $ withFunded $ \l original -> do
+      let c=expiryConfig original
+          transport=custodyContract c (1100000,1000000,100000) []
+      setupCustodyScans l c
+      previous<-readCheckpoint l "Native"
+      commitScan l (ScanBatch "Native" (nativeCheckpointHash c) previous custodyNativeTip 100 [] [ChainEvent "unknown" "outgoing" "block" Null])
+      result<-reconcileCustodyWith (pure 100) transport c l
+      fieldValue "lastError" result `shouldReturn` Just ("chain_observations_require_review"::Text)
+    it "retains principal and pauses when an allocated source loses eligibility" $ withFunded $ \l original -> do
+      let c=expiryConfig original
+      (order,_)<-fundOrder l c
+      setupCustodyScans l c
+      observeDeposit l (Deposit "fixture-tx:0" (Just $ orderId order) Native (input req) "unconfirmed" 0 False 100) custodyNativeTip
+      before<-auditExport l
+      result<-reconcileCustodyWith (pure 100) (custodyContract c (1200000,1000000,100000) []) c l
+      fieldValue "lastError" result `shouldReturn` Just ("source_reorg_requires_review"::Text)
+      auditExport l `shouldReturn` before
+    it "invalidates a saved check on real SQLite reopen and never refreshes its age with RPC delay" $ withDir $ \dir -> do
+      let c=expiryConfig (cfg dir)
+          transport=custodyContract c (0,0,0) []
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        setupCustodyScans l c
+        checked<-reconcileCustodyWith (pure 100) transport c l
+        fieldValue "lastError" checked `shouldReturn` (Nothing::Maybe Text)
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        resumeAfterChecks l
+        checkIntakeReady l 100 `shouldThrow` isError "custody_not_reconciled"
+        calls<-newIORef (0::Int)
+        let clock=atomicModifyIORef' calls (\n->(n+1,if n==0 then 100 else 161))
+        result<-reconcileCustodyWith clock transport c l
+        fieldValue "lastError" result `shouldReturn` Just ("custody_check_timed_out"::Text)
+    it "leaves unseen signed bytes and their reservations intact" $ withSendFixture $ \l original _ attempt _->do
+      let c=expiryConfig original
+          transport=custodyContract c (10004,10000,3000000) []
+      setupCustodyScans l c
+      before<-auditExport l
+      result<-reconcileCustodyWith (pure 100) transport c l
+      fieldValue "lastError" result `shouldReturn` (Nothing::Maybe Text)
+      (fieldValue "report" result >>= fieldValue "inFlightEffects") `shouldReturn` ([]::[Value])
+      pendingAttempts l `shouldReturn` [attempt]
+      auditExport l `shouldReturn` before
+    it "refuses an on-chain payment whose broadcast intent was never committed" $ withSendFixture $ \l original _ attempt _->do
+      let c=expiryConfig original
+          transport=custodyContract c (10004,9997,2995000) []
+      setupCustodyScans l c
+      signed<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ attemptPolicy attempt)
+      proof<-codecSettlementProof c signed True
+      let call method params=if method=="getTransaction" then pure proof else paymentSolana transport method params
+      result<-reconcileCustodyWith (pure 100) transport{paymentSolana=call} c l
+      fieldValue "lastError" result `shouldReturn` Just ("unrecorded_broadcast_observed"::Text)
+    forM_ [(True,0),(True,1488440),(False,0)] $ \(success,rent)->
+      it ("normalizes a Solana outcome once, including rent/failure: "<>show (success,rent)) $ withSendFixture $ \l original _ attempt _->do
+        let c=expiryConfig original
+            txid=attemptId attempt
+            outgoing=if success then 3 else 0
+            cost=5000+rent
+            base=custodyContract c (10004,10000-outgoing,3000000-cost) [("Solana",txid),("SolanaOperating",txid)]
+        _<-markBroadcastIntent l txid
+        [saved]<-pendingAttempts l
+        signed<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ attemptPolicy attempt)
+        originalProof<-codecSettlementProof c signed success
+        proof<-addCodecRent signed rent originalProof
+        setupCustodyScans l c
+        forM_ [("Solana",negate outgoing),("SolanaOperating",negate cost)] $ \(stream,delta)->do
+          previous<-readCheckpoint l stream
+          origin<-maybe (fail "missing origin") pure (if stream=="Solana" then solanaHistoryStart c else solanaOperatingHistoryStart c)
+          let kind=if stream=="Solana" && not success then "failed" else "outgoing"
+          commitScan l (ScanBatch stream origin previous txid 100 [] [ChainEvent txid kind "101" (object ["delta" .= T.pack(show delta),"feeUnits" .= amt 5000])])
+        let call method params=if method=="getTransaction" then pure proof else paymentSolana base method params
+            transport=base{paymentSolana=call}
+        before<-auditExport l
+        result<-reconcileCustodyWith (pure 100) transport c l
+        fieldValue "lastError" result `shouldReturn` (Nothing::Maybe Text)
+        auditExport l `shouldReturn` before
+        settleAttemptWith transport c l saved `shouldReturn` (if success then "settled" else "failed")
+        second<-reconcileCustodyWith (pure 100) transport c l
+        fieldValue "lastError" second `shouldReturn` (Nothing::Maybe Text)
+        (fieldValue "report" second >>= fieldValue "inFlightEffects") `shouldReturn` ([]::[Value])
+        -- Equal current balances cannot excuse loss of a booked finality anchor.
+        cursor<-readCheckpoint l "SolanaOperating"
+        origin<-maybe (fail "missing origin") pure (solanaOperatingHistoryStart c)
+        commitScan l (ScanBatch "SolanaOperating" origin cursor txid 100 [] [ChainEvent txid "outgoing" "102" (object ["delta" .= T.pack(show $ negate cost),"feeUnits" .= amt 5000])])
+        changed<-reconcileCustodyWith (pure 100) transport c l
+        fieldValue "lastError" changed `shouldReturn` Just ("booked_solana_observation_changed"::Text)
+    it "normalizes a native mempool payment and its fee using the captured signed bytes" $ withFunded $ \l original->do
+      (plan,previous,fee,tx)<-nativeFixture
+      captured<-BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
+      raw<-fieldValue "raw" captured
+      decoded<-fieldValue "decoded" captured
+      let c=(expiryConfig original){nativeConfirmations=planDepth plan,maxNativeFee=planFeeLimit plan}
+          signed=NativeSigned raw tx plan previous fee
+          txid=nativeTxid tx
+          request'=req{input=planAmount plan,refund=planRecipient plan}
+      order<-createOrder l c 100 cap request'
+      bindInstruction l (orderId order) "fixture-native-instruction"
+      observeDeposit l (Deposit "native-refund-source" (Just $ orderId order) Native (planAmount plan) "source-block" (planDepth plan) True 100) "source-cursor"
+      ob<-createRefund l "native-refund-source"
+      testAttempt l c ob "Native" txid raw (TE.decodeUtf8 $ LBS.toStrict $ encode signed) (units $ planFeeLimit plan) Nothing
+      _<-markBroadcastIntent l txid
+      setupCustodyScans l c
+      cursor<-readCheckpoint l "Native"
+      let evidence=object ["confirmations" .= (0::Int),"walletNetUnits" .= T.pack(show $ negate $ units $ planAmount plan),"feeUnits" .= fee]
+      commitScan l (ScanBatch "Native" (nativeCheckpointHash c) cursor custodyNativeTip 100 [] [ChainEvent txid "outgoing" "unconfirmed" evidence])
+      let transport=custodyContract c (1100000-toInteger (units fee),1000000,100000) []
+          call wallet method params=case method of
+            "decoderawtransaction"->pure decoded
+            "gettransaction"->pure $ object ["hex" .= raw,"decoded" .= decoded,"txid" .= txid
+              ,"confirmations" .= (0::Int),"walletconflicts" .= ([]::[Text]),"fee" .= scientific (negate $ toInteger $ units fee) (-8)]
+            "getmempoolentry"->pure $ object ["vsize" .= (141::Int)]
+            _->paymentNative transport wallet method params
+      result<-reconcileCustodyWith (pure 100) transport{paymentNative=call} c l
+      fieldValue "lastError" result `shouldReturn` (Nothing::Maybe Text)
+      pendingAttempts l >>= \saved->map attemptState saved `shouldBe` ["broadcast_intent"]
   describe "SOL accounting from captured public Devnet metadata" $ do
     it "observes the actual SOL setup receipt without charging the external payer's fee to custody" $ do
       captured<-BS.readFile "test/fixtures/solana-devnet-accounts.json" >>= either fail pure . eitherDecodeStrict'
@@ -1134,6 +1316,8 @@ main=hspec $ do
       withLedger (dbPath c) (fingerprint c) $ \l -> do
         available <$> readiness l `shouldReturn` False
         resumeAfterChecks l
+        createCustomerOrderWith transport c l cap req `shouldThrow` isError "custody_not_reconciled"
+        freshScans l 100
         restored<-createCustomerOrderWith transport c l cap req
         orderId restored `shouldBe` orderId prior
         deadline restored `shouldBe` deadline prior
@@ -1695,10 +1879,66 @@ solanaFixture=do
 contextContract :: Value -> Value
 contextContract value=object ["context" .= object ["slot" .= (100::Int)],"value" .= value]
 
+custodyNativeTip :: Text
+custodyNativeTip=T.replicate 64 "d"
+
+-- These explicit RPC fixtures are unit contracts, not substitute networks.
+setupCustodyScans :: Ledger -> Config -> IO ()
+setupCustodyScans l c=do
+  previous<-readCheckpoint l "Native"
+  commitScan l (ScanBatch "Native" (nativeCheckpointHash c) previous custodyNativeTip 100 [] [])
+  forM_ [("Solana",solanaHistoryStart c),("SolanaOperating",solanaOperatingHistoryStart c)] $ \(stream,configured)->do
+    origin<-maybe (fail "missing fixture origin") pure configured
+    old<-readCheckpoint l stream
+    commitScan l (ScanBatch stream origin old origin 100 [] [ChainEvent origin "reference" "100" (object ["delta" .= ("0"::Text)])])
+
+custodyContract :: Config -> (Integer,Integer,Integer) -> [(Text,Text)] -> PaymentTransport
+custodyContract c (nativeUnits,wrapped,sol) heads=PaymentTransport native call Nothing (pure ())
+  (const $ expectationFailure "custody reconciliation requested a backup")
+ where
+  native _ method _=case method of
+    "getbalances"->pure $ object ["mine" .= object ["trusted" .= nativeNumber (amt nativeUnits)
+      ,"untrusted_pending" .= (0::Int),"immature" .= (0::Int)]
+      ,"lastprocessedblock" .= object ["hash" .= custodyNativeTip,"height" .= (20000::Int)]]
+    "getblockhash"->pure (toJSON custodyNativeTip)
+    "listsinceblock"->pure $ object ["lastblock" .= custodyNativeTip,"transactions" .= ([]::[Value]),"removed" .= ([]::[Value])]
+    _->expectationFailure ("unexpected custody native RPC: "<>T.unpack method) >> pure Null
+  call method params=case (method,params) of
+    ("getMultipleAccounts",[_,options])->do
+      fieldValue "commitment" options `shouldReturn` ("finalized"::Text)
+      let token=setPath ["data","parsed","info","tokenAmount","amount"] (toJSON $ T.pack $ show wrapped) (tokenContract c $ custodyOwner c)
+      pure $ object ["context" .= object ["slot" .= (102::Int)],"value" .= [token,systemContract sol]]
+    ("getSignaturesForAddress",[String address,options])->do
+      fieldValue "minContextSlot" options `shouldReturn` (102::Int)
+      fieldValue "limit" options `shouldReturn` (1::Int)
+      let stream=if address==custodyAta c then "Solana" else "SolanaOperating"
+          origin=if stream=="Solana" then solanaHistoryStart c else solanaOperatingHistoryStart c
+      signature<-maybe (fail "missing fixture history") pure (case lookup stream heads of Just h->Just h; Nothing->origin)
+      pure $ toJSON [object ["signature" .= signature,"slot" .= (if Just signature==origin then 100::Int else 101)
+        ,"confirmationStatus" .= ("finalized"::Text),"err" .= Null]]
+    ("getTransaction",_)->pure Null
+    _->expectationFailure ("unexpected custody Solana RPC: "<>T.unpack method) >> pure Null
+
+addCodecRent :: SolanaSigned -> Integer -> Value -> IO Value
+addCodecRent _ 0 proof=pure proof
+addCodecRent signed rent proof=do
+  keys<-fieldValue "transaction" proof >>= fieldValue "message" >>= fieldValue "accountKeys"
+  destination<-maybe (fail "codec destination missing") pure (elemIndex (replyDestination $ signedSolanaReply signed) keys)
+  meta<-fieldValue "meta" proof
+  before<-fieldValue "preBalances" meta :: IO [Integer]
+  after<-fieldValue "postBalances" meta :: IO [Integer]
+  let pre=[if i==destination then n-rent else n | (i,n)<-zip [0::Int ..] before]
+      post=[if i==0 then n-rent else n | (i,n)<-zip [0::Int ..] after]
+  pure $ setPath ["meta","preBalances"] (toJSON pre) $ setPath ["meta","postBalances"] (toJSON post) proof
+
 freshScans :: Ledger -> Int64 -> IO ()
-freshScans ledger now=forM_ ["Native","Solana","SolanaOperating"] $ \chain -> do
-  previous<-readCheckpoint ledger chain
-  commitScan ledger (ScanBatch chain "fixture-scan-origin" previous "fixture-scan-tip" now [] [])
+freshScans ledger now=do
+  forM_ ["Native","Solana","SolanaOperating"] $ \chain -> do
+    previous<-readCheckpoint ledger chain
+    commitScan ledger (ScanBatch chain "fixture-scan-origin" previous "fixture-scan-tip" now [] [])
+  -- Provisioning-only offline fixtures assume a successful custody check.
+  -- Reconciliation itself is exercised separately with explicit RPC contracts.
+  ledgerAction ledger $ \db -> execute db "UPDATE custody_check SET checked_revision=revision,checked_at=?,last_error=NULL" (Only now)
 
 withProvisioning :: (Ledger -> Config -> OrderTransport -> IORef Int -> IO a) -> IO a
 withProvisioning action=withFunded $ \l c -> do

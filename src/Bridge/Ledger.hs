@@ -6,7 +6,7 @@ module Bridge.Ledger
   , findOrder, checkIntakeReady, claimNativeAllocation, recordNativeInstruction, issueInstruction, instructionBackup
   , exposeOrder, freeInventory, allocateTreasuryReceipt, recordTreasurySpend, expireQuotes
   , Deposit(..), observeDeposit, refreshDeposit, recordScan, readCheckpoint, promoteDeposit, checkpoint
-  , ChainEvent(..), ScanBatch(..), commitScan, recordScanFailure, scannerHealth
+  , ChainEvent(..), ScanBatch(..), commitScan, recordScanFailure, scannerHealth, custodyHealth
   , lookupInstruction, maximumNativeDepth, pendingVerification
   , Obligation(..), readyObligations, Attempt(..), storeAttempt, markBroadcastIntent, authorizeRecordedSend
   , Preparation(..), beginPreparation, storeDraft, pendingPreparations
@@ -42,7 +42,7 @@ import Text.Read (readMaybe)
 -- All financial mutations are serialized and committed before external IO.
 newtype Ledger = Ledger (MVar Connection)
 schemaVersion :: Int
-schemaVersion = 8
+schemaVersion = 9
 sqliteIdentity :: Connection -> IO Value
 sqliteIdentity c = do
   versions <- query_ c "SELECT sqlite_version(),sqlite_source_id()" :: IO [(Text,Text)]
@@ -90,10 +90,13 @@ withLedger path identity action = do
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/006.sql"))) $ execute_ c . fromString . T.unpack
     when (meta `elem` [[(v,identity)] | v<-[1..6]]) $ withTransaction c $
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/007.sql"))) $ execute_ c . fromString . T.unpack
-    when (meta/=[(schemaVersion,identity)]) $ withTransaction c $
+    when (meta `elem` [[(v,identity)] | v<-[1..7]]) $ withTransaction c $
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/008.sql"))) $ execute_ c . fromString . T.unpack
+    when (meta/=[(schemaVersion,identity)]) $ withTransaction c $
+      forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/009.sql"))) $ execute_ c . fromString . T.unpack
     -- Restart is quarantined until external identities and unresolved attempts are checked.
     execute_ c "UPDATE deployment SET paused=1,pause_reason='restart_requires_reconciliation'"
+    execute_ c "UPDATE custody_check SET revision=revision+1"
     newMVar c >>= action . Ledger
  where
   acquire = tryLockFile (path<>".lock") Exclusive >>= maybe (reject "worker_already_running") pure
@@ -349,6 +352,10 @@ checkIntakeReadyC c now = do
   require (map (\(chain,_,_,_)->chain) scans==["Native","Solana","SolanaOperating"]
     && all (\(_,success,err,anchor)->err==Nothing && not (T.null anchor)
       && maybe False (\t->t>=0 && t<=now && toInteger now-toInteger t<=60) success) scans) "scanners_not_fresh"
+  checks <- query_ c "SELECT revision,checked_revision,checked_at,last_error FROM custody_check" :: IO [(Int64,Maybe Int64,Maybe Int64,Maybe Text)]
+  require (case checks of
+    [(revision,Just checked,Just at,Nothing)] -> revision==checked && at>=0 && at<=now && toInteger now-toInteger at<=60
+    _ -> False) "custody_not_reconciled"
 
 -- Exactly one caller receives permission to allocate. Every later caller may
 -- only recover the durable label; even a lost reply never grants another try.
@@ -818,7 +825,18 @@ auditExportWithBudget :: Ledger -> Config -> IO Value
 auditExportWithBudget l cfg = ledgerAction l $ \c -> do
   audit <- auditExportC c
   budget <- operatingBudget c cfg
-  case audit of Object fields -> pure $ Object (KM.insert "operatingBudget" budget fields); _ -> reject "invalid_audit_export"
+  custody <- custodyHealthC c
+  case audit of Object fields -> pure $ Object (KM.insert "custodyReconciliation" custody $ KM.insert "operatingBudget" budget fields); _ -> reject "invalid_audit_export"
+custodyHealth :: Ledger -> IO Value
+custodyHealth l = ledgerAction l custodyHealthC
+custodyHealthC :: Connection -> IO Value
+custodyHealthC c = do
+  rows <- query_ c "SELECT revision,checked_revision,checked_at,last_error,report_json FROM custody_check" :: IO [(Int64,Maybe Int64,Maybe Int64,Maybe Text,Maybe Text)]
+  case rows of
+    [(revision,checked,at,err,report)] -> do
+      value <- mapM fromText report :: IO (Maybe Value)
+      pure $ object ["revision" .= revision,"checkedRevision" .= checked,"checkedAt" .= at,"lastError" .= err,"report" .= value]
+    _ -> reject "custody_check_missing"
 auditExportC :: Connection -> IO Value
 auditExportC c = do
   bs <- balances c

@@ -2,7 +2,7 @@
 
 A small inventory bridge: one Haskell/Servant application, two chain adapters, one SQLite ledger, and a thin browser interface. A separate Rust executable uses official Solana SDK and SPL interface crates to construct and sign a fixed transaction format. No custom blockchain or token program.
 
-**Development checkpoint — not ready for public custody.** Both ledger-driven directions have completed on real L2L Signet / Solana Devnet, alongside a full refund of a late deposit. The redemption survived a process interruption after broadcast and settled the same native transaction. The code builds and 160 Haskell examples pass. Browser signing, full reconciliation/recovery and Linux deployment remain unfinished. Customer intake and signing routes are disabled in code. See [STATUS.md](docs/STATUS.md) for the evidence and outstanding work.
+**Development checkpoint — not ready for public custody.** Both ledger-driven directions have completed on real L2L Signet / Solana Devnet, alongside a full refund of a late deposit. The redemption survived a process interruption after broadcast and settled the same native transaction. The code builds and 174 Haskell examples pass. Continuous custody checks now match all three real balances after restart. Browser signing, full recovery and Linux deployment remain unfinished. Customer intake and signing routes are disabled in code. See [STATUS.md](docs/STATUS.md) for the evidence and outstanding work.
 
 ## Components
 
@@ -14,6 +14,7 @@ A small inventory bridge: one Haskell/Servant application, two chain adapters, o
 | `Bridge.Ledger` | Quotes, inventory reservations, protected principal, obligations, exact signed attempts, fee accounting, backup coverage, audit records. |
 | `Bridge.Native` / `Bridge.Solana` | Real node/RPC identity checks and bounded calls. Native destinations use daemon script classification and ownership checks. Adapter integration is incomplete. |
 | `Bridge.Observer` | Native wallet history and separate finalized Solana token/SOL histories; atomic evidence/cursors, quarantined unknown activity, independent-provider deposit checks. |
+| `Bridge.Reconciliation` | Compare the journal and verified unsettled outgoing effects with custody balances at checked history positions; invalidate stale checks and pause on discrepancies. |
 | `Bridge.NativePayment` / `Bridge.SolanaPayment` / `Bridge.Payment` | Validate outgoing transactions and native quote amounts with the real daemon, reserve operating costs, save exact preparation requests/drafts before signing and signed bytes afterward. Solana simulations use unsigned copies. |
 | `Bridge.Settlement` | Recheck the bound source, journal broadcast intent, enforce backup coverage, send recorded bytes and book verified outcomes. Worker scheduling remains behind the disabled acceptance gate. |
 | `Bridge.Deposit` | Build and validate an unsigned order-bound Solana deposit, with customer token/SOL balance, fee, expiry and backup checks. |
@@ -42,6 +43,8 @@ cabal run ecx-bridge -- check-config /absolute/private/config.json
 cabal run ecx-bridge -- doctor /absolute/private/config.json
 # Exclusive ledger access: stop the worker before this one-shot scan.
 cabal run ecx-bridge -- scan /absolute/private/config.json
+# Scan and reconcile all custody balances; leave the deployment paused.
+cabal run ecx-bridge -- reconcile /absolute/private/config.json
 ```
 
 Copy `config/l2l-devnet.example.json` into a private directory and replace every required value with the actual deployment inputs. The example deliberately contains no usable keys or invented mint. `doctor` checks actual chain identity, synchronization, mint and token-account policy; success does not certify settlement readiness.
@@ -70,6 +73,7 @@ Build the browser assets first. Open `http://127.0.0.1:8096`. Administrator rout
 - A real Devnet deposit first observed after its immutable deadline was returned in full. The rate-limited refund attempt expired; the application proved absence through finalized, setup-anchored token and fee-payer histories before one replacement. The original attempt and all preparation generations remain saved: [refund and expiry evidence](docs/evidence/late-ledger-refund.json), [schema migration](docs/evidence/expiry-migration.json). This used the primary public-Devnet RPC; independent-provider canonical acceptance remains outstanding.
 - The reverse conversion accepted 10,000 wrapped units and paid 9,900 native units, booking a 100-unit token bridge fee and a 141-unit native network fee. Its actual [Signet payout](https://explorer.signet.drivechain.info/tx/88c8c46cc3c6f34e880ffc3978c3095159059ef663c2e1573ebcf2839c3d4350) settled after the acceptance process was terminated in the mempool phase and restarted. All custody balances matched: [redemption evidence](docs/evidence/first-ledger-redemption.json), [interruption](docs/evidence/native-payout-interruption.json).
 - Replaying all three completed orders changed no financial records. The normal worker then restarted with healthy scanners and authenticated order reads, while public readiness remained disabled: [replay](docs/evidence/both-directions-replay.json), [restart](docs/evidence/both-directions-restart.json).
+- Schema 9 preserved every financial row and critical sequence. The ongoing custody check matched actual native, wrapped-token and operating-SOL balances twice across reopening, then passed in the restarted worker: [evidence](docs/evidence/custody-reconciliation.json). In-flight, failed-payment, rent, changing-history and discrepancy paths have offline contract coverage; no new payment was sent during this check.
 
 The native smoke script is restricted to the real L2L Signet and two dedicated test wallets. It persists exact signed bytes before sending. It is an integration probe, not a ledger-driven bridge.
 

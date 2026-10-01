@@ -1,4 +1,3 @@
-Running 1 test suites...
 Test suite bridge-test: RUNNING...
 
 exact amounts
@@ -71,6 +70,21 @@ verified treasury allocation and accounting
   cannot classify an existing customer attempt as an operator spend [✔]
   requires review when signed bytes appear on-chain before a recorded broadcast intent [✔]
   preserves reserved operating funds when reconciling a separate operator spend [✔]
+continuous custody reconciliation (offline RPC contracts)
+  checks all three assets without resuming or changing any financial records [✔]
+  pauses on either a shortfall or an unexplained surplus and deduplicates the alert [✔]
+  rejects a journal mutation during the RPC snapshot even when the old totals match [✔]
+  rejects a new Solana history head, an older balance context, and verifier disagreement [✔]
+  rejects a new native history cursor or balance changing during the read [✔]
+  does not accept equal totals with an unresolved chain review flag [✔]
+  retains principal and pauses when an allocated source loses eligibility [✔]
+  invalidates a saved check on real SQLite reopen and never refreshes its age with RPC delay [✔]
+  leaves unseen signed bytes and their reservations intact [✔]
+  refuses an on-chain payment whose broadcast intent was never committed [✔]
+  normalizes a Solana outcome once, including rent/failure: (True,0) [✔]
+  normalizes a Solana outcome once, including rent/failure: (True,1488440) [✔]
+  normalizes a Solana outcome once, including rent/failure: (False,0) [✔]
+  normalizes a native mempool payment and its fee using the captured signed bytes [✔]
 SOL accounting from captured public Devnet metadata
   observes the actual SOL setup receipt without charging the external payer's fee to custody [✔]
   observes fee and account-rent SOL for the existing recipient [✔]
@@ -188,6 +202,6 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 1.7298 seconds
-160 examples, 0 failures
+Finished in 2.4053 seconds
+174 examples, 0 failures
 Test suite bridge-test: PASS

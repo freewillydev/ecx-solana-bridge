@@ -9,6 +9,7 @@ import Bridge.Native
 import Bridge.Order (createCustomerOrder)
 import Bridge.Observer
 import Bridge.RPC
+import Bridge.Reconciliation
 import Bridge.Settlement
 import Bridge.Solana
 import Bridge.SolanaPayment (systemLamports)
@@ -124,13 +125,13 @@ loop manager c ledger capability oid deadline previous=do
     threadDelay 15000000
     loop manager c ledger capability oid deadline (Just state)
 
--- This acceptance tool has no unrelated pending transactions. The runtime's
--- general reconciliation of in-flight effects remains a separate requirement.
+-- This acceptance tool has no unrelated pending transactions.
+-- The continuous worker additionally normalizes unresolved outgoing effects.
 requireBalances :: Manager -> Config -> Ledger -> IO ()
 requireBalances manager c ledger=again (2::Int)
  where
   again retries=checkBalances manager c ledger `catch` \(problem::BridgeError)->case problem of
-    BridgeError "custody_ledger_balance_mismatch" | retries>0 -> do
+    BridgeError code | code `elem` ["custody_ledger_balance_mismatch","custody_not_reconciled"] && retries>0 -> do
       -- A receipt can finalize between the history and balance RPCs. Re-scan
       -- without releasing the pause; persistent differences remain errors.
       pause ledger "public_test_balance_rescan"
@@ -154,3 +155,6 @@ checkBalances manager c ledger=do
   rows<-ledgerAction ledger $ \db -> query_ db "SELECT asset,account,delta FROM postings" :: IO [(Text,Text,Int64)]
   let observed=[("Native",sum $ map (toInteger . units) native),("Wrapped",toInteger $ units wrapped),("Sol",toInteger $ units sol)]
   require (all (\(asset,n)->sum [toInteger d | (a,account,d)<-rows,a==asset,account/="external"]==n) observed) "custody_ledger_balance_mismatch"
+  custody<-reconcileCustody manager c ledger
+  failure<-fieldValue "lastError" custody :: IO (Maybe Text)
+  require (failure==Nothing) "custody_not_reconciled"
