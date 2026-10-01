@@ -4,8 +4,11 @@ import Bridge.Config
 import Bridge.RPC
 import Bridge.Types
 import Bridge.SolanaMessage (publicKey)
+import Control.Monad (unless)
 import Data.Aeson
+import Data.Aeson.Types (Parser,parseEither)
 import Data.Text (Text)
+import qualified Data.Text as T
 import Network.HTTP.Client (Manager)
 
 solanaCall :: Manager -> Config -> Text -> [Value] -> IO Value
@@ -42,17 +45,33 @@ tokenAccount manager c address expectedOwner = do
   response <- solanaCall manager c "getAccountInfo" [toJSON address,object ["commitment" .= ("finalized"::Text),"encoding" .= ("jsonParsed"::Text)]]
   v <- fieldValue "value" response
   require (v/=Null) "token_account_missing"
-  program <- fieldValue "owner" v
-  require (program==tokenProgram) "unsupported_account_program"
-  dat <- fieldValue "data" v
-  parsed <- fieldValue "parsed" dat
-  info <- fieldValue "info" parsed
-  owner <- fieldValue "owner" info
-  token <- fieldValue "mint" info
-  state <- fieldValue "state" info :: IO Text
-  delegate <- parseValue (withObject "token info" (.:? "delegate")) info :: IO (Maybe Text)
-  require (owner==expectedOwner && token==mint c && state=="initialized" && delegate==Nothing) "token_account_policy_mismatch"
-  pure info
+  _ <- either reject pure (inspectTokenAccount (mint c) expectedOwner v)
+  fieldValue "data" v >>= fieldValue "parsed" >>= fieldValue "info"
+
+inspectTokenAccount :: Text -> Text -> Value -> Either Text Amount
+inspectTokenAccount expectedMint expectedOwner = either (const $ Left "token_account_policy_mismatch") Right . parseEither inspect
+ where
+  field key = withObject "account field" (.: key)
+  inspect v = do
+    program <- field "owner" v
+    executable <- field "executable" v :: Parser Bool
+    dat <- field "data" v
+    space <- field "space" dat :: Parser Int
+    parsed <- field "parsed" dat
+    kind <- field "type" parsed :: Parser Text
+    info <- field "info" parsed
+    owner <- field "owner" info
+    token <- field "mint" info
+    state <- field "state" info :: Parser Text
+    isNative <- field "isNative" info :: Parser Bool
+    delegate <- withObject "token info" (.:? "delegate") info :: Parser (Maybe Text)
+    closeAuthority <- withObject "token info" (.:? "closeAuthority") info :: Parser (Maybe Text)
+    balance <- field "tokenAmount" info
+    decimals <- field "decimals" balance :: Parser Int
+    unless (program==tokenProgram && not executable && space==165 && kind=="account"
+      && owner==expectedOwner && token==expectedMint && state=="initialized" && not isNative
+      && delegate==Nothing && closeAuthority==Nothing && decimals==8) (fail "unsupported token account")
+    field "amount" balance >>= either (fail . T.unpack) pure . parseUnits
 finalizedTransaction :: Manager -> Config -> Text -> IO Value
 finalizedTransaction manager c signature = solanaCall manager c "getTransaction"
   [toJSON signature,object ["commitment" .= ("finalized"::Text),"encoding" .= ("json"::Text),"maxSupportedTransactionVersion" .= (0::Int)]]

@@ -23,7 +23,7 @@ The current process IDs, logs and private configuration are in `work/build/cache
 
 The worker's customer socket is `/tmp/ecx-bridge-0930/customer/api.sock`; its administrator socket is separate at `/tmp/ecx-bridge-0930/admin/api.sock`. The development web and worker run under the same local account. Actual service-user separation is still a Linux test requirement.
 
-The preview ledger is at schema 3 and paused. The live observer recorded the faucet receipt as unallocated and flagged the standalone probe's payment as outgoing without a ledger intent. Repeated scanning did not duplicate accounting. Neither event creates application float. Do not create treasury allocations from a wallet's historical gross receipts without reconciling already-spent outputs. The worker continues both scans every 15 seconds; Solana reports `mint_not_found`. Private `/scanners` reports cursor, last success/error and pending review. Native preparation exists as a library path, not an enabled HTTP route or scheduled payment task.
+The preview ledger is at schema 3 and paused. The live observer recorded the faucet receipt as unallocated and flagged the standalone probe's payment as outgoing without a ledger intent. Repeated scanning did not duplicate accounting. Neither event creates application float. Do not create treasury allocations from a wallet's historical gross receipts without reconciling already-spent outputs. The worker continues both scans every 15 seconds; both report successful reads. The Solana setup receipt is also unallocated, and both standalone Solana payouts require explicit reconciliation. These unallocated totals are gross observed receipts, not available inventory; the outgoing probes and operating costs have not yet been booked. Private `/scanners` reports cursor, last success/error and pending review. Both native and Solana preparation exist as library paths, not enabled HTTP routes or scheduled payment tasks.
 
 The schema 1→2 and 2→3 migrations preserve financial rows and critical/backup sequences and start paused. Consistent private snapshots were taken before both local upgrades. Schema 3 adds preparation policy/draft records; it does not erase old attempts. For a manual one-shot scan, stop the verified worker PID, then run `ecx-bridge scan /absolute/private/config.json`; the exclusive ledger lock prevents concurrent workers or offline commands.
 
@@ -41,9 +41,9 @@ Compile this manual probe against the same pinned SQLite library as the applicat
 
 ## Devnet setup
 
-Private keys and setup records are under `work/build/cache/devnet`, outside source control. Do not print, copy into a screenshot, or include the keypair files in a release. The public setup manifest identifies the payer, custody owner, tester and intended mint. A generated mint key is not an on-chain mint; `doctor` currently confirms it is missing.
+Private keys and setup records are under `work/build/cache/devnet`, outside source control. Do not print, copy into a screenshot, or include the keypair files in a release. The public setup manifest identifies the payer, custody owner, tester and intended mint. The setup transaction has finalized and `doctor` verifies the actual mint and custody ATA. The user supplied 10 Devnet SOL to the existing setup payer.
 
-When real Devnet funding is available, run the separate example with the absolute private directory:
+To reconcile the existing completed setup, run the separate example with the same absolute private directory:
 
 ```sh
 cargo run --locked --manifest-path solana-helper/Cargo.toml \
@@ -54,7 +54,15 @@ Use the already configured external `CARGO_HOME`/`CARGO_TARGET_DIR` for this Mac
 
 The test mint authority is separate from the custody key and is not installed with the bridge helper. No official wbECX mint authority is needed or requested.
 
-After setup finalizes, set `solanaHistoryStart` to the saved real setup signature that created the custody ATA. The first successful scan stores that immutable origin. Every later scan must find its previous cursor; an empty or truncated history response stops progress. Do not change the origin to skip unexpected transfers. The implemented Solana observer still needs real public-chain deposit and pagination acceptance; its fixtures are decoding/recovery contracts only.
+The private configuration now sets `solanaHistoryStart` to the saved real setup signature that created the custody ATA. It also sets the separate `maxSolAccountRent` ceiling to `"2100000"` lamports; configurations must provide this field, even if new ATAs are disallowed by setting it to `"0"`. The first successful scan stores that immutable origin. Every later scan must find its previous cursor; an empty or truncated history response stops progress. Do not change the origin to skip unexpected transfers. The Solana observer has replayed the real setup and payouts without duplicate accounting. A real order-bound customer deposit and multi-page stopped-scanner recovery remain acceptance work.
+
+## Manual Solana adapter probes
+
+`scripts/solana-probe.hs` prepares a fixed three-unit public-Devnet payment using the actual helper/RPC, or verifies saved finalized evidence. Compile it with the same Cabal environment and SQLite linker settings as the native probe. `scripts/solana-smoke.py CONFIG PRIVATE_DEVNET_DIR COMPILED_PROBE` wraps it with exclusive-create, fsynced attempt files before send, bounded exact-byte rebroadcast and finalized byte/balance/cost checks. It uses the setup tester for the existing-ATA case and setup payer for the new-ATA case. It is an operator acceptance tool, not a ledger or a worker.
+
+The initial `devnet-three-existing` signature expired without appearing in finalized history. Its original attempt and exact setup-anchored history decision remain in the private directory. The explicit `--replace-expired-existing` option validates that saved decision and names a single `devnet-three-existing-retry-1` attempt; it never overwrites the original. That replacement and `devnet-three-new` have both finalized. For this existing local run, include that flag on subsequent checks so they reconcile the saved successful replacement. Never delete an attempt to force a new signature. A missing status alone cannot authorize replacement.
+
+The exported evidence contains public test identities and finalized transaction data, without private keys or signer paths. These programmatic probes do not prove browser-wallet support, full bridge settlement, remote recovery or canonical activation.
 
 ## Recovery and deployment
 

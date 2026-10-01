@@ -5,10 +5,13 @@ import Bridge.Config
 import Bridge.Ledger
 import Bridge.SolanaMessage
 import Bridge.SolanaDeposit
+import Bridge.Solana (inspectTokenAccount)
+import Bridge.SolanaHelper
+import Bridge.SolanaPayment
 import qualified Data.Aeson.KeyMap as KM
 import Bridge.Native (nativeAmount,nativeNumber)
 import Bridge.NativePayment
-import Bridge.Payment (prepareNativeWith)
+import Bridge.Payment (prepareNativeWith,prepareSolanaWith)
 import Bridge.RPC
 import Bridge.API
 import Bridge.Worker
@@ -25,6 +28,9 @@ import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Base64 as B64
 import Data.Int (Int64)
 import Data.IORef
+import Crypto.Error (CryptoFailable(..))
+import qualified Crypto.PubKey.Ed25519 as Ed
+import qualified Data.ByteArray as BA
 import Data.String (fromString)
 import Data.Scientific (scientific)
 import Data.Text (Text)
@@ -45,7 +51,7 @@ amt n = either (error . T.unpack) id (amount n)
 cap :: Text
 cap=T.replicate 64 "a"
 cfg :: FilePath -> Config
-cfg dir = Config L2LSignetDevnet "unit-fixture" "http://127.0.0.1:29432" (dir</>"cookie") "fixture-wallet" 16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47" "https://api.devnet.solana.com" Nothing "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM" "RWjpjjkpABkEGomLbZYyN53pA3FVdPXp9izJ25wErGX" "11111111111111111111111111111111" (dir</>"private/ledger.sqlite") (dir</>"customer/api.sock") (dir</>"admin/api.sock") "/usr/bin/false" (dir</>"helper.json") (amt 2) (amt 1000000000000) 100 300 600 1 (amt 1000) (amt 1000) False Nothing
+cfg dir = Config L2LSignetDevnet "unit-fixture" "http://127.0.0.1:29432" (dir</>"cookie") "fixture-wallet" 16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47" "https://api.devnet.solana.com" Nothing "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM" "RWjpjjkpABkEGomLbZYyN53pA3FVdPXp9izJ25wErGX" "11111111111111111111111111111111" (dir</>"private/ledger.sqlite") (dir</>"customer/api.sock") (dir</>"admin/api.sock") "/usr/bin/false" (dir</>"helper.json") (amt 2) (amt 1000000000000) 100 300 600 1 (amt 1000) (amt 1000) False Nothing (amt 2100000)
 req :: OrderRequest
 req=OrderRequest NativeToWrapped (amt 100000) "fixture-solana-recipient" "fixture-native-refund" Nothing "retry-key"
 withDir :: (FilePath -> IO a) -> IO a
@@ -493,6 +499,150 @@ main=hspec $ do
       available <$> readiness l `shouldReturn` False
       pendingAttempts l `shouldReturn` []
       prepareNativeWith call c l ob `shouldThrow` isError "payouts_paused"
+  describe "Solana preparation (SDK fixtures and RPC contract tests)" $ do
+    it "binds the helper protocol, message, memo, signature and custody account" $ do
+      (c,plan,reply)<-solanaFixture
+      let request=solanaPayoutRequest c plan
+      validateHelperReply c request reply `shouldSatisfy` either (const False) (const True)
+      forM_ [reply{replyProtocol=2},reply{replyMemo="wrong"},reply{replySignature=Nothing}
+        ,reply{replySource=replyDestination reply},reply{replyMessage="AAAA"}] $ \changed ->
+          validateHelperReply c request changed `shouldSatisfy` either (const True) (const False)
+      validateHelperReply c request{helperAmount=amt 2} reply `shouldSatisfy` either (const True) (const False)
+    it "simulates the exact SDK message without exposing its valid signature" $ do
+      (c,plan,reply)<-solanaFixture
+      calls<-newIORef []
+      let call method params=do
+            modifyIORef' calls (<>[method])
+            case (method,params) of
+              ("getFeeForMessage",[message,_])->message `shouldBe` toJSON (replyMessage reply)
+              ("simulateTransaction",[String encoded,options])->do
+                transaction<-either (fail . T.unpack) pure (decodeTransaction encoded)
+                case transaction of
+                  Transaction signatures _ body -> do
+                    signatures `shouldBe` [BS.replicate 64 0]
+                    TE.decodeUtf8 (B64.encode body) `shouldBe` replyMessage reply
+                fieldValue "sigVerify" options `shouldReturn` False
+                fieldValue "replaceRecentBlockhash" options `shouldReturn` False
+              _->pure ()
+            solanaContract c plan Null method params
+      signed<-prepareSolanaSigned call (const $ pure reply) c plan
+      signedSolanaFeeEstimate signed `shouldBe` amt 5000
+      signedSolanaRentEstimate signed `shouldBe` amt 1488440
+      readIORef calls >>= (`shouldSatisfy` notElem "sendTransaction")
+    it "charges no rent for an existing ATA and credits lamports pre-funded to a new ATA" $ do
+      (c,plan,reply)<-solanaFixture
+      let prepare destination=prepareSolanaSigned (solanaContract c plan destination) (const $ pure reply) c plan
+      existing<-prepare (tokenContract c (solPlanRecipient plan))
+      signedSolanaRentEstimate existing `shouldBe` amt 0
+      prefunded<-prepare (systemContract 100000)
+      signedSolanaRentEstimate prefunded `shouldBe` amt 1388440
+      full<-prepare (systemContract 2000000)
+      signedSolanaRentEstimate full `shouldBe` amt 0
+    it "refuses excess rent/fees, missing fee quotes and insufficient operating SOL" $ do
+      (c,plan,reply)<-solanaFixture
+      let prepare p transport=prepareSolanaSigned transport (const $ pure reply) c p
+          call=solanaContract c plan Null
+          missingFee method params=if method=="getFeeForMessage" then pure (contextContract Null) else call method params
+          noSol method params=if method=="getMultipleAccounts" then pure (contextContract $ toJSON [tokenContract c (custodyOwner c),Null,systemContract 1]) else call method params
+      prepare plan{solPlanRentLimit=amt 1} call `shouldThrow` isError "solana_rent_above_limit"
+      prepare plan{solPlanFeeLimit=amt 1} call `shouldThrow` isError "solana_fee_above_limit"
+      prepare plan missingFee `shouldThrow` isError "solana_fee_unavailable"
+      prepare plan noSol `shouldThrow` isError "insufficient_operating_sol"
+    it "refuses short-lived blockhashes, stale account context and failed simulation" $ do
+      (c,plan,reply)<-solanaFixture
+      let call=solanaContract c plan Null
+          prepare rpcCall=prepareSolanaSigned rpcCall (const $ pure reply) c plan
+          expired method params=if method=="getBlockHeight" then pure (toJSON (970::Int)) else call method params
+          stale method params=if method=="getMultipleAccounts" then pure (object ["context" .= object ["slot" .= (99::Int)],"value" .= Null]) else call method params
+          failed method params=if method=="simulateTransaction" then pure (contextContract $ object ["err" .= ("fixture-error"::Text)]) else call method params
+      prepare expired `shouldThrow` isError "solana_blockhash_window_too_short"
+      prepare stale `shouldThrow` isError "solana_context_too_old"
+      prepare failed `shouldThrow` isError "solana_simulation_failed"
+    it "reserves fee plus rent and saves the request before signing; retries reuse exact bytes" $ withSolanaLedger $ \l c plan reply -> do
+      (_,ob)<-fundSolanaOrder l c plan
+      calls<-newIORef []
+      let call method params=modifyIORef' calls (<>[method]) >> solanaContract c plan Null method params
+          helper request=do
+            preparations<-pendingPreparations l
+            map preparationFeeLimit preparations `shouldBe` [2110000]
+            map preparationDraft preparations `shouldBe` [Just $ TE.decodeUtf8 $ LBS.toStrict $ encode request]
+            pendingAttempts l `shouldReturn` []
+            -- The public deterministic codec key signs only this offline test.
+            codecReply c request reply
+      signature<-prepareSolanaWith call helper c l ob
+      initialCalls<-readIORef calls
+      pause l "fixture-restart"
+      prepareSolanaWith call helper c l ob `shouldReturn` signature
+      readIORef calls `shouldReturn` initialCalls
+      attempts<-pendingAttempts l
+      map attemptId attempts `shouldBe` [signature]
+      map attemptState attempts `shouldBe` ["signed"]
+      map attemptFeeLimit attempts `shouldBe` [2110000]
+      pendingPreparations l `shouldReturn` []
+      initialCalls `shouldSatisfy` notElem "sendTransaction"
+    it "retains the request and pauses after a lost helper response" $ withSolanaLedger $ \l c plan _ -> do
+      (_,ob)<-fundSolanaOrder l c plan
+      let helper _=reject "fixture_helper_reply_lost"
+      prepareSolanaWith (solanaContract c plan Null) helper c l ob `shouldThrow` isError "fixture_helper_reply_lost"
+      preparations<-pendingPreparations l
+      length preparations `shouldBe` 1
+      map preparationDraft preparations `shouldSatisfy` all (/=Nothing)
+      pendingAttempts l `shouldReturn` []
+      available <$> readiness l `shouldReturn` False
+      prepareSolanaWith (solanaContract c plan Null) helper c l ob `shouldThrow` isError "payouts_paused"
+    it "does not invoke the helper unless the full operating budget can be reserved" $ withFunded $ \l c -> do
+      (_,ob)<-fundOrder l c
+      (_,plan,_)<-solanaFixture
+      let helper _=expectationFailure "signer called without budget" >> reject "unexpected"
+      prepareSolanaWith (solanaContract c plan Null) helper c l ob `shouldThrow` isError "insufficient_fee_budget"
+      pendingPreparations l `shouldReturn` []
+      pendingAttempts l `shouldReturn` []
+  describe "token account policy (captured finalized Devnet accounts)" $ do
+    it "accepts the real eight-decimal custody balance" $ do
+      (c,account)<-capturedCustodyAccount
+      inspectTokenAccount (mint c) (custodyOwner c) account `shouldBe` Right (amt 100000000000)
+    it "rejects owner/mint changes, delegates, close authorities, frozen and extended accounts" $ do
+      (c,account)<-capturedCustodyAccount
+      let info=["data","parsed","info"]
+          mutations=[(["owner"],String "wrong"),(["executable"],Bool True),(["data","space"],Number 166)
+            ,(info<>["owner"],String "wrong"),(info<>["mint"],String "wrong")
+            ,(info<>["delegate"],toJSON $ custodyOwner c),(info<>["closeAuthority"],toJSON $ custodyOwner c)
+            ,(info<>["state"],String "frozen"),(info<>["isNative"],Bool True)
+            ,(info<>["tokenAmount","decimals"],Number 9)]
+      forM_ mutations $ \(path,value) ->
+        inspectTokenAccount (mint c) (custodyOwner c) (setPath path value account) `shouldBe` Left "token_account_policy_mismatch"
+  describe "Solana settlement evidence (captured finalized public Devnet payments)" $ do
+    forM_ ["existing","new"] $ \kind -> it ("validates exact bytes/units and actual costs for "<>kind<>" recipient ATA") $ do
+      (c,signed,proof,outcome)<-capturedSolanaPayment kind
+      verifySolanaOutcome c signed proof `shouldBe` Right outcome
+      outcomeSucceeded outcome `shouldBe` True
+      outcomeFee outcome `shouldBe` amt 5000
+      outcomeRent outcome `shouldBe` amt (if kind=="new" then 1488440 else 0)
+    it "rejects altered message/signature/slot/costs and missing token evidence" $ do
+      (c,signed,proof,_)<-capturedSolanaPayment "new"
+      let mutations=[(["slot"],Number 0),(["transaction","signatures"],toJSON ["wrong"::Text])
+            ,(["transaction","message","recentBlockhash"],String "wrong")
+            ,(["transaction","message","header","numRequiredSignatures"],Number 2)
+            ,(["meta","fee"],Number 4999),(["meta","preBalances"],toJSON ([]::[Int]))
+            ,(["meta","preTokenBalances"],toJSON ([]::[Value]))
+            ,(["meta","postTokenBalances"],toJSON ([]::[Value]))]
+      forM_ mutations $ \(path,value) -> verifySolanaOutcome c signed (setPath path value proof)
+        `shouldBe` Left "solana_settlement_evidence_mismatch"
+    it "rejects costs above the saved rent cap and a changed deployment" $ do
+      (c,signed,proof,_)<-capturedSolanaPayment "new"
+      let lowered=signed{signedSolanaPlan=(signedSolanaPlan signed){solPlanRentLimit=amt 1}}
+      verifySolanaOutcome c lowered proof `shouldBe` Left "solana_settlement_evidence_mismatch"
+      verifySolanaOutcome c{deploymentId="changed"} signed proof `shouldBe` Left "saved_solana_policy_mismatch"
+    it "uses saved ceilings to reconcile an existing payment after future limits are lowered" $ do
+      (c,signed,proof,outcome)<-capturedSolanaPayment "new"
+      verifySolanaOutcome c{maxSolFee=amt 1,maxSolAccountRent=amt 0} signed proof `shouldBe` Right outcome
+    it "rejects a changed token delta or historical owner and contradictory failure metadata" $ do
+      (c,signed,proof,_)<-capturedSolanaPayment "existing"
+      rows<-fieldValue "meta" proof >>= fieldValue "postTokenBalances" :: IO [Value]
+      let changed path value=setPath ["meta","postTokenBalances"] (toJSON $ map (setPath path value) rows) proof
+      forM_ [changed ["uiTokenAmount","amount"] (String "4"),changed ["owner"] (String "wrong")
+        ,setPath ["meta","err"] (String "fixture-failure") proof] $ \bad ->
+          verifySolanaOutcome c signed bad `shouldBe` Left "solana_settlement_evidence_mismatch"
   describe "public/private Unix socket boundary" $ do
     it "uses the shared Servant contract and separate admin socket" $ withDir $ \dir -> do
       let c=cfg dir
@@ -637,3 +787,90 @@ depositFixture=do
             ,"meta" .= object ["err" .= Null,"preTokenBalances" .= [tokenBalance sourceIndex "10",tokenBalance destIndex "0"],"postTokenBalances" .= [tokenBalance sourceIndex "7",tokenBalance destIndex "3"],"preBalances" .= replicate (length keys) (2039280::Int64),"postBalances" .= replicate (length keys) (2039280::Int64),"innerInstructions" .= ([]::[Value])]]
           binding=DepositBinding sig (expectedOwner expected) (expectedMint expected) (expectedDestination expected) (expectedRecipient expected) (expectedMemo expected)
       pure(binding,proof)
+
+-- Transport-only fixtures: no validator, network, or acceptance result is faked.
+solanaFixture :: IO (Config,SolanaPlan,HelperReply)
+solanaFixture=do
+  value<-BS.readFile "test/fixtures/signed-three-units.json" >>= either fail pure . eitherDecodeStrict'
+  reply<-fieldValue "reply" value
+  owner<-fieldValue "owner" value
+  target<-fieldValue "recipient" value
+  token<-fieldValue "mint" value
+  hash<-fieldValue "blockhash" value
+  let c=(cfg "/unused-codec-test"){deploymentId="codec-fixture",mint=token,custodyOwner=owner,custodyAta=replySource reply,maxSolFee=amt 10000}
+      plan=SolanaPlan (fingerprint c) target (amt 3) "order-1" (RecentBlockhash hash 1000 100) (maxSolFee c) (maxSolAccountRent c)
+  pure(c,plan,reply)
+
+contextContract :: Value -> Value
+contextContract value=object ["context" .= object ["slot" .= (100::Int)],"value" .= value]
+systemContract :: Integer -> Value
+systemContract lamports=object ["owner" .= ("11111111111111111111111111111111"::Text),"executable" .= False,"data" .= ["","base64"::Text],"lamports" .= lamports]
+tokenContract :: Config -> Text -> Value
+tokenContract c owner=object ["owner" .= tokenProgram,"executable" .= False,"data" .= object
+  ["space" .= (165::Int),"parsed" .= object ["type" .= ("account"::Text),"info" .= object
+    ["mint" .= mint c,"owner" .= owner,"state" .= ("initialized"::Text),"isNative" .= False
+    ,"tokenAmount" .= object ["amount" .= ("100000000000"::Text),"decimals" .= (8::Int)]]]]]
+solanaContract :: Config -> SolanaPlan -> Value -> SolanaRPC
+solanaContract c plan destination method _=case method of
+  "getLatestBlockhash" -> pure $ contextContract $ object ["blockhash" .= recentHash (solPlanRecent plan),"lastValidBlockHeight" .= (1000::Int)]
+  "getBlockHeight" -> pure (Number 900)
+  "getFeeForMessage" -> pure (contextContract $ Number 5000)
+  "getMultipleAccounts" -> pure $ contextContract $ toJSON [tokenContract c (custodyOwner c),destination,systemContract 10000000]
+  "getMinimumBalanceForRentExemption" -> pure (Number 1488440)
+  "simulateTransaction" -> pure $ contextContract $ object ["err" .= Null]
+  _ -> expectationFailure ("unexpected RPC in offline contract test: "<>T.unpack method) >> pure Null
+
+withSolanaLedger :: (Ledger -> Config -> SolanaPlan -> HelperReply -> IO a) -> IO a
+withSolanaLedger action=withDir $ \dir -> do
+  (old,plan,reply)<-solanaFixture
+  let c=old{dbPath=dir</>"private/ledger.sqlite"}
+  withLedger (dbPath c) (fingerprint c) $ \l -> do
+    fundAllocation l "fixture-tokens" Wrapped "float" (amt 10000)
+    fundAllocation l "fixture-operating" Sol "operating" (amt 3000000)
+    resumeAfterChecks l
+    action l c plan reply
+fundSolanaOrder :: Ledger -> Config -> SolanaPlan -> IO (OrderView,Obligation)
+fundSolanaOrder l c plan=do
+  o<-createOrder l c 100 cap req{input=amt 4,recipient=solPlanRecipient plan}
+  bindInstruction l (orderId o) "fixture-address"
+  observeDeposit l (Deposit "fixture-four-units:0" (Just $ orderId o) Native (amt 4) "fixture-anchor" 1 True 100) "cursor"
+  promoteDeposit l 110 "fixture-four-units:0" `shouldReturn` True
+  obligations<-readyObligations l
+  case obligations of [ob]->pure(o,ob); _->fail "expected one three-unit obligation"
+
+-- Adapt only the terminal memo in the official SDK fixture. This known public
+-- key is strictly for offline tests and must never be funded on any network.
+codecReply :: Config -> HelperRequest -> HelperReply -> IO HelperReply
+codecReply c request old=do
+  body<-either fail pure (B64.decode $ TE.encodeUtf8 $ replyMessage old)
+  let memo=helperMemo c request
+      memoBytes=TE.encodeUtf8 memo
+      oldMemo=TE.encodeUtf8 (replyMemo old)
+  BS.length memoBytes `shouldSatisfy` (<128)
+  BS.drop (BS.length body-BS.length oldMemo) body `shouldBe` oldMemo
+  key<-case Ed.secretKey (BS.replicate 32 1) of CryptoPassed k->pure k; CryptoFailed _->fail "invalid test key"
+  let message=BS.take (BS.length body-BS.length oldMemo-1) body<>BS.singleton (fromIntegral $ BS.length memoBytes)<>memoBytes
+      signature=BA.convert (Ed.sign key (Ed.toPublic key) message)::BS.ByteString
+  pure old{replyMemo=memo,replyMessage=TE.decodeUtf8 $ B64.encode message
+    ,replySignature=Just $ base58 signature,replyTransaction=TE.decodeUtf8 $ B64.encode (BS.singleton 1<>signature<>message)}
+
+capturedCustodyAccount :: IO (Config,Value)
+capturedCustodyAccount=do
+  captured<-BS.readFile "test/fixtures/solana-devnet-accounts.json" >>= either fail pure . eitherDecodeStrict'
+  accounts<-fieldValue "accounts" captured >>= fieldValue "value" :: IO [Value]
+  account<-case accounts of _:a:_->pure a; _->fail "missing captured custody"
+  pure(cfg "/unused-real-account-parser-test",account)
+setPath :: [Key] -> Value -> Value -> Value
+setPath [] replacement _=replacement
+setPath (key:rest) replacement (Object fields)=Object $ KM.insert key (setPath rest replacement $ maybe Null id $ KM.lookup key fields) fields
+setPath _ _ _=error "missing test fixture field"
+
+capturedSolanaPayment :: String -> IO (Config,SolanaSigned,Value,SolanaOutcome)
+capturedSolanaPayment kind=do
+  fixtureValue<-BS.readFile ("test/fixtures/solana-devnet-"<>kind<>"-payment.json") >>= either fail pure . eitherDecodeStrict'
+  signed<-fieldValue "signed" fixtureValue
+  proof<-fieldValue "transaction" fixtureValue
+  outcome<-fieldValue "outcome" fixtureValue
+  let c=(cfg "/unused-real-payment-parser-test"){deploymentId="l2l-devnet-local",nativeWallet="ecx-bridge-test"
+        ,custodyAta="CKXz4AWgfRjw5YK17P64TgXuaci2QKAD7J1vZ9X2mNvT",maxSolFee=amt 10000}
+  pure(c,signed,proof,outcome)

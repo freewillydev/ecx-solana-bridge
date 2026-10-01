@@ -24,6 +24,7 @@
   "nativeConfirmations": 1,
   "maxNativeFee": "1000",
   "maxSolFee": "10000",
+  "maxSolAccountRent": "2100000",
   "backupRequired": false,
   "solanaHistoryStart": null
 }

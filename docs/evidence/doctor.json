@@ -11,22 +11,22 @@
   "native": {
     "evidence": {
       "automatic_pruning": true,
-      "bestblockhash": "0000029162f9e1ef3cace96a490a929f2b22ef8e065b3c34a276d14360575b95",
+      "bestblockhash": "000000933ec3825adaf4d53bd699f639b3e53d32a2c5b3b72fa81c88f7dc8df5",
       "bits": "1e0375f4",
-      "blocks": 16379,
+      "blocks": 16389,
       "chain": "signet",
-      "chainwork": "000000000000000000000000000000000000000000000000000000127827aefc",
+      "chainwork": "000000000000000000000000000000000000000000000000000000127b0b6816",
       "difficulty": 0.001128710665376272,
-      "headers": 16379,
+      "headers": 16389,
       "initialblockdownload": false,
-      "mediantime": 1790812201,
+      "mediantime": 1790818201,
       "prune_target_size": 1048576000,
       "pruned": true,
       "pruneheight": 0,
       "signet_challenge": "00148835832e28c816b7acd8fdb19772ab2199603a56",
-      "size_on_disk": 95387378,
+      "size_on_disk": 95659016,
       "target": "00000375f4000000000000000000000000000000000000000000000000000000",
-      "time": 1790815201,
+      "time": 1790821202,
       "verificationprogress": 1,
       "warnings": []
     },
@@ -34,7 +34,13 @@
   },
   "profile": "L2LSignetDevnet",
   "solana": {
-    "error": "mint_not_found",
-    "ok": false
+    "evidence": {
+      "decimals": 8,
+      "freezeAuthority": null,
+      "isInitialized": true,
+      "mintAuthority": "3psSKHRPopKXPcBajcm2crjoKzrUtWyfsqeprTRMxAqZ",
+      "supply": "200000000000"
+    },
+    "ok": true
   }
 }

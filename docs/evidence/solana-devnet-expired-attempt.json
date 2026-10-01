@@ -1,0 +1,84 @@
+{
+  "scope": "Standalone public-Devnet probe; primary RPC trust, not canonical independent-provider acceptance",
+  "recordedAt": "2026-10-01T02:20:14.984041+00:00",
+  "expiredSignature": "33TjgG6FHdTqQ1xSd3kRVx21jZTz7132bEXLemziJ739yTEFbyNHdinx28dUezeAVEt5ykajCDfrGuke2WE1TotE",
+  "originalAttempt": {
+    "state": "possibly_broadcast",
+    "label": "devnet-three-existing",
+    "signed": {
+      "signedSolanaFeeEstimate": "5000",
+      "signedSolanaPlan": {
+        "solPlanAmount": "3",
+        "solPlanFeeLimit": "10000",
+        "solPlanFingerprint": "027929d80f528c8da4766560c2597c3971960bd47b4fc7c9f7648c0eba5996f8",
+        "solPlanRecent": {
+          "recentHash": "GwuHvYVCESXBB71ohBQ3J1j4deKwrdDGtuywrgsmE6zo",
+          "recentLastValidHeight": 493363839,
+          "recentSlot": 506115660
+        },
+        "solPlanRecipient": "HcctYHWCfLGrE5WigGKHg5hR6Q1P1Gntb5PYQWSQFHXg",
+        "solPlanReference": "devnet-three-existing",
+        "solPlanRentLimit": "2100000"
+      },
+      "signedSolanaRentEstimate": "0",
+      "signedSolanaReply": {
+        "destination_ata": "GQnRnfs2B9j6pymrbY4KmX9WnAQ6czPAdt2u6XpWZSjQ",
+        "memo": "ecx-bridge:v1:l2l-devnet-local:payout:devnet-three-existing",
+        "message": "AQAGCQZHkI0Yp9a4Fxm0sDtgFlE9tssAyZf6KSP8uHn6v4cQqDALTFZQwxjm9R61ZGSFgTK5Y6Bi7dMHxpRj8v78H8Dk9wcDTV28eRiIgCLPE2GhnC7rLS8h1GZclvhJ9X1kTwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABUpTWpkpIQZNJOhxYNo4fHw1td28kruB5B+oQEEFRI0G3fbh12Whk9nL4UbO63msHLSF7V9bN5E6jPWFfv8AqYyXJY9OJInxuz0QKRSODYMLWhOZ2v8QhASOe9jb6fhZ9trmBWpLKz12MDQs/9iRYf4N7Hz/ajlt4EnQzLL+4jP6LXNSmmEd1E/63cWrjOnhST/W9NaI3/L3OkJ9cO6pgOzvy0lWQPql4HxordjJTnep36/HNoMMD+qcft9Qa48UAwYGAAIHCAMFAQEFBAEIAgAKDAMAAAAAAAAACAQBADtlY3gtYnJpZGdlOnYxOmwybC1kZXZuZXQtbG9jYWw6cGF5b3V0OmRldm5ldC10aHJlZS1leGlzdGluZw==",
+        "protocol": 1,
+        "signature": "33TjgG6FHdTqQ1xSd3kRVx21jZTz7132bEXLemziJ739yTEFbyNHdinx28dUezeAVEt5ykajCDfrGuke2WE1TotE",
+        "source_ata": "CKXz4AWgfRjw5YK17P64TgXuaci2QKAD7J1vZ9X2mNvT",
+        "transaction": "AWYn/yi4YtgkCeFPQTzONmpw/9ybYvNT1bPcG1Vkvy85m/FK1eX486CUovErEV62grJWf7vdrNLLMOCDWEdlRAMBAAYJBkeQjRin1rgXGbSwO2AWUT22ywDJl/opI/y4efq/hxCoMAtMVlDDGOb1HrVkZIWBMrljoGLt0wfGlGPy/vwfwOT3BwNNXbx5GIiAIs8TYaGcLustLyHUZlyW+En1fWRPAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFSlNamSkhBk0k6HFg2jh8fDW13bySu4HkH6hAQQVEjQbd9uHXZaGT2cvhRs7reawctIXtX1s3kTqM9YV+/wCpjJclj04kifG7PRApFI4NgwtaE5na/xCEBI572Nvp+Fn22uYFaksrPXYwNCz/2JFh/g3sfP9qOW3gSdDMsv7iM/otc1KaYR3UT/rdxauM6eFJP9b01ojf8vc6Qn1w7qmA7O/LSVZA+qXgfGit2MlOd6nfr8c2gwwP6px+31BrjxQDBgYAAgcIAwUBAQUEAQgCAAoMAwAAAAAAAAAIBAEAO2VjeC1icmlkZ2U6djE6bDJsLWRldm5ldC1sb2NhbDpwYXlvdXQ6ZGV2bmV0LXRocmVlLWV4aXN0aW5n"
+      }
+    }
+  },
+  "finalizedEpochContext": {
+    "absoluteSlot": 506116632,
+    "blockHeight": 493364661,
+    "epoch": 1171,
+    "slotIndex": 244632,
+    "slotsInEpoch": 432000,
+    "transactionCount": 19565149871
+  },
+  "invalidBlockhash": {
+    "context": {
+      "apiVersion": "4.3.0",
+      "slot": 506116639
+    },
+    "value": false
+  },
+  "status": {
+    "context": {
+      "apiVersion": "4.3.0",
+      "slot": 506116639
+    },
+    "value": [
+      null
+    ]
+  },
+  "transaction": null,
+  "custodyHistoryThroughSetupAnchor": [
+    {
+      "blockTime": 1790820514,
+      "confirmationStatus": "finalized",
+      "err": null,
+      "memo": null,
+      "signature": "2NnCvanH599gGB7kGPJiy12LyYAjV3UYijAGoJFsQowUYZ6SZaRG6Qa8J1QXy5pdeRyX5JaXgxUDJTurupuRdkWA",
+      "slot": 506113645,
+      "transactionIndex": 6
+    }
+  ],
+  "ownerHistoryThroughSetupAnchor": [
+    {
+      "blockTime": 1790820514,
+      "confirmationStatus": "finalized",
+      "err": null,
+      "memo": null,
+      "signature": "2NnCvanH599gGB7kGPJiy12LyYAjV3UYijAGoJFsQowUYZ6SZaRG6Qa8J1QXy5pdeRyX5JaXgxUDJTurupuRdkWA",
+      "slot": 506113645,
+      "transactionIndex": 6
+    }
+  ],
+  "setupAnchor": "2NnCvanH599gGB7kGPJiy12LyYAjV3UYijAGoJFsQowUYZ6SZaRG6Qa8J1QXy5pdeRyX5JaXgxUDJTurupuRdkWA",
+  "replacementDecision": "Original bytes are expired and absent from finalized history through the exact setup anchor. Retain this record before creating one replacement for the same three-unit probe."
+}

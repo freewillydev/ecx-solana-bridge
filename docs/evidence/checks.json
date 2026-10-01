@@ -1,8 +1,8 @@
 {
-  "recordedUtc": "2026-10-01T01:52:44.226239+00:00",
+  "recordedUtc": "2026-10-01T02:31:39.880291+00:00",
   "platform": "macOS arm64",
   "haskell": {
-    "examples": 58,
+    "examples": 74,
     "propertyCases": 100,
     "failures": 0,
     "sqliteVersion": "3.53.4",
@@ -43,5 +43,22 @@
     "signedRpcContractTest": true,
     "signedLiveLedgerTest": false,
     "automaticWorkerEnabled": false
+  },
+  "solanaPreparation": {
+    "durableRequestAndFeeRentHold": true,
+    "unsignedSimulation": true,
+    "exactRecordedAttemptReuse": true,
+    "realExistingAta": "solana-devnet-existing-payment.json",
+    "realNewAta": "solana-devnet-new-payment.json",
+    "expiredStandaloneAttempt": "solana-devnet-expired-attempt.json",
+    "automaticWorkerEnabled": false
+  },
+  "solanaObserver": {
+    "setup": "devnet-setup.json",
+    "realScan": "solana-observer-first-scan.json",
+    "replay": "solana-observer-replay.json",
+    "duplicatePostings": false,
+    "realOrderBoundDepositVerified": false,
+    "treasuryAllocated": false
   }
 }

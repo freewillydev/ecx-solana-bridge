@@ -2,7 +2,7 @@
 
 A small inventory bridge: one Haskell/Servant application, two chain adapters, one SQLite ledger, and a thin browser interface. A separate Rust executable uses official Solana SDK and SPL interface crates to construct and sign a fixed transaction format. No custom blockchain or token program.
 
-**Development checkpoint — the bridge is not operational.** The code compiles and the financial-state tests pass. The real L2L Signet node, native PSBT payment, native observer/replay, and unsigned payout validation have been exercised. Both observers run in the worker; the Solana observer still needs funded Devnet acceptance. Native payment preparation is integrated with the ledger and contract-tested, but the automatic settlement loop, full reconciliation, Linux deployment, browser-wallet acceptance, and recovery remain unfinished. Customer intake and signing routes are disabled in code. See [STATUS.md](docs/STATUS.md) for the evidence and outstanding work.
+**Development checkpoint — the bridge is not operational.** The code compiles and the financial-state tests pass. The real L2L Signet node, native PSBT payment, native observer/replay, and unsigned payout validation have been exercised. Both observers have scanned real public-chain history. Native and Solana payment preparation are integrated with the ledger and contract-tested; two three-unit Devnet payout probes finalized, including new recipient-account creation. The automatic settlement loop, full reconciliation, Linux deployment, browser-wallet acceptance, and recovery remain unfinished. Customer intake and signing routes are disabled in code. See [STATUS.md](docs/STATUS.md) for the evidence and outstanding work.
 
 ## Components
 
@@ -13,7 +13,7 @@ A small inventory bridge: one Haskell/Servant application, two chain adapters, o
 | `Bridge.Ledger` | Quotes, inventory reservations, protected principal, obligations, exact signed attempts, fee accounting, backup coverage, audit records. |
 | `Bridge.Native` / `Bridge.Solana` | Real node/RPC identity checks and bounded calls. Adapter integration is incomplete. |
 | `Bridge.Observer` | Native wallet history and paginated finalized Solana custody history; atomic evidence/cursors, quarantined unknown activity, independent-provider deposit checks. |
-| `Bridge.NativePayment` / `Bridge.Payment` | Verify funded and signed native transactions against saved policy; reserve fees before funding, persist the unsigned draft before signing and exact bytes afterward. Not enabled in the worker loop. |
+| `Bridge.NativePayment` / `Bridge.SolanaPayment` / `Bridge.Payment` | Validate outgoing transactions, reserve operating costs, save exact preparation requests/drafts before signing and signed bytes afterward. Solana simulations use unsigned copies. Not enabled in the worker loop. |
 | `ecx-solana-helper` | Fixed mint/custody configuration; exact integer amounts; checked transfer, signed memo, recipient ATA creation. No RPC client. |
 | `web/` | Wallet Standard discovery, immutable order requests, recovery links, status display. No frontend framework or Node server. |
 
@@ -57,7 +57,9 @@ Build the browser assets first. Open `http://127.0.0.1:8096`. Administrator rout
 - Live native observer recorded the faucet receipt and quarantined the standalone payment. A repeated scan changed no deposits, postings or obligations: [replay evidence](docs/evidence/native-observer-replay.json).
 - Live unsigned PSBT preparation passed the new recipient/change/input/fee validator with a 141-unit fee. It did not sign or broadcast, and released its selected input lock: [evidence](docs/evidence/native-unsigned-probe.json).
 - Exact three-base-unit unsigned/signed Solana fixtures are checked against an independent Haskell decoder and Ed25519 verification. These are codec tests, **not Devnet transaction evidence**.
-- Devnet setup is prepared in `solana-helper/examples/setup_devnet.rs`. Actual mint creation and transfers are pending test SOL. This example is an operator tool, not part of the custody executable.
+- The real eight-decimal Devnet test mint was created by `solana-helper/examples/setup_devnet.rs`: [setup evidence](docs/evidence/devnet-setup.json). Mint authority remains separate from custody.
+- Real three-unit Devnet transfers finalized to an [existing account](https://explorer.solana.com/tx/2GobRapeVX92w9QKpyomVvTLswXGjvkxdbvu9Azk5CCXPbujUfEshdVEccq9QGFkboaqAS1VcgiDWvB7giC9tCG3?cluster=devnet) and a [new recipient account](https://explorer.solana.com/tx/4kjhetrGow3ty6446oBCzSstVUtp6GGPyWeJcB63sZyKNK8eoosHvEwww6h6cQ9dpLZXK2tf5aBJHC8FrPVZE8aD?cluster=devnet). Haskell checks matched the recorded bytes, amounts, fees and rent. The first expired attempt and the history decision preceding its replacement are retained in [evidence](docs/evidence/solana-devnet-expired-attempt.json). These are standalone adapter probes, not bridge orders.
+- The Solana observer scanned the actual setup and payouts; replay created no duplicate entries: [evidence](docs/evidence/solana-observer-replay.json).
 
 The native smoke script is restricted to the real L2L Signet and two dedicated test wallets. It persists exact signed bytes before sending. It is an integration probe, not a ledger-driven bridge.
 

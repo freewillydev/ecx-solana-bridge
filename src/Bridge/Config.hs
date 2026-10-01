@@ -27,6 +27,7 @@ data Config = Config
   , quoteSeconds :: !Int64, confirmationGraceSeconds :: !Int64
   , nativeConfirmations :: !Int, maxNativeFee :: !Amount, maxSolFee :: !Amount
   , backupRequired :: !Bool, solanaHistoryStart :: !(Maybe Text)
+  , maxSolAccountRent :: !Amount
   } deriving (Eq, Show, Generic, ToJSON)
 instance FromJSON Config where parseJSON = genericParseJSON defaultOptions { rejectUnknownFields = True }
 
@@ -59,6 +60,7 @@ validateConfig c = do
   require (units (minInput c) > 0 && minInput c <= maxInput c && units (maxInput c) <= 1000000000000000) "invalid_limits"
   require (maxQueued c > 0 && maxQueued c <= 1000 && quoteSeconds c > 0 && quoteSeconds c <= 3600 && confirmationGraceSeconds c >= 0 && confirmationGraceSeconds c <= 86400 && nativeConfirmations c > 0) "invalid_policy"
   require (units (maxNativeFee c) > 0 && units (maxSolFee c) > 0) "invalid_fee_budget"
+  _ <- either reject pure (amount $ toInteger (units $ maxSolFee c)+toInteger (units $ maxSolAccountRent c))
   require (T.length (nativeCheckpointHash c) == 64 && T.all (\x -> x `elem` ("0123456789abcdef"::String)) (nativeCheckpointHash c) && nativeCheckpointHeight c > 0) "checkpoint_required"
   nr <- parseRequest (nativeRpc c)
   require (host nr `elem` ["127.0.0.1","localhost","::1"]) "native_rpc_must_be_loopback"
