@@ -2,7 +2,7 @@
 
 A small inventory bridge: one Haskell/Servant application, two chain adapters, one SQLite ledger, and a thin browser interface. A separate Rust executable uses official Solana SDK and SPL interface crates to construct and sign a fixed transaction format. No custom blockchain or token program.
 
-**Local public-test build — L2L Signet / Solana Devnet.** The explicit `test-worker` command connects the customer API to the existing order, ledger and payment engine. The browser provides deposit instructions, Wallet Standard signing, saved orders, status updates and transaction links. Both real-chain directions have completed through the customer HTTP API and running worker; a clean launcher restart preserved the ledger and completed order views. The application builds and 367 Haskell examples pass. Browser-wallet acceptance, complete recovery, Linux installation and independent review remain outstanding. Canonical intake stays disabled. See [STATUS.md](docs/STATUS.md) for evidence and remaining work.
+**Local public-test build — L2L Signet / Solana Devnet.** The explicit `test-worker` command connects the customer API to the existing order, ledger and payment engine. The browser provides deposit instructions, Wallet Standard signing, saved orders, status updates and transaction links. Both real-chain directions have completed through the customer HTTP API and running worker; a clean launcher restart preserved the ledger and completed order views. The application builds and 367 Haskell examples pass. Browser-wallet acceptance, complete recovery and independent review remain outstanding. Ubuntu ARM64 installation is verified in a local VM. Canonical intake stays disabled. See [STATUS.md](docs/STATUS.md) for evidence and remaining work.
 
 ## Components
 
@@ -30,7 +30,7 @@ Native signing belongs to the official daemon wallet. Solana mint authority and 
 
 ## Build and verify
 
-Tested locally with GHC 9.14.1, Cabal 3.16.1.0, Rust 1.97.1, SQLite 3.53.4 and Node 25.4.0 on macOS arm64. Ubuntu 24.04 is the intended server target and has **not** yet passed the build/service gate. All three dependency graphs are locked; [the manifest](docs/dependencies.json) records versions, package licenses and available source checksums.
+Tested with GHC 9.14.1, Cabal 3.16.1.0, Rust 1.97.1, SQLite 3.53.4 and Node 25.4.0 on macOS arm64 and Ubuntu 24.04 ARM64. The Linux package also passes installation on a separate clean Ubuntu VM without build tools. All three dependency graphs are locked; [the manifest](docs/dependencies.json) records versions, package licenses and available source checksums.
 
 From this directory, with those tools installed:
 
@@ -64,7 +64,13 @@ Build the browser assets first. Open `http://127.0.0.1:61734`; Ctrl-C stops both
 
 Native → wrapped orders display an exact Signet deposit address and amount. Wrapped → native orders bind the connected Devnet wallet and request its signature on the validated deposit transaction. Orders and private recovery links survive a page reload. If admission is temporarily unavailable, retry the saved request; it keeps the same idempotency key.
 
-Administrator routes are unavailable through the public proxy. Different Unix users and Linux sandbox enforcement still need testing on the server. This command starts a configured local build; the clean-server installer remains a separate delivery gate.
+Administrator routes are unavailable through the public proxy. Separate Unix users, private-file restrictions and the helper sandbox are verified on Ubuntu ARM64. The command above starts a configured local build; use the installer below for a server.
+
+## Install on Ubuntu 24.04
+
+From a reviewed checkout, run `./scripts/install --with-signet` as a sudo-enabled normal user. This builds, tests and installs the software plus a dedicated real L2L Signet node. Supply `--config-dir /absolute/private/setup` to configure the bridge; wallet identities and funding are not invented by the installer.
+
+The build also produces a compiled one-command `.run` installer requiring no Haskell/Rust/Node installation on the target. Default worker mode observes with intake paused; `--test-worker` explicitly enables the existing public-test payment mode only after supplying its signer and funding. See [installation instructions](docs/INSTALL.md) and [Ubuntu acceptance evidence](docs/evidence/linux-installer.json). Release publication, full restore and independent review remain separate requirements.
 
 For local operator fee top-ups, use the documented private [funding procedure](docs/LOCAL-DEVELOPMENT.md#operator-fee-funding-for-local-tests). It allocates an already observed Devnet SOL receipt; it cannot credit invented funds or customer principal.
 
@@ -100,6 +106,6 @@ The native smoke script is restricted to the real L2L Signet and two dedicated t
 
 ## Design and next work
 
-[Contracts and accounting](docs/CONTRACTS.md), [implementation status](docs/STATUS.md), and [local operation](docs/LOCAL-DEVELOPMENT.md) distinguish implemented behavior from planned behavior. Candidate service files are in `deploy/`; they are not a tested distribution. There is no published installer or release URL yet.
+[Contracts and accounting](docs/CONTRACTS.md), [implementation status](docs/STATUS.md), and [local operation](docs/LOCAL-DEVELOPMENT.md) distinguish implemented behavior from planned behavior. Service files and the installer are in `deploy/`; Ubuntu ARM64 installation is tested locally. There is no published installer or release URL yet.
 
 MIT license for this repository. Dependency licenses remain their respective owners' licenses. License metadata is inventoried; release notice assembly and independent dependency/security review are still pending.

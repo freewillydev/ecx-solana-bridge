@@ -1,0 +1,30 @@
+[Unit]
+Description=ECX bridge dedicated public L2L Signet node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ecx-node
+Group=ecx-node
+UMask=0027
+RuntimeDirectory=ecx-node
+RuntimeDirectoryMode=0750
+ExecStart=/opt/ecx-bridge/current/bin/bitcoind -datadir=/var/lib/ecx-node -conf=/etc/ecx-node.conf -printtoconsole=1
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=120
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/ecx-node
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+MemoryMax=1G
+
+[Install]
+WantedBy=multi-user.target

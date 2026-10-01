@@ -9,3 +9,5 @@ web/dist/
 config/local.json
 run/
 .DS_Store
+.release-build/
+__pycache__/

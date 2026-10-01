@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Build a Linux release as an unprivileged user, using pinned upstream tools."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import shutil
+import subprocess
+import tarfile
+
+root = Path(__file__).resolve().parents[1]
+arch = platform.machine()
+if platform.system() != "Linux" or arch not in ("aarch64", "x86_64"):
+    raise SystemExit("Ubuntu Linux required")
+if os.geteuid() == 0:
+    raise SystemExit("Build as an unprivileged user")
+cache = Path(os.environ.get("ECX_BUILD_DIR", root / ".release-build")).resolve()
+cache.mkdir(parents=True, exist_ok=True)
+pins = json.loads((root / "deploy/toolchains.json").read_text())
+tools = cache / "tools"
+tools.mkdir(exist_ok=True)
+
+
+def run(*args, cwd=root, **kw):
+    subprocess.run(args, cwd=cwd, check=True, **kw)
+
+
+def fetch(name):
+    url, expected = pins["sqlite"] if name == "sqlite" else pins[arch][name]
+    archive = cache / url.rsplit("/", 1)[1]
+    if not archive.exists():
+        temp = archive.with_suffix(".download")
+        run("curl", "--fail", "--location", "--proto", "=https", "--retry", "3", "--output", str(temp), url)
+        temp.rename(archive)
+    digest = hashlib.sha3_256 if name == "sqlite" else hashlib.sha256
+    with archive.open("rb") as f:
+        if hashlib.file_digest(f, digest).hexdigest() != expected:
+            raise ValueError(f"Checksum mismatch: {name}")
+    target = cache / (name + "-source")
+    if not (target / ".extracted").exists():
+        if target.exists():
+            shutil.rmtree(target)
+        target.mkdir()
+        with tarfile.open(archive) as t:
+            t.extractall(target, filter="data")
+        (target / ".extracted").touch()
+    dirs = [p for p in target.iterdir() if p.is_dir()]
+    return dirs[0] if len(dirs) == 1 else target
+
+
+if not (tools / "bin/ghc").exists():
+    source = fetch("ghc")
+    run("./configure", f"--prefix={tools}", cwd=source)
+    run("make", "install", cwd=source)
+if not (tools / "bin/cabal").exists():
+    shutil.copy2(fetch("cabal") / "cabal", tools / "bin/cabal")
+if not (tools / "bin/rustc").exists():
+    run("./install.sh", f"--prefix={tools}", "--components=rustc,cargo,rust-std-" + ("aarch64" if arch == "aarch64" else "x86_64") + "-unknown-linux-gnu,rustfmt-preview", "--disable-ldconfig", cwd=fetch("rust"))
+node = fetch("node")
+os.environ["PATH"] = f"{tools}/bin:{node}/bin:" + os.environ["PATH"]
+os.environ["CARGO_HOME"] = str(cache / "cargo")
+os.environ["CARGO_TARGET_DIR"] = str(cache / "cargo-target")
+os.environ["CABAL_DIR"] = str(cache / "cabal")
+os.environ["CARGO_BUILD_JOBS"] = "2"
+sqlite = cache / "sqlite"
+if not (sqlite / "bin/sqlite3").exists():
+    source = fetch("sqlite")
+    run("./configure", f"--prefix={sqlite}", "--disable-readline", cwd=source)
+    run("make", "-j2", cwd=source)
+    run("make", "install", cwd=source)
+os.environ["PATH"] = f"{sqlite}/bin:" + os.environ["PATH"]
+os.environ["LD_LIBRARY_PATH"] = str(sqlite / "lib")
+os.environ["PKG_CONFIG_PATH"] = str(sqlite / "lib/pkgconfig")
+os.environ["LIBRARY_PATH"] = str(sqlite / "lib")
+os.environ["C_INCLUDE_PATH"] = str(sqlite / "include")
+run("cabal", "update")
+build_args = [f"--builddir={cache}/dist", f"--extra-lib-dirs={sqlite}/lib", f"--extra-include-dirs={sqlite}/include", "-j2"]
+run("cabal", "build", "all", *build_args)
+run("cabal", "test", "all", "--test-show-details=direct", *build_args)
+run("cargo", "test", "--locked", "--manifest-path", "solana-helper/Cargo.toml", "--all-targets")
+run("cargo", "build", "--locked", "--release", "--manifest-path", "solana-helper/Cargo.toml")
+run("npm", "ci", "--prefix", "web", "--ignore-scripts")
+run("npm", "run", "check", "--prefix", "web")
+run("npm", "run", "build", "--prefix", "web")
+run("python3", "test/installer_test.py")
+binary = subprocess.check_output(["cabal", "list-bin", "exe:ecx-bridge", f"--builddir={cache}/dist"], cwd=root, text=True).strip()
+bundle = cache / "bundle"
+if bundle.exists():
+    shutil.rmtree(bundle)
+for directory in ("bin", "lib", "web/dist", "deploy", "config"):
+    (bundle / directory).mkdir(parents=True, exist_ok=True)
+shutil.copy2(binary, bundle / "bin/ecx-bridge")
+shutil.copy2(cache / "cargo-target/release/ecx-solana-helper", bundle / "bin/ecx-solana-helper")
+shutil.copy2((sqlite / "lib/libsqlite3.so").resolve(), bundle / "lib/libsqlite3.so.0")
+shutil.copy2(sqlite / "bin/sqlite3", bundle / "bin/sqlite3")
+for name in ("bitcoind", "bitcoin-cli"):
+    shutil.copy2(fetch("bitcoin") / "bin" / name, bundle / "bin" / name)
+for path in (root / "web").iterdir():
+    if path.suffix in (".html", ".css"):
+        shutil.copy2(path, bundle / "web" / path.name)
+shutil.copytree(root / "web/dist", bundle / "web/dist", dirs_exist_ok=True)
+shutil.copytree(root / "deploy", bundle / "deploy", ignore=shutil.ignore_patterns("__pycache__"), dirs_exist_ok=True)
+shutil.copy2(root / "config/l2l-devnet.example.json", bundle / "config/l2l-devnet.example.json")
+shutil.copy2(root / "LICENSE", bundle / "LICENSE")
+shutil.copy2(root / "docs/dependencies.json", bundle / "dependencies.json")
+# Relative RUNPATH makes the supplied SQLite authoritative without global linker changes.
+for name in ("ecx-bridge", "sqlite3"):
+    run("patchelf", "--set-rpath", "$ORIGIN/../lib", str(bundle / "bin" / name))
+    run("patchelf", "--replace-needed", "libsqlite3.so", "libsqlite3.so.0", str(bundle / "bin" / name))
+run("patchelf", "--set-soname", "libsqlite3.so.0", str(bundle / "lib/libsqlite3.so.0"))
+clean_env = dict(os.environ)
+clean_env.pop("LD_LIBRARY_PATH", None)
+run(str(bundle / "bin/ecx-bridge"), "version", env=clean_env)
+run(str(bundle / "bin/sqlite3"), ":memory:", "SELECT sqlite_version();", env=clean_env)
+files = {str(p.relative_to(bundle)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(bundle.rglob("*")) if p.is_file()}
+(bundle / "manifest.json").write_text(json.dumps({"format": 1, "os": "ubuntu-24.04", "arch": arch, "files": files}, indent=2) + "\n")
+print(f"Release built and tested: {bundle}")
+# A self-contained installer carries the compiled release; target hosts need no compiler.
+archive = cache / "release.tar.gz"
+with tarfile.open(archive, "w:gz") as t:
+    t.add(bundle, arcname="release")
+archive_hash = hashlib.sha256(archive.read_bytes()).hexdigest()
+header = '''#!/bin/sh
+set -eu
+[ "$(uname -s)" = Linux ] || { echo 'Ubuntu 24.04 required' >&2; exit 1; }
+. /etc/os-release
+[ "$ID:$VERSION_ID" = ubuntu:24.04 ] || { echo 'Ubuntu 24.04 required' >&2; exit 1; }
+[ "$(uname -m)" = "@ARCH@" ] || { echo 'Wrong CPU architecture' >&2; exit 1; }
+task_dir=$(mktemp -d)
+trap 'rm -rf "$task_dir"' EXIT HUP INT TERM
+tail -n +@LINE@ "$0" > "$task_dir/release.tar.gz"
+printf '%s  %s\n' '@HASH@' "$task_dir/release.tar.gz" | sha256sum -c -
+tar -xzf "$task_dir/release.tar.gz" -C "$task_dir"
+sudo apt-get update
+sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends python3 bubblewrap apparmor ca-certificates libgmp10 libnuma1 libffi8 libtinfo6 zlib1g
+sudo python3 "$task_dir/release/deploy/install.py" "$task_dir/release" "$@"
+exit 0
+'''
+header = header.replace("@LINE@", str(header.count("\n") + 1)).replace("@HASH@", archive_hash).replace("@ARCH@", arch)
+release = cache / f"ecx-bridge-ubuntu-24.04-{arch}.run"
+with release.open("wb") as f:
+    f.write(header.encode())
+    with archive.open("rb") as src:
+        shutil.copyfileobj(src, f)
+release.chmod(0o755)
+release.with_suffix(".run.sha256").write_text(hashlib.sha256(release.read_bytes()).hexdigest() + "  " + release.name + "\n")
+print(f"One-command installer: {release}")

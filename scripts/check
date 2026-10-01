@@ -26,3 +26,4 @@ npm ci --prefix web --ignore-scripts
 npm run check --prefix web
 npm run build --prefix web
 npm audit --prefix web
+python3 test/installer_test.py

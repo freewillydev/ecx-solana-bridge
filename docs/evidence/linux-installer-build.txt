@@ -1,0 +1,490 @@
+Downloading the latest package list from hackage.haskell.org
+Package list of hackage.haskell.org is up to date.
+The index-state is set to 2026-10-01T14:14:14Z.
+Build profile: -w ghc-9.14.1 -O1
+In order, the following will be built (use -v for more details):
+ - ecx-bridge-0.1.0.0 (test:bridge-test) (additional components to build)
+Preprocessing test suite 'bridge-test' for ecx-bridge-0.1.0.0...
+Building test suite 'bridge-test' for ecx-bridge-0.1.0.0...
+Build profile: -w ghc-9.14.1 -O1
+In order, the following will be built (use -v for more details):
+ - ecx-bridge-0.1.0.0 (test:bridge-test) (ephemeral targets)
+Preprocessing test suite 'bridge-test' for ecx-bridge-0.1.0.0...
+Building test suite 'bridge-test' for ecx-bridge-0.1.0.0...
+Running 1 test suites...
+Test suite bridge-test: RUNNING...
+
+exact amounts
+  rejects floats, exponents, leading zeros, signs, overflow and extra precision [✔]
+  preserves one and three atomic units [✔]
+  conserves principal and bounds upward rounding in both directions [✔]
+    +++ OK, passed 100 tests.
+  never quotes an input consumed entirely by its fee [✔]
+durable order and inventory invariants
+  recovers a lost create response and rejects changed destinations [✔]
+  snapshots confirmation policy for idempotent retries after configuration changes [✔]
+  does not oversubscribe inventory under concurrent orders [✔]
+  deduplicates deposits and quoted obligations [✔]
+  expiry cannot release an eligible obligation's reservation [✔]
+  expired unfunded quotes release capacity without erasing their order [✔]
+  holds partial and excess deposits for review [✔]
+  rolls back a failed database action as one financial decision [✔]
+SQLite transaction failure boundaries (local database, no chain IO)
+  rolls back an interrupted request and releases the writer without publishing its checkpoint [✔]
+  fences a failed COMMIT, rolls it back, and reopens with the original balances and sequence [✔]
+  retains the original SQLITE_FULL error and fences writes when the private file reaches its page limit [✔]
+  cannot authorize a send after the broadcast-intent write fails, and preserves the exact signed attempt [✔]
+quote allowances and rolling operating budgets
+  reserves payout rent and refund costs before accepting a quote [✔]
+  refuses a quote without refund funds even when its payout is funded [✔]
+  serializes concurrent admission against the shared daily cap [✔]
+  snapshots fee ceilings and never reserves twice on a repeated request [✔]
+  transfers the allowance once and charges only actual settled costs [✔]
+  keeps the separate refund allowance after a failed conversion [✔]
+  releases only provisional costs on expiry and reacquires them for a late refund [✔]
+  rolls back a failed transfer if the current spending cap was lowered [✔]
+  counts an extra refund on an already-paid order against queue capacity [✔]
+  cannot classify a treasury spend that consumes quoted operating funds [✔]
+  counts fees once until the full rolling day ends, including future bookings [✔]
+  retains holds and accounting time across restart and clock rollback [✔]
+atomic observer checkpoints
+  rolls back an entire page and its cursor if any receipt conflicts [✔]
+  quarantines receipts without durable order bindings, including on replay [✔]
+  requires each order's snapshotted confirmation depth before eligibility [✔]
+  commits immutable evidence, cursor and receipts together and preserves scan origin [✔]
+  keeps scanner progress moving past unsupported activity while blocking spending [✔]
+  retains first-seen time while waiting for independent verification [✔]
+  records provider failures without moving a successful cursor or duplicating alerts [✔]
+  quarantines a custody spend with no recorded intent [✔]
+Solana history pagination (transport contract tests)
+  reads multiple pages through the exact saved anchor in durable order [✔]
+  rejects an empty/truncated history without the known anchor [✔]
+  detects repeated provider pages instead of accepting a false cursor [✔]
+  rejects a nonfinalized signature-history response [✔]
+unsigned cancellation ledger invariants (offline fixtures)
+  retains principal, inventory, policy, draft and fees, and excludes late callbacks [✔]
+  atomically transfers the retained fee hold into a new generation and rejects stale replies [✔]
+  releases the unused conversion fee once when a cancelled conversion becomes a full refund [✔]
+  cannot cancel any generation with a signed, broadcast or settled attempt [✔]
+  keeps a source that loses eligibility during cleanup in review [✔]
+  keeps an abandoned conversion cancelled when its refund source loses eligibility [✔]
+  bounds repeated cancellation generations instead of growing an unbounded retry chain [✔]
+unsigned preparation recovery (offline RPC contracts)
+  requires no locks when funding was interrupted before a draft could be saved [✔]
+  journals exact native cleanup, unlocks only saved inputs and does not sign or send [✔]
+  keeps a lost unlock response pending and completes on reopen without blanket unlocking [✔]
+  refuses foreign locks and preserves the unfinished cleanup request [✔]
+  does not cancel after a failed, stale or raced custody check [✔]
+  rejects a changed saved PSBT before any wallet unlock [✔]
+  cancels an unsigned Solana request without a signer, a replacement or a signed-expiry proof [✔]
+signed intent and settlement invariants
+  reserves the destination and fee budget before signing, without allowing a refund race [✔]
+  retains an immutable unsigned draft after interruption and restart [✔]
+  cannot store signed bytes without a prior durable preparation [✔]
+  retains exact bytes across restart and starts paused [✔]
+  cannot exceed the order's saved fee ceiling [✔]
+  requires correct chain and database-bound obligation [✔]
+  keeps earned fees out of available source float and settles once [✔]
+  cannot authorize a first send after loss of source eligibility [✔]
+  rechecks backup coverage and source eligibility after a recorded broadcast intent [✔]
+durable native replacement drafts (offline recovery contracts)
+  records the exact unsigned decision without changing money, holds or the old attempt [✔]
+  replays the same draft after reopening without another RPC or critical record [✔]
+  cancels only the unsigned draft and permits a new explicit decision with the same original hold [✔]
+  refuses a competing active decision and changed replay bytes [✔]
+  requires pause, current custody, and the unchanged parent broadcast decision [✔]
+  does not save a draft when the source loses eligibility [✔]
+  retains the original payment when a settlement callback arrives during drafting [✔]
+  includes replacement cancellation in the work suspended by a source loss [✔]
+  bounds repeated cancelled decisions without multiplying the fee hold [✔]
+  rolls back draft insertion and critical sequence on database failure [✔]
+  makes the draft immutable and keeps it after a failed cancellation [✔]
+native payment families (offline lineage and RPC contracts)
+  retains immutable lineage and one maximum fee hold; a signed draft cannot be cancelled [✔]
+  settles member 0 once, including after reopening [✔]
+  settles member 1 once, including after reopening [✔]
+  normalizes only the mempool effect of member 0 [✔]
+  normalizes only the mempool effect of member 1 [✔]
+  retains evicted family bytes and restores one shared lock set without any outgoing effect [✔]
+  keeps all funds when a signed-only member is observed on chain [✔]
+  rejects an unrelated walletconflicts member [✔]
+  rejects an unrelated mempoolconflicts member [✔]
+  rejects a spender outside the immutable family [✔]
+  cannot infer an absent family effect when its inputs are spent on an unknown chain payment [✔]
+  refuses contradictory proof that both shared-input members confirmed [✔]
+  discards a family view that changes between its two observations [✔]
+  requires backup of the newest BroadcastIntent and prevents sending an older member [✔]
+  rejects a signature callback after cancelled work [✔]
+  rejects a signature callback after changed hold work [✔]
+  rolls back the member, signed bytes and sequence if its critical audit write fails [✔]
+  blocks a new send while an unsigned replacement decision is outstanding [✔]
+  does not accept a plausible sibling with no durable operator lineage [✔]
+  retains review when a losing wallet record lacks its alleged confirmed winner [✔]
+  retains the booked winner through finality loss and reconfirms it without changing money [✔]
+  refuses signing context when the original common input binding is missing [✔]
+  keeps a subsequently observed unrecorded sibling quarantined in an older ledger [✔]
+native winner changes (offline reorg accounting)
+  transfers member 0 through repeated winner changes and restart without rebooking principal [✔]
+  transfers member 1 through repeated winner changes and restart without rebooking principal [✔]
+  supersedes old finality reviews and opens a fresh review if the new winner later disappears [✔]
+  retains the old settlement when the new winner's durable scan has changed depth [✔]
+  retains the old settlement when the new winner's durable scan has changed block [✔]
+  retains the old settlement when the new winner's durable scan has changed fee [✔]
+  retains the old settlement when the new winner's durable scan has changed amount [✔]
+  retains the old settlement when the new winner's durable scan has changed missing [✔]
+  cannot treat an arbitrary reviewed member as an earlier settled winner [✔]
+  preserves a primary conversion link when an additional refund changes winner [✔]
+  rolls back all winner changes after a postings failure and recovers once after restart [✔]
+  rolls back all winner changes after a audit failure and recovers once after restart [✔]
+  fences changed cost, policy, family and concurrent stale callbacks [✔]
+  keeps an independent source review after the destination winner changes [✔]
+  books a proved higher fee after operating capital was exhausted and blocks resume [✔]
+  cannot change the booked fee for an unconfirmed or unavailable competing member [✔]
+native replacement signing (offline daemon contracts)
+  refuses recipient owned before invoking the signer [✔]
+  refuses change missing before invoking the signer [✔]
+  refuses recipient script before invoking the signer [✔]
+  refuses change script before invoking the signer [✔]
+  signs the saved template once, persists it before any broadcast decision and reuses it on replay [✔]
+  keeps the original when the signer is rejected [✔]
+  keeps the original when the signer is lost reply [✔]
+  cannot persist a late signature after cancellation while the signer is running [✔]
+  rechecks the bound source after signing and retains all funds if it lost eligibility [✔]
+one economic settlement per intent (offline competing callbacks)
+  books only the older winner and preserves it across restart [✔]
+  books only the newer winner and preserves it across restart [✔]
+  serializes concurrent confirmations into exactly one payout and one network cost [✔]
+  refuses a callback with a released fee hold [✔]
+  refuses a callback with a wrong fee asset [✔]
+  refuses a callback with a resolved intent [✔]
+  refuses a callback with a cancelled obligation [✔]
+  cannot pay a second member after accidental reopening of the paid intent [✔]
+  enforces the unique winner in SQLite and preserves the earlier result after reopening [✔]
+  rolls back money and winner selection together if recording the winner fails [✔]
+bounded rate-limit recovery (offline transport contracts)
+  retries read-only requests with bounded waits and honors numeric Retry-After [✔]
+  does not retry sends, wallet mutations, unknown methods, or indefinite throttling [✔]
+refund principal and failed transaction fees
+  keeps a late Solana receipt out of conversion and refunds its full principal once [✔]
+  separates rent from fees, caps their total, and refuses changed settlement evidence [✔]
+  refunds a confirmed partial deposit without consuming payout float [✔]
+  will not refund a signed or possibly broadcast conversion [✔]
+  charges a failed Solana transaction fee and preserves full refundable principal [✔]
+  does not promote a deposit first observed after its deposit deadline [✔]
+verified treasury allocation and accounting
+  allocates a finalized SOL operating receipt once across reopening [✔]
+  refuses Native principal as operating SOL [✔]
+  refuses Wrapped principal as operating SOL [✔]
+  refuses an operating receipt whose scanner evidence requires review [✔]
+  moves an observed receipt exactly once instead of crediting the asset again [✔]
+  cannot allocate bound customer principal, unconfirmed receipts or an incorrect total [✔]
+  separates SOL history from token history and restricts SOL to operating funds [✔]
+  books a verified operator payment and fee once, preserving its review decision across scans [✔]
+  cannot classify an existing customer attempt as an operator spend [✔]
+  requires review when signed bytes appear on-chain before a recorded broadcast intent [✔]
+  preserves reserved operating funds when reconciling a separate operator spend [✔]
+continuous custody reconciliation (offline RPC contracts)
+  checks all three assets without resuming or changing any financial records [✔]
+  pauses on either a shortfall or an unexplained surplus and deduplicates the alert [✔]
+  rejects a journal mutation during the RPC snapshot even when the old totals match [✔]
+  rejects a new Solana history head, an older balance context, and verifier disagreement [✔]
+  rejects a new native history cursor or balance changing during the read [✔]
+  does not accept equal totals with an unresolved chain review flag [✔]
+  retains principal and pauses when an allocated source loses eligibility [✔]
+  invalidates a saved check on real SQLite reopen and never refreshes its age with RPC delay [✔]
+  leaves unseen signed bytes and their reservations intact [✔]
+  refuses an on-chain payment whose broadcast intent was never committed [✔]
+  normalizes a Solana outcome once, including rent/failure: (True,0) [✔]
+  normalizes a Solana outcome once, including rent/failure: (True,1488440) [✔]
+  normalizes a Solana outcome once, including rent/failure: (False,0) [✔]
+  normalizes a native mempool payment and its fee using the captured signed bytes [✔]
+SOL accounting from captured public Devnet metadata
+  observes the actual SOL setup receipt without charging the external payer's fee to custody [✔]
+  observes fee and account-rent SOL for the existing recipient [✔]
+  observes fee and account-rent SOL for the new recipient [✔]
+  retains failed-transaction fees but rejects a failed transaction changing other principal [✔]
+backup and schema protections
+  migrates version one without losing financial rows or critical sequence [✔]
+  preserves an unfinished legacy order without inventing cost policy or allowing resume [✔]
+  does not expose canonical instructions before acknowledged coverage [✔]
+  makes a consistent snapshot while the ledger is open [✔]
+  refuses repointing an existing database [✔]
+native quote admission (offline RPC contracts)
+  checks the full native refund and exact net redemption without signing or locking [✔]
+  rejects owned and watched destinations before wallet funding [✔]
+  refuses unknown witness, anchor and nonstandard destination types [✔]
+  rejects invalid address bounds and malformed script responses [✔]
+  requires a safe confirmed spendable wallet output for existing change [✔]
+  does not touch locks belonging to another or interrupted payment [✔]
+  preserves a node refusal or unknown funding response without retrying or signing [✔]
+  refuses funding above the native fee ceiling without changing the quoted output [✔]
+native transaction validation (captured public-Signet transaction)
+  accepts the exact recipient, change, input and fee in the recorded real payment [✔]
+  rejects changed amounts, destinations, third outputs and nonowned change scripts [✔]
+  computes fees from verified prevouts and rejects unconfirmed or duplicate inputs [✔]
+  enforces separate Signet and ECX locktime rules (pure mutation checks, not ECX acceptance) [✔]
+  refuses a corrupted saved draft before invoking the wallet signer [✔]
+  stores the draft before locking/signing and reuses a recorded attempt (RPC contract test) [✔]
+  retains preparation and pauses if a funding response is lost (RPC contract test) [✔]
+native lock recovery (offline RPC and SQLite restart contracts)
+  reconstructs exact unsigned inputs after reopening, once, without changing funds or signing [✔]
+  preserves unseen native signed bytes and restores their inputs: broadcast=False [✔]
+  preserves unseen native signed bytes and restores their inputs: broadcast=True [✔]
+  does not relock a generation whose recorded cancellation has a lost cleanup reply [✔]
+  protects native inputs during source review without resolving or releasing the obligation [✔]
+  reconciles a recorded native spend without creating another transaction: mempool [✔]
+  reconciles a recorded native spend without creating another transaction: confirmed [✔]
+  reconciles a recorded native spend without creating another transaction: evicted [✔]
+  refuses an observed signed-only transaction before treating its inputs as spent [✔]
+  never unlocks or replaces unknown wallet locks [✔]
+  refuses unavailable, changed or insufficiently confirmed inputs before any lock mutation [✔]
+  reconciles a lost lock response without repeating it or releasing any funds [✔]
+  does not sign when a success reply is contradicted by the wallet's actual locks [✔]
+  leaves a draftless preparation intact and refuses any unexplained locks [✔]
+  refuses the wrong wallet before touching its locks [✔]
+native source recovery (captured receipt, offline RPC and accounting contracts)
+  keeps a newly observed mempool receipt pending without opening a recovery incident [✔]
+  journals lost eligibility atomically and retains unsigned obligations, principal and holds [✔]
+  records a proved source deficit without releasing a signed attempt: broadcast=False [✔]
+  records a proved source deficit without releasing a signed attempt: broadcast=True [✔]
+  preserves a paid payout through loss, reopening, mempool return and source reconfirmation [✔]
+  still books a possibly broadcast payout after the source conflict without paying or refunding again [✔]
+  keeps an already recorded deficit when later RPC evidence is unavailable [✔]
+  does not book a deficit on ambiguous or contradictory evidence: mempool-conflict [✔]
+  does not book a deficit on ambiguous or contradictory evidence: unspent-conflict [✔]
+  does not book a deficit on ambiguous or contradictory evidence: absent-mempool [✔]
+  does not book a deficit on ambiguous or contradictory evidence: missing-wallet [✔]
+  does not book a deficit on ambiguous or contradictory evidence: wrong-output [✔]
+  does not book a deficit on ambiguous or contradictory evidence: stale-scan [✔]
+  does not book a deficit on ambiguous or contradictory evidence: identity-refusal [✔]
+  refuses stale receipt and observation snapshots [✔]
+  rolls back the recovery decision if its financial posting cannot commit [✔]
+operator approval of a restored source (offline contracts)
+  restores only the suspended work, with money and bytes retained: ready [✔]
+  restores only the suspended work, with money and bytes retained: unsigned [✔]
+  restores only the suspended work, with money and bytes retained: signed [✔]
+  restores only the suspended work, with money and bytes retained: broadcast [✔]
+  refuses an old restoration after another loss and approves unchanged work against the latest restoration only [✔]
+  does not revive work changed during source review: draft-callback [✔]
+  does not revive work changed during source review: expiry [✔]
+  does not revive work changed during source review: settlement [✔]
+  does not reinterpret an existing failure review as a suspended source obligation [✔]
+  survives reopening and cannot reuse an old approval to clear a new source review [✔]
+  rolls back approval, sequence and status together when the state write fails [✔]
+  refuses a pending unsigned cancellation even when it predates the source loss [✔]
+  does not approve source recovery when the saved outgoing payment needs separate review [✔]
+  runs real source/custody validation before operator approval: healthy [✔]
+  runs real source/custody validation before operator approval: shortfall [✔]
+  runs real source/custody validation before operator approval: identity [✔]
+operator funding of proved source losses (offline contracts)
+  covers a deficit with free capital without altering customer work: ready [✔]
+  covers a deficit with free capital without altering customer work: unsigned [✔]
+  covers a deficit with free capital without altering customer work: signed [✔]
+  covers a deficit with free capital without altering customer work: broadcast [✔]
+  covers a deficit with free capital without altering customer work: paid [✔]
+  returns the same split once after source reappearance, preserving a new loss as a separate decision [✔]
+  does not forgive the cover on RPC failure or cover the same outstanding loss twice [✔]
+  refuses invalid capital or stale evidence without changing allocations: float-held [✔]
+  refuses invalid capital or stale evidence without changing allocations: earned-short [✔]
+  refuses invalid capital or stale evidence without changing allocations: wrong-total [✔]
+  refuses invalid capital or stale evidence without changing allocations: stale-revision [✔]
+  refuses invalid capital or stale evidence without changing allocations: stale-time [✔]
+  refuses invalid capital or stale evidence without changing allocations: wrong-block [✔]
+  refuses invalid capital or stale evidence without changing allocations: wrong-output [✔]
+  refuses invalid capital or stale evidence without changing allocations: stale-observation [✔]
+  refuses invalid capital or stale evidence without changing allocations: available [✔]
+  requires an actual custody inspection including the recorded loss: healthy [✔]
+  requires an actual custody inspection including the recorded loss: shortfall [✔]
+  requires an actual custody inspection including the recorded loss: unavailable [✔]
+  rolls back capital and its decision together if a posting fails, and retains immutable history [✔]
+  retries a failed capital return atomically after reopening without releasing the allocation twice [✔]
+native settlement finality recovery (offline RPC contracts)
+  shows review for an additional refund while preserving the original conversion link [✔]
+  reopens a lost-finality review and reconfirms the same payment without another financial decision [✔]
+  records a new confirmed anchor even when the unconfirmed interval was not observed [✔]
+  keeps a completed payment under review without replacement when missing [✔]
+  keeps a completed payment under review without replacement when conflicted [✔]
+  keeps a completed payment under review without replacement when changed-bytes [✔]
+  will not replace settlement proof until the durable scanner agrees with the canonical read [✔]
+  rejects changed costs or confirmation policy and retains every earlier recovery decision [✔]
+  treats missing confirmation metadata as unavailable instead of accepting SQL NULL as a match [✔]
+  refuses a stale attempt snapshot instead of overwriting a newer decision [✔]
+  records identity refusal without a signer, backup, send or money movement [✔]
+Solana preparation (SDK fixtures and RPC contract tests)
+  binds the helper protocol, message, memo, signature and custody account [✔]
+  simulates the exact SDK message without exposing its valid signature [✔]
+  charges no rent for an existing ATA and credits lamports pre-funded to a new ATA [✔]
+  refuses excess rent/fees, missing fee quotes and insufficient operating SOL [✔]
+  refuses short-lived blockhashes, stale account context and failed simulation [✔]
+  uses the quoted fee/rent ceilings after settings change and reuses saved bytes [✔]
+  retains the request and pauses after a lost helper response [✔]
+  does not invoke the helper after the current daily operating cap is lowered [✔]
+unsigned customer deposits (SDK fixture and offline RPC contracts)
+  binds owner, amount and memo without a custody signature or payment intent [✔]
+  refreshes a blockhash without changing the order or reserving more inventory [✔]
+  requires instruction backup coverage before invoking the helper [✔]
+  rechecks deadline and pause state after RPC without losing the quote [✔]
+  rejects unauthorized access and insufficient user fee funds without signing [✔]
+recoverable order provisioning (offline RPC contracts)
+  records and issues one address after admission, then reuses it while paused [✔]
+  rejects failed admission before storing an order or allocating an address [✔]
+  stops new orders when scans become stale or fail during admission [✔]
+  recovers a lost getnewaddress reply using the saved label without repeating allocation [✔]
+  does not allocate again when a claimed address is still absent [✔]
+  never treats malformed or ambiguous label reads as permission to allocate [✔]
+  keeps an invalid address reply hidden until its wallet binding can be verified [✔]
+  retains the allocation claim across closing and reopening the actual SQLite ledger [✔]
+  prevents duplicate addresses and reservations under concurrent request retries [✔]
+  records the address but hides it if intake pauses during the node call [✔]
+  requires actual backup acknowledgment before first exposure and rechecks the deadline after backup [✔]
+  recovers a late address without reopening an expired quote or exposing it [✔]
+  binds a deterministic redemption memo without allocating a native address [✔]
+  refuses an idempotency conflict before chain checks or allocation [✔]
+Solana quote admission (offline official-SDK and RPC contracts)
+  checks the exact net payout using only unsigned messages [✔]
+  admits an unfunded wrap recipient and missing ATA within the rent ceiling [✔]
+  deducts only existing system-account lamports from ATA rent [✔]
+  checks gross redemption tokens, user deposit fees and the full-refund message [✔]
+  rejects custody identities and mismatched source owners before any IO [✔]
+  rejects token, nonce and executable accounts passed as wallet owners [✔]
+  rejects wrong-owner, frozen, delegated and extended recipient accounts [✔]
+  rejects insufficient custody tokens or operating SOL [✔]
+  rejects missing/insufficient redemption tokens and insufficient customer SOL [✔]
+  rejects fee/rent over budget and unavailable fee estimates [✔]
+  refuses stale/incomplete account responses and failed simulation [✔]
+  rejects signed or altered preview bytes before account reads/simulation [✔]
+  rechecks the blockhash after simulation [✔]
+token account policy (captured finalized Devnet accounts)
+  accepts the real eight-decimal custody balance [✔]
+  rejects owner/mint changes, delegates, close authorities, frozen and extended accounts [✔]
+durable send orchestration (offline RPC contracts)
+  backs up BroadcastIntent and rechecks the source before sending the exact saved bytes [✔]
+  does not send when a backup callback returns without acknowledging coverage [✔]
+  retains signed bytes and reservations if the source loses eligibility during backup [✔]
+  retries identical bytes after an unknown send response without another signature [✔]
+  does not treat missing history or an expired blockhash as permission to replace [✔]
+  requires review if a signed-only transaction is observed as processed [✔]
+  reconciles finalized success while paused without broadcasting again [✔]
+  books only the verified fee on finalized failure and retains customer principal [✔]
+paused worker payment recovery (offline RPC contracts)
+  never sends unseen signed or broadcast bytes even when the deployment is available [✔]
+  books a finalized outcome once while paused: True [✔]
+  books a finalized outcome once while paused: False [✔]
+  records an already-paid outcome during source review without reopening payouts [✔]
+  preserves an unseen native attempt and its locks without signing or releasing fees [✔]
+  pauses and retains contradictory evidence or an unavailable RPC without duplicate alerts [✔]
+  retires conclusively expired bytes without authorizing a new preparation [✔]
+  continues booking the other chain after one attempt requires review [✔]
+conclusive Solana expiry (offline recovery contracts)
+  requires finalized absence on both complete account histories and every configured provider [✔]
+  refuses missing history, observed signatures, valid blockhashes, old contexts and wrong identities [✔]
+  retires an expired attempt once while preserving principal, old bytes, and replacement barriers [✔]
+  preserves ambiguous broadcast history before authorizing a new preparation [✔]
+  does not permit a changed configured history origin to retire a real intent [✔]
+  requires durable operator approval even if an expired obligation is made ready by a caller [✔]
+  rechecks source eligibility before approving a replacement [✔]
+  does not revive an expired conversion after a refund has been authorized [✔]
+native replacement construction (captured public templates and offline pending contracts)
+  raises only the fee, preserving every input and the exact customer payment [✔]
+  rejects non-increasing fees, the immutable ceiling and exhausted change [✔]
+  cannot replace original inputs with fresh inputs even at the same value [✔]
+  rejects changed replay fields and a changed recipient despite balanced fees [✔]
+  accepts an evicted saved payment only while all exact chain inputs remain available [✔]
+  refuses a confirmed family member before constructing a PSBT [✔]
+  refuses a conflicted family member before constructing a PSBT [✔]
+  refuses a mempool spender outside the saved family [✔]
+  refuses an input already spent in the active chain [✔]
+  refuses lagging wallet state and a wrong chain checkpoint [✔]
+  discards a draft if the chain view changes while it is being built [✔]
+  rejects unexpected signatures and mismatched PSBT fees [✔]
+  propagates unavailable RPC evidence without allocating keys or signing [✔]
+native confirmation evidence (captured bytes and offline RPC contracts)
+  requires the exact saved bytes and a confirmed active-chain anchor [✔]
+Solana settlement evidence (captured finalized public Devnet payments)
+  validates exact bytes/units and actual costs for existing recipient ATA [✔]
+  validates exact bytes/units and actual costs for new recipient ATA [✔]
+  rejects altered message/signature/slot/costs and missing token evidence [✔]
+  rejects costs above the saved rent cap and a changed deployment [✔]
+  uses saved ceilings to reconcile an existing payment after future limits are lowered [✔]
+  rejects a changed token delta or historical owner and contradictory failure metadata [✔]
+public/private Unix socket boundary
+  refuses canonical and backup-dependent deployments in the local test command [✔]
+  uses the shared Servant contract and separate admin socket [✔]
+  refuses a second worker on the same ledger [✔]
+  reconnects the first GET and POST after worker replacement without replacing the clients [✔]
+historical Solana deposit evidence
+  validates the captured real Devnet order deposit without current account lookups [✔]
+  validates owner, mint, memo, signer and exact historical custody increase [✔]
+  retains an unmatched balance increase even when automatic authorization fails [✔]
+  resolves a version-zero custody address loaded from historical metadata [✔]
+  rejects copied memos, wrong historical owners and wrong custody [✔]
+  cannot authorize a failed or unsupported-version transaction [✔]
+official SDK wire fixtures (not network evidence)
+  independently validates unsigned-three-units.json [✔]
+  independently validates signed-three-units.json [✔]
+  rejects corrupted signed bytes [✔]
+
+Finished in 21.2414 seconds
+367 examples, 0 failures
+Test suite bridge-test: PASS
+Test suite logged to:
+/home/lukekensik.guest/ecx-bridge/./.release-build/dist/build/aarch64-linux/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log
+1 of 1 test suites (1 of 1 test cases) passed.
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s
+     Running unittests src/main.rs (.release-build/cargo-target/debug/deps/ecx_solana_helper-30f9c2a731a4b49f)
+
+running 7 tests
+test tests::exact_integer_boundaries ... ok
+test tests::unknown_request_fields_rejected ... ok
+test wire_tests::preview_rejects_wrong_custody_off_curve_and_unknown_fields ... ok
+test wire_tests::unsigned_quote_fixture_never_needs_a_signer ... ok
+test wire_tests::wrong_custody_and_unknown_fields_refused ... ok
+test wire_tests::unsigned_wire_fidelity ... ok
+test wire_tests::signed_payout_and_idempotent_ata_fidelity ... ok
+
+test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/deposit_devnet.rs (.release-build/cargo-target/debug/examples/deposit_devnet-b75d7a984f140a8e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/fund_devnet.rs (.release-build/cargo-target/debug/examples/fund_devnet-ef1f89eadc5ceadd)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests examples/setup_devnet.rs (.release-build/cargo-target/debug/examples/setup_devnet-1ed5e3e57f44dd9e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+    Finished `release` profile [optimized] target(s) in 0.07s
+
+added 7 packages, and audited 8 packages in 6s
+
+found 0 vulnerabilities
+
+> ecx-bridge-web-tools@0.1.0 check
+> tsc --noEmit --strict --target es2022 --module nodenext --moduleResolution nodenext wallet.ts
+
+
+> ecx-bridge-web-tools@0.1.0 build
+> esbuild wallet.ts --bundle --minify --format=esm --outfile=dist/wallet.js
+
+
+  dist/wallet.js  11.6kb
+
+⚡ Done in 3ms
+........
+----------------------------------------------------------------------
+Ran 8 tests in 0.002s
+
+OK
+ecx-bridge 0.1.0.0 (development; explicit public-test mode available)
+3.53.4
+Release built and tested: /home/lukekensik.guest/ecx-bridge/.release-build/bundle
+One-command installer: /home/lukekensik.guest/ecx-bridge/.release-build/ecx-bridge-ubuntu-24.04-aarch64.run

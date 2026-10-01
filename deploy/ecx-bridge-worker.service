@@ -1,13 +1,13 @@
 [Unit]
 Description=ECX bridge private worker
-After=network-online.target
+After=network-online.target ecx-bridge-node.service
 Wants=network-online.target
 
 [Service]
 Type=simple
 User=ecx-worker
 Group=ecx-api
-SupplementaryGroups=ecx-worker
+SupplementaryGroups=ecx-worker ecx-node
 UMask=0077
 ExecStart=/opt/ecx-bridge/current/bin/ecx-bridge worker /etc/ecx-bridge/worker.json
 Restart=on-failure
