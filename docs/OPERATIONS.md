@@ -117,8 +117,27 @@ sudo systemctl start ecx-bridge-backup.service
 sudo systemctl status ecx-bridge-backup.service
 ```
 
-The backup service checks archive readability. Same-host restoration with row
-comparison has been tested. This is **not** remote durability or fresh-host recovery:
+The backup service pins a separate read-only PostgreSQL snapshot and uses that
+same snapshot for the dump, deployment metadata and every table count. Financial
+transactions keep running; no worker capability or deployment row lock is held
+across the dump. Archives and manifests stay private, with SHA-256 integrity.
+
+Verify a **trusted backup produced by this installation** with:
+
+```sh
+sudo python3 /opt/ecx-bridge/current/deploy/postgres-verify-backup.py /var/lib/ecx-bridge/private/backups/ledger-TIMESTAMP.json
+```
+
+The verifier creates a random disposable database, revokes public access,
+restores the archive transactionally, compares deployment metadata and all table
+counts, and drops the database. It never starts a worker or changes the source
+ledger. On an installed host the root wrapper copies only the ledger archive and
+manifest into temporary PostgreSQL-owner storage; it does not copy signing keys.
+Restore only trusted archives: PostgreSQL restoration executes their SQL.
+
+The real PostgreSQL acceptance also writes to an isolated copy between metadata
+capture and `pg_dump`, proves those newer writes are excluded, and rejects a
+checksum mismatch. This is **not** remote durability or fresh-host recovery:
 copy retention, encryption/key escrow, wallet/node backup and a separate-host
 restore drill remain required. A ledger dump alone cannot recover custody keys.
 Do not delete the last known good archive or signed-attempt history.

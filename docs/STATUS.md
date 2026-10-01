@@ -713,3 +713,34 @@ X86 installation, supported-wallet payment, active source-loss/missing-destinati
 resolution, wider Solana history/expiry and crash recovery, remote clean-host/key
 restoration, canonical-network acceptance and independent review remain open.
 [Evidence](evidence/postgres-final-product-arm64.json).
+
+### Exact-snapshot PostgreSQL backup and restore verification — October 1
+
+The maintained backup service now exports a separate read-only MVCC snapshot;
+`pg_dump`, deployment metadata and all table counts use that snapshot. No worker
+capability or financial row lock is held during the dump. A maintained verifier
+restores trusted archives into a random database with public access revoked,
+checks the SHA-256 archive, exact deployment metadata and every table count, then
+drops the database without starting a worker. Root installation usage handles
+private filesystem ownership through a temporary PostgreSQL-owner copy.
+
+Real PostgreSQL acceptance restored the current live ledger (38 tables), and an
+isolated restored copy received a concurrent audit insertion and critical-sequence
+advance after snapshot capture but before dumping. Restoration still matched the
+older captured metadata/counts; a damaged checksum was rejected. The source
+ledger was not modified. Evidence: `docs/evidence/postgres-snapshot-restore.json`.
+This is local ledger recovery evidence, not remote durability acknowledgement,
+key restoration, signer fencing, or valuable-fund release acceptance.
+
+The same backup/verifier pair also passed against the installed Ubuntu ARM64
+private database: backup used the restricted `ecx_read` role, and the root wrapper
+successfully restored via the PostgreSQL owner despite worker-only archive
+permissions. All 38 table counts and deployment metadata matched; the temporary
+restore database was removed. The task VM was stopped after verification.
+
+The first native x86 CI run exhausted hosted-runner disk capacity before retaining
+an artifact. The retry workflow removes unrelated SDKs from its disposable runner,
+requires 30 GiB free up front, and uses two remote build jobs. The release builder
+removes expanded GHC/Rust installers after verified installation and omits debug
+symbols in Rust test builds; production release profiles remain unchanged. Local
+build/resource limits remain unchanged.
