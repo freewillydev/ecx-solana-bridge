@@ -1,8 +1,8 @@
 {
-  "recordedUtc": "2026-10-01T03:07:54.960366+00:00",
+  "recordedUtc": "2026-10-01T03:34:12.811907+00:00",
   "platform": "macOS arm64",
   "haskell": {
-    "examples": 85,
+    "examples": 95,
     "propertyCases": 100,
     "failures": 0,
     "sqliteVersion": "3.53.4",
@@ -73,5 +73,32 @@
     "customerOrders": 0,
     "transactionsSentDuringReconciliation": 0,
     "generalOperatorWorkflowComplete": false
+  },
+  "settlement": {
+    "sourceRecheckedBeforeAndAfterBackup": true,
+    "backupAcknowledgmentRequired": true,
+    "identicalByteRetryAfterAmbiguousSend": true,
+    "networkFeesAndRentSeparate": true,
+    "pausedFinalityReconciliation": true,
+    "readOnlyRealAdapterEvidence": "settlement-adapter-readback.json",
+    "automaticWorkerEnabled": false,
+    "nativeReplacementFamilies": false,
+    "automaticSafeExpiry": false,
+    "destinationReorgRecovery": false
+  },
+  "firstLedgerWrap": {
+    "order": "first-ledger-wrap.json",
+    "replay": "first-ledger-wrap-replay.json",
+    "restart": "first-ledger-wrap-restart.json",
+    "source": "public L2L Signet",
+    "destination": "public Solana Devnet",
+    "completed": true,
+    "grossUnits": "10000",
+    "netUnits": "9980",
+    "bridgeFeeUnits": "20",
+    "feeLamports": "5000",
+    "rentLamports": "0",
+    "browserSigning": false,
+    "customerApiEnabled": false
   }
 }

@@ -1,0 +1,20 @@
+{
+  "recordedUtc": "2026-10-01T03:31:55.416562+00:00",
+  "before": {
+    "critical_sequence": 10,
+    "deposits": 4,
+    "orders": 1,
+    "attempts": 1,
+    "postings": 33
+  },
+  "after": {
+    "critical_sequence": 10,
+    "deposits": 4,
+    "orders": 1,
+    "attempts": 1,
+    "postings": 33
+  },
+  "financialStateUnchanged": true,
+  "balancesMatch": true,
+  "status": "Paid"
+}

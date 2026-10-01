@@ -4,12 +4,12 @@ module Bridge.Ledger
   ( Ledger, withLedger, ledgerAction, schemaVersion, sqliteIdentity, readiness, pause, resumeAfterChecks
   , createOrder, readOrder, bindInstruction, criticalSequence, acknowledgeBackup
   , exposeOrder, freeInventory, allocateTreasuryReceipt, recordTreasurySpend, expireQuotes
-  , Deposit(..), observeDeposit, recordScan, readCheckpoint, promoteDeposit, checkpoint
+  , Deposit(..), observeDeposit, refreshDeposit, recordScan, readCheckpoint, promoteDeposit, checkpoint
   , ChainEvent(..), ScanBatch(..), commitScan, recordScanFailure, scannerHealth
   , lookupInstruction, maximumNativeDepth, pendingVerification
   , Obligation(..), readyObligations, Attempt(..), storeAttempt, markBroadcastIntent, authorizeRecordedSend
   , Preparation(..), beginPreparation, storeDraft, pendingPreparations
-  , pendingAttempts, recordSettlement, createRefund, recordFailedSolana, requireBackup, addHint, auditExport
+  , pendingAttempts, PaymentCosts(..), recordSettlement, createRefund, recordFailedSolana, requireBackup, addHint, auditExport
   ) where
 
 import Bridge.Config
@@ -29,6 +29,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Database.SQLite.Simple
+import GHC.Generics (Generic)
 import System.Directory (createDirectoryIfMissing)
 import System.FileLock (SharedExclusive(Exclusive), tryLockFile, unlockFile)
 import System.FilePath (takeDirectory)
@@ -318,6 +319,13 @@ observeDeposit l deposit cursor = ledgerAction l $ \c -> do
   observeDepositC c deposit
   checkpoint c (case depositAsset deposit of Native->"Native"; Wrapped->"Solana"; Sol->"SolanaOperating") cursor
 
+-- A focused source recheck must not advance the history scanner's cursor.
+refreshDeposit :: Ledger -> Deposit -> IO ()
+refreshDeposit l deposit = ledgerAction l $ \c -> do
+  existing <- query c "SELECT id FROM deposits WHERE id=?" (Only $ depositId deposit) :: IO [Only Text]
+  require (existing==[Only $ depositId deposit]) "source_deposit_missing"
+  observeDepositC c deposit
+
 -- The whole page and its continuation commit together. A stale scanner cannot
 -- advance a newer cursor, and one invalid receipt rolls back the complete page.
 recordScan :: Ledger -> Text -> Maybe Text -> Text -> [Deposit] -> IO ()
@@ -578,13 +586,21 @@ authorizeRecordedSend l remote txid = ledgerAction l $ \c -> do
   require (health==[Only False]) "payouts_paused"
   pure attempt
 
-recordSettlement :: Ledger -> Text -> Int64 -> Text -> IO ()
-recordSettlement l txid actualFee evidence = ledgerAction l $ \c -> do
+data PaymentCosts = PaymentCosts { networkFee :: !Amount, accountRent :: !Amount }
+  deriving (Eq,Show,Generic,ToJSON,FromJSON)
+
+recordSettlement :: Ledger -> Text -> PaymentCosts -> Text -> IO ()
+recordSettlement l txid costs evidence = ledgerAction l $ \c -> do
+  require (not (T.null evidence) && T.length evidence<=32768) "settlement_fee_or_evidence_invalid"
+  let saved=jsonText $ object ["costs" .= costs,"proof" .= evidence]
+      actualCost=toInteger (units $ networkFee costs)+toInteger (units $ accountRent costs)
   rows <- query c "SELECT a.state,a.fee_limit,o.id,o.order_id,d.asset,d.amount,o.asset,o.amount,q.quote_json,o.kind FROM attempts a JOIN intents i ON i.id=a.intent_id JOIN obligations o ON o.id=i.obligation_id JOIN deposits d ON d.id=o.deposit_id JOIN orders q ON q.id=o.order_id WHERE a.txid=?" (Only txid) :: IO [(Text,Int64,Text,Text,Text,Int64,Text,Int64,Text,Text)]
   case rows of
-    [("settled",_,_,_,_,_,_,_,_,_)] -> pure ()
+    [("settled",_,_,_,_,_,_,_,_,_)] -> do
+      old <- query c "SELECT observation_json FROM attempts WHERE txid=?" (Only txid) :: IO [Only Text]
+      require (old==[Only saved]) "settlement_evidence_conflict"
     [("broadcast_intent",limit,intent,oid,src,g,dst,n,qj,kind)] -> do
-      require (actualFee>=0 && actualFee<=limit && not (T.null evidence)) "settlement_fee_or_evidence_invalid"
+      require (units (networkFee costs)>0 && actualCost<=toInteger limit && (dst/="Native" || units (accountRent costs)==0)) "settlement_fee_or_evidence_invalid"
       q <- fromText qj
       source <- parseAsset src; dest <- parseAsset dst
       let feeAsset = if dest==Native then Native else Sol
@@ -592,9 +608,11 @@ recordSettlement l txid actualFee evidence = ledgerAction l $ \c -> do
             then [(source,"principal",negate $ toInteger g),(source,"external",toInteger g)]
             else [(source,"principal",negate $ toInteger g),(source,"float",toInteger $ units $ net q),(source,"earned",toInteger $ units $ fee q)
                  ,(dest,"float",negate $ toInteger n),(dest,"external",toInteger n)]
-      posting c ("settlement:"<>txid) "successful finalized payout" (flow<>
-        [(feeAsset,"operating",negate $ toInteger actualFee),(feeAsset,"external",toInteger actualFee)])
-      execute c "UPDATE attempts SET state='settled',observation_json=? WHERE txid=?" (evidence,txid)
+      posting c ("settlement:"<>txid) "successful finalized payout" flow
+      forM_ [("network-fee",networkFee costs),("account-rent",accountRent costs)] $ \(label,cost) ->
+        when (units cost>0) $ posting c (label<>":"<>txid) label
+          [(feeAsset,"operating",negate $ toInteger $ units cost),(feeAsset,"external",toInteger $ units cost)]
+      execute c "UPDATE attempts SET state='settled',observation_json=? WHERE txid=?" (saved,txid)
       execute c "UPDATE fee_reservations SET released=1 WHERE intent_id=?" (Only intent)
       execute c "UPDATE intents SET resolved=1 WHERE id=?" (Only intent)
       execute c "UPDATE obligations SET status='paid' WHERE id=?" (Only intent)
@@ -664,9 +682,12 @@ recordFailedSolana :: Ledger -> Text -> Int64 -> Text -> IO ()
 recordFailedSolana l txid actualFee evidence = ledgerAction l $ \c -> do
   rows <- query c "SELECT a.state,a.fee_limit,a.intent_id,i.chain FROM attempts a JOIN intents i ON i.id=a.intent_id WHERE txid=?" (Only txid) :: IO [(Text,Int64,Text,Text)]
   case rows of
-    [("failed",_,_,"Solana")] -> pure ()
+    [("failed",_,_,"Solana")] -> do
+      old <- query c "SELECT observation_json FROM attempts WHERE txid=?" (Only txid) :: IO [Only Text]
+      charged <- query c "SELECT delta FROM postings WHERE event_id=? AND account='external'" (Only $ "failed-fee:"<>txid) :: IO [Only Int64]
+      require (old==[Only evidence] && charged==[Only actualFee]) "failure_evidence_conflict"
     [("broadcast_intent",limit,intent,"Solana")] -> do
-      require (actualFee>=0 && actualFee<=limit && not (T.null evidence)) "invalid_failure_evidence"
+      require (actualFee>0 && actualFee<=limit && not (T.null evidence) && T.length evidence<=32768) "invalid_failure_evidence"
       posting c ("failed-fee:"<>txid) "finalized Solana failure network fee" [(Sol,"operating",negate $ toInteger actualFee),(Sol,"external",toInteger actualFee)]
       execute c "UPDATE attempts SET state='failed',observation_json=? WHERE txid=?" (evidence,txid)
       execute c "UPDATE intents SET resolved=1 WHERE id=?" (Only intent)

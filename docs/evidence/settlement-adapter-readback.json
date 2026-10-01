@@ -1,0 +1,31 @@
+{
+  "native": {
+    "confirmed": true,
+    "costs": {
+      "accountRent": "0",
+      "networkFee": "282"
+    },
+    "proof": "{\"blockhash\":\"00000275f066ecfd57ea08cc649c72a67e9724ad96ef4f95ad87501570f882c8\",\"height\":16377,\"requiredDepth\":1,\"txid\":\"b2278e8dd0be7be001a5630545ddb73c83423ee1ee7dbd0327675e27f1642bd3\"}"
+  },
+  "network": "public L2L Signet and Solana Devnet",
+  "solana": [
+    {
+      "confirmed": true,
+      "costs": {
+        "accountRent": "0",
+        "networkFee": "5000"
+      },
+      "proof": "{\"outcome\":{\"outcomeFee\":\"5000\",\"outcomeRent\":\"0\",\"outcomeSlot\":506116936,\"outcomeSucceeded\":true},\"signature\":\"2GobRapeVX92w9QKpyomVvTLswXGjvkxdbvu9Azk5CCXPbujUfEshdVEccq9QGFkboaqAS1VcgiDWvB7giC9tCG3\",\"transactionHash\":\"9f2f294794500c8d3cf0b726613844d6786fb5d4f1a68649aca9825767178381\"}"
+    },
+    {
+      "confirmed": true,
+      "costs": {
+        "accountRent": "1488440",
+        "networkFee": "5000"
+      },
+      "proof": "{\"outcome\":{\"outcomeFee\":\"5000\",\"outcomeRent\":\"1488440\",\"outcomeSlot\":506116964,\"outcomeSucceeded\":true},\"signature\":\"4kjhetrGow3ty6446oBCzSstVUtp6GGPyWeJcB63sZyKNK8eoosHvEwww6h6cQ9dpLZXK2tf5aBJHC8FrPVZE8aD\",\"transactionHash\":\"94c517c241437d60491552acc79a712eda77091f8d1463da6ff25f5d642d0bae\"}"
+    }
+  ],
+  "transactionsSent": 0,
+  "recordedUtc": "2026-10-01T03:26:39.645806+00:00"
+}

@@ -25,9 +25,10 @@ stored = either (const $ reject "invalid_saved_payment") pure . eitherDecodeStri
 -- No broadcast occurs here. The separate first-send decision must still
 -- recheck source/freshness, journal BroadcastIntent and satisfy backup coverage.
 prepareNativePayment :: Manager -> Config -> Ledger -> Obligation -> IO Text
-prepareNativePayment manager c ledger obligation = do
+prepareNativePayment manager c ledger obligation = (do
   _ <- nativeIdentity manager c
-  prepareNativeWith (nativeCall manager c) c ledger obligation
+  prepareNativeWith (nativeCall manager c) c ledger obligation)
+  `onException` pause ledger "native_preparation_requires_review"
 
 prepareNativeWith :: NativeRPC -> Config -> Ledger -> Obligation -> IO Text
 prepareNativeWith call c ledger obligation = prepare `onException` pause ledger "native_preparation_requires_review"
@@ -88,9 +89,10 @@ payoutReference c obligation = digest $ TE.encodeUtf8
   ("ecx-payout-v1:"<>fingerprint c<>":"<>obligationId obligation)
 
 prepareSolanaPayment :: Manager -> Config -> Ledger -> Obligation -> IO Text
-prepareSolanaPayment manager c ledger obligation = do
+prepareSolanaPayment manager c ledger obligation = (do
   _ <- solanaIdentity manager c
-  prepareSolanaWith (solanaCall manager c) (invokeHelper c) c ledger obligation
+  prepareSolanaWith (solanaCall manager c) (invokeHelper c) c ledger obligation)
+  `onException` pause ledger "solana_preparation_requires_review"
 
 prepareSolanaWith :: SolanaRPC -> (HelperRequest -> IO HelperReply) -> Config -> Ledger -> Obligation -> IO Text
 prepareSolanaWith call helper c ledger obligation = prepare `onException` pause ledger "solana_preparation_requires_review"

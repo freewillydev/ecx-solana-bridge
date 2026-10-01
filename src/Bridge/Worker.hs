@@ -8,10 +8,13 @@ import Bridge.Native
 import Bridge.Observer
 import Bridge.RPC
 import Bridge.Solana
+import Bridge.Settlement
 import Bridge.Types
 import Bridge.Web
 import Control.Concurrent.Async (concurrently_)
-import Control.Exception (try,bracket)
+import Control.Concurrent (threadDelay)
+import Control.Exception (try,bracket,catch,IOException)
+import Control.Monad (forever,when)
 import Data.Aeson
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -29,7 +32,18 @@ bearer header = case T.stripPrefix "Bearer " header of
 runWorker :: Config -> IO ()
 runWorker c = do
   manager <- newRpcManager
-  runWorkerWith c (observerLoop manager c)
+  runWorkerWith c $ \ledger -> forever $ do
+    _ <- observeOnce manager c ledger
+    when implementationReady $ do
+      result <- try (paymentPass manager c ledger (const $ reject "critical_backup_not_configured")
+        `catch` ioFailure) :: IO (Either BridgeError ())
+      case result of
+        Right () -> pure ()
+        Left (BridgeError code) -> pause ledger code
+    threadDelay 15000000
+ where
+  ioFailure :: IOException -> IO ()
+  ioFailure _=reject "payment_io_requires_reconciliation"
 
 -- The socket tests supply an idle observer; the runtime always uses the real
 -- adapters above. This seam does not expose a selectable substitute chain.

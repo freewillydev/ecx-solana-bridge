@@ -1,13 +1,13 @@
 # Implementation status — 2026-09-30
 
-**This is an unfinished development checkpoint, not a functioning bridge or a deployable custody release.** `implementationReady = False` in `Bridge.Worker`; it is deliberately not a configuration toggle. New orders and unsigned deposit transactions cannot be requested. No administrator resume endpoint is exposed.
+**This is an unfinished development checkpoint, not a deployable custody release.** One real ledger-driven wrap has completed through a scoped acceptance tool. `implementationReady = False` in `Bridge.Worker`; it is deliberately not a configuration toggle. New orders and unsigned deposit transactions cannot be requested through the customer API. No administrator resume endpoint is exposed.
 
 ## Verified locally
 
 | Check | Result and evidence |
 | --- | --- |
 | Haskell application | Builds on macOS arm64 / GHC 9.14.1 with the frozen Cabal graph |
-| Financial/state tests | 85 examples pass, plus 100 generated arithmetic cases; [test output](evidence/haskell-tests.txt) |
+| Financial/state tests | 95 examples pass, plus 100 generated arithmetic cases; [test output](evidence/haskell-tests.txt) |
 | SQLite actually linked | 3.53.4, exact upstream source identity checked by the application; [doctor](evidence/doctor.json) |
 | Rust helper | Five tests pass; the separate Devnet setup example compiles; fixed SDK/interface graph in `Cargo.lock` |
 | Browser build | TypeScript strict check and esbuild succeed; generated module about 6.7 KiB |
@@ -30,8 +30,12 @@
 | Public-test treasury reconciliation | Three known funding receipts allocated and five prior outgoing asset effects booked, including fees/rent; ledger balances match live native, token and fee-payer SOL balances; [reconciliation](evidence/test-treasury-reconciliation.json) |
 | Treasury migration/replay | Actual schema 3→4 preserved the ledger; repeat reconciliation changed no financial records; [migration](evidence/treasury-migration.json), [replay](evidence/test-treasury-replay.json) |
 | SOL history and worker restart | Separate fee-payer cursor; a real Devnet read rejected a history origin with nonzero opening balance without advancing its cursor; three observation streams healthy and no pending review after restart; [origin check](evidence/solana-operating-origin-check.json), [scanners](evidence/treasury-scanner-restart.json) |
+| Send/settlement contracts | Exact-byte retry, lost send response, backup acknowledgment, source recheck after backup, expired-blockhash hold, signed-only on-chain refusal and paused success/failure reconciliation tested |
+| Live settlement-reader checks | New adapters verified the actual prior native payment and both finalized Solana payouts; no new transactions sent during readback; [evidence](evidence/settlement-adapter-readback.json) |
+| First ledger-driven wrap | 10,000 native units in, 9,980 wrapped units out, 20-unit bridge fee and 5,000-lamport network fee; exact real-chain evidence and all custody balances matched; [order](evidence/first-ledger-wrap.json) |
+| Completed-order replay/restart | A fresh ledger opening and payment pass changed no financial records; after worker restart, all scanners were healthy and the authenticated customer API returned the saved `Paid` order; [replay](evidence/first-ledger-wrap-replay.json), [restart](evidence/first-ledger-wrap-restart.json) |
 
-The native payment used the standalone probe and dedicated public-test wallets. It was **not** a ledger-driven cross-chain order. The deterministic Solana codec fixtures remain explicitly labeled. Separate captured finalized Devnet fixtures now exercise actual payout evidence. No ledger-driven cross-chain order has completed.
+The earlier native payment and three-unit Solana payments were standalone probes. The later 10,000-unit native deposit and 9,980-unit token payout form a complete application-ledger wrap. It used dedicated public-test wallets and the command-line acceptance tool; it does not establish browser-wallet support, a completed reverse direction or full restart/host-loss recovery. Deterministic codec and RPC fixtures remain explicitly labeled as offline tests.
 
 ## Coverage against the approved sequence
 
@@ -40,8 +44,8 @@ The native payment used the standalone probe and dedicated public-test wallets. 
 | 1. Dependency and integration boundary | Partial | Linux build/systemd/helper sandbox; actual browser-wallet finalized deposit; dependency provenance/notice/security review |
 | 2. Economic/API contracts | Partial | Implement native destination/dust policy, rolling budgets, full state/error contracts for replacement/reorg/recovery; validate all exception examples |
 | 3. Durable ledger/worker | Partial | Existing primitives are tested; still need explicit cancellation/disk-full fault injection, production-size reconciliation and restore coverage |
-| 4. Both chain observers | Partial | Native, token and operating-SOL histories exercised and known public-test funding reconciled. Real order-bound deposits, ongoing custody/in-flight reconciliation, long-backlog recovery and complete reorg reconciliation remain |
-| 5. Settlement and recovery | Partial | Both preparation paths, durable intent/cost holds and Solana finalized-outcome validation are implemented. Still need rent settlement postings/rolling budgets, automatic scheduler, live source rechecks, exact-byte send/rebroadcast, finality/reorg reconciliation, native replacement families, Solana expiry and remote backup orchestration |
+| 4. Both chain observers | Partial | Real order-bound native deposit and native/token/operating-SOL history verified. Order-bound Solana deposit, ongoing custody/in-flight reconciliation, long-backlog recovery and complete reorg reconciliation remain |
+| 5. Settlement and recovery | Partial | Bounded payment pass now rechecks sources, enforces intent/backup barriers, sends exact bytes and posts verified outcomes including fee/rent. Still need quote/queue operating budgets, automatic startup recovery, destination reorgs, native replacement families, conclusive Solana expiry decisions and remote backup orchestration |
 | 6. Usable public-test bridge | Not complete | Both real directions through the browser, new recipient ATA, reload/rejection/expiry flows and supported-wallet matrix |
 | 7. Actual ECX betanet | Not started | Adequately sized host/node, official daemon/checkpoint and replay-policy tests, funding and real round trips |
 | 8. Installation and recovery | Not complete | Candidate service files exist; installer, release verification, remote backup permissions/retention, key restore and clean-host restore still required |
@@ -55,8 +59,8 @@ Some pure ledger work overlapped the first integration stage, as allowed by the 
 ## External inputs and next actions
 
 1. **Devnet funding received:** the user funded the existing setup payer with 10 Devnet SOL. Setup and two tiny payout probes finalized. The actual mint is `Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM`; it is a public-test mint, not canonical ECX.
-2. Complete a real helper-built incoming transfer and browser-wallet signing. Programmatic outgoing probes do not substitute for an actual supported browser wallet or either full bridge direction.
-3. Implement ongoing custody/in-flight reconciliation and the outgoing send/settlement/recovery loop. The known public-test receipts and prior probes are now explicitly reconciled, with no second treasury credit. The resulting balances are 1,899,718 native units (1,750,000 float and 149,718 operating), 99,999,999,994 wrapped units (float), and 3,501,560 fee-payer lamports (operating). This scoped bootstrap is not a general operator workflow or canonical reserve proof. Both Solana histories use the actual setup signature as their immutable origin.
+2. Complete a real helper-built incoming Solana transfer and ledger-driven native payout, then both directions through a supported browser wallet. The completed wrap used the command-line acceptance tool.
+3. Complete ongoing custody/in-flight reconciliation and the remaining recovery paths. After the first ledger-driven wrap, balances match at 1,909,718 native units (1,759,980 float, 149,718 operating and 20 earned), 99,999,990,014 wrapped units (float), and 3,496,560 fee-payer lamports (operating). Neither the scoped treasury bootstrap nor this order is a general operator workflow or canonical reserve proof. Both Solana histories use the actual setup signature as their immutable origin.
 4. **Linux server:** user requested local continuation and will provide server details later. The local Docker storage is reporting I/O errors; unrelated containers were left alone. Test Ubuntu 24.04, native node access, distinct service users, helper isolation, and pinned SQLite/restic artifacts when an appropriate target is available.
 5. Complete full public Signet/Devnet round trips, crash/ambiguous-send cases, replacement/refund exclusions and host-loss recovery before enabling even a small tester pilot. ECX betanet requires its real node and separate test allocation.
 
@@ -73,8 +77,8 @@ Unfinished implementation is an additional requirement beyond those external inp
 
 The next implementation must retain the original plan's security/recovery scope. Do not remove the disabled intake gate simply to make the interface appear finished.
 
-The native preparation module is not called by the worker's observer loop and has no HTTP signing route. Its full signing path has RPC contract tests; the fresh real-node check intentionally covered unsigned construction/validation only. The earlier standalone real signed payment remains separate evidence. No new signed native transaction or on-chain transfer was produced during this preparation checkpoint.
+The native preparation path has RPC contract tests and real unsigned validation; the earlier standalone signed native probe is separate evidence. The first wrap's native transfer was sent by the dedicated tester as a deposit. The application's native payout path still needs a complete real redemption order.
 
-The new Solana preparation path, like the native path, is not scheduled by the worker or exposed over HTTP. The manual Devnet probes save and fsync exact signed bytes before submission. One initial send did not land before expiry; its bytes/history decision were retained before a single replacement. Bounded exact-byte retries then finalized both probes. The primary public Devnet RPC was used; this does not establish canonical independent-provider expiry/recovery acceptance.
+The normal worker's payment scheduling and HTTP intake remain behind the disabled implementation gate. The scoped wrap acceptance tool used the real payment pass to sign, persist, submit and finalize one obligation. The earlier standalone probes separately exercised an expired attempt followed by an explicit replacement; this does not establish automatic expiry or canonical independent-provider recovery acceptance.
 
 The treasury checkpoint sent no transactions. Its operator tool checks the exact existing public-test deployment, requires zero customer orders, verifies the known funding and finalized probe evidence, and matches current chain balances. Customer attempts cannot be reclassified as treasury spends. An on-chain signature saved only as `signed`, without `BroadcastIntent`, now triggers review. The worker remains paused with intake disabled.

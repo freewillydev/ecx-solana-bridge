@@ -12,6 +12,7 @@ import qualified Data.Aeson.KeyMap as KM
 import Bridge.Native (nativeAmount,nativeNumber)
 import Bridge.NativePayment
 import Bridge.Payment (prepareNativeWith,prepareSolanaWith)
+import Bridge.Settlement
 import Bridge.RPC
 import Bridge.API
 import Bridge.Worker
@@ -28,6 +29,7 @@ import qualified Data.ByteString.Lazy as LBS
 import qualified Data.ByteString.Base64 as B64
 import Data.Int (Int64)
 import Data.IORef
+import Data.List (elemIndex)
 import Crypto.Error (CryptoFailable(..))
 import qualified Crypto.PubKey.Ed25519 as Ed
 import qualified Data.ByteArray as BA
@@ -330,8 +332,8 @@ main=hspec $ do
       (_,ob)<-fundOrder l c
       testAttempt l ob "Solana" "fixture-signature" "bytes" "{}" 5000 Nothing
       _<-markBroadcastIntent l "fixture-signature"
-      recordSettlement l "fixture-signature" 5000 "fixture-finalized-proof"
-      recordSettlement l "fixture-signature" 5000 "fixture-finalized-proof"
+      recordSettlement l "fixture-signature" (PaymentCosts (amt 5000) (amt 0)) "fixture-finalized-proof"
+      recordSettlement l "fixture-signature" (PaymentCosts (amt 5000) (amt 0)) "fixture-finalized-proof"
       ledgerAction l (\db->freeInventory db Native) `shouldReturn` 1099800
       ledgerAction l (\db->freeInventory db Wrapped) `shouldReturn` 900200
       pendingAttempts l `shouldReturn` []
@@ -354,6 +356,16 @@ main=hspec $ do
       authorizeRecordedSend l True "tx" `shouldThrow` isError "source_not_eligible"
       length <$> pendingAttempts l `shouldReturn` 1
   describe "refund principal and failed transaction fees" $ do
+    it "separates rent from fees, caps their total, and refuses changed settlement evidence" $ withFunded $ \l c -> do
+      (_,ob)<-fundOrder l c
+      testAttempt l ob "Solana" "costed-tx" "bytes" "{}" 10000 Nothing
+      _<-markBroadcastIntent l "costed-tx"
+      recordSettlement l "costed-tx" (PaymentCosts (amt 5000) (amt 5001)) "proof" `shouldThrow` isError "settlement_fee_or_evidence_invalid"
+      recordSettlement l "costed-tx" (PaymentCosts (amt 5000) (amt 3000)) "proof"
+      recordSettlement l "costed-tx" (PaymentCosts (amt 5000) (amt 3000)) "proof"
+      recordSettlement l "costed-tx" (PaymentCosts (amt 5000) (amt 2999)) "proof" `shouldThrow` isError "settlement_evidence_conflict"
+      ledgerAction l (\db->query_ db "SELECT event_id,delta FROM postings WHERE account='operating' AND event_id IN('network-fee:costed-tx','account-rent:costed-tx') ORDER BY event_id" :: IO [(Text,Int64)])
+        `shouldReturn` [("account-rent:costed-tx",-3000),("network-fee:costed-tx",-5000)]
     it "refunds a confirmed partial deposit without consuming payout float" $ withFunded $ \l c -> do
       o<-createOrder l c 100 cap req
       observeDeposit l (Deposit "partial:0" (Just $ orderId o) Native (amt 1000) "anchor" 1 True 100) "cursor"
@@ -361,7 +373,7 @@ main=hspec $ do
       obligationRecipient ob `shouldBe` refund req
       testAttempt l ob "Native" "refund-tx" "fixture-refund-bytes" "{}" 100 Nothing
       _<-markBroadcastIntent l "refund-tx"
-      recordSettlement l "refund-tx" 100 "fixture-refund-proof"
+      recordSettlement l "refund-tx" (PaymentCosts (amt 100) (amt 0)) "fixture-refund-proof"
       ledgerAction l (\db->freeInventory db Native) `shouldReturn` 1000000
       ledgerAction l (\db->freeInventory db Wrapped) `shouldReturn` 1000000
       status <$> readOrder l cap (orderId o) `shouldReturn` "Refunded"
@@ -724,6 +736,102 @@ main=hspec $ do
             ,(info<>["tokenAmount","decimals"],Number 9)]
       forM_ mutations $ \(path,value) ->
         inspectTokenAccount (mint c) (custodyOwner c) (setPath path value account) `shouldBe` Left "token_account_policy_mismatch"
+  describe "durable send orchestration (offline RPC contracts)" $ do
+    it "backs up BroadcastIntent and rechecks the source before sending the exact saved bytes" $ withSendFixture $ \l c _ attempt transport -> do
+      sourceReads<-newIORef (0::Int)
+      let native wallet method params=do
+            if method=="gettransaction" then modifyIORef' sourceReads (+1) else pure ()
+            paymentNative transport wallet method params
+          backup seqNo=do
+            map attemptState <$> pendingAttempts l `shouldReturn` ["broadcast_intent"]
+            readIORef sourceReads `shouldReturn` 1
+            acknowledgeBackup l seqNo "fixture-remote-snapshot"
+          sol method params=if method=="sendTransaction" then do
+            readIORef sourceReads `shouldReturn` 2
+            case params of String raw:_->raw `shouldBe` attemptBytes attempt; _->expectationFailure "missing bytes"
+            attemptBytes <$> authorizeRecordedSend l True (attemptId attempt) `shouldReturn` attemptBytes attempt
+            pure (toJSON $ attemptId attempt)
+            else paymentSolana transport method params
+      settleAttemptWith transport{paymentNative=native,paymentSolana=sol,paymentBackup=backup} c{backupRequired=True} l attempt `shouldReturn` "submitted"
+      map attemptState <$> pendingAttempts l `shouldReturn` ["broadcast_intent"]
+      readCheckpoint l "Native" `shouldReturn` Just "cursor"
+    it "does not send when a backup callback returns without acknowledging coverage" $ withSendFixture $ \l c _ attempt transport -> do
+      let sol method params=if method=="sendTransaction" then expectationFailure "sent without backup" >> pure Null else paymentSolana transport method params
+      settleAttemptWith transport{paymentSolana=sol,paymentBackup=const $ pure ()} c{backupRequired=True} l attempt `shouldThrow` isError "backup_pending"
+      map attemptState <$> pendingAttempts l `shouldReturn` ["broadcast_intent"]
+    it "retains signed bytes and reservations if the source loses eligibility during backup" $ withSendFixture $ \l c ob attempt transport -> do
+      depth<-newIORef 1
+      let native wallet method params=readIORef depth >>= \n -> sourceNativeContract n wallet method params
+          backup seqNo=acknowledgeBackup l seqNo "fixture-backup" >> writeIORef depth 0
+          sol method params=if method=="sendTransaction" then expectationFailure "sent after reorg" >> pure Null else paymentSolana transport method params
+      settleAttemptWith transport{paymentNative=native,paymentSolana=sol,paymentBackup=backup} c{backupRequired=True} l attempt `shouldThrow` isError "source_not_eligible"
+      map attemptBytes <$> pendingAttempts l `shouldReturn` [attemptBytes attempt]
+      createRefund l (obligationDeposit ob) `shouldThrow` isError "refundable_deposit_not_found"
+      ledgerAction l (\db->query_ db "SELECT released FROM fee_reservations" :: IO [Only Bool]) `shouldReturn` [Only False]
+    it "retries identical bytes after an unknown send response without another signature" $ withSendFixture $ \l c _ attempt transport -> do
+      sent<-newIORef ([]::[Text])
+      let sol method params=if method=="sendTransaction" then do
+            case params of String raw:_->modifyIORef' sent (<>[raw]); _->expectationFailure "missing bytes"
+            reject "fixture_lost_send_response"
+            else paymentSolana transport method params
+          rpcTransport=transport{paymentSolana=sol}
+      settleAttemptWith rpcTransport c l attempt `shouldReturn` "broadcast_uncertain"
+      [saved]<-pendingAttempts l
+      settleAttemptWith rpcTransport c l saved `shouldReturn` "broadcast_uncertain"
+      readIORef sent `shouldReturn` [attemptBytes attempt,attemptBytes attempt]
+      pendingPreparations l `shouldReturn` []
+    it "does not treat missing history or an expired blockhash as permission to replace" $ withSendFixture $ \l c _ attempt transport -> do
+      let sol method params=if method=="getBlockHeight" then pure (Number 1100) else paymentSolana transport method params
+      settleAttemptWith transport{paymentSolana=sol} c l attempt `shouldThrow` isError "solana_blockhash_window_too_short"
+      map attemptBytes <$> pendingAttempts l `shouldReturn` [attemptBytes attempt]
+      available <$> readiness l `shouldReturn` False
+    it "requires review if a signed-only transaction is observed as processed" $ withSendFixture $ \l c _ attempt transport -> do
+      let sol method params=if method=="getSignatureStatuses" then pure $ contextContract $ toJSON [object ["confirmationStatus" .= ("processed"::Text)]] else paymentSolana transport method params
+      settleAttemptWith transport{paymentSolana=sol} c l attempt `shouldThrow` isError "unrecorded_broadcast_observed"
+    it "reconciles finalized success while paused without broadcasting again" $ withSendFixture $ \l c ob attempt transport -> do
+      _<-markBroadcastIntent l (attemptId attempt)
+      [saved]<-pendingAttempts l
+      signed<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ attemptPolicy saved)
+      proof<-codecSettlementProof c signed True
+      pause l "fixture-restart"
+      let sol method _=if method=="getTransaction" then pure proof else expectationFailure "unexpected send/status RPC" >> pure Null
+      settleAttemptWith transport{paymentSolana=sol} c l saved `shouldReturn` "settled"
+      pendingAttempts l `shouldReturn` []
+      status <$> readOrder l cap (obligationOrder ob) `shouldReturn` "Paid"
+      available <$> readiness l `shouldReturn` False
+    it "books only the verified fee on finalized failure and retains customer principal" $ withSendFixture $ \l c ob attempt transport -> do
+      _<-markBroadcastIntent l (attemptId attempt)
+      [saved]<-pendingAttempts l
+      signed<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ attemptPolicy saved)
+      proof<-codecSettlementProof c signed False
+      let sol method _=if method=="getTransaction" then pure proof else expectationFailure "unexpected RPC" >> pure Null
+      settleAttemptWith transport{paymentSolana=sol} c l saved `shouldReturn` "failed"
+      status <$> readOrder l cap (obligationOrder ob) `shouldReturn` "NeedsReview"
+      ledgerAction l (\db->query_ db "SELECT SUM(delta) FROM postings WHERE asset='Native' AND account='principal'" :: IO [Only Int64]) `shouldReturn` [Only 4]
+      obligationAmount <$> createRefund l (obligationDeposit ob) `shouldReturn` 4
+  describe "native confirmation evidence (captured bytes and offline RPC contracts)" $ do
+    it "requires the exact saved bytes and a confirmed active-chain anchor" $ do
+      fixtureValue<-BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
+      (plan,previous,fee,tx)<-nativeFixture
+      raw<-fieldValue "raw" fixtureValue
+      decoded<-fieldValue "decoded" fixtureValue
+      let signed=NativeSigned raw tx plan previous fee
+          anchor=T.replicate 64 "b"
+          walletValue=object ["txid" .= nativeTxid tx,"hex" .= raw,"decoded" .= (decoded::Value)
+            ,"fee" .= Number (scientific (negate $ toInteger $ units fee) (-8))
+            ,"confirmations" .= (3::Int),"walletconflicts" .= ([]::[Text]),"blockhash" .= anchor]
+          call _ method _=case method of
+            "gettransaction"->pure walletValue
+            "getblockheader"->pure $ object ["hash" .= anchor,"height" .= (123::Int),"confirmations" .= (3::Int)]
+            "getblockhash"->pure (toJSON anchor)
+            _->expectationFailure "unexpected native RPC" >> pure Null
+      observeNativePayment call signed >>= \result -> case result of
+        PaymentConfirmed costs _->costs `shouldBe` PaymentCosts fee (amt 0)
+        _->expectationFailure "expected confirmed payment"
+      let fork wallet method params=if method=="getblockhash" then pure (String $ T.replicate 64 "c") else call wallet method params
+      observeNativePayment fork signed `shouldThrow` isError "native_settlement_not_canonical"
+      let changed wallet method params=if method=="gettransaction" then pure (setPath ["hex"] (String "00") walletValue) else call wallet method params
+      observeNativePayment changed signed `shouldThrow` isError "native_settlement_evidence_mismatch"
   describe "Solana settlement evidence (captured finalized public Devnet payments)" $ do
     forM_ ["existing","new"] $ \kind -> it ("validates exact bytes/units and actual costs for "<>kind<>" recipient ATA") $ do
       (c,signed,proof,outcome)<-capturedSolanaPayment kind
@@ -946,8 +1054,9 @@ fundSolanaOrder :: Ledger -> Config -> SolanaPlan -> IO (OrderView,Obligation)
 fundSolanaOrder l c plan=do
   o<-createOrder l c 100 cap req{input=amt 4,recipient=solPlanRecipient plan}
   bindInstruction l (orderId o) "fixture-address"
-  observeDeposit l (Deposit "fixture-four-units:0" (Just $ orderId o) Native (amt 4) "fixture-anchor" 1 True 100) "cursor"
-  promoteDeposit l 110 "fixture-four-units:0" `shouldReturn` True
+  let did="native:"<>T.replicate 64 "a"<>":0"
+  observeDeposit l (Deposit did (Just $ orderId o) Native (amt 4) (T.replicate 64 "b") 1 True 100) "cursor"
+  promoteDeposit l 110 did `shouldReturn` True
   obligations<-readyObligations l
   case obligations of [ob]->pure(o,ob); _->fail "expected one three-unit obligation"
 
@@ -987,3 +1096,56 @@ capturedSolanaPayment kind=do
   let c=(cfg "/unused-real-payment-parser-test"){deploymentId="l2l-devnet-local",nativeWallet="ecx-bridge-test"
         ,custodyAta="CKXz4AWgfRjw5YK17P64TgXuaci2QKAD7J1vZ9X2mNvT",maxSolFee=amt 10000}
   pure(c,signed,proof,outcome)
+
+-- Entirely offline execution tests. Only the SDK's published deterministic
+-- codec key is used; these fixtures are never sent to or counted as a network.
+withSendFixture :: (Ledger -> Config -> Obligation -> Attempt -> PaymentTransport -> IO a) -> IO a
+withSendFixture action=withSolanaLedger $ \l c plan reply -> do
+  (_,ob)<-fundSolanaOrder l c plan
+  _<-prepareSolanaWith (solanaContract c plan Null) (\r -> codecReply c r reply) c l ob
+  [attempt]<-pendingAttempts l
+  let sol method _=case method of
+        "getTransaction"->pure Null
+        "getSignatureStatuses"->pure (contextContract $ toJSON [Null])
+        "getBlockHeight"->pure (Number 900)
+        "sendTransaction"->pure (toJSON $ attemptId attempt)
+        _->expectationFailure ("unexpected RPC: "<>T.unpack method) >> pure Null
+      transport=PaymentTransport (sourceNativeContract 1) sol Nothing (pure ())
+        (const $ expectationFailure "unexpected backup callback")
+  action l c ob attempt transport
+
+sourceNativeContract :: Int -> NativeRPC
+sourceNativeContract depth _ method _=do
+  let txid=T.replicate 64 "a"
+      anchor=T.replicate 64 "b"
+      script="0014"<>T.replicate 40 "1"
+  case method of
+    "gettransaction"->pure $ object ["txid" .= txid,"confirmations" .= depth,"blockhash" .= anchor
+      ,"decoded" .= object ["txid" .= txid,"vout" .= [object ["n" .= (0::Int),"value" .= nativeNumber (amt 4),"scriptPubKey" .= object ["hex" .= script]]]]]
+    "getaddressinfo"->pure $ object ["ismine" .= True,"scriptPubKey" .= script]
+    "getblockheader"->pure $ object ["hash" .= anchor,"height" .= (123::Int),"confirmations" .= depth]
+    "getblockhash"->pure (toJSON anchor)
+    _->expectationFailure ("unexpected source RPC: "<>T.unpack method) >> pure Null
+
+codecSettlementProof :: Config -> SolanaSigned -> Bool -> IO Value
+codecSettlementProof c signed success=do
+  let reply=signedSolanaReply signed
+      plan=signedSolanaPlan signed
+  Transaction _ (Message required signedReadonly readonly keys blockhash instructions) _ <-
+    either (fail . T.unpack) pure (validateHelperReply c (solanaPayoutRequest c plan) reply)
+  let addresses=map base58 keys
+  src<-maybe (fail "missing codec source") pure (elemIndex (replySource reply) addresses)
+  dst<-maybe (fail "missing codec destination") pure (elemIndex (replyDestination reply) addresses)
+  let token i owner n=object ["accountIndex" .= i,"mint" .= mint c,"owner" .= owner
+        ,"uiTokenAmount" .= object ["amount" .= T.pack(show (n::Int)),"decimals" .= (8::Int)]]
+      balances=[if i==0 then 3000000 else 1488440::Int | i<-[0..length keys-1]]
+      afterBalances=[if i==0 then n-5000 else n | (i,n)<-zip [0::Int ..] balances]
+      tokens source destination=[token src (custodyOwner c) source,token dst (solPlanRecipient plan) destination]
+  pure $ object ["slot" .= (101::Int),"version" .= ("legacy"::Text)
+    ,"transaction" .= object ["signatures" .= [maybe "" id $ replySignature reply],"message" .= object
+      ["header" .= object ["numRequiredSignatures" .= required,"numReadonlySignedAccounts" .= signedReadonly,"numReadonlyUnsignedAccounts" .= readonly]
+      ,"accountKeys" .= addresses,"recentBlockhash" .= base58 blockhash
+      ,"instructions" .= [object ["programIdIndex" .= p,"accounts" .= as,"data" .= base58 dat] | Instruction p as dat<-instructions]]]
+    ,"meta" .= object ["err" .= (if success then Null else String "offline-fixture-failure"),"fee" .= (5000::Int)
+      ,"preBalances" .= balances,"postBalances" .= afterBalances
+      ,"preTokenBalances" .= tokens 10 0,"postTokenBalances" .= (if success then tokens 7 3 else tokens 10 0)]]

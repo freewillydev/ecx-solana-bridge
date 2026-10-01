@@ -1,12 +1,6 @@
 Build profile: -w ghc-9.14.1 -O1
 In order, the following will be built (use -v for more details):
- - ecx-bridge-0.1.0.0 (lib) (configuration changed)
- - ecx-bridge-0.1.0.0 (test:bridge-test) (configuration changed)
-Configuring library for ecx-bridge-0.1.0.0...
-Preprocessing library for ecx-bridge-0.1.0.0...
-Building library for ecx-bridge-0.1.0.0...
-[12 of 18] Compiling Bridge.Ledger    ( src/Bridge/Ledger.hs, <build-cache>/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Ledger.o, <build-cache>/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/build/Bridge/Ledger.dyn_o ) [Source file changed]
-Configuring test suite 'bridge-test' for ecx-bridge-0.1.0.0...
+ - ecx-bridge-0.1.0.0 (test:bridge-test) (file test/Spec.hs changed)
 Preprocessing test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 Building test suite 'bridge-test' for ecx-bridge-0.1.0.0...
 [1 of 1] Compiling Main             ( test/Spec.hs, <build-cache>/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/build/bridge-test/bridge-test-tmp/Main.o ) [Source file changed]
@@ -54,6 +48,7 @@ signed intent and settlement invariants
   cannot authorize a first send after loss of source eligibility [✔]
   rechecks backup coverage and source eligibility after a recorded broadcast intent [✔]
 refund principal and failed transaction fees
+  separates rent from fees, caps their total, and refuses changed settlement evidence [✔]
   refunds a confirmed partial deposit without consuming payout float [✔]
   will not refund a signed or possibly broadcast conversion [✔]
   charges a failed Solana transaction fee and preserves full refundable principal [✔]
@@ -96,6 +91,17 @@ Solana preparation (SDK fixtures and RPC contract tests)
 token account policy (captured finalized Devnet accounts)
   accepts the real eight-decimal custody balance [✔]
   rejects owner/mint changes, delegates, close authorities, frozen and extended accounts [✔]
+durable send orchestration (offline RPC contracts)
+  backs up BroadcastIntent and rechecks the source before sending the exact saved bytes [✔]
+  does not send when a backup callback returns without acknowledging coverage [✔]
+  retains signed bytes and reservations if the source loses eligibility during backup [✔]
+  retries identical bytes after an unknown send response without another signature [✔]
+  does not treat missing history or an expired blockhash as permission to replace [✔]
+  requires review if a signed-only transaction is observed as processed [✔]
+  reconciles finalized success while paused without broadcasting again [✔]
+  books only the verified fee on finalized failure and retains customer principal [✔]
+native confirmation evidence (captured bytes and offline RPC contracts)
+  requires the exact saved bytes and a confirmed active-chain anchor [✔]
 Solana settlement evidence (captured finalized public Devnet payments)
   validates exact bytes/units and actual costs for existing recipient ATA [✔]
   validates exact bytes/units and actual costs for new recipient ATA [✔]
@@ -117,8 +123,8 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 0.7009 seconds
-85 examples, 0 failures
+Finished in 0.7745 seconds
+95 examples, 0 failures
 Test suite bridge-test: PASS
 Test suite logged to:
 <repository>/./<build-cache>/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log
