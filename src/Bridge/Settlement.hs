@@ -2,6 +2,7 @@
 module Bridge.Settlement
   ( PaymentTransport(..), realPaymentTransport, paymentPass, settleAttemptWith
   , recheckSourceWith, observeNativePayment, observeSolanaPayment, solanaExpiryEvidence, PaymentObservation(..)
+  , approveSolanaRetry, approveSolanaRetryWith
   ) where
 
 import Bridge.Config
@@ -278,8 +279,7 @@ settleAttemptWith transport c ledger attempt = work `onException` pause ledger "
           SolanaPayment signed -> solanaExpiryEvidence transport c signed
         case expiry of
           Just proof -> do
-            origins <- ledgerAction ledger $ \db -> query_ db "SELECT chain,anchor FROM scan_origins WHERE chain IN('Solana','SolanaOperating') ORDER BY chain" :: IO [(Text,Text)]
-            require (map (\(chain,anchor)->(chain,Just anchor)) origins==[("Solana",solanaHistoryStart c),("SolanaOperating",solanaOperatingHistoryStart c)]) "expiry_scan_origin_mismatch"
+            checkExpiryOrigins ledger c
             recordSolanaExpiry ledger attempt proof
             pure "expired"
           Nothing -> sendIfAvailable ob payment
@@ -306,6 +306,37 @@ settleAttemptWith transport c ledger attempt = work `onException` pause ledger "
     "Solana" -> paymentSolana transport "sendTransaction" [toJSON $ attemptBytes saved,object
       ["encoding" .= ("base64"::Text),"skipPreflight" .= False,"preflightCommitment" .= ("confirmed"::Text),"maxRetries" .= (0::Int)]] >>= parseValue parseJSON
     _ -> reject "wrong_destination_chain"
+
+checkExpiryOrigins :: Ledger -> Config -> IO ()
+checkExpiryOrigins ledger c=do
+  origins <- ledgerAction ledger $ \db -> query_ db "SELECT chain,anchor FROM scan_origins WHERE chain IN('Solana','SolanaOperating') ORDER BY chain" :: IO [(Text,Text)]
+  require (map (\(chain,anchor)->(chain,Just anchor)) origins==[("Solana",solanaHistoryStart c),("SolanaOperating",solanaOperatingHistoryStart c)]) "expiry_scan_origin_mismatch"
+
+approveSolanaRetry :: Manager -> Config -> Ledger -> Text -> Text -> IO ()
+approveSolanaRetry manager c=approveSolanaRetryWith (realPaymentTransport manager c (const $ reject "unexpected_backup_callback")) c
+
+-- Private operator command only. Revalidate the saved signed message, source,
+-- immutable origins and complete expiry evidence before journaling permission.
+-- It neither signs, broadcasts nor resumes a paused worker.
+approveSolanaRetryWith :: PaymentTransport -> Config -> Ledger -> Text -> Text -> IO ()
+approveSolanaRetryWith transport c ledger txid reason=do
+  prior <- ledgerAction ledger $ \db -> query db "SELECT reason FROM solana_retry_approvals WHERE expired_txid=?" (Only txid) :: IO [Only Text]
+  case prior of
+    [Only old] -> require (old==reason) "retry_approval_conflict"
+    [] -> do
+      require (not (T.null $ T.strip reason) && T.length reason<=512) "invalid_retry_approval"
+      health <- readiness ledger
+      require (not $ available health) "pause_before_operator_action"
+      rows <- ledgerAction ledger $ \db -> query db "SELECT a.txid,a.intent_id,i.chain,a.signed_bytes,a.policy_json,a.fee_limit,a.state,a.critical_sequence FROM attempts a JOIN intents i ON i.id=a.intent_id JOIN obligations o ON o.id=i.obligation_id JOIN solana_expiries e ON e.txid=a.txid WHERE a.txid=? AND i.resolved=1 AND a.state='review' AND o.status='review' AND a.preparation_generation=(SELECT MAX(generation) FROM preparations WHERE intent_id=i.id)" (Only txid)
+      attempt <- case rows of [a]->pure a; _->reject "solana_retry_not_expected"
+      paymentIdentity transport
+      (ob,payment) <- readSavedPayment transport c ledger attempt
+      signed <- case payment of SolanaPayment s->pure s; _->reject "wrong_destination_chain"
+      checkExpiryOrigins ledger c
+      recheckSourceWith transport c ledger ob
+      proof <- solanaExpiryEvidence transport c signed >>= maybe (reject "solana_expiry_not_proven") pure
+      recordSolanaRetryApproval ledger txid reason proof
+    _ -> reject "duplicate_retry_approval"
 
 -- One bounded pass; the database owns the queue across restarts. Reconciliation
 -- runs even while paused, but only an available deployment may prepare/send.

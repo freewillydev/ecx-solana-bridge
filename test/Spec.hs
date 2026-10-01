@@ -957,6 +957,16 @@ main=hspec $ do
       [Only proof]<-ledgerAction l (\db->query_ db "SELECT proof_json FROM solana_expiries" :: IO [Only Text])
       recordSolanaExpiry l attempt proof
       recordSolanaExpiry l attempt "changed proof" `shouldThrow` isError "expiry_evidence_conflict"
+      readyObligations l `shouldReturn` []
+      resumeAfterChecks l
+      beginPreparation l ob "Solana" (attemptFeeLimit attempt) "new-policy" `shouldThrow` isError "obligation_not_ready"
+      approveSolanaRetryWith verified configured l (attemptId attempt) "operator retry" `shouldThrow` isError "pause_before_operator_action"
+      pause l "operator-action"
+      approveSolanaRetryWith verified configured l (attemptId attempt) "operator retry"
+      approveSolanaRetryWith verified{paymentIdentity=expectationFailure "duplicate approval performed chain IO"} configured l (attemptId attempt) "operator retry"
+      approveSolanaRetryWith verified configured l (attemptId attempt) "changed reason" `shouldThrow` isError "retry_approval_conflict"
+      available <$> readiness l `shouldReturn` False
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM solana_retry_approvals" :: IO [Only Int]) `shouldReturn` [Only 1]
       resumeAfterChecks l
       testAttempt l ob "Solana" "replacement" "new-fixture-bytes" "new-policy" (attemptFeeLimit attempt) Nothing
       ledgerAction l (\db->query_ db "SELECT generation,retired_txid FROM preparations ORDER BY generation" :: IO [(Int,Maybe Text)])
@@ -979,6 +989,32 @@ main=hspec $ do
       settleAttemptWith transport{paymentSolana=expiryContract (expiryConfig c)} (expiryConfig c) l attempt
         `shouldThrow` isError "expiry_scan_origin_mismatch"
       map attemptId <$> pendingAttempts l `shouldReturn` [attemptId attempt]
+    it "requires durable operator approval even if an expired obligation is made ready by a caller" $ withSendFixture $ \l c ob attempt transport -> do
+      let configured=expiryConfig c
+      recordExpiryOrigins l configured
+      settleAttemptWith transport{paymentSolana=expiryContract configured} configured l attempt `shouldReturn` "expired"
+      ledgerAction l $ \db->execute db "UPDATE obligations SET status='ready' WHERE id=?" (Only $ obligationId ob)
+      beginPreparation l ob "Solana" (attemptFeeLimit attempt) "new-policy" `shouldThrow` isError "solana_retry_not_authorized"
+      pendingPreparations l `shouldReturn` []
+    it "rechecks source eligibility before approving a replacement" $ withSendFixture $ \l c _ attempt transport -> do
+      let configured=expiryConfig c
+          verified=transport{paymentSolana=expiryContract configured}
+      recordExpiryOrigins l configured
+      settleAttemptWith verified configured l attempt `shouldReturn` "expired"
+      pause l "operator-action"
+      approveSolanaRetryWith verified{paymentNative=sourceNativeContract 0} configured l (attemptId attempt) "retry after expiry"
+        `shouldThrow` isError "source_not_eligible"
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM solana_retry_approvals" :: IO [Only Int]) `shouldReturn` [Only 0]
+      readyObligations l `shouldReturn` []
+    it "does not revive an expired conversion after a refund has been authorized" $ withSendFixture $ \l c _ attempt transport -> do
+      let configured=expiryConfig c
+          verified=transport{paymentSolana=expiryContract configured}
+      recordExpiryOrigins l configured
+      settleAttemptWith verified configured l attempt `shouldReturn` "expired"
+      _<-createRefund l ("native:"<>T.replicate 64 "a"<>":0")
+      pause l "operator-action"
+      approveSolanaRetryWith verified configured l (attemptId attempt) "retry after expiry" `shouldThrow` isError "solana_retry_not_expected"
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM solana_retry_approvals" :: IO [Only Int]) `shouldReturn` [Only 0]
   describe "native confirmation evidence (captured bytes and offline RPC contracts)" $ do
     it "requires the exact saved bytes and a confirmed active-chain anchor" $ do
       fixtureValue<-BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'

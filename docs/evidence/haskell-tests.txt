@@ -109,6 +109,9 @@ conclusive Solana expiry (offline recovery contracts)
   retires an expired attempt once while preserving principal, old bytes, and replacement barriers [✔]
   preserves ambiguous broadcast history before authorizing a new preparation [✔]
   does not permit a changed configured history origin to retire a real intent [✔]
+  requires durable operator approval even if an expired obligation is made ready by a caller [✔]
+  rechecks source eligibility before approving a replacement [✔]
+  does not revive an expired conversion after a refund has been authorized [✔]
 native confirmation evidence (captured bytes and offline RPC contracts)
   requires the exact saved bytes and a confirmed active-chain anchor [✔]
 Solana settlement evidence (captured finalized public Devnet payments)
@@ -133,8 +136,8 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 1.0532 seconds
-109 examples, 0 failures
+Finished in 1.1024 seconds
+112 examples, 0 failures
 Test suite bridge-test: PASS
 Test suite logged to:
 [local build log]

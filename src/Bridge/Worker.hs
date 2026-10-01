@@ -1,4 +1,4 @@
-module Bridge.Worker (runWorker, runWorkerWith, scanOnce, doctor) where
+module Bridge.Worker (runWorker, runWorkerWith, scanOnce, approveRetry, doctor) where
 
 import Bridge.API
 import Control.Monad.IO.Class (liftIO)
@@ -58,6 +58,11 @@ scanOnce :: Config -> IO Value
 scanOnce c = withLedger (dbPath c) (fingerprint c) $ \ledger -> do
   manager <- newRpcManager
   observeOnce manager c ledger
+approveRetry :: Config -> Text -> Text -> IO Value
+approveRetry c txid reason = withLedger (dbPath c) (fingerprint c) $ \ledger -> do
+  manager <- newRpcManager
+  approveSolanaRetry manager c ledger txid reason
+  pure $ object ["approvedRetryOf" .= txid,"paused" .= True,"signedOrSent" .= False]
 customerServer :: Config -> Ledger -> Server CustomerAPI
 customerServer c ledger =
   configView :<|> create :<|> get :<|> transaction :<|> hint :<|> health :<|> ready

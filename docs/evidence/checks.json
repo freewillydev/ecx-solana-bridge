@@ -1,13 +1,13 @@
 {
-  "recordedUtc": "2026-10-01T04:27:38.826834+00:00",
+  "recordedUtc": "2026-10-01T04:39:52.535462+00:00",
   "platform": "macOS arm64",
   "haskell": {
-    "examples": 109,
+    "examples": 112,
     "propertyCases": 100,
     "failures": 0,
     "sqliteVersion": "3.53.4",
     "evidence": "haskell-tests.txt",
-    "ledgerSchema": 5
+    "ledgerSchema": 6
   },
   "rust": {
     "unitTests": 5,
@@ -87,7 +87,8 @@
     "destinationReorgRecovery": false,
     "canonicalExpiryLiveAcceptance": false,
     "expiryAndRefundEvidence": "late-ledger-refund.json",
-    "nativePayoutInterruption": "native-payout-interruption.json"
+    "nativePayoutInterruption": "native-payout-interruption.json",
+    "operatorApprovalRequiredForReplacement": true
   },
   "firstLedgerWrap": {
     "order": "first-ledger-wrap.json",
@@ -144,5 +145,14 @@
     "allCustodyBalancesMatch": true,
     "authenticatedOrderReads": 3,
     "healthyScanners": 3
+  },
+  "operatorRetryApproval": {
+    "schemaVersion": 6,
+    "migrationAndRefusal": "operator-retry-upgrade.json",
+    "financialStatePreserved": true,
+    "privateCommand": "approve-solana-retry",
+    "successfulApprovalContractTests": true,
+    "successfulApprovalLiveTest": false,
+    "signsOrBroadcastsDuringApproval": false
   }
 }

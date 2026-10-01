@@ -9,7 +9,7 @@ module Bridge.Ledger
   , lookupInstruction, maximumNativeDepth, pendingVerification
   , Obligation(..), readyObligations, Attempt(..), storeAttempt, markBroadcastIntent, authorizeRecordedSend
   , Preparation(..), beginPreparation, storeDraft, pendingPreparations
-  , pendingAttempts, PaymentCosts(..), recordSettlement, createRefund, recordFailedSolana, recordSolanaExpiry, requireBackup, addHint, auditExport
+  , pendingAttempts, PaymentCosts(..), recordSettlement, createRefund, recordFailedSolana, recordSolanaExpiry, recordSolanaRetryApproval, requireBackup, addHint, auditExport
   ) where
 
 import Bridge.Config
@@ -39,7 +39,7 @@ import Text.Read (readMaybe)
 -- All financial mutations are serialized and committed before external IO.
 newtype Ledger = Ledger (MVar Connection)
 schemaVersion :: Int
-schemaVersion = 5
+schemaVersion = 6
 sqliteIdentity :: Connection -> IO Value
 sqliteIdentity c = do
   versions <- query_ c "SELECT sqlite_version(),sqlite_source_id()" :: IO [(Text,Text)]
@@ -81,8 +81,10 @@ withLedger path identity action = do
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/003.sql"))) $ execute_ c . fromString . T.unpack
     when (meta `elem` [[(v,identity)] | v<-[1..3]]) $ withTransaction c $
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/004.sql"))) $ execute_ c . fromString . T.unpack
-    when (meta/=[(schemaVersion,identity)]) $ withTransaction c $
+    when (meta `elem` [[(v,identity)] | v<-[1..4]]) $ withTransaction c $
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/005.sql"))) $ execute_ c . fromString . T.unpack
+    when (meta/=[(schemaVersion,identity)]) $ withTransaction c $
+      forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/006.sql"))) $ execute_ c . fromString . T.unpack
     -- Restart is quarantined until external identities and unresolved attempts are checked.
     execute_ c "UPDATE deployment SET paused=1,pause_reason='restart_requires_reconciliation'"
     newMVar c >>= action . Ledger
@@ -533,6 +535,8 @@ beginPreparation l obligation chain feeLimit policy = ledgerAction l $ \c -> do
           prior <- query c "SELECT generation,retired_txid FROM preparations WHERE intent_id=? ORDER BY generation" (Only $ obligationId obligation) :: IO [(Int,Maybe Text)]
           unresolved <- query c "SELECT a.txid FROM attempts a LEFT JOIN solana_expiries e ON e.txid=a.txid WHERE a.intent_id=? AND e.txid IS NULL" (Only $ obligationId obligation) :: IO [Only Text]
           require (not (null prior) && length prior<8 && all ((/=Nothing).snd) prior && null unresolved) "solana_retry_not_authorized"
+          approved <- query c "SELECT expired_txid FROM solana_retry_approvals WHERE expired_txid=?" (Only $ snd $ last prior) :: IO [Only Text]
+          require (map (\(Only tx)->Just tx) approved==[snd $ last prior]) "solana_retry_not_authorized"
           released <- query c "SELECT released FROM fee_reservations WHERE intent_id=?" (Only $ obligationId obligation) :: IO [Only Bool]
           require (released==[Only True]) "solana_retry_fee_hold_conflict"
           execute c "UPDATE intents SET resolved=0 WHERE id=?" (Only $ obligationId obligation)
@@ -608,10 +612,32 @@ recordSolanaExpiry l attempt proof = ledgerAction l $ \c -> do
       execute c "UPDATE attempts SET state='review',observation_json=? WHERE txid=?" (proof,attemptId attempt)
       execute c "UPDATE fee_reservations SET released=1 WHERE intent_id=?" (Only $ attemptIntent attempt)
       execute c "UPDATE intents SET resolved=1 WHERE id=?" (Only $ attemptIntent attempt)
-      execute c "UPDATE obligations SET status='ready' WHERE id=? AND status='paying'" (Only $ attemptIntent attempt)
-      execute c "UPDATE orders SET status=CASE WHEN (SELECT status FROM obligations WHERE id=?)='ready' THEN 'Ready' ELSE 'NeedsReview' END WHERE id=(SELECT order_id FROM obligations WHERE id=?) AND status<>'Paid'" (attemptIntent attempt,attemptIntent attempt)
+      execute c "UPDATE obligations SET status='review' WHERE id=? AND status='paying'" (Only $ attemptIntent attempt)
+      execute c "UPDATE orders SET status='NeedsReview' WHERE id=(SELECT order_id FROM obligations WHERE id=?) AND status<>'Paid'" (Only $ attemptIntent attempt)
       execute c "INSERT INTO audit(action,detail) VALUES('solana_expiry_verified',?)" (Only $ attemptId attempt)
     _ -> reject "duplicate_expiry"
+
+-- This is a separate, explicit private operator action. An expiry observation
+-- never gives the scheduler permission to sign a replacement on its own.
+recordSolanaRetryApproval :: Ledger -> Text -> Text -> Text -> IO ()
+recordSolanaRetryApproval l txid reason proof = ledgerAction l $ \c -> do
+  require (not (T.null $ T.strip reason) && T.length reason<=512 && not (T.null proof) && T.length proof<=200000) "invalid_retry_approval"
+  old <- query c "SELECT reason FROM solana_retry_approvals WHERE expired_txid=?" (Only txid) :: IO [Only Text]
+  case old of
+    [Only previous] -> require (reason==previous) "retry_approval_conflict"
+    [] -> do
+      health <- query_ c "SELECT paused FROM deployment" :: IO [Only Bool]
+      require (health==[Only True]) "pause_before_operator_action"
+      rows <- query c "SELECT i.id,i.resolved,o.status,d.eligible,a.state FROM attempts a JOIN solana_expiries e ON e.txid=a.txid JOIN intents i ON i.id=a.intent_id JOIN obligations o ON o.id=i.obligation_id JOIN deposits d ON d.id=o.deposit_id WHERE a.txid=? AND i.chain='Solana'" (Only txid) :: IO [(Text,Bool,Text,Bool,Text)]
+      intent <- case rows of [(i,True,"review",True,"review")]->pure i; _->reject "solana_retry_not_expected"
+      latest <- query c "SELECT txid FROM attempts WHERE intent_id=? AND preparation_generation=(SELECT MAX(generation) FROM preparations WHERE intent_id=?)" (intent,intent) :: IO [Only Text]
+      require (latest==[Only txid]) "solana_retry_not_latest"
+      seqNo <- criticalSequence c
+      execute c "INSERT INTO solana_retry_approvals(expired_txid,reason,proof_json,critical_sequence) VALUES(?,?,?,?)" (txid,reason,proof,seqNo)
+      execute c "UPDATE obligations SET status='ready' WHERE id=?" (Only intent)
+      execute c "UPDATE orders SET status='Ready' WHERE id=(SELECT order_id FROM obligations WHERE id=?)" (Only intent)
+      execute c "INSERT INTO audit(action,detail) VALUES('solana_retry_approved',?)" (Only txid)
+    _ -> reject "duplicate_retry_approval"
 
 -- Recheck after a backup wait, even when BroadcastIntent was already recorded.
 -- Returning its sequence alone never grants permission to send old signed data.

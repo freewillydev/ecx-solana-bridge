@@ -2,7 +2,7 @@
 
 A small inventory bridge: one Haskell/Servant application, two chain adapters, one SQLite ledger, and a thin browser interface. A separate Rust executable uses official Solana SDK and SPL interface crates to construct and sign a fixed transaction format. No custom blockchain or token program.
 
-**Development checkpoint — not ready for public custody.** Both ledger-driven directions have completed on real L2L Signet / Solana Devnet, alongside a full refund of a late deposit. The redemption survived a process interruption after broadcast and settled the same native transaction. The code builds and 109 tests pass. Browser signing, full reconciliation/recovery and Linux deployment remain unfinished. Customer intake and signing routes are disabled in code. See [STATUS.md](docs/STATUS.md) for the evidence and outstanding work.
+**Development checkpoint — not ready for public custody.** Both ledger-driven directions have completed on real L2L Signet / Solana Devnet, alongside a full refund of a late deposit. The redemption survived a process interruption after broadcast and settled the same native transaction. The code builds and 112 tests pass. Browser signing, full reconciliation/recovery and Linux deployment remain unfinished. Customer intake and signing routes are disabled in code. See [STATUS.md](docs/STATUS.md) for the evidence and outstanding work.
 
 ## Components
 
