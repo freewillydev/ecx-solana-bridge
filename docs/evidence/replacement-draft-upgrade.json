@@ -1,0 +1,131 @@
+{
+  "network": "public L2L Signet / Solana Devnet",
+  "scope": "Schema 15 to 16 migration, settled-parent replacement refusal, completed recovery replay and paused worker restart",
+  "startedUtc": "2026-10-01T12:02:52.848524+00:00",
+  "applicationSha256": "2b1837adb201dd0850e830ddafa27fc0c79aa9ed818adcde8d3a724f89b99f1b",
+  "stage": "complete",
+  "upgradeCustody": {
+    "checkedAt": 1790856175,
+    "checkedRevision": 10970,
+    "lastError": null,
+    "report": {
+      "assets": [
+        {
+          "asset": "Native",
+          "booked": "1879387",
+          "difference": "0",
+          "expected": "1879387",
+          "inFlight": "0",
+          "observed": "1879387"
+        },
+        {
+          "asset": "Sol",
+          "booked": "3491560",
+          "difference": "0",
+          "expected": "3491560",
+          "inFlight": "0",
+          "observed": "3491560"
+        },
+        {
+          "asset": "Wrapped",
+          "booked": "100000020014",
+          "difference": "0",
+          "expected": "100000020014",
+          "inFlight": "0",
+          "observed": "100000020014"
+        }
+      ],
+      "inFlightEffects": [],
+      "matches": true,
+      "nativeBlock": "0000022a88a5da9d31ff6194722a0ef2d1281bdb05fc5f02a3e1504280d61b72",
+      "nativeHeight": 16447,
+      "solanaSlot": 506265847
+    },
+    "revision": 10970
+  },
+  "uniqueWinnerIndex": true,
+  "completedReplayFinanciallyUnchanged": true,
+  "newReplacementDrafts": 0,
+  "newReplacementCancellations": 0,
+  "refusal": {
+    "error": "native_replacement_not_expected"
+  },
+  "schema": 16,
+  "criticalSequence": 47,
+  "orders": 8,
+  "signedAttempts": 7,
+  "financialAndBindingRowsPreserved": true,
+  "sourceJournalPreserved": true,
+  "newCapitalAllocations": 0,
+  "newSignedAttempts": 0,
+  "newMonetaryPostings": 0,
+  "finalCustody": {
+    "checkedAt": 1790856189,
+    "checkedRevision": 11000,
+    "lastError": null,
+    "report": {
+      "assets": [
+        {
+          "asset": "Native",
+          "booked": "1879387",
+          "difference": "0",
+          "expected": "1879387",
+          "inFlight": "0",
+          "observed": "1879387"
+        },
+        {
+          "asset": "Sol",
+          "booked": "3491560",
+          "difference": "0",
+          "expected": "3491560",
+          "inFlight": "0",
+          "observed": "3491560"
+        },
+        {
+          "asset": "Wrapped",
+          "booked": "100000020014",
+          "difference": "0",
+          "expected": "100000020014",
+          "inFlight": "0",
+          "observed": "100000020014"
+        }
+      ],
+      "inFlightEffects": [],
+      "matches": true,
+      "nativeBlock": "0000022a88a5da9d31ff6194722a0ef2d1281bdb05fc5f02a3e1504280d61b72",
+      "nativeHeight": 16447,
+      "solanaSlot": 506265907
+    },
+    "revision": 11000
+  },
+  "scanners": {
+    "review": [],
+    "scanners": [
+      {
+        "chain": "Native",
+        "checkedAt": 1790856188,
+        "cursor": "0000022a88a5da9d31ff6194722a0ef2d1281bdb05fc5f02a3e1504280d61b72",
+        "lastError": null,
+        "lastSuccess": 1790856188
+      },
+      {
+        "chain": "Solana",
+        "checkedAt": 1790856188,
+        "cursor": "3dArKVRqpyuXLNfcUXzsfyfA29ZoPKqoZXmkoBXETez8WYnCec8tB4bfGMgn5wHKG1V6vF8neYVCM33KY7vf2rik",
+        "lastError": null,
+        "lastSuccess": 1790856188
+      },
+      {
+        "chain": "SolanaOperating",
+        "checkedAt": 1790856189,
+        "cursor": "2XMrZrQBMt8b6gZbMRHx4FtfsLm1zc1xQB716dwAC5QdgKehioAN1sy16dCFz39AP7tA2RPZ6ZQYx2kngnbTSJP",
+        "lastError": null,
+        "lastSuccess": 1790856189
+      }
+    ]
+  },
+  "publicStatus": "Paid",
+  "readiness": 503,
+  "finishedUtc": "2026-10-01T12:03:20.509566+00:00",
+  "limitations": "This live check verifies the real-ledger migration, refusal to draft a replacement for an already-settled payout, unchanged completed recovery replay and restarted custody checks. Successful draft/cancellation, stale-parent and source refusal, critical-record rollback and work-hash fencing have offline contract coverage. No replacement draft, signature, new payment or family member was created on a real network. Native family signing, member observation, custody normalization, reorg compensation and full restore/resume remain unfinished."
+}

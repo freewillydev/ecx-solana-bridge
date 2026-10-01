@@ -264,6 +264,29 @@ withCompetingNativeAt dir action=withNativeLockRecoveryAt True dir $ \l c p _ _ 
   ledgerAction l $ \db->execute db "INSERT INTO attempts(txid,intent_id,signed_bytes,policy_json,fee_limit,state,critical_sequence,preparation_generation) SELECT ?,intent_id,'offline-not-signed','offline-ledger-only',fee_limit,state,critical_sequence,preparation_generation FROM attempts WHERE txid=?" (other,attemptId original)
   action l c (attemptId original) other
 
+withReplacementDraftAt :: FilePath -> (Ledger -> Config -> Attempt -> NativeDraft -> PaymentTransport -> IO a) -> IO a
+withReplacementDraftAt dir action=withNativeReplacementContract $ \_ original draft replacementRpc _->
+  withNativeLockRecoveryAt True dir $ \l c p _ _ sourceTransport->do
+    initial<-saveNativeFixtureAttempt l p
+    markNativeFixtureBroadcast l initial
+    [parent]<-pendingAttempts l
+    let txid=attemptId parent
+        cost=toInteger $ units $ signedNativeFee original
+        custody=custodyContract c (1200000-100000-cost,1000000,100000) []
+        native wallet method params=case (method,params) of
+          ("gettransaction",wanted:_) | wanted/=toJSON txid->paymentNative sourceTransport wallet method params
+          ("getaddressinfo",[String "fixture-address"])->paymentNative sourceTransport wallet method params
+          ("getblockheader",_)->paymentNative sourceTransport wallet method params
+          ("getblockhash",[Number 123])->paymentNative sourceTransport wallet method params
+          ("getbalances",_)->paymentNative custody wallet method params >>= pure . setPath ["lastprocessedblock","height"] (toJSON (16010::Int))
+          ("listsinceblock",_)->paymentNative custody wallet method params
+          ("getmempoolentry",_)->pure $ object ["vsize" .= (141::Int)]
+          _->replacementRpc wallet method params
+    previous<-readCheckpoint l "Native"
+    commitScan l (ScanBatch "Native" (nativeCheckpointHash c) previous custodyNativeTip 100 []
+      [ChainEvent txid "outgoing" "unconfirmed" (object ["confirmations" .= (0::Int),"walletNetUnits" .= ("-100000"::Text),"feeUnits" .= signedNativeFee original])])
+    action l c parent draft custody{paymentNative=native}
+
 -- Captured native transaction, local financial fixture, and explicit RPC
 -- responses. No alternate chain is selected or contacted by these tests.
 withNativeSettlementAt :: FilePath -> (Ledger -> Config -> Attempt -> NativeSigned -> IORef (Maybe Value) -> IORef Text -> PaymentTransport -> IO a) -> IO a
@@ -1218,6 +1241,129 @@ main=hspec $ do
       markBroadcastIntent l "tx" `shouldReturn` sequenceNumber
       authorizeRecordedSend l True "tx" `shouldThrow` isError "source_not_eligible"
       length <$> pendingAttempts l `shouldReturn` 1
+  describe "durable native replacement drafts (offline recovery contracts)" $ do
+    it "records the exact unsigned decision without changing money, holds or the old attempt" $ withDir $ \dir->withReplacementDraftAt dir $ \l c parent draft transport->do
+      before<-auditExport l
+      result<-prepareNativeReplacementWith (pure 100) transport c l (attemptId parent) (draftFee draft) "operator fee increase"
+      sequenceNo<-fieldValue "draftSequence" result :: IO Int64
+      fieldValue "signedOrSent" result `shouldReturn` False
+      fieldValue "cancelled" result `shouldReturn` False
+      nativeReplacementDecision l (attemptId parent) (draftFee draft) "operator fee increase" `shouldReturn` Just (sequenceNo,False)
+      ledgerAction l (\db->query_ db "SELECT draft_json FROM native_replacement_drafts" :: IO [Only Text]) `shouldReturn` [Only $ fixtureJson draft]
+      ledgerAction l (\db->query_ db "SELECT amount,released FROM fee_reservations" :: IO [(Int64,Bool)]) `shouldReturn` [(1000,False)]
+      pendingAttempts l `shouldReturn` [parent]
+      auditExport l `shouldReturn` before
+      available <$> readiness l `shouldReturn` False
+      createRefund l ("native:"<>T.replicate 64 "a"<>":0") >>= \ob->obligationId ob `shouldBe` attemptIntent parent
+    it "replays the same draft after reopening without another RPC or critical record" $ withDir $ \dir->do
+      (c,parent,draft,transport,sequenceNo,saved)<-withReplacementDraftAt dir $ \l c parent draft transport->do
+        result<-prepareNativeReplacementWith (pure 100) transport c l (attemptId parent) (draftFee draft) "reviewed increase"
+        sequenceNo<-fieldValue "draftSequence" result :: IO Int64
+        snapshot<-auditExport l
+        pure(c,parent,draft,transport,sequenceNo,snapshot)
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        result<-prepareNativeReplacementWith (pure 999) transport{paymentIdentity=expectationFailure "replay contacted a chain"} c l (attemptId parent) (draftFee draft) "reviewed increase"
+        fieldValue "draftSequence" result `shouldReturn` sequenceNo
+        auditExport l `shouldReturn` saved
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM native_replacement_drafts" :: IO [Only Int]) `shouldReturn` [Only 1]
+    it "cancels only the unsigned draft and permits a new explicit decision with the same original hold" $ withDir $ \dir->withReplacementDraftAt dir $ \l c parent draft transport->do
+      result<-prepareNativeReplacementWith (pure 100) transport c l (attemptId parent) (draftFee draft) "first decision"
+      sequenceNo<-fieldValue "draftSequence" result :: IO Int64
+      before<-auditExport l
+      recordNativeReplacementCancellation l sequenceNo "withdraw unsigned decision"
+      recordNativeReplacementCancellation l sequenceNo "withdraw unsigned decision"
+      recordNativeReplacementCancellation l sequenceNo "different cancellation" `shouldThrow` isError "native_replacement_cancellation_conflict"
+      replay<-prepareNativeReplacementWith (pure 100) transport{paymentIdentity=expectationFailure "cancelled replay contacted a chain"} c l (attemptId parent) (draftFee draft) "first decision"
+      fieldValue "cancelled" replay `shouldReturn` True
+      next<-prepareNativeReplacementWith (pure 100) transport c l (attemptId parent) (draftFee draft) "new explicit decision"
+      nextSequence<-fieldValue "draftSequence" next :: IO Int64
+      nextSequence `shouldSatisfy` (>sequenceNo)
+      pendingAttempts l `shouldReturn` [parent]
+      ledgerAction l (\db->query_ db "SELECT amount,released FROM fee_reservations" :: IO [(Int64,Bool)]) `shouldReturn` [(1000,False)]
+      auditExport l `shouldReturn` before
+    it "refuses a competing active decision and changed replay bytes" $ withDir $ \dir->withReplacementDraftAt dir $ \l c parent draft transport->do
+      _<-prepareNativeReplacementWith (pure 100) transport c l (attemptId parent) (draftFee draft) "first decision"
+      before<-auditExport l
+      recordNativeReplacementDraft l c parent draft "competing decision" 100 `shouldThrow` isError "native_replacement_draft_pending"
+      recordNativeReplacementDraft l c parent draft{draftPsbt="changed offline template"} "first decision" 100 `shouldThrow` isError "native_replacement_draft_conflict"
+      auditExport l `shouldReturn` before
+    it "requires pause, current custody, and the unchanged parent broadcast decision" $ withDir $ \dir->withReplacementDraftAt dir $ \l c parent draft _->do
+      ledgerAction l $ \db->execute_ db "UPDATE deployment SET paused=0"
+      recordNativeReplacementDraft l c parent draft "review" 100 `shouldThrow` isError "pause_before_operator_action"
+      pause l "operator review"
+      recordNativeReplacementDraft l c parent draft "review" 100 `shouldThrow` isError "custody_not_reconciled"
+      assumeSourceApprovalCustody l
+      recordNativeReplacementDraft l c parent{attemptSequence=Just 999} draft "review" 100 `shouldThrow` isError "native_replacement_parent_changed"
+      recordNativeReplacementDraft l c parent draft "review" 161 `shouldThrow` isError "custody_not_reconciled"
+    it "does not save a draft when the source loses eligibility" $ withDir $ \dir->withReplacementDraftAt dir $ \l c parent draft transport->do
+      let original=paymentNative transport
+          changed wallet method params=do
+            value<-original wallet method params
+            pure $ case (method,params) of
+              ("gettransaction",wanted:_) | wanted/=toJSON (attemptId parent)->setPath ["confirmations"] (toJSON (0::Int)) value
+              _->value
+      prepareNativeReplacementWith (pure 100) transport{paymentNative=changed} c l (attemptId parent) (draftFee draft) "review"
+        `shouldThrow` isError "source_not_eligible"
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM native_replacement_drafts" :: IO [Only Int]) `shouldReturn` [Only 0]
+      pendingAttempts l `shouldReturn` [parent]
+    it "retains the original payment when a settlement callback arrives during drafting" $ withDir $ \dir->withReplacementDraftAt dir $ \l c parent draft transport->do
+      let original=paymentNative transport
+          changed wallet method params=do
+            value<-original wallet method params
+            when (method=="decodepsbt") $ recordSettlement l (attemptId parent) (PaymentCosts (amt 282) (amt 0))
+              (nativeSettlementProof (attemptId parent) custodyNativeTip 1)
+            pure value
+      prepareNativeReplacementWith (pure 100) transport{paymentNative=changed} c l (attemptId parent) (draftFee draft) "review"
+        `shouldThrow` isError "native_replacement_not_expected"
+      ledgerAction l (\db->query_ db "SELECT txid FROM attempts WHERE state='settled'" :: IO [Only Text]) `shouldReturn` [Only $ attemptId parent]
+      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM native_replacement_drafts" :: IO [Only Int]) `shouldReturn` [Only 0]
+    it "includes replacement cancellation in the work suspended by a source loss" $ withDir $ \dir->withReplacementDraftAt dir $ \l c parent draft transport->do
+      result<-prepareNativeReplacementWith (pure 100) transport c l (attemptId parent) (draftFee draft) "review"
+      sequenceNo<-fieldValue "draftSequence" result :: IO Int64
+      [Only oid]<-ledgerAction l (\db->query db "SELECT order_id FROM obligations WHERE id=?" (Only $ attemptIntent parent) :: IO [Only Text])
+      let txid=T.replicate 64 "a"
+          source=Deposit ("native:"<>txid<>":0") (Just oid) Native (amt 100000) (T.replicate 64 "b") 1 True 100
+      observeDeposit l source{depositAnchor="unconfirmed",depositConfirmations=0,depositEligible=False} custodyNativeTip
+      recordNativeReplacementCancellation l sequenceNo "withdraw while source is reviewed"
+      previous<-readCheckpoint l "Native"
+      commitScan l (ScanBatch "Native" (nativeCheckpointHash c) previous custodyNativeTip 100 [source]
+        [ChainEvent txid "incoming" (depositAnchor source) (object ["confirmations" .= (1::Int)])])
+      [Only proofHash]<-ledgerAction l (\db->query db "SELECT evidence_hash FROM chain_events WHERE chain='Native' AND event_id=?" (Only txid) :: IO [Only Text])
+      recordSourceCheck l source (SourceRestored $ object ["observationHash" .= proofHash])
+      restored<-sourceRestoration l source
+      assumeSourceApprovalCustody l
+      recordSourceRecoveryApproval l (attemptIntent parent) restored 100 "restore suspended work" `shouldThrow` isError "source_review_work_changed"
+    it "bounds repeated cancelled decisions without multiplying the fee hold" $ withDir $ \dir->withReplacementDraftAt dir $ \l c parent draft _->do
+      forM_ [1..7::Int] $ \n->do
+        assumeSourceApprovalCustody l
+        sequenceNo<-recordNativeReplacementDraft l c parent draft (T.pack $ show n) 100
+        recordNativeReplacementCancellation l sequenceNo "cancel unsigned draft"
+      assumeSourceApprovalCustody l
+      recordNativeReplacementDraft l c parent draft "eighth decision" 100 `shouldThrow` isError "native_replacement_draft_limit"
+      ledgerAction l (\db->query_ db "SELECT amount,released FROM fee_reservations" :: IO [(Int64,Bool)]) `shouldReturn` [(1000,False)]
+    it "rolls back draft insertion and critical sequence on database failure" $ withDir $ \dir->do
+      (c,parent,before,sequenceNo)<-withReplacementDraftAt dir $ \l c parent draft _->do
+        assumeSourceApprovalCustody l
+        before<-auditExport l
+        [Only sequenceNo]<-ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64])
+        ledgerAction l $ \db->execute_ db "CREATE TRIGGER fail_draft_audit BEFORE INSERT ON audit WHEN NEW.action='native_replacement_drafted' BEGIN SELECT RAISE(ABORT,'offline_draft_failure'); END"
+        recordNativeReplacementDraft l c parent draft "review" 100 `shouldThrow` (\err->sqlError err==ErrorConstraint)
+        pure(c,parent,before,sequenceNo)
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        auditExport l `shouldReturn` before
+        pendingAttempts l `shouldReturn` [parent]
+        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM native_replacement_drafts" :: IO [Only Int]) `shouldReturn` [Only 0]
+        ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64]) `shouldReturn` [Only sequenceNo]
+    it "makes the draft immutable and keeps it after a failed cancellation" $ withDir $ \dir->do
+      (c,parent,draft,sequenceNo)<-withReplacementDraftAt dir $ \l c parent draft transport->do
+        result<-prepareNativeReplacementWith (pure 100) transport c l (attemptId parent) (draftFee draft) "review"
+        sequenceNo<-fieldValue "draftSequence" result :: IO Int64
+        ledgerAction l $ \db->execute_ db "CREATE TRIGGER fail_cancel_audit BEFORE INSERT ON audit WHEN NEW.action='native_replacement_cancelled' BEGIN SELECT RAISE(ABORT,'offline_cancel_failure'); END"
+        recordNativeReplacementCancellation l sequenceNo "cancel" `shouldThrow` (\err->sqlError err==ErrorConstraint)
+        pure(c,parent,draft,sequenceNo)
+      withLedger (dbPath c) (fingerprint c) $ \l->do
+        nativeReplacementDecision l (attemptId parent) (draftFee draft) "review" `shouldReturn` Just (sequenceNo,False)
+        ledgerAction l (\db->execute_ db "DELETE FROM native_replacement_drafts") `shouldThrow` (\err->sqlError err==ErrorConstraint)
   describe "one economic settlement per intent (offline competing callbacks)" $ do
     forM_ [False,True] $ \newer->it ("books only the "<>(if newer then "newer" else "older")<>" winner and preserves it across restart") $ withDir $ \dir->do
       (c,winner,loser,cost,proof,snapshot)<-withCompetingNativeAt dir $ \l c original other->do

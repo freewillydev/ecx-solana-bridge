@@ -28,6 +28,12 @@ main = go `catch` (\(BridgeError code) -> LBS.putStrLn (encode $ object ["error"
       (Just sequenceNo,Just f,Just e) | sequenceNo>0,Right floatAmount<-amount f,Right earnedAmount<-amount e ->
         loadConfig path >>= \c -> coverLoss c (T.pack deposit) sequenceNo floatAmount earnedAmount (T.pack reason) >>= LBS.putStrLn . encode
       _ -> die "Invalid source loss sequence or capital allocation (use nonnegative integer base units)"
+    ["prepare-native-replacement",path,parent,fee,reason] -> case readMaybe fee >>= either (const Nothing) Just . amount of
+      Just quantity | units quantity>0 -> loadConfig path >>= \c -> draftReplacement c (T.pack parent) quantity (T.pack reason) >>= LBS.putStrLn . encode
+      _ -> die "Invalid replacement fee (expected positive integer base units)"
+    ["cancel-native-replacement",path,sequenceText,reason] -> case readMaybe sequenceText of
+      Just sequenceNo | sequenceNo>0 -> loadConfig path >>= \c -> cancelReplacement c sequenceNo (T.pack reason) >>= LBS.putStrLn . encode
+      _ -> die "Invalid native replacement draft sequence (expected a positive integer)"
     ["cancel-preparation",path,intent,generation,reason] -> case readMaybe generation of
       Just g | g>=0 && g<8 -> loadConfig path >>= \c -> cancelUnsigned c (T.pack intent) g (T.pack reason) >>= LBS.putStrLn . encode
       _ -> die "Invalid preparation generation (expected 0 through 7)"
@@ -35,4 +41,4 @@ main = go `catch` (\(BridgeError code) -> LBS.putStrLn (encode $ object ["error"
     ["serve",socket,port,assets] -> case readMaybe port of
       Just p | p>=1024 && p<=65535 -> runPublic socket p assets
       _ -> die "Invalid unprivileged port"
-    _ -> die "Usage: ecx-bridge version | check-config CONFIG | doctor CONFIG | scan CONFIG | reconcile CONFIG | recover CONFIG | approve-solana-retry CONFIG SIGNATURE REASON | approve-source-recovery CONFIG OBLIGATION RESTORATION_SEQUENCE REASON | cover-source-loss CONFIG DEPOSIT LOSS_SEQUENCE FLOAT_UNITS EARNED_UNITS REASON | cancel-preparation CONFIG INTENT GENERATION REASON | worker CONFIG | serve CUSTOMER_SOCKET PORT ASSETS"
+    _ -> die "Usage: ecx-bridge version | check-config CONFIG | doctor CONFIG | scan CONFIG | reconcile CONFIG | recover CONFIG | approve-solana-retry CONFIG SIGNATURE REASON | approve-source-recovery CONFIG OBLIGATION RESTORATION_SEQUENCE REASON | cover-source-loss CONFIG DEPOSIT LOSS_SEQUENCE FLOAT_UNITS EARNED_UNITS REASON | prepare-native-replacement CONFIG TRANSACTION FEE_UNITS REASON | cancel-native-replacement CONFIG DRAFT_SEQUENCE REASON | cancel-preparation CONFIG INTENT GENERATION REASON | worker CONFIG | serve CUSTOMER_SOCKET PORT ASSETS"

@@ -79,6 +79,18 @@ signed intent and settlement invariants
   keeps earned fees out of available source float and settles once [✔]
   cannot authorize a first send after loss of source eligibility [✔]
   rechecks backup coverage and source eligibility after a recorded broadcast intent [✔]
+durable native replacement drafts (offline recovery contracts)
+  records the exact unsigned decision without changing money, holds or the old attempt [✔]
+  replays the same draft after reopening without another RPC or critical record [✔]
+  cancels only the unsigned draft and permits a new explicit decision with the same original hold [✔]
+  refuses a competing active decision and changed replay bytes [✔]
+  requires pause, current custody, and the unchanged parent broadcast decision [✔]
+  does not save a draft when the source loses eligibility [✔]
+  retains the original payment when a settlement callback arrives during drafting [✔]
+  includes replacement cancellation in the work suspended by a source loss [✔]
+  bounds repeated cancelled decisions without multiplying the fee hold [✔]
+  rolls back draft insertion and critical sequence on database failure [✔]
+  makes the draft immutable and keeps it after a failed cancellation [✔]
 one economic settlement per intent (offline competing callbacks)
   books only the older winner and preserves it across restart [✔]
   books only the newer winner and preserves it across restart [✔]
@@ -348,8 +360,8 @@ official SDK wire fixtures (not network evidence)
   independently validates signed-three-units.json [✔]
   rejects corrupted signed bytes [✔]
 
-Finished in 6.5814 seconds
-303 examples, 0 failures
+Finished in 7.5681 seconds
+314 examples, 0 failures
 Test suite bridge-test: PASS
 Test suite logged to: /Volumes/Crucial
 X9/CodexBuilds/ecx-bridge-20260930/workspace-b/outputs/ecx-bridge/./../../work/build/cache/dist-newstyle/build/aarch64-osx/ghc-9.14.1/ecx-bridge-0.1.0.0/t/bridge-test/test/ecx-bridge-0.1.0.0-bridge-test.log

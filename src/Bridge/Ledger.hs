@@ -16,11 +16,14 @@ module Bridge.Ledger
   , SourceCheck(..), nativeSourceCandidates, recordSourceCheck
   , sourceRecoveryApproval, sourceRecoveryObligation, recordSourceRecoveryApproval
   , LossCapital(..), sourceLossCover, recordSourceLossCover
+  , nativeReplacementParent, nativeReplacementDecision, recordNativeReplacementDraft, recordNativeReplacementCancellation
   ) where
 
 import Bridge.Config
 import Bridge.Budget
 import Bridge.Types
+import Bridge.NativePayment
+import Bridge.NativeReplacement (validateNativeFamily,validateNativeReplacementDraft)
 import Control.Concurrent.MVar
 import Control.Exception (bracket,mask,try,SomeException,fromException,throwIO)
 import Control.Monad (forM, forM_, when)
@@ -49,7 +52,7 @@ import Text.Read (readMaybe)
 -- checks integrity and always starts paused; no caller can clear the fence.
 newtype Ledger = Ledger (MVar (Maybe Connection))
 schemaVersion :: Int
-schemaVersion = 15
+schemaVersion = 16
 sqliteIdentity :: Connection -> IO Value
 sqliteIdentity c = do
   versions <- query_ c "SELECT sqlite_version(),sqlite_source_id()" :: IO [(Text,Text)]
@@ -132,6 +135,8 @@ withLedger path identity action = do
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/014.sql"))) $ execute_ c . fromString . T.unpack
     when (meta `elem` [[(v,identity)] | v<-[1..14]]) $ withTransaction c $
       forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/015.sql"))) $ execute_ c . fromString . T.unpack
+    when (meta `elem` [[(v,identity)] | v<-[1..15]]) $ withTransaction c $
+      forM_ (T.splitOn "-- @statement" (TE.decodeUtf8 $(embedFile "migrations/016.sql"))) $ execute_ c . fromString . T.unpack
     -- Restart is quarantined until external identities and unresolved attempts are checked.
     execute_ c "UPDATE deployment SET paused=1,pause_reason='restart_requires_reconciliation'"
     execute_ c "UPDATE custody_check SET revision=revision+1"
@@ -764,6 +769,14 @@ recordSourceLossCover l source recovery now capital reason sourceProof custodyPr
 -- cancellation, expiry and settlement before any operator state restoration.
 sourceWorkHashC :: Connection -> Text -> IO Text
 sourceWorkHashC c intent=do
+  base <- paymentWorkHashC c intent
+  drafts <- query c "SELECT r.critical_sequence,r.parent_txid,r.fee,r.draft_json,r.work_hash,r.reason FROM native_replacement_drafts r JOIN attempts a ON a.txid=r.parent_txid WHERE a.intent_id=? ORDER BY r.critical_sequence" (Only intent) :: IO [(Int64,Text,Int64,Text,Text,Text)]
+  cancellations <- query c "SELECT x.draft_sequence,x.reason,x.critical_sequence FROM native_replacement_cancellations x JOIN native_replacement_drafts r ON r.critical_sequence=x.draft_sequence JOIN attempts a ON a.txid=r.parent_txid WHERE a.intent_id=? ORDER BY x.critical_sequence" (Only intent) :: IO [(Int64,Text,Int64)]
+  -- Preserve the prior hash for historical source reviews without native drafts.
+  pure $ if null drafts && null cancellations then base else digest $ TE.encodeUtf8 $ jsonText (base,drafts,cancellations)
+
+paymentWorkHashC :: Connection -> Text -> IO Text
+paymentWorkHashC c intent=do
   obligation <- query c "SELECT id,order_id,deposit_id,kind,asset,amount,recipient FROM obligations WHERE id=?" (Only intent) :: IO [(Text,Text,Text,Text,Text,Int64,Text)]
   work <- query c "SELECT chain,resolved,common_input FROM intents WHERE id=?" (Only intent) :: IO [(Text,Bool,Maybe Text)]
   preparations <- query c "SELECT generation,policy_json,draft_json,retired_txid,cancelled FROM preparations WHERE intent_id=? ORDER BY generation" (Only intent) :: IO [(Int,Text,Maybe Text,Maybe Text,Bool)]
@@ -856,6 +869,84 @@ readyObligations :: Ledger -> IO [Obligation]
 readyObligations l = ledgerAction l $ \c -> query_ c "SELECT id,order_id,deposit_id,kind,asset,amount,recipient FROM obligations WHERE status='ready' ORDER BY rowid LIMIT 100"
 data Attempt = Attempt { attemptId :: !Text, attemptIntent :: !Text, attemptChain :: !Text, attemptBytes :: !Text, attemptPolicy :: !Text, attemptFeeLimit :: !Int64, attemptState :: !Text, attemptSequence :: !(Maybe Int64) } deriving (Eq,Show)
 instance FromRow Attempt where fromRow = Attempt <$> field <*> field <*> field <*> field <*> field <*> field <*> field <*> field
+
+-- The first durable-draft checkpoint accepts exactly the original native
+-- attempt. Family-member persistence/observation must be integrated before a
+-- second member can be signed or made sendable by an operator command.
+nativeReplacementParent :: Ledger -> Config -> Text -> IO Attempt
+nativeReplacementParent l cfg parent=ledgerAction l $ \c->do
+  (attempt,_) <- nativeReplacementContextC c cfg parent
+  pure attempt
+
+nativeReplacementContextC :: Connection -> Config -> Text -> IO (Attempt,NativeSigned)
+nativeReplacementContextC c cfg parent=do
+  rows <- query c "SELECT a.txid,a.intent_id,i.chain,a.signed_bytes,a.policy_json,a.fee_limit,a.state,a.critical_sequence FROM attempts a JOIN intents i ON i.id=a.intent_id JOIN obligations o ON o.id=i.obligation_id JOIN deposits d ON d.id=o.deposit_id JOIN fee_reservations f ON f.intent_id=i.id WHERE a.txid=? AND a.state='broadcast_intent' AND i.chain='Native' AND i.resolved=0 AND o.status='paying' AND d.eligible=1 AND f.asset='Native' AND f.released=0 AND f.amount>=a.fee_limit" (Only parent)
+  attempt <- case rows of [a]->pure a; _->reject "native_replacement_not_expected"
+  require (maybe False (>0) $ attemptSequence attempt) "broadcast_intent_required"
+  family <- query c "SELECT txid FROM attempts WHERE intent_id=? ORDER BY rowid" (Only $ attemptIntent attempt) :: IO [Only Text]
+  require (family==[Only parent]) "native_replacement_family_not_integrated"
+  _ <- activePreparationGenerationC c (attemptIntent attempt)
+  bindings <- query c "SELECT o.asset,o.amount,o.recipient,q.policy_json FROM obligations o JOIN orders q ON q.id=o.order_id WHERE o.id=?" (Only $ attemptIntent attempt) :: IO [(Text,Int64,Text,Text)]
+  (asset,quantity,recipient,policyText) <- case bindings of [b]->pure b; _->reject "obligation_not_found"
+  policy <- fromText policyText
+  signed <- fromText (attemptPolicy attempt)
+  let plan=signedNativePlan signed
+  require (asset=="Native" && units (planAmount plan)==quantity && planRecipient plan==recipient
+    && planProfile plan==profile cfg && planDepth plan==nativeDepth policy && deploymentFingerprint policy==fingerprint cfg
+    && units (planFeeLimit plan)==attemptFeeLimit attempt && nativeTxid (signedNativeTransaction signed)==parent
+    && signedNativeBytes signed==attemptBytes attempt) "saved_native_policy_mismatch"
+  either reject pure (validateNativeFamily [signed])
+  pure(attempt,signed)
+
+nativeReplacementDecision :: Ledger -> Text -> Amount -> Text -> IO (Maybe (Int64,Bool))
+nativeReplacementDecision l parent fee reason=ledgerAction l $ \c->do
+  rows <- query c "SELECT r.critical_sequence,EXISTS(SELECT 1 FROM native_replacement_cancellations x WHERE x.draft_sequence=r.critical_sequence) FROM native_replacement_drafts r WHERE r.parent_txid=? AND r.fee=? AND r.reason=?" (parent,units fee,reason) :: IO [(Int64,Bool)]
+  case rows of []->pure Nothing; [r]->pure(Just r); _->reject "duplicate_native_replacement_decision"
+
+recordNativeReplacementDraft :: Ledger -> Config -> Attempt -> NativeDraft -> Text -> Int64 -> IO Int64
+recordNativeReplacementDraft l cfg expected draft reason now=ledgerAction l $ \c->do
+  require (not (T.null $ T.strip reason) && T.length reason<=512 && T.length (jsonText draft)<=200000) "invalid_native_replacement_draft"
+  state <- query_ c "SELECT paused FROM deployment" :: IO [Only Bool]
+  require (state==[Only True]) "pause_before_operator_action"
+  let parent=attemptId expected
+      fee=units $ draftFee draft
+  old <- query c "SELECT critical_sequence,draft_json FROM native_replacement_drafts WHERE parent_txid=? AND fee=? AND reason=?" (parent,fee,reason) :: IO [(Int64,Text)]
+  case old of
+    [(sequenceNo,saved)]->require (saved==jsonText draft) "native_replacement_draft_conflict" >> pure sequenceNo
+    []->do
+      (current,signed) <- nativeReplacementContextC c cfg parent
+      require (current==expected) "native_replacement_parent_changed"
+      either reject pure (validateNativeReplacementDraft [signed] (draftFee draft) draft)
+      active <- query c "SELECT r.critical_sequence FROM native_replacement_drafts r JOIN attempts a ON a.txid=r.parent_txid WHERE a.intent_id=? AND NOT EXISTS(SELECT 1 FROM native_replacement_cancellations x WHERE x.draft_sequence=r.critical_sequence)" (Only $ attemptIntent current) :: IO [Only Int64]
+      require (null active) "native_replacement_draft_pending"
+      count <- query c "SELECT COUNT(*) FROM native_replacement_drafts r JOIN attempts a ON a.txid=r.parent_txid WHERE a.intent_id=?" (Only $ attemptIntent current) :: IO [Only Int]
+      require (case count of [Only n]->n<7; _->False) "native_replacement_draft_limit"
+      checkCustodyFreshC c now
+      workHash <- paymentWorkHashC c (attemptIntent current)
+      custody <- query_ c "SELECT revision,checked_at,report_json FROM custody_check" :: IO [(Int64,Maybe Int64,Maybe Text)]
+      let proof=jsonText $ object ["custody" .= custody,"parentBroadcastSequence" .= attemptSequence current]
+      require (T.length proof<=32768) "native_replacement_evidence_too_large"
+      sequenceNo <- criticalSequence c
+      execute c "INSERT INTO native_replacement_drafts(critical_sequence,parent_txid,fee,draft_json,work_hash,reason,proof_json) VALUES(?,?,?,?,?,?,?)" (sequenceNo,parent,fee,jsonText draft,workHash,reason,proof)
+      execute c "INSERT INTO audit(action,detail) VALUES('native_replacement_drafted',?)" (Only parent)
+      pure sequenceNo
+    _->reject "duplicate_native_replacement_decision"
+
+recordNativeReplacementCancellation :: Ledger -> Int64 -> Text -> IO ()
+recordNativeReplacementCancellation l draftSequence reason=ledgerAction l $ \c->do
+  require (draftSequence>0 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_native_replacement_cancellation"
+  state <- query_ c "SELECT paused FROM deployment" :: IO [Only Bool]
+  require (state==[Only True]) "pause_before_operator_action"
+  old <- query c "SELECT reason FROM native_replacement_cancellations WHERE draft_sequence=?" (Only draftSequence) :: IO [Only Text]
+  case old of
+    [Only previous]->require (previous==reason) "native_replacement_cancellation_conflict"
+    []->do
+      saved <- query c "SELECT parent_txid FROM native_replacement_drafts WHERE critical_sequence=?" (Only draftSequence) :: IO [Only Text]
+      parent <- case saved of [Only txid]->pure txid; _->reject "native_replacement_draft_missing"
+      sequenceNo <- criticalSequence c
+      execute c "INSERT INTO native_replacement_cancellations(draft_sequence,reason,critical_sequence) VALUES(?,?,?)" (draftSequence,reason,sequenceNo)
+      execute c "INSERT INTO audit(action,detail) VALUES('native_replacement_cancelled',?)" (Only parent)
+    _->reject "duplicate_native_replacement_cancellation"
 
 -- Reserve the chain and its fee budget before the wallet/helper is invoked.
 -- A crash during preparation leaves an intent even if no signed bytes exist.
@@ -1221,6 +1312,7 @@ auditExportWithBudget l cfg = ledgerAction l $ \c -> do
   nativeReviews <- query_ c "SELECT txid,state,critical_sequence FROM native_payment_recovery_state ORDER BY id DESC LIMIT 100" :: IO [(Text,Text,Int64)]
   sourceApprovals <- query_ c "SELECT obligation_id,restoration_sequence,prior_status,critical_sequence FROM source_recovery_approvals ORDER BY critical_sequence DESC LIMIT 100" :: IO [(Text,Int64,Text,Int64)]
   sourceFunding <- query_ c "SELECT f.deposit_id,f.recovery_sequence,f.float_amount,f.earned_amount,f.critical_sequence,r.recovery_sequence FROM source_loss_covers f LEFT JOIN source_loss_returns r ON r.cover_sequence=f.critical_sequence ORDER BY f.critical_sequence DESC LIMIT 100" :: IO [(Text,Int64,Int64,Int64,Int64,Maybe Int64)]
+  replacementDrafts <- query_ c "SELECT d.critical_sequence,d.parent_txid,d.fee,x.critical_sequence FROM native_replacement_drafts d LEFT JOIN native_replacement_cancellations x ON x.draft_sequence=d.critical_sequence ORDER BY d.critical_sequence DESC LIMIT 100" :: IO [(Int64,Text,Int64,Maybe Int64)]
   sourceReviews <- query_ c "SELECT r.deposit_id,d.order_id,d.asset,d.amount,r.state,r.shortfall,r.critical_sequence,CASE WHEN EXISTS(SELECT 1 FROM obligations o WHERE o.deposit_id=d.id AND o.status='paid') THEN 'paid' WHEN EXISTS(SELECT 1 FROM obligations o JOIN intents i ON i.obligation_id=o.id JOIN attempts a ON a.intent_id=i.id WHERE o.deposit_id=d.id AND a.state='broadcast_intent') THEN 'possibly_sent' WHEN EXISTS(SELECT 1 FROM obligations o JOIN intents i ON i.obligation_id=o.id JOIN attempts a ON a.intent_id=i.id WHERE o.deposit_id=d.id AND a.state='signed') THEN 'signed' WHEN d.allocated=1 THEN 'allocated' ELSE 'unallocated' END FROM source_recovery_state r JOIN deposits d ON d.id=r.deposit_id ORDER BY r.state='restored',r.id DESC LIMIT 100" :: IO [(Text,Maybe Text,Text,Int64,Text,Int64,Int64,Text)]
   let recoveries=toJSON [object ["intent" .= obligationId (preparationObligation p),"generation" .= preparationGeneration p
         ,"chain" .= preparationChain p,"hasDraft" .= (preparationDraft p/=Nothing)
@@ -1231,6 +1323,7 @@ auditExportWithBudget l cfg = ledgerAction l $ \c -> do
       [("sourceRecovery",toJSON [object ["deposit" .= did,"order" .= oid,"asset" .= asset,"amount" .= T.pack(show n),"state" .= state,"shortfall" .= T.pack(show loss),"criticalSequence" .= sequenceNo,"paymentExposure" .= exposure] | (did,oid,asset,n,state,loss,sequenceNo,exposure)<-sourceReviews])
       ,("sourceRecoveryApprovals",toJSON [object ["obligation" .= intent,"restorationSequence" .= restored,"restoredStatus" .= status,"criticalSequence" .= sequenceNo] | (intent,restored,status,sequenceNo)<-sourceApprovals])
       ,("sourceLossFunding",toJSON [object ["deposit" .= did,"lossSequence" .= loss,"float" .= T.pack(show f),"earned" .= T.pack(show e),"criticalSequence" .= sequenceNo,"returnedAtRecovery" .= returned] | (did,loss,f,e,sequenceNo,returned)<-sourceFunding])
+      ,("nativeReplacementDrafts",toJSON [object ["draftSequence" .= sequenceNo,"parentTransaction" .= parent,"fee" .= T.pack(show fee),"cancelledAtSequence" .= cancelled] | (sequenceNo,parent,fee,cancelled)<-replacementDrafts])
       ,("nativeSettlementRecovery",toJSON [object ["transaction" .= tx,"state" .= state,"criticalSequence" .= sequenceNo] | (tx,state,sequenceNo)<-nativeReviews])
       ,("pendingPayments",pending),("unsignedPreparations",recoveries),("custodyReconciliation",custody),("operatingBudget",budget)]
     _ -> reject "invalid_audit_export"

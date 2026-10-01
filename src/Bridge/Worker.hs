@@ -1,4 +1,4 @@
-module Bridge.Worker (runWorker, runWorkerWith, scanOnce, reconcileOnce, recoverOnce, approveRetry, cancelUnsigned, approveRestoredSource, coverLoss, doctor) where
+module Bridge.Worker (runWorker, runWorkerWith, scanOnce, reconcileOnce, recoverOnce, approveRetry, cancelUnsigned, approveRestoredSource, coverLoss, draftReplacement, cancelReplacement, doctor) where
 
 import Bridge.API
 import Control.Monad.IO.Class (liftIO)
@@ -87,6 +87,14 @@ coverLoss :: Config -> Text -> Int64 -> Amount -> Amount -> Text -> IO Value
 coverLoss c did recovery fromFloat fromEarned reason = withLedger (dbPath c) (fingerprint c) $ \ledger -> do
   manager <- newRpcManager
   coverSourceLoss manager c ledger did recovery (LossCapital fromFloat fromEarned) reason
+draftReplacement :: Config -> Text -> Amount -> Text -> IO Value
+draftReplacement c parent fee reason=withLedger (dbPath c) (fingerprint c) $ \ledger->do
+  manager <- newRpcManager
+  prepareNativeReplacement manager c ledger parent fee reason
+cancelReplacement :: Config -> Int64 -> Text -> IO Value
+cancelReplacement c sequenceNo reason=withLedger (dbPath c) (fingerprint c) $ \ledger->do
+  recordNativeReplacementCancellation ledger sequenceNo reason
+  pure $ object ["cancelledDraftSequence" .= sequenceNo,"paused" .= True,"signedOrSent" .= False]
 customerServer :: Config -> Ledger -> Server CustomerAPI
 customerServer c ledger =
   configView :<|> create :<|> get :<|> transaction :<|> hint :<|> health :<|> ready

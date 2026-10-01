@@ -2,12 +2,13 @@
 module Bridge.Recovery
   ( recoverDeployment, reconcileNativeLocks, reconcileNativeLocksWith
   , cancelPreparation, cancelPreparationWith, approveSourceRecovery, approveSourceRecoveryWith
-  , coverSourceLoss, coverSourceLossWith ) where
+  , coverSourceLoss, coverSourceLossWith, prepareNativeReplacement, prepareNativeReplacementWith ) where
 
 import Bridge.Config
 import Bridge.Ledger
 import Bridge.Native (nativeAmount,nativeIdentity)
 import Bridge.NativePayment
+import Bridge.NativeReplacement
 import Bridge.Observer (epochSeconds,observeOnce)
 import Bridge.Payment (payoutReference)
 import Bridge.Reconciliation
@@ -75,6 +76,43 @@ approveSourceRecoveryWith clock transport c ledger intent restoration reason=do
       recordSourceRecoveryApproval ledger intent restoration now reason
   pure $ object ["approvedSourceRecovery" .= intent,"restorationSequence" .= restoration
     ,"paused" .= True,"signedOrSent" .= False]
+
+prepareNativeReplacement :: Manager -> Config -> Ledger -> Text -> Amount -> Text -> IO Value
+prepareNativeReplacement manager c ledger parent fee reason=do
+  _ <- recoverDeployment manager c ledger
+  prepareNativeReplacementWith epochSeconds
+    (realPaymentTransport manager c (const $ reject "unexpected_replacement_backup")) c ledger parent fee reason
+
+-- Persist the reviewed unsigned template; this command cannot invoke a signer
+-- or create another economic intent. Cancellation keeps the original payment.
+prepareNativeReplacementWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> Text -> Amount -> Text -> IO Value
+prepareNativeReplacementWith clock transport c ledger parent fee reason=do
+  require (units fee>0 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_native_replacement_draft"
+  health <- readiness ledger
+  require (not $ available health) "pause_before_operator_action"
+  previous <- nativeReplacementDecision ledger parent fee reason
+  (sequenceNo,cancelled) <- case previous of
+    Just saved->pure saved
+    Nothing->do
+      expected <- nativeReplacementParent ledger c parent
+      paymentIdentity transport
+      (ob,payment) <- readSavedPayment transport c ledger expected
+      signed <- case payment of NativePayment s->pure s; _->reject "wrong_destination_chain"
+      recheckSourceWith transport c ledger ob
+      draft <- draftNativeReplacementWith (paymentNative transport) c [signed] fee
+      -- The original can confirm during drafting. Reconcile it and reject a
+      -- stale parent before committing an operator decision for new work.
+      payments <- reconcilePaymentsWith transport c ledger
+      outcomes <- fieldValue "attempts" payments :: IO [Value]
+      failures <- mapM (fieldValue "error") outcomes :: IO [Maybe Text]
+      require (all (==Nothing) failures) "native_replacement_payment_requires_review"
+      recheckSourceWith transport c ledger ob
+      _ <- reconcileCustodyWith clock transport c ledger
+      now <- clock
+      sequenceNo <- recordNativeReplacementDraft ledger c expected draft reason now
+      pure(sequenceNo,False)
+  pure $ object ["parentTransaction" .= parent,"draftSequence" .= sequenceNo,"fee" .= fee
+    ,"cancelled" .= cancelled,"paused" .= True,"signedOrSent" .= False]
 
 coverSourceLoss :: Manager -> Config -> Ledger -> Text -> Int64 -> LossCapital -> Text -> IO Value
 coverSourceLoss manager c ledger did recovery capital reason=do
