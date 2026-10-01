@@ -61,8 +61,8 @@ The wizard neither creates a mint nor provides funds or liquidity.
 The compiled ARM64 package passed the interactive wizard on Ubuntu 24.04 with
 real Signet/Devnet identities, a custom port and support link, followed by repeat
 installation and reboot with port/link settings preserved. No signer was supplied and payment intake stayed paused.
-Existing service definitions from another release are deliberately not overwritten;
-release upgrades need a separately verified stop, backup and replacement procedure.
+Cross-release PostgreSQL upgrades now use the explicit `--upgrade` procedure below.
+Locally modified service definitions are refused until reconciled.
 See [setup evidence](evidence/postgres-setup-interface.json).
 
 ## Configuration supplied once
@@ -150,8 +150,8 @@ global Ubuntu namespace restrictions are not disabled.
 
 Repeating the same installation preserves the release, configuration and ledger
 and does not restart active services. Different configuration is refused. A
-different release is also refused rather than automatically migrating a funded
-ledger. Back up and review upgrades separately. Full host-loss restore, release
+different release requires `--upgrade`; configuration changes and legacy-ledger
+migration remain separate actions. Full host-loss restore, release
 signing/publication and independent security review are separate unfinished gates.
 
 ## Existing ledger and backups
@@ -169,3 +169,33 @@ dumps under `/var/lib/ecx-bridge/private/backups`, validates the archive invento
 and records a digest. These local files do not acknowledge remote durability or
 replace the valuable-fund backup barrier. Keep keys and off-host journal backups
 protected. A full clean-host restore rehearsal remains a release acceptance task.
+
+## Upgrade an existing PostgreSQL release
+
+Verify the new package checksum, then run as the same sudo-enabled user:
+
+```sh
+sh ecx-bridge-ubuntu-24.04-aarch64.run --upgrade
+```
+
+This supports the managed PostgreSQL 16 / ledger schema 18 installation. It
+verifies the old release and its managed units, stops the worker, web, backup
+timer and dedicated node, and creates a private ledger dump plus configuration,
+key, native-wallet and unit archive under `/var/lib/ecx-bridge/upgrades/`. It
+checks archive readability and digests before replacing managed deployment files,
+applying supported schema corrections and switching the release. Configuration,
+keys, port and observation/test mode are preserved. New configurations cannot be
+combined with `--upgrade`. Local modifications to managed units require review.
+
+On failure, services remain stopped. If activation had begun, the previous release
+is selected; database changes are not automatically reversed and this is not a
+complete rollback. Inspect the failure and private backup before repairing and
+resuming. Never restore an old ledger over newer financial decisions. Upgrade
+backups are local recovery material, not acknowledged remote durability.
+
+ARM64 acceptance covers cross-release upgrades, repeat installation, nine
+preserved configuration files, 32 unchanged durable tables, a nonempty audit
+marker, two verified private backups, same-host restoration and reboot. The
+fixture was observation-only without signing material or payments; valuable-fund
+upgrade, key restoration, x86 and remote recovery remain separate gates. See
+[upgrade evidence](evidence/postgres-upgrade-arm64.json).

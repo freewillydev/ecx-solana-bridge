@@ -119,13 +119,14 @@ copy retention, encryption/key escrow, wallet/node backup and a separate-host
 restore drill remain required. A ledger dump alone cannot recover custody keys.
 Do not delete the last known good archive or signed-attempt history.
 
-Same-release reinstall preserves managed configuration. Different release symlinks
-or differing systemd files are refused. There is no automated cross-release upgrade
-command yet: do not delete that protection on a funded server. A verified upgrade
-must stop workers, retain a consistent ledger and key/node recovery material,
-validate migrations and permissions, switch the reviewed release, then prove
-custody/recovery before resuming intake. The fresh-install test fixture explicitly
-preserved its old unfunded units; that is not an upgrade acceptance result.
+Same-release reinstall preserves managed configuration. An explicit compiled
+package `--upgrade` now verifies the existing PostgreSQL release, stops services,
+saves private ledger/configuration/key/native-wallet recovery material and
+replaces only verified managed deployment files. Local edits are refused. Failure
+leaves services stopped; selecting the old release does not undo committed schema
+changes or authorize resuming. See [the upgrade procedure](INSTALL.md). ARM64
+observation-only upgrade and same-host dump restoration pass; valuable-fund, key
+and remote restore acceptance remain required.
 
 ## Mint, metadata and backing administration
 

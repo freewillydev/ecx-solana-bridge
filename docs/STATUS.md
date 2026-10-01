@@ -99,13 +99,13 @@ The current architecture is the approved Haskell application, two real-chain ada
 
 | Gate | Required remaining evidence | Current state |
 | --- | --- | --- |
-| U1 — Usable local test bridge — **first priority** | Existing real-chain core exposed through customer API and thin UI; both automatic transfer directions; saved-order reload; simple start command; actual supported-wallet signing | API, UI and launcher implemented; both real customer-API transfers and a clean restart pass with matching custody. Actual wallet/browser acceptance remains blocked by unavailable browser policy verification. Additional recovery gates below follow this explicitly authorized local test milestone. |
-| R1 — Complete native replacement workflow | Exact private operator draft/sign/send; backup and source gates; one actual Signet replacement family, confirmation, paused restart and matched custody | Winner-change accounting and signer guards pass contract tests; schema 18 is applied. Integrated operator send and real-family acceptance deferred until U1. |
+| U1 — Usable local test bridge — **first priority** | Existing real-chain core exposed through customer API and thin UI; both automatic transfer directions; saved-order reload; simple start command; actual supported-wallet signing | API, UI and launcher implemented; both real customer-API transfers and a clean restart pass with matching custody. Actual supported-wallet Solana Pay acceptance remains unverified. Additional recovery gates below follow this explicitly authorized local test milestone. |
+| R1 — Complete native replacement workflow | Exact private operator draft/sign/send; backup and source gates; one actual Signet replacement family, confirmation, paused restart and matched custody | Winner-change accounting and signer guards pass contract tests; schema 18 is applied. Private PostgreSQL draft/sign/send/cancel workflows are integrated; actual family signing/send/confirmation and recovery acceptance remain. |
 | R2 — Close recovery state transitions | Explicit covered-source resolution, proved missing-destination treatment, finalized Solana history-loss handling, and unchanged claims during ambiguous evidence | Partial; existing source/finality/capital journals are the implementation base. Follow U1. |
 | R3 — Complete restore and resume | Critical backup coverage, old-ledger/old-signer fencing, key restore, exact-byte recovery and a final resume decision; independent-provider Solana expiry, in-flight and backlog acceptance | Partial; follow U1. Remote and clean-host checks also close D1. |
 | N1 — Actual ECX betanet | Official node/provenance/checkpoint, separate funded profile, replay fields and real deposit/payout/refund | Not started; real node and test allocation required. |
 | D1 — Reproducible installation and recovery | One-line Ubuntu installation from verified pinned artifacts; service/helper isolation; retained remote backups; fresh-host/key restoration and affected fault checks | One-command source and compiled installers pass on local Ubuntu 24.04 ARM64, including separate users, sandboxed helper, real-chain doctor, repeated installation and VM reboot. Signed publication, x86-64 acceptance, remote backups and full host/key restore remain. The separate x86-64 Ubuntu 24.04 QEMU VM has booted without host mounts; its source installer is running, with acceptance still pending. |
-| S1 — Reviewable open-source test release | Frozen source and dependency/license/advisory evidence; installed-release acceptance and independent review; material findings resolved with focused regression checks | Not complete. Reproducible notice collection covers all 333 dependency entries; Bitcoin Core source notices and SQLite disclaimer excerpts are recorded with provenance; system-library notices and native applicability review remain. Release-notice integration is implemented but awaits a completed Linux build; independent review remains. See THIRD-PARTY.md. Publication and valuable-fund deployment are not implied. |
+| S1 — Reviewable open-source test release | Frozen source and dependency/license/advisory evidence; installed-release acceptance and independent review; material findings resolved with focused regression checks | Not complete. Reproducible notice collection covers all 333 dependency entries; Bitcoin Core source notices and SQLite disclaimer excerpts are recorded with provenance; system-library notices and native applicability review remain. The completed ARM64 package covers 369 dependency notices; system-library applicability and independent review remain. See THIRD-PARTY.md. Publication and valuable-fund deployment are not implied. |
 | C1 — Remaining approved rollout | Canonical mint/reserves/identities and explicitly authorized pilot; separately authorized real market/liquidity integrations; conditional official mainnet activation | Preserved in the full plan; external facts and explicit valuable-fund authorization required. |
 
 For each gate, implement the complete workflow, run its relevant tests, perform its real-network/host acceptance where required, and record the result once. Batch related schema/code changes before the live upgrade. Do not repeat completed one-shot acceptance drivers or add a new deployment checkpoint for each internal function. Passing a gate ends that work unless a specific failure, security finding or changed requirement reopens it. A proposed extra task must identify the requirement it satisfies or the concrete defect it fixes; otherwise defer it. Keep all remaining approved checks in the stage table below, including independent review, rather than declaring completion from test counts or matching balances.
@@ -618,3 +618,26 @@ new package, cross-release upgrade acceptance or x86-64 acceptance. The old
 installer deliberately refuses a different installed release until a reviewed
 upgrade path is provided; that remains an explicit delivery requirement.
 [Evidence](evidence/postgres-operator-release-arm64.json).
+
+## One-command PostgreSQL upgrade — 2026-10-01
+
+The compiled ARM64 installer now accepts an explicit `--upgrade`: verify the old
+managed release/units, stop services, privately back up the ledger and recovery
+files, apply supported schema corrections, activate the reviewed package and
+preserve configuration. Failure leaves services stopped; no automatic financial
+rollback or resume is attempted. Runtime binaries are unchanged from the verified
+operator release; a deployment-only repack avoids repeated compiler/download work.
+
+Ubuntu acceptance passes two cross-release upgrades, same-release repeat install,
+nine unchanged configuration files, 32 unchanged durable tables, the nonempty audit
+marker and critical sequence, two backup digests, same-host restoration of all 37
+tables (33 stable baseline hashes match), and reboot. Scanner/custody/clock records
+may legitimately advance and are excluded from unchanged-state assertions.
+Observation mode and closed readiness are retained; no signer or transfer was used.
+Sixteen installer tests pass, including exact embedded payload checksum framing.
+Installed dependencies skip unnecessary apt refresh/install. The final installer
+checksum is verified on the host; the task VM is stopped.
+
+X86 installation, supported-wallet payment, real replacement/reorg and source-loss
+acceptance, remote clean-host/key restoration, canonical network acceptance and
+independent review remain open. [Evidence](evidence/postgres-upgrade-arm64.json).

@@ -75,12 +75,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle", type=Path)
     parser.add_argument("--config-dir", type=Path, help="private directory containing worker.json, helper.json and optional signer.json")
+    parser.add_argument("--upgrade", action="store_true", help="stop and privately back up an existing PostgreSQL deployment, then switch verified releases")
     parser.add_argument("--configure", action="store_true", help="interactively collect and validate private Signet/Devnet configuration")
     parser.add_argument("--port", type=int, help="loopback web port (default 8080, or existing configuration)")
     parser.add_argument("--legacy-snapshot", type=Path, help="consistent final SQLite snapshot; old worker must be stopped")
     parser.add_argument("--with-signet", action="store_true", help="install/start a dedicated real L2L public Signet node")
     parser.add_argument("--test-worker", action="store_true", help="enable payments only for the public Signet/Devnet profile")
     args = parser.parse_args()
+    if args.upgrade and (args.configure or args.config_dir or args.legacy_snapshot or args.test_worker or args.port is not None):
+        parser.error("--upgrade preserves configuration/payment mode; do not combine it with configuration, import, port or payment-mode changes")
     if args.configure and (args.config_dir or not sys.stdin.isatty()):
         parser.error("--configure requires a terminal and cannot be combined with --config-dir")
     if args.port is not None and not 1024 <= args.port <= 65535:
@@ -113,22 +116,39 @@ def install(args):
     current = Path("/opt/ecx-bridge/current")
     if current.exists() and not current.is_symlink():
         raise ValueError("current must be a release symlink")
-    if current.is_symlink() and current.resolve() != target:
-        raise ValueError("A different release is installed; stop and back up before a reviewed upgrade")
+    previous = current.resolve() if current.is_symlink() else None
+    upgrading = previous is not None and previous != target
+    if upgrading and not args.upgrade:
+        raise ValueError("A different release is installed; use --upgrade for a stopped-worker private backup and verified switch")
+    if args.upgrade and previous is None:
+        raise ValueError("--upgrade requires an existing managed release")
     # Subsequent helper imports use the verified root-owned snapshot, rather
     # than the caller's writable extraction directory.
     sys.path.insert(0, str(target / "deploy"))
-    if args.configure:
-        from configure import create_setup
-        with tempfile.TemporaryDirectory(prefix="ecx-setup-", dir="/run") as directory:
-            args.config_dir = Path(directory)
-            args.port = create_setup(target / "bin/ecx-bridge", target / "config/l2l-devnet.example.json", args.config_dir, args.with_signet)
-            install_runtime(args, target, release_id, current)
-    else:
-        install_runtime(args, target, release_id, current)
+    upgrade = None
+    keeper = keep_file
+    if upgrading:
+        from upgrade import Upgrade
+        upgrade = Upgrade(previous, target, current, verify, run)
+        upgrade.prepare()
+        keeper = lambda path, content, mode, group="root": upgrade.keep_file(path, content, mode, group, ordinary=keep_file)
+        args.with_signet = args.with_signet or upgrade.node_was_active
+    try:
+        if args.configure:
+            from configure import create_setup
+            with tempfile.TemporaryDirectory(prefix="ecx-setup-", dir="/run") as directory:
+                args.config_dir = Path(directory)
+                args.port = create_setup(target / "bin/ecx-bridge", target / "config/l2l-devnet.example.json", args.config_dir, args.with_signet)
+                install_runtime(args, target, release_id, current, keeper)
+        else:
+            install_runtime(args, target, release_id, current, keeper)
+    except BaseException:
+        if upgrade is not None:
+            upgrade.fail()
+        raise
 
 
-def install_runtime(args, target, release_id, current):
+def install_runtime(args, target, release_id, current, keep=keep_file):
     import postgres
     for name in ("ecx-api", "ecx-worker", "ecx-node"):
         try:
@@ -146,7 +166,7 @@ def install_runtime(args, target, release_id, current):
     shutil.copy2("/usr/bin/bwrap", "/opt/ecx-bridge/libexec/bwrap")
     os.chown("/opt/ecx-bridge/libexec/bwrap", 0, grp.getgrnam("ecx-worker").gr_gid)
     os.chmod("/opt/ecx-bridge/libexec/bwrap", 0o750)
-    keep_file("/etc/apparmor.d/ecx-bridge-bwrap", (target / "deploy/ecx-bridge-bwrap.apparmor").read_bytes(), 0o644)
+    keep("/etc/apparmor.d/ecx-bridge-bwrap", (target / "deploy/ecx-bridge-bwrap.apparmor").read_bytes(), 0o644)
     run("apparmor_parser", "-r", "/etc/apparmor.d/ecx-bridge-bwrap")
     mkdir("/var/lib/ecx-bridge", 0o755)
     mkdir("/var/lib/ecx-bridge/private", 0o700, "ecx-worker", "ecx-worker")
@@ -179,13 +199,13 @@ def install_runtime(args, target, release_id, current):
             if dest.is_symlink() or (dest.exists() and dest.read_bytes() != content):
                 raise ValueError(f"Refusing to replace existing {name}")
         for name, content in incoming:
-            keep_file(Path("/etc/ecx-bridge") / name, content, 0o640, "ecx-worker")
+            keep(Path("/etc/ecx-bridge") / name, content, 0o640, "ecx-worker")
     if Path("/etc/ecx-bridge/interface.json").is_file():
-        keep_file("/etc/ecx-bridge/interface.env", b"ECX_INTERFACE_CONFIG=/etc/ecx-bridge/interface.json\n", 0o640, "ecx-worker")
+        keep("/etc/ecx-bridge/interface.env", b"ECX_INTERFACE_CONFIG=/etc/ecx-bridge/interface.json\n", 0o640, "ecx-worker")
     port = 8080
     web_environment = Path("/etc/ecx-bridge/web.env")
     if args.port is not None:
-        keep_file(web_environment, f"ECX_PORT={args.port}\n".encode(), 0o640, "ecx-worker")
+        keep(web_environment, f"ECX_PORT={args.port}\n".encode(), 0o640, "ecx-worker")
     if web_environment.is_file():
         line = web_environment.read_text().strip()
         if not line.startswith("ECX_PORT=") or not line[9:].isdecimal() or not 1024 <= int(line[9:]) <= 65535:
@@ -204,21 +224,19 @@ def install_runtime(args, target, release_id, current):
         if worker["profile"] != "L2LSignetDevnet" or worker["nativeRpc"] != "http://127.0.0.1:29432" or worker["nativeCookie"] != "/run/ecx-node/rpc.cookie":
             raise ValueError("Managed Signet requires the matching profile, loopback port 29432 and /run/ecx-node/rpc.cookie")
     if args.with_signet:
-        keep_file("/etc/ecx-node.conf", (target / "deploy/signet.conf").read_bytes(), 0o644)
-    if not current.is_symlink():
-        temp_link = current.with_name(".current-new")
-        temp_link.unlink(missing_ok=True)
-        temp_link.symlink_to(target)
-        temp_link.replace(current)
+        keep("/etc/ecx-node.conf", (target / "deploy/signet.conf").read_bytes(), 0o644)
     for name in ("ecx-bridge-worker.service", "ecx-bridge-web.service", "ecx-bridge-node.service"):
         dest = Path("/etc/systemd/system") / name
-        keep_file(dest, (target / "deploy" / name).read_bytes(), 0o644)
-    postgres.install(target, config, mkdir, keep_file, args.legacy_snapshot)
+        keep(dest, (target / "deploy" / name).read_bytes(), 0o644)
+    postgres.install(target, config, mkdir, keep, args.legacy_snapshot)
     for name in ("ecx-bridge-backup.service", "ecx-bridge-backup.timer"):
-        keep_file(Path("/etc/systemd/system") / name, (target / "deploy" / name).read_bytes(), 0o644)
+        keep(Path("/etc/systemd/system") / name, (target / "deploy" / name).read_bytes(), 0o644)
     if args.test_worker:
         mkdir("/etc/systemd/system/ecx-bridge-worker.service.d", 0o755)
-        keep_file("/etc/systemd/system/ecx-bridge-worker.service.d/test.conf", b"[Service]\nExecStart=\nExecStart=/opt/ecx-bridge/current/bin/ecx-bridge postgres-test-worker /etc/ecx-bridge/worker.json\n", 0o644)
+        keep("/etc/systemd/system/ecx-bridge-worker.service.d/test.conf", b"[Service]\nExecStart=\nExecStart=/opt/ecx-bridge/current/bin/ecx-bridge postgres-test-worker /etc/ecx-bridge/worker.json\n", 0o644)
+    # Switch only after configuration, schema and unit setup have succeeded.
+    from upgrade import atomic_link
+    atomic_link(current, target)
     run("systemctl", "daemon-reload")
     run("runuser", "-u", "ecx-worker", "--", "/opt/ecx-bridge/libexec/bwrap", "--unshare-all", "--ro-bind", "/", "/", "--", "/usr/bin/true")
     run("systemd-analyze", "verify", "/etc/systemd/system/ecx-bridge-worker.service", "/etc/systemd/system/ecx-bridge-web.service", "/etc/systemd/system/ecx-bridge-node.service")
