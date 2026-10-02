@@ -1,0 +1,13 @@
+{
+  "missingReadIdentityRejected": true,
+  "workerIdentityReuseRejected": true,
+  "nonSuperuserWithFinancialWriteGrantRejected": true,
+  "restrictedReaderAcceptedBeforeDeliberateProfileMismatch": true,
+  "allLedgerTableHashesUnchanged": true,
+  "ledgerTables": 38,
+  "temporaryRolesRemoved": true,
+  "linuxArtifactsContainFix": false,
+  "publicRelease": false,
+  "sequenceMutationGrantRejected": true,
+  "restrictedReaderAcceptedWithSequenceGuard": true
+}

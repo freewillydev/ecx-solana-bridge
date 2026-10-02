@@ -1684,3 +1684,24 @@ The PostgreSQL-only review pair is now uploaded as private draft/prerelease
 and verifying both archives using the independently retained development public
 key succeeded. The repository remains private and all task VMs are stopped.
 See `evidence/postgresql-review-release.json`; remaining release gates are unchanged.
+
+### Authorization audit: safe reader fallback removed
+
+The bounded DSL/runtime audit found that absent `PGREADUSER` reused the worker's
+identity for safe evaluation. Read-only transactions prevented normal writes,
+but the connection capability retained inappropriate credentials/privileges.
+Runtime startup now requires a distinct reader identity, authenticates it with
+its own optional password, and rejects administrative, schema-create, financial
+mutation or sequence mutation grants before worker ownership or chain effects.
+Installed configuration already specifies the required restricted roles.
+
+The production binary compiles. Actual PostgreSQL acceptance rejected missing
+reader identity, worker reuse, a non-superuser with financial UPDATE permission
+and a role with sequence mutation grants. A properly restricted reader passed
+validation before an intentional profile mismatch prevented worker startup.
+All 38 ledger table row hashes stayed unchanged; temporary roles were removed.
+See `evidence/safe-reader-authority.json`. No new chain transfer occurred.
+The existing signed private Linux review pair predates this fix; rebuild it once
+the related authorization audit is complete, rather than repeating both builds
+for each audit finding. This is a bounded finding/repair, not a complete security
+audit or external review.

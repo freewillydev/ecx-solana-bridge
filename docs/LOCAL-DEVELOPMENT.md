@@ -429,3 +429,16 @@ just to clear the pending order. The source worker finishes paused/stopped and
 the VM is stopped. The full-row staged backup and independent native unspent/
 wallet/mempool checks are recorded in
 `docs/evidence/installed-native-signed-boundary.json`.
+
+### Separate safe database identity
+
+The runtime requires `PGREADUSER`, distinct from `PGUSER`. Its role must lack
+superuser, role/database creation, replication, RLS bypass, public-schema creation,
+financial-table mutation and sequence mutation privileges. Safe connections use
+`PGREADPASSWORD` only if needed; they never inherit `PGPASSWORD`. The Ubuntu
+installer already supplies `PGUSER=ecx_worker` and `PGREADUSER=ecx_read` with private
+Unix-socket peer authentication. For a manually configured development cluster,
+provision the equivalent restricted reader and grant only schema usage, table
+SELECT and sequence SELECT. A read-only SQL transaction also remains mandatory.
+Missing, reused or writable reader identities stop startup before worker ownership
+or chain operations; configuration errors are not automatically worked around.
