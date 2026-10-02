@@ -2,7 +2,9 @@
 module Main (main) where
 
 import Bridge.Types hiding (deploymentFingerprint)
-import Bridge.Ledger.Model (Deposit(..))
+import Bridge.Ledger.Model (Deposit(..),Obligation(..))
+import qualified Bridge.Postgres.Preparation as Preparation
+import qualified Bridge.Postgres.Settlement as Settlement
 import Bridge.Config
 import qualified Bridge.Postgres.Order as Order
 import qualified Bridge.Postgres.Runtime as Runtime
@@ -21,7 +23,10 @@ import qualified Bridge.Postgres.Ledger as L
 import Bridge.Postgres.Schema
 import qualified Opaleye as O
 import Control.Exception (bracket, try, IOException)
-import Control.Concurrent.Async (withAsync,wait,mapConcurrently)
+import Control.Concurrent.Async (withAsync,wait,mapConcurrently,cancel)
+import Control.Concurrent.MVar (MVar,newEmptyMVar,putMVar,takeMVar)
+import Opaleye.Internal.Column (Field_(Column))
+import qualified Opaleye.Internal.HaskellDB.PrimQuery as Expr
 import System.Timeout (timeout)
 import qualified Opaleye.Internal.Locking as Locking
 import Data.Int (Int64)
@@ -101,7 +106,7 @@ main = do
   orderContracts settings
   provisioningContracts settings
   rollbackContract settings
-  putStrLn "PostgreSQL journal and backup acknowledgment: balanced writes, row locking, ownership, exact coverage, identity/receipt/stale refusal, idempotence, durable reopen, order/provisioning contracts and SQL-error rollback/fencing passed"
+  putStrLn "PostgreSQL journal and backup acknowledgment: balanced writes, row locking, ownership, exact coverage, identity/receipt/stale refusal, idempotence, durable reopen, order/provisioning contracts, interruption, commit/capacity failure and send-authority rollback/fencing passed"
 
 
 -- Closed test operations: no arbitrary SQL/query callback in fixture access.
@@ -118,7 +123,15 @@ data Fixture a where
   FreeWrapped :: Fixture Integer
   ReceiptCounts :: Fixture (Int,Int)
   FailTransaction :: Fixture ()
-  JournalState :: Fixture ([Events],[Postings],[(Int64,Int64,Int64)])
+  FailCommit :: IORef Bool -> Fixture ()
+  FailCapacity :: Fixture ()
+  InterruptedWrite :: MVar () -> MVar () -> Fixture ()
+  FundedObligation :: Fixture Obligation
+  SendState :: Fixture ([Attempts],[FeeReservations],[Reservations],[OperatingReservations])
+  JournalState :: Fixture JournalSnapshot
+
+data JournalSnapshot = JournalSnapshot [Events] [Postings] [(Int64,Int64,Int64)]
+  [CustodyCheck] [Checkpoints] deriving (Eq,Show)
 
 fixture :: PG.Connection -> Fixture a -> IO a
 fixture connection = \case
@@ -229,7 +242,53 @@ fixture connection = \case
     events <- O.runSelect connection (O.selectTable eventsTable)
     postings <- O.runSelect connection (O.selectTable postingsTable)
     coverage <- fixture connection ReadCoverage
-    pure (sortOn eventsId events,sortOn postingsId postings,coverage)
+    custody <- O.runSelect connection (O.selectTable custodycheckTable)
+    checkpoints <- O.runSelect connection (O.selectTable checkpointsTable)
+    pure (JournalSnapshot (sortOn eventsId events) (sortOn postingsId postings) coverage
+      custody (sortOn checkpointsChain checkpoints))
+  SendState -> (,,,)
+    <$> (sortOn attemptsTxid <$> O.runSelect connection (O.selectTable attemptsTable))
+    <*> (sortOn feereservationsIntentId <$> O.runSelect connection (O.selectTable feereservationsTable))
+    <*> (sortOn reservationsOrderId <$> O.runSelect connection (O.selectTable reservationsTable))
+    <*> (sortOn (\r->(operatingreservationsOrderId r,operatingreservationsKind r))
+          <$> O.runSelect connection (O.selectTable operatingreservationsTable))
+  FundedObligation -> do
+    rows <- (O.runSelect connection $ do
+      row <- O.selectTable obligationsTable
+      O.where_ (obligationsDepositId row O..== O.sqlStrictText "contract-deposit:0")
+      pure row) :: IO [Obligations]
+    case rows of
+      [row]->pure (Obligation (obligationsId row) (obligationsOrderId row)
+        (obligationsDepositId row) (obligationsKind row) (obligationsAsset row)
+        (obligationsAmount row) (obligationsRecipient row))
+      _->reject "funded_contract_obligation_missing"
+  InterruptedWrite reached hold -> do
+    L.posting connection "interrupted" "cancellation contract"
+      [(Native,"float",1),(Native,"external",-1)]
+    void $ L.criticalSequence connection
+    void $ O.runUpdate connection O.Update
+      { O.uTable=checkpointsTable
+      , O.uUpdateWith= \row->row {checkpointsAnchor=O.sqlStrictText "uncommitted"}
+      , O.uWhere= \row->checkpointsChain row O..== O.sqlStrictText "Native",O.uReturning=O.rCount }
+    putMVar reached ()
+    takeMVar hold
+  FailCommit bodyCompleted -> do
+    -- Fault-injection DDL only. Application/test row access still uses Opaleye.
+    -- This deferred FK fails at COMMIT, after the entire body has returned.
+    void $ PG.execute_ connection "CREATE TEMP TABLE contract_commit_parent (id text PRIMARY KEY); CREATE TEMP TABLE contract_deferred_commit (event_id text REFERENCES contract_commit_parent(id) DEFERRABLE INITIALLY DEFERRED)"
+    L.posting connection "commit-rollback" "deferred commit contract"
+      [(Native,"float",1),(Native,"external",-1)]
+    void $ L.criticalSequence connection
+    void $ O.runInsert connection O.Insert
+      { O.iTable=O.table "contract_deferred_commit" (O.requiredTableField "event_id")
+      , O.iRows=[O.sqlStrictText "missing-event"],O.iReturning=O.rCount,O.iOnConflict=Nothing }
+    writeIORef bodyCompleted True
+  FailCapacity -> do
+    -- PostgreSQL reports its actual disk_full SQLSTATE, without filling the
+    -- host disk. This exercises error preservation, not filesystem durability.
+    void $ PG.execute_ connection "CREATE FUNCTION pg_temp.contract_capacity_failure() RETURNS boolean LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'contract capacity failure' USING ERRCODE='53100'; END $$"
+    void $ L.criticalSequence connection
+    void (O.runSelect connection (pure (Column (Expr.FunExpr "pg_temp.contract_capacity_failure" []) :: O.Field O.SqlBool)) :: IO [Bool])
   FailTransaction -> do
     L.posting connection "must-rollback" "constraint rollback contract"
       [(Native,"float",1),(Native,"external",-1)]
@@ -325,19 +384,72 @@ orderContracts settings = do
     retained <- L.ledgerAction ledger (\connection->fixture connection FreeWrapped)
     require (retained==901000) "expiry_released_eligible_obligation"
 
+-- Each fault runs against a disposable real PostgreSQL ledger. A failed
+-- commit/send-intent cannot leak a posting, advance its sequence or grant send.
 rollbackContract :: PG.ConnectInfo -> IO ()
 rollbackContract settings = do
-  before <- L.withLedger settings "journal-contract" $ \ledger->do
-    original <- L.ledgerAction ledger (\connection->fixture connection JournalState)
-    result <- try (L.ledgerAction ledger (\connection->fixture connection FailTransaction)) :: IO (Either PG.SqlError ())
-    require (case result of Left err->PG.sqlState err=="23505"; _->False) "constraint_failure_missing"
-    fenced <- try (L.ledgerAction ledger L.balances) :: IO (Either IOException (M.Map (T.Text,T.Text) Integer))
-    require (case fenced of Left _->True; _->False) "failed_transaction_connection_reused"
-    pure original
   L.withLedger settings "journal-contract" $ \ledger->do
-    after <- L.ledgerAction ledger (\connection->fixture connection JournalState)
-    require (before==after) "failed_transaction_changed_journal"
+    before <- state ledger JournalState
+    reached <- newEmptyMVar
+    hold <- newEmptyMVar
+    withAsync (state ledger (InterruptedWrite reached hold)) $ \pending->do
+      entered <- timeout 2000000 (takeMVar reached)
+      require (entered==Just ()) "interrupted_transaction_not_entered"
+      cancel pending
+    after <- state ledger JournalState
+    require (before==after) "interruption_published_uncommitted_state"
+  bodyCompleted <- newIORef False
+  forM_ [("23505",FailTransaction),("23503",FailCommit bodyCompleted),("53100",FailCapacity)] $ \(code,operation)->do
+    before <- L.withLedger settings "journal-contract" $ \ledger->do
+      original <- state ledger JournalState
+      result <- try (state ledger operation) :: IO (Either PG.SqlError ())
+      require (case result of Left err->PG.sqlState err==code; _->False) ("database_fault_not_preserved:"<>T.pack(show(code,result)))
+      expectFenced (state ledger JournalState)
+      pure original
+    L.withLedger settings "journal-contract" $ \ledger->do
+      after <- state ledger JournalState
+      require (before==after) "failed_transaction_changed_journal"
+      paused <- L.readiness ledger
+      require (not $ available paused) "failed_transaction_reopened_unpaused"
+  readIORef bodyCompleted >>= \finished->require finished "commit_fault_occurred_before_body_completed"
+  broadcastWriteContract settings
+ where
+  state ledger operation=L.ledgerAction ledger (\connection->fixture connection operation)
 
+expectFenced :: IO a -> IO ()
+expectFenced action = do
+  result <- try (void action) :: IO (Either IOException ())
+  require (case result of Left _->True; _->False) "failed_transaction_connection_reused"
+
+broadcastWriteContract :: PG.ConnectInfo -> IO ()
+broadcastWriteContract settings = do
+  base <- BS.readFile "config/l2l-devnet.example.json" >>= either fail pure . eitherDecodeStrict'
+  let quantity n=either (error . T.unpack) id (amount n)
+      cfg=base {maxSolAccountRent=quantity 0,maxNativeDailyCost=quantity 1000000,maxSolDailyCost=quantity 1000000}
+      state ledger operation=L.ledgerAction ledger (\connection->fixture connection operation)
+      txid="contract-send-write-failure"
+  (before,saved) <- L.withLedger settings "journal-contract" $ \ledger->do
+    state ledger (ReadyAt 100)
+    ob <- state ledger FundedObligation
+    Preparation.begin ledger cfg ob "Solana" 10000 "{\"contract\":true}"
+    generation <- Preparation.active ledger (obligationId ob)
+    Preparation.storeAttempt ledger ob "Solana" txid "original-contract-bytes" "{}" 10000 Nothing generation
+    original <- state ledger JournalState
+    signed <- state ledger SendState
+    -- A genuine server constraint refuses the authority-granting state write.
+    L.ledgerAction ledger $ \connection->void $ PG.execute_ connection
+      "ALTER TABLE attempts ADD CONSTRAINT contract_send_write_failure CHECK (state <> 'broadcast_intent')"
+    result <- try (Settlement.markBroadcastIntent ledger txid) :: IO (Either PG.SqlError Int64)
+    require (case result of Left err->PG.sqlState err=="23514"; _->False) "broadcast_write_failure_missing"
+    expectFenced (Settlement.authorizeRecordedSend ledger False txid)
+    pure (original,signed)
+  bracket (PG.connect settings) PG.close $ \connection->void $ PG.execute_ connection
+    "ALTER TABLE attempts DROP CONSTRAINT contract_send_write_failure"
+  L.withLedger settings "journal-contract" $ \ledger->do
+    after <- state ledger JournalState
+    attempts <- state ledger SendState
+    require (before==after && saved==attempts) "failed_broadcast_write_changed_bytes_or_holds"
+    expectError "broadcast_intent_required" (Settlement.authorizeRecordedSend ledger False txid)
 
 -- Offline RPC contracts against the production PostgreSQL order workflow.
 -- The in-memory node below models uncertain replies, not a real network.

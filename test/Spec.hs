@@ -33,8 +33,8 @@ import Bridge.Web (runUnix,securityBoundary)
 import qualified Database.PostgreSQL.Simple as PG
 import Servant (serve,throwError,err409,Handler)
 import Bridge.Observer
-import Control.Concurrent (threadDelay,newEmptyMVar,putMVar,takeMVar)
-import Control.Concurrent.Async (mapConcurrently,withAsync,cancel,concurrently_)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (mapConcurrently,withAsync,concurrently_)
 import Control.Exception (bracket,try,SomeException)
 import Control.Monad (forM_,when)
 import Data.Aeson
@@ -57,9 +57,8 @@ import Database.SQLite.Simple
 import Servant.API ((:<|>)(..))
 import Servant.Client
 import System.Directory
-import System.FilePath ((</>),takeDirectory)
+import System.FilePath ((</>))
 import System.Posix.Files (getFileStatus,fileMode,setFileMode)
-import System.Timeout (timeout)
 import Data.Bits ((.&.))
 import Test.Hspec hiding (before,after)
 import Test.QuickCheck hiding ((.&.))
@@ -741,86 +740,6 @@ main=hspec $ do
       nativeAmount (scientific 1 (-1000000000)) `shouldBe` Left "native_amount_out_of_range"
     it "conserves principal and bounds upward rounding in both directions" $ property $ forAll (chooseInteger (1000,1000000000000)) $ \n -> all (valid n) [NativeToWrapped,WrappedToNative]
     it "never quotes an input consumed entirely by its fee" $ makeQuote NativeToWrapped (amt 1) `shouldBe` Left "nonpositive_net"
-  describe "SQLite transaction failure boundaries (local database, no chain IO)" $ do
-    it "rolls back an interrupted request and releases the writer without publishing its checkpoint" $ withFunded $ \l _->do
-      original<-auditExport l
-      sequenceBefore<-ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64])
-      custodyBefore<-custodyHealth l
-      reached<-newEmptyMVar
-      hold<-newEmptyMVar
-      withAsync (ledgerAction l $ \db->do
-        execute_ db "INSERT INTO events(id,description) VALUES('interrupted','offline cancellation')"
-        execute_ db "INSERT INTO postings(event_id,asset,account,delta) VALUES('interrupted','Native','float',1),('interrupted','Native','external',-1)"
-        _<-criticalSequence db
-        checkpoint db "Native" "uncommitted-offline-cursor"
-        putMVar reached ()
-        takeMVar hold :: IO ()) $ \request->do
-          timeout 1000000 (takeMVar reached) `shouldReturn` Just ()
-          cancel request
-      auditExport l `shouldReturn` original
-      custodyHealth l `shouldReturn` custodyBefore
-      readCheckpoint l "Native" `shouldReturn` Nothing
-      ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64]) `shouldReturn` sequenceBefore
-    it "fences a failed COMMIT, rolls it back, and reopens with the original balances and sequence" $ withDir $ \dir->do
-      (original,sequenceBefore)<-withFundedAt dir $ \l _->do
-        before<-auditExport l
-        previous<-ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64])
-        bodyCompleted<-newIORef False
-        result<-try (ledgerAction l $ \db->do
-          execute_ db "PRAGMA defer_foreign_keys=ON"
-          execute_ db "INSERT INTO postings(event_id,asset,account,delta) VALUES('missing-offline-event','Native','float',1)"
-          _<-criticalSequence db
-          writeIORef bodyCompleted True) :: IO (Either SQLError ())
-        readIORef bodyCompleted `shouldReturn` True
-        either (Just . sqlError) (const Nothing) result `shouldBe` Just ErrorConstraint
-        auditExport l `shouldThrow` isError "ledger_requires_reopen"
-        pure (before,previous)
-      let c=cfg dir
-      withLedger (dbPath c) (fingerprint c) $ \l->do
-        auditExport l `shouldReturn` original
-        ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64]) `shouldReturn` sequenceBefore
-        ledgerAction l (\db->query_ db "PRAGMA foreign_key_check" :: IO [(Text,Int64,Text,Int)]) `shouldReturn` []
-        available <$> readiness l `shouldReturn` False
-    it "retains the original SQLITE_FULL error and fences writes when the private file reaches its page limit" $ withDir $ \dir->do
-      (original,sequenceBefore)<-withFundedAt dir $ \l _->do
-        before<-auditExport l
-        previous<-ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64])
-        ledgerAction l $ \db->do
-          [Only pages]<-query_ db "PRAGMA page_count" :: IO [Only Int]
-          limit<-query_ db (fromString $ "PRAGMA max_page_count="<>show pages) :: IO [Only Int]
-          limit `shouldBe` [Only pages]
-        -- This bounded SQLite capacity error does not fill the host disk and
-        -- is not claimed as a filesystem/power-loss acceptance test.
-        result<-try (ledgerAction l $ \db->do
-          _<-criticalSequence db
-          execute_ db "INSERT INTO audit(action,detail) VALUES('offline-capacity-failure',zeroblob(4194304))") :: IO (Either SQLError ())
-        either (Just . sqlError) (const Nothing) result `shouldBe` Just ErrorFull
-        ledgerAction l (const $ pure ()) `shouldThrow` isError "ledger_requires_reopen"
-        pure (before,previous)
-      let c=cfg dir
-      withLedger (dbPath c) (fingerprint c) $ \l->do
-        auditExport l `shouldReturn` original
-        ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64]) `shouldReturn` sequenceBefore
-        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM audit WHERE action='offline-capacity-failure'" :: IO [Only Int]) `shouldReturn` [Only 0]
-        available <$> readiness l `shouldReturn` False
-    it "cannot authorize a send after the broadcast-intent write fails, and preserves the exact signed attempt" $ withDir $ \dir->do
-      (original,attempts,sequenceBefore)<-withFundedAt dir $ \l c->do
-        (_,ob)<-fundOrder l c
-        testAttempt l c ob "Solana" "offline-write-failure" "original-bytes" "{}" 10000 Nothing
-        before<-auditExport l
-        saved<-pendingAttempts l
-        previous<-ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64])
-        ledgerAction l $ \db->execute_ db "CREATE TEMP TRIGGER injected_intent_failure BEFORE UPDATE OF state ON attempts WHEN NEW.state='broadcast_intent' BEGIN SELECT RAISE(ABORT,'offline injected database failure'); END"
-        markBroadcastIntent l "offline-write-failure" `shouldThrow` (\e->sqlError e==ErrorConstraint)
-        authorizeRecordedSend l False "offline-write-failure" `shouldThrow` isError "ledger_requires_reopen"
-        pure (before,saved,previous)
-      let c=cfg dir
-      withLedger (dbPath c) (fingerprint c) $ \l->do
-        auditExport l `shouldReturn` original
-        pendingAttempts l `shouldReturn` attempts
-        ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64]) `shouldReturn` sequenceBefore
-        ledgerAction l (\db->query_ db "SELECT released FROM fee_reservations" :: IO [Only Bool]) `shouldReturn` [Only False]
-        available <$> readiness l `shouldReturn` False
   describe "quote allowances and rolling operating budgets" $ do
     it "reserves payout rent and refund costs before accepting a quote" $ withFunded $ \l c -> do
       o<-createOrder l c{maxSolAccountRent=amt 80000} 100 cap req
@@ -2464,48 +2383,6 @@ main=hspec $ do
       newSig<-maybe (fail "missing signature") pure (replySignature $ signedSolanaReply newSigned)
       lamportEffect newSig (custodyOwner newConfig) (setPath ["meta","err"] (String "fixture-error") newProof)
         `shouldBe` Left "unclassified_lamport_effect"
-  describe "backup and schema protections" $ do
-    it "migrates version one without losing financial rows or critical sequence" $ withDir $ \dir -> do
-      let c=cfg dir
-      createDirectoryIfMissing True (takeDirectory $ dbPath c)
-      schema<-TE.decodeUtf8 <$> BS.readFile "migrations/001.sql"
-      bracket (open $ dbPath c) close $ \db -> do
-        forM_ (T.splitOn "-- @statement" schema) $ execute_ db . fromString . T.unpack
-        execute db "INSERT INTO deployment(singleton,schema_version,fingerprint,critical_sequence,backup_sequence) VALUES(1,1,?,47,46)" (Only $ fingerprint c)
-        execute_ db "INSERT INTO events(id,description) VALUES('legacy','existing receipt')"
-        execute_ db "INSERT INTO postings(event_id,asset,account,delta) VALUES('legacy','Native','float',1000),('legacy','Native','external',-1000)"
-        execute_ db "INSERT INTO events(id,description) VALUES('legacy-cost','historical fee with no trustworthy timestamp')"
-        execute_ db "INSERT INTO postings(event_id,asset,account,delta) VALUES('legacy-cost','Native','operating',-10),('legacy-cost','Native','external',10)"
-      withLedger (dbPath c) (fingerprint c) $ \l -> do
-        ledgerAction l (\db->query_ db "SELECT schema_version,critical_sequence,backup_sequence FROM deployment" :: IO [(Int,Int64,Int64)]) `shouldReturn` [(schemaVersion,47,46)]
-        ledgerAction l (\db->freeInventory db Native) `shouldReturn` 1000
-        ledgerAction l (\db->operatingTime db >>= operatingSpent db "Native") `shouldReturn` 10
-        ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM operating_costs" :: IO [Only Int]) `shouldReturn` [Only 1]
-        available <$> readiness l `shouldReturn` False
-    it "preserves an unfinished legacy order without inventing cost policy or allowing resume" $ withDir $ \dir -> do
-      let c=cfg dir
-          json value=TE.decodeUtf8 $ LBS.toStrict $ encode value
-      capHash<-either (fail . T.unpack) pure (capabilityHash cap)
-      quoted<-either (fail . T.unpack) pure (makeQuote (direction req) (input req))
-      createDirectoryIfMissing True (takeDirectory $ dbPath c)
-      bracket (open $ dbPath c) close $ \db -> do
-        schema<-TE.decodeUtf8 <$> BS.readFile "migrations/001.sql"
-        forM_ (T.splitOn "-- @statement" schema) $ execute_ db . fromString . T.unpack
-        execute db "INSERT INTO deployment(singleton,schema_version,fingerprint) VALUES(1,1,?)" (Only $ fingerprint c)
-        forM_ [2..6::Int] $ \v -> do
-          migration<-TE.decodeUtf8 <$> BS.readFile ("migrations/00"<>show v<>".sql")
-          forM_ (T.splitOn "-- @statement" migration) $ execute_ db . fromString . T.unpack
-        execute db "INSERT INTO orders(id,capability_hash,idempotency_key,request_hash,request_json,quote_json,policy_json,status,deadline,grace_deadline) VALUES('legacy-order',?,'legacy-key','legacy-request',?,?,?,'Provisioning',400,1000)"
-          (capHash,json req,json quoted,json $ PolicySnapshot 1 "finalized" (fingerprint c))
-      withLedger (dbPath c) (fingerprint c) $ \l -> do
-        request <$> readOrder l cap "legacy-order" `shouldReturn` req
-        ledgerAction l (\db->orderCostLimits db "legacy-order") `shouldThrow` isError "order_cost_policy_missing"
-        resumeAfterChecks l `shouldThrow` isError "legacy_order_cost_review_required"
-        available <$> readiness l `shouldReturn` False
-    it "refuses repointing an existing database" $ withDir $ \dir -> do
-      let c=cfg dir
-      withLedger (dbPath c) (fingerprint c) (const $ pure ())
-      withLedger (dbPath c) "other-profile" (const $ pure ()) `shouldThrow` isError "ledger_profile_or_schema_mismatch"
   describe "native quote admission (offline RPC contracts)" $ do
     it "checks the full native refund and exact net redemption without signing or locking" $ withNativeAdmission $ \c plan calls call -> do
       let wrap=req{refund=planRecipient plan}

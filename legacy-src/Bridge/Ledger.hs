@@ -3,11 +3,11 @@
 -- SQLite row adapters intentionally live with this legacy backend.
 {-# OPTIONS_GHC -Wno-orphans #-}
 module Bridge.Ledger
-  ( Ledger, withLedger, ledgerAction, schemaVersion, sqliteIdentity, readiness, pause, resumeAfterChecks
+  ( Ledger, withLedger, ledgerAction, readiness, pause, resumeAfterChecks
   , createOrder, readOrder, bindInstruction, criticalSequence, acknowledgeBackup
   , checkIntakeReady
   , freeInventory, allocateTreasuryReceipt, allocateSolOperatingReceipt, recordTreasurySpend, expireQuotes
-  , Deposit(..), observeDeposit, refreshDeposit, recordScan, readCheckpoint, promoteDeposit, checkpoint
+  , Deposit(..), observeDeposit, refreshDeposit, recordScan, readCheckpoint, promoteDeposit
   , economicOutflow, ChainEvent(..), ScanBatch(..), commitScan, recordScanFailure, custodyHealth
   , maximumNativeDepth, pendingVerification
   , Obligation(..), readyObligations, Attempt(..), storeAttempt, markBroadcastIntent, authorizeRecordedSend
