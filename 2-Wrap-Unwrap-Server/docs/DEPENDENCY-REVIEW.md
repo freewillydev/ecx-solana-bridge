@@ -37,9 +37,10 @@ The upstream update replaces the memory dependency with ram. Application APIs,
 ledger schema, fee terms and signed transaction formats are unchanged. GHC 9.14's
 base/time/containers versions exceed the declared bounds in serialise/cborg;
 exceptions are limited to those specific dependencies in `cabal.project`.
-Compilation and all 371 application examples pass. A separate certificate-only
-regression creates a constrained issuer and checks that permitted DNS succeeds,
-while outside and explicitly excluded DNS names fail validation. It uses no chain,
+That dependency update passed the then-current 371 application examples. The
+certificate regression now runs in the Cabal suite as a QuickCheck property: a
+temporary constrained issuer accepts generated permitted DNS names and rejects
+outside names, the exact excluded name and generated children of the exclusion. It uses no chain,
 wallet, signer or network stand-in, and runs in the Linux release builder too.
 Actual Signet/betanet native identities and HTTPS Devnet identity checks pass with
 the patched binary. Offline custody-key validation passes and the existing ledger

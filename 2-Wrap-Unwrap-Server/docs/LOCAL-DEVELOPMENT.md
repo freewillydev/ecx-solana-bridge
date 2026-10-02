@@ -61,6 +61,10 @@ Read their restrictions before running them; some sign or transfer test funds.
 Historical acceptance applies only to its recorded source/configuration/network.
 Current release gaps are in [RELEASE-REVIEW.md](RELEASE-REVIEW.md).
 
+The same Cabal suite generates temporary certificate chains and checks permitted
+and excluded DNS constraints through the real X.509 validator. It needs OpenSSL
+on PATH; the separate Python fixture generator and TLS executable are retired.
+
 ## Customer capability boundary
 
 `cabal repl lib:customer-api --offline` loads only customer handlers and their

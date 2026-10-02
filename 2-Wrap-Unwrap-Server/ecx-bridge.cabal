@@ -83,7 +83,8 @@ test-suite bridge-test
     hspec >=2.11 && <2.12, QuickCheck >=2.15 && <2.19,
     text, time, async, network, http-client, servant-client, servant, servant-server, postgresql-simple, unix, scientific, base64-bytestring,
     crypton, ram, wai, wai-extra, warp, warp-tls, http-types, process,
-    http-client-tls, crypton-connection, tls, crypton-x509-store
+    http-client-tls, crypton-connection, tls, crypton-x509-store,
+    data-default, crypton-pem, crypton-x509, crypton-x509-validation
 
 executable ecx-postgres-journal-check
   import: settings
@@ -104,11 +105,3 @@ executable ecx-postgres-source-approval-check
   hs-source-dirs: integration
   main-is: SourceApprovalCheck.hs
   build-depends: base, ecx-bridge:bridge-types, ecx-bridge:customer-api, ecx-bridge:bridge-runtime, aeson, bytestring, containers, opaleye, postgresql-simple, unix, text
-
--- Certificate-only validation; never included in the server release bundle.
-executable ecx-tls-constraints-check
-  import: settings
-  hs-source-dirs: integration
-  main-is: TLSConstraintsCheck.hs
-  build-depends: base, bytestring, filepath, data-default,
-    crypton-pem, crypton-x509, crypton-x509-store, crypton-x509-validation

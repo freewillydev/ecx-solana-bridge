@@ -266,6 +266,9 @@ The sequence below remains the broader refactor checklist, subject to that prior
    the custody freshness check is called directly from its owner. Cancellation
    generation lookups share one query with preparation/signing checks.
    Remove redundant wrappers immediately after their replacement works.
+   The standalone TLS executable and Python certificate generator are retired;
+   their real-validator assertions now run as generated QuickCheck cases inside
+   the existing Cabal suite, including exact and descendant DNS exclusions.
    Core PostgreSQL budgeting is now part of Ledger, so allowance and journal
    arithmetic share one implementation. Retain remaining unique SQLite assertions
    until their production equivalent exists. Treasury-spend classification now uses
