@@ -1900,4 +1900,8 @@ original bytes and private file modes; existing destinations and a tampered
 receipt were refused, the latter before exposing a staged bundle. See
 `evidence/encrypted-handoff-staging-local.json`. No VM or package build was used.
 The real off-host/host-loss drill and paying reconciliation for an in-flight
-Solana payment remain open; faucet funding is still awaiting confirmation.
+Solana payment remain open. The faucet funding was subsequently verified in
+actual L2L Signet block 16607, with one confirmation and the exact 10000-unit
+tester output; see `evidence/l2l-faucet-funding.json`. The expired unfunded order
+and its unsigned preparation journal are retained; a distinct fresh order is
+required for the next recovery acceptance.
