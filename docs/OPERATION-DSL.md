@@ -177,6 +177,21 @@ insert an arbitrary critical DSL through these constructors. Customer and operat
 routes currently share the public planning module; component-level separation of
 their imports remains part of the authority audit.
 
+The HTTP/API process serves the DSL-backed CustomerAPI directly, alongside
+HTML/CSS and the Haskell interface compiled with GHC’s JavaScript backend. `Web.runPublic` receives that WAI
+application; it no longer generates a Servant client or forwards HTTP requests.
+The operator API retains its private Unix socket.
+
+The revised custody boundary is a dedicated Haskell signer process. All signer
+communication must originate inside the critical evaluator's closed workflows;
+the client implementation and socket capability must be private to that evaluator.
+Safe operations and HTTP handlers cannot obtain or call them. The signer accepts
+only named, durable signing decisions, checks them independently, and never sends
+transactions. Native RPC credentials must also be split so the HTTP process cannot
+bypass this service using walletprocesspsbt or another signing/key-export method.
+Solana SDK Rust remains only through Haskell FFI inside the signer. Completing this
+boundary is current work, not an implemented guarantee of the existing runtime.
+
 Servant's `ServerT` requires a type constructor of kind `Type -> Type`; hoisting
 requires a natural transformation `forall a. Plan a -> Handler a`. Add
 only the pure/applicative/monadic structure actually required by the installed
@@ -195,7 +210,7 @@ Hoist this server once to `Handler`:
 
 Preserve synchronous create-order responses; routing internally to the worker
 must not silently change the public API into a new asynchronous order protocol.
-Use the existing private process/socket boundary. Do not add a second public
+Use the dedicated signer process/socket boundary. Do not add a second public
 service, message broker or general-purpose remotely executable command endpoint.
 An in-process worker can use the same dispatcher without inventing another
 network protocol.

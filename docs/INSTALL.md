@@ -179,7 +179,7 @@ hot-wallet migration or backup restoration procedure.
 
 ## Operation
 
-The web service listens on loopback at `http://127.0.0.1:8080`. Use an SSH tunnel
+The HTTP/API service listens on loopback at `http://127.0.0.1:8080`. Use an SSH tunnel
 for remote access; a public domain/TLS reverse proxy is a separate configuration.
 The installer does not open firewall ports or expose native RPC.
 

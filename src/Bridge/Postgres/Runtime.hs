@@ -38,7 +38,7 @@ import Bridge.RPC (fieldValue,parseValue)
 import qualified Bridge.Order as OrderWorkflow
 import Bridge.Observer (epochSeconds)
 import Bridge.RPC (newRpcManager)
-import Bridge.Web (asHandler,runUnix,securityBoundary)
+import Bridge.Web (asHandler,runUnix,runPublic,securityBoundary)
 import Control.Concurrent.Async (concurrently_)
 import Control.Exception (bracket,try)
 import Data.Aeson (Value(..),object,(.=),toJSON,encode,parseJSON)
@@ -46,6 +46,7 @@ import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Map.Strict as M
 import System.Environment (lookupEnv)
 import Data.Maybe (fromMaybe)
+import Text.Read (readMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.HTTP.Client (Manager)
@@ -356,6 +357,10 @@ runRuntime paying remote settings cfg = do
   case remote of
     Nothing->require (publicTestProfile cfg) "public_test_profile_required"
     Just _->require (paying && profile cfg `elem` [L2LSignetDevnet,ECXBetanetDevnet] && backupRequired cfg) "backed_test_profile_required"
+  portText <- fromMaybe "8080" <$> lookupEnv "ECX_PORT"
+  port <- maybe (reject "invalid_http_port") pure (readMaybe portText :: Maybe Int)
+  require (port>=1024 && port<=65535) "invalid_http_port"
+  assets <- fromMaybe "web" <$> lookupEnv "ECX_ASSETS"
   links <- lookupEnv "ECX_INTERFACE_CONFIG" >>= loadInterface cfg
   readUser <- lookupEnv "PGREADUSER" >>= maybe (reject "read_database_user_required") pure
   require (not(T.null $ T.strip $ T.pack readUser) && readUser/=PG.connectUser settings) "distinct_read_database_user_required"
@@ -386,9 +391,13 @@ runRuntime paying remote settings cfg = do
     let bootstrap=checked $ do
           _ <- evaluate runtime (worker ScanAndReconcile)
           when paying (evaluate runtime (worker StartPayments))
-    customerApp <- securityBoundary (serve customerAPI (hoistServer customerAPI (interpret runtime) Server.customerServer))
+    let customerAPIApp=serve customerAPI (hoistServer customerAPI (interpret runtime) Server.customerServer)
+    customerApp <- securityBoundary customerAPIApp
     adminApp <- securityBoundary (serve Server.operatorAPI (hoistServer Server.operatorAPI (interpret runtime) Server.adminServer))
-    let api=concurrently_ (runUnix (customerSocket cfg) 0o660 customerApp) (runUnix (adminSocket cfg) 0o600 adminApp)
+    -- Local clients retain their existing socket; public HTTP invokes the same
+    -- typed server directly. Operator routes remain private to their own socket.
+    let api=concurrently_ (runPublic port assets customerAPIApp)
+          (concurrently_ (runUnix (customerSocket cfg) 0o660 customerApp) (runUnix (adminSocket cfg) 0o600 adminApp))
         loop=forever $ do
           result <- try ((do
             _ <- evaluate runtime (worker ScanAndReconcile)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the public Signet/Devnet bridge locally. Ctrl-C stops both child processes."""
+"""Run the public Signet/Devnet bridge locally. Ctrl-C stops the server."""
 import argparse
 import json
 import os
@@ -7,7 +7,6 @@ from pathlib import Path
 import shutil
 import signal
 import subprocess
-import time
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument("config", type=Path)
@@ -35,7 +34,7 @@ if args.postgres:
     fence = Path(os.environ.setdefault("ECX_WORKER_FENCE_DIR", str(Path.home() / ".local/state/ecx-bridge/worker-fence")))
     if not (fence / "sequence.json").exists():
         subprocess.run([binary, "postgres-init-worker-fence", str(config_path)], check=True)
-children = []
+os.environ.update(ECX_PORT=str(args.port), ECX_ASSETS=str(assets))
 
 
 def stop(_signal=None, _frame=None):
@@ -43,20 +42,16 @@ def stop(_signal=None, _frame=None):
 
 
 signal.signal(signal.SIGTERM, stop)
+child = None
 try:
-    children.append(subprocess.Popen([binary, "postgres-test-worker", str(config_path)]))
-    children.append(subprocess.Popen([binary, "serve", config["customerSocket"], str(args.port), str(assets)]))
+    child = subprocess.Popen([binary, "postgres-test-worker", str(config_path)])
     print(f"Bridge: http://127.0.0.1:{args.port} — public test funds only. Ctrl-C to stop.", flush=True)
-    while all(child.poll() is None for child in children):
-        time.sleep(0.25)
-    raise SystemExit(next(child.returncode for child in children if child.poll() is not None) or 1)
+    raise SystemExit(child.wait())
 except KeyboardInterrupt:
     pass
 finally:
-    for child in children:
-        if child.poll() is None:
-            child.terminate()
-    for child in children:
+    if child is not None and child.poll() is None:
+        child.terminate()
         try:
             child.wait(timeout=10)
         except subprocess.TimeoutExpired:

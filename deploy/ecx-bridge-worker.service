@@ -1,5 +1,5 @@
 [Unit]
-Description=ECX bridge private worker
+Description=ECX bridge HTTP API and payment workflows
 After=network-online.target ecx-bridge-node.service ecx-bridge-postgres.service
 Requires=ecx-bridge-postgres.service
 Wants=network-online.target
@@ -10,6 +10,9 @@ User=ecx-worker
 Group=ecx-api
 SupplementaryGroups=ecx-worker ecx-node
 UMask=0077
+Environment=ECX_PORT=8080
+Environment=ECX_ASSETS=/opt/ecx-bridge/current/web
+EnvironmentFile=-/etc/ecx-bridge/web.env
 EnvironmentFile=/etc/ecx-bridge/postgres.env
 EnvironmentFile=-/etc/ecx-bridge/interface.env
 EnvironmentFile=-/etc/ecx-bridge/fence.env

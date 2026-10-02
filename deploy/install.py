@@ -176,7 +176,7 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
             grp.getgrnam(name)
         except KeyError:
             run("groupadd", "--system", name)
-    for name, group in (("ecx-worker", "ecx-api"), ("ecx-web", "ecx-api"), ("ecx-node", "ecx-node")):
+    for name, group in (("ecx-worker", "ecx-api"), ("ecx-node", "ecx-node")):
         try:
             pwd.getpwnam(name)
         except KeyError:
@@ -262,7 +262,7 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
             raise ValueError("Managed Signet requires the matching profile, loopback port 29432 and /run/ecx-node/rpc.cookie")
     if args.with_signet:
         keep("/etc/ecx-node.conf", (target / "deploy/signet.conf").read_bytes(), 0o644)
-    for name in ("ecx-bridge-worker.service", "ecx-bridge-web.service", "ecx-bridge-node.service"):
+    for name in ("ecx-bridge-worker.service", "ecx-bridge-node.service"):
         dest = Path("/etc/systemd/system") / name
         keep(dest, (target / "deploy" / name).read_bytes(), 0o644)
     postgres.install(target, config, mkdir, keep)
@@ -277,9 +277,14 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
     # Switch only after configuration, schema and unit setup have succeeded.
     from upgrade import atomic_link
     atomic_link(current, target)
+    # Retire the previous public proxy before the API binds its loopback port.
+    obsolete = Path("/etc/systemd/system/ecx-bridge-web.service")
+    if obsolete.exists():
+        run("systemctl", "disable", "--now", obsolete.name)
+        obsolete.unlink()
     run("systemctl", "daemon-reload")
     run("runuser", "-u", "ecx-worker", "--", "/opt/ecx-bridge/libexec/bwrap", "--unshare-all", "--ro-bind", "/", "/", "--", "/usr/bin/true")
-    run("systemd-analyze", "verify", "/etc/systemd/system/ecx-bridge-worker.service", "/etc/systemd/system/ecx-bridge-web.service", "/etc/systemd/system/ecx-bridge-node.service")
+    run("systemd-analyze", "verify", "/etc/systemd/system/ecx-bridge-worker.service", "/etc/systemd/system/ecx-bridge-node.service")
     if args.with_signet:
         run("systemctl", "enable", "--now", "ecx-bridge-node.service")
         if config.exists():
@@ -300,7 +305,7 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
                     run(*cli, "-named", "createwallet", "wallet_name=" + wallet, "descriptors=true", "load_on_startup=true", stdout=subprocess.DEVNULL)
     if config.exists():
         run("systemctl", "enable", "--now", "ecx-bridge-backup.timer")
-        run("systemctl", "enable", "--now", "ecx-bridge-worker.service", "ecx-bridge-web.service")
+        run("systemctl", "enable", "--now", "ecx-bridge-worker.service")
         if payment_mode_added:
             # daemon-reload changes future starts, not an active observer process.
             # Existing paying repeat installs retain their running process.
@@ -314,7 +319,7 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
                 pass
             time.sleep(1)
         else:
-            raise ValueError("Installed services failed their liveness check; inspect journalctl -u ecx-bridge-worker -u ecx-bridge-web")
+            raise ValueError("Installed services failed their liveness check; inspect journalctl -u ecx-bridge-worker")
         print(f"Installed. Interface: http://127.0.0.1:{port}; check /readyz before use.")
     else:
         print("Installed; awaiting real wallet configuration. See docs/INSTALL.md. Services have not been started.")

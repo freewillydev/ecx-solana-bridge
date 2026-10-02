@@ -29,9 +29,12 @@ import Bridge.Process (runBounded)
 import Bridge.RPC
 import Bridge.API
 import qualified Bridge.Postgres.Runtime as Runtime
-import Bridge.Web (runUnix,securityBoundary)
+import Bridge.Web (runUnix,publicApplication,securityBoundary)
 import qualified Database.PostgreSQL.Simple as PG
-import Servant (serve,throwError,err409,Handler)
+import Servant (serve,throwError,err409,Handler,Server)
+import Network.Wai (defaultRequest)
+import Network.HTTP.Types (status200,status404)
+import qualified Network.Wai.Test as W
 import Bridge.Observer
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (mapConcurrently,withAsync,concurrently_)
@@ -65,17 +68,22 @@ import Test.QuickCheck hiding ((.&.))
 
 -- Transport-only fixture: exercises real Servant routing, Unix permissions and
 -- reconnects, with no ledger, chain model, wallet or financial implementation.
+customerFixture :: Server CustomerAPI
+customerFixture =
+  let unavailable :: Handler a
+      unavailable = throwError err409
+      health = pure (Availability True "process_running")
+  in pure (object ["intakeEnabled" .= False])
+       :<|> (\_ _ -> unavailable) :<|> (\_ _ -> unavailable)
+       :<|> (\_ _ -> unavailable) :<|> (\_ _ _ -> unavailable)
+       :<|> health :<|> health
+
 socketFixture :: Config -> IO ()
 socketFixture c = do
   let unavailable :: Handler a
       unavailable = throwError err409
-      health = pure (Availability True "process_running")
-      customer = pure (object ["intakeEnabled" .= False])
-        :<|> (\_ _ -> unavailable) :<|> (\_ _ -> unavailable)
-        :<|> (\_ _ -> unavailable) :<|> (\_ _ _ -> unavailable)
-        :<|> health :<|> health
-      admin = health :<|> (\_ -> unavailable) :<|> unavailable :<|> unavailable
-  customerApp <- securityBoundary (serve customerAPI customer)
+      admin = pure (Availability True "process_running") :<|> (\_ -> unavailable) :<|> unavailable :<|> unavailable
+  customerApp <- securityBoundary (serve customerAPI customerFixture)
   adminApp <- securityBoundary (serve adminAPI admin)
   concurrently_ (runUnix (customerSocket c) 0o660 customerApp)
                 (runUnix (adminSocket c) 0o600 adminApp)
@@ -3812,6 +3820,20 @@ main=hspec $ do
       forM_ [changed ["uiTokenAmount","amount"] (String "4"),changed ["owner"] (String "wrong")
         ,setPath ["meta","err"] (String "fixture-failure") proof] $ \bad ->
           verifySolanaOutcome c signed bad `shouldBe` Left "solana_settlement_evidence_mismatch"
+  describe "direct public server" $ do
+    it "serves assets and CustomerAPI with security headers, excluding operator routes" $ withDir $ \dir->do
+      writeFile (dir</>"index.html") "<html>bridge</html>"
+      app <- publicApplication dir (serve customerAPI customerFixture)
+      let get path=W.runSession (W.request $ W.setPath defaultRequest path) app
+      page <- get "/"
+      W.simpleStatus page `shouldBe` status200
+      W.simpleBody page `shouldBe` "<html>bridge</html>"
+      lookup "Cache-Control" (W.simpleHeaders page) `shouldBe` Just "no-store"
+      health <- get "/healthz"
+      W.simpleStatus health `shouldBe` status200
+      eitherDecode (W.simpleBody health) `shouldBe` Right (Availability True "process_running")
+      forM_ ["/health","/scanners","/audit","/pause"] $ \path->get path >>= \response->
+        W.simpleStatus response `shouldBe` status404
   describe "public/private Unix socket boundary" $ do
     it "refuses canonical and backup-dependent deployments in the local test command" $ withDir $ \dir->do
       publicTestProfile (cfg dir) `shouldBe` True

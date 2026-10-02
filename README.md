@@ -27,13 +27,12 @@ The bridge needs funded inventory and operating budgets on both sides. Low inven
 
 ## Architecture
 
-One Haskell application provides the financial engine and typed Servant API, with two real-chain adapters, one PostgreSQL ledger accessed with Opaleye and a thin browser interface. The same executable runs as a private worker or a public web proxy. A small Rust helper handles a fixed Solana transaction format using official SDK/SPL interface crates.
+One Haskell application provides the financial engine and typed Servant API, with two real-chain adapters, one PostgreSQL ledger accessed with Opaleye and a thin browser interface. The HTTP server serves the interface and typed API directly, with payment workflows in the same process and a private operator socket. A dedicated Haskell signer, Solana SDK FFI and Haskell frontend compiled with GHC’s JavaScript backend are the accepted next changes; the existing subprocess helper and TypeScript frontend remain until those replacements pass.
 
 ```mermaid
 flowchart LR
-    Browser[Connection-free browser UI / Solana Pay] --> Web[Loopback web proxy]
-    Client[Customer HTTP client] --> Web
-    Web -->|Customer Unix socket| Worker[Haskell worker / Servant API]
+    Browser[Connection-free browser UI / Solana Pay] --> Worker[Haskell HTTP server / Servant API]
+    Client[Customer HTTP client] --> Worker
     Operator[Private operator commands] --> Worker
     Worker --> Dispatcher[Severity-indexed DSL dispatcher]
     Dispatcher --> Ledger[(Private PostgreSQL ledger)]
@@ -85,7 +84,7 @@ identifies current code boundaries and records the remaining gates.
 | `Native.hs`, `Solana.hs`, `Observer.hs` | Real-chain RPC adapters, identity checks, bounded history scans and evidence |
 | `NativePayment.hs`, `SolanaPayment.hs`, `Payment.hs`, `Settlement.hs` | Transaction validation, preparation/signing, saved-byte send and verified settlement |
 | `Reconciliation.hs`, `Recovery.hs`, `Reorg.hs`, `NativeReplacement.hs`, `Backup.hs` | Custody checks, pause/recovery, source/finality loss, replacement families and backup barriers |
-| `Operation.hs`, `Operation/Internal.hs`, `Postgres/Server.hs`, `Postgres/Runtime.hs`, `API.hs`, `Web.hs`, `app/Main.hs` | Severity-indexed handler plans, safe/critical dispatcher, Servant contract, customer proxy and runtime entry points |
+| `Operation.hs`, `Operation/Internal.hs`, `Postgres/Server.hs`, `Postgres/Runtime.hs`, `API.hs`, `Web.hs`, `app/Main.hs` | Severity-indexed handler plans, safe/critical dispatcher, Servant contract, direct customer server and runtime entry points |
 | `solana-helper/` | Fixed official-SDK helper and separate real-Devnet setup/test clients |
 | `web/` | HTML/CSS/TypeScript interface and Solana Pay QR/payment links |
 | `deploy/`, `scripts/install`, `scripts/build-release` | Pinned Linux build, packaged runtime, installer, systemd services and helper sandbox |

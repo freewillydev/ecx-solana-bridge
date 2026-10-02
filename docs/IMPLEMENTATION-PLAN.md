@@ -95,12 +95,43 @@ typeclasses whose only remaining purpose is supporting the retired SQLite backen
 - Native/Solana: concrete adapters; separate codec/validation modules only where useful.
 - Small configuration, RPC/process, backup and frontend boundaries.
 
-Use one application/executable with public/worker modes where needed for OS privilege
-separation. Do not place custody authority in the public web process just to reduce
-process count. Keep one active paying worker. PostgreSQL, the native node, Solana RPC
-and existing backup tooling are explicit dependencies rather than custom frameworks.
+Use one Haskell HTTP/API process and one dedicated Haskell signer process.
+The HTTP process serves HTML/CSS and invokes its Servant Plan interpreter directly;
+there is no public-to-worker HTTP proxy. Keep the operator socket private. Existing
+local customer sockets may remain as alternate transport for acceptance clients,
+not a separate application or intermediary. Keep one active paying workflow.
+
+Only the critical DSL evaluator may communicate with the signer. Keep its socket
+client and connection capability private to that evaluator; handlers and the safe
+context receive neither. Use closed signing requests tied to durable preparation
+or replacement decisions, never arbitrary bytes, RPC methods or caller callbacks.
+The signer independently checks identity, saved authorization, transaction effects
+and limits before signing, and never broadcasts. Separate OS credentials must keep
+Solana keys and native signing RPC authority inaccessible to the HTTP process.
+Restrict the HTTP process's native RPC methods at the node; merely routing ordinary
+calls through the signer does not isolate authority while a full cookie remains
+readable. Preserved saved attempts and backup-before-sign/send gates still apply.
+
+First-party application and browser logic use Haskell, with the browser compiled
+by GHC’s JavaScript backend and HTML/CSS for presentation. Do not use WebAssembly. Keep the existing Solana SDK Rust
+only behind a bounded Haskell FFI in the signer process; remove its subprocess
+protocol after migration. Browser DOM bindings and the generated JavaScript runtime remain necessary,
+but no TypeScript application or npm frontend build should remain. Preserve QR,
+integer amounts, payment instructions, saved-order reload and error behavior.
+PostgreSQL, the native node, Solana RPC and backup tooling remain dependencies.
+This revised process/FFI/JavaScript-backend architecture is not yet complete or accepted
+on real chains; previous package evidence describes the earlier process design.
 
 ## Ordered execution
+
+Immediate priority, per the latest instructions: finish the direct HTTP server,
+dedicated signer with critical-only communication, Solana SDK Haskell FFI and
+Haskell frontend using GHC's JavaScript backend (no WebAssembly). Complete and
+verify those replacements together before the next repository-wide deletion pass.
+Then remove every obsolete or irrelevant tracked file/folder, including retired
+frontend/helper/proxy code and unused deployment/test tools. Preserve essential
+invariant checks, dependency locks and licenses; do not hide clutter elsewhere.
+The sequence below remains the broader refactor checklist, subject to that priority.
 
 1. **Freeze behavior and classify the tree.** Preserve the baseline commit and a
    consistent private ledger backup. Map every file to keep, merge/rewrite, remove,

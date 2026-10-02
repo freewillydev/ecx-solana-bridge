@@ -1,10 +1,8 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module Bridge.Web (runUnix, runPublic, securityBoundary, asHandler) where
+module Bridge.Web (runUnix, runPublic, publicApplication, securityBoundary, asHandler) where
 
-import Bridge.API
 import Control.Monad.IO.Class (liftIO)
 import Bridge.Types
-import Bridge.RPC (unixManager)
 import Control.Concurrent.STM
 import Control.Exception (bracket,catch)
 import Control.Monad (when)
@@ -17,7 +15,6 @@ import qualified Network.Socket as NS
 import Network.Wai
 import Network.Wai.Handler.Warp
 import Servant hiding (respond)
-import Servant.Client
 import System.Directory (createDirectoryIfMissing,removeFile,doesPathExist)
 import System.FilePath ((</>),takeDirectory)
 import System.Posix.Files (setFileMode)
@@ -66,23 +63,18 @@ securityBoundary app = do
     let n=total+BS.length b
     require (n<=16384) "request_too_large"
     if BS.null b then pure (BS.concat $ reverse chunks) else consume req n (b:chunks)
-runPublic :: FilePath -> Int -> FilePath -> IO ()
-runPublic socketPath port assets = do
-  manager <- unixManager socketPath
-  let env=mkClientEnv manager (BaseUrl Http "localhost" 80 "")
-      interpret :: ClientM a -> Handler a
-      interpret clientAction = do
-        result <- liftIO (runClientM clientAction env)
-        case result of
-          Right value -> pure value
-          Left (FailureResponse _ r) -> throwError err502 {errHTTPCode=statusCode (responseStatusCode r),errBody=responseBody r,errHeaders=[("Content-Type","application/json")]}
-          Left _ -> throwError err503 {errBody="{\"error\":\"worker_unavailable\"}"}
-      api=serve customerAPI (hoistServer customerAPI interpret (client customerAPI))
-      application req respond = case (requestMethod req,pathInfo req) of
+-- The API supplied here is the DSL-backed server, not a generated client.
+runPublic :: Int -> FilePath -> Application -> IO ()
+runPublic port assets api = do
+  application <- publicApplication assets api
+  runSettings (setHost "127.0.0.1" $ setPort port $ setTimeout 20 defaultSettings) application
+
+publicApplication :: FilePath -> Application -> IO Application
+publicApplication assets api = do
+  let application req respond = case (requestMethod req,pathInfo req) of
         ("GET",[]) -> file "index.html" "text/html; charset=utf-8" respond
         ("GET",["style.css"]) -> file "style.css" "text/css; charset=utf-8" respond
         ("GET",["wallet.js"]) -> file "dist/wallet.js" "text/javascript; charset=utf-8" respond
         _ -> api req respond
       file name mime respond = respond $ responseFile status200 [("Content-Type",mime)] (assets </> name) Nothing
-  protected <- securityBoundary application
-  runSettings (setHost "127.0.0.1" $ setPort port $ setTimeout 20 defaultSettings) protected
+  securityBoundary application

@@ -5,7 +5,6 @@ import qualified Bridge.Postgres.Backup as Backup
 import qualified Bridge.Postgres.Maintenance as Maintenance
 import qualified Database.PostgreSQL.Simple as PG
 import System.Posix.User (getEffectiveUserName)
-import Bridge.Web
 import Bridge.Types
 import Control.Exception (catch)
 import Data.Aeson (encode,object,(.=))
@@ -63,10 +62,7 @@ main = go `catch` (\(BridgeError code) -> LBS.putStrLn (encode $ object ["error"
       cfg <- loadConfig path
       settings <- postgresSettings
       Postgres.runTestWorker settings cfg
-    ["serve",socket,port,assets] -> case readMaybe port of
-      Just p | p>=1024 && p<=65535 -> runPublic socket p assets
-      _ -> die "Invalid unprivileged port"
-    _ -> die "Usage: ecx-bridge version | check-config CONFIG | check-interface CONFIG INTERFACE | check-signer CONFIG KEYFILE | doctor CONFIG | postgres-init CONFIG | postgres-init-worker-fence CONFIG (stopped worker, ECX_WORKER_FENCE_DIR) | postgres-retire-worker CONFIG (stopped worker) | postgres-test-worker CONFIG (PG* settings, real Devnet profiles) | check-backup BACKUP_CONFIG | postgres-backed-test-worker CONFIG BACKUP_CONFIG | postgres-api CONFIG | worker CONFIG (PostgreSQL observer alias) | test-worker CONFIG (PostgreSQL paying alias) | serve CUSTOMER_SOCKET PORT ASSETS. Financial operator actions use the private PostgreSQL operator API."
+    _ -> die "Usage: ecx-bridge version | check-config CONFIG | check-interface CONFIG INTERFACE | check-signer CONFIG KEYFILE | doctor CONFIG | postgres-init CONFIG | postgres-init-worker-fence CONFIG (stopped worker, ECX_WORKER_FENCE_DIR) | postgres-retire-worker CONFIG (stopped worker) | postgres-test-worker CONFIG (PG* settings, real Devnet profiles) | check-backup BACKUP_CONFIG | postgres-backed-test-worker CONFIG BACKUP_CONFIG | postgres-api CONFIG | worker CONFIG (PostgreSQL observer alias) | test-worker CONFIG (PostgreSQL paying alias) (ECX_PORT defaults to 8080; ECX_ASSETS defaults to web). Financial operator actions use the private PostgreSQL operator API."
 
 
 postgresSettings :: IO PG.ConnectInfo
