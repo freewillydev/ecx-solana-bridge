@@ -11,9 +11,10 @@ import qualified Bridge.Postgres.Fence as Fence
 import Bridge.Postgres.Schema hiding (Audit)
 import Bridge.Postgres.Catalog (verifyReadRole)
 import qualified Bridge.Postgres.Backup as Backup
-import qualified Bridge.Postgres.CoveredSource as CoveredSource
-import qualified Bridge.Postgres.NativeRebroadcast as NativeRebroadcast
 import qualified Bridge.Postgres.NativeRecovery as NativeRecovery
+import qualified Bridge.Postgres.Source as Source
+import Bridge.NativeReplacement (NativeFamilyView(..))
+import qualified Data.Text.Encoding as TE
 import Data.Int (Int64)
 import qualified Bridge.Postgres.Order as Order
 import qualified Bridge.Observer as Observer
@@ -22,24 +23,24 @@ import qualified Bridge.Postgres.Server as Server
 import qualified Bridge.Postgres.Refund as Refund
 import qualified Bridge.Ledger.Model as Domain
 import Bridge.Postgres.PaymentStore (Store(..))
-import Bridge.Settlement (realPaymentTransport,settleAttemptWith,paymentPass,reconcilePaymentsWith,PaymentTransport(..),approveSolanaRetryWith)
+import Bridge.Settlement (realPaymentTransport,settleAttemptWith,paymentPass,reconcilePaymentsWith,PaymentTransport(..),approveSolanaRetryWith,readSavedPayment,readSavedNativeFamily,recheckSourceWith,paymentNativeFamily)
 import qualified Bridge.Postgres.Startup as Startup
 import Bridge.Recovery (cancelPreparationWith,reconcileNativeLocksWith,approveSourceRecoveryWith,prepareNativeReplacementWith,signNativeReplacementWith,NativeReplacementStore(..),coverSourceLossWith)
 import Bridge.Native (nativeIdentity)
-import Bridge.Reorg (reconcileNativeSourcesWith,reconcileNativeSettlementsWith)
+import Bridge.Reorg (reconcileNativeSourcesWith,reconcileNativeSettlementsWith,sourceCandidates,inspectNativeSourceWith)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar,newMVar,withMVar)
 import Control.Monad (forever,when)
-import Control.Exception (IOException,catch)
+import Control.Exception (IOException,catch,onException)
 import qualified Bridge.SolanaPay as Pay
-import Bridge.RPC (fieldValue)
+import Bridge.RPC (fieldValue,parseValue)
 import qualified Bridge.Order as OrderWorkflow
 import Bridge.Observer (epochSeconds)
 import Bridge.RPC (newRpcManager)
 import Bridge.Web (asHandler,runUnix,securityBoundary)
 import Control.Concurrent.Async (concurrently_)
 import Control.Exception (bracket,try)
-import Data.Aeson (Value(..),object,(.=),toJSON,encode)
+import Data.Aeson (Value(..),object,(.=),toJSON,encode,parseJSON)
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Map.Strict as M
 import System.Environment (lookupEnv)
@@ -161,33 +162,33 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
       pure(object["accepted" .= True,"authorization" .= ("independent_chain_evidence_required"::Text)])
   OperatorDSL operation->case operation of
     Pause reason->pause ledger reason >> readiness ledger
-    CancelPreparation intent generation reason->cancelPreparationWith epochSeconds (realPaymentTransport manager cfg backup) cfg (Store ledger) intent generation reason
+    CancelPreparation intent generation reason->cancelPreparationWith epochSeconds transport cfg store intent generation reason
     Resume->do
-      Startup.resumeAfterReview epochSeconds (realPaymentTransport manager cfg backup) cfg ledger
+      Startup.resumeAfterReview epochSeconds transport cfg ledger
       readiness ledger
     ApproveSolanaRetry txid reason->do
-      approveSolanaRetryWith (realPaymentTransport manager cfg backup) cfg (Store ledger) txid reason
+      approveSolanaRetryWith transport cfg store txid reason
       pure(object["approvedRetryOf" .= txid,"signedOrSent" .= False])
-    ApproveSourceRecovery intent restoration reason->approveSourceRecoveryWith epochSeconds (realPaymentTransport manager cfg backup) cfg (Store ledger) intent restoration reason
-    ApproveCoveredSource intent loss reason->CoveredSource.approveWith epochSeconds (realPaymentTransport manager cfg backup) cfg ledger intent loss reason
-    RebroadcastNative txid recovery reason->NativeRebroadcast.rebroadcastWith (realPaymentTransport manager cfg backup) cfg ledger txid recovery reason
+    ApproveSourceRecovery intent restoration reason->approveSourceRecoveryWith epochSeconds transport cfg store intent restoration reason
+    ApproveCoveredSource intent loss reason->approveCoveredSource intent loss reason
+    RebroadcastNative txid recovery reason->rebroadcastNative txid recovery reason
     PrepareNativeReplacement parent fee reason->
-      prepareNativeReplacementWith epochSeconds (realPaymentTransport manager cfg backup) cfg (Store ledger) parent fee reason
+      prepareNativeReplacementWith epochSeconds transport cfg store parent fee reason
     SignNativeReplacement sequenceNo->do
-      a <- signNativeReplacementWith epochSeconds (realPaymentTransport manager cfg backup) cfg (Store ledger) sequenceNo
+      a <- signNativeReplacementWith epochSeconds transport cfg store sequenceNo
       pure(object["transaction" .= Domain.attemptId a,"draftSequence" .= sequenceNo,"signed" .= True,"sent" .= False])
     CancelNativeReplacement sequenceNo reason->do
-      replacementCancel (Store ledger) sequenceNo reason
+      replacementCancel store sequenceNo reason
       pure(object["draftSequence" .= sequenceNo,"cancelled" .= True,"signedOrSent" .= False])
     SendNativeReplacement sequenceNo->do
-      saved <- replacementMember (Store ledger) sequenceNo
+      saved <- replacementMember store sequenceNo
       a <- maybe (reject "native_replacement_member_missing") pure saved
-      outcome <- settleAttemptWith (realPaymentTransport manager cfg backup) cfg (Store ledger) a
+      outcome <- settleAttemptWith transport cfg store a
       pure(object["transaction" .= Domain.attemptId a,"outcome" .= outcome])
     CoverSourceLoss did recovery capital reason->
-      coverSourceLossWith epochSeconds (realPaymentTransport manager cfg backup) cfg (Store ledger) did recovery capital reason
+      coverSourceLossWith epochSeconds transport cfg store did recovery capital reason
     AllocateTreasury did split reason->do
-      _<-Reconciliation.reconcileCustodyWith epochSeconds (realPaymentTransport manager cfg backup) cfg ledger
+      _<-Reconciliation.reconcileCustodyWith epochSeconds transport cfg ledger
       now<-epochSeconds
       Treasury.allocate ledger now did split reason
     RefundDeposit did->do
@@ -196,22 +197,21 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
   WorkerDSL ScanAndReconcile->do
     -- Advisory native locks must be restored independently of Solana RPC health.
     _ <- reconcileNativeLocksWith
-      (realPaymentTransport manager cfg backup)
-        {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg (Store ledger)
+      transport
+        {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg store
     _ <- Observer.observeOnce manager cfg ledger
     _ <- reconcileNativeSourcesWith
-      (realPaymentTransport manager cfg backup)
-        {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg (Store ledger)
+      transport
+        {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg store
     _ <- reconcileNativeSettlementsWith
-      (realPaymentTransport manager cfg backup)
-        {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg (Store ledger)
+      transport
+        {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg store
     now <- epochSeconds
     Order.expireQuotes ledger now
-    _ <- reconcilePaymentsWith (realPaymentTransport manager cfg backup) cfg (Store ledger)
-    Reconciliation.reconcileCustodyWith epochSeconds (realPaymentTransport manager cfg backup) cfg ledger
+    _ <- reconcilePaymentsWith transport cfg store
+    Reconciliation.reconcileCustodyWith epochSeconds transport cfg ledger
   WorkerDSL StartPayments->do
-    let transport=realPaymentTransport manager cfg backup
-    lockResult <- reconcileNativeLocksWith transport {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg (Store ledger)
+    lockResult <- reconcileNativeLocksWith transport {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg store
     lockError <- fieldValue "error" lockResult :: IO (Maybe Text)
     maybe (pure ()) reject lockError
     now <- epochSeconds
@@ -222,9 +222,89 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
       now <- epochSeconds
       fresh <- try (Order.checkIntakeReady ledger now) :: IO (Either BridgeError ())
       case fresh of
-        Right ()->paymentPass manager cfg (Store ledger) backup
+        Right ()->paymentPass manager cfg store backup
         Left (BridgeError "custody_not_reconciled")->pure ()
         Left (BridgeError reason)->reject reason
+ where
+  transport=realPaymentTransport manager cfg backup
+  store=Store ledger
+
+  -- Explicit operator approval revives the original suspended obligation only.
+  -- It never resumes intake, signs, broadcasts, marks a deposit eligible or books
+  -- another capital allocation. Every effect still traverses the existing engine.
+  approveCoveredSource :: Text -> Int64 -> Text -> IO Value
+  approveCoveredSource intent loss reason = do
+    require (loss>0 && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_source_approval"
+    readiness ledger >>= \health->require (not $ available health) "pause_before_operator_action"
+    old <- Source.coveredApproval ledger intent loss
+    case old of
+      Just saved->require (saved==reason) "source_approval_conflict"
+      Nothing->do
+        ob <- Source.coveredObligation ledger intent loss
+        paymentIdentity transport
+        payments <- reconcilePaymentsWith transport cfg store
+        attempts <- fieldValue "attempts" payments :: IO [Value]
+        failures <- mapM (fieldValue "error") attempts :: IO [Maybe Text]
+        require (all (==Nothing) failures) "source_approval_payment_requires_review"
+        _ <- Reconciliation.reconcileCustodyWith epochSeconds transport cfg ledger
+        candidates <- sourceCandidates store
+        require (length candidates<=1000) "source_recovery_backlog"
+        source <- case filter ((==Domain.obligationDeposit ob).Domain.depositId) candidates of
+          [row]->pure row
+          _->reject "source_loss_not_proven"
+        proof <- inspectNativeSourceWith transport cfg store source >>= \case
+          Domain.SourceMissing evidence->pure evidence
+          _->reject "source_loss_not_proven"
+        now <- epochSeconds
+        Source.coveredRecord ledger intent loss now reason proof
+    pure $ object["approvedCoveredSource" .= intent,"lossRecoverySequence" .= loss
+      ,"paused" .= True,"signedOrSent" .= False]
+
+  -- Explicit repair of the original native payment, including after a lost send
+  -- reply. Never create a signature, release principal or resume payment intake.
+  -- All family members share the original inputs; the chain adapter validates
+  -- current wallet/tip, saved outputs/fees, and every actual previous output.
+  rebroadcastNative :: Text -> Int64 -> Text -> IO Value
+  rebroadcastNative txid anchor reason = work `onException` pause ledger "native_rebroadcast_requires_review"
+   where
+    work=do
+      require (anchor>0 && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_native_rebroadcast_approval"
+      state <- readiness ledger
+      require (not $ available state) "pause_before_operator_action"
+      previous <- NativeRecovery.rebroadcastDecision ledger txid anchor reason
+      candidates <- NativeRecovery.candidates ledger
+      require (length candidates<=1000) "native_settlement_recovery_backlog"
+      attempt <- case filter ((==txid).Domain.attemptId) candidates of
+        [saved]->pure saved
+        _->reject "native_rebroadcast_payment_not_in_review"
+      paymentIdentity transport
+      (ob,_) <- readSavedPayment transport cfg store attempt
+      family <- paymentNativeFamily store (Domain.attemptIntent attempt)
+      view <- missing family
+      recheckSourceWith transport cfg store ob
+      block <- paymentNative transport False "getblockchaininfo" [] >>= fieldValue "bestblockhash" :: IO Text
+      let proof=object["transaction" .= txid,"bytesHash" .= digest(TE.encodeUtf8 $ Domain.attemptBytes attempt),
+            "nodeBlock" .= block,"family" .= map Domain.attemptId family,
+            "noActiveFamilyPayment" .= (familyActive view==Nothing)]
+      approved <- case previous of
+        Just sequenceNo->pure sequenceNo
+        Nothing->NativeRecovery.recordRebroadcast ledger attempt family anchor reason proof
+      when (backupRequired cfg) $ paymentBackup transport approved
+      -- Upload can take time. Repeat actual identity, source and input/tip proofs
+      -- immediately before the short ledger authorization and exact-byte send.
+      paymentIdentity transport
+      recheckSourceWith transport cfg store ob
+      _ <- missing family
+      NativeRecovery.authorizeRebroadcast ledger (backupRequired cfg) attempt family approved
+      actual <- paymentNative transport True "sendrawtransaction" [toJSON $ Domain.attemptBytes attempt] >>= parseValue parseJSON
+      require (actual==txid) "native_broadcast_identity_mismatch"
+      pure(object["transaction" .= txid,"approvalSequence" .= approved,
+        "outcome" .= ("rebroadcast"::Text),"paused" .= True,"newSignature" .= False,
+        "newPrincipalPosting" .= False])
+    missing family=do
+      (_,view) <- readSavedNativeFamily transport cfg store family
+      require (familyActive view==Nothing) "native_rebroadcast_payment_not_missing"
+      pure view
 
 -- Routes return existential operations, without performing IO. Unpack their
 -- class dictionaries here and elaborate to the DSL before either evaluator.

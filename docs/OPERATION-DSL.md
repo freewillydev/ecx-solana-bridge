@@ -207,6 +207,9 @@ its own read-only connection, while customer, operator and worker plans pass
 through one critical evaluator call under a single workflow gate. The gate covers
 RPC calls as well as individual ledger transactions, preventing scanner updates
 from interleaving with admission or settlement. Safe reads remain concurrent.
+Covered-source approval and native rebroadcast are private local workflows inside
+evalCritical, reached by their named operator DSL commands. They use its captured
+ledger/transport; callers cannot import these workflows or inject another transport.
 The module names below describe the intended capability separation; splitting
 the existing runtime into more modules is not required to deliver the product.
 
