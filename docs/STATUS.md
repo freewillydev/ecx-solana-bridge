@@ -1494,3 +1494,11 @@ downloaded and checksum verified; installed upgrade acceptance is still pending.
 The current private draft release contains the earlier candidate, so these newer
 artifacts are not yet represented as an authenticated updated review release.
 See `docs/evidence/latest-review-{arm,x86}-build.json` for bounded evidence.
+
+The subsequent x86 installed upgrade and repeat installation passed: all 31
+checked durable tables, eight configuration files and sequence zero were
+preserved. This was the existing observation-only deployment without a signer,
+not a paid x86 chain round trip. Both consolidated archives were signed and
+individually verified using the development Ed25519 release key. The local
+`signed-latest-review-candidate` directory preserves the new pair separately
+from the earlier candidate. No public or valuable-fund release is authorized.
