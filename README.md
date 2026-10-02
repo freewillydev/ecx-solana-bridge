@@ -151,7 +151,7 @@ The current public-test mint is independently created Devnet test inventory, **n
 
 The [current implementation plan](docs/IMPLEMENTATION-PLAN.md) now puts remaining payment recovery, customer acceptance, operational recovery
 and canonical integration before consolidated audits and final packaging.
-The following inventory retains the broader release scope. These are not equal-sized percentages; [`docs/STATUS.md`](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/STATUS.md) is the detailed https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/backlog record.
+The following inventory retains the broader release scope. See [release review](docs/RELEASE-REVIEW.md) for current evidence and outstanding gates; historical progress logs remain in Git history.
 
 | Order | Remaining work | Why it matters |
 | --- | --- | --- |
