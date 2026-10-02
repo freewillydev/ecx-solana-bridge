@@ -1546,3 +1546,18 @@ diagnostic path imports the legacy worker. Those adapters and maintenance tools
 must be isolated into a separate Cabal component before dropping SQLite from
 the production library and installer. The published private review artifacts
 precede this source refactor; no replacement Linux build is claimed here.
+
+### Observer and preparation SQLite adapters isolated
+
+The shared `Bridge.Observer` and `Bridge.Payment` modules now depend on the pure
+financial model and store typeclasses, without importing SQLite, legacy ledger
+capabilities or SQLite budget helpers. Their two existing SQLite instances moved
+verbatim into `Bridge.Legacy.ObservationPreparation`. Legacy consumers and the
+regression suite explicitly load that adapter; PostgreSQL's typed implementations
+continue using the same real chain algorithms. The executable and regression
+suite compile, and all 373 examples pass. No schema or financial behavior changed.
+
+The production package still links SQLite through the remaining settlement,
+reconciliation, recovery and diagnostic paths. Their adapters and tools still
+need separation before the Cabal components and installer can drop the dependency.
+No new Linux package or broader runtime-removal acceptance is claimed here.

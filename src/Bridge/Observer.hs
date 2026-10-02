@@ -5,8 +5,7 @@ module Bridge.Observer
   ) where
 
 import Bridge.Config
-import Bridge.Ledger (Ledger, Deposit(..), ScanBatch(..), ChainEvent(..))
-import qualified Bridge.Ledger as Legacy
+import Bridge.Ledger.Model (Deposit(..), ScanBatch(..), ChainEvent(..))
 import Bridge.Native
 import Bridge.RPC
 import Bridge.Solana
@@ -27,7 +26,6 @@ import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock.POSIX (getPOSIXTime)
-import Database.SQLite.Simple
 import Network.HTTP.Client (Manager)
 
 -- Storage changes do not replace or duplicate chain decoding. Both ledgers use
@@ -43,19 +41,6 @@ class ObserverLedger ledger where
   observerRecordScanFailure :: ledger -> Text -> Int64 -> Text -> IO ()
   observerScannerHealth :: ledger -> IO Value
   observerPromoteObserved :: ledger -> IO ()
-
-instance ObserverLedger Ledger where
-  observerReadCheckpoint = Legacy.readCheckpoint
-  observerMaximumNativeDepth = Legacy.maximumNativeDepth
-  observerCommitScan = Legacy.commitScan
-  observerLookupInstruction = Legacy.lookupInstruction
-  observerPendingVerification = Legacy.pendingVerification
-  observerRecordScanFailure = Legacy.recordScanFailure
-  observerScannerHealth = Legacy.scannerHealth
-  observerPromoteObserved ledger = do
-    candidates <- Legacy.ledgerAction ledger $ \db -> query_ db "SELECT d.id FROM deposits d JOIN orders o ON o.id=d.order_id WHERE d.eligible=1 AND d.allocated=0 AND o.status IN('Provisioning','AwaitingDeposit') ORDER BY d.first_seen,d.id LIMIT 1000" :: IO [Only Text]
-    now <- epochSeconds
-    forM_ candidates $ \(Only did)->Legacy.promoteDeposit ledger now did >> pure ()
 
 epochSeconds :: IO Int64
 epochSeconds = floor <$> getPOSIXTime

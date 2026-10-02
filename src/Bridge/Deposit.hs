@@ -1,6 +1,7 @@
 module Bridge.Deposit (DepositStore(..), solanaDepositMemo, prepareSolanaDeposit, prepareSolanaDepositWith) where
 
 import Bridge.Config
+import Bridge.Legacy.ObservationPreparation ()
 import Bridge.Ledger
 import Bridge.Native (nativeIdentity)
 import Bridge.RPC

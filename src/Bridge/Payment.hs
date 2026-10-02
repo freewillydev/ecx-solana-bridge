@@ -1,8 +1,7 @@
 module Bridge.Payment (PreparationStore(..), prepareNativePayment, prepareNativeWith, prepareSolanaPayment, prepareSolanaWith, payoutReference) where
 
 import Bridge.Config
-import Bridge.Budget
-import Bridge.Ledger
+import Bridge.Ledger.Model
 import Bridge.Native
 import Bridge.NativePayment
 import Bridge.Solana (solanaIdentity, solanaCall)
@@ -16,7 +15,6 @@ import Data.Text (Text)
 import Data.Int (Int64)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Database.SQLite.Simple
 import Network.HTTP.Client (Manager)
 
 class PreparationStore ledger where
@@ -30,20 +28,6 @@ class PreparationStore ledger where
   preparationActive :: ledger -> Text -> IO Int
   preparationStoreDraft :: ledger -> Text -> Text -> Int -> IO ()
   preparationStoreAttempt :: ledger -> Obligation -> Text -> Text -> Text -> Text -> Int64 -> Maybe Text -> Int -> IO ()
-
-instance PreparationStore Ledger where
-  preparationPause = pause
-  preparationReadiness = readiness
-  preparationOrderPolicy ledger oid = do
-    rows <- ledgerAction ledger $ \db->query db "SELECT policy_json FROM orders WHERE id=?" (Only oid) :: IO [Only Text]
-    case rows of [Only value]->stored value; _->reject "order_not_found"
-  preparationCostLimits ledger oid = ledgerAction ledger $ \db->orderCostLimits db oid
-  preparationAttempts = pendingAttempts
-  preparationPending = pendingPreparations
-  preparationBegin = beginPreparation
-  preparationActive = activePreparationGeneration
-  preparationStoreDraft = storeDraft
-  preparationStoreAttempt = storeAttempt
 
 json :: ToJSON a => a -> Text
 json = TE.decodeUtf8 . LBS.toStrict . encode

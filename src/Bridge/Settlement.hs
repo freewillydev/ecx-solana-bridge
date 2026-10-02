@@ -8,6 +8,7 @@ module Bridge.Settlement
   ) where
 
 import Bridge.Config
+import Bridge.Legacy.ObservationPreparation ()
 import Bridge.Ledger
 import Bridge.Native
 import Bridge.NativePayment

@@ -2,6 +2,7 @@
 module Bridge.Reconciliation (CustodyStore(..), View(..), inspectCustodyWith, reconcileCustodyRecordWith, reconcileCustody, reconcileCustodyWith, inspectSourceLossCustodyWith) where
 
 import Bridge.Config
+import Bridge.Legacy.ObservationPreparation ()
 import Bridge.Ledger
 import Bridge.Native
 import Bridge.NativePayment

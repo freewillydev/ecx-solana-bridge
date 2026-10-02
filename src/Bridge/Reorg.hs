@@ -2,6 +2,7 @@
 module Bridge.Reorg (NativeSettlementStore(..),NativeSourceStore(..),reconcileNativeSettlements,reconcileNativeSettlementsWith,reconcileNativeSources,reconcileNativeSourcesWith,inspectNativeSourceWith) where
 
 import Bridge.Config
+import Bridge.Legacy.ObservationPreparation ()
 import Bridge.Ledger
 import Bridge.Native (nativeIdentity,nativeAmount)
 import Bridge.NativePayment (ownedScript,transactionId,signedNativePlan,planDepth,signedNativeFee)

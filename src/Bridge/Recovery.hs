@@ -6,6 +6,7 @@ module Bridge.Recovery
   , NativeReplacementStore(..), signNativeReplacementWith ) where
 
 import Bridge.Config
+import Bridge.Legacy.ObservationPreparation ()
 import Bridge.Ledger
 import Bridge.Native (nativeAmount,nativeIdentity)
 import Bridge.NativePayment
