@@ -20,8 +20,10 @@ fn text<'a>(v: &'a Value, key: &str) -> Result<&'a str> {
 }
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().collect();
-    if args.len() != 4 || args[1..].iter().any(|p| !Path::new(p).is_absolute()) {
-        return Err("deposit_devnet PRIVATE_DEVNET_DIR PREPARED_JSON NEW_ATTEMPT_JSON".into());
+    if !(args.len() == 4 || args.len() == 5)
+        || args[1..].iter().any(|p| !Path::new(p).is_absolute())
+    {
+        return Err("deposit_devnet PRIVATE_DEVNET_DIR PREPARED_JSON NEW_ATTEMPT_JSON [EXPLICIT_TEST_CONFIG]".into());
     }
     let dir = Path::new(&args[1]);
     let output = Path::new(&args[3]);
@@ -43,10 +45,35 @@ fn main() -> Result<()> {
         || prepared["chain"] != "solana:devnet"
         || prepared["amount"] != "10000"
         || prepared["mint"] != manifest["mint"]
-        || prepared["custody"] != manifest["custodyAta"]
         || prepared["owner"] != manifest["tester"]
     {
         return Err("Different public-test deployment or amount".into());
+    }
+    // Optional explicit acceptance target; existing funding/tester identities
+    // stay fixed. This changes neither the custody helper nor production API.
+    let target = if args.len() == 5 {
+        let raw = fs::read(&args[4])?;
+        if raw.len() > 32768 {
+            return Err("Test config too large".into());
+        }
+        let config: Value = serde_json::from_slice(&raw)?;
+        if config["profile"] != "L2LSignetDevnet" || config["mint"] != manifest["mint"] {
+            return Err("Different explicit test network or mint".into());
+        }
+        config
+    } else {
+        json!({"custodyOwner":manifest["custody"],"custodyAta":manifest["custodyAta"],"deploymentId":"l2l-devnet-local"})
+    };
+    let target_owner = Pubkey::from_str(text(&target, "custodyOwner")?)?;
+    let target_ata = get_associated_token_address_with_program_id(
+        &target_owner,
+        &Pubkey::from_str(text(&manifest, "mint")?)?,
+        &spl_token_interface::id(),
+    );
+    if target_ata.to_string() != text(&target, "custodyAta")?
+        || prepared["custody"] != target["custodyAta"]
+    {
+        return Err("Prepared deposit differs from explicit custody target".into());
     }
     let order = text(&prepared, "orderId")?;
     if order.len() != 64
@@ -56,7 +83,10 @@ fn main() -> Result<()> {
     {
         return Err("Invalid order identifier".into());
     }
-    let memo = format!("ecx-bridge:v1:l2l-devnet-local:deposit:{order}");
+    let memo = format!(
+        "ecx-bridge:v1:{}:deposit:{order}",
+        text(&target, "deploymentId")?
+    );
     let pay_reference = prepared.get("reference").and_then(Value::as_str);
     if pay_reference.is_none() && text(&prepared, "memo")? != memo {
         return Err("Memo does not bind the expected order".into());
@@ -74,7 +104,7 @@ fn main() -> Result<()> {
         return Err("Tester key mismatch".into());
     }
     let mint = Pubkey::from_str(text(&manifest, "mint")?)?;
-    let custody = Pubkey::from_str(text(&manifest, "custody")?)?;
+    let custody = target_owner;
     let token = spl_token_interface::id();
     let source = get_associated_token_address_with_program_id(&tester.pubkey(), &mint, &token);
     let destination = get_associated_token_address_with_program_id(&custody, &mint, &token);

@@ -8,6 +8,7 @@ import argparse
 import hashlib
 import json
 import os
+import pwd
 from pathlib import Path
 import subprocess
 import urllib.error
@@ -18,6 +19,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('baseline', type=Path)
     parser.add_argument('--capture', action='store_true')
+    parser.add_argument('--require-fence', action='store_true', help='require the current installed host fence; omit only when capturing older pre-fence releases')
+    parser.add_argument('--upgrade-from', type=Path, help='compare original durable state/configuration before capturing the new release')
     args = parser.parse_args()
     assert os.geteuid() == 0, 'root required for protected configuration hashes'
     env = dict(os.environ, PGHOST='/run/ecx-postgres', PGPORT='29436',
@@ -51,6 +54,17 @@ def main():
     assert sql('SELECT paused FROM deployment;') == '1'
     assert sql('SELECT count(*) FROM scan_origins;') == '3', 'wait for initial history scans'
     assert sql('SELECT count(*) FROM scan_health WHERE last_success IS NOT NULL AND last_error IS NULL;') == '3', 'wait for healthy scans'
+    fence = Path('/var/lib/ecx-bridge/fence')
+    fence_verified = False
+    if fence.exists() or args.require_fence:
+        owner = pwd.getpwnam('ecx-worker').pw_uid
+        for path in (fence, fence / 'sequence.json'):
+            assert not path.is_symlink() and path.stat().st_uid == owner and path.stat().st_mode & 0o077 == 0, 'unsafe installed worker fence'
+        watermark = json.loads((fence / 'sequence.json').read_text())
+        assert watermark['format'] == 1 and not watermark.get('retired', False)
+        assert watermark['fingerprint'] == sql('SELECT fingerprint FROM deployment;')
+        assert watermark['sequence'] == int(sql('SELECT critical_sequence FROM deployment;'))
+        fence_verified = True
     mutable = {'audit', 'checkpoints', 'custody_check', 'scan_health', 'operating_clock',
                'chain_events', 'observation_evidence'}
     tables = sql("SELECT tablename FROM pg_tables WHERE schemaname='public' ORDER BY tablename;").splitlines()
@@ -66,6 +80,14 @@ def main():
     state = {'releaseId': Path('/opt/ecx-bridge/current').resolve().name,
              'criticalSequence': sql('SELECT critical_sequence FROM deployment;'),
              'configurationHashes': configs, 'durableTableHashes': hashes}
+    if args.upgrade_from:
+        assert args.capture, '--upgrade-from requires --capture'
+        original = json.loads(args.upgrade_from.read_text())
+        assert original['releaseId'] != state['releaseId'], 'no release upgrade occurred'
+        assert original['criticalSequence'] == state['criticalSequence'], 'upgrade changed sequence'
+        assert original['durableTableHashes'] == state['durableTableHashes'], 'upgrade changed financial state'
+        assert all(configs.get(name) == digest for name, digest in original['configurationHashes'].items()), 'upgrade changed existing configuration'
+        assert set(configs) - set(original['configurationHashes']) <= {'fence.env'}, 'unexpected new configuration'
     if args.capture:
         with args.baseline.open('x') as output:
             os.chmod(args.baseline, 0o600)
@@ -74,7 +96,7 @@ def main():
         assert json.loads(args.baseline.read_text()) == state, 'durable installation state changed'
     print(json.dumps({'releaseId': state['releaseId'], 'healthStatus': 200,
         'readyStatus': 503, 'observationOnly': True, 'signerAbsent': True,
-        'privatePostgres': True, 'restrictedRoles': True,
+        'privatePostgres': True, 'restrictedRoles': True, 'installedFenceVerified': fence_verified,
         'configurationFiles': len(configs), 'durableTables': len(hashes),
         'criticalSequence': int(state['criticalSequence']),
         'baselineMatched': not args.capture}))

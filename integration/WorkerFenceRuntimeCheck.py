@@ -13,6 +13,7 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('config')
 parser.add_argument('--binary', required=True)
 parser.add_argument('--report')
+parser.add_argument('--migrations', type=Path, help='reviewed installed PostgreSQL migration directory')
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[1]
 binary = str(Path(args.binary).resolve(strict=True))
@@ -35,7 +36,7 @@ run('createdb', '--template=template0', database)
 try:
     for number in range(1, 5):
         run('psql', '-Xq', '-v', 'ON_ERROR_STOP=1', '-f',
-            str(root / f'migrations/postgresql/{number:03}.sql'))
+            str((args.migrations or root / 'migrations/postgresql') / f'{number:03}.sql'))
     with tempfile.TemporaryDirectory(prefix='ecx-fence-runtime-') as folder:
         directory = Path(folder)
         configuration = json.loads(Path(args.config).read_text())

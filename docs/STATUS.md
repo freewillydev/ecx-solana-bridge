@@ -16,7 +16,7 @@ code now provisions private PostgreSQL, read/write roles, typed initialization,
 explicit legacy import and private dump backups. ARM64 installation, repeat
 installation, reboot, role restrictions and same-host restoration of all 38
 tables passed. See [installer evidence](evidence/postgres-installer-arm64.json).
-Current consolidated installed-release acceptance, full recovery/audit, actual supported-wallet
+Current ARM64 and installed paying acceptance, full recovery/audit, actual supported-wallet
 signing and canonical deployment
 remain open. Canonical `implementationReady` remains false.
 
@@ -40,10 +40,20 @@ It imports no legacy ledger and submits no customer payouts. All three actual fi
 with stable replays, exactly three allocation records, zero orders/attempts and
 a final paused state. The test worker then stopped. See
 [fresh treasury evidence](evidence/postgres-fresh-treasury-live.json).
-This proves fresh funding/allocation, not another customer round trip.
-The stopped older test VMs and prior installed artifacts do not prove this new
-consolidated source. Package this batch once for native Linux, then run installed
-upgrade/repeat/reboot acceptance rather than rebuilding separately per feature.
+Both customer directions then completed from this same fresh ledger at 1%
+fees, with a confirmed native payout and finalized Solana payout. A guarded
+worker restart preserved both terminal order views, ten financial tables and
+critical sequence. See [fresh product evidence](evidence/postgres-fresh-product-live.json).
+The dedicated worker stopped paused; actual GUI wallet signing remains unverified.
+Earlier installed artifacts predate this batch. The consolidated native x86-64 package passed upgrade, repeat installation and
+a cold VM restart, preserving 31 durable tables and all seven existing config
+files while adding protected fence configuration. Installed-binary stale-ledger
+and retirement contracts passed on Ubuntu. See
+[consolidated installer evidence](evidence/postgres-installer-consolidated-x86.json)
+and [Linux fence evidence](evidence/postgres-worker-fence-linux.json). The
+observation-only installation had no signer and remained unavailable for
+payments. Current ARM64 packaging, installed paying flows and off-host/key
+restoration remain separate checks.
 
 ## Verified locally
 
@@ -126,7 +136,7 @@ The current architecture is the approved Haskell application, two real-chain ada
 | R2 — Close recovery state transitions | Explicit covered-source resolution, proved missing-destination treatment, finalized Solana history-loss handling, and unchanged claims during ambiguous evidence | Explicit covered-source approval is implemented and passes real PostgreSQL ready/paying, backup and authority contracts. Live source-conflict acceptance, missing-destination recovery and broader finality/interruption acceptance remain. |
 | R3 — Complete restore and resume | Critical backup coverage, old-ledger/old-signer fencing, key restore, exact-byte recovery and a final resume decision; independent-provider Solana expiry, in-flight and backlog acceptance | Partial; follow U1. Remote and clean-host checks also close D1. |
 | N1 — Actual ECX betanet | Official node/provenance/checkpoint, separate funded profile, replay fields and real deposit/payout/refund | Actual official node identity/checkpoint and betanet/Devnet runtime/observer authority checks pass. A dedicated funded custody wallet and real betanet deposit/payout/refund acceptance remain; no existing beta wallet was modified. |
-| D1 — Reproducible installation and recovery | One-line Ubuntu installation from verified pinned artifacts; service/helper isolation; retained remote backups; fresh-host/key restoration and affected fault checks | One-command source and compiled installers pass on local Ubuntu 24.04 ARM64, including separate users, sandboxed helper, real-chain doctor, repeated installation and VM reboot. Native x86-64 observation installation, repeat installation, cold restart and same-host ledger restoration now pass. Current consolidated packages, signed publication, off-host backups and full host/key restore remain. Compilation runs on cached native Ubuntu CI; acceptance VMs are stopped after use. |
+| D1 — Reproducible installation and recovery | One-line Ubuntu installation from verified pinned artifacts; service/helper isolation; retained remote backups; fresh-host/key restoration and affected fault checks | One-command source and compiled installers pass on local Ubuntu 24.04 ARM64, including separate users, sandboxed helper, real-chain doctor, repeated installation and VM reboot. Native x86-64 observation installation, repeat installation, cold restart and same-host ledger restoration now pass. The current consolidated x86-64 package also passed upgrade/reinstall/cold restart and Linux fence refusals. Current ARM64 packaging, installed paying acceptance, signed publication, off-host backups and full host/key restore remain. Compilation runs on cached native Ubuntu CI; acceptance VMs are stopped after use. |
 | S1 — Reviewable open-source test release | Frozen source and dependency/license/advisory evidence; installed-release acceptance and independent review; material findings resolved with focused regression checks | Not complete. Reproducible notice collection covers all 333 dependency entries; Bitcoin Core source notices and SQLite disclaimer excerpts are recorded with provenance; system-library notices and native applicability review remain. The completed ARM64 package covers 369 dependency notices; system-library applicability and independent review remain. See THIRD-PARTY.md. Publication and valuable-fund deployment are not implied. |
 | C1 — Remaining approved rollout | Canonical mint/reserves/identities and explicitly authorized pilot; separately authorized real market/liquidity integrations; conditional official mainnet activation | Preserved in the full plan; external facts and explicit valuable-fund authorization required. |
 

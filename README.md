@@ -44,7 +44,7 @@ flowchart LR
 
 ### Process and key boundaries
 
-Paying workers now use a shared host lock and durable critical-sequence watermark across database clones. The installer manages their protected fence; local startup uses PostgreSQL by default. Explicit stopped-worker retirement supports a handoff, while independent-host/key restoration remains unproved. Fresh PostgreSQL treasury allocation is the next main-product workflow; the prior real round trips used already allocated migrated inventory.
+Paying workers now use a shared host lock and durable critical-sequence watermark across database clones. The installer manages their protected fence; local startup uses PostgreSQL by default. Explicit stopped-worker retirement supports a handoff, while independent-host/key restoration remains unproved. Fresh PostgreSQL funding and private treasury allocation now pass on real Signet/Devnet without a legacy import. Both 1% customer directions then completed from that fresh ledger, and a guarded restart preserved orders and financial rows. The consolidated x86-64 Ubuntu package passed upgrade, repeat installation and cold restart. See [fresh product evidence](docs/evidence/postgres-fresh-product-live.json) and [installed package evidence](docs/evidence/postgres-installer-consolidated-x86.json). Current ARM64 and installed paying acceptance, GUI wallet signing, full recovery and independent review remain open.
 
 | Component | Responsibility and access |
 | --- | --- |
