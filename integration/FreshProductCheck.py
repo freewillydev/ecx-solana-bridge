@@ -9,10 +9,20 @@ import argparse,base64,http.client,json,os,secrets,socket,subprocess,time,urllib
 from pathlib import Path
 p=argparse.ArgumentParser(description=__doc__)
 p.add_argument('state');p.add_argument('--binary',help='local paying binary; required unless --installed-vm is used');p.add_argument('--devnet-dir',required=True);p.add_argument('--deposit-helper',required=True);p.add_argument('--report',required=True)
+p.add_argument('--replay-only', action='store_true', help='require existing complete journals; never prepare or broadcast deposits')
+p.add_argument('--restored-handoff', type=Path, help='verified retired-source journal; requires replay-only installed mode')
 p.add_argument('--installed-vm', help='dedicated Lima VM; use the installed systemd paying service instead of a local process')
 a=p.parse_args();state=Path(a.state).resolve();cfg=json.loads((state/'config.json').read_text())
 assert cfg['profile']=='L2LSignetDevnet' and cfg['deploymentId']=='fresh-treasury-acceptance' and not cfg['backupRequired']
 private=state/'product';private.mkdir(mode=0o700,exist_ok=True);private.chmod(0o700)
+if a.replay_only:
+    for name in ('native-recipient.json','wrap-request.json','redeem-request.json','wrap-order.json','redeem-order.json','native-deposit.json','solana-deposit.json'):
+        assert (private/name).is_file(), 'Replay requires complete existing product journals'
+if a.restored_handoff:
+    assert a.replay_only and a.installed_vm
+    handoff=json.loads(a.restored_handoff.read_text())
+    assert handoff['sourceFence']['retired'] and handoff['sourcePayingWorkerRefused']
+
 env=dict(os.environ,PGDATABASE='ecx_fresh_treasury_acceptance',ECX_WORKER_FENCE_DIR=str(state/'fence'))
 assert a.installed_vm or a.binary,'Local binary required'
 binary=None if a.installed_vm else str(Path(a.binary).resolve(strict=True));manifest=json.loads((Path(a.devnet_dir)/'setup.json').read_text())
@@ -133,7 +143,9 @@ try:
         save('native-deposit.json',{'phase':'possibly_broadcast','transaction':decoded['txid'],'raw':final['hex']})
     nd=json.loads((private/'native-deposit.json').read_text());assert 'raw' in nd,'Interrupted native preparation requires inspection'
     try:rpc('gettransaction',[nd['transaction']],True,'ecx-bridge-tester')
-    except RuntimeError:assert rpc('sendrawtransaction',[nd['raw']],True)==nd['transaction']
+    except RuntimeError:
+        assert not a.replay_only,'Restored native deposit missing; reconcile before any broadcast'
+        assert rpc('sendrawtransaction',[nd['raw']],True)==nd['transaction']
     redeem=json.loads((private/'redeem-order.json').read_text());auth=json.loads((private/'redeem-request.json').read_text())
     if not (private/'solana-deposit.json').exists():
         pay=api('/api/v1/orders/'+redeem['orderId']+'/transaction',{},auth['capability'])
@@ -144,6 +156,7 @@ try:
     sd=json.loads((private/'solana-deposit.json').read_text())
     status=rpc('getSignatureStatuses',[[sd['signature']],{'searchTransactionHistory':True}])['value'][0]
     if status is None:
+        assert not a.replay_only,'Restored Solana deposit missing; reconcile before any broadcast'
         assert rpc('getBlockHeight',[{'commitment':'finalized'}])<=sd['lastValidBlockHeight'],'Saved deposit expired; explicit recovery required'
         assert rpc('sendTransaction',[sd['transaction'],{'encoding':'base64','preflightCommitment':'finalized','maxRetries':0}])==sd['signature']
     api('/api/v1/orders/'+redeem['orderId']+'/observations',{'signature':sd['signature']},auth['capability'])
@@ -161,6 +174,6 @@ try:
     assert {which:view(which) for which in ['wrap','redeem']}==terminal,'Saved-order reload changed terminal result'
     after=financial();assert before==after,'Restart changed financial rows or critical sequence'
     api('/pause',{'pauseReason':'fresh product acceptance complete; stopped for review'},admin=True)
-    report={'networks':['actual L2L Signet','actual Solana Devnet'],'freshPostgresLedger':True,'legacyImport':False,'feesBpsBothDirections':100,'orders':[{'direction':x['request']['direction'],'orderId':x['orderId'],'status':x['status'],'payout':x['payoutTx'],'quote':x['quote']} for x in terminal.values()],'nativeDeposit':nd['transaction'],'solanaDeposit':sd['signature'],'nativePayoutConfirmed':True,'solanaPayoutFinalized':True,'financialTablesCompared':len(before['tables']),'financialRowsAndSequenceUnchangedAfterRestart':True,'savedOrderReloadStable':True,'hostFenceEnabled':True,'guiWalletVerified':False,'workerStopped':True,'finalPaused':True,'installedSystemdWorker':bool(installed)}
+    report={'networks':['actual L2L Signet','actual Solana Devnet'],'freshPostgresLedger':not bool(a.restored_handoff),'postgresBackupRestored':bool(a.restored_handoff),'existingDepositReplayOnly':a.replay_only,'legacyImport':False,'feesBpsBothDirections':100,'orders':[{'direction':x['request']['direction'],'orderId':x['orderId'],'status':x['status'],'payout':x['payoutTx'],'quote':x['quote']} for x in terminal.values()],'nativeDeposit':nd['transaction'],'solanaDeposit':sd['signature'],'nativePayoutConfirmed':True,'solanaPayoutFinalized':True,'financialTablesCompared':len(before['tables']),'financialRowsAndSequenceUnchangedAfterRestart':True,'savedOrderReloadStable':True,'hostFenceEnabled':True,'guiWalletVerified':False,'workerStopped':True,'finalPaused':True,'installedSystemdWorker':bool(installed)}
     Path(a.report).write_text(json.dumps(report,indent=2)+'\n');print(json.dumps({'freshProductAcceptance':'passed','directions':2,'restartStable':True}))
 finally:stop()

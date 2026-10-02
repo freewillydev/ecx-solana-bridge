@@ -307,3 +307,19 @@ paused, stopped two-terminal-order fixture across a same-release reinstall,
 including 31 durable tables, configuration hashes and the protected fence.
 The earlier local preview supervisor and its worker/web children were stopped
 after verifying its orders were terminal; recorded preview PIDs are historical.
+
+The dedicated installed acceptance deployment has been handed off from
+`pg-install` (retired; do not re-enable) to a fresh `restore` guest.
+`PrepareInstalledHandoff.py` and `RestoreInstalledHandoff.py` are guarded test
+orchestration for exactly the two-paid-order fixture, not general unattended
+production restore commands. They retain private journals, verify stopped-source
+archive digests and all table rows, and deliberately omit source fences/overrides.
+The destination first starts in observation mode. `RestoredSignerCheck.py`
+reproduces only saved settled signatures with no broadcast.
+
+`FreshProductCheck.py --replay-only --restored-handoff PRIVATE_JOURNAL` requires
+all existing request/deposit journals and refuses a missing on-chain deposit
+rather than sending it. This verifies recovery of existing customer work without
+issuing new funding or transfers. The installed restored worker finishes paused
+and stopped. Both guests are on this physical computer; remote durability is
+still unverified. Preserve the retired guest and private recovery journals.

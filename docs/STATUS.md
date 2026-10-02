@@ -1050,3 +1050,37 @@ post-upgrade baseline: 31 durable tables, eight configuration files, sequence 0
 and private fence checks matched, with all three observers healthy. The fixture
 is observation-only; ARM64 supplies the separate actual installed paying evidence.
 Acceptance VMs are stopped after these checks; private funded state is retained.
+
+## Fresh-guest keys, ledger and paying-worker handoff
+
+A newly provisioned Ubuntu 24.04 ARM64 guest installed the verified current
+package with no keys or worker active. The original dedicated paying fixture
+then stopped: its fence was durably retired, direct paying CLI startup refused
+before chain calls, and persistent source-only retirement conditions refused
+starts of worker, web, node and backup timer. Original data and keys remain
+preserved; the source VM stays stopped. This changes the active test deployment
+from `pg-install` to `restore`; the original fixture must not be reactivated.
+
+The final private archive restored three real native wallets and the Solana
+signer to the clean guest. Every row in all 38 tables matched before startup.
+No source fence or service overrides were copied. Explicit destination adoption
+initialized its new fence at the reviewed sequence 8, then observation mode
+loaded the native custody wallet and synchronized against actual L2L Signet.
+All three real-chain observers became healthy.
+
+Paying startup and a bounded replay of the existing two paid orders then passed
+actual finality checks, saved-order reload and restart with ten financial tables
+and critical sequence unchanged. Replay mode refuses missing journals or any
+deposit broadcast. With the worker paused/stopped, the restored native wallet
+and sandboxed Solana signer reproduced the original settled signed bytes exactly;
+no new economic intent or broadcast occurred. See [handoff](evidence/installed-clean-host-handoff.json),
+[restore](evidence/installed-clean-host-restore.json),
+[customer replay](evidence/installed-clean-host-product-replay.json) and
+[signer verification](evidence/installed-clean-host-signers.json).
+
+These are separate fresh OS guests on the same physical computer, not a remote
+durability test. Valuable/canonical activation, independent-provider expiry,
+in-flight/failure recovery and real off-host backup retention remain open.
+Retirement constrains cooperating bridge workers; it cannot cryptographically
+revoke copies of a private key held by root or other software. The VM is stopped
+after acceptance, and private archive/journal copies are retained outside Git.
