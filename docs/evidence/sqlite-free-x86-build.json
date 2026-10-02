@@ -1,0 +1,20 @@
+{
+  "architecture": "x86_64",
+  "sourceCommit": "f24ed3766a78ee540ba39e482a762834f6d99bc6",
+  "githubActionsRun": 37011612013,
+  "buildConclusion": "success",
+  "archiveSha256": "f387d44088ee640cd0e0a56c406c76b0f6ef5b155c51386567b957b055f63252",
+  "archiveBytes": 19877629,
+  "installedUpgradeAccepted": true,
+  "installedRepeatAccepted": true,
+  "installedReleaseId": "976796a1f0fbd578e336ed6f",
+  "preservedDurableTables": 31,
+  "preservedConfigurationFiles": 8,
+  "preservedCriticalSequence": 0,
+  "observationOnly": true,
+  "signerAbsent": true,
+  "installedApplicationSqliteLinkage": false,
+  "bundledSqliteCli": false,
+  "bundledSqliteSharedLibrary": false,
+  "publicRelease": false
+}

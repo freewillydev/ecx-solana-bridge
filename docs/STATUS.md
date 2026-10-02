@@ -1663,3 +1663,18 @@ sequence 19. The installed application's dynamic linkage has no SQLite, and the
 release contains no standalone SQLite CLI/library. These checks ran with the
 worker stopped against its existing observation-only configuration; they do not
 prove a new payout or complete cold-start reconciliation. The guest was shut down.
+
+### PostgreSQL-only x86 installed acceptance and signed review pair
+
+Native x86 CI run 37011612013 passed at source f24ed37. The downloaded archive
+checksum verified. Actual x86 upgrade and repeat installation preserved all 31
+checked durable tables, eight configuration files and sequence zero in the
+existing observation-only fixture. Its installed application has no SQLite
+linkage or standalone SQLite bundle files. No signer or paid x86 round trip is
+claimed. See `evidence/sqlite-free-x86-build.json`.
+
+Both accepted architecture archives were signed and individually authenticated
+with the existing development Ed25519 release key, in the separate retained
+`signed-sqlite-free-review-candidate` directory. This is a private review pair,
+not approval of the development key for production publishing. The task x86 guest
+was shut down after acceptance.

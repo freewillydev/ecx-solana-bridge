@@ -88,7 +88,7 @@ Exclusive worker ownership, immutable attempts, generation fencing, input-lock r
 
 ## Build and installation
 
-The tested dependency boundary is GHC **9.14.1**, Cabal **3.16.1.0**, Rust **1.97.1**, SQLite **3.53.4**, Node **25.4.0** and Bitcoin Core **30.2**. Cabal, Cargo and npm dependency graphs are locked. Linux upstream toolchain URLs/checksums are in [`deploy/toolchains.json`](deploy/toolchains.json). The legacy importer retains SQLite compatibility; the active PostgreSQL worker uses libpq/PostgreSQL 16.
+The tested dependency boundary is GHC **9.14.1**, Cabal **3.16.1.0**, Rust **1.97.1**, SQLite **3.53.4**, Node **25.4.0** and Bitcoin Core **30.2**. Cabal, Cargo and npm dependency graphs are locked. Linux upstream toolchain URLs/checksums are in [`deploy/toolchains.json`](deploy/toolchains.json). The Haskell SQLite dependency is confined to the separate `legacy` Cabal component and build-cache regression tests; the production application uses libpq/PostgreSQL 16 and no longer links or bundles a SQLite CLI/shared library. The explicit legacy importer retains read-only compatibility through Python’s standard library. `doctor` checks the actual configured PostgreSQL ledger in a read-only transaction.
 
 On Ubuntu 24.04, from a reviewed checkout, run as a normal sudo-enabled user:
 
@@ -128,8 +128,8 @@ The local launcher serves `http://127.0.0.1:61734` and accepts only the public-t
 
 | Checkpoint | Evidence and limits |
 | --- | --- |
-| Financial/state contracts | 368 Haskell examples plus 100 generated arithmetic cases; [`test output`](docs/evidence/haskell-tests.txt). These tests do not substitute for real-chain acceptance. |
-| Helper and installer contracts | Seven Rust tests and nine installer tests pass in the revised ARM64 build. The new installer regression checks that helper imports preserve the package inventory. |
+| Financial/state contracts | 373 Haskell examples, including generated arithmetic cases; [`current ARM package evidence`](docs/evidence/sqlite-free-arm-build.json). These tests do not substitute for real-chain acceptance. |
+| Helper and installer contracts | Seven Rust tests and 21 installer tests pass in the revised ARM64 build. The new installer regression checks that helper imports preserve the package inventory. |
 | Browser source | Strict TypeScript checking and asset build pass. A connection-free quote, invalid-amount rejection, QR instructions and saved-order reload were verified in the browser. Actual supported-wallet Solana Pay signing remains pending. [`Evidence`](docs/evidence/postgres-product-flows.json). |
 | Operator setup | Interactive private configuration, hidden-input TTY check, actual custody-key identity validation and real Devnet identity configuration pass locally. Compiled Ubuntu ARM64 wizard, custom port, private configuration and same-release repeat installation pass. Cross-release upgrades and x86-64 acceptance remain. |
 | PostgreSQL product | Both new 1% conversions paid; verified-owner full refund, explicit expired retry, unsigned cancellation and clean restart passed on real Signet/Devnet. [`Evidence`](docs/evidence/postgres-product-flows.json). |
@@ -171,7 +171,7 @@ Jupiter was part of the intended market path, not a replacement for native wrapp
 - [`docs/STATUS.md`](docs/STATUS.md): implemented behavior, real evidence and remaining gates.
 - [`docs/CONTRACTS.md`](docs/CONTRACTS.md): accounting, amount, API and recovery contracts; historical checkpoints are explicitly distinguished from current public-test operation in STATUS.
 - [`docs/LOCAL-DEVELOPMENT.md`](docs/LOCAL-DEVELOPMENT.md): local operation and dedicated public-test procedures.
-- [`docs/THIRD-PARTY.md`](docs/THIRD-PARTY.md): notice provenance, 333-entry dependency collection and remaining review.
+- [`docs/THIRD-PARTY.md`](docs/THIRD-PARTY.md): notice provenance, 377-entry dependency collection and remaining review.
 
 MIT license for this repository. Dependencies retain their respective licenses. This repository contains source and public-test evidence; custody keys, private runtime configuration, ledgers, backups and chain data belong outside Git.
 
