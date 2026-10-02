@@ -1,0 +1,18 @@
+{
+  "orderId": "de8263b85175e9c2db4796c9ba8335e4814cbb8b16f2d6875e384a3693377bce",
+  "quote": {
+    "fee": "100",
+    "gross": "10000",
+    "net": "9900"
+  },
+  "status": "Paid",
+  "replacement": "3Jha9ig3L1TSpiquyZiHdENm57ea4ssFxDkqr3joAEtJckXnCdhUTnEPVUTCWpt6LzqHbkpi5q6yLSGkT1Y36xqj",
+  "reviewedResume": true,
+  "workerStopped": true,
+  "guiWalletVerified": false,
+  "finalizedRpcReadback": true,
+  "finalizedSlot": 506630756,
+  "actualNetworkFeeLamports": 5000,
+  "custodyTokenDelta": -9900,
+  "recipientTokenDelta": 9900
+}

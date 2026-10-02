@@ -51,9 +51,9 @@ elif action=='api':
     class UnixHTTP(http.client.HTTPConnection):
         def connect(self):
             self.sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
-            self.sock.settimeout(55)
+            self.sock.settimeout(180)
             self.sock.connect(cfg['adminSocket' if request['admin'] else 'customerSocket'])
-    conn=UnixHTTP('localhost',timeout=55)
+    conn=UnixHTTP('localhost',timeout=180)
     headers={'Content-Type':'application/json'}
     if request['token']:headers['Authorization']='Bearer '+request['token']
     try:
@@ -89,7 +89,7 @@ class InstalledTestTransport:
         result = subprocess.run(
             ['limactl', 'shell', self.vm, 'sudo', 'python3', '-c', GUEST],
             input=json.dumps(dict(action=action, identity=self.identity, **values)),
-            capture_output=True, text=True, timeout=75)
+            capture_output=True, text=True, timeout=210)
         if result.returncode:
             # Never print private capabilities, signed bytes, cookies or config.
             raise RuntimeError('Installed test action failed: ' + action)

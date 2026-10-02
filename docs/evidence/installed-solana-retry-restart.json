@@ -1,0 +1,29 @@
+{
+  "criticalSequence": 19,
+  "restartFinancialGroupsUnchanged": 8,
+  "customerApiSavedOrderReloadStable": true,
+  "singleSettlement": true,
+  "postingsBalanced": true,
+  "reservationsReleased": true,
+  "attempts": [
+    {
+      "id": "2nNCfmQFHSj7gWBrZ35t1YUiTazniqrz5L96h3xZ7ZcTuJUSwntqScC6jiuTShrRg1U5KBjaGZuBTYZav6ukFe8c",
+      "state": "review",
+      "generation": 0,
+      "sequence": null,
+      "bytesHash": "ded0467e4a3d0e0c0247b39dec336bc882c9e5eeccdb8942f2d7f263f446a85b"
+    },
+    {
+      "id": "3Jha9ig3L1TSpiquyZiHdENm57ea4ssFxDkqr3joAEtJckXnCdhUTnEPVUTCWpt6LzqHbkpi5q6yLSGkT1Y36xqj",
+      "state": "settled",
+      "generation": 1,
+      "sequence": 19,
+      "bytesHash": "123e51ae0b16ce5fbbfa30f5796347db93aa3c007228d15ddc37fc9c33b940e5"
+    }
+  ],
+  "finalBackupTables": 38,
+  "finalBackupSha256": "834cae3f6c41e429ecf7e7ad9d2eb337abcbe7af3fd8a42d94de819c975e731b",
+  "paused": true,
+  "workerStopped": true,
+  "coldBootResumeVerified": false
+}

@@ -1439,3 +1439,43 @@ Resume this saved Ready order once guest RPC access is stable; do not create
 another customer order or funding transfer to bypass the wait. Solana signed
 replay, expiry/retry and interruption acceptance remain unfinished. See
 [evidence](evidence/installed-solana-recovery-driver.json).
+
+## Installed Solana signed expiry and approved retry completed
+
+The same saved wrapping order completed without another customer deposit or
+funding transfer. The real Solana payout was staged durably without sending;
+replay invoked neither RPC nor signer and preserved all signed bytes/financial
+state. After restart, the installed observer proved expiry against the official
+Devnet RPC and independent OnFinality RPC. Both supplied correct genesis,
+finalized height beyond the saved validity limit, invalid blockhash, complete
+anchored custody/owner histories and absent transaction/historical signature
+status. The original attempt entered review at sequence 17 and stayed unsent.
+
+Private operator DSL approval independently revalidated that evidence and
+recorded one retry at sequence 18. Identical approval replay was stable; the
+ledger remained paused, with no replacement signed or sent by approval. Explicit
+reviewed resume then produced generation 1 and settled it at sequence 19. The
+actual finalized transaction delivered 9,900 units for a 10,000-unit deposit and
+100-unit fee; direct RPC readback showed custody -9,900, recipient +9,900 and
+a 5,000-lamport network fee. The retained generation-0 signed-byte hash is
+unchanged, and only generation 1 has a broadcast/settlement sequence. Exactly
+one settlement posting event exists for the two-attempt family, all posting
+events balance, and fee/destination reservations released.
+
+A subsequent worker restart and authenticated customer API saved-order reload
+preserved eight financial groups and sequence 19. The installed backup service
+created another consistent 38-table snapshot. Cold-boot automatic resume for
+this particular final state was not accepted; the test remains explicitly
+paused/stopped. The test-only private transport now allows longer bounded
+operator calls (180-second socket, 210-second SSH process limit) to accommodate
+complete two-provider history verification. Runtime RPC timeouts/retries and
+financial guards did not change. No Haskell or installer rebuild was needed.
+
+Evidence: [signed staging](evidence/installed-solana-signed-stage.json),
+[actual two-provider expiry](evidence/installed-solana-expiry.json),
+[approval](evidence/installed-solana-retry-approval.json),
+[finalized replacement](evidence/installed-solana-retry-settlement.json),
+and [restart/accounting](evidence/installed-solana-retry-restart.json).
+This closes this actual signed-but-unsent expiry/retry case. Clean-host Solana
+restoration, the wider interruption/reorg matrix, GUI wallet/clipboard
+acceptance, off-host backup, canonical deployment and independent review remain.
