@@ -1,12 +1,15 @@
 module Bridge.Postgres.Preparation
-  ( orderPolicy, costLimits, begin, active, activeC, storeDraft, storeAttempt, pending, pendingC, signingDecisionC, nativeLockAudit ) where
+  ( orderPolicy, costLimits, begin, active, activeC, storeDraft, storeAttempt, pending, pendingC, signingDecisionC, nativeLockAudit
+  , readCancellation, beginCancellation, finishCancellation ) where
 
 import Bridge.Config
 import Bridge.Types
-import Bridge.Ledger.Model (decodePaymentRecord, CostLimits(..), Obligation(..), Preparation(..))
+import Bridge.Ledger.Model (encodeRecord, decodePaymentRecord, CostLimits(..), Obligation(..), Preparation(..))
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema hiding (deploymentFingerprint)
 import qualified Bridge.Postgres.Source as Source
+import Bridge.Postgres.Custody (freshC)
+import Data.Aeson (Value(..))
 import Data.Int (Int64)
 import Data.List (sortOn)
 import Data.Text (Text)
@@ -43,7 +46,7 @@ activeC c intent = do
     pure (preparationsGeneration p)
     :: IO [Int64]
   generation <- case rows of [g]->pure g; _->reject "preparation_not_found"
-  cancellations <- O.runSelect c $ whereRows (\row->preparationcancellationsIntentId row O..== text intent O..&& preparationcancellationsGeneration row O..== num generation) (O.selectTable preparationcancellationsTable) :: IO [PreparationCancellations]
+  cancellations <- cancellationRowsC c intent generation
   require (null cancellations) "preparation_cancellation_pending"
   pure generation
 
@@ -86,7 +89,7 @@ begin ledger cfg expected chain limit policy = ledgerAction ledger $ \c->do
           fees <- O.runSelect c $ whereRows (\row->feereservationsIntentId row O..== text intent) (O.selectTable feereservationsTable) :: IO [FeeReservations]
           case last prior of
             row | preparationsRetiredTxid row==Nothing && preparationsCancelled row==1->do
-              completed <- O.runSelect c $ whereRows (\r->preparationcancellationsIntentId r O..== text intent O..&& preparationcancellationsGeneration r O..== num(preparationsGeneration row)) (O.selectTable preparationcancellationsTable) :: IO [PreparationCancellations]
+              completed <- cancellationRowsC c intent (preparationsGeneration row)
               require (map preparationcancellationsCompleted completed==[1] && map feereservationsReleased fees==[0]) "preparation_cancellation_not_complete"
             row | Just txid<-preparationsRetiredTxid row,preparationsCancelled row==0->do
               approved <- O.runSelect c $ whereRows (\r->solanaretryapprovalsExpiredTxid r O..== text txid) (O.selectTable solanaretryapprovalsTable) :: IO [SolanaRetryApprovals]
@@ -199,4 +202,77 @@ nativeLockAudit :: Ledger -> Text -> IO ()
 nativeLockAudit ledger subject = ledgerAction ledger $ \connection->do
   _ <- O.runInsert connection O.Insert
     {O.iTable=auditTable,O.iRows=[Audit Nothing (O.sqlStrictText "native_locks_restored") (O.sqlStrictText subject)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  pure ()
+
+-- Unsigned cancellation shares the preparation generation and fee hold.
+cancellationRowsC :: PG.Connection -> Text -> Int64 -> IO [PreparationCancellations]
+cancellationRowsC c intent generation = O.runSelect c $ do
+  r <- O.selectTable preparationcancellationsTable
+  O.where_(preparationcancellationsIntentId r O..== text intent O..&& preparationcancellationsGeneration r O..== num generation)
+  pure r
+readCancellation :: Ledger -> Text -> Int -> IO (Maybe(Text,Text,Bool))
+readCancellation ledger intent generation = ledgerAction ledger $ \c->do
+  saved <- cancellationRowsC c intent (fromIntegral generation)
+  case saved of
+    []->pure Nothing
+    [r]->pure(Just(preparationcancellationsReason r,preparationcancellationsCleanupJson r,preparationcancellationsCompleted r==1))
+    _->reject "duplicate_preparation_cancellation"
+
+paused :: PG.Connection -> IO ()
+paused c = do
+  state <- O.runSelect c(fmap deploymentPaused $ O.selectTable deploymentTable) :: IO [Int64]
+  require(state==[1]) "pause_before_operator_action"
+
+beginCancellation :: Ledger -> Preparation -> Int64 -> Text -> Value -> IO ()
+beginCancellation ledger preparation now reason cleanup = ledgerAction ledger $ \c->do
+  let intent=obligationId(preparationObligation preparation); generation=preparationGeneration preparation
+      encoded=encodeRecord cleanup
+  require(not(T.null $ T.strip reason) && T.length reason<=512 && cleanup/=Null && T.length encoded<=32768) "invalid_preparation_cancellation"
+  paused c
+  old <- cancellationRowsC c intent (fromIntegral generation)
+  case old of
+    [r]->require ((preparationcancellationsReason r,preparationcancellationsCleanupJson r)==(reason,encoded)) "preparation_cancellation_conflict"
+    []->do
+      freshC c now
+      current <- pendingC c
+      require(preparation `elem` current) "preparation_cancellation_not_expected"
+      seqNo <- criticalSequence c
+      _ <- O.runInsert c O.Insert {O.iTable=preparationcancellationsTable,O.iRows=[PreparationCancellations (text intent) (num $ fromIntegral generation) (text reason) (text encoded) (num seqNo) (num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      cancellationAudit c "preparation_cancellation_requested" intent generation
+    _->reject "duplicate_preparation_cancellation"
+
+finishCancellation :: Ledger -> Preparation -> IO ()
+finishCancellation ledger preparation = ledgerAction ledger $ \c->do
+  let ob=preparationObligation preparation;intent=obligationId ob;generation=preparationGeneration preparation
+  paused c
+  saved <- cancellationRowsC c intent (fromIntegral generation)
+  case map preparationcancellationsCompleted saved of
+    [1]->pure ()
+    [0]->do
+      current <- pendingC c
+      require(preparation `elem` current) "preparation_cancellation_not_expected"
+      fees <- O.runSelect c $ do
+        r <- O.selectTable feereservationsTable
+        O.where_(feereservationsIntentId r O..== text intent)
+        pure(feereservationsAmount r,feereservationsReleased r)
+        :: IO [(Int64,Int64)]
+      require(fees==[(preparationFeeLimit preparation,0)]) "preparation_fee_hold_missing"
+      source <- O.runSelect c $ do
+        r <- O.selectTable depositsTable
+        O.where_(depositsId r O..== text(obligationDeposit ob))
+        pure(depositsEligible r)
+        :: IO [Int64]
+      eligible <- case source of [r] | r `elem` [0,1]->pure(r==1);_->reject "deposit_not_found"
+      _ <- criticalSequence c
+      _ <- O.runUpdate c O.Update {O.uTable=preparationcancellationsTable,O.uUpdateWith= \r->r {preparationcancellationsCompleted=num 1},O.uWhere= \r->preparationcancellationsIntentId r O..== text intent O..&& preparationcancellationsGeneration r O..== num(fromIntegral generation),O.uReturning=O.rCount}
+      _ <- O.runUpdate c O.Update {O.uTable=preparationsTable,O.uUpdateWith= \r->r {preparationsCancelled=num 1},O.uWhere= \r->preparationsIntentId r O..== text intent O..&& preparationsGeneration r O..== num(fromIntegral generation),O.uReturning=O.rCount}
+      _ <- O.runUpdate c O.Update {O.uTable=intentsTable,O.uUpdateWith= \r->r {intentsResolved=num 1},O.uWhere= \r->intentsId r O..== text intent,O.uReturning=O.rCount}
+      _ <- O.runUpdate c O.Update {O.uTable=obligationsTable,O.uUpdateWith= \r->r {obligationsStatus=text(if eligible then "ready" else "review")},O.uWhere= \r->obligationsId r O..== text intent,O.uReturning=O.rCount}
+      _ <- O.runUpdate c O.Update {O.uTable=ordersTable,O.uUpdateWith= \r->r {ordersStatus=text(if eligible then "Ready" else "NeedsReview")},O.uWhere= \r->ordersId r O..== text(obligationOrder ob) O..&& ordersStatus r O../= text "Paid",O.uReturning=O.rCount}
+      _ <- O.runUpdate c O.Update {O.uTable=reservationsTable,O.uUpdateWith= \r->r {reservationsPhase=text "obligation"},O.uWhere= \r->reservationsOrderId r O..== text(obligationOrder ob) O..&& reservationsPhase r O..== text "payment",O.uReturning=O.rCount}
+      cancellationAudit c "preparation_cancellation_completed" intent generation
+    _->reject "preparation_cancellation_not_expected"
+cancellationAudit :: PG.Connection -> Text -> Text -> Int -> IO ()
+cancellationAudit c action intent generation = do
+  _ <- O.runInsert c O.Insert {O.iTable=auditTable,O.iRows=[Audit Nothing (text action) (text $ intent<>":"<>T.pack(show generation))],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   pure ()

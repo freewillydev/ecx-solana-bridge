@@ -261,6 +261,10 @@ The sequence below remains the broader refactor checklist, subject to that prior
    Saved-record JSON encoding and decoding now share one implementation in
    Ledger.Model. Payment records share their error category; other workflows retain
    their existing error codes. Stored bytes and Aeson parsing rules are unchanged.
+   Preparation cancellation now lives with preparation; Solana retry and refund
+   creation live with settlement. Their separate store modules are removed, and
+   the custody freshness check is called directly from its owner. Cancellation
+   generation lookups share one query with preparation/signing checks.
    Remove redundant wrappers immediately after their replacement works.
    Core PostgreSQL budgeting is now part of Ledger, so allowance and journal
    arithmetic share one implementation. Retain remaining unique SQLite assertions

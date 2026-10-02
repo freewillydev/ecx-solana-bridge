@@ -33,7 +33,7 @@ import qualified Data.Text.Encoding as TE
 import Data.Int (Int64)
 import qualified Bridge.Postgres.Order as Order
 import qualified Bridge.Observer as Observer
-import qualified Bridge.Postgres.Refund as Refund
+import qualified Bridge.Postgres.Settlement as Settlement
 import qualified Bridge.Ledger.Model as Domain
 import qualified Bridge.Postgres.NativeFamily as NativeFamily
 import qualified Bridge.Reconciliation as CustodyWorkflow
@@ -197,7 +197,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
       Treasury.allocate ledger now did split reason
     ClassifyTreasurySpend stream txid reason->Treasury.classifySpend ledger stream txid reason
     RefundDeposit did->do
-      obligation <- Refund.createRefund ledger did
+      obligation <- Settlement.createRefund ledger did
       pure(object["obligation" .= Domain.obligationId obligation,"recipient" .= Domain.obligationRecipient obligation,"amount" .= T.pack(show $ Domain.obligationAmount obligation)])
   WorkerDSL ScanAndReconcile->do
     -- Advisory native locks must be restored independently of Solana RPC health.

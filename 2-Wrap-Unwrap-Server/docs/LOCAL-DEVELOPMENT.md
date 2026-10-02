@@ -41,6 +41,8 @@ The same runner generates earned-fee funding/cancellation contracts for Native
 and Wrapped assets: immutable terms, rejected replay conflicts, balanced holds,
 exact cancellation, asset/amount bounds and pause/freshness gates. These are
 funding-stage contracts; they do not prove fee signing or sending.
+The unsigned-cancellation contract checks pause/freshness gates, replay, retained
+fee holds, blocked signing and generation advancement before a new attempt.
 
 Use a fresh disposable database with all `migrations/postgresql/*.sql` applied in
 filename order. This host uses socket `/tmp/ecx-pg-seam`, port 29436 and the current

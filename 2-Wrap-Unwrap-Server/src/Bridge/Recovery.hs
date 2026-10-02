@@ -5,7 +5,7 @@ module Bridge.Recovery
   , coverSourceLossWith, prepareNativeReplacementUsing
   , signNativeReplacementUsing ) where
 
-import qualified Bridge.Postgres.Cancellation as PgCancellation
+import qualified Bridge.Postgres.Custody as PgCustody
 import qualified Bridge.Postgres.Ledger as PgLedger
 import qualified Bridge.Postgres.LossCover as PgLossCover
 import qualified Bridge.Postgres.Settlement as PgSettlement
@@ -127,7 +127,7 @@ signNativeReplacementUsing clock transport signer c ledger sequenceNo=do
     require (all (==Nothing) failures) "native_replacement_payment_requires_review"
     _ <- reconcileCustodyWith clock transport c ledger
     now <- clock
-    PgCancellation.checkFresh ledger now
+    PgCustody.checkFresh ledger now
 
 coverSourceLossWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> Text -> Int64 -> LossCapital -> Text -> IO Value
 coverSourceLossWith clock transport c ledger did recovery capital reason=do
@@ -180,7 +180,7 @@ reconcileNativeLocksWith transport c ledger=do
       ([p],[])->do
         policy <- preparationPolicyFor c ledger p
         (plan,draft) <- readNativePreparation call c p policy
-        cancelling <- PgCancellation.readCancellation ledger (obligationId $ preparationObligation p) (preparationGeneration p)
+        cancelling <- PgPreparation.readCancellation ledger (obligationId $ preparationObligation p) (preparationGeneration p)
         let subject=obligationId (preparationObligation p)<>"@"<>T.pack(show $ preparationGeneration p)
         case draft of
           Nothing->verifyOnly (if cancelling==Nothing then "awaiting_draft" else "cancellation_pending") []
@@ -239,7 +239,7 @@ cancelPreparationWith clock transport c ledger intent generation reason=do
   require (generation>=0 && generation<8 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_preparation_cancellation"
   state <- PgLedger.readiness ledger
   require (not $ available state) "pause_before_operator_action"
-  old <- PgCancellation.readCancellation ledger intent generation
+  old <- PgPreparation.readCancellation ledger intent generation
   case old of
     Just (previous,_,_) -> require (previous==reason) "preparation_cancellation_conflict"
     Nothing -> pure ()
@@ -258,12 +258,12 @@ cancelPreparationWith clock transport c ledger intent generation reason=do
         Just (_,encoded,False) -> stored encoded >>= \saved -> require (saved==expected) "preparation_cancellation_conflict"
         _ -> pure ()
       now <- clock
-      PgCancellation.checkFresh ledger now
-      PgCancellation.begin ledger preparation now reason expected
+      PgCustody.checkFresh ledger now
+      PgPreparation.beginCancellation ledger preparation now reason expected
       when (preparationChain preparation=="Native") $ do
         inputs <- fieldValue "nativeInputs" expected
         cleanupLocks (paymentNative transport) inputs
-      PgCancellation.finish ledger preparation
+      PgPreparation.finishCancellation ledger preparation
       pure result
  where
   result=object ["cancelledPreparation" .= intent,"generation" .= generation,"paused" .= True

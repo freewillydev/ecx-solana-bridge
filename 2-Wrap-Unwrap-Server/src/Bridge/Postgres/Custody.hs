@@ -1,4 +1,4 @@
-module Bridge.Postgres.Custody (readSnapshot, readRevision, hasEvent, recordCheck, eventProof, freshC) where
+module Bridge.Postgres.Custody (readSnapshot, readRevision, hasEvent, recordCheck, eventProof, checkFresh, freshC) where
 
 import qualified Database.PostgreSQL.Simple as PG
 import Bridge.Ledger.Model (encodeRecord, decodeRecord, View(..))
@@ -154,3 +154,6 @@ hasEvent ledger txid chain = ledgerAction ledger $ \connection->do
     pure (chaineventsEventId row)
     :: IO [Text]
   pure (not $ null rows)
+
+checkFresh :: Ledger -> Int64 -> IO ()
+checkFresh ledger now = ledgerAction ledger (\c->freshC c now)

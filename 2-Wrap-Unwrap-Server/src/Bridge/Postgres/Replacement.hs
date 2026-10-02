@@ -10,7 +10,7 @@ import Bridge.Postgres.Schema hiding (deploymentFingerprint)
 import qualified Bridge.Postgres.NativeFamily as Family
 import qualified Bridge.Postgres.Preparation as P
 import Bridge.Postgres.Source (paymentWorkHashC)
-import Bridge.Postgres.Cancellation (freshC)
+import Bridge.Postgres.Custody (freshC)
 import Data.Aeson (object,(.=))
 import Data.Int (Int64)
 import Data.Text (Text)

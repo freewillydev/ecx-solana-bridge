@@ -10,7 +10,6 @@ module Bridge.Settlement
 import qualified Bridge.Postgres.Ledger as PgLedger
 import qualified Bridge.Postgres.Observation as PgObservation
 import qualified Bridge.Postgres.Settlement as PgSettlement
-import qualified Bridge.Postgres.Retry as PgRetry
 import qualified Bridge.Postgres.NativeFamily as NativeFamily
 import qualified Bridge.Postgres.Source as PgSource
 import Bridge.Config
@@ -408,14 +407,14 @@ settleAttemptWith transport c ledger attempt = work `onException` PgLedger.pause
 -- It neither signs, broadcasts nor resumes a paused worker.
 approveSolanaRetryWith :: PaymentTransport -> Config -> Ledger -> Text -> Text -> IO ()
 approveSolanaRetryWith transport c ledger txid reason=do
-  prior <- PgRetry.reasons ledger txid
+  prior <- PgSettlement.retryReasons ledger txid
   case prior of
     [old] -> require (old==reason) "retry_approval_conflict"
     [] -> do
       require (not (T.null $ T.strip reason) && T.length reason<=512) "invalid_retry_approval"
       health <- PgLedger.readiness ledger
       require (not $ available health) "pause_before_operator_action"
-      rows <- PgRetry.candidates ledger txid
+      rows <- PgSettlement.retryCandidates ledger txid
       attempt <- case rows of [a]->pure a; _->reject "solana_retry_not_expected"
       paymentIdentity transport
       (ob,payment) <- readSavedPayment transport c ledger attempt
@@ -423,7 +422,7 @@ approveSolanaRetryWith transport c ledger txid reason=do
       PgSettlement.checkExpiryOrigins ledger c
       recheckSourceWith transport c ledger ob
       proof <- solanaExpiryEvidence transport c signed >>= maybe (reject "solana_expiry_not_proven") pure
-      PgRetry.recordApproval ledger txid reason proof
+      PgSettlement.approveRetry ledger txid reason proof
     _ -> reject "duplicate_retry_approval"
 
 -- One bounded pass; the database owns the queue across restarts. Reconciliation

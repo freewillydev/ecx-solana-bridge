@@ -4,7 +4,6 @@ module Main (main) where
 import Bridge.Types hiding (deploymentFingerprint)
 import Bridge.Ledger.Model (Deposit(..),Obligation(..),Preparation(..),CostLimits(..),ScanBatch(..),ChainEvent(..))
 import qualified Bridge.Postgres.FeeWithdrawal as Withdrawal
-import qualified Bridge.Postgres.Refund as Refund
 import qualified Bridge.Postgres.Treasury as Treasury
 import qualified Bridge.Postgres.Preparation as Preparation
 import qualified Bridge.Postgres.Settlement as Settlement
@@ -641,9 +640,39 @@ broadcastWriteContract settings = do
       && preparationGeneration prepared==generation) "signing_decision_not_bound"
     expectError "preparation_generation_changed" $ L.ledgerAction ledger $ \c->
       Preparation.signingDecisionC c cfg (obligationId ob) (generation+1)
-    Preparation.storeAttempt ledger ob "Solana" txid "original-contract-bytes" "{}" 10000 Nothing generation
+    -- Cancellation must fence the old generation without dropping its fee hold.
+    let cleanup=object ["unsigned" .= True]
+        cancelUnsigned=Preparation.beginCancellation ledger prepared 100 "contract cancellation" cleanup
+        signing gen=L.ledgerAction ledger (\c->Preparation.signingDecisionC c cfg (obligationId ob) gen)
+    expectError "pause_before_operator_action" cancelUnsigned
+    L.pause ledger "contract cancellation"
+    state ledger InvalidateCustody
+    expectError "custody_not_reconciled" cancelUnsigned
+    state ledger FreshFeeContract
+    (_,held,_,_) <- state ledger SendState
+    cancelUnsigned
+    journal <- state ledger JournalState
+    cancelUnsigned
+    state ledger JournalState >>= \replayed->require (replayed==journal) "cancellation_replay_changed_journal"
+    expectError "preparation_cancellation_conflict" $
+      Preparation.beginCancellation ledger prepared 100 "different reason" cleanup
+    expectError "preparation_cancellation_pending" (signing generation)
+    Preparation.finishCancellation ledger prepared
+    finished <- state ledger JournalState
+    Preparation.finishCancellation ledger prepared
+    state ledger JournalState >>= \replayed->require (replayed==finished) "completed_cancellation_replay_changed_journal"
+    (_,retained,_,_) <- state ledger SendState
+    require (held==retained) "unsigned_cancellation_released_fee_hold"
+    expectError "preparation_not_found" (signing generation)
+    state ledger (ReadyAt 100)
+    Preparation.begin ledger cfg ob "Solana" 10000 "{\"contract\":true}"
+    nextGeneration <- Preparation.active ledger (obligationId ob)
+    require (nextGeneration==generation+1) "cancelled_generation_reused"
+    expectError "preparation_generation_changed" (signing generation)
+    Preparation.storeDraft ledger (obligationId ob) "{}" nextGeneration
+    Preparation.storeAttempt ledger ob "Solana" txid "original-contract-bytes" "{}" 10000 Nothing nextGeneration
     expectError "preparation_not_unsigned" $ L.ledgerAction ledger $ \c->
-      Preparation.signingDecisionC c cfg (obligationId ob) generation
+      Preparation.signingDecisionC c cfg (obligationId ob) nextGeneration
     original <- state ledger JournalState
     signed <- state ledger SendState
     -- A genuine server constraint refuses the authority-granting state write.
@@ -885,7 +914,7 @@ observerContracts settings = do
     require (not promoted) "unbound_receipt_created_obligation"
     candidatesAfter <- Observation.promotionCandidates ledger
     require (all (`notElem` candidatesAfter) [depositId receipt,depositId unknown]) "allocated_or_unbound_receipt_queued"
-    expectError "refundable_deposit_not_found" (Refund.createRefund ledger $ depositId unknown)
+    expectError "refundable_deposit_not_found" (Settlement.createRefund ledger $ depositId unknown)
     rejected ledger "conflicting_deposit_evidence" (Observation.recordScan ledger "Native" (Just "unbound-replay") "rebound"
       [unknown{depositOrder=Just $ ordersId order,depositConfirmations=6}])
 
