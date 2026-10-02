@@ -1,0 +1,17 @@
+{
+  "network": "actual L2L Signet",
+  "platform": "native Ubuntu 24.04 aarch64 installed node",
+  "fixture": "pg-install",
+  "newWalletJournals": 2,
+  "wallets": [
+    "ecx-bridge-fresh-treasury",
+    "ecx-bridge-tester"
+  ],
+  "creationAndReplayPassed": true,
+  "fundingSent": false,
+  "keysExported": false,
+  "bridgeConfigurationChanged": false,
+  "bridgeLedgerChangedByPreparation": false,
+  "installedPayingAcceptance": false,
+  "taskVmStopped": true
+}

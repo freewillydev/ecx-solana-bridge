@@ -8,12 +8,14 @@ rerun reconciles the same orders/deposits rather than issuing another payment.
 import argparse,base64,http.client,json,os,secrets,socket,subprocess,time,urllib.request,urllib.error
 from pathlib import Path
 p=argparse.ArgumentParser(description=__doc__)
-p.add_argument('state');p.add_argument('--binary',required=True);p.add_argument('--devnet-dir',required=True);p.add_argument('--deposit-helper',required=True);p.add_argument('--report',required=True)
+p.add_argument('state');p.add_argument('--binary',help='local paying binary; required unless --installed-vm is used');p.add_argument('--devnet-dir',required=True);p.add_argument('--deposit-helper',required=True);p.add_argument('--report',required=True)
+p.add_argument('--installed-vm', help='dedicated Lima VM; use the installed systemd paying service instead of a local process')
 a=p.parse_args();state=Path(a.state).resolve();cfg=json.loads((state/'config.json').read_text())
 assert cfg['profile']=='L2LSignetDevnet' and cfg['deploymentId']=='fresh-treasury-acceptance' and not cfg['backupRequired']
 private=state/'product';private.mkdir(mode=0o700,exist_ok=True);private.chmod(0o700)
 env=dict(os.environ,PGDATABASE='ecx_fresh_treasury_acceptance',ECX_WORKER_FENCE_DIR=str(state/'fence'))
-binary=str(Path(a.binary).resolve(strict=True));manifest=json.loads((Path(a.devnet_dir)/'setup.json').read_text())
+assert a.installed_vm or a.binary,'Local binary required'
+binary=None if a.installed_vm else str(Path(a.binary).resolve(strict=True));manifest=json.loads((Path(a.devnet_dir)/'setup.json').read_text())
 assert manifest['mint']==cfg['mint']=='Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM'
 
 def save(name,value):
@@ -29,7 +31,14 @@ def run(*args):
     if r.returncode:raise RuntimeError('Acceptance subprocess failed: '+Path(args[0]).name)
     return r.stdout
 
+installed=None
+if a.installed_vm:
+    from InstalledTestTransport import InstalledTestTransport
+    installed=InstalledTestTransport(a.installed_vm,cfg)
+    installed.preflight()
+
 def rpc(method,params=(),native=False,wallet=None):
+    if installed:return installed.rpc(method,params,native,wallet)
     headers={'Content-Type':'application/json'}
     if native:
         assert wallet in (None,cfg['nativeWallet'],'ecx-bridge-tester')
@@ -47,6 +56,7 @@ class UnixHTTP(http.client.HTTPConnection):
     def connect(self):
         self.sock=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM);self.sock.settimeout(55);self.sock.connect(self.target)
 def api(route,data=None,token=None,admin=False):
+    if installed:return installed.api(route,data,token,admin)
     conn=UnixHTTP('localhost',timeout=55);conn.target=cfg['adminSocket' if admin else 'customerSocket']
     headers={'Content-Type':'application/json'}
     if token:headers['Authorization']='Bearer '+token
@@ -59,6 +69,7 @@ def api(route,data=None,token=None,admin=False):
 worker=None;log=None
 def stop():
     global worker,log
+    if installed:installed.service('stop')
     if worker:
         worker.terminate()
         try:worker.wait(timeout=15)
@@ -68,9 +79,10 @@ def stop():
 def start():
     global worker,log
     launched=int(time.time());log=(private/'worker.log').open('a');os.chmod(private/'worker.log',0o600)
-    worker=subprocess.Popen([binary,'postgres-test-worker',str(state/'config.json')],env=env,stdout=log,stderr=log)
+    if installed:installed.service('start')
+    else:worker=subprocess.Popen([binary,'postgres-test-worker',str(state/'config.json')],env=env,stdout=log,stderr=log)
     for _ in range(90):
-        assert worker.poll() is None,'Product worker exited'
+        assert (installed.alive() if installed else worker.poll() is None),'Product worker exited'
         try:
             scans=api('/scanners',admin=True)['scanners']
             if len(scans)==3 and all(x['lastSuccess'] and x['lastSuccess']>=launched and x['lastError'] is None for x in scans):
@@ -89,7 +101,7 @@ def view(which):
 def financial():
     tables=['orders','obligations','attempts','postings','reservations','fee_reservations','order_cost_limits','treasury_allocations','preparations','intents']
     q="SELECT json_build_object('sequence',(SELECT critical_sequence FROM deployment),'tables',json_build_object("+','.join("'"+t+"',(SELECT md5(coalesce(string_agg(to_jsonb(x)::text,'' ORDER BY to_jsonb(x)::text),'')) FROM "+t+" x)" for t in tables)+"));"
-    return json.loads(run('psql','-XqAt','-v','ON_ERROR_STOP=1','-c',q))
+    return installed.financial(q) if installed else json.loads(run('psql','-XqAt','-v','ON_ERROR_STOP=1','-c',q))
 try:
     assert rpc('getGenesisHash')=='EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG'
     native=rpc('getblockchaininfo',native=True)
@@ -130,7 +142,7 @@ try:
         assert rpc('sendTransaction',[sd['transaction'],{'encoding':'base64','preflightCommitment':'finalized','maxRetries':0}])==sd['signature']
     api('/api/v1/orders/'+redeem['orderId']+'/observations',{'signature':sd['signature']},auth['capability'])
     for _ in range(360):
-        assert worker.poll() is None,'Worker exited with saved customer work'
+        assert (installed.alive() if installed else worker.poll() is None),'Worker exited with saved customer work'
         results={which:view(which) for which in ['wrap','redeem']}
         if all(x['status']=='Paid' for x in results.values()):
             sol=rpc('getSignatureStatuses',[[results['wrap']['payoutTx']],{'searchTransactionHistory':True}])['value'][0]
@@ -143,6 +155,6 @@ try:
     assert {which:view(which) for which in ['wrap','redeem']}==terminal,'Saved-order reload changed terminal result'
     after=financial();assert before==after,'Restart changed financial rows or critical sequence'
     api('/pause',{'pauseReason':'fresh product acceptance complete; stopped for review'},admin=True)
-    report={'networks':['actual L2L Signet','actual Solana Devnet'],'freshPostgresLedger':True,'legacyImport':False,'feesBpsBothDirections':100,'orders':[{'direction':x['request']['direction'],'orderId':x['orderId'],'status':x['status'],'payout':x['payoutTx'],'quote':x['quote']} for x in terminal.values()],'nativeDeposit':nd['transaction'],'solanaDeposit':sd['signature'],'nativePayoutConfirmed':True,'solanaPayoutFinalized':True,'financialTablesCompared':len(before['tables']),'financialRowsAndSequenceUnchangedAfterRestart':True,'savedOrderReloadStable':True,'hostFenceEnabled':True,'guiWalletVerified':False,'workerStopped':True,'finalPaused':True}
+    report={'networks':['actual L2L Signet','actual Solana Devnet'],'freshPostgresLedger':True,'legacyImport':False,'feesBpsBothDirections':100,'orders':[{'direction':x['request']['direction'],'orderId':x['orderId'],'status':x['status'],'payout':x['payoutTx'],'quote':x['quote']} for x in terminal.values()],'nativeDeposit':nd['transaction'],'solanaDeposit':sd['signature'],'nativePayoutConfirmed':True,'solanaPayoutFinalized':True,'financialTablesCompared':len(before['tables']),'financialRowsAndSequenceUnchangedAfterRestart':True,'savedOrderReloadStable':True,'hostFenceEnabled':True,'guiWalletVerified':False,'workerStopped':True,'finalPaused':True,'installedSystemdWorker':bool(installed)}
     Path(a.report).write_text(json.dumps(report,indent=2)+'\n');print(json.dumps({'freshProductAcceptance':'passed','directions':2,'restartStable':True}))
 finally:stop()

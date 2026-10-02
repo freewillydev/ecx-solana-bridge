@@ -261,3 +261,38 @@ The actual 16→17 upgrade, completed recovery replay, settled-parent refusal an
 `scripts/native-family-readback.hs CONFIG` is a read-only diagnostic restricted to the dedicated existing public-test deployment. It verified the previously confirmed Signet payment through the new family reader, preserving wallet balances, transaction count and key-pool counts. Its allowlist excludes signing, sending and wallet mutations. [Readback evidence](evidence/native-family-readback.json). This exercises one actual confirmed member, not a live replacement family.
 
 All 342 examples plus 100 generated arithmetic cases pass. The 28 new family/signing cases use captured public templates and explicitly non-sendable sibling byte stubs for deterministic RPC contracts. They test application state transitions, not a substitute network or cryptographic validity of those stubs. Actual replacement signing/broadcast, changed-winner accounting, complete destination loss and restore/resume remain separate gates.
+
+
+## Installed Linux product acceptance driver
+
+`integration/FreshProductCheck.py` can use `--installed-vm NAME` to run the
+same customer, fee, finality and restart checks against the installed systemd
+paying worker. The host state directory must contain that guest's matching
+private `config.json`; use a separate `product/` journal for its own orders.
+The driver verifies the exact configured custody/chain identity and installed
+public-test payment mode before starting. It uses SSH stdin for requests and
+reads the native RPC cookie inside the guest. It opens no public RPC port and
+copies no existing custody or tester key into the guest. The Solana tester signs
+locally with its existing dedicated Devnet key. The guest must already have its
+own funded `ecx-bridge-tester` native wallet and configured treasury allocations.
+
+Set `LIMA_HOME` to the dedicated task VM directory. Supply `--devnet-dir`,
+`--deposit-helper` and `--report` as for local acceptance; `--binary` is unnecessary
+for installed mode. Run only against the dedicated freshly funded acceptance
+installation. This option does not provision funds, import a ledger or authorize
+an existing signing deployment to be duplicated. On completion or timeout it
+stops the installed worker and retains the exact requests and deposits for
+reconciliation. GUI wallet signing and clean-host/key restoration remain separate
+checks. The installed paying test has not yet run; the modified local driver
+replayed the existing two real terminal orders and passed its restart comparison
+without new funding or deposits.
+
+
+The `pg-install` fixture now retains two newly created empty native wallets and
+private funding-address/checkpoint journals under
+`/var/lib/ecx-bridge/private/installed-paying-stage/`. Preparation is reproducible
+with `integration/PrepareInstalledNative.py` run as root in that dedicated guest.
+It checks the real L2L Signet challenge, refuses unjournaled preexisting names,
+and sends no funding. The guest's existing observer installation remains intact;
+preparation is not a paying-mode activation. Preserve its original database,
+configuration and fence before switching to a distinct fresh acceptance deployment.

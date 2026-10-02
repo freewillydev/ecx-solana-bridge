@@ -54,6 +54,16 @@ and [Linux fence evidence](evidence/postgres-worker-fence-linux.json). The
 observation-only installation had no signer and remained unavailable for
 payments. The consolidated native ARM64 build also passed 371 Haskell examples, seven Rust tests and the browser build. Its deployment-only repack requires both actual Solana history origins in the wizard; 17 installer tests pass. ARM64 upgrade/reinstall preserved 31 durable tables and existing configuration. After initial real-chain history ingestion settled, cold reboot preserved the exact baseline with all three scanners healthy and the protected fence verified. Installed ARM64 stale-ledger and retirement contracts passed. See [ARM build](evidence/native-arm-consolidated-build.json), [ARM installation](evidence/postgres-installer-consolidated-arm.json) and [ARM fence](evidence/postgres-worker-fence-linux-arm.json). The fixture remained observation-only, without a signer. Installed paying flows, off-host/key restoration and an x86 deployment-only repack of the wizard fix remain separate checks.
 
+The product acceptance driver now supports the installed systemd worker through
+private SSH/stdin transport, with the guest reading its own RPC cookie. Its local
+path replayed both existing real terminal orders and passed the restart comparison
+without new funding/deposits; see [driver replay](evidence/postgres-product-driver-replay.json).
+Two new native wallets were created and durably journaled on the actual installed
+ARM64 Signet node, with replay checked and no funding or key export. See
+[installed native preparation](evidence/installed-paying-native-preparation.json).
+The installed paying mode itself is not yet verified: separate Solana custody,
+funding, fresh ledger/configuration and treasury allocation must precede that run.
+
 ## Verified locally
 
 | Check | Result and evidence |
