@@ -13,6 +13,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Opaleye as O
+import qualified Opaleye.Internal.Locking as Locking
 
 -- Internal financial capability. Do not pass it to safe HTTP interpreters.
 data Ledger = Ledger (MVar (Maybe PG.Connection)) (Maybe (Int64 -> IO ()))
@@ -41,21 +42,25 @@ ledgerAction (Ledger cell guard) action = do
     Nothing -> pure (Nothing,Left (toException (userError "ledger_connection_fenced")))
     Just connection -> mask $ \restore -> do
       outcome <- try $ do
-        _ <- PG.execute_ connection "BEGIN"
+        PG.begin connection
         -- Serialize mutations even if a maintenance session also accesses state.
-        _ <- PG.query_ connection "SELECT singleton FROM deployment WHERE singleton=1 FOR UPDATE" :: IO [PG.Only Int64]
+        locked <- O.runSelect connection $ Locking.forUpdate $ do
+          row <- O.selectTable deploymentTable
+          O.where_ (deploymentSingleton row O..== O.sqlInt8 1)
+          pure (deploymentSingleton row)
+        require (locked==[1::Int64]) "corrupt_deployment"
         value <- restore (action connection)
         case guard of
           Nothing->pure ()
           Just checkpoint->do
             sequences <- O.runSelect connection $ fmap deploymentCriticalSequence (O.selectTable deploymentTable) :: IO [Int64]
             case sequences of [sequenceNo]->checkpoint sequenceNo; _->reject "corrupt_sequence"
-        _ <- PG.execute_ connection "COMMIT"
+        PG.commit connection
         pure value
       case outcome of
         Right value -> pure (Just connection,Right value)
         Left (err :: SomeException) -> do
-          cleanup <- try (PG.execute_ connection "ROLLBACK") :: IO (Either SomeException Int64)
+          cleanup <- try (PG.rollback connection) :: IO (Either SomeException ())
           let sqlFailure = case fromException err of Just (_ :: PG.SqlError)->True; Nothing->False
               ioFailure = case fromException err of Just (_ :: IOException)->True; Nothing->False
               reusable = not sqlFailure && not ioFailure && case cleanup of Right _->True; Left _->False

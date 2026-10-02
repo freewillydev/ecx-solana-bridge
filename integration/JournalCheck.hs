@@ -1,8 +1,14 @@
+{-# LANGUAGE GADTs #-}
 module Main (main) where
 
 import Bridge.Types (Asset(..), require, BridgeError)
 import qualified Bridge.Postgres.Ledger as L
+import Bridge.Postgres.Schema
+import qualified Opaleye as O
 import Control.Exception (bracket, try)
+import Control.Concurrent.Async (withAsync,wait)
+import System.Timeout (timeout)
+import qualified Opaleye.Internal.Locking as Locking
 import Data.Int (Int64)
 import qualified Data.Map.Strict as M
 import qualified Database.PostgreSQL.Simple as PG
@@ -18,13 +24,20 @@ main = do
   database <- fromMaybe "ecx_financial_schema" <$> lookupEnv "ECX_JOURNAL_CONTRACT_DATABASE"
   let settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,
         PG.connectDatabase=database,PG.connectUser=user}
-  bracket (PG.connect settings) PG.close $ \connection->do
-    existing <- PG.query_ connection "SELECT count(*) FROM deployment" :: IO [PG.Only Int64]
-    require (existing==[PG.Only 0]) "fresh_contract_database_required"
-    PG.withTransaction connection $ do
-      _ <- PG.execute_ connection "INSERT INTO deployment(singleton,schema_version,fingerprint) VALUES(1,18,'journal-contract')"
-      _ <- PG.execute_ connection "INSERT INTO custody_check(singleton,revision) VALUES(1,0)"
-      pure ()
+  bracket (PG.connect settings) PG.close $ \connection->
+    PG.withTransaction connection (fixture connection InitializeFixture)
+  -- A second connection must wait for the Opaleye FOR UPDATE owner, then
+  -- proceed after commit. This exercises the database lock, not a Haskell mutex.
+  bracket (PG.connect settings) PG.close $ \first->
+    bracket (PG.connect settings) PG.close $ \second->do
+      PG.begin first
+      fixture first LockDeployment
+      withAsync (fixture second LockDeployment) $ \pending->do
+        blocked <- timeout 200000 (wait pending)
+        require (blocked==Nothing) "deployment_row_lock_missing"
+        PG.commit first
+        released <- timeout 2000000 (wait pending)
+        require (released==Just ()) "deployment_row_lock_not_released"
   L.withLedger settings "journal-contract" $ \ledger->do
     L.ledgerAction ledger $ \connection->do
       L.posting connection "contract" "isolated accounting contract" [(Native,"float",100),(Native,"external",-100)]
@@ -40,9 +53,7 @@ main = do
         refused action=do
           result <- try action :: IO(Either BridgeError ())
           require (case result of Left _->True; _->False) "invalid_backup_accepted"
-        coverage=L.ledgerAction ledger $ \connection->PG.query_ connection
-          "SELECT critical_sequence,backup_sequence,(SELECT count(*) FROM audit WHERE action='backup') FROM deployment"
-          :: IO [(Int64,Int64,Int64)]
+        coverage=L.ledgerAction ledger (\connection->fixture connection ReadCoverage)
     refused $ L.acknowledgeBackup ledger "wrong-deployment" 1 receipt
     refused $ L.acknowledgeBackup ledger "journal-contract" 2 receipt
     refused $ L.acknowledgeBackup ledger "journal-contract" 1 "not-a-remote-receipt"
@@ -57,6 +68,46 @@ main = do
   L.withLedger settings "journal-contract" $ \ledger->do
     bs <- L.ledgerAction ledger L.balances
     require (M.lookup ("Native","float") bs==Just 100) "reopen_balance_failed"
-    coverage <- L.ledgerAction ledger $ \connection->PG.query_ connection "SELECT critical_sequence,backup_sequence FROM deployment" :: IO [(Int64,Int64)]
-    require (coverage==[(2,1)]) "backup_acknowledgment_not_durable"
-  putStrLn "PostgreSQL journal and backup acknowledgment: balanced writes, ownership, exact coverage, identity/receipt/stale refusal, idempotence and durable reopen passed"
+    coverage <- L.ledgerAction ledger (\connection->fixture connection ReadCoverage)
+    require (coverage==[(2,1,1)]) "backup_acknowledgment_not_durable"
+  putStrLn "PostgreSQL journal and backup acknowledgment: balanced writes, row locking, ownership, exact coverage, identity/receipt/stale refusal, idempotence and durable reopen passed"
+
+
+-- Closed test operations: no arbitrary SQL/query callback in fixture access.
+data Fixture a where
+  InitializeFixture :: Fixture ()
+  LockDeployment :: Fixture ()
+  ReadCoverage :: Fixture [(Int64,Int64,Int64)]
+
+fixture :: PG.Connection -> Fixture a -> IO a
+fixture connection = \case
+  LockDeployment -> do
+    rows <- O.runSelect connection $ Locking.forUpdate $ do
+      row <- O.selectTable deploymentTable
+      O.where_ (deploymentSingleton row O..== O.sqlInt8 1)
+      pure (deploymentSingleton row)
+    require (rows==[1::Int64]) "fixture_deployment_missing"
+  InitializeFixture -> do
+    existing <- O.runSelect connection (O.selectTable deploymentTable) :: IO [Deployment]
+    require (null existing) "fresh_contract_database_required"
+    _ <- O.runInsert connection O.Insert
+      { O.iTable=deploymentTable
+      , O.iRows=[Deployment (O.sqlInt8 1) (O.sqlInt8 18) (O.sqlStrictText "journal-contract")
+          (O.sqlInt8 0) (O.sqlInt8 0) (O.sqlInt8 1) (O.sqlStrictText "contract")]
+      , O.iReturning=O.rCount,O.iOnConflict=Nothing }
+    _ <- O.runInsert connection O.Insert
+      { O.iTable=custodycheckTable
+      , O.iRows=[CustodyCheck (O.sqlInt8 1) (O.sqlInt8 0) O.null O.null O.null O.null]
+      , O.iReturning=O.rCount,O.iOnConflict=Nothing }
+    pure ()
+  ReadCoverage -> do
+    rows <- O.runSelect connection $ do
+      row <- O.selectTable deploymentTable
+      pure (deploymentCriticalSequence row,deploymentBackupSequence row)
+      :: IO [(Int64,Int64)]
+    receipts <- O.runSelect connection $ do
+      row <- O.selectTable auditTable
+      O.where_ (auditAction row O..== O.sqlStrictText "backup")
+      pure (auditId row)
+      :: IO [Int64]
+    pure [(current,covered,fromIntegral(length receipts)) | (current,covered)<-rows]
