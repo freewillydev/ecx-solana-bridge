@@ -12,6 +12,9 @@ import qualified Bridge.Postgres.Ledger as L
 import qualified Bridge.Postgres.Source as Source
 import qualified Bridge.Postgres.NativeRecovery as NativeRecovery
 import qualified Bridge.Postgres.LossCover as LossCover
+import qualified Bridge.Postgres.Settlement as Settlement
+import System.Environment (lookupEnv)
+import Data.Maybe (fromMaybe)
 import Bridge.Ledger (LossCapital(..),SourceCheck(..),Deposit(..),Attempt(..),PaymentCosts(..),NativeSettlementCheck(..))
 import qualified Data.Text as T
 import Control.Exception (bracket,try)
@@ -66,7 +69,8 @@ snapshot ledger = L.ledgerAction ledger $ \c->do
 main :: IO ()
 main = do
   user <- getEffectiveUserName
-  let connectionSettings=settings user
+  database <- fromMaybe "ecx_source_approval_contract" <$> lookupEnv "ECX_SOURCE_CONTRACT_DATABASE"
+  let connectionSettings=(settings user) {PG.connectDatabase=database}
   bracket (PG.connect connectionSettings) PG.close $ \c->do
     [PG.Only count] <- PG.query_ c "SELECT count(*) FROM deployment" :: IO[PG.Only Int64]
     require (count==0) "fresh_contract_database_required"
@@ -173,11 +177,12 @@ main = do
       require (count==0) "contract_unapproved_winner_money_posted"
     winnerContract ledger
     lossCoverContract ledger
+    coveredObligationContract ledger
   L.withLedger connectionSettings identity $ \ledger->do
     L.ledgerAction ledger $ \c->do
       rows <- PG.query_ c "SELECT id,status FROM obligations ORDER BY id" :: IO[(Text,Text)]
       require (lookup "restore-ready" rows==Just "ready" && lookup "restore-paying" rows==Just "paying" && lookup "changed-work" rows==Just "review" && lookup "stale-restoration" rows==Just "review") "contract_restart_changed_state"
-  putStrLn "PostgreSQL source approval: ready/paying restoration, freshness, replay, conflict, changed-work/stale refusal, candidate view, source/evidence fences and reopen plus native finality and replacement draft/sign/cancel, older/newer winner fees, loss cover/return and fences passed; database-only contract"
+  putStrLn "PostgreSQL source approval: ready/paying restoration, freshness, replay, conflict, changed-work/stale refusal, candidate view, source/evidence fences and reopen plus native finality and replacement draft/sign/cancel, older/newer winner fees, loss cover/return, covered ready/paying approvals, exact backup coverage and fences passed; database-only contract"
 
 jsonText :: ToJSON a => a -> Text
 jsonText = TE.decodeUtf8 . LBS.toStrict . encode
@@ -343,3 +348,84 @@ lossCoverContract ledger = do
     posts <- PG.query_ c "SELECT account,sum(delta)::bigint FROM postings WHERE asset='Native' AND account IN('float','earned','source_deficit') GROUP BY account ORDER BY account" :: IO [(Text,Int64)]
     require (posts==[("earned",4000),("float",6000),("source_deficit",0)]) "contract_loss_return_changed_capital"
     pure ()
+
+
+-- Only database fixtures and non-sendable byte stubs. This never supplies fake
+-- chain responses, calls a signer or broadcasts a transaction.
+coveredObligationContract :: L.Ledger -> IO ()
+coveredObligationContract ledger = forM_ ["ready","paying"] $ \prior->do
+  let oid="covered-"<>prior
+      txid=T.replicate 64 (if prior=="ready" then "c" else "d")
+      did="native:"<>txid<>":0"
+      eventHash=oid<>"-database-evidence"
+      proof=object["transaction" .= txid,"output" .= (0::Int),"confirmations" .= (-1::Int),"observationHash" .= eventHash,"nodeBlock" .= ("covered-contract-block"::Text),"nodeHeight" .= (100::Int)]
+      report=object["matches" .= True,"nativeBlock" .= ("covered-contract-block"::Text),"nativeHeight" .= (100::Int)]
+      savedTx=oid<>"-non-sendable-payment"
+  (recovery,source,oldSendSequence) <- L.ledgerAction ledger $ \c->do
+    _ <- PG.execute c "INSERT INTO orders(id,capability_hash,idempotency_key,request_hash,request_json,quote_json,policy_json,status,deadline,grace_deadline) VALUES(?,?,?,'contract','{}','{}','{}','NeedsReview',100,200)" (oid,oid,oid)
+    _ <- PG.execute c "INSERT INTO deposits(id,order_id,asset,amount,anchor,first_seen,confirmations,eligible,allocated) VALUES(?,?,'Native',10000,'unconfirmed',100,0,0,1)" (did,oid)
+    _ <- PG.execute c "INSERT INTO obligations(id,order_id,deposit_id,kind,asset,amount,recipient,status) VALUES(?,?,?,'conversion','Wrapped',9900,'database-contract-recipient',?)" (oid,oid,did,prior)
+    oldSequence <- L.criticalSequence c
+    if prior=="paying" then do
+      -- Earlier changed-work fixture has no attempts or signed bytes. Retire
+      -- that isolated fixture's slot before testing a different Solana intent.
+      _ <- PG.execute_ c "UPDATE intents SET resolved=1 WHERE id='changed-work'"
+      _ <- PG.execute c "INSERT INTO intents(id,obligation_id,chain) VALUES(?,?,'Solana')" (oid,oid)
+      _ <- PG.execute c "INSERT INTO preparations(intent_id,generation,policy_json) VALUES(?,0,'{}')" (PG.Only oid)
+      _ <- PG.execute c "INSERT INTO fee_reservations(intent_id,asset,amount,released) VALUES(?,'Sol',5000,0)" (PG.Only oid)
+      _ <- PG.execute c "INSERT INTO attempts(txid,intent_id,signed_bytes,policy_json,fee_limit,state,critical_sequence) VALUES(?,?,'database-fixture-not-signed','{}',5000,'broadcast_intent',?)" (savedTx,oid,oldSequence)
+      pure ()
+    else pure ()
+    work <- Source.sourceWorkHashC c oid
+    Source.recordSourceCheckC c did $ SourceUnavailable $ object["reason" .= ("source_eligibility_lost"::Text),"reviewedObligations" .= [object["intent" .= oid,"previousStatus" .= prior,"workHash" .= work]]]
+    _ <- PG.execute c "UPDATE obligations SET status='review' WHERE id=?" (PG.Only oid)
+    _ <- PG.execute c "INSERT INTO observation_evidence(hash,chain,event_id,evidence_json) VALUES(?,'Native',?,'{}')" (eventHash,txid)
+    _ <- PG.execute c "INSERT INTO chain_events(chain,event_id,kind,anchor,evidence_hash,first_seen,last_seen,needs_review) VALUES('Native',?,'incoming','unconfirmed',?,100,100,0)" (txid,eventHash)
+    L.posting c (oid<>"-original-deposit") "isolated database fixture only" [(Native,"float",10000),(Native,"external",-10000)]
+    Source.recordSourceCheckC c did (SourceMissing proof)
+    [PG.Only loss] <- PG.query c "SELECT critical_sequence FROM source_recoveries WHERE deposit_id=? ORDER BY id DESC LIMIT 1" (PG.Only did) :: IO [PG.Only Int64]
+    quantity <- either reject pure(amount 10000)
+    pure(loss,Deposit did (Just oid) Native quantity "unconfirmed" 0 False 100,oldSequence)
+  Source.coveredAuthorized ledger oid >>= \yes->require (not yes) "uncovered_source_authorized"
+  expectError "source_loss_not_covered" $ Source.coveredObligation ledger oid recovery >> pure ()
+  capital <- LossCapital <$> either reject pure(amount 10000) <*> either reject pure(amount 0)
+  revision <- L.ledgerAction ledger $ \c->do
+    [PG.Only r] <- PG.query_ c "SELECT revision FROM custody_check" :: IO [PG.Only Int64]
+    pure r
+  LossCover.record ledger source recovery 100 capital "isolated cover contract" proof (object["revision" .= revision,"checkedAt" .= (100::Int),"report" .= report])
+  Source.coveredAuthorized ledger oid >>= \yes->require (not yes) "capital_cover_implicitly_authorized_payment"
+  expectError "custody_not_reconciled" $ Source.coveredRecord ledger oid recovery 100 "explicit covered contract" proof
+  fresh ledger
+  L.ledgerAction ledger $ \c->PG.execute c "UPDATE custody_check SET report_json=?" (PG.Only $ jsonText report) >> pure ()
+  Source.coveredRecord ledger oid recovery 100 "explicit covered contract" proof
+  before <- snapshot ledger
+  Source.coveredRecord ledger oid recovery 100 "explicit covered contract" proof
+  expectError "source_approval_conflict" $ Source.coveredRecord ledger oid recovery 100 "changed approval" proof
+  after <- snapshot ledger
+  require (before==after) "covered_approval_replay_mutated_state"
+  Source.coveredAuthorized ledger oid >>= \yes->require yes "approved_covered_source_not_authorized"
+  L.ledgerAction ledger $ \c->PG.execute c "UPDATE chain_events SET needs_review=1 WHERE chain='Native' AND event_id=?" (PG.Only txid) >> pure ()
+  Source.coveredAuthorized ledger oid >>= \yes->require (not yes) "ambiguous_covered_source_authorized"
+  L.ledgerAction ledger $ \c->PG.execute c "UPDATE chain_events SET needs_review=0 WHERE chain='Native' AND event_id=?" (PG.Only txid) >> pure ()
+  L.ledgerAction ledger $ \c->do
+    states <- PG.query c "SELECT o.status,d.eligible FROM obligations o JOIN deposits d ON d.id=o.deposit_id WHERE o.id=?" (PG.Only oid) :: IO [(Text,Int64)]
+    require (states==[(prior,0)]) "covered_approval_changed_physical_eligibility_or_prior_state"
+  if prior=="paying" then do
+    L.ledgerAction ledger $ \c->PG.execute_ c "UPDATE deployment SET paused=0" >> pure ()
+    L.acknowledgeBackup ledger identity oldSendSequence (T.replicate 64 "e")
+    needed <- Settlement.markBroadcastIntent ledger savedTx
+    require (needed>oldSendSequence) "covered_approval_not_included_in_send_coverage"
+    expectError "backup_pending" $ Settlement.authorizeRecordedSend ledger True savedTx >> pure ()
+    L.acknowledgeBackup ledger identity needed (T.replicate 64 "f")
+    saved <- Settlement.authorizeRecordedSend ledger True savedTx
+    require (attemptId saved==savedTx && attemptBytes saved=="database-fixture-not-signed") "covered_approval_created_different_payment"
+    L.pause ledger "isolated-contract-finished"
+  else pure ()
+  -- Returning the source retires the cover. If it is lost again, its previous
+  -- capital allocation/approval cannot authorize another uncovered loss.
+  L.ledgerAction ledger $ \c->do
+    _ <- PG.execute c "UPDATE deposits SET eligible=1 WHERE id=?" (PG.Only did)
+    Source.recordSourceCheckC c did (SourceRestored $ object["contractRestored" .= True])
+    _ <- PG.execute c "UPDATE deposits SET eligible=0 WHERE id=?" (PG.Only did)
+    Source.recordSourceCheckC c did (SourceMissing proof)
+  Source.coveredAuthorized ledger oid >>= \yes->require (not yes) "returned_cover_authorized_later_loss"

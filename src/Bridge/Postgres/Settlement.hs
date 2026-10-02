@@ -5,6 +5,7 @@ import Bridge.Types
 import Bridge.Ledger (Attempt(..),PaymentCosts(..))
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
+import qualified Bridge.Postgres.Source as Source
 import Control.Monad (forM_,when)
 import Data.Aeson (FromJSON,ToJSON,object,(.=),encode,eitherDecodeStrict')
 import qualified Data.ByteString.Lazy as LBS
@@ -106,11 +107,13 @@ nativeSendChoice c a i = when (intentsChain i=="Native") $ do
 
 markBroadcastIntent :: Ledger -> Text -> IO Int64
 markBroadcastIntent ledger txid = ledgerAction ledger $ \c->do
-  (a,i,_,d,_) <- paymentContext c txid
+  (a,i,_,_,_) <- paymentContext c txid
   nativeSendChoice c a i
   case (attemptsState a,attemptsCriticalSequence a) of
     ("broadcast_intent",Just sequenceNo)->sourceCoverage c (intentsId i) sequenceNo
-    ("signed",_) | depositsEligible d==1->do
+    ("signed",_)->do
+      sourceAllowed <- Source.authorizedC c (intentsId i)
+      require sourceAllowed "source_not_eligible"
       deployment <- O.runSelect c (O.selectTable deploymentTable) :: IO [Deployment]
       require (map deploymentPaused deployment==[0]) "payouts_paused"
       sequenceNo <- criticalSequence c
@@ -120,13 +123,14 @@ markBroadcastIntent ledger txid = ledgerAction ledger $ \c->do
 
 authorizeRecordedSend :: Ledger -> Bool -> Text -> IO Attempt
 authorizeRecordedSend ledger remote txid = ledgerAction ledger $ \c->do
-  (a,i,ob,d,_) <- paymentContext c txid
+  (a,i,ob,_,_) <- paymentContext c txid
   require (intentsResolved i==0 && attemptsState a=="broadcast_intent") "broadcast_intent_required"
   sequenceNo <- maybe (reject "broadcast_intent_required") pure(attemptsCriticalSequence a)
   needed <- sourceCoverage c (intentsId i) sequenceNo
   deployment <- O.runSelect c (O.selectTable deploymentTable) :: IO [Deployment]
   require (not remote || case deployment of [r]->deploymentBackupSequence r>=needed; _->False) "backup_pending"
-  require (depositsEligible d==1 && obligationsStatus ob=="paying") "source_not_eligible"
+  sourceAllowed <- Source.authorizedC c (intentsId i)
+  require (sourceAllowed && obligationsStatus ob=="paying") "source_not_eligible"
   require (map deploymentPaused deployment==[0]) "payouts_paused"
   nativeSendChoice c a i
   pure(Attempt (attemptsTxid a) (attemptsIntentId a) (intentsChain i) (attemptsSignedBytes a) (attemptsPolicyJson a) (attemptsFeeLimit a) (attemptsState a) (attemptsCriticalSequence a))

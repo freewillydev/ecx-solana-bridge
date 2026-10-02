@@ -7,6 +7,7 @@ import Bridge.Budget (CostLimits(..))
 import Bridge.Ledger (Obligation(..),Preparation(..))
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
+import qualified Bridge.Postgres.Source as Source
 import Bridge.Postgres.Budget (transferOrderCosts)
 import Data.Aeson (FromJSON,eitherDecodeStrict')
 import Data.Int (Int64)
@@ -70,8 +71,8 @@ begin ledger cfg expected chain limit policy = ledgerAction ledger $ \c->do
     []->do
       deployment <- O.runSelect c (O.selectTable deploymentTable) :: IO [Deployment]
       require (map deploymentPaused deployment==[0]) "payouts_paused"
-      deposits <- O.runSelect c $ whereRows (\row->depositsId row O..== text(obligationDeposit expected)) (O.selectTable depositsTable) :: IO [Deposits]
-      require (map depositsEligible deposits==[1]) "source_not_eligible"
+      sourceAllowed <- Source.authorizedC c intent
+      require sourceAllowed "source_not_eligible"
       require (obligationsStatus ob=="ready") "obligation_not_ready"
       busy <- O.runSelect c $ whereRows (\row->intentsChain row O..== text chain O..&& intentsResolved row O..== num 0) (O.selectTable intentsTable) :: IO [Intents]
       require (null busy) "destination_payment_unresolved"
@@ -135,8 +136,8 @@ storeAttempt ledger expected chain txid bytes policy limit common generation = l
   require (actual==fromIntegral generation) "preparation_generation_changed"
   fees <- O.runSelect c $ whereRows (\r->feereservationsIntentId r O..== text(obligationId expected)) (O.selectTable feereservationsTable) :: IO [FeeReservations]
   require ([(feereservationsAmount r,feereservationsReleased r) | r<-fees]==[(limit,0)]) "payment_not_prepared"
-  deposits <- O.runSelect c $ whereRows (\r->depositsId r O..== text(obligationDeposit expected)) (O.selectTable depositsTable) :: IO [Deposits]
-  require (map depositsEligible deposits==[1]) "source_not_eligible"
+  sourceAllowed <- Source.authorizedC c (obligationId expected)
+  require sourceAllowed "source_not_eligible"
   require (obligationsStatus ob=="paying") "obligation_not_preparing"
   prior <- O.runSelect c $ whereRows (\r->attemptsIntentId r O..== text(obligationId expected) O..&& attemptsPreparationGeneration r O..== num actual) (O.selectTable attemptsTable) :: IO [Attempts]
   require (null prior) "attempt_already_recorded"

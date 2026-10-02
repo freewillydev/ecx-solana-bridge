@@ -1,0 +1,14 @@
+{
+  "scope": "isolated real PostgreSQL 16, database fixtures only; no chain clients or workers",
+  "result": "PostgreSQL source approval: ready/paying restoration, freshness, replay, conflict, changed-work/stale refusal, candidate view, source/evidence fences and reopen plus native finality and replacement draft/sign/cancel, older/newer winner fees, loss cover/return, covered ready/paying approvals, exact backup coverage and fences passed; database-only contract",
+  "coveredReadyAndPayingApprovalsPassed": true,
+  "capitalCoverAloneCannotAuthorize": true,
+  "physicalEligibilityPreserved": true,
+  "originalPaymentRetained": true,
+  "approvalBackupCoverageEnforced": true,
+  "ambiguousSourceCannotAuthorize": true,
+  "returnedCoverCannotAuthorizeLaterLoss": true,
+  "sourceLedgerModified": false,
+  "liveSourceConflictRoundTripTested": false,
+  "signedOrSent": false
+}

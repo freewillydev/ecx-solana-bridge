@@ -8,6 +8,7 @@ import Bridge.Operation.Internal
 import Bridge.Postgres.Ledger (Ledger,withLedger,ledgerAction,pause,readiness)
 import Bridge.Postgres.Schema hiding (Audit)
 import qualified Bridge.Postgres.Backup as Backup
+import qualified Bridge.Postgres.CoveredSource as CoveredSource
 import Data.Int (Int64)
 import qualified Bridge.Postgres.Order as Order
 import qualified Bridge.Postgres.Observer as Observer
@@ -151,6 +152,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
       approveSolanaRetryWith (realPaymentTransport manager cfg backup) cfg (Store ledger) txid reason
       pure(object["approvedRetryOf" .= txid,"signedOrSent" .= False])
     ApproveSourceRecovery intent restoration reason->approveSourceRecoveryWith epochSeconds (realPaymentTransport manager cfg backup) cfg (Store ledger) intent restoration reason
+    ApproveCoveredSource intent loss reason->CoveredSource.approveWith epochSeconds (realPaymentTransport manager cfg backup) cfg ledger intent loss reason
     PrepareNativeReplacement parent fee reason->
       prepareNativeReplacementWith epochSeconds (realPaymentTransport manager cfg backup) cfg (Store ledger) parent fee reason
     SignNativeReplacement sequenceNo->do

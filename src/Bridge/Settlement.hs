@@ -203,7 +203,7 @@ recheckSourceWith :: SettlementStore ledger => PaymentTransport -> Config -> led
 recheckSourceWith transport c ledger ob = do
   (deposit,request,policy,instruction) <- paymentSourceContext ledger ob
   require (deploymentFingerprint policy==fingerprint c && solanaCommitment policy=="finalized") "payment_profile_mismatch"
-  refreshed <- case depositAsset deposit of
+  (refreshed,provedMissing) <- case depositAsset deposit of
     Native -> do
       (txid,index) <- case T.splitOn ":" (depositId deposit) of
         ["native",tx,n] | transactionId tx,Just i<-readMaybe (T.unpack n),i>=0 -> pure (tx,i::Int)
@@ -222,11 +222,11 @@ recheckSourceWith transport c ledger ob = do
       owned <- ownedScript call instruction
       require (actualIndex==index && quantity==depositAmount deposit && script==owned) "source_binding_mismatch"
       depth <- fieldValue "confirmations" value :: IO Int
-      if depth<nativeDepth policy then pure deposit{depositConfirmations=max 0 depth,depositEligible=False}
+      if depth<nativeDepth policy then pure (deposit{depositConfirmations=max 0 depth,depositEligible=False},depth<0)
       else do
         anchor <- fieldValue "blockhash" value
         _ <- activeNativeBlock call anchor (nativeDepth policy)
-        pure deposit{depositAnchor=anchor,depositConfirmations=depth,depositEligible=True}
+        pure (deposit{depositAnchor=anchor,depositConfirmations=depth,depositEligible=True},False)
     Wrapped -> do
       signature <- maybe (reject "invalid_solana_deposit_id") pure (T.stripPrefix "solana:" $ depositId deposit)
       verify <- case T.stripPrefix "solana-pay:" instruction of
@@ -242,10 +242,23 @@ recheckSourceWith transport c ledger ob = do
         Just verifier -> do
           independent <- solanaProof verifier signature >>= either reject pure . verify
           require (independent==verified) "source_verifier_disagreement"
-      pure deposit{depositConfirmations=1,depositEligible=True}
+      pure (deposit{depositConfirmations=1,depositEligible=True},False)
     Sol -> reject "unsupported_source_asset"
   settlementRefresh ledger refreshed
-  require (depositEligible refreshed) "source_not_eligible"
+  covered <- if not(depositEligible refreshed) && provedMissing
+    then settlementCoveredSource ledger ob else pure False
+  require (depositEligible refreshed || covered) "source_not_eligible"
+  when covered $ do
+    -- A saved cover cannot turn a merely pending or ambiguously missing input
+    -- into spend authority. Confirm the same node's conflict/absence evidence
+    -- again immediately before signing/broadcasting the recorded obligation.
+    (txid,index) <- case T.splitOn ":" (depositId refreshed) of
+      ["native",tx,n] | transactionId tx,Just i<-readMaybe(T.unpack n),i>=0->pure(tx,i::Int)
+      _->reject "invalid_native_deposit_id"
+    mempool <- try (paymentNative transport False "getmempoolentry" [toJSON txid]) :: IO(Either BridgeError Value)
+    require (case mempool of Left(BridgeError "rpc_error_-5")->True; _->False) "native_source_conflict_not_proven"
+    output <- paymentNative transport False "gettxout" [toJSON txid,toJSON index,Bool True]
+    require (output==Null) "native_source_conflict_not_proven"
 
 -- Storage boundary shared by immutable saved-payment verification. The chain
 -- validation below stays identical across the migration.
@@ -269,6 +282,10 @@ class (PaymentStore ledger, PreparationStore ledger) => SettlementStore ledger w
   settlementReady :: ledger -> IO [Obligation]
   settlementBusy :: ledger -> Text -> IO Bool
   settlementRefresh :: ledger -> Deposit -> IO ()
+  -- Only PostgreSQL's explicit covered-obligation approval supplies this
+  -- capability. Ordinary pending sources and RPC uncertainty never qualify.
+  settlementCoveredSource :: ledger -> Obligation -> IO Bool
+  settlementCoveredSource _ _ = pure False
   settlementRecord :: ledger -> Text -> PaymentCosts -> Text -> IO ()
   settlementFailed :: ledger -> Text -> Int64 -> Text -> IO ()
   settlementExpiry :: ledger -> Attempt -> Text -> IO ()

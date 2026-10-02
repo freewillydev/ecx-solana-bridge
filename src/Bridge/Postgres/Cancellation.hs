@@ -3,6 +3,7 @@ import Bridge.Types
 import Bridge.Ledger (Preparation(..),Obligation(..))
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
+import Bridge.Postgres.Custody (freshC)
 import qualified Bridge.Postgres.Preparation as P
 import Data.Aeson (Value(..),encode)
 import qualified Data.ByteString.Lazy as LBS
@@ -26,12 +27,6 @@ readCancellation ledger intent generation = ledgerAction ledger $ \c->do
     [r]->pure(Just(preparationcancellationsReason r,preparationcancellationsCleanupJson r,preparationcancellationsCompleted r==1))
     _->reject "duplicate_preparation_cancellation"
 
-freshC :: PG.Connection -> Int64 -> IO ()
-freshC c now = do
-  checks <- O.runSelect c(O.selectTable custodycheckTable) :: IO [CustodyCheck]
-  require (case checks of
-    [r]->custodycheckCheckedRevision r==Just(custodycheckRevision r) && custodycheckLastError r==Nothing && maybe False (\at->at>=0 && at<=now && toInteger now-toInteger at<=60) (custodycheckCheckedAt r)
-    _->False) "custody_not_reconciled"
 checkFresh :: Ledger -> Int64 -> IO ()
 checkFresh ledger now = ledgerAction ledger(\c->freshC c now)
 paused :: PG.Connection -> IO ()

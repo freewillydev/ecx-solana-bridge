@@ -25,6 +25,7 @@ data RefundRequest = RefundRequest { depositId :: Text } deriving (Generic,FromJ
 data RetryRequest = RetryRequest { transaction :: Text, reason :: Text } deriving (Generic,FromJSON)
 data CancelRequest = CancelRequest { intent :: Text, generation :: Int, cancellationReason :: Text } deriving (Generic,FromJSON)
 data SourceRecoveryRequest = SourceRecoveryRequest { obligation :: Text, restorationSequence :: Int64, approvalReason :: Text } deriving (Generic,FromJSON)
+data CoveredSourceRequest = CoveredSourceRequest { coveredObligation :: Text, coveredLossSequence :: Int64, coveredApprovalReason :: Text } deriving (Generic,FromJSON)
 data ReplacementDraftRequest = ReplacementDraftRequest { parentTransaction :: Text, replacementFee :: Amount, replacementReason :: Text } deriving (Generic,FromJSON)
 data ReplacementRequest = ReplacementRequest { draftSequence :: Int64 } deriving (Generic,FromJSON)
 data ReplacementCancelRequest = ReplacementCancelRequest { cancelledDraftSequence :: Int64, replacementCancellationReason :: Text } deriving (Generic,FromJSON)
@@ -33,6 +34,7 @@ type OperatorAPI = AdminAPI :<|> "refund" :> ReqBody '[JSON] RefundRequest :> Po
   :<|> "retry-solana" :> ReqBody '[JSON] RetryRequest :> Post '[JSON] Data.Aeson.Value
   :<|> "cancel-preparation" :> ReqBody '[JSON] CancelRequest :> Post '[JSON] Data.Aeson.Value
   :<|> "approve-source-recovery" :> ReqBody '[JSON] SourceRecoveryRequest :> Post '[JSON] Data.Aeson.Value
+  :<|> "approve-covered-source" :> ReqBody '[JSON] CoveredSourceRequest :> Post '[JSON] Data.Aeson.Value
   :<|> "prepare-native-replacement" :> ReqBody '[JSON] ReplacementDraftRequest :> Post '[JSON] Data.Aeson.Value
   :<|> "sign-native-replacement" :> ReqBody '[JSON] ReplacementRequest :> Post '[JSON] Data.Aeson.Value
   :<|> "cancel-native-replacement" :> ReqBody '[JSON] ReplacementCancelRequest :> Post '[JSON] Data.Aeson.Value
@@ -50,6 +52,7 @@ adminServer = (safe Readiness
   :<|> (\request->operator(ApproveSolanaRetry(transaction request)(reason request)))
   :<|> (\request->operator(CancelPreparation(intent request)(generation request)(cancellationReason request)))
   :<|> (\request->operator(ApproveSourceRecovery(obligation request)(restorationSequence request)(approvalReason request)))
+  :<|> (\request->operator(ApproveCoveredSource(coveredObligation request)(coveredLossSequence request)(coveredApprovalReason request)))
   :<|> (\request->operator(PrepareNativeReplacement(parentTransaction request)(replacementFee request)(replacementReason request)))
   :<|> (\request->operator(SignNativeReplacement(draftSequence request)))
   :<|> (\request->operator(CancelNativeReplacement(cancelledDraftSequence request)(replacementCancellationReason request)))

@@ -145,6 +145,7 @@ instance SettlementStore Store where
       :: IO [Text]
     pure(not $ null rows)
   settlementRefresh (Store ledger) = Observation.refreshDeposit ledger
+  settlementCoveredSource (Store ledger) ob = Source.coveredAuthorized ledger (obligationId ob)
   settlementRecord (Store ledger) = S.recordSettlement ledger
   settlementFailed (Store ledger) = S.recordFailedSolana ledger
   settlementExpiry (Store ledger) = S.recordSolanaExpiry ledger

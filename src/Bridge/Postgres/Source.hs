@@ -1,9 +1,10 @@
-module Bridge.Postgres.Source (recordSourceCheckC, paymentWorkHashC, sourceWorkHashC, recoveryApproval, recoveryObligation, recoveryRecord, candidates, recordCheck, orderBinding, eventEvidence) where
+module Bridge.Postgres.Source (recordSourceCheckC, paymentWorkHashC, sourceWorkHashC, recoveryApproval, recoveryObligation, recoveryRecord, coveredApproval, coveredObligation, coveredRecord, authorizedC, coveredAuthorized, candidates, recordCheck, orderBinding, eventEvidence) where
 
 import Bridge.Types
 import Bridge.Ledger (SourceCheck(..),Obligation(..),Deposit(..))
 import Bridge.Postgres.Ledger (Ledger,ledgerAction)
-import Bridge.Postgres.Cancellation (freshC)
+import Bridge.Postgres.Custody (freshC)
+import qualified Bridge.Postgres.Order as Order
 import Bridge.RPC (fieldValue)
 import Data.Int (Int64)
 import Data.Aeson (object,(.=),eitherDecodeStrict')
@@ -13,6 +14,7 @@ import Bridge.Postgres.Schema
 import Bridge.Postgres.Ledger (criticalSequence, posting)
 import Control.Monad (when, forM_)
 import Data.Aeson (Value(..), ToJSON, encode)
+import qualified Data.Aeson
 import Data.List (sortOn)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -134,8 +136,8 @@ recoveryApprovalC c intent restoration = do
 recoveryApproval :: Ledger -> Text -> Int64 -> IO (Maybe Text)
 recoveryApproval ledger intent restoration = ledgerAction ledger (\c->recoveryApprovalC c intent restoration)
 
-recoveryContextC :: PG.Connection -> Text -> Int64 -> IO (Obligation,Text,Int64,Text)
-recoveryContextC c intent restoration = do
+recoveryContextC :: PG.Connection -> Bool -> Text -> Int64 -> IO (Obligation,Text,Int64,Text,Maybe Int64)
+recoveryContextC c covered intent restoration = do
   rows <- O.runSelect c $ do
     ob <- O.selectTable obligationsTable
     deposit <- O.selectTable depositsTable
@@ -148,9 +150,12 @@ recoveryContextC c intent restoration = do
     O.where_ (sourcerecoveriesDepositId row O..== O.sqlStrictText (depositsId deposit))
     pure row
     :: IO [SourceRecoveries]
-  require (obligationsStatus ob=="review" && depositsEligible deposit==1 && case reverse(sortOn sourcerecoveriesId history) of
-    current:_->sourcerecoveriesState current=="restored" && sourcerecoveriesShortfall current==0 && sourcerecoveriesCriticalSequence current==restoration
+  require (obligationsStatus ob=="review" && case reverse(sortOn sourcerecoveriesId history) of
+    current:_->sourcerecoveriesCriticalSequence current==restoration &&
+      if covered then depositsAsset deposit=="Native" && depositsEligible deposit==0 && sourcerecoveriesState current=="missing" && sourcerecoveriesShortfall current==depositsAmount deposit
+      else depositsEligible deposit==1 && sourcerecoveriesState current=="restored" && sourcerecoveriesShortfall current==0
     _->False) "source_approval_not_expected"
+  cover <- if covered then activeCoverC c deposit >>= maybe (reject "source_loss_not_covered") (pure . Just) else pure Nothing
   approvals <- O.runSelect c $ do
     row <- O.selectTable sourcerecoveryapprovalsTable
     O.where_ (sourcerecoveryapprovalsObligationId row O..== O.sqlStrictText intent)
@@ -182,33 +187,146 @@ recoveryContextC c intent restoration = do
     pure(preparationcancellationsGeneration row)
     :: IO [Int64]
   require (null cancellations) "preparation_cancellation_pending"
-  pure(Obligation (obligationsId ob) (obligationsOrderId ob) (obligationsDepositId ob) (obligationsKind ob) (obligationsAsset ob) (obligationsAmount ob) (obligationsRecipient ob),previous,loss,actual)
+  pure(Obligation (obligationsId ob) (obligationsOrderId ob) (obligationsDepositId ob) (obligationsKind ob) (obligationsAsset ob) (obligationsAmount ob) (obligationsRecipient ob),previous,loss,actual,cover)
 
 recoveryObligation :: Ledger -> Text -> Int64 -> IO Obligation
 recoveryObligation ledger intent restoration = ledgerAction ledger $ \c->do
-  (ob,_,_,_) <- recoveryContextC c intent restoration
+  (ob,_,_,_,_) <- recoveryContextC c False intent restoration
   pure ob
 
 recoveryRecord :: Ledger -> Text -> Int64 -> Int64 -> Text -> IO ()
-recoveryRecord ledger intent restoration now reason = ledgerAction ledger $ \c->do
+recoveryRecord = recordApproval False Nothing
+
+coveredRecord :: Ledger -> Text -> Int64 -> Int64 -> Text -> Value -> IO ()
+coveredRecord ledger intent sequenceNo now reason proof = recordApproval True (Just proof) ledger intent sequenceNo now reason
+
+coveredObligation :: Ledger -> Text -> Int64 -> IO Obligation
+coveredObligation ledger intent sequenceNo = ledgerAction ledger $ \c->do
+  (ob,_,_,_,_) <- recoveryContextC c True intent sequenceNo
+  pure ob
+
+coveredApproval :: Ledger -> Text -> Int64 -> IO (Maybe Text)
+coveredApproval ledger intent sequenceNo = ledgerAction ledger $ \c->do
+  old <- recoveryApprovalC c intent sequenceNo
+  case old of
+    Nothing->pure Nothing
+    Just reason->do
+      rows <- O.runSelect c $ matching (\r->sourcerecoveryapprovalsObligationId r O..== O.sqlStrictText intent O..&& sourcerecoveryapprovalsRestorationSequence r O..== O.sqlInt8 sequenceNo) (O.selectTable sourcerecoveryapprovalsTable) :: IO [SourceRecoveryApprovals]
+      require (case rows of [r]->proofCover (sourcerecoveryapprovalsProofJson r)/=Nothing; _->False) "source_approval_kind_mismatch"
+      pure(Just reason)
+
+recordApproval :: Bool -> Maybe Value -> Ledger -> Text -> Int64 -> Int64 -> Text -> IO ()
+recordApproval covered sourceProof ledger intent restoration now reason = ledgerAction ledger $ \c->do
   require (restoration>0 && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_source_approval"
   states <- O.runSelect c (fmap deploymentPaused $ O.selectTable deploymentTable) :: IO [Int64]
   require (states==[1]) "pause_before_operator_action"
   old <- recoveryApprovalC c intent restoration
   case old of
-    Just previous->require(previous==reason) "source_approval_conflict"
+    Just previous->do
+      require(previous==reason) "source_approval_conflict"
+      rows <- O.runSelect c $ matching (\r->sourcerecoveryapprovalsObligationId r O..== O.sqlStrictText intent O..&& sourcerecoveryapprovalsRestorationSequence r O..== O.sqlInt8 restoration) (O.selectTable sourcerecoveryapprovalsTable) :: IO [SourceRecoveryApprovals]
+      require (case rows of [r]->covered==(proofCover(sourcerecoveryapprovalsProofJson r)/=Nothing); _->False) "source_approval_kind_mismatch"
     Nothing->do
-      (_,previous,loss,workHash) <- recoveryContextC c intent restoration
+      (ob,previous,loss,workHash,cover) <- recoveryContextC c covered intent restoration
       freshC c now
       checks <- O.runSelect c (O.selectTable custodycheckTable) :: IO [CustodyCheck]
-      let proof=TE.decodeUtf8 $ LBS.toStrict $ encode $ object
-            ["custody" .= [(custodycheckRevision row,custodycheckCheckedAt row,custodycheckReportJson row) | row<-checks],"sourceRestoration" .= restoration]
+      when covered $ do
+        evidence <- maybe (reject "source_loss_not_proven") pure sourceProof
+        txid <- fieldValue "transaction" evidence :: IO Text
+        index <- fieldValue "output" evidence :: IO Int64
+        depth <- fieldValue "confirmations" evidence :: IO Int64
+        observedHash <- fieldValue "observationHash" evidence :: IO Text
+        sourceBlock <- fieldValue "nodeBlock" evidence :: IO Text
+        sourceHeight <- fieldValue "nodeHeight" evidence :: IO Int64
+        require (depth<0 && index>=0 && obligationDeposit ob=="native:"<>txid<>":"<>T.pack(show index)) "source_loss_not_proven"
+        hashes <- O.runSelect c $ do
+          event <- O.selectTable chaineventsTable
+          O.where_(chaineventsChain event O..== O.sqlStrictText "Native" O..&& chaineventsEventId event O..== O.sqlStrictText txid O..&& chaineventsNeedsReview event O..== O.sqlInt8 0)
+          pure(chaineventsEvidenceHash event)
+          :: IO [Text]
+        require (hashes==[observedHash]) "source_recovery_scan_not_current"
+        report <- case checks of
+          [r] | Just saved<-custodycheckReportJson r->either (const $ reject "custody_not_reconciled") pure (eitherDecodeStrict' $ TE.encodeUtf8 saved)
+          _->reject "custody_not_reconciled"
+        matched <- fieldValue "matches" report :: IO Bool
+        block <- fieldValue "nativeBlock" report :: IO Text
+        height <- fieldValue "nativeHeight" report :: IO Int64
+        require (matched && block==sourceBlock && height==sourceHeight) "source_loss_custody_view_changed"
+      let proof=TE.decodeUtf8 $ LBS.toStrict $ encode $ object $
+            ["custody" .= [(custodycheckRevision row,custodycheckCheckedAt row,custodycheckReportJson row) | row<-checks],"sourceRestoration" .= restoration] <> maybe [] (\n->["sourceCover" .= n,"source" .= sourceProof]) cover
       require (T.length proof<=32768) "source_approval_evidence_too_large"
       sequenceNo <- criticalSequence c
       _ <- O.runInsert c O.Insert {O.iTable=sourcerecoveryapprovalsTable,O.iRows=[SourceRecoveryApprovals (O.sqlStrictText intent) (O.sqlInt8 restoration) (O.sqlInt8 loss) (O.sqlStrictText previous) (O.sqlStrictText workHash) (O.sqlStrictText reason) (O.sqlStrictText proof) (O.sqlInt8 sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
       _ <- O.runUpdate c O.Update {O.uTable=obligationsTable,O.uUpdateWith= \row->row {obligationsStatus=O.sqlStrictText previous},O.uWhere= \row->obligationsId row O..== O.sqlStrictText intent,O.uReturning=O.rCount}
       _ <- O.runInsert c O.Insert {O.iTable=auditTable,O.iRows=[Audit Nothing (O.sqlStrictText "source_recovery_approved") (O.sqlStrictText intent)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
       pure ()
+
+-- A capital cover is not a physical deposit. Authorization stays attached to
+-- one immutable obligation and its active cover; neither changes eligibility.
+activeCoverC :: PG.Connection -> Deposits -> IO (Maybe Int64)
+activeCoverC c deposit = do
+  rows <- O.runSelect c $ matching (\r->sourcelosscoversDepositId r O..== O.sqlStrictText(depositsId deposit) O..&& sourcelosscoversAmount r O..== O.sqlInt8(depositsAmount deposit)) (O.selectTable sourcelosscoversTable) :: IO [SourceLossCovers]
+  returns <- O.runSelect c $ do
+    r <- O.selectTable sourcelossreturnsTable
+    f <- O.selectTable sourcelosscoversTable
+    O.where_(sourcelossreturnsCoverSequence r O..== sourcelosscoversCriticalSequence f O..&& sourcelosscoversDepositId f O..== O.sqlStrictText(depositsId deposit))
+    pure(sourcelossreturnsCoverSequence r)
+    :: IO [Int64]
+  case [sourcelosscoversCriticalSequence r | r<-rows,sourcelosscoversCriticalSequence r `notElem` returns] of
+    []->pure Nothing
+    [n]->pure(Just n)
+    _->reject "duplicate_source_loss_cover"
+
+proofCover :: Text -> Maybe Int64
+proofCover proof = case eitherDecodeStrict' (TE.encodeUtf8 proof) of
+  Right (Object fields) | Just value<-KM.lookup "sourceCover" fields->case Data.Aeson.fromJSON value of
+    Data.Aeson.Success n | n>0->Just n
+    _->Nothing
+  _->Nothing
+
+coveredAuthorizedC :: PG.Connection -> Text -> IO Bool
+coveredAuthorizedC c intent = do
+  rows <- O.runSelect c $ do
+    ob <- O.selectTable obligationsTable
+    d <- O.selectTable depositsTable
+    O.where_(obligationsId ob O..== O.sqlStrictText intent O..&& obligationsDepositId ob O..== depositsId d)
+    pure(ob,d)
+    :: IO [(Obligations,Deposits)]
+  case rows of
+    [(ob,d)] | depositsAsset d=="Native" && depositsEligible d==0 && obligationsStatus ob `elem` ["ready","paying"]->do
+      accounted <- O.runSelect c $ do
+        did <- Order.accountedLosses
+        O.where_(did O..== O.sqlStrictText(depositsId d))
+        pure did
+        :: IO [Text]
+      txid <- case T.splitOn ":" (depositsId d) of
+        ["native",tx,_]->pure tx
+        _->reject "invalid_native_deposit_id"
+      events <- O.runSelect c $ do
+        event <- O.selectTable chaineventsTable
+        O.where_(chaineventsChain event O..== O.sqlStrictText "Native" O..&& chaineventsEventId event O..== O.sqlStrictText txid O..&& chaineventsNeedsReview event O..== O.sqlInt8 0 O..&&
+          (chaineventsKind event O..== O.sqlStrictText "incoming" O..|| chaineventsKind event O..== O.sqlStrictText "unmatched_incoming"))
+        pure(chaineventsEventId event)
+        :: IO [Text]
+      cover <- activeCoverC c d
+      approvals <- O.runSelect c $ matching (\r->sourcerecoveryapprovalsObligationId r O..== O.sqlStrictText intent) (O.selectTable sourcerecoveryapprovalsTable) :: IO [SourceRecoveryApprovals]
+      pure (accounted==[depositsId d] && events==[txid] && case cover of
+        Just n->any (\r->proofCover(sourcerecoveryapprovalsProofJson r)==Just n && sourcerecoveryapprovalsCriticalSequence r>n) approvals
+        Nothing->False)
+    _->pure False
+
+coveredAuthorized :: Ledger -> Text -> IO Bool
+coveredAuthorized ledger intent = ledgerAction ledger (\c->coveredAuthorizedC c intent)
+
+authorizedC :: PG.Connection -> Text -> IO Bool
+authorizedC c intent = do
+  rows <- O.runSelect c $ do
+    ob <- O.selectTable obligationsTable
+    d <- O.selectTable depositsTable
+    O.where_(obligationsId ob O..== O.sqlStrictText intent O..&& obligationsDepositId ob O..== depositsId d)
+    pure(depositsEligible d)
+    :: IO [Int64]
+  if rows==[1] then pure True else coveredAuthorizedC c intent
 
 -- Typed read of the latest recovery view, matching the legacy candidate rules.
 sourceStateTable :: O.Table (O.Field O.SqlText,O.Field O.SqlText) (O.Field O.SqlText,O.Field O.SqlText)

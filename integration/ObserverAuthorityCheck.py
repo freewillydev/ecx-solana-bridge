@@ -50,11 +50,12 @@ try:
                      'resume':api('/resume'),
                      'sign':api('/sign-native-replacement',{'draftSequence':1}),
                      'send':api('/send-native-replacement',{'draftSequence':1}),
-                     'refund':api('/refund',{'depositId':'no-observer-payment'})}
+                     'refund':api('/refund',{'depositId':'no-observer-payment'}),
+                     'coveredSource':api('/approve-covered-source',{'coveredObligation':'no-observer-payment','coveredLossSequence':1,'coveredApprovalReason':'observer cannot grant covered payment authority'})}
             assert all(v=={'error':'payment_worker_required'} for v in refused.values()),refused
             result=json.loads(run('psql','-XqAt','-c',"SELECT json_build_object('orders',(SELECT count(*) FROM orders),'attempts',(SELECT count(*) FROM attempts),'criticalSequence',(SELECT critical_sequence FROM deployment));").stdout)
             assert result=={'orders':0,'attempts':0,'criticalSequence':0}
-            report={'actualProfile':c['profile'],'canonicalOperationEnabled':False,'observationOnlyAvailabilityPassed':True,'orderCreationRefused':True,'resumeRefused':True,'signatureRefused':True,'broadcastRefused':True,'refundRefused':True,'orders':0,'attempts':0,'criticalSequence':0,'walletsModified':False,'roundTripVerified':False}
+            report={'actualProfile':c['profile'],'canonicalOperationEnabled':False,'observationOnlyAvailabilityPassed':True,'orderCreationRefused':True,'resumeRefused':True,'signatureRefused':True,'broadcastRefused':True,'refundRefused':True,'coveredSourceApprovalRefused':True,'orders':0,'attempts':0,'criticalSequence':0,'walletsModified':False,'roundTripVerified':False}
             print(json.dumps(report))
             if args.report:Path(args.report).write_text(json.dumps(report,indent=2)+'\n')
 finally:

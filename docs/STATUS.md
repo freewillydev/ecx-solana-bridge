@@ -837,3 +837,45 @@ acceptance also pass; no live ledger, signer or payment was changed. Evidence:
 
 R3 still needs actual HTTPS repository/worker acceptance, independent-host restore,
 key restoration and old-worker/ledger fencing. Canonical activation remains blocked.
+
+## Explicit covered-source resolution
+
+A recorded source-loss capital allocation can now support the original suspended
+customer obligation through a separate `approve-covered-source` operator action.
+The action binds the current missing-source sequence, active capital cover,
+immutable obligation and captured suspended-work hash, checks current native
+conflict evidence and reconciled custody, then records the approval in the existing
+append-only source recovery journal. It restores only the previous ready/paying
+state, leaves intake paused and never marks the missing deposit eligible.
+
+Preparation, saved-attempt storage and send authorization recognize this scoped
+approval. Each actual source recheck still requires a negative native confirmation,
+absence from the mempool and an absent spendable source output. Pending sources,
+RPC uncertainty, ambiguous observations, returned covers and unrelated obligations
+cannot use that authority. Sending an existing BroadcastIntent additionally needs
+backup coverage of the newer approval. No additional economic intent, signature,
+principal posting or capital allocation is created by approval itself.
+
+PostgreSQL migration `004.sql` extends the existing approval binding trigger;
+financial format remains 18 and no new tables or balance transformations are
+introduced. The installer applies it only with the worker stopped. Custody
+freshness checking now lives in the custody module to keep the storage dependency
+graph acyclic. Servant still resolves to the closed severity DSL and retains one
+critical evaluator invocation.
+
+The real-PostgreSQL database contract verifies ready/paying approvals, stale
+custody refusal, idempotence, saved-payment retention, backup coverage, ambiguity
+refusal and retirement of returned covers. The actual betanet-profile observer
+API refuses the new approval operation. The 371-example application suite and
+16 installer tests pass. See `evidence/postgres-covered-source-contract.json`
+and `evidence/postgres-covered-source-observer.json`. These database fixtures do
+not claim a live source-conflict round trip; that acceptance, missing-destination
+recovery and the broader interruption matrix remain release work.
+
+Native x86 Ubuntu packaging also passed at source commit `aaafee0`, including
+upstream TLS remediation, notices, tests and installer checksum verification.
+The downloaded private artifact's checksum was independently verified. Its
+release ID is `d23dd6bb3158c92fceace861`; it does not yet contain the subsequent
+backup/runtime and covered-source batches. Evidence:
+`evidence/native-x86-packaging.json`. Clean installation/reboot and a current
+consolidated package remain required.

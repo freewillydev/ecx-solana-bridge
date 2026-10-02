@@ -264,3 +264,24 @@ unbacked instructions. This acceptance mode does not by itself prove independent
 host durability, signer/key restoration, old-worker fencing or canonical custody;
 those remain separate release gates. The tested local encrypted round trip is
 explicitly not off-host acceptance.
+
+### Approving an operator-covered native source loss
+
+After pausing, reconciling the current source/custody evidence and recording a
+full source-loss capital allocation with `cover-source-loss`, approve each
+original suspended obligation separately through the private operator socket:
+
+```sh
+sudo -u ecx-worker curl --unix-socket /run/ecx-bridge/admin/api.sock \
+  -H 'Content-Type: application/json' \
+  --data '{"coveredObligation":"ORIGINAL_OBLIGATION_ID","coveredLossSequence":MISSING_SOURCE_SEQUENCE,"coveredApprovalReason":"Reviewed original obligation and active capital cover"}' \
+  http://localhost/approve-covered-source
+```
+
+Use the current missing-source recovery sequence, not a transaction ID or a
+backup sequence. The request deliberately leaves the bridge paused and signs or
+sends nothing. A current full cover, unchanged suspended work, current negative
+native source evidence and reconciled custody are required. Explicit resume runs
+the normal global reconciliation and reservation checks. Later signing/sending
+uses the existing engine and its backup barriers; an already saved payment stays
+the same payment. A returned capital cover cannot authorize a subsequent loss.

@@ -75,6 +75,10 @@ def install(target, config, mkdir, keep_file, snapshot=None):
         if subprocess.run(["systemctl", "is-active", "--quiet", "ecx-bridge-worker.service"]).returncode == 0:
             raise ValueError("Stop the worker before applying the PostgreSQL winner-binding correction")
         run("runuser", "-u", "postgres", "--", "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-f", str(target / "migrations/postgresql/003.sql"))
+    if sql("SELECT position('sourceCover' in prosrc)>0 FROM pg_proc WHERE proname='trg_source_approval_binding';") != "t":
+        if subprocess.run(["systemctl", "is-active", "--quiet", "ecx-bridge-worker.service"]).returncode == 0:
+            raise ValueError("Stop the worker before applying the PostgreSQL covered-source approval migration")
+        run("runuser", "-u", "postgres", "--", "psql", "-X", "-q", "-v", "ON_ERROR_STOP=1", "-f", str(target / "migrations/postgresql/004.sql"))
     sql("""REVOKE ALL ON DATABASE ecx_bridge FROM PUBLIC;
       GRANT CONNECT ON DATABASE ecx_bridge TO ecx_worker,ecx_read;
       REVOKE ALL ON SCHEMA public FROM PUBLIC;

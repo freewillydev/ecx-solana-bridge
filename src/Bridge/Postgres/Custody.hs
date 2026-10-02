@@ -1,5 +1,6 @@
-module Bridge.Postgres.Custody (Snapshot(..), readSnapshot, recordCheck, eventProof) where
+module Bridge.Postgres.Custody (Snapshot(..), readSnapshot, recordCheck, eventProof, freshC) where
 
+import qualified Database.PostgreSQL.Simple as PG
 import Bridge.Config
 import Bridge.Types
 import Bridge.Postgres.Ledger (Ledger,ledgerAction)
@@ -138,3 +139,10 @@ json = TE.decodeUtf8 . LBS.toStrict . encode
 
 textColumn :: String -> String -> O.Table (O.Field O.SqlText) (O.Field O.SqlText)
 textColumn name column = O.table name (O.requiredTableField column)
+
+freshC :: PG.Connection -> Int64 -> IO ()
+freshC c now = do
+  checks <- O.runSelect c(O.selectTable custodycheckTable) :: IO [CustodyCheck]
+  require (case checks of
+    [r]->custodycheckCheckedRevision r==Just(custodycheckRevision r) && custodycheckLastError r==Nothing && maybe False (\at->at>=0 && at<=now && toInteger now-toInteger at<=60) (custodycheckCheckedAt r)
+    _->False) "custody_not_reconciled"

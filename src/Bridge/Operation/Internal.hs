@@ -31,6 +31,7 @@ data OperatorOperation a where
   CancelPreparation :: Text -> Int -> Text -> OperatorOperation Value
   Resume :: OperatorOperation Availability
   ApproveSolanaRetry :: Text -> Text -> OperatorOperation Value
+  ApproveCoveredSource :: Text -> Int64 -> Text -> OperatorOperation Value
   ApproveSourceRecovery :: Text -> Int64 -> Text -> OperatorOperation Value
   PrepareNativeReplacement :: Text -> Amount -> Text -> OperatorOperation Value
   SignNativeReplacement :: Int64 -> OperatorOperation Value
