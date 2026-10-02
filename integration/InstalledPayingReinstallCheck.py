@@ -17,6 +17,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('baseline', type=Path)
     parser.add_argument('--capture', action='store_true')
+    parser.add_argument('--upgrade', action='store_true', help='require a different release with identical durable state')
     args = parser.parse_args()
     assert os.geteuid() == 0
     cfg = json.loads(Path('/etc/ecx-bridge/worker.json').read_text())
@@ -65,10 +66,14 @@ def main():
             os.chmod(args.baseline, 0o600)
             json.dump(state, output)
     else:
-        assert json.loads(args.baseline.read_text()) == state, 'Installation changed durable state'
+        before = json.loads(args.baseline.read_text())
+        if args.upgrade:
+            assert before['releaseId'] != state['releaseId'], 'No release upgrade occurred'
+            before['releaseId'] = state['releaseId']
+        assert before == state, 'Installation changed durable state'
     print(json.dumps(dict(releaseId=state['releaseId'], durableTables=len(hashes),
         configurationFiles=len(configs), criticalSequence=fence['sequence'],
-        baselineMatched=not args.capture, signerPrivate=True, fenceVerified=True,
+        baselineMatched=not args.capture, upgraded=args.upgrade, signerPrivate=True, fenceVerified=True,
         publicRelease=False)))
 
 

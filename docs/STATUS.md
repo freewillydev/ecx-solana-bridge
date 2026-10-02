@@ -1034,6 +1034,19 @@ verification database and temporary wallet copies were removed. See
 This verifies the corrected offline archive routine on the actual paying fixture;
 it does not prove off-host retention, clean-host key loading/signing, independent
 host fencing or safe resume. The deployment-only repack is prepared, with compiled
-application/helper/frontend unchanged and 21 installer tests passing. Installing
-that repack on ARM64 and updating the x86 package remain next deployment checks.
+application/helper/frontend unchanged and 21 installer tests passing. The ARM64 upgrade now passes, preserving all 31 durable tables, 12 configuration
+files and critical sequence 8, with installed signer validation and private fence
+checks passing. See [ARM archive-fix upgrade](evidence/installed-wallet-archive-upgrade-arm.json).
+The x86 deployment repack also passed upgrade and repeat installation, preserving
+all 31 durable tables, eight configuration files and critical sequence 0. Its
+observation-only service has no signer; it returned health 200 and ready 503,
+with private PostgreSQL, restricted roles and the protected fence verified. See
+[x86 deployment acceptance](evidence/postgres-installer-final-deployment-x86.json).
+Both repacks retain the previously compiled application/helper/frontend.
 Preserve the funded guest disk and private journals until full recovery passes.
+
+The latest x86 deployment package also passed a cold VM restart against the exact
+post-upgrade baseline: 31 durable tables, eight configuration files, sequence 0
+and private fence checks matched, with all three observers healthy. The fixture
+is observation-only; ARM64 supplies the separate actual installed paying evidence.
+Acceptance VMs are stopped after these checks; private funded state is retained.

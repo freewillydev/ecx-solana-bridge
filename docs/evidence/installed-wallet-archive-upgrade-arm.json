@@ -1,0 +1,19 @@
+{
+  "platform": "native Ubuntu 24.04 aarch64",
+  "releaseId": "55b523e248e8687bc34f29f7",
+  "previousRelease": "d3329ec6899a48caa1ecee7f",
+  "installerSha256": "ef9468527f22bb877ad26d7b325ad005f48db8b0afa89f5bd87ef2fa4b2f998b",
+  "deploymentOnlyRepack": true,
+  "nonDeploymentArtifactsUnchanged": true,
+  "upgradePassed": true,
+  "durableTablesCompared": 31,
+  "configurationFilesCompared": 12,
+  "criticalSequence": 8,
+  "baselineMatched": true,
+  "signerPrivate": true,
+  "signerPreflightPassed": true,
+  "fenceVerified": true,
+  "workerStopped": true,
+  "finalPaused": true,
+  "publicRelease": false
+}

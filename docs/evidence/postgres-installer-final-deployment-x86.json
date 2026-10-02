@@ -1,0 +1,29 @@
+{
+  "platform": "Ubuntu 24.04 x86_64",
+  "releaseId": "5fc0d68eb70457516fe5122d",
+  "previousRelease": "38f7bf5d9f031d022a2dcd7b",
+  "installerSha256": "b83d6dee61a2230d841150101c81a018b2479586f224f3dc6ef3d0b2fd206cec",
+  "deploymentOnlyRepack": true,
+  "nonDeploymentArtifactsUnchanged": true,
+  "upgradePassed": true,
+  "durableTablesPreserved": 31,
+  "configurationFilesPreserved": 8,
+  "criticalSequencePreserved": true,
+  "privatePostgres": true,
+  "restrictedRoles": true,
+  "protectedFenceVerified": true,
+  "healthStatus": 200,
+  "readyStatus": 503,
+  "observationOnly": true,
+  "signerAbsent": true,
+  "installedPayingRoundTripVerified": false,
+  "oldHistoricalBaselineDifference": {
+    "releaseId": "prior upgrade",
+    "fence.env": "introduced by prior upgrade",
+    "durableTablesChanged": []
+  },
+  "sameReleaseReinstallPassed": true,
+  "baselineMatchedAfterReinstall": true,
+  "coldRestartPassed": true,
+  "baselineMatchedAfterColdRestart": true
+}
