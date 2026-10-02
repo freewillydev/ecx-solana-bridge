@@ -65,6 +65,7 @@ import System.Posix.Files (getFileStatus,fileMode,setFileMode)
 import Data.Bits ((.&.),xor)
 import Data.Word (Word8)
 import System.Exit (ExitCode(..))
+import System.Environment (getEnv)
 import System.Process (readProcessWithExitCode)
 import Test.Hspec hiding (before,after)
 import Test.QuickCheck hiding ((.&.))
@@ -105,7 +106,7 @@ releaseAuthentication fault seed arch = withDir $ \dir->do
       bytes=BS.pack seed
       privatePrefix=BS.pack [0x30,0x2e,0x02,0x01,0x00,0x30,0x05,0x06,0x03,0x2b,0x65,0x70,0x04,0x22,0x04,0x20]
       publicPrefix=BS.pack [0x30,0x2a,0x30,0x05,0x06,0x03,0x2b,0x65,0x70,0x03,0x21,0x00]
-      pem label content="-----BEGIN "<>label<>"-----\n"<>B64.encode content<>"\n-----END "<>label<>"-----\n"
+      pem tag content="-----BEGIN "<>tag<>"-----\n"<>B64.encode content<>"\n-----END "<>tag<>"-----\n"
       publicBytes inputBytes=case Ed.secretKey inputBytes of
         CryptoPassed secret->BA.convert (Ed.toPublic secret)
         CryptoFailed _->error "generated seed must have 32 bytes"
@@ -143,7 +144,7 @@ amt n = either (error . T.unpack) id (amount n)
 cap :: Text
 cap=T.replicate 64 "a"
 cfg :: FilePath -> Config
-cfg dir = Config L2LSignetDevnet "unit-fixture" "http://127.0.0.1:29432" (dir</>"cookie") "fixture-wallet" 16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47" "https://api.devnet.solana.com" Nothing "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM" "RWjpjjkpABkEGomLbZYyN53pA3FVdPXp9izJ25wErGX" "11111111111111111111111111111111" (dir</>"private/ledger.sqlite") (dir</>"customer/api.sock") (dir</>"admin/api.sock") "/usr/bin/false" (dir</>"helper.json") (amt 2) (amt 1000000000000) 100 300 600 1 (amt 1000) (amt 10000) False Nothing (amt 0) Nothing (amt 100000) (amt 100000000)
+cfg dir = Config L2LSignetDevnet "unit-fixture" "http://127.0.0.1:29432" (dir</>"cookie") "fixture-wallet" 16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47" "https://api.devnet.solana.com" Nothing "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM" "RWjpjjkpABkEGomLbZYyN53pA3FVdPXp9izJ25wErGX" "11111111111111111111111111111111" (dir</>"private/ledger.sqlite") (dir</>"customer/api.sock") (dir</>"admin/api.sock") "/usr/bin/false" (dir</>"helper.json") (dir</>"sdk-library") (amt 2) (amt 1000000000000) 100 300 600 1 (amt 1000) (amt 10000) False Nothing (amt 0) Nothing (amt 100000) (amt 100000000)
 req :: OrderRequest
 req=OrderRequest NativeToWrapped (amt 100000) "fixture-solana-recipient" "fixture-native-refund" Nothing "retry-key"
 withDir :: (FilePath -> IO a) -> IO a
@@ -3871,7 +3872,7 @@ main=hspec $ do
         ,setPath ["meta","err"] (String "fixture-failure") proof] $ \bad ->
           verifySolanaOutcome c signed bad `shouldBe` Left "solana_settlement_evidence_mismatch"
   describe "release authentication properties" $ do
-    forM_ [minBound..maxBound] $ \fault->it (show fault) $ property $ withMaxSuccess 5 $
+    forM_ [minBound..maxBound] $ \fault->it (show fault) $ property $ withNumTests 5 $
       forAll (vectorOf 32 arbitrary) $ \seed->forAll (elements ["aarch64","x86_64"]) $ \arch->
         ioProperty (releaseAuthentication fault seed arch)
   describe "direct public server" $ do
@@ -4006,6 +4007,27 @@ main=hspec $ do
           setVersion x=x
       verifyDeposit binding (setMetaError proof) `shouldSatisfy` either (const True) (const False)
       verifyDeposit binding (setVersion proof) `shouldSatisfy` either (const True) (const False)
+  describe "Haskell / official Solana SDK FFI (offline codec contracts)" $ do
+    library <- runIO (getEnv "ECX_SOLANA_SDK_LIBRARY")
+    it "preserves captured unsigned messages without opening private configuration" $ do
+      (c,request,deposit,payout) <- sdkFixture library
+      invokeUnsignedHelper c request `shouldReturn` deposit
+      invokeUnsignedHelper c request{helperPayout=True,helperOwner=custodyOwner c
+        ,helperRecipient=helperOwner request} `shouldReturn` payout
+    it "binds generated amounts/references in both directions without signatures" $
+      property $ withNumTests 50 $ forAll (chooseInteger (1,toInteger (maxBound::Int64))) $ \quantity->
+        forAll arbitrary $ \payout->forAll (chooseInt (1,64) >>= \n->vectorOf n (elements ['a'..'z'])) $ \reference->
+          ioProperty $ do
+            (c,base,_,_) <- sdkFixture library
+            let request=base{helperPayout=payout,helperAmount=amt quantity,helperReference=T.pack reference
+                  ,helperOwner=if payout then custodyOwner c else helperOwner base
+                  ,helperRecipient=if payout then helperOwner base else custodyOwner c}
+            reply <- invokeUnsignedHelper c request
+            pure (replySignature reply==Nothing && case validateUnsignedHelperReply c request reply of
+              Right _->True; Left _->False)
+    it "fails closed on a missing SDK library" $ do
+      (c,request,_,_) <- sdkFixture "/nonexistent-ecx-sdk"
+      invokeUnsignedHelper c request `shouldThrow` (\(_::SomeException)->True)
   describe "official SDK wire fixtures (not network evidence)" $ do
     forM_ ["unsigned-three-units.json","signed-three-units.json"] $ \name -> it ("independently validates "<>name) $ do
       (expected,encoded)<-fixture name
@@ -4374,3 +4396,18 @@ codecSettlementProof c signed success=do
     ,"meta" .= object ["err" .= (if success then Null else String "offline-fixture-failure"),"fee" .= (5000::Int)
       ,"preBalances" .= balances,"postBalances" .= afterBalances
       ,"preTokenBalances" .= tokens 10 0,"postTokenBalances" .= (if success then tokens 7 3 else tokens 10 0)]]
+
+-- Fixed SDK vectors are public, unfunded encoding fixtures, never a fake chain.
+sdkFixture :: FilePath -> IO (Config,HelperRequest,HelperReply,HelperReply)
+sdkFixture library = do
+  value <- BS.readFile "test/fixtures/admission-unsigned.json" >>= either fail pure . eitherDecodeStrict'
+  deployment <- fieldValue "deploymentId" value
+  token <- fieldValue "mint" value
+  custody <- fieldValue "custodyOwner" value
+  wallet <- fieldValue "wallet" value
+  hash <- fieldValue "blockhash" value
+  deposit <- fieldValue "deposit" value
+  payout <- fieldValue "payout" value
+  let c=(cfg "/nonexistent-private-config"){deploymentId=deployment,mint=token,custodyOwner=custody
+        ,custodyAta=replySource payout,solanaSdkLibrary=library}
+  pure (c,HelperRequest False wallet custody (amt 3) hash "quote-check",deposit,payout)

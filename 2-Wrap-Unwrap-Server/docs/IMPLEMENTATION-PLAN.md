@@ -35,7 +35,7 @@ files; 13 test files / 6,504 lines; 218 documentation files including 186 eviden
 artifacts. Local dependencies and build caches are not tracked source bloat.
 Required license notices are not development clutter.
 
-Aim for roughly 15–20 production Haskell modules, one small Rust signing helper,
+Aim for roughly 15–20 production Haskell modules, one narrow Solana SDK FFI library,
 one thin frontend, one test suite with one acceptance runner, and three maintained
 guides. Seek roughly 50–75 first-party tracked files, excluding required notices
 and lockfiles. These are provisional review targets, not reasons to hide logic or

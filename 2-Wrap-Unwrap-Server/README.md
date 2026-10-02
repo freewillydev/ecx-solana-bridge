@@ -27,7 +27,7 @@ The bridge needs funded inventory and operating budgets on both sides. Low inven
 
 ## Architecture
 
-One Haskell application provides the financial engine and typed Servant API, with two real-chain adapters, one PostgreSQL ledger accessed with Opaleye and a thin browser interface. The HTTP server serves the interface and typed API directly, with payment workflows in the same process and a private operator socket. A dedicated Haskell signer, Solana SDK FFI and Haskell frontend compiled with GHC’s JavaScript backend are the accepted next changes; the existing subprocess helper and TypeScript frontend remain until those replacements pass.
+One Haskell application provides the financial engine and typed Servant API, with two real-chain adapters, one PostgreSQL ledger accessed with Opaleye and a thin browser interface. The HTTP server serves the interface and typed API directly, with payment workflows in the same process and a private operator socket. Unsigned Solana deposit/preview construction now uses the official SDK through a bounded Haskell FFI, with public identity data only. A dedicated Haskell signer and Haskell frontend compiled with GHC’s JavaScript backend remain the accepted next changes; signed payouts retain the sandboxed subprocess and the frontend remains TypeScript until those replacements pass.
 
 ```mermaid
 flowchart LR
@@ -38,7 +38,8 @@ flowchart LR
     Dispatcher --> Ledger[(Private PostgreSQL ledger)]
     Worker --> Native[Native adapter / dedicated daemon wallet]
     Worker --> Solana[Solana RPC adapter]
-    Worker --> Helper[Sandboxed Rust Solana helper]
+    Worker --> SDK[Solana SDK FFI / unsigned construction]
+    Worker --> Helper[Sandboxed signing helper / transitional]
     Native --> NativeChain[Real L2L Signet or ECX betanet]
     Solana --> SolanaChain[Real Solana Devnet]
 ```

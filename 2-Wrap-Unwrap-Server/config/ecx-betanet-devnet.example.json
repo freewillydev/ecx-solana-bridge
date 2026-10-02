@@ -16,6 +16,7 @@
   "adminSocket": "/run/ecx-bridge/admin/api.sock",
   "helperPath": "/opt/ecx-bridge/current/deploy/helper-sandbox.sh",
   "helperConfig": "/etc/ecx-bridge/helper.json",
+  "solanaSdkLibrary": "/opt/ecx-bridge/current/lib/libecx_solana_sdk.so",
   "minInput": "10000",
   "maxInput": "100000",
   "maxQueued": 4,

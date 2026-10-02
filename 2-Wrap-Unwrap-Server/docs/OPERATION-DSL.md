@@ -192,6 +192,19 @@ bypass this service using walletprocesspsbt or another signing/key-export method
 Solana SDK Rust remains only through Haskell FFI inside the signer. Completing this
 boundary is current work, not an implemented guarantee of the existing runtime.
 
+Unsigned Solana construction now calls the pinned SDK shared library through
+Haskell FFI. Its private, versioned `ecx_solana_prepare_v1` C ABI accepts at most
+4096 configuration bytes and 8192 request bytes and writes at most 8192 reply
+bytes into caller-owned buffers. No pointer or allocator crosses ownership
+boundaries; ordinary failures return fixed codes, and Rust panics are caught
+before returning across the ABI. Haskell independently validates the resulting
+transaction. The unsigned adapter supplies only public identity fields and a
+null signing path, never the private helper configuration. Signed payouts retain
+the existing subprocess sandbox until the Haskell signer replaces it; neither
+native signing isolation nor the complete critical-only signer boundary is done.
+See the [Rust FFI contract](https://doc.rust-lang.org/nomicon/ffi.html) and
+[GHC FFI documentation](https://ghc.gitlab.haskell.org/ghc/doc/users_guide/exts/ffi.html).
+
 Servant's `ServerT` requires a type constructor of kind `Type -> Type`; hoisting
 requires a natural transformation `forall a. Plan a -> Handler a`. Add
 only the pure/applicative/monadic structure actually required by the installed

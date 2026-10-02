@@ -1,10 +1,15 @@
-module Bridge.SolanaHelper where
+{-# LANGUAGE ForeignFunctionInterface #-}
+module Bridge.SolanaHelper
+  ( HelperRequest(..), HelperReply(..), helperMemo, validateHelperRequest
+  , validateHelperReply, validateUnsignedHelperReply, invokeHelper, invokeUnsignedHelper
+  , unsignedSimulation ) where
 
 import Bridge.Config
 import Bridge.Process
 import Bridge.SolanaMessage
 import Bridge.Types
 import Control.Monad (unless)
+import Control.Exception (bracket)
 import Data.Aeson
 import Data.Aeson.Types (Parser)
 import qualified Data.Aeson.KeyMap as KM
@@ -15,6 +20,9 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import GHC.Generics (Generic)
+import Foreign (Ptr, FunPtr, Word8, alloca, allocaBytes, castPtr, peek, poke)
+import Foreign.C.Types (CInt(..), CSize(..))
+import System.Posix.DynamicLinker (dlopen, dlclose, dlsym, RTLDFlags(..))
 
 data HelperRequest = HelperRequest
   { helperPayout :: !Bool, helperOwner :: !Text, helperRecipient :: !Text
@@ -85,22 +93,50 @@ validateHelperReplyWithSignature signed c request@HelperRequest{..} HelperReply{
   pure tx
 
 invokeHelper :: Config -> HelperRequest -> IO HelperReply
-invokeHelper c request = invokeHelperWith c request (toJSON request) (validateHelperReply c request)
+invokeHelper c request = do
+  require (helperPayout request) "signed_helper_requires_payout"
+  either reject pure (validateHelperRequest c request)
+  output <- runBounded 10 8192 (helperPath c) ["--config",helperConfig c]
+    (LBS.toStrict $ encode request)
+  reply <- either (const $ reject "invalid_helper_reply") pure (eitherDecodeStrict' output)
+  _ <- either reject pure (validateHelperReply c request reply)
+  pure reply
 
 invokeUnsignedHelper :: Config -> HelperRequest -> IO HelperReply
-invokeUnsignedHelper c request = invokeHelperWith c request wireRequest (validateUnsignedHelperReply c request)
- where
-  wireRequest=case toJSON request of
-    Object fields | helperPayout request -> Object (KM.insert "verb" (String "payout_preview") fields)
-    value -> value
-
-invokeHelperWith :: Config -> HelperRequest -> Value -> (HelperReply -> Either Text Transaction) -> IO HelperReply
-invokeHelperWith c request wireRequest validate = do
+invokeUnsignedHelper c request = do
   either reject pure (validateHelperRequest c request)
-  output <- runBounded 10 8192 (helperPath c) ["--config",helperConfig c] (LBS.toStrict $ encode wireRequest)
+  -- Public identity only. Preview/deposit construction cannot open a custody key
+  -- or the private helper configuration, even if a signer is configured there.
+  let publicConfig=object ["deployment_id" .= deploymentId c,"mint" .= mint c
+        ,"custody_owner" .= custodyOwner c,"signer_path" .= Null]
+      wireRequest=case toJSON request of
+        Object fields | helperPayout request -> Object (KM.insert "verb" (String "payout_preview") fields)
+        value -> value
+  output <- invokeSdk (solanaSdkLibrary c) (LBS.toStrict $ encode publicConfig)
+    (LBS.toStrict $ encode wireRequest)
   reply <- either (const $ reject "invalid_helper_reply") pure (eitherDecodeStrict' output)
-  _ <- either reject pure (validate reply)
+  _ <- either reject pure (validateUnsignedHelperReply c request reply)
   pure reply
+
+-- Versioned, bounded C ABI. Haskell owns inputs/output; Rust retains no pointer
+-- and exports no allocator. Keep this binding private to the concrete adapter.
+type SdkPrepare = Ptr Word8 -> CSize -> Ptr Word8 -> CSize
+  -> Ptr Word8 -> CSize -> Ptr CSize -> IO CInt
+foreign import ccall safe "dynamic" callSdk :: FunPtr SdkPrepare -> SdkPrepare
+
+invokeSdk :: FilePath -> BS.ByteString -> BS.ByteString -> IO BS.ByteString
+invokeSdk library config request = do
+  require (BS.length config<=4096 && BS.length request<=8192) "sdk_input_too_large"
+  bracket (dlopen library [RTLD_NOW,RTLD_LOCAL]) dlclose $ \handle->do
+    prepare <- callSdk <$> dlsym handle "ecx_solana_prepare_v1"
+    BS.useAsCStringLen config $ \(c,nc)->BS.useAsCStringLen request $ \(r,nr)->
+      allocaBytes 8192 $ \output->alloca $ \lengthPtr->do
+        poke lengthPtr 0
+        status <- prepare (castPtr c) (fromIntegral nc) (castPtr r) (fromIntegral nr)
+          output 8192 lengthPtr
+        size <- peek lengthPtr
+        require (status==0 && size>0 && size<=8192) "solana_sdk_failed"
+        BS.packCStringLen (castPtr output,fromIntegral size)
 
 -- The SDK's exact message is unchanged. A zero signature cannot authorize a
 -- payment, even if a simulation provider attempts to relay this transaction.

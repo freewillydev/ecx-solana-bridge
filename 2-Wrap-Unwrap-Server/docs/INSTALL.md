@@ -22,6 +22,14 @@ From a reviewed source checkout, as a normal sudo-enabled Ubuntu user:
 ./scripts/install --with-signet
 ```
 
+The current source configuration adds `solanaSdkLibrary`, an absolute path to the
+built SDK shared library (`libecx_solana_sdk.so` on Linux, `.dylib` on macOS).
+Unsigned construction uses this library and does not read `helper.json` or custody
+keys. Existing running fixtures have not been upgraded by this source change;
+reviewed configuration and rebuilt-package acceptance remain required before
+switching them. For local Haskell tests, build the library first and set
+`ECX_SOLANA_SDK_LIBRARY` to its absolute path; `scripts/check` does this automatically.
+
 This fetches checksum-pinned upstream toolchains, builds against the locked
 dependencies, runs the application/helper tests and installs the resulting local
 release. The first build takes time. Later servers can use the compiled installer
