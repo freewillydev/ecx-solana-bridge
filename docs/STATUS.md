@@ -1397,3 +1397,16 @@ At the recorded check it was unconfirmed; allocation and customer testing remain
 pending. No customer deposit or bridge payout was sent. See
 [evidence](evidence/installed-solana-recovery-driver.json). This evidence is
 preparation and an actual wait, not completed Solana recovery acceptance.
+
+## Customer errors and clipboard-denial fallback
+
+The thin interface translates common native/Solana admission failures and stale
+scanner pauses into customer instructions. Native daemon `-4` remains a general
+quote-preparation failure; the interface does not assume every instance means
+insufficient funds. Invalid native address errors identify the configured-network
+address check. When clipboard writing fails or is unavailable, payment instructions
+and private recovery links appear as selected read-only text for manual copying,
+with an explicit close-and-clear action. New orders and saved-order switching
+clear that temporary text. Strict TypeScript checking and browser bundling pass.
+These frontend changes are not yet in the accepted private installer draft;
+actual clipboard/recovery-link and customer wallet browser acceptance remain open.

@@ -91,6 +91,35 @@ function persist() {
   select.value = session?.id || "";
   el("history-field").hidden = !history.length;
 }
+const customerErrors: Record<string, string> = {
+  "rpc_error_-5": "Check the native destination or refund address for the configured network.",
+  "rpc_error_-4": "The native node could not prepare this quote. Try later or contact support.",
+  native_admission_funds_unavailable: "The bridge needs more native liquidity before it can quote this transfer. Try later.",
+  insufficient_custody_tokens: "The bridge needs more wrapped-token liquidity. Try later.",
+  insufficient_operating_sol: "The bridge needs more SOL for transaction fees. Try later.",
+  invalid_public_key: "Enter a valid Solana address.",
+  amount_outside_limits: "Enter an amount within the displayed limits.",
+  deposit_window_closed: "This order has expired. Do not pay; create a new order.",
+  payouts_paused: "The bridge is paused. Refresh for its current status.",
+  scanners_not_fresh: "Waiting for fresh chain observations. Try again shortly.",
+};
+const customerError = (code: string) => customerErrors[code] || code;
+async function copyText(value: string, confirmation: string): Promise<void> {
+  if (!value) return;
+  el("manual-copy").hidden = true;
+  el<HTMLTextAreaElement>("copy-text").value = "";
+  try {
+    await navigator.clipboard.writeText(value);
+    text("message", confirmation);
+  } catch {
+    const field = el<HTMLTextAreaElement>("copy-text");
+    field.value = value;
+    el("manual-copy").hidden = false;
+    field.focus();
+    field.select();
+    text("message", "Clipboard access is unavailable. Copy the selected text below.");
+  }
+}
 async function api(path: string, method = "GET", body?: unknown): Promise<any> {
   const response = await fetch(path, {
     method,
@@ -103,7 +132,7 @@ async function api(path: string, method = "GET", body?: unknown): Promise<any> {
   const result = await response.json();
   if (!response.ok)
     throw Error(
-      result.error || result.reason || `Request failed (${response.status})`,
+      customerError(result.error || result.reason || `Request failed (${response.status})`),
     );
   return result;
 }
@@ -197,7 +226,7 @@ async function loadConfig() {
     "availability",
     config!.availability.available
       ? "Bridge is accepting orders."
-      : `Deposits paused: ${config!.availability.reason}`,
+      : `Deposits paused: ${customerError(config!.availability.reason)}`,
   );
   text(
     "limits",
@@ -330,23 +359,28 @@ button("new").onclick = () => {
   direction();
   persist();
   el("order-details").hidden = true;
+  el<HTMLTextAreaElement>("copy-text").value = "";
+  el("manual-copy").hidden = true;
   text("status", "No order yet.");
   text("error", "");
   text("message", "");
   controls();
 };
+button("close-copy").onclick = () => {
+  el<HTMLTextAreaElement>("copy-text").value = "";
+  el("manual-copy").hidden = true;
+};
 button("copy").onclick = () =>
   void attempt(async () => {
     if (!session?.id) return;
-    await navigator.clipboard.writeText(
+    await copyText(
       `${location.origin}/#order=${encodeURIComponent(session.id)}&cap=${session.capability}`,
+      "Private recovery link copied.",
     );
-    text("message", "Private recovery link copied.");
   });
 button("copy-payment").onclick = () =>
   void attempt(async () => {
-    await navigator.clipboard.writeText(payment);
-    text("message", "Payment instructions copied.");
+    await copyText(payment, "Payment instructions copied.");
   });
 el<HTMLSelectElement>("history").onchange = () =>
   void attempt(async () => {
@@ -354,6 +388,8 @@ el<HTMLSelectElement>("history").onchange = () =>
       el<HTMLSelectElement>("history").value = session?.id || "";
       return;
     }
+    el<HTMLTextAreaElement>("copy-text").value = "";
+    el("manual-copy").hidden = true;
     session = history.find(
       (s) => s.id === el<HTMLSelectElement>("history").value,
     );

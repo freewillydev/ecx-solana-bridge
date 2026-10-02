@@ -64,6 +64,7 @@ label {
   font-size: 0.9rem;
 }
 input,
+textarea,
 select,
 button {
   font: inherit;
@@ -123,6 +124,7 @@ dd { margin: 0; }
 .deposit-box { padding: 16px; border: 1px solid #53695c; border-radius: 8px; margin: 20px 0; }
 .deposit-box code { display: block; margin-bottom: 14px; }
 input:focus,
+textarea:focus,
 button:focus,
 select:focus {
   outline: 2px solid #bae7c7;
