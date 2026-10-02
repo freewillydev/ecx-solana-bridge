@@ -1479,3 +1479,18 @@ and [restart/accounting](evidence/installed-solana-retry-restart.json).
 This closes this actual signed-but-unsent expiry/retry case. Clean-host Solana
 restoration, the wider interruption/reorg matrix, GUI wallet/clipboard
 acceptance, off-host backup, canonical deployment and independent review remain.
+
+### Consolidated review installers, 2026-10-02
+
+The latest ARM64 runtime package passed its compiled configuration check and
+rejected a normalized same-host independent-verifier alias. Actual upgrade and
+repeat installation preserved all eight checked financial table groups, eleven
+configuration files and critical sequence 19 in the dedicated paying deployment.
+The checks ran with the worker stopped; they do not assert a new transfer or
+complete reboot acceptance. The task guest was stopped afterward.
+
+Native Ubuntu x86 CI run 37006311333 passed at commit 696cf0c. Its installer was
+downloaded and checksum verified; installed upgrade acceptance is still pending.
+The current private draft release contains the earlier candidate, so these newer
+artifacts are not yet represented as an authenticated updated review release.
+See `docs/evidence/latest-review-{arm,x86}-build.json` for bounded evidence.
