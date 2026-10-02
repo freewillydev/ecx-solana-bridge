@@ -1384,3 +1384,16 @@ yet been exercised against a funded order or installed on Ubuntu. The private
 draft release remains the previously accepted binaries and does not contain
 this new configuration guard. No wallets, installed configurations, financial
 records or running services changed during this batch.
+
+The Solana recovery driver now also compiles against the cached Ubuntu ARM64
+library and loads successfully on the dedicated installed `inflight` guest.
+The live orchestration script retains customer idempotency, exact deposit bytes,
+an observer-only override before any deposit, and signed-attempt replay evidence.
+The first attempt stopped before order creation: the actual daemon's unsigned
+refund admission returned insufficient funds (9,502 available native units for
+a 10,000-unit quote plus fee). A journaled 2,000-unit transfer from the existing
+dedicated tester wallet was broadcast to the verified owned treasury address.
+At the recorded check it was unconfirmed; allocation and customer testing remain
+pending. No customer deposit or bridge payout was sent. See
+[evidence](evidence/installed-solana-recovery-driver.json). This evidence is
+preparation and an actual wait, not completed Solana recovery acceptance.

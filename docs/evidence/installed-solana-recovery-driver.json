@@ -1,0 +1,23 @@
+{
+  "platform": "Ubuntu 24.04 ARM64",
+  "cachedLibraryBuildReused": true,
+  "fullApplicationRebuilt": false,
+  "driverSourceSha256": "5d50242ab14d939466d5be7616c0f6d776284d6980c49114795e838fa01221f7",
+  "driverBinarySha256": "e69db72d66ce07e468543da0155d7e5e3371acc1ab8d87726e47ab5f5d816003",
+  "compiled": true,
+  "installedDriverLoaderVerified": true,
+  "newSignedSolanaAttemptStaged": false,
+  "liveAcceptanceComplete": false,
+  "dedicatedGuest": "inflight",
+  "providerConfigured": "https://solana-devnet.api.onfinality.io/public",
+  "originalConfigurationPrivatelyPreserved": true,
+  "firstAdmissionRejectedBeforeOrderCreation": true,
+  "admissionError": "rpc_error_-4: Insufficient funds",
+  "custodyNativeUnitsBeforeTopup": 9502,
+  "quoteGrossUnits": 10000,
+  "topupUnits": 2000,
+  "topupTransaction": "9bb783d7cb639fc89d97383af496e45003489fde335f052ff2cc04b3ed3f72b9",
+  "topupConfirmedAtRecordedCheck": false,
+  "customerDepositSent": false,
+  "bridgePayoutSent": false
+}
