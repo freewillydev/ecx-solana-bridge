@@ -105,6 +105,14 @@ the critical interpreter. If composition becomes necessary later, its severity
 must be the maximum of every constituent operation; safe code cannot downgrade a
 critical operation. Existentially hiding severity itself would lose the boundary.
 
+Database access belongs to the implementations of specific closed DSL operations.
+The safe evaluator opens its read-only transaction internally and interprets only
+SafeOperation constructors; it accepts no query or connection callback. Handlers
+receive neither the connection nor an Opaleye Select/Insert/Update capability.
+The obsolete prototype status-server DSL has been removed; Runtime implements
+the operational interpreter. Remaining writable-store exports, maintenance paths
+and handwritten catalog/locking reads still need consolidation under this boundary.
+
 ## Classification and authority
 
 Safe means unable to change economic authority, authorize a payment, sign,

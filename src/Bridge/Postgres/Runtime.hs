@@ -63,65 +63,70 @@ bearer header = do
   _ <- either reject pure(capabilityHash token)
   pure token
 
-readOnly :: SafeContext -> (PG.Connection -> IO a) -> IO a
-readOnly (SafeContext settings _ _ _) action = bracket (PG.connect settings) PG.close $ \connection->
-  Tx.withTransactionMode (Tx.TransactionMode Tx.RepeatableRead Tx.ReadOnly) connection (action connection)
-
-availability :: PG.Connection -> IO Availability
-availability connection = do
-  rows <- O.runSelect connection (O.selectTable deploymentTable) :: IO [Deployment]
-  case rows of [row]->pure(Availability (deploymentPaused row==0) (deploymentPauseReason row)); _->reject "corrupt_deployment"
-
-publicAvailability :: Bool -> PG.Connection -> IO Availability
-publicAvailability False _ = pure(Availability False "observation_only")
-publicAvailability True connection = do
-  state <- availability connection
-  if not(available state) then pure state else do
-    now <- epochSeconds
-    outcome <- try(Order.checkIntakeReadyC connection now) :: IO(Either BridgeError ())
-    pure $ case outcome of Right ()->state; Left(BridgeError reason)->Availability False reason
-
+-- The only input to read evaluation is a closed safe DSL command. No caller
+-- can supply a query, callback or receive a database connection.
 evalSafe :: SafeContext -> DSL 'Safe a -> IO a
-evalSafe context@(SafeContext _ public remote paying) (SafeDSL operation) = case operation of
-  PublicConfig->readOnly context $ \connection->do
-    state <- publicAvailability paying connection
-    case public of
-      Object fields->pure(Object(KM.insert "availability" (toJSON state) fields))
-      _->reject "invalid_public_configuration"
-  OrderStatus header oid->do
-    token <- bearer header
-    cap <- either reject pure(capabilityHash token)
-    readOnly context (\connection->Order.exposeOrderC connection remote cap oid)
-  PaymentInstructions header oid->do
-    token <- bearer header
-    cap <- either reject pure(capabilityHash token)
-    readOnly context $ \connection->do
+evalSafe _ (SafeDSL Health) = pure(Availability True "process_running")
+evalSafe (SafeContext settings public remote paying) (SafeDSL operation) =
+  bracket (PG.connect settings) PG.close $ \connection->
+    Tx.withTransactionMode (Tx.TransactionMode Tx.RepeatableRead Tx.ReadOnly)
+      connection (readOperation connection operation)
+ where
+  publicAvailability :: PG.Connection -> IO Availability
+  publicAvailability connection
+    | not paying = pure(Availability False "observation_only")
+    | otherwise = do
+        rows <- O.runSelect connection (O.selectTable deploymentTable) :: IO [Deployment]
+        state <- case rows of
+          [row]->pure(Availability (deploymentPaused row==0) (deploymentPauseReason row))
+          _->reject "corrupt_deployment"
+        if not(available state) then pure state else do
+          now <- epochSeconds
+          outcome <- try(Order.checkIntakeReadyC connection now) :: IO(Either BridgeError ())
+          pure $ case outcome of
+            Right ()->state
+            Left(BridgeError reason)->Availability False reason
+
+  readOperation :: PG.Connection -> SafeOperation result -> IO result
+  readOperation connection = \case
+    PublicConfig->do
+      state <- publicAvailability connection
+      case public of
+        Object fields->pure(Object(KM.insert "availability" (toJSON state) fields))
+        _->reject "invalid_public_configuration"
+    OrderStatus header oid->do
+      token <- bearer header
+      cap <- either reject pure(capabilityHash token)
+      Order.exposeOrderC connection remote cap oid
+    PaymentInstructions header oid->do
+      token <- bearer header
+      cap <- either reject pure(capabilityHash token)
       order <- Order.exposeOrderC connection remote cap oid
       now <- epochSeconds
-      state <- publicAvailability paying connection
+      state <- publicAvailability connection
       require (available state && status order=="AwaitingDeposit" && now<=deadline order && direction(request order)==WrappedToNative) "deposit_window_closed"
       instruction <- maybe (reject "instruction_not_recorded") pure(depositInstruction order)
       owner <- fieldValue "custodyOwner" public
       mintId <- fieldValue "mint" public
       uri <- either reject pure(Pay.payURIFor owner mintId instruction (gross $ quote order))
       pure(object["uri" .= uri,"reference" .= T.drop 11 instruction,"mint" .= mintId,"amount" .= gross(quote order),"refundPolicy" .= ("verified_source_owner"::Text)])
-  Health->pure(Availability True "process_running")
-  Readiness->readOnly context (publicAvailability paying)
-  ReadyEndpoint->readOnly context (publicAvailability paying)
-  Scanners->readOnly context $ \connection->do
-    rows <- O.runSelect connection (O.selectTable scanhealthTable) :: IO [ScanHealth]
-    pure(object["scanners" .= [object["chain" .= scanhealthChain row,"lastSuccess" .= scanhealthLastSuccess row,"lastError" .= scanhealthLastError row] | row<-rows]])
-  Audit->readOnly context $ \connection->do
-    rows <- O.runSelect connection (O.selectTable postingsTable) :: IO [Postings]
-    obligations <- O.runSelect connection (O.selectTable obligationsTable) :: IO [Obligations]
-    treasuryReceipts <- O.runSelect connection $ O.limit 1001 $ do
-      row<-O.selectTable depositsTable
-      O.where_(O.isNull(depositsOrderId row) O..&& depositsEligible row O..== O.sqlInt8 1 O..&& depositsAllocated row O..== O.sqlInt8 0)
-      pure row
-      :: IO [Deposits]
-    nativeReviews <- NativeRecovery.reviewSequences connection
-    let totals=M.fromListWith (+) [((postingsAsset row,postingsAccount row),toInteger(postingsDelta row)) | row<-rows]
-    pure(object["treasuryReceipts" .= [object["receipt" .= depositsId row,"asset" .= depositsAsset row,"units" .= T.pack(show $ depositsAmount row),"ownershipRequiresAttestation" .= True] | row<-take 1000 treasuryReceipts],"treasuryBacklog" .= (length treasuryReceipts>1000),"balances" .= [object["asset" .= asset,"allocation" .= account,"units" .= T.pack(show n)] | ((asset,account),n)<-M.toList totals],"unresolved" .= [object["id" .= obligationsId row,"status" .= obligationsStatus row] | row<-obligations,obligationsStatus row/="paid"],"nativeRecoveryReviews" .= [object["transaction" .= txid,"state" .= state,"recoverySequence" .= sequenceNo] | (txid,state,sequenceNo)<-take 1000 nativeReviews],"nativeRecoveryBacklog" .= (length nativeReviews>1000)])
+    Health->pure(Availability True "process_running")
+    Readiness->publicAvailability connection
+    ReadyEndpoint->publicAvailability connection
+    Scanners->do
+      rows <- O.runSelect connection (O.selectTable scanhealthTable) :: IO [ScanHealth]
+      pure(object["scanners" .= [object["chain" .= scanhealthChain row,"lastSuccess" .= scanhealthLastSuccess row,"lastError" .= scanhealthLastError row] | row<-rows]])
+    Audit->do
+      rows <- O.runSelect connection (O.selectTable postingsTable) :: IO [Postings]
+      obligations <- O.runSelect connection (O.selectTable obligationsTable) :: IO [Obligations]
+      treasuryReceipts <- O.runSelect connection $ O.limit 1001 $ do
+        row<-O.selectTable depositsTable
+        O.where_(O.isNull(depositsOrderId row) O..&& depositsEligible row O..== O.sqlInt8 1 O..&& depositsAllocated row O..== O.sqlInt8 0)
+        pure row
+        :: IO [Deposits]
+      nativeReviews <- NativeRecovery.reviewSequences connection
+      let totals=M.fromListWith (+) [((postingsAsset row,postingsAccount row),toInteger(postingsDelta row)) | row<-rows]
+      pure(object["treasuryReceipts" .= [object["receipt" .= depositsId row,"asset" .= depositsAsset row,"units" .= T.pack(show $ depositsAmount row),"ownershipRequiresAttestation" .= True] | row<-take 1000 treasuryReceipts],"treasuryBacklog" .= (length treasuryReceipts>1000),"balances" .= [object["asset" .= asset,"allocation" .= account,"units" .= T.pack(show n)] | ((asset,account),n)<-M.toList totals],"unresolved" .= [object["id" .= obligationsId row,"status" .= obligationsStatus row] | row<-obligations,obligationsStatus row/="paid"],"nativeRecoveryReviews" .= [object["transaction" .= txid,"state" .= state,"recoverySequence" .= sequenceNo] | (txid,state,sequenceNo)<-take 1000 nativeReviews],"nativeRecoveryBacklog" .= (length nativeReviews>1000)])
 
 evalCritical :: CriticalContext -> DSL 'Critical a -> IO a
 -- Observer mode can retain payment hints, pause and reconcile recorded effects.

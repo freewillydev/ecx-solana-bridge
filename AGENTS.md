@@ -20,3 +20,7 @@ Database access: use Opaleye for all application reads/writes, diagnostics, role
 checks and database test fixtures/assertions. No raw SQL query/execute escape path
 for those operations and no alternative database backend. Underlying libpq
 connections/transaction control and schema-migration DDL are separate infrastructure.
+
+Opaleye queries belong only to implementations of specific closed DSL operations.
+Do not expose connection/query callbacks or generic RunQuery/RunSQL operations to
+handlers. Keep connection capabilities private to the relevant interpreter.

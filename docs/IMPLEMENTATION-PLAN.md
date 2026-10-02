@@ -83,6 +83,8 @@ typeclasses whose only remaining purpose is supporting the retired SQLite backen
 - Workflow: prepare, journal, sign, save bytes, authorize/send, observe, settle.
 - Recovery: cancellation, expiry, replacement and loss decisions using that same workflow.
 - Store: typed schema and explicit transactions/queries; PostgreSQL only.
+  Opaleye access belongs only to implementations of specific closed DSL operations;
+  no generic query/SQL/callback operation or connection access for handlers.
   All application reads/writes, diagnostics, permission checks and database test
   fixtures/assertions use Opaleye. Replace remaining handwritten runtime SQL queries,
   including system-catalog checks, with typed Opaleye access. Keep PostgreSQL driver

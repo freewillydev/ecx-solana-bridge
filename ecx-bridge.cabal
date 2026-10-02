@@ -80,15 +80,6 @@ test-suite bridge-test
     text, time, async, network, http-client, servant-client, servant, unix, scientific, base64-bytestring,
     crypton, ram
 
--- Real integration seam for the PostgreSQL/DSL migration, private Unix API only.
-executable ecx-postgres-seam
-  import: settings
-  hs-source-dirs: integration
-  main-is: Main.hs
-  ghc-options: -threaded
-  build-depends: base, ecx-bridge, text, servant, servant-server,
-    postgresql-simple, opaleye
-
 executable ecx-postgres-journal-check
   import: settings
   hs-source-dirs: integration
