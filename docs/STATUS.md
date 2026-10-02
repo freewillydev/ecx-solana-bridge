@@ -1796,3 +1796,19 @@ primary provider passed Devnet identity, but the verifier was unavailable; no
 order or deposit was created. Preflight now uses the transport's normal 25-second
 network budget and reports only provider role/readiness, never URLs or credentials.
 Both independent real providers remain required. The guest is stopped.
+
+## Actual browser manual recovery-link acceptance
+
+The current frontend was served against the retained installed PostgreSQL
+observer, with payments disabled and no package rebuild. The actual in-app
+browser recovered the completed real Signet/Devnet order from its dedicated
+private journal. Copy exposed a correctly formed selectable recovery link;
+Close and clear emptied the private field. After New order, opening that selected
+link and reloading recovered the same completed order, saved 1% quote and payout
+explorer link. The capability fragment was removed from the displayed URL.
+
+This proves the manual recovery-link path independently of clipboard integration.
+The automation virtual clipboard remains unavailable; external wallet signing
+is still unverified. The ledger remained six orders, five attempts and sequence
+19. Temporary web/observer overrides and the local forwarding were removed; no
+new transfer occurred. See `evidence/customer-manual-recovery-link.json`.
