@@ -7,6 +7,7 @@ import qualified Bridge.Postgres.Maintenance as Maintenance
 import Bridge.Ledger
 import Bridge.Reconciliation
 import Bridge.Recovery
+import Bridge.Legacy.Recovery ()
 import Bridge.Reorg
 import Bridge.Budget
 import Bridge.SolanaMessage

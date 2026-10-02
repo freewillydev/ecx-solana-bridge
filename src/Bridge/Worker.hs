@@ -11,7 +11,7 @@ import Bridge.Observer
 import Bridge.Order (createCustomerOrder)
 import Bridge.RPC
 import Bridge.Reconciliation
-import Bridge.Recovery
+import Bridge.Legacy.Recovery
 import Bridge.Solana
 import Bridge.Settlement
 import Bridge.Types

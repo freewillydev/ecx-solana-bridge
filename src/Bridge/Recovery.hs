@@ -1,17 +1,15 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.Recovery
-  ( recoverDeployment, NativeLockStore(..), reconcileNativeLocks, reconcileNativeLocksWith
-  , CancellationStore(..), cancelPreparation, cancelPreparationWith, SourceRecoveryStore(..), approveSourceRecovery, approveSourceRecoveryWith
-  , LossCoverStore(..), coverSourceLoss, coverSourceLossWith, prepareNativeReplacement, prepareNativeReplacementWith
+  ( NativeLockStore(..), reconcileNativeLocksWith
+  , CancellationStore(..), cancelPreparationWith, SourceRecoveryStore(..), approveSourceRecoveryWith
+  , LossCoverStore(..), coverSourceLossWith, prepareNativeReplacementWith
   , NativeReplacementStore(..), signNativeReplacementWith ) where
 
 import Bridge.Config
-import Bridge.Legacy.PaymentLifecycle ()
-import Bridge.Ledger
-import Bridge.Native (nativeAmount,nativeIdentity)
+import Bridge.Ledger.Model
+import Bridge.Native (nativeAmount)
 import Bridge.NativePayment
 import Bridge.NativeReplacement
-import Bridge.Observer (epochSeconds,observeOnce)
 import Bridge.Payment (payoutReference,PreparationStore(..))
 import Bridge.Reconciliation hiding (custodyProof)
 import Bridge.Reorg
@@ -26,46 +24,17 @@ import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Database.SQLite.Simple
-import Network.HTTP.Client (Manager)
 
 stored :: FromJSON a => Text -> IO a
 stored=either (const $ reject "invalid_saved_preparation") pure . eitherDecodeStrict' . TE.encodeUtf8
 
 -- Reconstruct from durable records on every startup/pass. Observing and booking
 -- a recorded outcome continue during a pause; this never prepares or broadcasts.
-recoverDeployment :: Manager -> Config -> Ledger -> IO Value
-recoverDeployment manager c ledger=do
-  scans <- observeOnce manager c ledger
-  epochSeconds >>= expireQuotes ledger
-  sources <- reconcileNativeSources manager c ledger
-  nativeSettlements <- reconcileNativeSettlements manager c ledger
-  payments <- reconcilePayments manager c ledger
-  locks <- reconcileNativeLocks manager c ledger
-  custody <- reconcileCustody manager c ledger
-  health <- readiness ledger
-  pure $ object ["scanners" .= scans,"sources" .= sources,"nativeSettlements" .= nativeSettlements,"payments" .= payments,"nativeLocks" .= locks,"custody" .= custody
-    ,"availability" .= health,"signedOrSent" .= False]
-
--- Explicitly restore only the work suspended by a recovered source. This is
--- neither a replacement approval nor permission to resume or send anything.
-approveSourceRecovery :: Manager -> Config -> Ledger -> Text -> Int64 -> Text -> IO Value
-approveSourceRecovery manager c ledger intent restoration reason=do
-  _ <- recoverDeployment manager c ledger
-  approveSourceRecoveryWith epochSeconds
-    (realPaymentTransport manager c (const $ reject "unexpected_source_approval_backup")) c ledger intent restoration reason
-
 class (SettlementStore ledger,CustodyStore ledger) => SourceRecoveryStore ledger where
   recoveryApproval :: ledger -> Text -> Int64 -> IO (Maybe Text)
   recoveryObligation :: ledger -> Text -> Int64 -> IO Obligation
   recoveryRecord :: ledger -> Text -> Int64 -> Int64 -> Text -> IO ()
   recoveryReconcile :: IO Int64 -> PaymentTransport -> Config -> ledger -> IO Value
-instance SourceRecoveryStore Ledger where
-  recoveryApproval = sourceRecoveryApproval
-  recoveryObligation = sourceRecoveryObligation
-  recoveryRecord = recordSourceRecoveryApproval
-  recoveryReconcile = reconcileCustodyWith
-
 approveSourceRecoveryWith :: SourceRecoveryStore ledger => IO Int64 -> PaymentTransport -> Config -> ledger -> Text -> Int64 -> Text -> IO Value
 approveSourceRecoveryWith clock transport c ledger intent restoration reason=do
   require (restoration>0 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_source_approval"
@@ -90,14 +59,6 @@ approveSourceRecoveryWith clock transport c ledger intent restoration reason=do
   pure $ object ["approvedSourceRecovery" .= intent,"restorationSequence" .= restoration
     ,"paused" .= True,"signedOrSent" .= False]
 
-prepareNativeReplacement :: Manager -> Config -> Ledger -> Text -> Amount -> Text -> IO Value
-prepareNativeReplacement manager c ledger parent fee reason=do
-  _ <- recoverDeployment manager c ledger
-  prepareNativeReplacementWith epochSeconds
-    (realPaymentTransport manager c (const $ reject "unexpected_replacement_backup")) c ledger parent fee reason
-
--- Storage capability for the complete explicit operator workflow. Chain
--- inspection and signing remain shared; callers cannot substitute arbitrary IO.
 class (SettlementStore ledger,CustodyStore ledger) => NativeReplacementStore ledger where
   replacementDecision :: ledger -> Text -> Amount -> Text -> IO (Maybe(Int64,Bool))
   replacementParent :: ledger -> Config -> Text -> IO Attempt
@@ -108,19 +69,6 @@ class (SettlementStore ledger,CustodyStore ledger) => NativeReplacementStore led
   replacementCustody :: IO Int64 -> PaymentTransport -> Config -> ledger -> IO Value
   replacementFresh :: ledger -> Int64 -> IO ()
   replacementCancel :: ledger -> Int64 -> Text -> IO ()
-instance NativeReplacementStore Ledger where
-  replacementDecision = nativeReplacementDecision
-  replacementParent = nativeReplacementParent
-  replacementRecordDraft = recordNativeReplacementDraft
-  replacementMember = nativeReplacementMember
-  replacementSigningContext = nativeReplacementSigningContext
-  replacementRecordMember = recordNativeReplacementMember
-  replacementCustody = reconcileCustodyWith
-  replacementFresh = checkCustodyFresh
-  replacementCancel = recordNativeReplacementCancellation
-
--- Persist the reviewed unsigned template; this command cannot invoke a signer
--- or create another economic intent. Cancellation keeps the original payment.
 prepareNativeReplacementWith :: NativeReplacementStore ledger => IO Int64 -> PaymentTransport -> Config -> ledger -> Text -> Amount -> Text -> IO Value
 prepareNativeReplacementWith clock transport c ledger parent fee reason=do
   require (units fee>0 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_native_replacement_draft"
@@ -184,21 +132,10 @@ signNativeReplacementWith clock transport c ledger sequenceNo=do
     now <- clock
     replacementFresh ledger now
 
-coverSourceLoss :: Manager -> Config -> Ledger -> Text -> Int64 -> LossCapital -> Text -> IO Value
-coverSourceLoss manager c ledger did recovery capital reason=do
-  _ <- recoverDeployment manager c ledger
-  coverSourceLossWith epochSeconds
-    (realPaymentTransport manager c (const $ reject "unexpected_loss_cover_backup")) c ledger did recovery capital reason
-
 class (NativeSourceStore ledger,CustodyStore ledger) => LossCoverStore ledger where
   lossReadiness :: ledger -> IO Availability
   lossDecision :: ledger -> Text -> Int64 -> IO (Maybe(LossCapital,Text))
   lossRecord :: ledger -> Deposit -> Int64 -> Int64 -> LossCapital -> Text -> Value -> Value -> IO ()
-instance LossCoverStore Ledger where
-  lossReadiness = readiness
-  lossDecision = sourceLossCover
-  lossRecord = recordSourceLossCover
-
 coverSourceLossWith :: LossCoverStore ledger => IO Int64 -> PaymentTransport -> Config -> ledger -> Text -> Int64 -> LossCapital -> Text -> IO Value
 coverSourceLossWith clock transport c ledger did recovery capital reason=do
   require (recovery>0 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_source_loss_cover"
@@ -224,16 +161,8 @@ coverSourceLossWith clock transport c ledger did recovery capital reason=do
 
 -- Holding saved native inputs is independent of Solana availability. This may
 -- restore advisory locks, but cannot sign, broadcast, unlock or release funds.
-reconcileNativeLocks :: Manager -> Config -> Ledger -> IO Value
-reconcileNativeLocks manager c=reconcileNativeLocksWith
-  (realPaymentTransport manager c (const $ reject "unexpected_lock_recovery_backup"))
-    {paymentIdentity=nativeIdentity manager c >> pure ()} c
-
 class CancellationStore ledger => NativeLockStore ledger where
   nativeLockAudit :: ledger -> Text -> IO ()
-instance NativeLockStore Ledger where
-  nativeLockAudit ledger subject = ledgerAction ledger $ \db->execute db "INSERT INTO audit(action,detail) VALUES('native_locks_restored',?)" (Only subject)
-
 reconcileNativeLocksWith :: NativeLockStore ledger => PaymentTransport -> Config -> ledger -> IO Value
 reconcileNativeLocksWith transport c ledger=do
   result <- try (work `catch` (\(_::IOException)->reject "native_lock_recovery_io_unavailable")) :: IO (Either BridgeError Value)
@@ -314,25 +243,12 @@ reconcileNativeLocksWith transport c ledger=do
 
 -- Private operator action under the exclusive ledger lock. This cannot sign,
 -- send, release customer principal, or resume the deployment.
-cancelPreparation :: Manager -> Config -> Ledger -> Text -> Int -> Text -> IO Value
-cancelPreparation manager c ledger intent generation reason=do
-  _ <- observeOnce manager c ledger
-  cancelPreparationWith epochSeconds
-    (realPaymentTransport manager c (const $ reject "unexpected_cancellation_backup")) c ledger intent generation reason
-
 class (SettlementStore ledger,CustodyStore ledger) => CancellationStore ledger where
   cancellationReconcile :: IO Int64 -> PaymentTransport -> Config -> ledger -> IO Value
   cancellationRead :: ledger -> Text -> Int -> IO (Maybe(Text,Text,Bool))
   cancellationCheckFresh :: ledger -> Int64 -> IO ()
   cancellationBegin :: ledger -> Preparation -> Int64 -> Text -> Value -> IO ()
   cancellationFinish :: ledger -> Preparation -> IO ()
-instance CancellationStore Ledger where
-  cancellationReconcile = reconcileCustodyWith
-  cancellationRead = preparationCancellation
-  cancellationCheckFresh = checkCustodyFresh
-  cancellationBegin = beginPreparationCancellation
-  cancellationFinish = finishPreparationCancellation
-
 cancelPreparationWith :: CancellationStore ledger => IO Int64 -> PaymentTransport -> Config -> ledger -> Text -> Int -> Text -> IO Value
 cancelPreparationWith clock transport c ledger intent generation reason=do
   require (generation>=0 && generation<8 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_preparation_cancellation"

@@ -1578,3 +1578,17 @@ Remaining SQLite dependencies include recovery and reconciliation adapters,
 legacy order provisioning, diagnostics and maintenance/import tooling. The Cabal
 component split and production installer dependency removal remain unfinished.
 No Linux rebuild or new chain transfer was needed for this source refactor.
+
+### Recovery SQLite adapter isolated
+
+Five SQLite recovery store instances and six concrete legacy entry points moved
+verbatim from `Bridge.Recovery` to `Bridge.Legacy.Recovery`. The shared recovery
+module now imports the pure financial records and exposes the store typeclasses
+and shared algorithms, with no direct SQLite, legacy ledger or legacy adapter
+import. Legacy worker/tests explicitly load the adapter; PostgreSQL keeps its
+existing implementations. The executable and all 373 regression examples pass.
+
+SQLite remains linked indirectly through custody reconciliation, legacy order
+provisioning, diagnostics and maintenance/import components. Separating those
+paths and the Cabal components remains necessary before removing the production
+SQLite dependency and rebuilding installers. No new chain operation occurred.
