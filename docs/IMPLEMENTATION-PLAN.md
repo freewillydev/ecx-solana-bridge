@@ -16,6 +16,17 @@ compilation and checks during this phase. Completed build artifacts are retained
    remaining concrete replacement/reorg/loss and interrupted-operation gaps.
    Reuse existing real Signet/Devnet fixtures, ledger and adapters; do not create
    a parallel payment implementation. Verify each complete workflow once.
+   Implement the outstanding bounded earned-fee withdrawal as an operator payment
+   before calling the product complete. Preserve its distinction from customer
+   conversions: do not create fictitious deposit receipts or customer orders to
+   reuse the engine. Generalize saved payment context only where necessary, with
+   typed operator funding, immutable destination/amount/fee ceilings, atomic
+   reservation of unencumbered earned funds, central critical dispatch, saved
+   bytes/backup/send barriers and ordinary independently verified settlement.
+   Concurrent source-loss capital allocation must exclude those reservations.
+   Recovery, cancellation and retries must preserve the same single-payment and
+   custody invariants. Exercise the complete withdrawal on dedicated real test
+   funds before packaging; no manual wallet-send bypass.
 2. **Finish customer acceptance.** Exercise the connection-free browser journey,
    clipboard/private recovery links and an actual supported Solana Pay wallet.
    Keep external wallet signing pending until it can be performed with the
@@ -42,6 +53,11 @@ The signed-but-unsent Solana local clean-host restore, explicit expired retry,
 normal-worker settlement and restart checkpoint passed on the real chains; see
 [evidence](evidence/installed-solana-inflight-restore.json). Item 1 still includes
 the remaining concrete replacement/reorg/loss acceptance gaps.
+
+The published canonical pool and both Jupiter quote directions have now been
+read from actual mainnet services; see `evidence/published-orca-pool-readback.json`
+and `evidence/published-jupiter-routes.json`. Quote availability does not establish
+executed-trade acceptance, issuer approval or global reserve backing.
 
 The next task remains item 1. Packaging does not become the default fallback when an
 external acceptance prerequisite is unavailable: continue another substantive

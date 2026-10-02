@@ -107,3 +107,26 @@ threshold of 32768; its fee-rate field is 10000 hundredths of a basis point
 prove issuer approval, reserve backing, LP ownership/lock, auto-compounding or
 Jupiter routing. It does not change the bridge's configured dedicated Devnet
 mint or authorize mainnet operations.
+
+## Published Jupiter routes
+
+On October 2, actual quote-only reads of Jupiter's Swap V2 `/order` endpoint
+returned direct Metis/Whirlpool routes through that same pool in both directions:
+1000000 USDC base units quoted 32520698 wrapped base units, and 100000000 wrapped
+base units quoted 3007388 USDC base units. Each route allocated 10000 basis points
+to the exact published pool and token pair. The reported aggregator fee was
+10 basis points, separate from the pool fee and the bridge's 1% conversion fee.
+Quotes change; these amounts are evidence snapshots, not customer price promises.
+
+Run `python3 scripts/check-market-routes --report /path/to/market-quotes.json`
+to repeat the read-only check. It supplies no wallet identity, signs nothing,
+and refuses unexpected pair/pool bindings or a non-direct route. It records
+response hashes and timestamps, and never calls `/execute`. The real endpoint
+accepted these requests without credentials, although the
+[current API documentation](https://developers.jup.ag/docs/swap) specifies an
+API key; future authentication refusal must be investigated rather than treated
+as absent liquidity. See `evidence/published-jupiter-routes.json`.
+
+Both quoted routes are verified. An assembled transaction and executed swap are
+not verified. Canonical configuration, issuer approval and backing gates remain
+open; trading links stay disabled in the dedicated Devnet deployment.

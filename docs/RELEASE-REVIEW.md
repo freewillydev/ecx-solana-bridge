@@ -19,6 +19,7 @@ No independent reviewer has signed off, and canonical intake remains disabled.
 | PostgreSQL source loss/restoration | `evidence/postgres-source-local-disconnect.json`: actual local Signet block invalidation/reconnection, unchanged postings/attempts. No permanent loss or double spend. |
 | Encrypted escrow and retention tools | `evidence/encrypted-handoff-staging-local.json`, `evidence/backup-retention-local.json`: real local restic encryption/restore and retention; not physically independent storage. |
 | Current regression batch | `evidence/process-group-cleanup.json`: library build and 374 Haskell examples, including surviving-child cleanup; not installed Linux acceptance. |
+| Published canonical trading routes | `evidence/published-jupiter-routes.json`: actual Jupiter Swap V2 quotes in both directions through the exact published Orca pool; no wallet identity, signing or executed swap. |
 
 ## Review boundaries
 
@@ -70,7 +71,7 @@ is unresolved. Bincode is pinned and unmaintained; no migration or waiver is imp
    betanet/canonical flows. Verify the full-range pool and executable market route
    before claiming Jupiter/Orca availability. No canonical funds are allocated here.
 5. Complete dependency/license applicability and independent security review.
-   If the plan's bounded fee-sweeping requirement is retained, it still needs a
+   The plan's bounded fee-sweeping requirement still needs a
    supported ledger/signing workflow and acceptance; no general fee-withdrawal
    command is implemented or certified by the current evidence.
 6. After substantive fixes, build source once for ARM64/x86, perform affected
