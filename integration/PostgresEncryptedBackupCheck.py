@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Real restic encryption/restore plus isolated PostgreSQL verification.
 
-Uses a LOCAL temporary repository: never off-host acceptance or worker coverage.
+Defaults to a LOCAL temporary repository; explicit protected credentials select
+an existing HTTPS repository. Neither mode acknowledges worker coverage or
+proves the repository is physically independent of the bridge host.
 Only a trusted archive produced by our own PostgreSQL backup tool is accepted.
 """
 import argparse
@@ -32,10 +34,22 @@ def main():
     parser.add_argument('--directory', required=True)
     parser.add_argument('--restic', default=shutil.which('restic'))
     parser.add_argument('--report')
+    parser.add_argument('--repository-file', help='protected file for an existing HTTPS restic repository')
+    parser.add_argument('--password-file', help='protected existing repository password file')
     args = parser.parse_args()
+    if bool(args.repository_file) != bool(args.password_file):
+        parser.error('Repository and password files must be supplied together')
+    if not args.restic or not Path(args.restic).is_absolute():
+        parser.error('An absolute restic executable is required')
     os.umask(0o077)
     verify = load('verify_snapshot', 'postgres-verify-backup.py')
     uploader = load('encrypted_snapshot', 'postgres-remote-backup.py')
+    remote = bool(args.repository_file)
+    if remote:
+        # Validate before creating any temporary state or reaching the network.
+        # Credentials and the repository URL must never enter the report/argv.
+        uploader.remote_repository(args.repository_file)
+        uploader.private_file(args.password_file)
     archive, _ = verify.load_archive(args.manifest)
     directory = Path(args.directory)
     directory.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -46,14 +60,19 @@ def main():
         manifest = inputs / Path(args.manifest).name
         shutil.copyfile(args.manifest, manifest)
         shutil.copyfile(archive, inputs / archive.name)
-        password = stage / 'password'
-        password.write_text(secrets.token_urlsafe(48))
-        password.chmod(0o600)
-        repository = stage / 'repository-file'
-        repository.write_text(str(stage / 'encrypted-repository'))
-        repository.chmod(0o600)
+        if remote:
+            repository = Path(args.repository_file)
+            password = Path(args.password_file)
+        else:
+            password = stage / 'password'
+            password.write_text(secrets.token_urlsafe(48))
+            password.chmod(0o600)
+            repository = stage / 'repository-file'
+            repository.write_text(str(stage / 'encrypted-repository'))
+            repository.chmod(0o600)
         common = [args.restic, '--repository-file', str(repository), '--password-file', str(password)]
-        subprocess.run([*common, 'init'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
+        if not remote:
+            subprocess.run([*common, 'init'], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=60)
         receipt = uploader.upload_snapshot(manifest, args.restic, repository, password)
         restore = stage / 'restored'
         subprocess.run([*common, 'restore', receipt['snapshotId'], '--target', str(restore)], check=True,
@@ -67,7 +86,8 @@ def main():
         report = {'encryptedRepositoryRoundTripPassed': True,
                   'authenticatedSnapshotMetadataPassed': True,
                   'postgresRestore': result, 'snapshotId': receipt['snapshotId'],
-                  'repositoryLocation': 'local disposable storage',
+                  'repositoryLocation': 'configured HTTPS repository' if remote else 'local disposable storage',
+                  'httpsRepositoryRoundTripPassed': remote,
                   'offHostDurabilityTested': False, 'workerCoverageAcknowledged': False,
                   'signerKeysCopied': False, 'sourceLedgerModified': False}
         print(json.dumps(report, sort_keys=True))
@@ -76,4 +96,7 @@ def main():
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except (ValueError, KeyError, TypeError, OSError, subprocess.SubprocessError):
+        raise SystemExit('Encrypted backup acceptance failed; no worker coverage was acknowledged') from None

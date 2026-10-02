@@ -1113,3 +1113,21 @@ order has a deposit. The unfunded records and reservations are retained for
 normal deadline/grace expiry on the next worker run; no ledger rows were deleted
 or clock/network behavior approximated. The worker finishes paused/stopped and
 the VM is stopped after acceptance. Production binaries/frontend were unchanged.
+
+## Single-command encrypted remote-repository acceptance
+
+The existing encrypted backup acceptance command now accepts paired protected
+repository/password files for an existing HTTPS restic repository. It reuses the
+production snapshot uploader, authenticated snapshot association check and trusted
+archive verifier, then restores into an isolated PostgreSQL database. Default
+local mode retains its explicit non-remote classification. No duplicate backup
+implementation or production compilation was needed.
+
+The real local restic round trip passed checksum, deployment and table-count
+verification for all 38 tables; the disposable repository, restore files and
+database were removed. Four offline refusal cases passed before staging/network
+access, including exposed credentials and loopback storage, with redacted errors.
+See `evidence/postgres-encrypted-backup-command.json`. Actual HTTPS acceptance
+still requires configured remote storage. The command never acknowledges worker
+coverage, initializes/prunes a remote repository or copies signer keys. Remote
+retention, physical independence and in-flight/key recovery remain open gates.

@@ -332,3 +332,32 @@ rerun those guarded tools against this changed fixture. Retain the new records
 for ordinary deadline/grace expiry; no new signing attempt or deposit was made.
 Browser screenshots/evidence are in `docs/evidence/installed-browser-acceptance.json`.
 External wallet signing and clipboard/private recovery-link verification remain.
+
+### Encrypted backup acceptance on the configured repository
+
+`integration/PostgresEncryptedBackupCheck.py` defaults to disposable local restic
+storage. Supply both protected credential files to exercise an already initialized
+HTTPS repository with the same uploader and authenticated read-back used by the
+worker. Run as a PostgreSQL owner able to create/drop disposable databases, with
+the explicit private `PGHOST`, `PGPORT` and `PGUSER` for the acceptance cluster:
+
+```sh
+python3 integration/PostgresEncryptedBackupCheck.py /absolute/trusted-ledger-manifest.json \
+  --directory /absolute/private-acceptance-stage \
+  --restic /usr/bin/restic \
+  --repository-file /absolute/private-backup.repository \
+  --password-file /absolute/private-backup.password \
+  --report /absolute/acceptance-report.json
+```
+
+Use only a trusted ledger manifest from `deploy/postgres-backup.py`, not a release
+package manifest. Remote mode uploads a new encrypted archive/manifest snapshot;
+it does not initialize, prune or delete remote snapshots. The temporary restore
+and isolated database are removed after the check. The test checks archive bytes,
+deployment identity and all table counts; it does not prove signer-key recovery,
+in-flight resumption or independent physical storage. Establish host independence
+and retention separately. Neither mode acknowledges coverage in the live ledger
+or starts a worker. Credentials and repository URLs are omitted from reports and
+failure diagnostics. An unavailable repository fails the command without a success
+report. The local round trip is recorded in
+`docs/evidence/postgres-encrypted-backup-command.json`.
