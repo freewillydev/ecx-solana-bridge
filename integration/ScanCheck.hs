@@ -8,7 +8,7 @@ import Bridge.Types (require,BridgeError(..))
 import Control.Exception (try)
 import qualified Bridge.Postgres.Source as Source
 import Bridge.Postgres.Ledger (withLedger, readiness)
-import qualified Bridge.Postgres.Observer as Observer
+import qualified Bridge.Observer as Observer
 import qualified Bridge.Postgres.Custody as Custody
 import Bridge.Observer (epochSeconds)
 import Bridge.Settlement (realPaymentTransport,readSavedPayment,PaymentTransport(..))

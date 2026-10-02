@@ -1,7 +1,8 @@
 {-# OPTIONS_GHC -Wno-orphans #-}
 -- Legacy SQLite adapters; shared payment/reorg/deposit algorithms stay generic.
 module Bridge.Legacy.PaymentLifecycle () where
-import Bridge.Legacy.ObservationPreparation ()
+import Bridge.Payment (PreparationStore(..))
+import Bridge.Budget (orderCostLimits)
 import Bridge.Ledger
 import Bridge.Config
 import Bridge.Types
@@ -90,3 +91,17 @@ instance DepositStore Ledger where
   depositExpose = exposeOrder
   depositPause = pause
   depositReadiness = readiness
+
+instance PreparationStore Ledger where
+  preparationPause = pause
+  preparationReadiness = readiness
+  preparationOrderPolicy ledger oid = do
+    rows <- ledgerAction ledger $ \db->query db "SELECT policy_json FROM orders WHERE id=?" (Only oid) :: IO [Only Text]
+    case rows of [Only value]->stored value; _->reject "order_not_found"
+  preparationCostLimits ledger oid = ledgerAction ledger $ \db->orderCostLimits db oid
+  preparationAttempts = pendingAttempts
+  preparationPending = pendingPreparations
+  preparationBegin = beginPreparation
+  preparationActive = activePreparationGeneration
+  preparationStoreDraft = storeDraft
+  preparationStoreAttempt = storeAttempt

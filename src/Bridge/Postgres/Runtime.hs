@@ -16,7 +16,7 @@ import qualified Bridge.Postgres.NativeRebroadcast as NativeRebroadcast
 import qualified Bridge.Postgres.NativeRecovery as NativeRecovery
 import Data.Int (Int64)
 import qualified Bridge.Postgres.Order as Order
-import qualified Bridge.Postgres.Observer as Observer
+import qualified Bridge.Observer as Observer
 import qualified Bridge.Postgres.Reconciliation as Reconciliation
 import qualified Bridge.Postgres.Server as Server
 import qualified Bridge.Postgres.Refund as Refund

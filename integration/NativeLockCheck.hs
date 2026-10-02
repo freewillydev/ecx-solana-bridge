@@ -15,7 +15,7 @@ import qualified Bridge.Postgres.Fence as Fence
 import Bridge.Postgres.PaymentStore (Store(..))
 import Bridge.RPC
 import Control.Exception (try,finally)
-import qualified Bridge.Postgres.Observer as Observer
+import qualified Bridge.Observer as Observer
 import qualified Bridge.Postgres.Reconciliation as Reconciliation
 import qualified Bridge.Postgres.Startup as Startup
 import Bridge.Observer (epochSeconds)

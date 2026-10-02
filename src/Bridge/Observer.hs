@@ -1,10 +1,14 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.Observer
-  ( observeOnce, observeNative, observeSolana, observeSolanaOperating, observerLoop
-  , ObserverLedger(..), SignatureInfo(..), collectSignatures, epochSeconds
+  ( observeOnce, SignatureInfo(..), collectSignatures, epochSeconds
   ) where
 
 import Bridge.Config
+import Bridge.Postgres.Ledger (Ledger,ledgerAction)
+import qualified Bridge.Postgres.Observation as Store
+import Bridge.Postgres.Schema
+import qualified Opaleye as O
+import qualified Data.Text.Encoding as TE
 import Bridge.Ledger.Model (Deposit(..), ScanBatch(..), ChainEvent(..))
 import Bridge.Native
 import Bridge.RPC
@@ -14,33 +18,18 @@ import qualified Data.Aeson.KeyMap as KM
 import Bridge.SolanaDeposit
 import Bridge.SolanaMessage (signatureBytes)
 import Bridge.Types
-import Control.Concurrent (threadDelay)
 import Control.Exception (IOException, catch, try)
-import Control.Monad (forM, forM_, forever, when)
+import Control.Monad (forM, forM_, when)
 import Data.Aeson
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
-import Data.List (nub)
+import Data.List (nub,sortOn)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Network.HTTP.Client (Manager)
-
--- Storage changes do not replace or duplicate chain decoding. Both ledgers use
--- the same real RPC identities, history/finality checks and receipt validation.
-class ObserverLedger ledger where
-  observerReadCheckpoint :: ledger -> Text -> IO (Maybe Text)
-  observerMaximumNativeDepth :: ledger -> Int -> IO Int
-  observerCommitScan :: ledger -> ScanBatch -> IO ()
-  observerLookupInstruction :: ledger -> Text -> IO (Maybe (Text,OrderRequest,PolicySnapshot))
-  observerLookupReferences :: ledger -> [Text] -> IO (Maybe (Text,OrderRequest,PolicySnapshot,Text))
-  observerLookupReferences _ _ = pure Nothing
-  observerPendingVerification :: ledger -> IO [Text]
-  observerRecordScanFailure :: ledger -> Text -> Int64 -> Text -> IO ()
-  observerScannerHealth :: ledger -> IO Value
-  observerPromoteObserved :: ledger -> IO ()
 
 epochSeconds :: IO Int64
 epochSeconds = floor <$> getPOSIXTime
@@ -51,7 +40,7 @@ optionalField key = parseValue (withObject "RPC object" (.:? key))
 isHash :: Text -> Bool
 isHash value = T.length value==64 && T.all (`elem` ("0123456789abcdef"::String)) value
 
-observeNative :: ObserverLedger ledger => Manager -> Config -> ledger -> IO ()
+observeNative :: Manager -> Config -> Ledger -> IO ()
 observeNative manager c ledger = do
   info <- nativeIdentity manager c
   wallet <- nativeCall manager c True "getwalletinfo" []
@@ -65,13 +54,13 @@ observeNative manager c ledger = do
   walletHash <- fieldValue "hash" processed :: IO Text
   activeHash <- nativeCall manager c False "getblockhash" [toJSON height] >>= parseValue parseJSON
   require (height>=tip && walletHash==activeHash) "native_wallet_behind_chain"
-  previous <- observerReadCheckpoint ledger "Native"
+  previous <- Store.readCheckpoint ledger "Native"
   when (previous==Nothing) $ do
     born <- fieldValue "birthtime" wallet :: IO Int64
     header <- nativeCall manager c False "getblockheader" [toJSON (nativeCheckpointHash c)]
     checkpointTime <- fieldValue "time" header :: IO Int64
     require (born>=checkpointTime) "native_wallet_predates_scan_origin"
-  depth <- observerMaximumNativeDepth ledger (nativeConfirmations c)
+  depth <- Store.maximumNativeDepth ledger (nativeConfirmations c)
   history <- nativeHistory manager c (Just $ maybe (nativeCheckpointHash c) id previous) depth
   current <- fieldValue "transactions" history :: IO [Value]
   removed <- fieldValue "removed" history :: IO [Value]
@@ -85,7 +74,7 @@ observeNative manager c ledger = do
   now <- epochSeconds
   let deposits=concatMap fst observations
       events=concatMap snd observations
-  observerCommitScan ledger (ScanBatch "Native" (nativeCheckpointHash c) previous next now deposits events)
+  Store.commitScan ledger (ScanBatch "Native" (nativeCheckpointHash c) previous next now deposits events)
  where
   readTransaction txid = do
     value <- nativeCall manager c True "gettransaction" [toJSON txid,Bool False,Bool True]
@@ -123,7 +112,7 @@ observeNative manager c ledger = do
         script <- fieldValue "scriptPubKey" addressInfo :: IO Text
         outputScript <- fieldValue "scriptPubKey" output >>= fieldValue "hex"
         require (owned && script==outputScript) "native_output_script_mismatch"
-        binding <- if category=="receive" then observerLookupInstruction ledger address else pure Nothing
+        binding <- if category=="receive" then Store.lookupInstruction ledger address else pure Nothing
         (order,required) <- case binding of
           Nothing -> pure (Nothing,if category=="receive" then nativeConfirmations c else max 101 (nativeConfirmations c))
           Just (oid,request,policy) -> do
@@ -177,21 +166,21 @@ collectSignatures origin previous fetch = go Nothing [] Set.empty 0
       (prefix,anchor:_) -> pure (reverse $ accumulated<>prefix<>[anchor])
       (_,[]) -> go (Just $ last ids) combined (Set.union seen $ Set.fromList ids) (pages+1::Int)
 
-observeSolana :: ObserverLedger ledger => Manager -> Config -> ledger -> IO ()
+observeSolana :: Manager -> Config -> Ledger -> IO ()
 observeSolana manager c ledger = do
   _ <- solanaIdentity manager c
   origin <- maybe (reject "solana_history_start_required") pure (solanaHistoryStart c)
-  previous <- observerReadCheckpoint ledger "Solana"
+  previous <- Store.readCheckpoint ledger "Solana"
   history <- collectSignatures origin previous $ \before ->
     solanaHistory manager c before Nothing >>= parseValue parseJSON
-  pending <- observerPendingVerification ledger
+  pending <- pendingVerification ledger
   let historyIds=map historySignature history
       work=[(historySignature h,Just h) | h<-history] <> [(sig,Nothing) | sig<-pending,sig `notElem` historyIds]
   require (length work<=1000) "solana_verification_backlog"
   observations <- mapM readTransaction work
   now <- epochSeconds
   let next=historySignature (last history) -- collectSignatures is nonempty
-  observerCommitScan ledger (ScanBatch "Solana" origin previous next now (concatMap fst observations) (map snd observations))
+  Store.commitScan ledger (ScanBatch "Solana" origin previous next now (concatMap fst observations) (map snd observations))
  where
   readTransaction (sig,history) = do
     result <- try (finalizedTransaction manager c sig) :: IO (Either BridgeError Value)
@@ -216,10 +205,10 @@ observeSolana manager c ledger = do
             else if effectDelta effect==0 then pure ([],ChainEvent sig "reference" anchor (evidence (Just effect) "no_token_change"))
             else do
               let memo=transactionMemo value
-              legacy <- maybe (pure Nothing) (observerLookupInstruction ledger) memo
+              legacy <- maybe (pure Nothing) (Store.lookupInstruction ledger) memo
               referenced <- case Pay.transactionKeys value of
                 Left _->pure Nothing
-                Right keys->observerLookupReferences ledger keys
+                Right keys->lookupReferences ledger keys
               authorized <- case (legacy,referenced) of
                 (Nothing,Just (oid,request,_,reference)) | direction request==WrappedToNative ->
                   authorize sig value oid (Just ("solana-pay:"<>reference)) (Pay.verifyPay (Pay.PayBinding sig (mint c) (custodyAta c) (custodyOwner c) reference))
@@ -255,11 +244,11 @@ observeSolana manager c ledger = do
           Right secondary | secondary==primary -> "verified"
           _ -> "disputed"
 
-observeSolanaOperating :: ObserverLedger ledger => Manager -> Config -> ledger -> IO ()
+observeSolanaOperating :: Manager -> Config -> Ledger -> IO ()
 observeSolanaOperating manager c ledger = do
   _ <- solanaIdentity manager c
   origin <- maybe (reject "solana_operating_history_start_required") pure (solanaOperatingHistoryStart c)
-  previous <- observerReadCheckpoint ledger "SolanaOperating"
+  previous <- Store.readCheckpoint ledger "SolanaOperating"
   history <- collectSignatures origin previous $ \before ->
     solanaAddressHistory manager c (custodyOwner c) before Nothing >>= parseValue parseJSON
   observations <- forM history $ \h -> do
@@ -291,24 +280,64 @@ observeSolanaOperating manager c ledger = do
                   ,"failed" .= lamportFailed effect,"rpcPayloadHash" .= digest (LBS.toStrict $ encode value)]
             pure (receipts,ChainEvent sig kind anchor evidence)
   now <- epochSeconds
-  observerCommitScan ledger (ScanBatch "SolanaOperating" origin previous (historySignature $ last history) now
+  Store.commitScan ledger (ScanBatch "SolanaOperating" origin previous (historySignature $ last history) now
     (concatMap fst observations) (map snd observations))
 
-promoteObserved :: ObserverLedger ledger => ledger -> IO ()
-promoteObserved = observerPromoteObserved
-
-observeOnce :: ObserverLedger ledger => Manager -> Config -> ledger -> IO Value
+observeOnce :: Manager -> Config -> Ledger -> IO Value
 observeOnce manager c ledger = do
   forM_ [("Native",observeNative manager c ledger),("Solana",observeSolana manager c ledger)
     ,("SolanaOperating",observeSolanaOperating manager c ledger)] $ \(chain,scan) -> do
     result <- try (scan `catch` (\(_::IOException) -> reject "observer_io_unavailable")) :: IO (Either BridgeError ())
     case result of
       Right () -> pure ()
-      Left (BridgeError code) -> epochSeconds >>= \now -> observerRecordScanFailure ledger chain now code
+      Left (BridgeError code) -> epochSeconds >>= \now -> Store.recordScanFailure ledger chain now code
   promoteObserved ledger
-  observerScannerHealth ledger
+  scannerHealth ledger
 
-observerLoop :: ObserverLedger ledger => Manager -> Config -> ledger -> IO ()
-observerLoop manager c ledger = forever $ do
-  _ <- observeOnce manager c ledger
-  threadDelay 15000000
+-- Concrete PostgreSQL implementations used only by the scan workflow.
+lookupReferences :: Ledger -> [Text] -> IO (Maybe (Text,OrderRequest,PolicySnapshot,Text))
+lookupReferences ledger keys = ledgerAction ledger $ \connection->do
+  rows <- O.runSelect connection $ do
+    row <- O.selectTable ordersTable
+    O.where_ (O.matchNullable (O.sqlBool False) (\instruction->foldr (O..||) (O.sqlBool False) [instruction O..== O.sqlStrictText ("solana-pay:"<>key) | key<-keys]) (ordersInstruction row))
+    pure(ordersId row,ordersRequestJson row,ordersPolicyJson row,ordersInstruction row)
+    :: IO [(Text,Text,Text,Maybe Text)]
+  case rows of
+    [(oid,request,policy,Just instruction)] | Just reference<-T.stripPrefix "solana-pay:" instruction->do
+      req <- either (const $ reject "corrupt_ledger_json") pure(eitherDecodeStrict' $ TE.encodeUtf8 request)
+      saved <- either (const $ reject "corrupt_ledger_json") pure(eitherDecodeStrict' $ TE.encodeUtf8 policy)
+      pure(Just(oid,req,saved,reference))
+    _->pure Nothing
+pendingVerification :: Ledger -> IO [Text]
+pendingVerification ledger = ledgerAction ledger $ \connection->do
+  rows <- O.runSelect connection $ do
+    row <- O.selectTable chaineventsTable
+    O.where_ (chaineventsChain row O..== O.sqlStrictText "Solana" O..&& chaineventsKind row O..== O.sqlStrictText "awaiting_verifier")
+    pure (chaineventsFirstSeen row,chaineventsEventId row)
+    :: IO [(Int64,Text)]
+  pure (map snd (take 1000 (sortOn fst rows)))
+promoteObserved :: Ledger -> IO ()
+promoteObserved ledger = do
+  candidates <- ledgerAction ledger $ \connection->O.runSelect connection $ do
+    deposit <- O.selectTable depositsTable
+    order <- O.selectTable ordersTable
+    O.where_ (O.matchNullable (O.sqlBool False) (\oid->oid O..== ordersId order) (depositsOrderId deposit) O..&&
+      depositsEligible deposit O..== O.sqlInt8 1 O..&& depositsAllocated deposit O..== O.sqlInt8 0 O..&&
+      (ordersStatus order O..== O.sqlStrictText "Provisioning" O..|| ordersStatus order O..== O.sqlStrictText "AwaitingDeposit"))
+    pure (depositsFirstSeen deposit,depositsId deposit)
+    :: IO [(Int64,Text)]
+  now <- epochSeconds
+  forM_ (take 1000 (sortOn id candidates)) $ \(_,did)->Store.promoteDeposit ledger now did >> pure ()
+scannerHealth :: Ledger -> IO Value
+scannerHealth ledger = ledgerAction ledger $ \connection->do
+  health <- O.runSelect connection (O.selectTable scanhealthTable) :: IO [ScanHealth]
+  checkpoints <- O.runSelect connection (O.selectTable checkpointsTable) :: IO [Checkpoints]
+  reviews <- O.runSelect connection $ do
+    row <- O.selectTable chaineventsTable
+    O.where_ (chaineventsNeedsReview row O..== O.sqlInt8 1)
+    pure (chaineventsFirstSeen row,chaineventsChain row,chaineventsEventId row,chaineventsKind row)
+    :: IO [(Int64,Text,Text,Text)]
+  let cursor chain=lookup chain [(checkpointsChain row,checkpointsAnchor row) | row<-checkpoints]
+      scanners=[object ["chain" .= scanhealthChain row,"lastSuccess" .= scanhealthLastSuccess row,"lastError" .= scanhealthLastError row,"checkedAt" .= scanhealthCheckedAt row,"cursor" .= cursor (scanhealthChain row)] | row<-sortOn scanhealthChain health]
+      reviewed=[object ["chain" .= chain,"event" .= event,"kind" .= kind] | (_,chain,event,kind)<-take 100 (sortOn (\(time,_,_,_)->time) reviews)]
+  pure (object ["scanners" .= scanners,"review" .= reviewed])
