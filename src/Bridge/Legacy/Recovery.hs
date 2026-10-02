@@ -4,7 +4,7 @@ module Bridge.Legacy.Recovery
   , coverSourceLoss, reconcileNativeLocks, cancelPreparation ) where
 import Bridge.Legacy.PaymentLifecycle ()
 import Bridge.Recovery
-import Bridge.Reconciliation hiding (custodyProof)
+import Bridge.Legacy.Reconciliation
 import Bridge.Reorg
 import Bridge.Settlement
 import Bridge.Observer (epochSeconds,observeOnce)

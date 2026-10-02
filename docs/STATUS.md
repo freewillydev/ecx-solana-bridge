@@ -1592,3 +1592,22 @@ SQLite remains linked indirectly through custody reconciliation, legacy order
 provisioning, diagnostics and maintenance/import components. Separating those
 paths and the Cabal components remains necessary before removing the production
 SQLite dependency and rebuilding installers. No new chain operation occurred.
+
+### Custody reconciliation and legacy order workflow isolated
+
+SQLite custody view/event queries, its store instance and reconciliation booking
+entry points moved verbatim into `Bridge.Legacy.Reconciliation`. Shared custody
+inspection and its uncertainty handling no longer import SQLite or the legacy
+ledger/adapters. Legacy recovery and tests load the adapter explicitly.
+
+The two SQLite customer-order workflows moved verbatim into `Bridge.Legacy.Order`;
+`Bridge.Order` now contains only the shared real-chain transport. PostgreSQL order
+provisioning keeps that same transport and its existing Opaleye implementation.
+The executable and regression suite compile; all 373 examples pass. No financial
+logic, schema, signing or chain effects changed.
+
+The remaining production SQLite path is the executable's legacy-worker diagnostic
+import, plus the combined Cabal component/dependency declaration. Diagnostics must
+be changed to inspect the actual PostgreSQL database, and legacy ledger/budget/
+backup/worker/import tooling separated into its own component before declaring
+SQLite removed or rebuilding the Linux release installers.

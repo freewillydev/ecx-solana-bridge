@@ -8,9 +8,9 @@ import Bridge.Deposit (prepareSolanaDeposit)
 import Bridge.Ledger
 import Bridge.Native
 import Bridge.Observer
-import Bridge.Order (createCustomerOrder)
+import Bridge.Legacy.Order (createCustomerOrder)
 import Bridge.RPC
-import Bridge.Reconciliation
+import Bridge.Legacy.Reconciliation
 import Bridge.Legacy.Recovery
 import Bridge.Solana
 import Bridge.Settlement

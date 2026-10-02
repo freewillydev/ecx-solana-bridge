@@ -5,6 +5,7 @@ import Bridge.Types
 import Bridge.Config
 import qualified Bridge.Postgres.Maintenance as Maintenance
 import Bridge.Ledger
+import Bridge.Legacy.Reconciliation
 import Bridge.Reconciliation
 import Bridge.Recovery
 import Bridge.Legacy.Recovery ()
@@ -26,6 +27,7 @@ import Bridge.Settlement
 import Bridge.Deposit
 import Bridge.Admission
 import Bridge.Order
+import Bridge.Legacy.Order
 import Bridge.RPC
 import Bridge.API
 import Bridge.Worker
