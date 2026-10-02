@@ -814,3 +814,26 @@ an enabled production payment command: the current public test worker remains
 backup-free, and canonical activation remains blocked. Actual off-host upload,
 restore/key recovery, worker fencing and runtime/installer configuration remain
 required before R3 is complete. No remote durability acceptance is claimed.
+
+### Backed runtime and installer wiring
+
+The callback is now wired through the critical context into provisioning,
+payment progression, native replacement and recovery transports. Safe handlers
+receive no backup uploader or financial capability; the sole critical evaluator
+invocation remains in the guarded dispatcher. The new explicit
+`postgres-backed-test-worker CONFIG BACKUP_CONFIG` command accepts backup-required
+real Devnet profiles only. The installer supports the corresponding
+`--backed-test-worker` mode with fixed managed paths and protected credentials;
+ordinary test and observer modes retain their previous restrictions.
+
+Actual local restic encryption/upload/readback/restore of a trusted ledger
+archive passed, followed by isolated PostgreSQL restoration matching its checksum,
+deployment and all 38 table counts. This is deliberately local storage acceptance,
+not off-host proof. Actual CLI mode guards and the real-profile observer authority
+acceptance also pass; no live ledger, signer or payment was changed. Evidence:
+`evidence/postgres-encrypted-backup.json`,
+`evidence/postgres-backed-worker-guards.json`, and
+`evidence/postgres-backed-runtime-observer.json`.
+
+R3 still needs actual HTTPS repository/worker acceptance, independent-host restore,
+key restoration and old-worker/ledger fencing. Canonical activation remains blocked.

@@ -1,0 +1,9 @@
+{
+  "managedBackupSettingsAccepted": true,
+  "unknownFieldsRejected": true,
+  "backupRequiredRejectedByOrdinaryTestWorker": true,
+  "backupFreeRejectedByBackedTestWorker": true,
+  "ledgerOpened": false,
+  "signerInvoked": false,
+  "remoteUploadTested": false
+}

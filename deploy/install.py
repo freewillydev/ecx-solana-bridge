@@ -81,8 +81,13 @@ def main():
     parser.add_argument("--legacy-snapshot", type=Path, help="consistent final SQLite snapshot; old worker must be stopped")
     parser.add_argument("--with-signet", action="store_true", help="install/start a dedicated real L2L public Signet node")
     parser.add_argument("--test-worker", action="store_true", help="enable payments only for explicit Signet/Devnet or betanet/Devnet test profiles")
+    parser.add_argument("--backed-test-worker", action="store_true", help="enable Devnet payments with mandatory encrypted off-host backup (requires backup.json and protected repository/password files)")
     args = parser.parse_args()
-    if args.upgrade and (args.configure or args.config_dir or args.legacy_snapshot or args.test_worker or args.port is not None):
+    if args.test_worker and args.backed_test_worker:
+        parser.error("Choose either --test-worker or --backed-test-worker")
+    if args.configure and args.backed_test_worker:
+        parser.error("--backed-test-worker requires prepared private backup configuration; use --config-dir instead of --configure")
+    if args.upgrade and (args.configure or args.config_dir or args.legacy_snapshot or args.test_worker or args.backed_test_worker or args.port is not None):
         parser.error("--upgrade preserves configuration/payment mode; do not combine it with configuration, import, port or payment-mode changes")
     if args.configure and (args.config_dir or not sys.stdin.isatty()):
         parser.error("--configure requires a terminal and cannot be combined with --config-dir")
@@ -192,6 +197,9 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
         if (source / "interface.json").is_file():
             run(str(target / "bin/ecx-bridge"), "check-interface", str(source / "worker.json"), str(source / "interface.json"), stdout=subprocess.DEVNULL)
             incoming.append(("interface.json", (source / "interface.json").read_bytes()))
+        if args.backed_test_worker:
+            from backed import incoming_backup
+            incoming.extend(incoming_backup(source, target, run))
         if signer:
             incoming.append(("signer.json", (source / "signer.json").read_bytes()))
         for name, content in incoming:
@@ -199,7 +207,12 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
             if dest.is_symlink() or (dest.exists() and dest.read_bytes() != content):
                 raise ValueError(f"Refusing to replace existing {name}")
         for name, content in incoming:
-            keep(Path("/etc/ecx-bridge") / name, content, 0o640, "ecx-worker")
+            dest = Path("/etc/ecx-bridge") / name
+            credential = name in {"backup.repository", "backup.password"}
+            keep(dest, content, 0o600 if credential else 0o640, "ecx-worker")
+            if credential:
+                os.chown(dest, pwd.getpwnam("ecx-worker").pw_uid, grp.getgrnam("ecx-worker").gr_gid)
+                dest.chmod(0o600)
     if Path("/etc/ecx-bridge/interface.json").is_file():
         keep("/etc/ecx-bridge/interface.env", b"ECX_INTERFACE_CONFIG=/etc/ecx-bridge/interface.json\n", 0o640, "ecx-worker")
     port = 8080
@@ -211,12 +224,16 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
         if not line.startswith("ECX_PORT=") or not line[9:].isdecimal() or not 1024 <= int(line[9:]) <= 65535:
             raise ValueError("Invalid managed web port")
         port = int(line[9:])
-    if args.test_worker:
+    if args.test_worker or args.backed_test_worker:
         if not config.exists():
             raise ValueError("--test-worker requires configured real chains and wallets")
         worker = json.loads(config.read_text())
-        if worker.get("profile") not in {"L2LSignetDevnet", "ECXBetanetDevnet"} or worker.get("backupRequired"):
-            raise ValueError("Payments allowed only for the explicit public test profile")
+        if worker.get("profile") not in {"L2LSignetDevnet", "ECXBetanetDevnet"} or worker.get("backupRequired") is not args.backed_test_worker:
+            raise ValueError("Devnet payment mode and backupRequired policy must match")
+        if args.backed_test_worker:
+            from backed import validate_managed_backup
+            validate_managed_backup(target, run)
+            mkdir("/var/lib/ecx-bridge/private/critical-backups", 0o700, "ecx-worker", "ecx-worker")
         if not Path("/etc/ecx-bridge/signer.json").is_file():
             raise ValueError("Payment mode requires the custody signer")
     if args.with_signet and config.exists():
@@ -231,9 +248,10 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
     postgres.install(target, config, mkdir, keep, args.legacy_snapshot)
     for name in ("ecx-bridge-backup.service", "ecx-bridge-backup.timer"):
         keep(Path("/etc/systemd/system") / name, (target / "deploy" / name).read_bytes(), 0o644)
-    if args.test_worker:
+    if args.test_worker or args.backed_test_worker:
         mkdir("/etc/systemd/system/ecx-bridge-worker.service.d", 0o755)
-        keep("/etc/systemd/system/ecx-bridge-worker.service.d/test.conf", b"[Service]\nExecStart=\nExecStart=/opt/ecx-bridge/current/bin/ecx-bridge postgres-test-worker /etc/ecx-bridge/worker.json\n", 0o644)
+        command = "postgres-backed-test-worker /etc/ecx-bridge/worker.json /etc/ecx-bridge/backup.json" if args.backed_test_worker else "postgres-test-worker /etc/ecx-bridge/worker.json"
+        keep("/etc/systemd/system/ecx-bridge-worker.service.d/test.conf", ("[Service]\nExecStart=\nExecStart=/opt/ecx-bridge/current/bin/ecx-bridge " + command + "\n").encode(), 0o644)
     # Switch only after configuration, schema and unit setup have succeeded.
     from upgrade import atomic_link
     atomic_link(current, target)

@@ -5,6 +5,7 @@ Returns a receipt; only the owning Haskell worker may acknowledge its sequence.
 This does not enable payments, copy signer keys, or claim a clean-host restore.
 """
 import argparse
+import hashlib
 import importlib.util
 import ipaddress
 import json
@@ -33,6 +34,10 @@ def private_file(filename):
 
 def remote_repository(repository_file):
     repository = private_file(repository_file).read_text().strip()
+    return validate_repository(repository)
+
+
+def validate_repository(repository):
     # One explicit supported remote protocol avoids silently accepting a local
     # path. Credentials stay in the protected file, never in subprocess argv.
     if not repository.startswith('rest:https://'):
@@ -72,7 +77,24 @@ def upload(directory, username, fingerprint, minimum_sequence, restic, repositor
     sequence = deployment['critical_sequence']
     if deployment['fingerprint'] != fingerprint or sequence < minimum_sequence:
         raise ValueError('Snapshot identity or sequence mismatch')
-    archive = manifest_path.parent / manifest['archive']
+    return upload_snapshot(manifest_path, restic, repository_file, password_file)
+
+
+def upload_snapshot(manifest_path, restic, repository_file, password_file):
+    # The CLI enforces the remote protocol before reaching this storage seam.
+    # Integration may exercise real restic encryption with local storage, but
+    # that is never a proof of off-host durability or a worker acknowledgement.
+    manifest_path = Path(manifest_path)
+    manifest = json.loads(manifest_path.read_text())
+    deployment = manifest['deployment']
+    fingerprint, sequence = deployment['fingerprint'], deployment['critical_sequence']
+    name = manifest['archive']
+    if not manifest_path.is_absolute() or Path(name).name != name or manifest['format'] != 1 or deployment['schema_version'] != 18:
+        raise ValueError('Invalid snapshot manifest')
+    archive = manifest_path.parent / name
+    with archive.open('rb') as source:
+        if hashlib.file_digest(source, 'sha256').hexdigest() != manifest['sha256']:
+            raise ValueError('Snapshot checksum mismatch')
     tags = ['ecx-bridge-critical', 'deployment:' + fingerprint, 'sequence:' + str(sequence)]
     common = ['--repository-file', str(repository_file), '--password-file', str(password_file)]
     args = [*common, 'backup', '--json']

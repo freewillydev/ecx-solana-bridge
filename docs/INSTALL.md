@@ -225,3 +225,42 @@ or relabel a canonical mainnet token as a Devnet mint.
 Read-only actual node/compiled-adapter and observation-mode authorization checks
 pass. A funded betanet conversion/refund and installation acceptance still remain;
 the existing complete round trips are Signet/Devnet evidence.
+
+### Backup-required Devnet acceptance
+
+The explicit `--backed-test-worker` mode exercises the production backup barrier
+on real Signet/Devnet or betanet/Devnet. It requires `backupRequired: true` in the
+worker configuration. Ordinary `--test-worker` still requires `false`; neither
+mode permits canonical/mainnet activation. Prepare the same private configuration
+directory used for test installation, plus:
+
+- `backup.json`: copy `config/backup.example.json` unchanged for managed paths.
+- `backup.repository`: a protected file containing the independently hosted
+  restic REST repository URL, beginning `rest:https://`.
+- `backup.password`: the protected restic encryption password file.
+
+Keep credential inputs as regular files with mode `0600`. Repository credentials
+belong in that private file, never the command line or a public configuration.
+The installer preserves existing configuration and refuses changed values on
+repeat installation. It installs the Ubuntu restic package, stores credentials
+with worker-only access, and configures the explicit backed worker command:
+
+```sh
+sudo sh ecx-bridge-ubuntu-24.04-ARCH.run --config-dir /absolute/private/setup --backed-test-worker
+```
+
+Initialize the independently managed repository with restic before use; the
+bridge does not implicitly initialize or replace storage. The managed command
+runs as `ecx-worker` and uses `/etc/ecx-bridge/backup.repository` and
+`/etc/ecx-bridge/backup.password`. Ensure its credentials and outbound access can
+reach that repository. Existing deployments need a stopped-worker, reviewed
+configuration/mode change; `--upgrade` deliberately preserves the existing mode.
+
+Each required barrier makes an exact MVCC snapshot through the read-only database
+role, uploads archive and manifest, reads back authenticated snapshot metadata,
+and acknowledges only that snapshot's sequence through the owning Haskell ledger
+capability. A failed upload emits no receipt and cannot advance coverage or expose
+unbacked instructions. This acceptance mode does not by itself prove independent
+host durability, signer/key restoration, old-worker fencing or canonical custody;
+those remain separate release gates. The tested local encrypted round trip is
+explicitly not off-host acceptance.

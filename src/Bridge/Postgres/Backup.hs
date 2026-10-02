@@ -1,6 +1,6 @@
 -- Exact-snapshot upload runs outside ledgerAction; only the final receipt is a
 -- short financial transaction. No customer/operator DSL operation can forge it.
-module Bridge.Postgres.Backup (RemoteBackup(..), backupCallback) where
+module Bridge.Postgres.Backup (RemoteBackup(..), loadRemoteBackup, backupCallback) where
 
 import Bridge.Config (Config, fingerprint)
 import Bridge.Postgres.Ledger (Ledger, acknowledgeBackup)
@@ -9,6 +9,7 @@ import Bridge.Types (require, reject)
 import Data.Aeson
 import qualified Data.ByteString as BS
 import Data.Int (Int64)
+import GHC.Generics (Generic)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Database.PostgreSQL.Simple as PG
@@ -20,7 +21,17 @@ import System.FilePath (isAbsolute)
 data RemoteBackup = RemoteBackup
   { python :: FilePath, uploader :: FilePath, stage :: FilePath
   , restic :: FilePath, repositoryFile :: FilePath, passwordFile :: FilePath
-  } deriving (Eq,Show)
+  } deriving (Eq,Show,Generic)
+instance FromJSON RemoteBackup where
+  parseJSON = genericParseJSON defaultOptions {rejectUnknownFields=True}
+
+loadRemoteBackup :: FilePath -> IO RemoteBackup
+loadRemoteBackup path = do
+  bytes <- BS.readFile path
+  require (BS.length bytes<=8192) "backup_configuration_too_large"
+  remote <- either (const $ reject "invalid_backup_configuration") pure (eitherDecodeStrict' bytes)
+  require (all isAbsolute [python remote,uploader remote,stage remote,restic remote,repositoryFile remote,passwordFile remote]) "invalid_backup_configuration"
+  pure remote
 
 data Receipt = Receipt Int Text Int64 Text Text
 instance FromJSON Receipt where

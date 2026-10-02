@@ -1,5 +1,5 @@
 {-# LANGUAGE DataKinds,GADTs #-}
-module Bridge.Postgres.Runtime (runAPI,runTestWorker) where
+module Bridge.Postgres.Runtime (runAPI,runTestWorker,runBackedTestWorker) where
 
 import Bridge.API
 import Bridge.Config
@@ -7,6 +7,8 @@ import Bridge.Types
 import Bridge.Operation.Internal
 import Bridge.Postgres.Ledger (Ledger,withLedger,ledgerAction,pause,readiness)
 import Bridge.Postgres.Schema hiding (Audit)
+import qualified Bridge.Postgres.Backup as Backup
+import Data.Int (Int64)
 import qualified Bridge.Postgres.Order as Order
 import qualified Bridge.Postgres.Observer as Observer
 import qualified Bridge.Postgres.Reconciliation as Reconciliation
@@ -46,7 +48,7 @@ import Servant
 
 -- No signer, mutating chain transport, writable ledger or private Config.
 data SafeContext = SafeContext PG.ConnectInfo Value Bool Bool
-data CriticalContext = CriticalContext Manager Config Ledger Bool
+data CriticalContext = CriticalContext Manager Config Ledger Bool (Int64 -> IO ())
 
 data Runtime = Runtime SafeContext CriticalContext (MVar ())
 
@@ -120,9 +122,9 @@ observationOperation = \case
   WorkerDSL ScanAndReconcile->True
   _->False
 
-evalCritical (CriticalContext manager cfg ledger _) plan = case plan of
+evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
   CustomerDSL operation->case operation of
-    CreateOrder header request->bearer header >>= \token->Provisioning.createCustomerOrder manager cfg ledger (const $ reject "unexpected_test_backup") token request
+    CreateOrder header request->bearer header >>= \token->Provisioning.createCustomerOrder manager cfg ledger backup token request
     DepositHint header oid signature->do
       token <- bearer header
       cap <- either reject pure(capabilityHash token)
@@ -141,18 +143,18 @@ evalCritical (CriticalContext manager cfg ledger _) plan = case plan of
       pure(object["accepted" .= True,"authorization" .= ("independent_chain_evidence_required"::Text)])
   OperatorDSL operation->case operation of
     Pause reason->pause ledger reason >> readiness ledger
-    CancelPreparation intent generation reason->cancelPreparationWith epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) intent generation reason
+    CancelPreparation intent generation reason->cancelPreparationWith epochSeconds (realPaymentTransport manager cfg backup) cfg (Store ledger) intent generation reason
     Resume->do
-      Startup.resumeAfterReview epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg ledger
+      Startup.resumeAfterReview epochSeconds (realPaymentTransport manager cfg backup) cfg ledger
       readiness ledger
     ApproveSolanaRetry txid reason->do
-      approveSolanaRetryWith (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) txid reason
+      approveSolanaRetryWith (realPaymentTransport manager cfg backup) cfg (Store ledger) txid reason
       pure(object["approvedRetryOf" .= txid,"signedOrSent" .= False])
-    ApproveSourceRecovery intent restoration reason->approveSourceRecoveryWith epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) intent restoration reason
+    ApproveSourceRecovery intent restoration reason->approveSourceRecoveryWith epochSeconds (realPaymentTransport manager cfg backup) cfg (Store ledger) intent restoration reason
     PrepareNativeReplacement parent fee reason->
-      prepareNativeReplacementWith epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) parent fee reason
+      prepareNativeReplacementWith epochSeconds (realPaymentTransport manager cfg backup) cfg (Store ledger) parent fee reason
     SignNativeReplacement sequenceNo->do
-      a <- signNativeReplacementWith epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) sequenceNo
+      a <- signNativeReplacementWith epochSeconds (realPaymentTransport manager cfg backup) cfg (Store ledger) sequenceNo
       pure(object["transaction" .= Domain.attemptId a,"draftSequence" .= sequenceNo,"signed" .= True,"sent" .= False])
     CancelNativeReplacement sequenceNo reason->do
       replacementCancel (Store ledger) sequenceNo reason
@@ -160,31 +162,31 @@ evalCritical (CriticalContext manager cfg ledger _) plan = case plan of
     SendNativeReplacement sequenceNo->do
       saved <- replacementMember (Store ledger) sequenceNo
       a <- maybe (reject "native_replacement_member_missing") pure saved
-      outcome <- settleAttemptWith (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) a
+      outcome <- settleAttemptWith (realPaymentTransport manager cfg backup) cfg (Store ledger) a
       pure(object["transaction" .= Domain.attemptId a,"outcome" .= outcome])
     CoverSourceLoss did recovery capital reason->
-      coverSourceLossWith epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger) did recovery capital reason
+      coverSourceLossWith epochSeconds (realPaymentTransport manager cfg backup) cfg (Store ledger) did recovery capital reason
     RefundDeposit did->do
       obligation <- Refund.createRefund ledger did
       pure(object["obligation" .= Domain.obligationId obligation,"recipient" .= Domain.obligationRecipient obligation,"amount" .= T.pack(show $ Domain.obligationAmount obligation)])
   WorkerDSL ScanAndReconcile->do
     -- Advisory native locks must be restored independently of Solana RPC health.
     _ <- reconcileNativeLocksWith
-      (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup"))
+      (realPaymentTransport manager cfg backup)
         {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg (Store ledger)
     _ <- Observer.observeOnce manager cfg ledger
     _ <- reconcileNativeSourcesWith
-      (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup"))
+      (realPaymentTransport manager cfg backup)
         {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg (Store ledger)
     _ <- reconcileNativeSettlementsWith
-      (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup"))
+      (realPaymentTransport manager cfg backup)
         {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg (Store ledger)
     now <- epochSeconds
     Order.expireQuotes ledger now
-    _ <- reconcilePaymentsWith (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg (Store ledger)
-    Reconciliation.reconcileCustodyWith epochSeconds (realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")) cfg ledger
+    _ <- reconcilePaymentsWith (realPaymentTransport manager cfg backup) cfg (Store ledger)
+    Reconciliation.reconcileCustodyWith epochSeconds (realPaymentTransport manager cfg backup) cfg ledger
   WorkerDSL StartPayments->do
-    let transport=realPaymentTransport manager cfg (const $ reject "unexpected_test_backup")
+    let transport=realPaymentTransport manager cfg backup
     lockResult <- reconcileNativeLocksWith transport {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg (Store ledger)
     lockError <- fieldValue "error" lockResult :: IO (Maybe Text)
     maybe (pure ()) reject lockError
@@ -196,7 +198,7 @@ evalCritical (CriticalContext manager cfg ledger _) plan = case plan of
       now <- epochSeconds
       fresh <- try (Order.checkIntakeReady ledger now) :: IO (Either BridgeError ())
       case fresh of
-        Right ()->paymentPass manager cfg (Store ledger) (const $ reject "unexpected_test_backup")
+        Right ()->paymentPass manager cfg (Store ledger) backup
         Left (BridgeError "custody_not_reconciled")->pure ()
         Left (BridgeError reason)->reject reason
 
@@ -213,7 +215,7 @@ evaluate (Runtime safeContext criticalContext gate) plan = case plan of
  -- a request's sampled time can precede a newer custody certificate after it
  -- waits for the ledger. Safe reads retain their independent connections.
  where critical dsl = case criticalContext of
-         CriticalContext _ _ _ paying->do
+         CriticalContext _ _ _ paying _->do
            -- Immutable mode authorization must not wait behind a chain scan.
            require (paying || observationOperation dsl) "payment_worker_required"
            withMVar gate (\_->evalCritical criticalContext dsl)
@@ -229,22 +231,32 @@ interpret runtime plan = do
 -- continuously scans/reconciles; it never resumes or advances payments.
 -- The paying test worker shares the same runtime and guarded dispatcher.
 runAPI :: PG.ConnectInfo -> Config -> IO ()
-runAPI = runRuntime False
+runAPI = runRuntime False Nothing
 
 runTestWorker :: PG.ConnectInfo -> Config -> IO ()
-runTestWorker = runRuntime True
+runTestWorker = runRuntime True Nothing
 
-runRuntime :: Bool -> PG.ConnectInfo -> Config -> IO ()
-runRuntime paying settings cfg = do
-  require (publicTestProfile cfg) "public_test_profile_required"
+-- Backed acceptance remains limited to the same real Devnet profiles. This
+-- command does not activate canonical/mainnet custody or waive release gates.
+runBackedTestWorker :: PG.ConnectInfo -> Config -> Backup.RemoteBackup -> IO ()
+runBackedTestWorker settings cfg remote = runRuntime True (Just remote) settings cfg
+
+runRuntime :: Bool -> Maybe Backup.RemoteBackup -> PG.ConnectInfo -> Config -> IO ()
+runRuntime paying remote settings cfg = do
+  case remote of
+    Nothing->require (publicTestProfile cfg) "public_test_profile_required"
+    Just _->require (paying && profile cfg `elem` [L2LSignetDevnet,ECXBetanetDevnet] && backupRequired cfg) "backed_test_profile_required"
   links <- lookupEnv "ECX_INTERFACE_CONFIG" >>= loadInterface cfg
   withLedger settings (fingerprint cfg) $ \ledger->do
     manager <- newRpcManager
     gate <- newMVar ()
     readUser <- fromMaybe (PG.connectUser settings) <$> lookupEnv "PGREADUSER"
     let readSettings=settings {PG.connectUser=readUser}
+        backup=case remote of
+          Nothing->const $ reject "unexpected_test_backup"
+          Just policy->Backup.backupCallback readSettings ledger cfg policy
         public=object["profile" .= profile cfg,"solanaCluster" .= (if profile cfg==CanonicalBeta then "mainnet-beta" else "devnet"::Text),"links" .= links,"deployment" .= deploymentId cfg,"mint" .= mint cfg,"custodyOwner" .= custodyOwner cfg,"decimals" .= (8::Int),"minInput" .= minInput cfg,"maxInput" .= maxInput cfg,"feesBps" .= object["NativeToWrapped" .= (100::Int),"WrappedToNative" .= (100::Int)],"intakeEnabled" .= paying,"implementationReady" .= False]
-        runtime=Runtime (SafeContext readSettings public (backupRequired cfg) paying) (CriticalContext manager cfg ledger paying) gate
+        runtime=Runtime (SafeContext readSettings public (backupRequired cfg) paying) (CriticalContext manager cfg ledger paying backup) gate
     let checked action = do
           outcome <- try (action `catch` (\(_::IOException)->reject "postgres_worker_io_unavailable")) :: IO (Either BridgeError ())
           case outcome of

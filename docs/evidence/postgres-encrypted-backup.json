@@ -1,0 +1,18 @@
+{
+  "encryptedRepositoryRoundTripPassed": true,
+  "authenticatedSnapshotMetadataPassed": true,
+  "postgresRestore": {
+    "archiveChecksumVerified": true,
+    "deploymentMatches": true,
+    "tableCountsMatch": true,
+    "tables": 38,
+    "remoteDurabilityAcknowledged": false,
+    "workerStarted": false
+  },
+  "snapshotId": "9b96a67551c19ec4b471b8e3fe69fdef636cc802dda4d3683f8924f8e6aadb48",
+  "repositoryLocation": "local disposable storage",
+  "offHostDurabilityTested": false,
+  "workerCoverageAcknowledged": false,
+  "signerKeysCopied": false,
+  "sourceLedgerModified": false
+}

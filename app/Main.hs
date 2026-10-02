@@ -2,6 +2,7 @@ module Main where
 import Bridge.Config
 import Bridge.Worker
 import qualified Bridge.Postgres.Runtime as Postgres
+import qualified Bridge.Postgres.Backup as Backup
 import qualified Bridge.Postgres.Maintenance as Maintenance
 import qualified Database.PostgreSQL.Simple as PG
 import System.Posix.User (getEffectiveUserName)
@@ -55,6 +56,12 @@ main = go `catch` (\(BridgeError code) -> LBS.putStrLn (encode $ object ["error"
       cfg <- loadConfig path
       settings <- postgresSettings
       Postgres.runTestWorker settings cfg
+    ["check-backup",path] -> Backup.loadRemoteBackup path >> putStrLn "Backup configuration valid"
+    ["postgres-backed-test-worker",path,backupPath] -> do
+      cfg <- loadConfig path
+      settings <- postgresSettings
+      policy <- Backup.loadRemoteBackup backupPath
+      Postgres.runBackedTestWorker settings cfg policy
     ["postgres-api",path] -> do
       cfg <- loadConfig path
       settings <- postgresSettings
@@ -64,7 +71,7 @@ main = go `catch` (\(BridgeError code) -> LBS.putStrLn (encode $ object ["error"
     ["serve",socket,port,assets] -> case readMaybe port of
       Just p | p>=1024 && p<=65535 -> runPublic socket p assets
       _ -> die "Invalid unprivileged port"
-    _ -> die "Usage: ecx-bridge version | check-config CONFIG | check-interface CONFIG INTERFACE | check-signer CONFIG KEYFILE (offline, no signing) | doctor CONFIG | scan CONFIG | reconcile CONFIG | recover CONFIG | allocate-test-operating CONFIG SIGNATURE LAMPORTS | approve-solana-retry CONFIG SIGNATURE REASON | approve-source-recovery CONFIG OBLIGATION RESTORATION_SEQUENCE REASON | cover-source-loss CONFIG DEPOSIT LOSS_SEQUENCE FLOAT_UNITS EARNED_UNITS REASON | prepare-native-replacement CONFIG TRANSACTION FEE_UNITS REASON | cancel-native-replacement CONFIG DRAFT_SEQUENCE REASON | cancel-preparation CONFIG INTENT GENERATION REASON | postgres-init CONFIG (offline maintenance) | postgres-test-worker CONFIG (PG* settings, Signet-or-betanet/Devnet) | postgres-api CONFIG (PG* settings, paused test deployment) | worker CONFIG | test-worker CONFIG | serve CUSTOMER_SOCKET PORT ASSETS"
+    _ -> die "Usage: ecx-bridge version | check-config CONFIG | check-interface CONFIG INTERFACE | check-signer CONFIG KEYFILE (offline, no signing) | doctor CONFIG | scan CONFIG | reconcile CONFIG | recover CONFIG | allocate-test-operating CONFIG SIGNATURE LAMPORTS | approve-solana-retry CONFIG SIGNATURE REASON | approve-source-recovery CONFIG OBLIGATION RESTORATION_SEQUENCE REASON | cover-source-loss CONFIG DEPOSIT LOSS_SEQUENCE FLOAT_UNITS EARNED_UNITS REASON | prepare-native-replacement CONFIG TRANSACTION FEE_UNITS REASON | cancel-native-replacement CONFIG DRAFT_SEQUENCE REASON | cancel-preparation CONFIG INTENT GENERATION REASON | postgres-init CONFIG (offline maintenance) | postgres-test-worker CONFIG (PG* settings, Signet-or-betanet/Devnet) | check-backup BACKUP_CONFIG | postgres-backed-test-worker CONFIG BACKUP_CONFIG (PG* settings, backup-required Devnet only) | postgres-api CONFIG (PG* settings, paused test deployment) | worker CONFIG | test-worker CONFIG | serve CUSTOMER_SOCKET PORT ASSETS"
 
 postgresSettings :: IO PG.ConnectInfo
 postgresSettings = do

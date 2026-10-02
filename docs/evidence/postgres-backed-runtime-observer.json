@@ -1,0 +1,15 @@
+{
+  "actualProfile": "ECXBetanetDevnet",
+  "canonicalOperationEnabled": false,
+  "observationOnlyAvailabilityPassed": true,
+  "orderCreationRefused": true,
+  "resumeRefused": true,
+  "signatureRefused": true,
+  "broadcastRefused": true,
+  "refundRefused": true,
+  "orders": 0,
+  "attempts": 0,
+  "criticalSequence": 0,
+  "walletsModified": false,
+  "roundTripVerified": false
+}
