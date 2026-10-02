@@ -6,5 +6,10 @@ tests: True
 package direct-sqlite
   flags: +systemlib
 
--- Opaleye 0.10.8.0 predates base 4.22; validate against GHC 9.14 explicitly.
-allow-newer: opaleye:base, postgresql-simple:base, postgresql-simple:template-haskell, postgresql-simple:containers, postgresql-simple:aeson
+-- GHC 9.14/base 4.22 and containers 0.8 exceed these packages' declared
+-- bounds. Keep exceptions package-specific and verify compilation/regressions;
+-- serialise/time uses the already selected modern time API (+newtime15).
+allow-newer: opaleye:base, postgresql-simple:base, postgresql-simple:template-haskell, postgresql-simple:containers, postgresql-simple:aeson, serialise:base, serialise:time, serialise:containers, cborg:base, cborg:containers
+
+-- HTTPS RPC trust must include the X.509 Name Constraints fix (HSEC-2026-0008).
+constraints: crypton-x509 >=1.9.1, crypton-x509-validation >=1.9.1

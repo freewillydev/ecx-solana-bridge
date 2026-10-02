@@ -23,16 +23,18 @@ jobs:
         with:
           persist-credentials: false
       - name: Restore pinned toolchains
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: tools
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             .release-build/tools
             .release-build/*-linux-*.tar.xz
             .release-build/node-source
             .release-build/sqlite
-          key: ubuntu24-x86-tools-${{ hashFiles('deploy/toolchains.json') }}
+          key: ubuntu24-x86-tools-notices-v2-${{ hashFiles('deploy/toolchains.json') }}
       - name: Restore frozen dependencies
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: dependencies
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             .release-build/cabal
@@ -40,12 +42,36 @@ jobs:
             .release-build/cargo-target
             ~/.npm
           key: ubuntu24-x86-dependencies-${{ hashFiles('cabal.project.freeze', 'solana-helper/Cargo.lock', 'web/package-lock.json') }}
+          restore-keys: ubuntu24-x86-dependencies-
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential curl ca-certificates xz-utils pkg-config libgmp-dev libffi-dev libnuma-dev libncurses-dev zlib1g-dev libssl-dev libpq-dev python3 patchelf
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends build-essential curl ca-certificates xz-utils pkg-config libgmp-dev libffi-dev libnuma-dev libncurses-dev zlib1g-dev libssl-dev libpq-dev python3 patchelf openssl
+      - name: Bootstrap verified toolchains
+        run: ECX_BOOTSTRAP_ONLY=1 ./scripts/build-release
+      - name: Save verified toolchains before compilation
+        if: steps.tools.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .release-build/tools
+            .release-build/*-linux-*.tar.xz
+            .release-build/node-source
+            .release-build/sqlite
+          key: ${{ steps.tools.outputs.cache-primary-key }}
       - name: Build, test and package
+        id: build
         run: ./scripts/build-release
+      - name: Retain dependency cache even after an application failure
+        if: always() && !cancelled() && steps.build.outcome != '' && steps.dependencies.outputs.cache-primary-key != '' && steps.dependencies.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            .release-build/cabal
+            .release-build/cargo
+            .release-build/cargo-target
+            ~/.npm
+          key: ${{ steps.dependencies.outputs.cache-primary-key }}
       - name: Verify installer checksum
         working-directory: .release-build
         run: sha256sum -c ecx-bridge-ubuntu-24.04-x86_64.run.sha256

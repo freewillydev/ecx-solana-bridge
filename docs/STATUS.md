@@ -768,3 +768,25 @@ critical sequence, and the temporary process/database were removed. Evidence:
 `docs/evidence/postgres-observer-authority.json`. The sole production critical
 evaluator invocation remains in the dispatcher. The 371-example Haskell suite
 and 16 installer contracts pass. The existing local paying bridge remains ready.
+
+### Published-advisory remediation and native build caching — October 1
+
+The locked dependency review identified HSEC-2026-0008 in the former TLS
+certificate group. The updated upstream group is frozen and compiled; all 371
+application examples and 16 installer contracts pass. Certificate-only regression
+accepts permitted DNS and rejects both outside and excluded DNS. Real HTTPS
+Devnet/native identity checks for Signet and betanet, offline signer validation
+and existing ledger fingerprint comparison pass without signing/broadcasting.
+See `docs/DEPENDENCY-REVIEW.md` and its machine evidence. Npm/Rust scans have no
+published vulnerability matches; bincode maintenance and base readFloat
+applicability remain recorded review items, not silently cleared findings.
+
+Native x86 run 36940950264 passed Haskell, Rust, web and installer tests, but
+failed notice collection: expanded-installer pruning had removed required
+licenses. Pruning now retains original notice bytes/paths under the cached tools
+before deleting bulk files. The collector uses those retained trees. CI saves
+verified tools immediately after bootstrap and saves dependency caches even when
+later application/package steps fail; older frozen caches can supply unchanged
+packages while the locked resolver rebuilds changed dependencies. Run 36942617231
+was canceled before pursuing an outdated TLS artifact. A corrected patched-stack
+build is the next acceptance; no x86 installer is claimed complete yet.

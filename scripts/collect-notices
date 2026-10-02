@@ -114,6 +114,9 @@ def add(ecosystem, name, version, source, texts, **extra):
 
 
 plan = json.loads((build / "dist/cache/plan.json").read_text())
+ghc_notices = build / "tools/notices/ghc-source"
+if not ghc_notices.is_dir():
+    ghc_notices = build / "ghc-source"
 seen = set()
 for package in plan["install-plan"]:
     name, version = package["pkg-name"], package["pkg-version"]
@@ -121,8 +124,8 @@ for package in plan["install-plan"]:
         continue
     seen.add((name, version))
     if package["type"] == "pre-existing":
-        candidates = list((build / "ghc-source").glob(f"*/share/doc/*/{name}-{version}/**/*"))
-        texts = licenses([(str(p.relative_to(build / "ghc-source")), p.read_bytes()) for p in candidates if p.is_file() and name_pattern.match(p.name)])
+        candidates = list(ghc_notices.glob(f"*/share/doc/*/{name}-{version}/**/*"))
+        texts = licenses([(str(p.relative_to(ghc_notices)), p.read_bytes()) for p in candidates if p.is_file() and name_pattern.match(p.name)])
         provenance = "Pinned GHC 9.14.1 bindist"
         extra = {}
         if name == "rts" and version == "1.0.3" and not texts:
@@ -200,6 +203,9 @@ for relative, package in npm_lock["packages"].items():
 
 # Rust's standard library and GHC's RTS may include licenses beyond package metadata.
 for name, directory in (("Rust 1.97.1 distribution", build / "rust-source"), ("GHC 9.14.1 distribution", build / "ghc-source")):
+    retained = build / "tools/notices" / directory.name
+    if retained.is_dir():
+        directory = retained
     texts = []
     for p in directory.glob("*/*"):
         if p.is_file() and name_pattern.match(p.name):

@@ -8,6 +8,8 @@ import platform
 import shutil
 import subprocess
 import tarfile
+import sys
+import importlib.util
 
 root = Path(__file__).resolve().parents[1]
 arch = platform.machine()
@@ -57,12 +59,16 @@ if not (tools / "bin/cabal").exists():
     shutil.copy2(fetch("cabal") / "cabal", tools / "bin/cabal")
 if not (tools / "bin/rustc").exists():
     run("./install.sh", f"--prefix={tools}", "--components=rustc,cargo,rust-std-" + ("aarch64" if arch == "aarch64" else "x86_64") + "-unknown-linux-gnu,rustfmt-preview", "--disable-ldconfig", cwd=fetch("rust"))
-# Installation copies the verified toolchains; retaining the expanded installers
-# doubles disk use without helping subsequent builds (the archives are retained).
+# Keep the original notice bytes/paths before pruning expanded tool installers.
+# The collector uses these cached small trees; compiler archives stay verified.
+sys.dont_write_bytecode = True
+notice_spec = importlib.util.spec_from_file_location("toolchain_notices", root / "deploy/toolchain-notices.py")
+notice_module = importlib.util.module_from_spec(notice_spec)
+notice_spec.loader.exec_module(notice_module)
 for name in ("ghc-source", "rust-source"):
     expanded = cache / name
     if expanded.exists():
-        shutil.rmtree(expanded)
+        notice_module.retain(expanded, tools / "notices" / name)
 node = fetch("node")
 os.environ["PATH"] = f"{tools}/bin:{node}/bin:" + os.environ["PATH"]
 os.environ["CARGO_HOME"] = str(cache / "cargo")
@@ -87,6 +93,9 @@ os.environ["LD_LIBRARY_PATH"] = str(sqlite / "lib")
 os.environ["PKG_CONFIG_PATH"] = str(sqlite / "lib/pkgconfig")
 os.environ["LIBRARY_PATH"] = str(sqlite / "lib")
 os.environ["C_INCLUDE_PATH"] = str(sqlite / "include")
+# CI saves the expensive verified toolchains before any application build.
+if os.environ.get("ECX_BOOTSTRAP_ONLY") == "1":
+    raise SystemExit(0)
 # Frozen dependencies do not require a network index refresh on every build.
 # Refresh explicitly when updating pins, or populate an empty build cache.
 index = cache / "cabal/packages/hackage.haskell.org/01-index.tar"
@@ -103,6 +112,8 @@ if not index.exists() or os.environ.get("ECX_REFRESH_INDEX") == "1":
 build_args = [f"--builddir={cache}/dist", f"--extra-lib-dirs={sqlite}/lib", f"--extra-include-dirs={sqlite}/include", "-j" + build_jobs]
 run("cabal", "build", "all", *build_args)
 run("cabal", "test", "all", "--test-show-details=direct", *build_args)
+validator = subprocess.check_output(["cabal", "list-bin", "exe:ecx-tls-constraints-check", f"--builddir={cache}/dist"], cwd=root, text=True).strip()
+run("python3", "integration/check-tls-constraints.py", "--validator", validator)
 run("cargo", "test", "--locked", "--manifest-path", "solana-helper/Cargo.toml", "--all-targets")
 run("cargo", "build", "--locked", "--release", "--manifest-path", "solana-helper/Cargo.toml")
 # npm's content-addressed download cache avoids repeated fetches; retain a clean
