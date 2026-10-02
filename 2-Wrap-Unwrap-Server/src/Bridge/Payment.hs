@@ -11,16 +11,9 @@ import Bridge.SolanaPayment
 import Bridge.Types
 import Bridge.Postgres.Ledger (Ledger)
 import Control.Exception (onException)
-import Data.Aeson
-import qualified Data.ByteString.Lazy as LBS
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-
-json :: ToJSON a => a -> Text
-json = TE.decodeUtf8 . LBS.toStrict . encode
-stored :: FromJSON a => Text -> IO a
-stored = either (const $ reject "invalid_saved_payment") pure . eitherDecodeStrict' . TE.encodeUtf8
 
 -- No broadcast occurs here. The separate first-send decision must still
 -- recheck source/freshness, journal BroadcastIntent and satisfy backup coverage.
@@ -36,7 +29,7 @@ prepareNativeWithSigner call signer c ledger obligation = prepare `onException` 
     attempts <- filter ((==obligationId obligation) . attemptIntent) <$> PgSettlement.pendingAttempts ledger
     case attempts of
       [attempt] -> do
-        signed <- stored (attemptPolicy attempt)
+        signed <- decodePaymentRecord (attemptPolicy attempt)
         validateSaved quantity policy (signedNativePlan signed)
         require (attemptChain attempt=="Native" && attemptBytes attempt==signedNativeBytes signed
           && attemptId attempt==nativeTxid (signedNativeTransaction signed)) "invalid_saved_payment"
@@ -50,11 +43,11 @@ prepareNativeWithSigner call signer c ledger obligation = prepare `onException` 
           [] -> do
             limits <- PgPreparation.costLimits ledger (obligationOrder obligation)
             plan <- newNativePlan call (profile c) (nativeDepth policy) (savedNativeFee limits) (obligationRecipient obligation) quantity
-            PgPreparation.begin ledger c obligation "Native" (units $ planFeeLimit plan) (json plan)
+            PgPreparation.begin ledger c obligation "Native" (units $ planFeeLimit plan) (encodeRecord plan)
             g <- PgPreparation.active ledger (obligationId obligation)
             pure (plan,Nothing,g)
           [p] -> do
-            plan <- stored (preparationPolicy p)
+            plan <- decodePaymentRecord (preparationPolicy p)
             require (preparationObligation p==obligation && preparationChain p=="Native" && preparationFeeLimit p==units (planFeeLimit plan)) "invalid_saved_payment"
             pure (plan,preparationDraft p,preparationGeneration p)
           _ -> reject "duplicate_preparation"
@@ -62,12 +55,12 @@ prepareNativeWithSigner call signer c ledger obligation = prepare `onException` 
         PgPreparation.active ledger (obligationId obligation) >>= \g ->
           require (g==generation) "preparation_generation_changed"
         draft <- case savedDraft of
-          Just value -> stored value
+          Just value -> decodePaymentRecord value
           Nothing -> do
             -- No wallet lock can be orphaned by losing the funding response.
             -- signNativeDraft locks the recorded inputs after storeDraft commits.
             value <- fundNativeDraftWith False call plan
-            PgPreparation.storeDraft ledger (obligationId obligation) (json value) generation
+            PgPreparation.storeDraft ledger (obligationId obligation) (encodeRecord value) generation
             pure value
         signed <- signer (obligationId obligation) generation plan draft
         require (signedNativePlan signed==plan && sameNativeTemplate (draftTransaction draft) (signedNativeTransaction signed)
@@ -76,7 +69,7 @@ prepareNativeWithSigner call signer c ledger obligation = prepare `onException` 
         let txid=nativeTxid (signedNativeTransaction signed)
             points=map nativeOutpoint (nativeInputs $ signedNativeTransaction signed)
         first <- case points of point:_ -> pure point; [] -> reject "native_input_mismatch"
-        PgPreparation.storeAttempt ledger obligation "Native" txid (signedNativeBytes signed) (json signed)
+        PgPreparation.storeAttempt ledger obligation "Native" txid (signedNativeBytes signed) (encodeRecord signed)
           (units $ planFeeLimit plan) (Just $ outpointTxid first<>":"<>T.pack (show $ outpointVout first)) generation
         pure txid
       _ -> reject "multiple_initial_native_attempts"
@@ -103,7 +96,7 @@ prepareSolanaWithSigner call signer c ledger obligation = prepare `onException` 
     attempts <- filter ((==obligationId obligation) . attemptIntent) <$> PgSettlement.pendingAttempts ledger
     case attempts of
       [attempt] -> do
-        signed <- stored (attemptPolicy attempt)
+        signed <- decodePaymentRecord (attemptPolicy attempt)
         let plan=signedSolanaPlan signed
             reply=signedSolanaReply signed
         validateSaved quantity plan
@@ -125,11 +118,11 @@ prepareSolanaWithSigner call signer c ledger obligation = prepare `onException` 
             let plan=SolanaPlan (fingerprint c) (obligationRecipient obligation) quantity
                   (payoutReference c obligation) recent (savedSolanaFee limits) (savedSolanaRent limits)
             limit <- either reject pure (solanaOperatingLimit plan)
-            PgPreparation.begin ledger c obligation "Solana" (units limit) (json plan)
+            PgPreparation.begin ledger c obligation "Solana" (units limit) (encodeRecord plan)
             g <- PgPreparation.active ledger (obligationId obligation)
             pure (plan,Nothing,g)
           [p] -> do
-            plan <- stored (preparationPolicy p)
+            plan <- decodePaymentRecord (preparationPolicy p)
             limit <- either reject pure (solanaOperatingLimit plan)
             require (preparationObligation p==obligation && preparationChain p=="Solana"
               && preparationFeeLimit p==units limit) "invalid_saved_payment"
@@ -140,8 +133,8 @@ prepareSolanaWithSigner call signer c ledger obligation = prepare `onException` 
           require (g==generation) "preparation_generation_changed"
         let request=solanaPayoutRequest c plan
         case savedDraft of
-          Nothing -> PgPreparation.storeDraft ledger (obligationId obligation) (json request) generation
-          Just value -> stored value >>= \old -> require (old==request) "saved_solana_request_mismatch"
+          Nothing -> PgPreparation.storeDraft ledger (obligationId obligation) (encodeRecord request) generation
+          Just value -> decodePaymentRecord value >>= \old -> require (old==request) "saved_solana_request_mismatch"
         -- The immutable order/preparation supplies these ceilings. Current
         -- aggregate daily caps were checked by beginPreparation above.
         signed <- signer (obligationId obligation) generation plan
@@ -151,7 +144,7 @@ prepareSolanaWithSigner call signer c ledger obligation = prepare `onException` 
         let reply=signedSolanaReply signed
         signature <- maybe (reject "helper_signature_missing") pure (replySignature reply)
         limit <- either reject pure (solanaOperatingLimit plan)
-        PgPreparation.storeAttempt ledger obligation "Solana" signature (replyTransaction reply) (json signed) (units limit) Nothing generation
+        PgPreparation.storeAttempt ledger obligation "Solana" signature (replyTransaction reply) (encodeRecord signed) (units limit) Nothing generation
         pure signature
       _ -> reject "multiple_initial_solana_attempts"
   validateSaved quantity plan = require

@@ -1,16 +1,14 @@
 module Bridge.Postgres.LossCover (decision,record) where
 import Bridge.Types
-import Bridge.Ledger.Model (LossCapital(..),Deposit(..))
+import Bridge.Ledger.Model (encodeRecord, LossCapital(..),Deposit(..))
 import Bridge.RPC (fieldValue)
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
-import Data.Aeson (Value,ToJSON,encode,object,(.=))
-import qualified Data.ByteString.Lazy as LBS
+import Data.Aeson (Value,object,(.=))
 import qualified Data.Map.Strict as M
 import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Opaleye as O
 
@@ -105,7 +103,7 @@ record ledger source recovery now capital reason sourceProof custodyProof=ledger
       let free=M.findWithDefault 0 ("Native","float") bs-sum(map toInteger held)
           earned=M.findWithDefault 0 ("Native","earned") bs
       require (free>=toInteger fromFloat && earned>=toInteger fromEarned) "insufficient_loss_capital"
-      let proof=json $ object["source" .= sourceProof,"custody" .= custodyProof]
+      let proof=encodeRecord $ object["source" .= sourceProof,"custody" .= custodyProof]
       require (T.length proof<=32768) "source_loss_evidence_too_large"
       sequenceNo <- criticalSequence c
       count <- O.runInsert c O.Insert {O.iTable=sourcelosscoversTable,O.iRows=[SourceLossCovers (num sequenceNo) (text did) (num recovery) (num quantity) (num fromFloat) (num fromEarned) (text reason) (text proof)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
@@ -115,8 +113,6 @@ record ledger source recovery now capital reason sourceProof custodyProof=ledger
       pure ()
     _->reject "duplicate_source_loss_cover"
 
-json :: ToJSON a => a -> Text
-json=TE.decodeUtf8 . LBS.toStrict . encode
 text :: Text -> O.Field O.SqlText
 text=O.sqlStrictText
 num :: Int64 -> O.Field O.SqlInt8

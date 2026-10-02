@@ -3,24 +3,21 @@ module Bridge.Postgres.Preparation
 
 import Bridge.Config
 import Bridge.Types
-import Bridge.Ledger.Model (CostLimits(..))
-import Bridge.Ledger.Model (Obligation(..),Preparation(..))
+import Bridge.Ledger.Model (decodePaymentRecord, CostLimits(..), Obligation(..), Preparation(..))
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema hiding (deploymentFingerprint)
 import qualified Bridge.Postgres.Source as Source
-import Data.Aeson (FromJSON,eitherDecodeStrict')
 import Data.Int (Int64)
 import Data.List (sortOn)
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Opaleye as O
 
 orderPolicy :: Ledger -> Text -> IO PolicySnapshot
 orderPolicy ledger oid = ledgerAction ledger $ \c->do
   rows <- O.runSelect c $ fmap ordersPolicyJson $ whereRows (\row->ordersId row O..== text oid) (O.selectTable ordersTable) :: IO [Text]
-  case rows of [value]->stored value; _->reject "order_not_found"
+  case rows of [value]->decodePaymentRecord value; _->reject "order_not_found"
 
 costLimits :: Ledger -> Text -> IO CostLimits
 costLimits ledger oid = ledgerAction ledger $ \c->do
@@ -174,8 +171,6 @@ text :: Text -> O.Field O.SqlText
 text = O.sqlStrictText
 num :: Int64 -> O.Field O.SqlInt8
 num = O.sqlInt8
-stored :: FromJSON a => Text -> IO a
-stored = either (const $ reject "invalid_saved_payment") pure . eitherDecodeStrict' . TE.encodeUtf8
 
 -- Specific read-only signer operation. It accepts durable identity, never a
 -- caller-supplied plan or transaction. No connection escapes the signer.
@@ -196,7 +191,7 @@ signingDecisionC c cfg intent generation = do
   fees <- O.runSelect c $ whereRows (\r->feereservationsIntentId r O..== text intent) (O.selectTable feereservationsTable) :: IO [FeeReservations]
   require ([(feereservationsAmount r,feereservationsReleased r) | r<-fees]==[(preparationFeeLimit prepared,0)]) "payment_not_prepared"
   policies <- O.runSelect c $ fmap ordersPolicyJson $ whereRows (\r->ordersId r O..== text(obligationOrder ob)) (O.selectTable ordersTable) :: IO [Text]
-  policy <- case policies of [value]->stored value; _->reject "order_not_found"
+  policy <- case policies of [value]->decodePaymentRecord value; _->reject "order_not_found"
   require (deploymentFingerprint policy==fingerprint cfg) "payment_profile_mismatch"
   pure (prepared,policy)
 

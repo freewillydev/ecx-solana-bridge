@@ -36,7 +36,6 @@ import Data.Int (Int64)
 import Data.List (nub)
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
 import Network.HTTP.Client (Manager)
 import Text.Read (readMaybe)
 
@@ -46,10 +45,6 @@ realPaymentTransport manager c backup = PaymentTransport
   (fmap (\url -> rpc manager url Nothing) $ solanaVerifierRpc c)
   (nativeIdentity manager c >> solanaIdentity manager c >> pure ()) backup
 
-json :: ToJSON a => a -> Text
-json=TE.decodeUtf8 . LBS.toStrict . encode
-stored :: FromJSON a => Text -> IO a
-stored=either (const $ reject "invalid_saved_payment") pure . eitherDecodeStrict' . TE.encodeUtf8
 zero :: Amount
 zero=either (error . T.unpack) id (amount 0)
 
@@ -70,7 +65,7 @@ observeNativePayment call signed = do
       if confirmations<planDepth plan then pure PaymentWaiting else do
         anchor <- fieldValue "blockhash" value
         height <- activeNativeBlock call anchor (planDepth plan)
-        pure $ PaymentConfirmed (PaymentCosts (signedNativeFee signed) zero) $ json $ object
+        pure $ PaymentConfirmed (PaymentCosts (signedNativeFee signed) zero) $ encodeRecord $ object
           ["txid" .= nativeTxid (signedNativeTransaction signed),"blockhash" .= anchor,"height" .= height,"requiredDepth" .= planDepth plan]
 
 -- Shared by settlement and custody reconciliation; even an unconfirmed wallet
@@ -115,7 +110,7 @@ observeSolanaPayment call c signed = do
   proof <- solanaProof call signature
   if proof/=Null then do
     outcome <- either reject pure (verifySolanaOutcome c signed proof)
-    let evidence=json $ object ["signature" .= signature,"outcome" .= outcome
+    let evidence=encodeRecord $ object ["signature" .= signature,"outcome" .= outcome
           ,"transactionHash" .= digest (LBS.toStrict $ encode proof)]
     pure $ if outcomeSucceeded outcome
       then PaymentConfirmed (PaymentCosts (outcomeFee outcome) (outcomeRent outcome)) evidence
@@ -149,7 +144,7 @@ solanaExpiryEvidence transport c signed = do
         require (profile c/=CanonicalBeta && solanaVerifierRpc c==Nothing) "independent_rpc_required"
         pure Nothing
       Just verifier -> Just <$> evidence verifier sourceOrigin ownerOrigin signature
-    pure $ Just $ json $ object ["signature" .= signature,"blockhash" .= recentHash recent
+    pure $ Just $ encodeRecord $ object ["signature" .= signature,"blockhash" .= recentHash recent
       ,"lastValidBlockHeight" .= recentLastValidHeight recent,"primary" .= primary,"independent" .= independent]
  where
   recent=solPlanRecent $ signedSolanaPlan signed
@@ -252,7 +247,7 @@ readSavedPayment transport c ledger attempt = do
   require (deploymentFingerprint policy==fingerprint c) "payment_profile_mismatch"
   payment <- case attemptChain attempt of
     "Native" -> do
-      signed <- stored (attemptPolicy attempt)
+      signed <- decodePaymentRecord (attemptPolicy attempt)
       let plan=signedNativePlan signed; tx=signedNativeTransaction signed
       require (obligationAsset ob=="Native" && planProfile plan==profile c && planDepth plan==nativeDepth policy
         && planRecipient plan==obligationRecipient ob && units (planAmount plan)==obligationAmount ob
@@ -263,7 +258,7 @@ readSavedPayment transport c ledger attempt = do
       either reject pure (validateNativeTx plan (signedNativePrevouts signed) (signedNativeFee signed) tx)
       pure (NativePayment signed)
     "Solana" -> do
-      signed <- stored (attemptPolicy attempt)
+      signed <- decodePaymentRecord (attemptPolicy attempt)
       let plan=signedSolanaPlan signed; reply=signedSolanaReply signed
       limit <- either reject pure (solanaOperatingLimit plan)
       require (obligationAsset ob=="Wrapped" && solPlanFingerprint plan==fingerprint c
@@ -354,7 +349,7 @@ reconcileRecordedAttempt transport c ledger attempt = do
         anchor <- fieldValue "blockhash" value
         height <- activeNativeBlock (paymentNative transport) anchor (planDepth $ signedNativePlan signed)
         require (attemptState winner=="broadcast_intent") "unrecorded_broadcast_observed"
-        PgSettlement.recordSettlement ledger (attemptId winner) (PaymentCosts (signedNativeFee signed) zero) $ json $ object
+        PgSettlement.recordSettlement ledger (attemptId winner) (PaymentCosts (signedNativeFee signed) zero) $ encodeRecord $ object
           ["txid" .= attemptId winner,"blockhash" .= anchor,"height" .= height,"requiredDepth" .= planDepth (signedNativePlan signed)]
         pure (Left "settled")
       Just (active,_,depth,_) | depth>0 || attemptId active==attemptId attempt->pure (Left "confirming")

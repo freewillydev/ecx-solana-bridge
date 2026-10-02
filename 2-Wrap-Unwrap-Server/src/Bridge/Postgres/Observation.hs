@@ -2,14 +2,13 @@ module Bridge.Postgres.Observation
   ( refreshDeposit, recordScan, readCheckpoint, lookupInstruction, maximumNativeDepth, pendingVerification, lookupReferences, promotionCandidates, scannerHealth, commitScan, recordScanFailure, promoteDeposit ) where
 
 import Bridge.Types
-import Bridge.Ledger.Model (Deposit(..), SourceCheck(..), ScanBatch(..), ChainEvent(..), economicOutflow)
+import Bridge.Ledger.Model (encodeRecord, decodeRecord, Deposit(..), SourceCheck(..), ScanBatch(..), ChainEvent(..), economicOutflow)
 import Bridge.Postgres.Source (recordSourceCheckC, sourceWorkHashC)
 import Bridge.Postgres.Ledger (Ledger, ledgerAction, posting)
 import Bridge.Postgres.Schema
 import Control.Monad (when, forM, forM_)
-import Data.Aeson (FromJSON, eitherDecodeStrict', object, (.=), ToJSON, encode, Value)
+import Data.Aeson (FromJSON, object, (.=), Value)
 import Data.List (sortOn)
-import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -155,7 +154,7 @@ maximumNativeDepth ledger minimumDepth = ledgerAction ledger $ \connection->do
   pure (maximum (minimumDepth:1:map nativeDepth policies))
 
 decodeSaved :: FromJSON a => Text -> IO a
-decodeSaved = either (const $ reject "corrupt_ledger_json") pure . eitherDecodeStrict' . TE.encodeUtf8
+decodeSaved = decodeRecord "corrupt_ledger_json"
 
 checkpointC :: PG.Connection -> Text -> Text -> IO ()
 checkpointC connection chain anchor = do
@@ -191,7 +190,7 @@ commitScan ledger ScanBatch{..} = ledgerAction ledger $ \connection->do
   forM_ scanEvents $ \ChainEvent{..}->do
     require (not (T.null chainEventId) && T.length chainEventId<=128 && T.length chainEventAnchor<=128) "invalid_observation_identity"
     require (chainEventKind `elem` ["incoming","unmatched_incoming","outgoing","failed","reference","unsupported","unclassified","awaiting_verifier","disputed"]) "invalid_observation_kind"
-    let evidence=jsonText (object ["chain" .= scanChain,"id" .= chainEventId,"anchor" .= chainEventAnchor,"kind" .= chainEventKind,"proof" .= chainEventEvidence])
+    let evidence=encodeRecord (object ["chain" .= scanChain,"id" .= chainEventId,"anchor" .= chainEventAnchor,"kind" .= chainEventKind,"proof" .= chainEventEvidence])
         hash=digest (TE.encodeUtf8 evidence)
         paymentChain=if scanChain=="SolanaOperating" then "Solana" else scanChain
     require (T.length evidence<=8192) "observation_evidence_too_large"
@@ -213,7 +212,7 @@ commitScan ledger ScanBatch{..} = ledgerAction ledger $ \connection->do
       O.where_ (treasuryspendsChain row O..== O.sqlStrictText scanChain O..&& treasuryspendsEventId row O..== O.sqlStrictText chainEventId)
       pure (treasuryspendsAnchor row,treasuryspendsEconomicJson row)
       :: IO [(Text,Text)]
-    let approved=case economicOutflow scanChain chainEventEvidence of Right economic->treasury==[(chainEventAnchor,jsonText economic)]; Left _->False
+    let approved=case economicOutflow scanChain chainEventEvidence of Right economic->treasury==[(chainEventAnchor,encodeRecord economic)]; Left _->False
         review=chainEventKind `elem` ["unsupported","unclassified","disputed"] || chainEventKind=="outgoing" && not known && not approved
         reviewed=if review then 1 else 0
     proofs <- O.runSelect connection $ do
@@ -283,8 +282,6 @@ recordScanFailure ledger chain now code = ledgerAction ledger $ \connection->do
   healthC connection chain Nothing (Just code) now False
   pauseC connection ("scanner_unavailable:"<>chain)
 
-jsonText :: ToJSON a => a -> Text
-jsonText = TE.decodeUtf8 . LBS.toStrict . encode
 
 promoteDeposit :: Ledger -> Int64 -> Text -> IO Bool
 promoteDeposit ledger now did = ledgerAction ledger $ \connection->do
@@ -346,8 +343,8 @@ lookupReferences ledger keys = ledgerAction ledger $ \connection->do
     :: IO [(Text,Text,Text,Maybe Text)]
   case rows of
     [(oid,request,policy,Just instruction)] | Just reference<-T.stripPrefix "solana-pay:" instruction->do
-      req <- either (const $ reject "corrupt_ledger_json") pure(eitherDecodeStrict' $ TE.encodeUtf8 request)
-      saved <- either (const $ reject "corrupt_ledger_json") pure(eitherDecodeStrict' $ TE.encodeUtf8 policy)
+      req <- decodeSaved request
+      saved <- decodeSaved policy
       pure(Just(oid,req,saved,reference))
     _->pure Nothing
 

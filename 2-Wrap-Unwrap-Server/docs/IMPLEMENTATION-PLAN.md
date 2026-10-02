@@ -119,7 +119,8 @@ protocol after migration. Browser DOM bindings and the generated JavaScript runt
 but no TypeScript application or npm frontend build should remain. Preserve QR,
 integer amounts, payment instructions, saved-order reload and error behavior.
 PostgreSQL, the native node, Solana RPC and backup tooling remain dependencies.
-The signer/FFI source is implemented; the JavaScript-backend frontend is still pending.
+The signer/FFI and JavaScript-backend frontend are implemented; deployment and
+funded wallet acceptance remain pending.
 The integrated architecture is not yet complete or accepted
 on real chains; previous package evidence describes the earlier process design.
 
@@ -131,7 +132,7 @@ existential `Request`; Runtime resolves its dictionary into the severity-indexed
 DSL. Wire results use concrete records, not arbitrary JSON `Value`. Operator
 recovery is a local CLI over a mode-0600 framed Unix socket, using the same runtime
 dispatcher; its old HTTP routes and handlers, health/readiness routes and optional
-deposit-hint operation are removed. The signer retains a separate private protocol.
+deposit-hint operation are removed. The signer uses its separate authenticated Servant API.
 
 The dedicated Haskell signer and critical-only client are implemented in source;
 real two-process acceptance, OS isolation and restricted native RPC credentials
@@ -257,6 +258,9 @@ The sequence below remains the broader refactor checklist, subject to that prior
    duplicate Snapshot; schema-to-obligation/attempt projections have one definition.
    Customer handlers now sit beside their four Servant routes in API.hs; the
    operation algebra depends on pure model types rather than the HTTP API module.
+   Saved-record JSON encoding and decoding now share one implementation in
+   Ledger.Model. Payment records share their error category; other workflows retain
+   their existing error codes. Stored bytes and Aeson parsing rules are unchanged.
    Remove redundant wrappers immediately after their replacement works.
    Core PostgreSQL budgeting is now part of Ledger, so allowance and journal
    arithmetic share one implementation. Retain remaining unique SQLite assertions

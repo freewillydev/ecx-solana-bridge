@@ -2,7 +2,7 @@ module Bridge.Postgres.Replacement
   ( parent,contextC,decision,recordDraft,member,signingContext,signingContextC,recordMember,cancel ) where
 import Bridge.Types
 import Bridge.Config (Config(..),fingerprint)
-import Bridge.Ledger.Model (Attempt(..))
+import Bridge.Ledger.Model (encodeRecord, decodePaymentRecord, Attempt(..))
 import Bridge.NativePayment
 import Bridge.NativeReplacement
 import Bridge.Postgres.Ledger
@@ -11,12 +11,10 @@ import qualified Bridge.Postgres.NativeFamily as Family
 import qualified Bridge.Postgres.Preparation as P
 import Bridge.Postgres.Source (paymentWorkHashC)
 import Bridge.Postgres.Cancellation (freshC)
-import Data.Aeson (FromJSON,ToJSON,eitherDecodeStrict',encode,object,(.=))
-import qualified Data.ByteString.Lazy as LBS
+import Data.Aeson (object,(.=))
 import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Opaleye as O
 
@@ -46,13 +44,13 @@ contextC c cfg txid=do
   family <- Family.familyC c (attemptIntent current)
   require (not(null family) && last family==current) "native_replacement_not_current"
   _ <- P.activeC c (attemptIntent current)
-  policy <- stored(ordersPolicyJson order)
-  signed <- stored(attemptPolicy current)
+  policy <- decodePaymentRecord(ordersPolicyJson order)
+  signed <- decodePaymentRecord(attemptPolicy current)
   let plan=signedNativePlan signed
   require (obligationsAsset ob=="Native" && units(planAmount plan)==obligationsAmount ob && planRecipient plan==obligationsRecipient ob &&
     planProfile plan==profile cfg && planDepth plan==nativeDepth policy && deploymentFingerprint policy==fingerprint cfg &&
     units(planFeeLimit plan)==attemptFeeLimit current && nativeTxid(signedNativeTransaction signed)==txid && signedNativeBytes signed==attemptBytes current) "saved_native_policy_mismatch"
-  members <- mapM (stored . attemptPolicy) family
+  members <- mapM (decodePaymentRecord . attemptPolicy) family
   either reject pure(validateNativeFamily members)
   pure(current,members)
 
@@ -89,11 +87,11 @@ decisionC c txid fee reason=O.runSelect c $ do
 
 recordDraft :: Ledger -> Config -> Attempt -> NativeDraft -> Text -> Int64 -> IO Int64
 recordDraft ledger cfg expected draft reason now=ledgerAction ledger $ \c->do
-  require (not(T.null $ T.strip reason) && T.length reason<=512 && T.length(json draft)<=200000) "invalid_native_replacement_draft"
+  require (not(T.null $ T.strip reason) && T.length reason<=512 && T.length(encodeRecord draft)<=200000) "invalid_native_replacement_draft"
   pausedC c
   old <- decisionC c (attemptId expected) (draftFee draft) reason
   case old of
-    [r]->require (nativereplacementdraftsDraftJson r==json draft) "native_replacement_draft_conflict" >> pure(nativereplacementdraftsCriticalSequence r)
+    [r]->require (nativereplacementdraftsDraftJson r==encodeRecord draft) "native_replacement_draft_conflict" >> pure(nativereplacementdraftsCriticalSequence r)
     []->do
       (current,family) <- contextC c cfg (attemptId expected)
       require (current==expected) "native_replacement_parent_changed"
@@ -113,10 +111,10 @@ recordDraft ledger cfg expected draft reason now=ledgerAction ledger $ \c->do
       workHash <- paymentWorkHashC c (attemptIntent current)
       checks <- O.runSelect c (O.selectTable custodycheckTable) :: IO [CustodyCheck]
       let custody=[(custodycheckRevision r,custodycheckCheckedAt r,custodycheckReportJson r) | r<-checks]
-          proof=json $ object["custody" .= custody,"parentBroadcastSequence" .= attemptSequence current]
+          proof=encodeRecord $ object["custody" .= custody,"parentBroadcastSequence" .= attemptSequence current]
       require (T.length proof<=32768) "native_replacement_evidence_too_large"
       sequenceNo <- criticalSequence c
-      inserted <- O.runInsert c O.Insert {O.iTable=nativereplacementdraftsTable,O.iRows=[NativeReplacementDrafts (num sequenceNo) (text $ attemptId current) (num $ units $ draftFee draft) (text $ json draft) (text workHash) (text reason) (text proof)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      inserted <- O.runInsert c O.Insert {O.iTable=nativereplacementdraftsTable,O.iRows=[NativeReplacementDrafts (num sequenceNo) (text $ attemptId current) (num $ units $ draftFee draft) (text $ encodeRecord draft) (text workHash) (text reason) (text proof)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
       require (inserted==1) "native_replacement_draft_insert_failed"
       auditC c "native_replacement_drafted" (attemptId current)
       pure sequenceNo
@@ -134,7 +132,7 @@ signingContextC c cfg sequenceNo=do
   (a,members) <- contextC c cfg (nativereplacementdraftsParentTxid row)
   workHash <- paymentWorkHashC c (attemptIntent a)
   require (workHash==nativereplacementdraftsWorkHash row) "native_replacement_work_changed"
-  draft <- stored(nativereplacementdraftsDraftJson row)
+  draft <- decodePaymentRecord(nativereplacementdraftsDraftJson row)
   require (units(draftFee draft)==nativereplacementdraftsFee row) "native_replacement_draft_changed"
   either reject pure(validateNativeReplacementDraft members (draftFee draft) draft)
   family <- Family.familyC c (attemptIntent a)
@@ -164,7 +162,7 @@ recordMember :: Ledger -> Config -> Int64 -> [Attempt] -> NativeSigned -> Int64 
 recordMember ledger cfg sequenceNo expected signed now=ledgerAction ledger $ \c->do
   let txid=nativeTxid(signedNativeTransaction signed)
       bytes=signedNativeBytes signed
-      policy=json signed
+      policy=encodeRecord signed
   require (T.length bytes<=200000 && T.length policy<=32768) "invalid_native_signed_bytes"
   previous <- memberC c sequenceNo
   case previous of
@@ -172,7 +170,7 @@ recordMember ledger cfg sequenceNo expected signed now=ledgerAction ledger $ \c-
     Nothing->do
       (family,draft) <- signingContextC c cfg sequenceNo
       require (family==expected) "native_replacement_family_changed"
-      members <- mapM (stored . attemptPolicy) family
+      members <- mapM (decodePaymentRecord . attemptPolicy) family
       either reject pure(validateNativeFamily $ members<>[signed])
       require (sameNativeTemplate (draftTransaction draft) (signedNativeTransaction signed) && draftFee draft==signedNativeFee signed && sameNativePrevouts (draftPrevouts draft) (signedNativePrevouts signed)) "native_replacement_signed_template_changed"
       freshC c now
@@ -206,10 +204,6 @@ auditC :: PG.Connection -> Text -> Text -> IO ()
 auditC c action detail=do
   count <- O.runInsert c O.Insert {O.iTable=auditTable,O.iRows=[Audit Nothing (text action) (text detail)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   require (count==1) "audit_insert_failed"
-stored :: FromJSON a => Text -> IO a
-stored=either (const $ reject "invalid_saved_payment") pure . eitherDecodeStrict' . TE.encodeUtf8
-json :: ToJSON a => a -> Text
-json=TE.decodeUtf8 . LBS.toStrict . encode
 text :: Text -> O.Field O.SqlText
 text=O.sqlStrictText
 num :: Int64 -> O.Field O.SqlInt8

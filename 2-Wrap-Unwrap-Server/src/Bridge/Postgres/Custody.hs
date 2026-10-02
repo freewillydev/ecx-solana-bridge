@@ -1,21 +1,19 @@
 module Bridge.Postgres.Custody (readSnapshot, readRevision, hasEvent, recordCheck, eventProof, freshC) where
 
 import qualified Database.PostgreSQL.Simple as PG
-import Bridge.Ledger.Model (View(..))
+import Bridge.Ledger.Model (encodeRecord, decodeRecord, View(..))
 import Bridge.Config
 import Bridge.Types
 import Bridge.Postgres.Ledger (Ledger,ledgerAction)
 import Bridge.Postgres.Schema
 import Control.Monad (forM_,when)
-import Data.Aeson (Value, FromJSON, ToJSON, encode, eitherDecodeStrict')
+import Data.Aeson (Value, FromJSON)
 import Bridge.RPC (fieldValue)
 import Data.Int (Int64)
 import Data.List (sortOn)
 import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
-import qualified Data.ByteString.Lazy as LBS
 import qualified Opaleye as O
 import Text.Read (readMaybe)
 
@@ -113,7 +111,7 @@ recordCheck ledger expected now failure report = ledgerAction ledger $ \connecti
       _ <- O.runUpdate connection O.Update {O.uTable=deploymentTable,O.uUpdateWith= \row->row {deploymentPaused=O.sqlInt8 1,deploymentPauseReason=O.sqlStrictText ("custody:"<>code)},O.uWhere=const (O.sqlBool True),O.uReturning=O.rCount}
       pure ()
   _ <- O.runUpdate connection O.Update
-    {O.uTable=custodycheckTable,O.uUpdateWith= \row->row {custodycheckCheckedRevision=if report==Nothing then O.null else O.toNullable (O.sqlInt8 expected),custodycheckCheckedAt=O.toNullable (O.sqlInt8 now),custodycheckLastError=maybe O.null (O.toNullable . O.sqlStrictText) failure,custodycheckReportJson=maybe O.null (O.toNullable . O.sqlStrictText . json) report},O.uWhere=const (O.sqlBool True),O.uReturning=O.rCount}
+    {O.uTable=custodycheckTable,O.uUpdateWith= \row->row {custodycheckCheckedRevision=if report==Nothing then O.null else O.toNullable (O.sqlInt8 expected),custodycheckCheckedAt=O.toNullable (O.sqlInt8 now),custodycheckLastError=maybe O.null (O.toNullable . O.sqlStrictText) failure,custodycheckReportJson=maybe O.null (O.toNullable . O.sqlStrictText . encodeRecord) report},O.uWhere=const (O.sqlBool True),O.uReturning=O.rCount}
   pure ()
 
 eventProof :: Ledger -> Text -> Text -> IO (Text,Text,Value)
@@ -131,9 +129,7 @@ eventProof ledger stream txid = ledgerAction ledger $ \connection->do
     _->reject "custody_history_not_current"
 
 decode :: FromJSON a => Text -> IO a
-decode = either (const $ reject "invalid_reconciliation_evidence") pure . eitherDecodeStrict' . TE.encodeUtf8
-json :: ToJSON a => a -> Text
-json = TE.decodeUtf8 . LBS.toStrict . encode
+decode = decodeRecord "invalid_reconciliation_evidence"
 
 textColumn :: String -> String -> O.Table (O.Field O.SqlText) (O.Field O.SqlText)
 textColumn name column = O.table name (O.requiredTableField column)

@@ -35,7 +35,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
 stored :: FromJSON a => Text -> IO a
-stored=either (const $ reject "invalid_saved_preparation") pure . eitherDecodeStrict' . TE.encodeUtf8
+stored=decodeRecord "invalid_saved_preparation"
 
 -- Reconstruct from durable records on every startup/pass. Observing and booking
 -- a recorded outcome continue during a pause; this never prepares or broadcasts.

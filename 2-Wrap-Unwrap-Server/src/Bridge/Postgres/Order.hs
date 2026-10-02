@@ -5,17 +5,17 @@ import Bridge.Config
 import qualified Bridge.Postgres.Ledger as Ledger
 import Control.Monad (when, forM_)
 import Data.List (nub, sortOn)
+import Bridge.Ledger.Model (encodeRecord, decodeRecord)
 import Bridge.Types
 import qualified Bridge.Types as Types
 import Bridge.Postgres.Schema
 import Bridge.Postgres.Ledger (Ledger, ledgerAction, criticalSequence, reserveOrderCosts)
-import Data.Aeson (encode, ToJSON, FromJSON, eitherDecodeStrict')
+import Data.Aeson (FromJSON)
 import Data.Profunctor.Product (p2)
 import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import qualified Data.ByteString.Lazy as LBS
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Opaleye as O
 
@@ -38,7 +38,7 @@ findSavedOrder ledger cfg capability request = do
       row <- O.selectTable ordersTable
       O.where_ (ordersCapabilityHash row O..== O.sqlStrictText cap O..&& ordersIdempotencyKey row O..== O.sqlStrictText (idempotencyKey request))
       pure row
-    let hash=digest (TE.encodeUtf8 (fingerprint cfg<>TE.decodeUtf8 (LBS.toStrict (encode request))))
+    let hash=digest (TE.encodeUtf8 (fingerprint cfg<>encodeRecord request))
     case rows of
       [row]->require (ordersRequestHash row==hash) "idempotency_conflict" >> pure (Just row)
       []->pure Nothing
@@ -90,7 +90,7 @@ createOrder ledger cfg now capability req = do
       row <- O.selectTable ordersTable
       O.where_ (ordersCapabilityHash row O..== O.sqlStrictText cap O..&& ordersIdempotencyKey row O..== O.sqlStrictText (idempotencyKey req))
       pure row
-    let hash=digest (TE.encodeUtf8 (fingerprint cfg<>jsonText req))
+    let hash=digest (TE.encodeUtf8 (fingerprint cfg<>encodeRecord req))
     case previous of
       [row]->require (ordersRequestHash row==hash) "idempotency_conflict" >> pure row
       []->do
@@ -116,8 +116,8 @@ createOrder ledger cfg now capability req = do
         require (now>=0 && toInteger now+toInteger (quoteSeconds cfg)+toInteger (confirmationGraceSeconds cfg)<=toInteger (maxBound::Int64)) "invalid_order_time"
         let end=now+quoteSeconds cfg
             row=Orders (O.sqlStrictText oid) (O.sqlStrictText cap) (O.sqlStrictText (idempotencyKey req)) (O.sqlStrictText hash)
-              (O.sqlStrictText (jsonText req)) (O.sqlStrictText (jsonText (Quote (input req) fee netAmount)))
-              (O.sqlStrictText (jsonText (PolicySnapshot (nativeConfirmations cfg) "finalized" (fingerprint cfg))))
+              (O.sqlStrictText (encodeRecord req)) (O.sqlStrictText (encodeRecord (Quote (input req) fee netAmount)))
+              (O.sqlStrictText (encodeRecord (PolicySnapshot (nativeConfirmations cfg) "finalized" (fingerprint cfg))))
               (O.sqlStrictText "Provisioning") (O.sqlInt8 end) (O.sqlInt8 (end+confirmationGraceSeconds cfg))
               O.null O.null O.null (O.sqlInt8 0)
         _ <- O.runInsert connection O.Insert {O.iTable=ordersTable,O.iRows=[row],O.iReturning=O.rCount,O.iOnConflict=Nothing}
@@ -127,8 +127,6 @@ createOrder ledger cfg now capability req = do
         readSavedOrder connection cap oid
       _->reject "duplicate_idempotency"
 
-jsonText :: ToJSON a => a -> Text
-jsonText = TE.decodeUtf8 . LBS.toStrict . encode
 
 checkIntakeReady :: Ledger -> Int64 -> IO ()
 checkIntakeReady ledger now = ledgerAction ledger (\connection->checkIntakeReadyC connection now)
@@ -200,7 +198,7 @@ readOrderC connection cap oid = do
     pure (ordersPayoutTx row) <*> decodeSaved (ordersPolicyJson row)
 
 decodeSaved :: FromJSON a => Text -> IO a
-decodeSaved = either (const $ reject "corrupt_ledger_json") pure . eitherDecodeStrict' . TE.encodeUtf8
+decodeSaved = decodeRecord "corrupt_ledger_json"
 
 exposeOrder :: Ledger -> Bool -> Text -> Text -> IO OrderView
 exposeOrder ledger remote capability oid = do

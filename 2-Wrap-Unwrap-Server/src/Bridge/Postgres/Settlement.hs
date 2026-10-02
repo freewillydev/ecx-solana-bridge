@@ -2,19 +2,17 @@ module Bridge.Postgres.Settlement (recordSettlement,recordFailedSolana,markBroad
 
 import Bridge.Config
 import Bridge.Types
-import Bridge.Ledger.Model (Attempt(..),Obligation(..),Deposit(..),PaymentCosts(..))
+import Bridge.Ledger.Model (encodeRecord, decodePaymentRecord, Attempt(..),Obligation(..),Deposit(..),PaymentCosts(..))
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
 import qualified Bridge.Postgres.Source as Source
 import Control.Monad (forM,forM_,when)
 import Data.List (sortOn,nub)
 import qualified Bridge.Postgres.NativeFamily as NativeFamily
-import Data.Aeson (FromJSON,ToJSON,object,(.=),encode,eitherDecodeStrict')
-import qualified Data.ByteString.Lazy as LBS
+import Data.Aeson (object,(.=))
 import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Opaleye as O
 
@@ -34,7 +32,7 @@ paymentContext c txid = do
 recordSettlement :: Ledger -> Text -> PaymentCosts -> Text -> IO ()
 recordSettlement ledger txid costs proof = ledgerAction ledger $ \c->do
   require (not(T.null proof) && T.length proof<=32768) "settlement_fee_or_evidence_invalid"
-  let saved=json(object["costs" .= costs,"proof" .= proof]); actual=toInteger(units $ networkFee costs)+toInteger(units $ accountRent costs)
+  let saved=encodeRecord(object["costs" .= costs,"proof" .= proof]); actual=toInteger(units $ networkFee costs)+toInteger(units $ accountRent costs)
   (a,i,ob,d,q) <- paymentContext c txid
   case attemptsState a of
     "settled"->require (attemptsObservationJson a==Just saved) "settlement_evidence_conflict"
@@ -45,7 +43,7 @@ recordSettlement ledger txid costs proof = ledgerAction ledger $ \c->do
       let feeAsset=if obligationsAsset ob=="Native" then Native else Sol
       require (intentsResolved i==0 && null winners && obligationsStatus ob `elem` ["paying","review"] &&
         case fees of [f]->feereservationsAsset f==T.pack(show feeAsset) && feereservationsAmount f>=attemptsFeeLimit a; _->False) "payment_intent_not_settleable"
-      quote <- stored(ordersQuoteJson q)
+      quote <- decodePaymentRecord(ordersQuoteJson q)
       source <- parseAsset(depositsAsset d); destination <- parseAsset(obligationsAsset ob)
       let principal=toInteger(depositsAmount d); payout=toInteger(obligationsAmount ob)
           flow=if obligationsKind ob=="refund" then [(source,"principal",negate principal),(source,"external",principal)]
@@ -147,10 +145,6 @@ text :: Text -> O.Field O.SqlText
 text=O.sqlStrictText
 num :: Int64 -> O.Field O.SqlInt8
 num=O.sqlInt8
-stored :: FromJSON a => Text -> IO a
-stored=either (const $ reject "invalid_saved_payment") pure . eitherDecodeStrict' . TE.encodeUtf8
-json :: ToJSON a => a -> Text
-json=TE.decodeUtf8 . LBS.toStrict . encode
 
 checkExpiryOrigins :: Ledger -> Config -> IO ()
 checkExpiryOrigins ledger cfg = ledgerAction ledger $ \c->do
@@ -203,8 +197,8 @@ sourceContext ledger expected = ledgerAction ledger $ \connection->do
     :: IO [(Obligations,Orders,Deposits)]
   (ob,order,deposit) <- case rows of [row]->pure row; _->reject "source_deposit_missing"
   require (asObligation ob==expected) "obligation_mismatch"
-  request <- stored (ordersRequestJson order)
-  policy <- stored (ordersPolicyJson order)
+  request <- decodePaymentRecord (ordersRequestJson order)
+  policy <- decodePaymentRecord (ordersPolicyJson order)
   instruction <- maybe (reject "source_instruction_missing") pure (ordersInstruction order)
   let asset=sourceAsset (direction request)
   require (depositsOrderId deposit==Just (obligationOrder expected) && depositsAsset deposit==T.pack(show asset)) "source_binding_mismatch"

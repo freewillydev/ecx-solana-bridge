@@ -27,9 +27,7 @@ import Control.Exception (bracket)
 import Control.Monad (when)
 import Data.Aeson
 import qualified Data.ByteString as BS
-import qualified Data.Text.Encoding as TE
 import qualified Data.Text as T
-import Data.Text (Text)
 import GHC.Generics (Generic)
 import System.IO (withBinaryFile,IOMode(ReadMode))
 import System.FilePath (isAbsolute)
@@ -118,15 +116,15 @@ readDecision settings cfg command = bracket (PG.connect settings) PG.close $ \c-
         draft <- maybe (reject "preparation_draft_required") pure (preparationDraft prepared)
         case preparationChain prepared of
           "Native"->do
-            plan <- stored(preparationPolicy prepared)
-            value <- stored draft
+            plan <- decodePaymentRecord(preparationPolicy prepared)
+            value <- decodePaymentRecord draft
             require (planProfile plan==profile cfg && planDepth plan==nativeDepth policy
               && planRecipient plan==obligationRecipient ob && units(planAmount plan)==obligationAmount ob
               && units(planFeeLimit plan)==preparationFeeLimit prepared) "saved_native_policy_mismatch"
             pure(InitialNative plan value)
           "Solana"->do
-            plan <- stored(preparationPolicy prepared)
-            request <- stored draft
+            plan <- decodePaymentRecord(preparationPolicy prepared)
+            request <- decodePaymentRecord draft
             limit <- either reject pure(solanaOperatingLimit plan)
             require (solPlanFingerprint plan==fingerprint cfg && solanaCommitment policy=="finalized"
               && solPlanRecipient plan==obligationRecipient ob && units(solPlanAmount plan)==obligationAmount ob
@@ -141,7 +139,5 @@ readDecision settings cfg command = bracket (PG.connect settings) PG.close $ \c-
       SignReplacement _ sequenceNo->do
         require (sequenceNo>0) "invalid_signing_decision"
         (family,draft) <- Replacement.signingContextC c cfg sequenceNo
-        members <- mapM (stored . attemptPolicy) family
+        members <- mapM (decodePaymentRecord . attemptPolicy) family
         pure(ReplacementNative members draft)
- where stored :: FromJSON a => Text -> IO a
-       stored=either (const $ reject "invalid_saved_payment") pure . eitherDecodeStrict' . TE.encodeUtf8

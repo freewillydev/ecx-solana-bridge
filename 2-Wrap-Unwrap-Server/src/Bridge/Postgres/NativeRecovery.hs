@@ -2,14 +2,13 @@ module Bridge.Postgres.NativeRecovery (candidates,observation,recordCheck,review
 import Bridge.Types
 import Bridge.NativePayment
 import qualified Bridge.Postgres.NativeFamily as Family
-import Bridge.Ledger.Model (Attempt(..),PaymentCosts(..),NativeSettlementCheck(..))
+import Bridge.Ledger.Model (encodeRecord, decodeRecord, Attempt(..),PaymentCosts(..),NativeSettlementCheck(..))
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
 import Bridge.RPC (fieldValue)
 import Control.Monad (when)
-import Data.Aeson (FromJSON,ToJSON,Value(..),object,(.=),toJSON,encode,eitherDecodeStrict')
+import Data.Aeson (FromJSON,Value(..),object,(.=),toJSON)
 import qualified Data.Aeson.KeyMap as KM
-import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text.Encoding as TE
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -90,10 +89,10 @@ recordCheck ledger expected previous check = ledgerAction ledger $ \c->do
 finalityC :: PG.Connection -> Attempt -> Text -> NativeSettlementCheck -> IO ()
 finalityC c expected previous check = do
   (state,saved) <- case check of
-    NativeSettlementConfirming->pure("confirming",json $ object["reason" .= ("native_confirmation_policy_pending"::Text)])
+    NativeSettlementConfirming->pure("confirming",encodeRecord $ object["reason" .= ("native_confirmation_policy_pending"::Text)])
     NativeSettlementUnavailable reason->do
       require (not(T.null reason) && T.length reason<=160) "invalid_native_recovery_reason"
-      pure("unavailable",json $ object["reason" .= reason])
+      pure("unavailable",encodeRecord $ object["reason" .= reason])
     NativeSettlementReconfirmed costs proof->do
       old <- stored previous :: IO Value
       oldCosts <- fieldValue "costs" old
@@ -114,7 +113,7 @@ finalityC c expected previous check = do
           confirmations <- fieldValue "proof" observed >>= fieldValue "confirmations" :: IO Int64
           require (chaineventsAnchor event==anchor && confirmations>=depth) "native_recovery_scan_not_current"
         _->reject "native_recovery_scan_not_current"
-      pure("reconfirmed",json $ object["costs" .= costs,"proof" .= proof])
+      pure("reconfirmed",encodeRecord $ object["costs" .= costs,"proof" .= proof])
     -- Winner changes must use the family/accounting path selected above.
     NativeSettlementReplaced{}->reject "native_winner_change_requires_accounting"
   require (T.length saved<=32768) "native_recovery_evidence_too_large"
@@ -210,7 +209,7 @@ recordRebroadcast ledger expected family anchor reason proof = ledgerAction ledg
       require (txid==attemptId expected && bytesHash==digest(TE.encodeUtf8 $ attemptBytes expected)) "native_rebroadcast_proof_mismatch"
       old <- stored(nativepaymentrecoveriesObservationJson review) :: IO Value
       fields <- case old of Object values->pure values; _->reject "invalid_native_recovery_evidence"
-      let saved=json $ Object $ KM.insert "rebroadcastRecovery" (toJSON anchor) $
+      let saved=encodeRecord $ Object $ KM.insert "rebroadcastRecovery" (toJSON anchor) $
             KM.insert "operatorReason" (toJSON reason) $ KM.insert "rebroadcastProof" proof fields
       require (T.length saved<=32768) "native_recovery_evidence_too_large"
       sequenceNo <- criticalSequence c
@@ -238,9 +237,7 @@ eventRows c txid = O.runSelect c $ do
   O.where_(chaineventsChain event O..== text "Native" O..&& chaineventsEventId event O..== text txid O..&& chaineventsKind event O..== text "outgoing" O..&& chaineventsNeedsReview event O..== num 0 O..&& chaineventsEvidenceHash event O..== observationevidenceHash evidence)
   pure(event,evidence)
 stored :: FromJSON a => Text -> IO a
-stored = either (const $ reject "invalid_native_settlement") pure . eitherDecodeStrict' . TE.encodeUtf8
-json :: ToJSON a => a -> Text
-json = TE.decodeUtf8 . LBS.toStrict . encode
+stored = decodeRecord "invalid_native_settlement"
 text :: Text -> O.Field O.SqlText
 text = O.sqlStrictText
 num :: Int64 -> O.Field O.SqlInt8
@@ -293,7 +290,7 @@ winnerChangeC c previousWinner previous expected txid costs proof = do
   net <- fieldValue "walletNetUnits" eventProof
   fee <- fieldValue "feeUnits" eventProof
   require (chaineventsAnchor event==anchor && confirmations>=depth && net==T.pack(show $ negate $ toInteger quantity) && fee==signedNativeFee signed) "native_recovery_scan_not_current"
-  let saved=json $ object["costs" .= costs,"proof" .= proof]
+  let saved=encodeRecord $ object["costs" .= costs,"proof" .= proof]
       delta=toInteger(units $ networkFee costs)-toInteger(units $ networkFee oldCosts)
   require (T.length saved<=32768 && delta/=0 && abs delta<=toInteger(maxBound::Int64)) "invalid_native_settlement"
   sequenceNo <- criticalSequence c

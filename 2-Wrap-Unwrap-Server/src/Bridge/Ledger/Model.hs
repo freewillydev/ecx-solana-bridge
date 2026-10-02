@@ -2,12 +2,14 @@
 module Bridge.Ledger.Model
   ( View(..), CostLimits(..), Deposit(..), ChainEvent(..), ScanBatch(..), SourceCheck(..)
   , LossCapital(..), Obligation(..), Attempt(..), Preparation(..), PaymentCosts(..)
-  , NativeSettlementCheck(..), economicOutflow
+  , NativeSettlementCheck(..), economicOutflow, encodeRecord, decodeRecord, decodePaymentRecord
   ) where
 
 import Bridge.Types
 import Data.Aeson
 import Data.Aeson.Types (parseEither,Parser)
+import qualified Data.ByteString.Lazy as LBS
+import qualified Data.Text.Encoding as TE
 import Data.Int (Int64)
 import qualified Data.Map.Strict as M
 import Data.Text (Text)
@@ -88,3 +90,13 @@ economicOutflow stream = either (const $ Left "invalid_treasury_outflow") Right 
     outflow <- quantity (negate delta)
     pure (asset,outflow,fee)
   requireP ok=if ok then pure () else fail "invalid outgoing value"
+
+-- Preserve Aeson's stored representation; never expose malformed record contents.
+encodeRecord :: ToJSON a => a -> Text
+encodeRecord = TE.decodeUtf8 . LBS.toStrict . encode
+
+decodeRecord :: FromJSON a => Text -> Text -> IO a
+decodeRecord failure = either (const $ reject failure) pure . eitherDecodeStrict' . TE.encodeUtf8
+
+decodePaymentRecord :: FromJSON a => Text -> IO a
+decodePaymentRecord = decodeRecord "invalid_saved_payment"
