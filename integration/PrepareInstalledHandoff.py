@@ -18,6 +18,8 @@ fixtures.add_argument('--signed-native-fixture', action='store_true',
                     help='Retire the exact reviewed five-order signed-native checkpoint')
 fixtures.add_argument('--settled-solana-fixture', action='store_true',
                     help='Retire the exact reviewed six-order settled Solana retry checkpoint')
+fixtures.add_argument('--signed-solana-fixture', type=Path,
+                    help='Reviewed signed-but-unsent Solana staging report; worker must already be stopped')
 args = parser.parse_args()
 assert os.geteuid() == 0
 sys.dont_write_bytecode = True
@@ -44,7 +46,27 @@ def sql(query):
     return run('runuser', '-u', 'postgres', '--', 'psql', '-XqAt', '-v',
                'ON_ERROR_STOP=1', '-c', query)
 
-if args.settled_solana_fixture:
+if args.signed_solana_fixture:
+    assert subprocess.run(['systemctl', 'is-active', '--quiet', 'ecx-bridge-worker']).returncode != 0
+    stage = json.loads(args.signed_solana_fixture.resolve(strict=True).read_text())
+    assert stage['signedSolanaAttemptDurable'] and stage['replayWithoutSignerOrRpcPassed']
+    assert stage['workerStopped'] and not stage['solanaBroadcast']
+    assert stage['quote'] == dict(gross='10000', fee='100', net='9900')
+    order, txid, digest = stage['orderId'], stage['solanaPayout'], stage['solanaSignedBytesSha256']
+    assert len(order) == 64 and all(c in '0123456789abcdef' for c in order)
+    assert 64 <= len(txid) <= 100 and all(c in '123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz' for c in txid)
+    assert len(digest) == 64 and all(c in '0123456789abcdef' for c in digest)
+    assert sql('SELECT paused FROM deployment;') == '1'
+    assert sql("SELECT count(*) FROM orders WHERE id='" + order + "' AND status='Paying';") == '1'
+    assert sql("SELECT count(*) FROM attempts WHERE intent_id='convert:" + order + "';") == '1'
+    assert sql("SELECT count(*) FROM attempts WHERE txid='" + txid + "' AND intent_id='convert:" + order + "' AND state='signed' AND critical_sequence IS NULL AND preparation_generation=0;") == '1'
+    saved = sql("SELECT signed_bytes FROM attempts WHERE txid='" + txid + "';")
+    assert hashlib.sha256(saved.encode()).hexdigest() == digest
+    del saved
+    assert sql("SELECT count(*) FROM fee_reservations WHERE intent_id='convert:" + order + "' AND released=0;") == '1'
+    assert sql("SELECT count(*) FROM reservations WHERE order_id='" + order + "' AND phase='payment';") == '1'
+    assert sql('SELECT count(*) FROM (SELECT event_id,asset FROM postings GROUP BY event_id,asset HAVING sum(delta)<>0) unbalanced;') == '0'
+elif args.settled_solana_fixture:
     order = 'de8263b85175e9c2db4796c9ba8335e4814cbb8b16f2d6875e384a3693377bce'
     original = '2nNCfmQFHSj7gWBrZ35t1YUiTazniqrz5L96h3xZ7ZcTuJUSwntqScC6jiuTShrRg1U5KBjaGZuBTYZav6ukFe8c'
     replacement = '3Jha9ig3L1TSpiquyZiHdENm57ea4ssFxDkqr3joAEtJckXnCdhUTnEPVUTCWpt6LzqHbkpi5q6yLSGkT1Y36xqj'
