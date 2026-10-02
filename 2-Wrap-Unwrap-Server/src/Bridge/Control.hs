@@ -4,7 +4,7 @@ module Bridge.Control (runControl, callControl) where
 
 import Bridge.Config (Config(adminSocket))
 import Bridge.Ledger.Model (LossCapital)
-import Bridge.Operation
+import Bridge.Operation.Internal (Plan, SafeOperation(Readiness,Audit,Scanners), OperatorOperation(..), safe, operator)
 import Bridge.Types
 import Control.Exception (bracket, catch, IOException)
 import Control.Monad (forever)

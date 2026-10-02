@@ -170,11 +170,21 @@ The customer server uses `ServerT CustomerAPI Plan`, hoisted into `Handler`.
 Local operator commands package the same existential plans without an HTTP server. The abstract `Plan a` contains a severity-indexed Request
 inside a safe/customer/operator/worker envelope. Public smart constructors accept
 only their concrete operation vocabulary; they package the operation without
-calling `resolve`. The class, instances, Request and Plan constructors remain in
-the hidden internal module. HTTP code cannot define a new executable operation or
-insert an arbitrary critical DSL through these constructors. Customer and operator
-routes currently share the public planning module; component-level separation of
-their imports remains part of the authority audit.
+calling `resolve`. The `bridge-types` private Cabal library owns the grammar,
+instances and existential constructors. The `customer-api` private library compiles
+only `api/Bridge/API.hs`, depends on the customer planning interface, and hides
+`Bridge.Operation.Internal` through Cabal's module mixin. `Bridge.Operation`
+exports only customer-safe reads and order creation, not operator/worker commands.
+The API component has no dependency on the runtime, Opaleye, a PostgreSQL driver,
+RPC adapters, a signing implementation or Servant ClientM. Thus importing those
+implementations or constructing an internal DSL directly fails at compilation.
+
+The private `bridge-runtime` library depends on the types and customer API and
+owns evaluation and transports. Executables and financial tests explicitly depend
+on this internal library; downstream packages cannot import it. The small
+`ecx-build-assets` support package retains the SDK/browser Cabal hooks, because
+Cabal 3.16 does not support Hooks together with internal libraries. Root Cabal
+commands build the whole graph; this adds no running service or manual build step.
 
 The HTTP/API process serves the DSL-backed CustomerAPI directly, alongside
 HTML/CSS and the Haskell interface compiled with GHC’s JavaScript backend. `Web.runPublic` receives that WAI
@@ -243,7 +253,7 @@ service, message broker or general-purpose remotely executable command endpoint.
 An in-process worker can use the same dispatcher without inventing another
 network protocol.
 
-The admin server follows the same pattern with a separate closed envelope.
+Private operator control follows the same pattern with a separate closed envelope.
 Read authorization and HTTP error mapping happen centrally without adding a
 catch-all exception handler that hides unknown financial outcomes.
 

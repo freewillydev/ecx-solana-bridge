@@ -112,11 +112,15 @@ if bundle.exists():
 for directory in ("bin", "lib", "web/dist", "deploy", "config", "migrations/postgresql", "scripts"):
     (bundle / directory).mkdir(parents=True, exist_ok=True)
 shutil.copy2(binary, bundle / "bin/ecx-bridge")
-shutil.copy2(Path(binary).parent.parent / "autogen/libecx_solana_sdk.so", bundle / "lib/libecx_solana_sdk.so")
+plan = json.loads((cache / "dist/cache/plan.json").read_text())
+assets = [p for p in plan["install-plan"] if p.get("pkg-name") == "ecx-build-assets" and "dist-dir" in p]
+if len(assets) != 1:
+    raise ValueError("Expected one Cabal asset component")
+autogen = Path(assets[0]["dist-dir"]) / "build/autogen"
+shutil.copy2(autogen / "libecx_solana_sdk.so", bundle / "lib/libecx_solana_sdk.so")
 for name in ("bitcoind", "bitcoin-cli"):
     shutil.copy2(fetch("bitcoin") / "bin" / name, bundle / "bin" / name)
 # Cabal generated both artifacts from their tracked sources.
-autogen = Path(binary).parent.parent / "autogen"
 shutil.copytree(autogen / "web", bundle / "web", dirs_exist_ok=True)
 shutil.copytree(root / "deploy", bundle / "deploy", ignore=shutil.ignore_patterns("__pycache__"), dirs_exist_ok=True)
 shutil.copy2(root / "config/l2l-devnet.example.json", bundle / "config/l2l-devnet.example.json")

@@ -286,7 +286,12 @@ The sequence below remains the broader refactor checklist, subject to that prior
    business ADTs/records instead of scattered state strings and Value blobs.
    Confine raw chain JSON to adapters. Put the operation vocabulary and permission
    table in one place. Preserve separate safe/critical evaluators and compile-time
-   authority checks. Check the final design directly against the supplied Main.hs and document intentional corrections.
+   authority checks. Cabal now separates private types, customer API and runtime
+   libraries. The API hides internal DSL constructors and cannot depend on database,
+   signing or RPC implementations; operator planning is internal to the runtime.
+   SDK/browser hooks live in a separate build-support package so Cabal 3.16 can
+   enforce these component boundaries. No new runtime service is introduced.
+   Check the final design directly against the supplied Main.hs and document intentional corrections.
 
 5. **Unify complete payment flows.** Trace wrap, unwrap, refund and fee withdrawal
    through one workflow. Represent customer-deposit funding and operator-earned

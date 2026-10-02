@@ -1,0 +1,20 @@
+cabal-version: 3.14
+name: ecx-build-assets
+version: 0.1.0.0
+synopsis: Cabal-generated native SDK and browser assets for the bridge
+license: MIT
+license-file: ../LICENSE
+build-type: Hooks
+extra-source-files: ../solana-helper/Cargo.toml, ../solana-helper/Cargo.lock,
+  ../solana-helper/src/lib.rs, ../rust-toolchain.toml, ../types/Bridge/Model.hs,
+  ../web/*.hs, ../web/*.html, ../web/*.css, ../web/*.cabal, ../web/cabal.project*
+
+custom-setup
+  setup-depends: base >=4.20 && <4.23, Cabal >=3.16 && <3.17, Cabal-hooks ==3.16,
+                directory, filepath, process
+
+library
+  default-language: GHC2021
+  autogen-modules: Bridge.SDKBuild, Bridge.BrowserBuild
+  exposed-modules: Bridge.SDKBuild, Bridge.BrowserBuild
+  build-depends: base >=4.20 && <4.23

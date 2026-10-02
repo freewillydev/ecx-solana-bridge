@@ -59,6 +59,17 @@ Read their restrictions before running them; some sign or transfer test funds.
 Historical acceptance applies only to its recorded source/configuration/network.
 Current release gaps are in [RELEASE-REVIEW.md](RELEASE-REVIEW.md).
 
+## Customer capability boundary
+
+`cabal repl lib:customer-api --offline` loads only customer handlers and their
+allowed dependencies. `:type customerServer` and `:type customer` succeed after
+`:module + Bridge.Operation`. Imports of `Bridge.Operation.Internal`,
+`Bridge.Postgres.Ledger`, `Bridge.Signer`, `Opaleye` and `Servant.Client` must fail.
+`operator`, `WorkerPlan` and `Request` must also be out of scope. These eight
+negative compiler checks were verified after the component split. The financial
+tests deliberately depend on the private runtime; their broader imports do not
+represent customer-handler authority.
+
 ## Local runtime
 
 Use private configuration for real L2L Signet or ECX betanet with Solana Devnet.

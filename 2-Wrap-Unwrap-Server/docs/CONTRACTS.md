@@ -224,7 +224,7 @@ Unexplained surplus/shortfall, incomplete or moving history, lost allocated-sour
 
 ## API and authorization
 
-The shared Servant definition is in `src/Bridge/API.hs`.
+The shared Servant definition is in `api/Bridge/API.hs`.
 
 | Customer route | Current behavior |
 | --- | --- |

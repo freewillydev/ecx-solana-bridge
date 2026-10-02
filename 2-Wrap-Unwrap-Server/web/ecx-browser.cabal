@@ -8,7 +8,7 @@ build-type: Simple
 
 executable ecx-browser
   main-is: Main.hs
-  hs-source-dirs: ., ../src
+  hs-source-dirs: ., ../types
   other-modules: Browser, Bridge.Model
   default-language: GHC2021
   default-extensions: OverloadedStrings, DeriveGeneric, DeriveAnyClass, DerivingStrategies

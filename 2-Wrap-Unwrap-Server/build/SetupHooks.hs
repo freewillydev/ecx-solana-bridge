@@ -1,5 +1,5 @@
 {-# LANGUAGE StaticPointers, GADTs, DuplicateRecordFields, OverloadedStrings #-}
--- Cabal tracks SDK inputs and builds it once, before compiling the main library.
+-- Cabal tracks SDK inputs and builds it once, for the runtime through this build-support package.
 module SetupHooks (setupHooks) where
 
 import Control.Monad (when)
@@ -24,7 +24,7 @@ sdkRules = rules (static ()) $ \PreBuildComponentInputs{targetInfo=target,localB
   when (componentName (targetComponent target) == CLibName LMainLibName) $ do
     let directory = autogenComponentModulesDir local (targetCLBI target)
         output name = Location directory (makeRelativePathEx name)
-        dependency name = FileDependency (Location (makeSymbolicPath ".") (makeRelativePathEx name))
+        dependency name = FileDependency (Location (makeSymbolicPath "..") (makeRelativePathEx name))
     registerRule_ "solana-sdk" $ staticRule
       (mkCommand (static Dict) (static buildSdk) (getSymbolicPath directory, withOptimization local == MaximumOptimisation))
       (map dependency ["solana-helper/Cargo.toml", "solana-helper/Cargo.lock",
@@ -32,7 +32,7 @@ sdkRules = rules (static ()) $ \PreBuildComponentInputs{targetInfo=target,localB
       (output "Bridge/SDKBuild.hs" :| [output sdkName])
     registerRule_ "browser" $ staticRule
       (mkCommand (static Dict) (static buildBrowser) (getSymbolicPath directory))
-      (map dependency ["web/Main.hs", "web/Browser.hs", "src/Bridge/Model.hs",
+      (map dependency ["web/Main.hs", "web/Browser.hs", "types/Bridge/Model.hs",
                        "web/ecx-browser.cabal", "web/cabal.project", "web/cabal.project.freeze",
                        "web/index.html", "web/style.css"])
       (output "Bridge/BrowserBuild.hs" :| map output ["web/index.html", "web/style.css", "web/dist/wallet.js"])
@@ -43,7 +43,7 @@ sdkName = "libecx_solana_sdk." <> if os == "darwin" then "dylib" else "so"
 buildSdk :: (FilePath, Bool) -> IO ()
 buildSdk (directory, release) = do
   destination <- makeAbsolute directory
-  source <- makeAbsolute "solana-helper"
+  source <- makeAbsolute "../solana-helper"
   target <- lookupEnv "CARGO_TARGET_DIR" >>= maybe
     (pure $ destination </> "cargo") makeAbsolute
   callProcess "cargo" $ ["build", "--locked", "--manifest-path", source </> "Cargo.toml",
@@ -63,7 +63,7 @@ buildSdk (directory, release) = do
 buildBrowser :: FilePath -> IO ()
 buildBrowser directory = do
   destination <- makeAbsolute directory
-  source <- makeAbsolute "web"
+  source <- makeAbsolute "../web"
   home <- getHomeDirectory
   compiler <- lookupEnv "ECX_GHC_JS" >>= maybe
     (findExecutable "javascript-unknown-ghcjs-ghc" >>= maybe

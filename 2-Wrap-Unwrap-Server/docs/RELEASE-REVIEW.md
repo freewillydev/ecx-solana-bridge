@@ -23,8 +23,8 @@ No independent reviewer has signed off, and canonical intake remains disabled.
 
 ## Review boundaries
 
-Start with `src/Bridge/Operation.hs` and `Operation/Internal.hs`, then
-`API.hs` and `Postgres/Runtime.hs`. Handlers resolve into closed plans;
+Start with `types/Bridge/Operation.hs` and `Operation/Internal.hs`, then
+`api/Bridge/API.hs` and `src/Bridge/Postgres/Runtime.hs`. Handlers resolve into closed plans;
 only the central dispatcher evaluates critical work. SafeContext uses separate
 read credentials. Examine exports and Cabal component boundaries as well as
 individual functions: a safe type is insufficient if it can import worker authority.
