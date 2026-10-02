@@ -47,14 +47,22 @@ fee holds, blocked signing and generation advancement before a new attempt.
 Use a fresh disposable database with all `migrations/postgresql/*.sql` applied in
 filename order. This host uses socket `/tmp/ecx-pg-seam`, port 29436 and the current
 OS user. Set `ECX_JOURNAL_CONTRACT_DATABASE` to a fresh `ecx_journal_contract_…`
-database, run the binary from `cabal list-bin exe:ecx-postgres-journal-check`, then
-drop that specific database. Never target an existing custody ledger.
+database, run the binary from `cabal list-bin exe:ecx-postgres-check` with the
+`journal` argument, then drop that specific database. Never target an existing
+custody ledger.
 
-The source-approval runner also uses only closed Opaleye fixture operations and
+The same executable with the `source` argument also uses only closed Opaleye fixture operations and
 whole typed record comparisons. Set `ECX_SOURCE_CONTRACT_DATABASE` to a fresh
 `ecx_source_approval_contract_…` database with the same migrations. It preserves
 restoration, native finality/replacement, source-loss capital and exact-byte
 rebroadcast/coverage contracts without signing or contacting either chain.
+
+The `fence DATABASE_A DATABASE_B DIRECTORY` mode uses two distinct fresh databases
+whose names start with `ecx_fence_contract_`, with all migrations applied and no
+ledger rows. It initializes its fixture through Opaleye and creates its own fence
+directory. It checks cross-process/cross-database ownership, precommit durability,
+stale/identity/permission/symlink refusal, uncertain-commit fencing and retirement.
+Drop both disposable databases and remove that temporary directory after use.
 
 Other `integration/` runners cover recovery, snapshot/restore and real chains.
 Read their restrictions before running them; some sign or transfer test funds.

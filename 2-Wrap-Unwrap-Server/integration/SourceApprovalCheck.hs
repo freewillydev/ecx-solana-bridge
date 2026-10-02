@@ -1,6 +1,6 @@
 {-# LANGUAGE GADTs, LambdaCase #-}
 -- Database-only recovery contract. No chain transport, signer or broadcast.
-module Main (main) where
+module SourceApprovalCheck (run) where
 import Bridge.Types hiding (deploymentFingerprint)
 import Bridge.Config (Config,fingerprint)
 import qualified Bridge.Postgres.Replacement as Replacement
@@ -65,8 +65,8 @@ fresh ledger = L.ledgerAction ledger $ \c->do
 snapshot :: L.Ledger -> IO RecoverySnapshot
 snapshot ledger = L.ledgerAction ledger (\c->fixtureOperation c RecoveryState)
 
-main :: IO ()
-main = do
+run :: IO ()
+run = do
   user <- getEffectiveUserName
   database <- fromMaybe "ecx_source_approval_contract" <$> lookupEnv "ECX_SOURCE_CONTRACT_DATABASE"
   require ("ecx_source_approval_contract" `T.isPrefixOf` T.pack database) "disposable_contract_database_required"

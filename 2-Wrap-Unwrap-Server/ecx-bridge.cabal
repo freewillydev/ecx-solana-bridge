@@ -86,22 +86,12 @@ test-suite bridge-test
     http-client-tls, crypton-connection, tls, crypton-x509-store,
     data-default, crypton-pem, crypton-x509, crypton-x509-validation
 
-executable ecx-postgres-journal-check
+-- One database contract runner; every row operation uses a closed Opaleye fixture.
+executable ecx-postgres-check
   import: settings
   hs-source-dirs: integration
   main-is: JournalCheck.hs
-  build-depends: base, ecx-bridge:bridge-types, ecx-bridge:customer-api, ecx-bridge:bridge-runtime, containers, postgresql-simple, opaleye, async, unix, text, bytestring, aeson, QuickCheck
-
--- Host/ledger anti-rollback contract; disposable databases, no chain adapters.
-executable ecx-postgres-fence-check
-  import: settings
-  hs-source-dirs: integration
-  main-is: FenceCheck.hs
-  build-depends: base, ecx-bridge:bridge-types, ecx-bridge:customer-api, ecx-bridge:bridge-runtime, bytestring, directory, filepath,
-    postgresql-simple, process, unix, text
-
-executable ecx-postgres-source-approval-check
-  import: settings
-  hs-source-dirs: integration
-  main-is: SourceApprovalCheck.hs
-  build-depends: base, ecx-bridge:bridge-types, ecx-bridge:customer-api, ecx-bridge:bridge-runtime, aeson, bytestring, containers, opaleye, postgresql-simple, unix, text
+  other-modules: SourceApprovalCheck, FenceCheck
+  build-depends: base, ecx-bridge:bridge-types, ecx-bridge:bridge-runtime,
+    aeson, async, bytestring, containers, directory, filepath, opaleye,
+    postgresql-simple, process, QuickCheck, text, unix

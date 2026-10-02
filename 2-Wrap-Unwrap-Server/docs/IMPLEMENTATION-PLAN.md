@@ -283,6 +283,10 @@ The sequence below remains the broader refactor checklist, subject to that prior
    loss-cover/return and covered-source send-fence assertions are preserved and
    pass against a fresh disposable PostgreSQL database; no signer or chain call
    occurs in that contract.
+   Journal, source-recovery and host-fence contracts now share the single
+   ecx-postgres-check executable. Fence fixtures initialize only explicitly named
+   fresh disposable databases and use Opaleye for every row read/write; the last
+   Haskell raw row queries are removed. Fault-injection DDL stays explicit.
    Receipt/page atomicity and delayed verification also use the PostgreSQL contract;
    legacy resume-policy checks remain until their whole workflow is migrated.
    Chain scanning no longer executes Opaleye directly: reference lookup, promotion

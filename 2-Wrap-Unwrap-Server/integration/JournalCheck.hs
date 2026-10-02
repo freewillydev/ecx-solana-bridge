@@ -1,6 +1,8 @@
 {-# LANGUAGE GADTs #-}
 module Main (main) where
 
+import qualified FenceCheck
+import qualified SourceApprovalCheck
 import Bridge.Types hiding (deploymentFingerprint)
 import Bridge.Ledger.Model (Deposit(..),Obligation(..),Preparation(..),CostLimits(..),ScanBatch(..),ChainEvent(..))
 import qualified Bridge.Postgres.FeeWithdrawal as Withdrawal
@@ -38,12 +40,19 @@ import qualified Data.Map.Strict as M
 import qualified Database.PostgreSQL.Simple as PG
 import System.Posix.User (getEffectiveUserName)
 import qualified Data.Text as T
-import System.Environment (lookupEnv)
+import System.Environment (lookupEnv,getArgs,withArgs)
 import Test.QuickCheck (quickCheckWithResult, stdArgs, maxSuccess, forAll, chooseInt, elements, ioProperty, isSuccess, conjoin, counterexample)
 
 -- Dedicated fresh schema contract, never the funded bridge's database.
 main :: IO ()
-main = do
+main = getArgs >>= \case
+  ["journal"] -> journalContracts
+  ["source"] -> SourceApprovalCheck.run
+  "fence":arguments -> withArgs arguments FenceCheck.run
+  _ -> reject "postgres_contract_mode_required: journal | source | fence DATABASE_A DATABASE_B DIRECTORY"
+
+journalContracts :: IO ()
+journalContracts = do
   user <- getEffectiveUserName
   database <- lookupEnv "ECX_JOURNAL_CONTRACT_DATABASE" >>= maybe (reject "contract_database_required") pure
   require ("ecx_journal_contract_" `T.isPrefixOf` T.pack database) "disposable_contract_database_required"
