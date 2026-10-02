@@ -2,7 +2,7 @@ module Bridge.Postgres.Observation
   ( refreshDeposit, recordScan, readCheckpoint, lookupInstruction, maximumNativeDepth, commitScan, recordScanFailure, promoteDeposit ) where
 
 import Bridge.Types
-import Bridge.Ledger (Deposit(..), SourceCheck(..), ScanBatch(..), ChainEvent(..), economicOutflow)
+import Bridge.Ledger.Model (Deposit(..), SourceCheck(..), ScanBatch(..), ChainEvent(..), economicOutflow)
 import Bridge.Postgres.Source (recordSourceCheckC, sourceWorkHashC)
 import Bridge.Postgres.Ledger (Ledger, ledgerAction, posting)
 import Bridge.Postgres.Schema

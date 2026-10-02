@@ -1527,3 +1527,22 @@ restoring an in-flight Solana transaction, post-restore paying reconciliation,
 off-host durability, lost-host key revocation or the broader fault/reorg matrix.
 `inflight` is now retired; `solrestore` is the retained destination. Both guests
 were shut down after acceptance; do not reactivate a retired source.
+
+### Database-independent financial model extracted
+
+`Bridge.Ledger.Model` now owns the eleven shared financial record definitions
+and economic-outflow evidence decoder. They were moved verbatim, without a
+financial/schema/serialization change. Every PostgreSQL module previously
+importing the legacy ledger or cost-limit record now imports this pure module
+directly. SQLite row adapters remain with the legacy backend, which reexports
+the records for migration and existing regression tests. The main executable
+and tests compile; all 373 regression examples pass against the selected SQLite
+3.53.4 runtime.
+
+This removes the PostgreSQL model's dependence on SQLite capabilities, but does
+not finish removal of the linked SQLite dependency. Shared observer/payment/
+recovery modules still contain SQLite store instances, and the executable's
+diagnostic path imports the legacy worker. Those adapters and maintenance tools
+must be isolated into a separate Cabal component before dropping SQLite from
+the production library and installer. The published private review artifacts
+precede this source refactor; no replacement Linux build is claimed here.

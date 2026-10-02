@@ -2,7 +2,7 @@ module Bridge.Postgres.NativeRecovery (candidates,observation,recordCheck,review
 import Bridge.Types
 import Bridge.NativePayment
 import qualified Bridge.Postgres.NativeFamily as Family
-import Bridge.Ledger (Attempt(..),PaymentCosts(..),NativeSettlementCheck(..))
+import Bridge.Ledger.Model (Attempt(..),PaymentCosts(..),NativeSettlementCheck(..))
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
 import Bridge.RPC (fieldValue)

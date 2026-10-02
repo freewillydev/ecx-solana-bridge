@@ -3,8 +3,8 @@ module Bridge.Postgres.Preparation
 
 import Bridge.Config
 import Bridge.Types
-import Bridge.Budget (CostLimits(..))
-import Bridge.Ledger (Obligation(..),Preparation(..))
+import Bridge.Ledger.Model (CostLimits(..))
+import Bridge.Ledger.Model (Obligation(..),Preparation(..))
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
 import qualified Bridge.Postgres.Source as Source

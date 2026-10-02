@@ -2,7 +2,7 @@ module Bridge.Postgres.Replacement
   ( parent,decision,recordDraft,member,signingContext,recordMember,cancel ) where
 import Bridge.Types
 import Bridge.Config (Config(..),fingerprint)
-import Bridge.Ledger (Attempt(..))
+import Bridge.Ledger.Model (Attempt(..))
 import Bridge.NativePayment
 import Bridge.NativeReplacement
 import Bridge.Postgres.Ledger

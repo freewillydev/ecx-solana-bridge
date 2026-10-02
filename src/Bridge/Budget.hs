@@ -5,6 +5,7 @@ module Bridge.Budget
 
 import Bridge.Config
 import Bridge.Types
+import Bridge.Ledger.Model (CostLimits(..))
 import Control.Monad (forM, forM_)
 import Data.Aeson
 import Data.Int (Int64)
@@ -12,9 +13,6 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Database.SQLite.Simple
 
-data CostLimits = CostLimits
-  { savedNativeFee :: !Amount, savedSolanaFee :: !Amount, savedSolanaRent :: !Amount }
-  deriving (Eq,Show)
 
 orderCostLimits :: Connection -> Text -> IO CostLimits
 orderCostLimits c oid = do

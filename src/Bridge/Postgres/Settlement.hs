@@ -2,7 +2,7 @@ module Bridge.Postgres.Settlement (recordSettlement,recordFailedSolana,markBroad
 
 import Bridge.Config
 import Bridge.Types
-import Bridge.Ledger (Attempt(..),PaymentCosts(..))
+import Bridge.Ledger.Model (Attempt(..),PaymentCosts(..))
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
 import qualified Bridge.Postgres.Source as Source

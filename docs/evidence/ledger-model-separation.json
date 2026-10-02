@@ -1,0 +1,13 @@
+{
+  "sharedModel": "Bridge.Ledger.Model",
+  "verbatimFinancialRecordDefinitions": 11,
+  "economicOutflowDecoderMovedUnchanged": true,
+  "postgresModulesImportModelDirectly": true,
+  "legacyLedgerReexportsModel": true,
+  "sqliteFromRowInstancesRemainLegacy": true,
+  "haskellExamples": 373,
+  "haskellFailures": 0,
+  "productionSqliteDependencyRemoved": false,
+  "newLinuxInstallersBuilt": false,
+  "publicRelease": false
+}

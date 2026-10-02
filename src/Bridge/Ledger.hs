@@ -1,5 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TemplateHaskell #-}
+-- SQLite row adapters intentionally live with this legacy backend.
+{-# OPTIONS_GHC -Wno-orphans #-}
 module Bridge.Ledger
   ( Ledger, withLedger, ledgerAction, schemaVersion, sqliteIdentity, readiness, pause, resumeAfterChecks
   , createOrder, readOrder, bindInstruction, criticalSequence, acknowledgeBackup
@@ -23,6 +25,7 @@ module Bridge.Ledger
 import Bridge.Config
 import Bridge.Budget
 import Bridge.Types
+import Bridge.Ledger.Model
 import Bridge.NativePayment
 import Bridge.NativeReplacement (validateNativeFamily,validateNativeReplacementDraft)
 import Bridge.SolanaMessage (signatureBytes)
@@ -31,7 +34,7 @@ import Control.Exception (bracket,mask,try,SomeException,fromException,throwIO)
 import Control.Monad (forM, forM_, when)
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KM
-import Data.Aeson.Types (parseEither,Parser)
+import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString.Lazy as LBS
 import Data.FileEmbed (embedFile)
 import Data.Int (Int64)
@@ -42,12 +45,10 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Database.SQLite.Simple
-import GHC.Generics (Generic)
 import System.Directory (createDirectoryIfMissing)
 import System.FileLock (SharedExclusive(Exclusive), tryLockFile, unlockFile)
 import System.FilePath (takeDirectory)
 import System.Posix.Files (setFileMode)
-import Text.Read (readMaybe)
 
 -- All financial mutations are serialized and committed before external IO.
 -- Nothing fences this process after a database/cleanup failure. Reopening
@@ -318,33 +319,6 @@ recordTreasurySpend l stream txid proof = ledgerAction l $ \c -> do
       execute c "UPDATE chain_events SET needs_review=0 WHERE chain=? AND event_id=?" (stream,txid)
     _ -> reject "duplicate_treasury_spend"
 
-economicOutflow :: Text -> Value -> Either Text (Asset,Amount,Amount)
-economicOutflow stream = either (const $ Left "invalid_treasury_outflow") Right . parseEither parseFlow
- where
-  property key = withObject "economic evidence" (.: key)
-  signed value = do
-    text <- parseJSON value :: Parser Text
-    case readMaybe (T.unpack text) of
-      Just n | T.length text<=21 && T.pack(show (n::Integer))==text -> pure n
-      _ -> fail "invalid signed units"
-  quantity = either (fail . T.unpack) pure . amount
-  parseFlow value = do
-    (asset,delta,fee) <- case stream of
-      "Native" -> do
-        net <- property "walletNetUnits" value >>= signed
-        fee <- property "feeUnits" value :: Parser Amount
-        pure (Native,net-toInteger (units fee),fee)
-      "Solana" -> do
-        delta <- property "delta" value >>= signed
-        zero <- quantity 0
-        pure (Wrapped,delta,zero)
-      "SolanaOperating" -> (,,) Sol <$> (property "delta" value >>= signed) <*> property "feeUnits" value
-      _ -> fail "invalid observation stream"
-    requireP (delta<0 && negate delta>=toInteger (units fee))
-    outflow <- quantity (negate delta)
-    pure (asset,outflow,fee)
-  requireP ok=if ok then pure () else fail "invalid outgoing value"
-
 createOrder :: Ledger -> Config -> Int64 -> Text -> OrderRequest -> IO OrderView
 createOrder l cfg now capability req = do
   cap <- either reject pure (capabilityHash capability)
@@ -518,7 +492,6 @@ expireQuotes l now = ledgerAction l $ \c -> do
   execute c "UPDATE operating_reservations SET phase='released' WHERE phase='quote' AND order_id IN (SELECT id FROM orders WHERE grace_deadline<?)" (Only now)
   execute c "UPDATE orders SET status='ExpiredUnfunded' WHERE grace_deadline<? AND status IN('Provisioning','AwaitingDeposit') AND NOT EXISTS (SELECT 1 FROM deposits WHERE deposits.order_id=orders.id)" (Only now)
 
-data Deposit = Deposit { depositId :: !Text, depositOrder :: !(Maybe Text), depositAsset :: !Asset, depositAmount :: !Amount, depositAnchor :: !Text, depositConfirmations :: !Int, depositEligible :: !Bool, depositSeenAt :: !Int64 } deriving (Eq,Show)
 observeDeposit :: Ledger -> Deposit -> Text -> IO ()
 observeDeposit l deposit cursor = ledgerAction l $ \c -> do
   observeDepositC c deposit
@@ -544,15 +517,6 @@ recordScan l chain previous next deposits = ledgerAction l $ \c -> do
 
 -- Immutable evidence is separate from the latest observation's classification.
 -- Neither an unknown receipt nor a provider's history cursor authorizes spending.
-data ChainEvent = ChainEvent
-  { chainEventId :: !Text, chainEventKind :: !Text, chainEventAnchor :: !Text
-  , chainEventEvidence :: !Value
-  } deriving (Eq,Show)
-data ScanBatch = ScanBatch
-  { scanChain :: !Text, scanOrigin :: !Text, scanPrevious :: !(Maybe Text)
-  , scanNext :: !Text, scanTime :: !Int64, scanDeposits :: ![Deposit]
-  , scanEvents :: ![ChainEvent]
-  } deriving (Eq,Show)
 
 commitScan :: Ledger -> ScanBatch -> IO ()
 commitScan l ScanBatch{..} = ledgerAction l $ \c -> do
@@ -669,8 +633,6 @@ observeDepositC c Deposit{..} = do
           execute c "UPDATE obligations SET status='review' WHERE deposit_id=? AND status NOT IN('paid','cancelled')" (Only depositId)
     _ -> reject "duplicate_deposit"
 
-data SourceCheck = SourcePending Value | SourceMissing Value | SourceRestored Value | SourceUnavailable Value
-  deriving (Eq,Show)
 
 nativeSourceCandidates :: Ledger -> IO [Deposit]
 nativeSourceCandidates l = ledgerAction l $ \c->do
@@ -733,8 +695,6 @@ recordSourceCheckC c did check = do
 
 -- An identical operator decision never consumes capital again, including after
 -- the source returns. It cannot cover a later, distinct loss episode.
-data LossCapital = LossCapital { lossFloat :: !Amount, lossEarned :: !Amount }
-  deriving (Eq,Show,Generic,ToJSON,FromJSON)
 
 sourceLossCover :: Ledger -> Text -> Int64 -> IO (Maybe (LossCapital,Text))
 sourceLossCover l did recovery=ledgerAction l $ \c->do
@@ -889,11 +849,9 @@ promoteDeposit l now did = ledgerAction l $ \c -> do
     [(_,_,_,False,_,_)] -> pure False
     _ -> reject "deposit_not_found"
 
-data Obligation = Obligation { obligationId :: !Text, obligationOrder :: !Text, obligationDeposit :: !Text, obligationKind :: !Text, obligationAsset :: !Text, obligationAmount :: !Int64, obligationRecipient :: !Text } deriving (Eq,Show)
 instance FromRow Obligation where fromRow = Obligation <$> field <*> field <*> field <*> field <*> field <*> field <*> field
 readyObligations :: Ledger -> IO [Obligation]
 readyObligations l = ledgerAction l $ \c -> query_ c "SELECT id,order_id,deposit_id,kind,asset,amount,recipient FROM obligations WHERE status='ready' ORDER BY rowid LIMIT 100"
-data Attempt = Attempt { attemptId :: !Text, attemptIntent :: !Text, attemptChain :: !Text, attemptBytes :: !Text, attemptPolicy :: !Text, attemptFeeLimit :: !Int64, attemptState :: !Text, attemptSequence :: !(Maybe Int64) } deriving (Eq,Show)
 instance FromRow Attempt where fromRow = Attempt <$> field <*> field <*> field <*> field <*> field <*> field <*> field <*> field
 
 -- Read the complete immutable lineage, including older members after a winner
@@ -1071,11 +1029,6 @@ recordNativeReplacementMember l cfg sequenceNo expected signed now=ledgerAction 
 
 -- Reserve the chain and its fee budget before the wallet/helper is invoked.
 -- A crash during preparation leaves an intent even if no signed bytes exist.
-data Preparation = Preparation
-  { preparationObligation :: !Obligation, preparationChain :: !Text
-  , preparationFeeLimit :: !Int64, preparationPolicy :: !Text
-  , preparationDraft :: !(Maybe Text), preparationGeneration :: !Int
-  } deriving (Eq,Show)
 instance FromRow Preparation where fromRow = Preparation <$> fromRow <*> field <*> field <*> field <*> field <*> field
 
 checkObligation :: Connection -> Obligation -> Text -> IO ()
@@ -1330,15 +1283,7 @@ nativeSendChoiceC c txid=do
     drafts <- query c "SELECT r.critical_sequence FROM native_replacement_drafts r JOIN attempts a ON a.txid=r.parent_txid WHERE a.intent_id=? AND NOT EXISTS(SELECT 1 FROM native_replacement_cancellations x WHERE x.draft_sequence=r.critical_sequence) AND NOT EXISTS(SELECT 1 FROM native_replacement_members m WHERE m.draft_sequence=r.critical_sequence)" (Only intent) :: IO [Only Int64]
     require (null drafts) "native_replacement_draft_pending"
 
-data PaymentCosts = PaymentCosts { networkFee :: !Amount, accountRent :: !Amount }
-  deriving (Eq,Show,Generic,ToJSON,FromJSON)
 
-data NativeSettlementCheck
-  = NativeSettlementConfirming
-  | NativeSettlementUnavailable Text
-  | NativeSettlementReconfirmed PaymentCosts Text
-  | NativeSettlementReplaced [Attempt] Text PaymentCosts Text
-  deriving (Eq,Show)
 
 -- Inspect only changed native settlements and previously opened reviews. The
 -- existing immutable signed attempt remains resolved; no new intent is made.

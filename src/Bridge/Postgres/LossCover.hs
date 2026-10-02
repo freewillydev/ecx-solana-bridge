@@ -1,6 +1,6 @@
 module Bridge.Postgres.LossCover (decision,record) where
 import Bridge.Types
-import Bridge.Ledger (LossCapital(..),Deposit(..))
+import Bridge.Ledger.Model (LossCapital(..),Deposit(..))
 import Bridge.RPC (fieldValue)
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema

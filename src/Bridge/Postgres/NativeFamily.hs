@@ -1,6 +1,6 @@
 module Bridge.Postgres.NativeFamily (familyC) where
 import Bridge.Types
-import Bridge.Ledger (Attempt(..))
+import Bridge.Ledger.Model (Attempt(..))
 import Bridge.NativePayment
 import Bridge.NativeReplacement
 import Bridge.Postgres.Schema

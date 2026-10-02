@@ -2,7 +2,7 @@ module Bridge.Postgres.NativeRebroadcast (rebroadcastWith) where
 
 import Bridge.Config
 import Bridge.Types
-import Bridge.Ledger (Attempt(..))
+import Bridge.Ledger.Model (Attempt(..))
 import Bridge.NativeReplacement (NativeFamilyView(..))
 import Bridge.Settlement
 import Bridge.RPC (fieldValue,parseValue)

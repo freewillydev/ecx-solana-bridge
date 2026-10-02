@@ -1,6 +1,6 @@
 module Bridge.Postgres.Cancellation (readCancellation,checkFresh,freshC,begin,finish) where
 import Bridge.Types
-import Bridge.Ledger (Preparation(..),Obligation(..))
+import Bridge.Ledger.Model (Preparation(..),Obligation(..))
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
 import Bridge.Postgres.Custody (freshC)

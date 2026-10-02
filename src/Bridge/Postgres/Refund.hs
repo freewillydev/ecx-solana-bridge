@@ -1,6 +1,6 @@
 module Bridge.Postgres.Refund (createRefund) where
 import Bridge.Types
-import Bridge.Ledger (Obligation(..))
+import Bridge.Ledger.Model (Obligation(..))
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
 import Bridge.RPC (fieldValue)

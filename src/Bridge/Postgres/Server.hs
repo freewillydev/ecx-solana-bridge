@@ -1,7 +1,7 @@
 {-# LANGUAGE DataKinds,TypeOperators,DeriveGeneric,DeriveAnyClass #-}
 module Bridge.Postgres.Server (customerServer,adminServer,operatorAPI) where
 import Bridge.API
-import Bridge.Ledger (LossCapital)
+import Bridge.Ledger.Model (LossCapital)
 import Bridge.Types (Availability,Amount)
 import Data.Aeson (FromJSON)
 import qualified Data.Aeson

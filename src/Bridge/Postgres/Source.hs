@@ -1,7 +1,7 @@
 module Bridge.Postgres.Source (recordSourceCheckC, paymentWorkHashC, sourceWorkHashC, recoveryApproval, recoveryObligation, recoveryRecord, coveredApproval, coveredObligation, coveredRecord, authorizedC, coveredAuthorized, candidates, recordCheck, orderBinding, eventEvidence) where
 
 import Bridge.Types
-import Bridge.Ledger (SourceCheck(..),Obligation(..),Deposit(..))
+import Bridge.Ledger.Model (SourceCheck(..),Obligation(..),Deposit(..))
 import Bridge.Postgres.Ledger (Ledger,ledgerAction)
 import Bridge.Postgres.Custody (freshC)
 import qualified Bridge.Postgres.Order as Order

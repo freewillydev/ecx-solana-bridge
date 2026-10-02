@@ -2,7 +2,7 @@ module Bridge.Postgres.CoveredSource (approveWith) where
 
 import Bridge.Config (Config)
 import Bridge.Types
-import Bridge.Ledger (Obligation(..),Deposit(..),SourceCheck(..))
+import Bridge.Ledger.Model (Obligation(..),Deposit(..),SourceCheck(..))
 import Bridge.Postgres.Ledger (Ledger,readiness)
 import Bridge.Postgres.PaymentStore (Store(..))
 import qualified Bridge.Postgres.Source as Source

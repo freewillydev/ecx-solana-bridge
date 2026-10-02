@@ -10,7 +10,7 @@ import Control.Monad (forM_)
 import Bridge.Settlement (PaymentTransport,reconcilePaymentsWith,readSavedPayment,recheckSourceWith)
 import Bridge.Postgres.PaymentStore (Store(..),pendingAttempts)
 import qualified Bridge.Postgres.Reconciliation as Reconciliation
-import qualified Bridge.Ledger as Domain
+import qualified Bridge.Ledger.Model as Domain
 import Bridge.RPC (fieldValue)
 import Data.Aeson (Value)
 import Data.Text (Text)

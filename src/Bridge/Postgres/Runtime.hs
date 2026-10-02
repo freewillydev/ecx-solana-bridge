@@ -19,7 +19,7 @@ import qualified Bridge.Postgres.Observer as Observer
 import qualified Bridge.Postgres.Reconciliation as Reconciliation
 import qualified Bridge.Postgres.Server as Server
 import qualified Bridge.Postgres.Refund as Refund
-import qualified Bridge.Ledger as Domain
+import qualified Bridge.Ledger.Model as Domain
 import Bridge.Postgres.PaymentStore (Store(..))
 import Bridge.Settlement (realPaymentTransport,settleAttemptWith,paymentPass,reconcilePaymentsWith,PaymentTransport(..),approveSolanaRetryWith)
 import qualified Bridge.Postgres.Startup as Startup

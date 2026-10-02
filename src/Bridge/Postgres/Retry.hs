@@ -1,6 +1,6 @@
 module Bridge.Postgres.Retry (reasons,candidates,recordApproval) where
 import Bridge.Types
-import Bridge.Ledger (Attempt(..))
+import Bridge.Ledger.Model (Attempt(..))
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
 import Data.Int (Int64)

@@ -1,7 +1,7 @@
 module Bridge.Postgres.PaymentStore (Store(..), pendingAttempts) where
 
 import Bridge.Types
-import Bridge.Ledger (Attempt(..),Obligation(..),Deposit(..))
+import Bridge.Ledger.Model (Attempt(..),Obligation(..),Deposit(..))
 import Bridge.Settlement (PaymentStore(..),SettlementStore(..))
 import Control.Exception (IOException,catch,try)
 import Data.Aeson (Value,object,(.=))
