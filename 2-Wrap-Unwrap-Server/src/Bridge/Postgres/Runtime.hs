@@ -35,7 +35,6 @@ import qualified Bridge.Postgres.Order as Order
 import qualified Bridge.Observer as Observer
 import qualified Bridge.Postgres.Settlement as Settlement
 import qualified Bridge.Ledger.Model as Domain
-import qualified Bridge.Postgres.NativeFamily as NativeFamily
 import qualified Bridge.Reconciliation as CustodyWorkflow
 import Bridge.Settlement (realPaymentTransport,settleAttemptWith,paymentPass,reconcilePaymentsWith,PaymentTransport(..),approveSolanaRetryWith,readSavedPayment,readSavedNativeFamily,recheckSourceWith)
 import qualified Bridge.Postgres.Startup as Startup
@@ -340,7 +339,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
         _->reject "native_rebroadcast_payment_not_in_review"
       paymentIdentity transport
       (ob,_) <- readSavedPayment transport cfg ledger attempt
-      family <- NativeFamily.readFamily ledger (Domain.attemptIntent attempt)
+      family <- PgReplacement.readFamily ledger (Domain.attemptIntent attempt)
       view <- missing family
       recheckSourceWith transport cfg ledger ob
       block <- paymentNative transport False "getblockchaininfo" [] >>= fieldValue "bestblockhash" :: IO Text

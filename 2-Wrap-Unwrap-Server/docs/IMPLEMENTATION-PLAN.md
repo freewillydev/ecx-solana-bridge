@@ -268,6 +268,9 @@ The sequence below remains the broader refactor checklist, subject to that prior
    creation live with settlement. Their separate store modules are removed, and
    the custody freshness check is called directly from its owner. Cancellation
    generation lookups share one query with preparation/signing checks.
+   Native replacement-family validation now lives with draft/sign/cancel storage
+   in Replacement, removing its separate storage module without changing checks
+   or transaction boundaries.
    Remove redundant wrappers immediately after their replacement works.
    The standalone TLS executable and Python certificate generator are retired;
    their real-validator assertions now run as generated QuickCheck cases inside

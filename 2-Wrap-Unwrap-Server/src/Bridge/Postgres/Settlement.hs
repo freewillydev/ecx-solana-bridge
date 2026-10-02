@@ -11,7 +11,7 @@ import Bridge.Postgres.Schema
 import qualified Bridge.Postgres.Source as Source
 import Control.Monad (forM,forM_,when)
 import Data.List (sortOn,nub)
-import qualified Bridge.Postgres.NativeFamily as NativeFamily
+import qualified Bridge.Postgres.Replacement as Replacement
 import Data.Aeson (object,(.=))
 import Data.Int (Int64)
 import Data.Text (Text)
@@ -219,7 +219,7 @@ pendingAttempts ledger = ledgerAction ledger $ \connection->do
     pure (a,intentsChain i)
     :: IO [(Attempts,Text)]
   expired <- O.runSelect connection (O.selectTable solanaexpiriesTable) :: IO [SolanaExpiries]
-  native <- fmap concat $ forM (nub [attemptsIntentId a | (a,chain)<-rows,chain=="Native"]) (NativeFamily.familyC connection)
+  native <- fmap concat $ forM (nub [attemptsIntentId a | (a,chain)<-rows,chain=="Native"]) (Replacement.familyC connection)
   -- A newly signed replacement has no broadcast sequence yet. Sorting on that
   -- nullable field puts it before its parent; lineage readers require fee order.
   -- Use the same verified family order as signing, settlement and recovery.

@@ -1,5 +1,5 @@
 module Bridge.Postgres.Replacement
-  ( parent,contextC,decision,recordDraft,member,signingContext,signingContextC,recordMember,cancel ) where
+  ( parent,contextC,decision,recordDraft,member,signingContext,signingContextC,recordMember,cancel,readFamily,familyC ) where
 import Bridge.Types
 import Bridge.Config (Config(..),fingerprint)
 import Bridge.Ledger.Model (encodeRecord, decodePaymentRecord, Attempt(..))
@@ -7,11 +7,12 @@ import Bridge.NativePayment
 import Bridge.NativeReplacement
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema hiding (deploymentFingerprint)
-import qualified Bridge.Postgres.NativeFamily as Family
 import qualified Bridge.Postgres.Preparation as P
 import Bridge.Postgres.Source (paymentWorkHashC)
 import Bridge.Postgres.Custody (freshC)
 import Data.Aeson (object,(.=))
+import Control.Monad (forM_,when)
+import Data.List (sortOn)
 import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -41,7 +42,7 @@ contextC c cfg txid=do
   (a,i,ob,order) <- case rows of [row]->pure row; _->reject "native_replacement_not_expected"
   let current=asAttempt a (intentsChain i)
   require (maybe False (>0) $ attemptSequence current) "broadcast_intent_required"
-  family <- Family.familyC c (attemptIntent current)
+  family <- familyC c (attemptIntent current)
   require (not(null family) && last family==current) "native_replacement_not_current"
   _ <- P.activeC c (attemptIntent current)
   policy <- decodePaymentRecord(ordersPolicyJson order)
@@ -135,7 +136,7 @@ signingContextC c cfg sequenceNo=do
   draft <- decodePaymentRecord(nativereplacementdraftsDraftJson row)
   require (units(draftFee draft)==nativereplacementdraftsFee row) "native_replacement_draft_changed"
   either reject pure(validateNativeReplacementDraft members (draftFee draft) draft)
-  family <- Family.familyC c (attemptIntent a)
+  family <- familyC c (attemptIntent a)
   common <- O.runSelect c $ do
     i <- O.selectTable intentsTable
     O.where_(intentsId i O..== text(attemptIntent a))
@@ -208,3 +209,56 @@ text :: Text -> O.Field O.SqlText
 text=O.sqlStrictText
 num :: Int64 -> O.Field O.SqlInt8
 num=O.sqlInt8
+
+readFamily :: Ledger -> Text -> IO [Attempt]
+readFamily ledger intent = ledgerAction ledger (\c->familyC c intent)
+
+-- Shared validator runs inside the caller's existing financial transaction.
+familyC :: PG.Connection -> Text -> IO [Attempt]
+familyC connection intent = do
+  rows <- O.runSelect connection $ do
+    a <- O.selectTable attemptsTable
+    i <- O.selectTable intentsTable
+    O.where_ (attemptsIntentId a O..== intentsId i O..&& intentsId i O..== O.sqlStrictText intent O..&& intentsChain i O..== O.sqlStrictText "Native")
+    pure (a,i)
+    :: IO [(Attempts,Intents)]
+  -- Native replacement fees strictly increase, defining the family order.
+  signedRows <- mapM (\(a,i)->do s <- decodePaymentRecord (attemptsPolicyJson a); pure (a,i,s)) rows
+  let ordered=sortOn (\(_,_,payment)->units $ signedNativeFee payment) signedRows
+      family=[asAttempt a (intentsChain i) | (a,i,_)<-ordered]
+      signed=[s | (_,_,s)<-ordered]
+  require (not(null family) && length family<=8) "native_replacement_family_bounds"
+  changes <- O.runSelect connection (O.selectTable nativewinnerchangesTable) :: IO [NativeWinnerChanges]
+  forM_ ordered $ \(a,_,_)->when (attemptsState a=="review") $
+    require (any (\change->nativewinnerchangesPreviousTxid change==attemptsTxid a && Just(nativewinnerchangesPreviousObservation change)==attemptsObservationJson a) changes) "native_family_review_not_a_previous_winner"
+  when (length family>1) $ do
+    either reject pure (validateNativeFamily signed)
+    require (and [attemptId a==nativeTxid(signedNativeTransaction s) && attemptBytes a==signedNativeBytes s && attemptFeeLimit a==units(planFeeLimit $ signedNativePlan s) | (a,s)<-zip family signed]) "saved_native_policy_mismatch"
+    links <- O.runSelect connection $ do
+      familyMember <- O.selectTable nativereplacementmembersTable
+      draft <- O.selectTable nativereplacementdraftsTable
+      parentAttempt <- O.selectTable attemptsTable
+      child <- O.selectTable attemptsTable
+      O.where_ (nativereplacementmembersDraftSequence familyMember O..== nativereplacementdraftsCriticalSequence draft O..&&
+        nativereplacementmembersTxid familyMember O..== attemptsTxid child O..&&
+        nativereplacementdraftsParentTxid draft O..== attemptsTxid parentAttempt O..&& attemptsIntentId child O..== O.sqlStrictText intent)
+      pure (familyMember,draft,parentAttempt,child)
+      :: IO [(NativeReplacementMembers,NativeReplacementDrafts,Attempts,Attempts)]
+    cancelled <- O.runSelect connection (O.selectTable nativereplacementcancellationsTable) :: IO [NativeReplacementCancellations]
+    let lineage=[(attemptId p,attemptId a) | (p,a)<-zip family (drop 1 family)]
+    require (length links==length lineage && all (\(_,d,_,a)->(nativereplacementdraftsParentTxid d,attemptsTxid a) `elem` lineage) links) "native_replacement_lineage_missing"
+    forM_ (zip [1..] lineage) $ \(count,pair)->do
+      (familyMember,draft,parentAttempt,child) <- case [row | row@(_,d,_,a)<-links,(nativereplacementdraftsParentTxid d,attemptsTxid a)==pair] of [row]->pure row; _->reject "native_replacement_lineage_missing"
+      decoded <- decodePaymentRecord (nativereplacementdraftsDraftJson draft)
+      let current=signed!!count; sequenceNo=nativereplacementdraftsCriticalSequence draft
+      either reject pure (validateNativeReplacementDraft (take count signed) (draftFee decoded) decoded)
+      require (nativereplacementdraftsFee draft==units(signedNativeFee current) && nativereplacementdraftsFee draft==units(draftFee decoded) &&
+        sameNativeTemplate (draftTransaction decoded) (signedNativeTransaction current) && attemptsTxid child==nativeTxid(signedNativeTransaction current) &&
+        all ((/=sequenceNo).nativereplacementcancellationsDraftSequence) cancelled &&
+        nativereplacementmembersCriticalSequence familyMember>sequenceNo && attemptsPreparationGeneration parentAttempt==attemptsPreparationGeneration child) "native_replacement_member_changed"
+    case ordered of
+      (_,i,first):_->case nativeInputs(signedNativeTransaction first) of
+        input:_->let point=nativeOutpoint input in require (intentsCommonInput i==Just(outpointTxid point<>":"<>T.pack(show $ outpointVout point))) "native_replacement_common_input_changed"
+        _->reject "native_input_mismatch"
+      _->reject "native_replacement_family_bounds"
+  pure family

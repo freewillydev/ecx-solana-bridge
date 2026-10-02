@@ -12,7 +12,6 @@ import qualified Bridge.Postgres.Settlement as PgSettlement
 import qualified Bridge.Postgres.Preparation as PgPreparation
 import qualified Bridge.Postgres.Replacement as PgReplacement
 import qualified Bridge.Postgres.Source as PgSource
-import qualified Bridge.Postgres.NativeFamily as NativeFamily
 import Bridge.Config
 import Bridge.Ledger.Model
 import Bridge.Native (nativeAmount)
@@ -77,7 +76,7 @@ prepareNativeReplacementUsing clock transport drafter c ledger parent fee reason
       paymentIdentity transport
       (ob,payment) <- readSavedPayment transport c ledger expected
       signed <- case payment of NativePayment s->pure s; _->reject "wrong_destination_chain"
-      attempts <- NativeFamily.readFamily ledger (attemptIntent expected)
+      attempts <- PgReplacement.readFamily ledger (attemptIntent expected)
       family <- if attempts==[expected] then pure [signed] else do
         (members,_) <- readSavedNativeFamily transport c ledger attempts
         pure (map snd members)

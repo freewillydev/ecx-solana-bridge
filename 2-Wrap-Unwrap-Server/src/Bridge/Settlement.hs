@@ -10,7 +10,7 @@ module Bridge.Settlement
 import qualified Bridge.Postgres.Ledger as PgLedger
 import qualified Bridge.Postgres.Observation as PgObservation
 import qualified Bridge.Postgres.Settlement as PgSettlement
-import qualified Bridge.Postgres.NativeFamily as NativeFamily
+import qualified Bridge.Postgres.Replacement as Replacement
 import qualified Bridge.Postgres.Source as PgSource
 import Bridge.Config
 import Bridge.Ledger.Model
@@ -286,7 +286,7 @@ paymentAttemptGroups attempts=do
 readSavedNativeFamily :: PaymentTransport -> Config -> Ledger -> [Attempt] -> IO ([(Attempt,NativeSigned)],NativeFamilyView)
 readSavedNativeFamily transport c ledger expected=do
   first <- case expected of a:_->pure a; _->reject "native_replacement_family_bounds"
-  family <- NativeFamily.readFamily ledger (attemptIntent first)
+  family <- Replacement.readFamily ledger (attemptIntent first)
   require (family==expected) "native_replacement_family_changed"
   signed <- forM family $ \attempt->do
     (_,payment) <- readSavedPayment transport c ledger attempt
@@ -338,7 +338,7 @@ reconcileRecordedAttempt :: PaymentTransport -> Config -> Ledger -> Attempt -> I
 reconcileRecordedAttempt transport c ledger attempt = do
   paymentIdentity transport
   (ob,payment) <- readSavedPayment transport c ledger attempt
-  family <- if attemptChain attempt=="Native" then NativeFamily.readFamily ledger (attemptIntent attempt) else pure [attempt]
+  family <- if attemptChain attempt=="Native" then Replacement.readFamily ledger (attemptIntent attempt) else pure [attempt]
   if length family>1 then do
     require (attempt `elem` family) "native_replacement_family_changed"
     (members,view) <- readSavedNativeFamily transport c ledger family

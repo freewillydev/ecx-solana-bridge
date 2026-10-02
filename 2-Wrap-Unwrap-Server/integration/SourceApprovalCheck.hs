@@ -7,7 +7,6 @@ import qualified Bridge.Postgres.Replacement as Replacement
 import qualified Bridge.Postgres.Settlement as Settlement
 import Bridge.NativePayment
 import Bridge.RPC (fieldValue)
-import qualified Bridge.Postgres.NativeFamily as Family
 import qualified Data.ByteString as BS
 import qualified Bridge.Postgres.Ledger as L
 import qualified Bridge.Postgres.Source as Source
@@ -240,7 +239,7 @@ winnerContract ledger = do
   beforeSignedReplay <- snapshot ledger
   Replacement.recordMember ledger cfg draftSequence expectedFamily newer 100 >>= \a->require (a==signedMember) "contract_replacement_signed_replay_changed"
   pendingFamily <- Settlement.pendingAttempts ledger
-  canonicalFamily <- L.ledgerAction ledger (\c->Family.familyC c $ attemptIntent signedMember)
+  canonicalFamily <- L.ledgerAction ledger (\c->Replacement.familyC c $ attemptIntent signedMember)
   require (filter ((==attemptIntent signedMember).attemptIntent) pendingFamily==canonicalFamily) "contract_pending_family_lineage_order"
   expectError "native_replacement_already_signed" $ Replacement.cancel ledger draftSequence "cannot cancel signature"
   snapshot ledger >>= \after->require (beforeSignedReplay==after) "contract_replacement_signed_replay_mutated"
@@ -256,7 +255,7 @@ winnerContract ledger = do
     fixtureOperation c (NativeEvidence "winner-contract-evidence" newId (jsonText $ object["proof" .= object["confirmations" .= (2::Int),"walletNetUnits" .= ("-100000"::Text),"feeUnits" .= draftFee draft]]))
     fixtureOperation c (NativeEvent newId "outgoing" "winner-contract-anchor" "winner-contract-evidence")
     pure ()
-  family <- L.ledgerAction ledger $ \c->Family.familyC c oid
+  family <- L.ledgerAction ledger $ \c->Replacement.familyC c oid
   old <- case filter ((==oldId).attemptId) family of [a]->pure a; _->reject "contract_old_winner_missing"
   before <- snapshot ledger
   expectError "native_recovery_cost_changed" $ NativeRecovery.recordCheck ledger old previous (NativeSettlementReplaced family newId oldCosts $ proof newId)
@@ -279,7 +278,7 @@ winnerContract ledger = do
     require (posts==[("external",delta),("operating",negate delta)]) "contract_winner_principal_changed"
     pure ()
   -- Re-read through the same validator after the prior winner becomes reviewed.
-  L.ledgerAction ledger (\c->Family.familyC c oid) >>= \current->require (length current==2) "contract_winner_lineage_not_preserved"
+  L.ledgerAction ledger (\c->Replacement.familyC c oid) >>= \current->require (length current==2) "contract_winner_lineage_not_preserved"
   -- A later reorg can restore the older winner. Charge/refund the delta once
   -- while preserving an unrelated primary conversion link (e.g. extra refund).
   L.ledgerAction ledger $ \c->do
@@ -287,7 +286,7 @@ winnerContract ledger = do
     fixtureOperation c (NativeEvidence "older-winner-contract-evidence" oldId (jsonText $ object["proof" .= object["confirmations" .= (2::Int),"walletNetUnits" .= ("-100000"::Text),"feeUnits" .= oldFee]]))
     fixtureOperation c (NativeEvent oldId "outgoing" "winner-contract-anchor" "older-winner-contract-evidence")
     pure ()
-  current <- L.ledgerAction ledger $ \c->Family.familyC c oid
+  current <- L.ledgerAction ledger $ \c->Replacement.familyC c oid
   new <- case filter ((==newId).attemptId) current of [a]->pure a; _->reject "contract_new_winner_missing"
   saved <- NativeRecovery.observation ledger newId
   NativeRecovery.recordCheck ledger new saved (NativeSettlementReplaced current oldId oldCosts $ proof oldId)
@@ -306,7 +305,7 @@ winnerContract ledger = do
 -- Storage-only acceptance: existing typed fixture family, no chain transport.
 rebroadcastContract :: L.Ledger -> Text -> Text -> IO ()
 rebroadcastContract ledger oid txid = do
-  family <- L.ledgerAction ledger $ \c->Family.familyC c oid
+  family <- L.ledgerAction ledger $ \c->Replacement.familyC c oid
   saved <- case filter ((==txid).attemptId) family of [a]->pure a; _->reject "contract_rebroadcast_winner_missing"
   old <- NativeRecovery.observation ledger txid
   NativeRecovery.recordCheck ledger saved old NativeSettlementConfirming

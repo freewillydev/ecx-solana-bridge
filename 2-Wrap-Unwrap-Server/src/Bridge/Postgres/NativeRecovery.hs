@@ -1,7 +1,7 @@
 module Bridge.Postgres.NativeRecovery (candidates,observation,recordCheck,reviewSequences,rebroadcastDecision,recordRebroadcast,authorizeRebroadcast) where
 import Bridge.Types
 import Bridge.NativePayment
-import qualified Bridge.Postgres.NativeFamily as Family
+import qualified Bridge.Postgres.Replacement as Replacement
 import Bridge.Ledger.Model (encodeRecord, decodeRecord, Attempt(..),PaymentCosts(..),NativeSettlementCheck(..))
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
@@ -170,7 +170,7 @@ rebroadcastContextC :: PG.Connection -> Attempt -> [Attempt] -> IO NativePayment
 rebroadcastContextC c expected family = do
   state <- O.runSelect c (O.selectTable deploymentTable) :: IO [Deployment]
   require (map deploymentPaused state==[1]) "pause_before_operator_action"
-  actual <- Family.familyC c (attemptIntent expected)
+  actual <- Replacement.familyC c (attemptIntent expected)
   require (actual==family && expected `elem` actual && attemptChain expected=="Native" && attemptState expected=="settled" && maybe False (>0) (attemptSequence expected)) "native_rebroadcast_payment_changed"
   contexts <- O.runSelect c $ do
     intent <- O.selectTable intentsTable
@@ -247,7 +247,7 @@ num = O.sqlInt8
 -- remain settled; only the proved fee difference is appended to the ledger.
 winnerChangeC :: PG.Connection -> Attempt -> Text -> [Attempt] -> Text -> PaymentCosts -> Text -> IO ()
 winnerChangeC c previousWinner previous expected txid costs proof = do
-  family <- Family.familyC c (attemptIntent previousWinner)
+  family <- Replacement.familyC c (attemptIntent previousWinner)
   require (family==expected && previousWinner `elem` family && txid/=attemptId previousWinner) "native_replacement_family_changed"
   winner <- case filter ((==txid).attemptId) family of [a]->pure a; _->reject "native_family_winner_missing"
   require (attemptState winner `elem` ["broadcast_intent","review"] && all (maybe False (>0).attemptSequence) [previousWinner,winner]) "unrecorded_broadcast_observed"
