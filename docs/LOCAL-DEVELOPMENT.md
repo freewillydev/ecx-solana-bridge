@@ -354,7 +354,11 @@ Use only a trusted ledger manifest from `deploy/postgres-backup.py`, not a relea
 package manifest. Remote mode uploads a new encrypted archive/manifest snapshot;
 it does not initialize, prune or delete remote snapshots. The temporary restore
 and isolated database are removed after the check. The test checks archive bytes,
-deployment identity and all table counts; it does not prove signer-key recovery,
+deployment identity, all table counts and, for newly created manifests, SHA-256
+digests of every row in every table. Legacy manifests report `tableContentsMatch`
+as null; they do not gain row verification retroactively. The digest streams sorted
+JSONB rows with UTC timestamp rendering inside the same exported snapshot used
+by pg_dump. This does not prove signer-key recovery,
 in-flight resumption or independent physical storage. Establish host independence
 and retention separately. Neither mode acknowledges coverage in the live ledger
 or starts a worker. Credentials and repository URLs are omitted from reports and

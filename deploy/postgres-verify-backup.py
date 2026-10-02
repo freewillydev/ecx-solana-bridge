@@ -65,8 +65,17 @@ def verify_backup(manifest_path):
         _, deployment, counts = backup.inspect_snapshot(session)
         if deployment != manifest.get('deployment') or counts != manifest.get('tableCounts'):
             raise ValueError('Restored ledger does not match snapshot manifest')
+        hashes = manifest.get('tableHashes')
+        if hashes is not None:
+            if (not isinstance(hashes, dict) or set(hashes) != set(counts) or
+                any(not isinstance(value, str) or not re.fullmatch('[0-9a-f]{64}', value)
+                    for value in hashes.values())):
+                raise ValueError('Invalid table-content manifest')
+            if backup.table_hashes(session, counts) != hashes:
+                raise ValueError('Restored ledger row contents do not match snapshot manifest')
         return {'archiveChecksumVerified': True, 'deploymentMatches': True,
                 'tableCountsMatch': True, 'tables': len(counts),
+                'tableContentsMatch': True if hashes is not None else None,
                 'remoteDurabilityAcknowledged': False, 'workerStarted': False}
     finally:
         if session is not None:

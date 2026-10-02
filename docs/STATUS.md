@@ -1131,3 +1131,25 @@ See `evidence/postgres-encrypted-backup-command.json`. Actual HTTPS acceptance
 still requires configured remote storage. The command never acknowledges worker
 coverage, initializes/prunes a remote repository or copies signer keys. Remote
 retention, physical independence and in-flight/key recovery remain open gates.
+
+## Full-row backup restore comparison
+
+New exact-snapshot manifests include SHA-256 digests of the sorted complete row
+contents of all 38 public ledger tables. Digests are streamed with bounded Python
+memory from the same exported read-only MVCC transaction used by pg_dump. UTC
+timestamp rendering and C sorting make source/restore comparison independent of
+the connection's timezone and text collation. Restore now refuses row differences
+even when deployment metadata, counts and archive checksum match. Old manifests
+remain readable but explicitly report null row-content verification.
+
+The real PostgreSQL concurrency contract and real local restic encrypted restore
+both pass full-row comparison. A deliberately altered archive in a disposable
+database, with unchanged counts/deployment and recomputed archive checksum, was
+rejected specifically by the row-content comparison. See
+`evidence/postgres-backup-row-content.json` and
+`evidence/postgres-encrypted-backup-row-content.json`. No source ledger mutation,
+chain operation, worker start or coverage acknowledgement occurred. Disposable
+databases and encrypted storage were removed; deliberately invalid contract
+archives remain privately isolated from normal recovery material. These deployment
+script changes are committed source; installed packages still use their prior
+verified releases pending the next consolidated deployment package update.

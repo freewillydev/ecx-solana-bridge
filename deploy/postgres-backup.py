@@ -50,9 +50,44 @@ class Snapshot:
         self.process.stdin.close()
         self.process.stdout.close()
 
+    def table_digest(self, table):
+        # Sorted JSONB rows preserve duplicates and every column without loading
+        # a whole table into Python memory. The non-JSON terminator cannot collide
+        # with a row. Use the same exported read-only transaction as pg_dump.
+        identifier = '"' + table.replace('"', '""') + '"'
+        command = ('SELECT to_jsonb(t)::text FROM public.' + identifier +
+                   ' t ORDER BY to_jsonb(t)::text COLLATE "C";\n\\echo ECX_TABLE_END\n')
+        self.process.stdin.write(command.encode())
+        self.process.stdin.flush()
+        digest = hashlib.sha256()
+        deadline = time.monotonic() + 90
+        with selectors.DefaultSelector() as selector:
+            selector.register(self.process.stdout, selectors.EVENT_READ)
+            while True:
+                while b'\n' in self.buffer:
+                    line, self.buffer = self.buffer.split(b'\n', 1)
+                    if line == b'ECX_TABLE_END':
+                        return digest.hexdigest()
+                    if not line.startswith(b'{'):
+                        raise ValueError('Invalid table digest stream')
+                    digest.update(line + b'\n')
+                if not selector.select(max(0, deadline-time.monotonic())):
+                    raise ValueError('Table digest timed out')
+                data = os.read(self.process.stdout.fileno(), 65536)
+                if not data:
+                    raise ValueError('Table digest failed')
+                self.buffer += data
+                if len(self.buffer) > 16*1024*1024:
+                    raise ValueError('Ledger row exceeds digest limit')
+
+
+def table_hashes(session, tables):
+    return {table: session.table_digest(table) for table in sorted(tables)}
+
 
 def inspect_snapshot(session):
     metadata = session.query("""BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY;
+      SET LOCAL timezone='UTC';
       SET LOCAL statement_timeout='60s';
       SET LOCAL idle_in_transaction_session_timeout='6min';
       SELECT json_build_object('snapshot',pg_export_snapshot(),
@@ -83,6 +118,7 @@ def create_backup(directory, username='ecx_read'):
     session = Snapshot(username)
     try:
         snapshot, deployment, counts = inspect_snapshot(session)
+        hashes = table_hashes(session, counts)
         with pending.open('xb') as output:
             pending.chmod(0o600)
             subprocess.run(['pg_dump', '--username=' + username, '--format=custom',
@@ -98,7 +134,7 @@ def create_backup(directory, username='ecx_read'):
         digest = hashlib.file_digest(source, 'sha256').hexdigest()
     pending.rename(finished)
     manifest = {'format': 1, 'archive': finished.name, 'sha256': digest,
-                'deployment': deployment, 'tableCounts': counts,
+                'deployment': deployment, 'tableCounts': counts, 'tableHashes': hashes,
                 'remoteDurabilityAcknowledged': False}
     manifest_path = directory / (name + '.json')
     with manifest_path.open('x') as output:

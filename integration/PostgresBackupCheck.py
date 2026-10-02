@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Private real-PostgreSQL snapshot/restore contract; no chain clients or workers."""
 import argparse
+import hashlib
 import importlib.util
 import json
 import os
@@ -20,6 +21,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('manifest', help='Trusted private ledger backup, never an untrusted archive')
     parser.add_argument('--directory', required=True, help='Private absolute test-output directory')
+    parser.add_argument('--report')
     args = parser.parse_args()
     os.umask(0o077)
     archive, _ = verify.load_archive(args.manifest)
@@ -68,9 +70,35 @@ def main():
             rejected = True
         else:
             raise ValueError('Damaged checksum accepted')
-        print(json.dumps({'originalRestore': original, 'concurrentWriteSnapshotRestore': matched,
+        # Change row values without changing counts or deployment metadata in
+        # this disposable database. Recompute the archive checksum so refusal
+        # must come from row comparison, not merely corrupted archive bytes.
+        content_manifest = verify.backup.create_backup(args.directory, username)
+        content = json.loads(content_manifest.read_text())
+        run(['psql', '-Xq', '-v', 'ON_ERROR_STOP=1', '-c',
+             "UPDATE audit SET detail='changed isolated row-content contract';"],
+            check=True, stdout=subprocess.DEVNULL)
+        changed_archive = Path(args.directory) / content['archive']
+        with changed_archive.open('wb') as output:
+            run(['pg_dump', '--format=custom', '--no-owner', '--no-privileges'],
+                stdout=output, stderr=subprocess.DEVNULL, check=True, timeout=300)
+        with changed_archive.open('rb') as source:
+            content['sha256'] = hashlib.file_digest(source, 'sha256').hexdigest()
+        content_manifest.write_text(json.dumps(content))
+        try:
+            verify.verify_backup(content_manifest)
+        except ValueError as error:
+            if str(error) != 'Restored ledger row contents do not match snapshot manifest':
+                raise
+        else:
+            raise ValueError('Changed row contents accepted')
+        report = {'originalRestore': original, 'concurrentWriteSnapshotRestore': matched,
                           'concurrentWriteExcluded': True, 'damagedChecksumRejected': rejected,
-                          'sourceLedgerModified': False, 'workerStarted': False}, sort_keys=True))
+                          'sameCountChangedRowsRejected': True,
+                          'sourceLedgerModified': False, 'workerStarted': False}
+        print(json.dumps(report, sort_keys=True))
+        if args.report:
+            Path(args.report).write_text(json.dumps(report, indent=2)+'\n')
     finally:
         if previous is None:
             os.environ.pop('PGDATABASE', None)

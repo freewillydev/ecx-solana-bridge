@@ -1,0 +1,25 @@
+{
+  "originalRestore": {
+    "archiveChecksumVerified": true,
+    "deploymentMatches": true,
+    "tableCountsMatch": true,
+    "tables": 38,
+    "tableContentsMatch": null,
+    "remoteDurabilityAcknowledged": false,
+    "workerStarted": false
+  },
+  "concurrentWriteSnapshotRestore": {
+    "archiveChecksumVerified": true,
+    "deploymentMatches": true,
+    "tableCountsMatch": true,
+    "tables": 38,
+    "tableContentsMatch": true,
+    "remoteDurabilityAcknowledged": false,
+    "workerStarted": false
+  },
+  "concurrentWriteExcluded": true,
+  "damagedChecksumRejected": true,
+  "sameCountChangedRowsRejected": true,
+  "sourceLedgerModified": false,
+  "workerStarted": false
+}
