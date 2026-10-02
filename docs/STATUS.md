@@ -1611,3 +1611,26 @@ import, plus the combined Cabal component/dependency declaration. Diagnostics mu
 be changed to inspect the actual PostgreSQL database, and legacy ledger/budget/
 backup/worker/import tooling separated into its own component before declaring
 SQLite removed or rebuilding the Linux release installers.
+
+### Production runtime separated from SQLite
+
+The main Cabal library no longer declares SQLite. Legacy ledger, budget, backups,
+worker and adapters moved to `legacy-src` in the separate `legacy` library;
+regression tests explicitly depend on that component. Real-chain integration
+clients import the pure financial records rather than the legacy ledger.
+The production executable no longer imports the legacy worker for diagnostics.
+
+The new PostgreSQL `doctor` reads the configured ledger through Opaleye inside a
+read-only transaction with a bounded statement timeout. It validates schema and
+configuration fingerprint and reports database identity with redacted errors.
+Against the actual local treasury acceptance database it verified PostgreSQL 16,
+schema 18 and sequence 8, along with both real chain identities. A mismatched
+configuration and a nonexistent database were rejected with the expected errors.
+The rebuilt macOS production binary's dynamic linkage has no SQLite library;
+all 373 legacy regression examples pass. See `evidence/postgres-only-runtime.json`.
+
+The Linux builder now rejects any production SQLite linkage and patches only the
+maintenance SQLite CLI. Existing installers still contain that CLI/library for
+explicit legacy snapshot import, and have not yet been rebuilt or accepted with
+this new component layout. Separating/removing bundled maintenance dependencies
+and repeating real Linux package/upgrade acceptance remain required.

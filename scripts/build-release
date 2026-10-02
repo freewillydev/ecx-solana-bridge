@@ -158,10 +158,15 @@ for component in ("bitcoin-core", "sqlite"):
         if hashlib.sha256((notices / entry["path"]).read_bytes()).hexdigest() != entry["sha256"]:
             raise ValueError(component + " notice differs from its recorded source")
     shutil.copytree(notices, bundle / "notices" / component)
-# Relative RUNPATH makes the supplied SQLite authoritative without global linker changes.
+# The runtime must not regain the legacy SQLite dependency. SQLite remains
+# bundled only for explicit legacy snapshot maintenance until that tooling splits.
+needed = subprocess.check_output(["patchelf", "--print-needed", str(bundle / "bin/ecx-bridge")], text=True)
+if "sqlite" in needed.lower():
+    raise ValueError("Production runtime links legacy SQLite")
+# Relative RUNPATH makes the maintenance SQLite authoritative without global changes.
 for name in ("ecx-bridge", "sqlite3"):
     run("patchelf", "--set-rpath", "$ORIGIN/../lib", str(bundle / "bin" / name))
-    run("patchelf", "--replace-needed", "libsqlite3.so", "libsqlite3.so.0", str(bundle / "bin" / name))
+run("patchelf", "--replace-needed", "libsqlite3.so", "libsqlite3.so.0", str(bundle / "bin/sqlite3"))
 run("patchelf", "--set-soname", "libsqlite3.so.0", str(bundle / "lib/libsqlite3.so.0"))
 clean_env = dict(os.environ)
 clean_env.pop("LD_LIBRARY_PATH", None)

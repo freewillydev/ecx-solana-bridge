@@ -1,0 +1,23 @@
+{
+  "database": {
+    "evidence": {
+      "criticalSequence": 8,
+      "engine": "PostgreSQL",
+      "fingerprint": "e9e276699dc659bc2693ab677e8babed9c40d0a387f5cb4553ce30ba38e64a83",
+      "paused": true,
+      "readOnly": true,
+      "schemaVersion": 18,
+      "serverVersionNumber": 160014
+    },
+    "ok": true
+  },
+  "nativeIdentityAccepted": true,
+  "solanaIdentityAccepted": true,
+  "mismatchedProfileRejected": true,
+  "unavailableDatabaseRedacted": true,
+  "productionBinaryLinksSqlite": false,
+  "legacyRegressionExamples": 373,
+  "legacyRegressionFailures": 0,
+  "linuxInstallerRebuilt": false,
+  "publicRelease": false
+}

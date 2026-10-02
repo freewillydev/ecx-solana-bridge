@@ -15,7 +15,7 @@ import qualified Bridge.Postgres.LossCover as LossCover
 import qualified Bridge.Postgres.Settlement as Settlement
 import System.Environment (lookupEnv)
 import Data.Maybe (fromMaybe)
-import Bridge.Ledger (LossCapital(..),SourceCheck(..),Deposit(..),Attempt(..),PaymentCosts(..),NativeSettlementCheck(..))
+import Bridge.Ledger.Model (LossCapital(..),SourceCheck(..),Deposit(..),Attempt(..),PaymentCosts(..),NativeSettlementCheck(..))
 import qualified Data.Text as T
 import Control.Exception (bracket,try)
 import Control.Monad (forM_)

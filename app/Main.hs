@@ -1,6 +1,6 @@
 module Main where
 import Bridge.Config
-import Bridge.Worker (doctor)
+import qualified Bridge.Postgres.Doctor as Doctor
 import qualified Bridge.Postgres.Runtime as Postgres
 import qualified Bridge.Postgres.Backup as Backup
 import qualified Bridge.Postgres.Maintenance as Maintenance
@@ -23,7 +23,10 @@ main = go `catch` (\(BridgeError code) -> LBS.putStrLn (encode $ object ["error"
     ["check-config",path] -> loadConfig path >>= LBS.putStrLn . encode . object . pure . ("fingerprint" .=) . fingerprint
     ["check-interface",configPath,interfacePath] -> loadConfig configPath >>= \c -> loadInterface c (Just interfacePath) >> putStrLn "Interface configuration valid"
     ["check-signer",configPath,keyPath] -> loadConfig configPath >>= \c -> Maintenance.verifySigner c keyPath >> putStrLn "Custody signer valid"
-    ["doctor",path] -> loadConfig path >>= doctor >>= LBS.putStrLn . encode
+    ["doctor",path] -> do
+      cfg <- loadConfig path
+      settings <- postgresSettings
+      Doctor.doctor settings cfg >>= LBS.putStrLn . encode
     command:_ | command `elem` ["scan","reconcile","recover","allocate-test-operating","approve-solana-retry","approve-source-recovery","cover-source-loss","prepare-native-replacement","cancel-native-replacement","cancel-preparation"] -> reject "postgres_operator_api_required"
     ["postgres-init",path] -> do
       cfg <- loadConfig path

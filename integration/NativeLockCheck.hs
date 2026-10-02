@@ -9,7 +9,7 @@ import Bridge.SolanaHelper (invokeHelper)
 import Bridge.Payment
 import Bridge.Recovery
 import Bridge.Settlement
-import qualified Bridge.Ledger as D
+import qualified Bridge.Ledger.Model as D
 import Bridge.Postgres.Ledger
 import qualified Bridge.Postgres.Fence as Fence
 import Bridge.Postgres.PaymentStore (Store(..))

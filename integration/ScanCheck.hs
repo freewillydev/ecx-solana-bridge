@@ -12,7 +12,7 @@ import qualified Bridge.Postgres.Observer as Observer
 import qualified Bridge.Postgres.Custody as Custody
 import Bridge.Observer (epochSeconds)
 import Bridge.Settlement (realPaymentTransport,readSavedPayment,PaymentTransport(..))
-import Bridge.Ledger (Attempt(..),PaymentCosts)
+import Bridge.Ledger.Model (Attempt(..),PaymentCosts)
 import Bridge.Postgres.PaymentStore (Store(..))
 import qualified Bridge.Postgres.Settlement as Settlement
 import Bridge.Postgres.Schema
