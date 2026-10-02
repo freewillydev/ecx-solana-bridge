@@ -1,0 +1,10 @@
+{
+  "change": "Terminate saved child process group during bounded subprocess cleanup even after parent exit",
+  "libraryBuildPassed": true,
+  "adversarialTermIgnoringChildRegressionPassed": true,
+  "haskellExamples": 374,
+  "failures": 0,
+  "logSha256": "c5ceb3d44af0becd7d3374c4f8775e7ff1e747aed21851994d3664e5b9adf4d5",
+  "networkOrWalletTouched": false,
+  "linuxInstalledAcceptance": false
+}

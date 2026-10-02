@@ -10,7 +10,7 @@ import System.Exit (ExitCode(..))
 import System.IO (Handle,hClose)
 import System.Process
 import System.Timeout (timeout)
-import System.Posix.Signals (signalProcessGroup,sigKILL)
+import System.Posix.Signals (signalProcessGroup,sigKILL,sigTERM)
 
 -- Fixed program paths and argument vectors only. Never invoke a shell.
 runBounded :: Int -> Int -> FilePath -> [String] -> BS.ByteString -> IO BS.ByteString
@@ -23,7 +23,7 @@ runBoundedWithEnvironment environment = runProcessBounded (Just environment)
 
 runProcessBounded :: Maybe [(String,String)] -> Int -> Int -> FilePath -> [String] -> BS.ByteString -> IO BS.ByteString
 runProcessBounded environment seconds limit program args input = do
-  result <- timeout (seconds*1000000) $ bracket acquire cleanup $ \(hin,hout,herr,ph) ->
+  result <- timeout (seconds*1000000) $ bracket acquire cleanup $ \(hin,hout,herr,ph,_) ->
     case (hin,hout,herr) of
       (Just i,Just o,Just e) -> do
         ((stdout,_),code) <- concurrently
@@ -34,21 +34,28 @@ runProcessBounded environment seconds limit program args input = do
       _ -> reject "subprocess_pipes_unavailable"
   maybe (reject "subprocess_timeout") pure result
  where
-  acquire = createProcess (proc program args) { std_in=CreatePipe,std_out=CreatePipe,std_err=CreatePipe,close_fds=True,create_group=True,env=environment }
-  cleanup (i,o,e,ph) = do
+  acquire = do
+    (i,o,e,ph) <- createProcess (proc program args) { std_in=CreatePipe,std_out=CreatePipe,std_err=CreatePipe,close_fds=True,create_group=True,env=environment }
+    group <- getPid ph
+    pure (i,o,e,ph,group)
+  cleanup (i,o,e,ph,group) = do
+    -- Retain the group identity before waitForProcess reaps the parent. A
+    -- parent exiting does not establish that its grandchildren have stopped.
+    let signalGroup signal = case group of
+          Just pid -> do
+            _ <- try (signalProcessGroup signal pid) :: IO (Either IOException ())
+            pure ()
+          Nothing -> pure ()
+    signalGroup sigTERM
     status <- getProcessExitCode ph
     case status of
       Nothing -> do
         terminateProcess ph
-        exited <- timeout 1000000 (waitForProcess ph)
-        case exited of
-          Just _ -> pure ()
-          Nothing -> do
-            pid <- getPid ph
-            case pid of Just p -> signalProcessGroup sigKILL p; Nothing -> pure ()
-            _ <- waitForProcess ph
-            pure ()
+        _ <- timeout 1000000 (waitForProcess ph)
+        pure ()
       Just _ -> pure ()
+    signalGroup sigKILL
+    _ <- waitForProcess ph
     mapM_ (\h -> case h of Just x -> do { _ <- try (hClose x) :: IO (Either IOException ()); pure () }; Nothing -> pure ()) [i,o,e]
   readLimit :: Handle -> IO BS.ByteString
   readLimit h = go 0 []

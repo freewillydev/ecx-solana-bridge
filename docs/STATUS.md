@@ -1962,3 +1962,15 @@ journal records unavailable and restored decisions. No new signature, payout,
 public consensus reorg, double spend or permanent loss was produced. See
 `evidence/postgres-source-local-disconnect.json`. External backup/wallet/reviewer
 prerequisites remain deferred at the user's request; continue local work.
+
+## Subprocess descendant cleanup fixed
+
+Backup/signing subprocess cleanup previously killed a process group only when
+the direct parent did not exit after termination. A parent that exited first
+could leave descendants running. The runner now retains its process-group ID
+at creation and signals/kills the group during cleanup even after parent exit.
+A real subprocess regression creates a TERM-ignoring child and proves its
+heartbeat stops following timeout. The application library builds and all 374
+Haskell examples pass; see `evidence/process-group-cleanup.json`. No wallet,
+chain, VM or package build was used. Installed Linux acceptance of the revised
+runner belongs to the final consolidated batch.

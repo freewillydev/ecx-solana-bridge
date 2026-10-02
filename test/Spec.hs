@@ -28,6 +28,7 @@ import Bridge.Deposit
 import Bridge.Admission
 import Bridge.Order
 import Bridge.Legacy.Order
+import Bridge.Process (runBounded)
 import Bridge.RPC
 import Bridge.API
 import Bridge.Worker
@@ -667,6 +668,19 @@ withNativeCancellationDraft saveDraft dir action=withFundedAt dir $ \l original 
 
 main :: IO ()
 main=hspec $ do
+  describe "bounded subprocess descendants" $ do
+    it "stops a TERM-ignoring child after its parent exits" $ withDir $ \dir->do
+      let heartbeat=dir</>"child-heartbeat"
+          child="import signal,time,pathlib; signal.signal(signal.SIGTERM,signal.SIG_IGN); p=pathlib.Path("<>show heartbeat<>");\nwhile True: p.write_text(str(time.monotonic_ns())); time.sleep(0.02)"
+          parent="import subprocess; subprocess.Popen(['python3','-c',"<>show child<>"])"
+      python <- findExecutable "python3" >>= maybe (error "python3 required") pure
+      runBounded 1 1024 python ["-c",parent] "" `shouldThrow` isError "subprocess_timeout"
+      threadDelay 100000
+      first <- readFile heartbeat
+      length first `seq` threadDelay 150000
+      second <- readFile heartbeat
+      second `shouldBe` first
+
   describe "operator configuration boundaries" $ do
     it "rejects aliases of the primary RPC as an independent provider" $ do
       forM_ ["https://api.devnet.solana.com/other", "https://api.devnet.solana.com?key=other",
