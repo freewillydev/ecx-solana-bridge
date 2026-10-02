@@ -3,7 +3,7 @@ module Bridge.Worker (runWorker, runTestWorker, runWorkerWith, scanOnce, reconci
 import Bridge.API
 import Control.Monad.IO.Class (liftIO)
 import Bridge.Config
-import Bridge.Legacy.ObservationPreparation ()
+import Bridge.Legacy.PaymentLifecycle ()
 import Bridge.Deposit (prepareSolanaDeposit)
 import Bridge.Ledger
 import Bridge.Native

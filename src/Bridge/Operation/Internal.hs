@@ -2,7 +2,7 @@
 module Bridge.Operation.Internal where
 
 import Bridge.Types
-import Bridge.Ledger (LossCapital)
+import Bridge.Ledger.Model (LossCapital)
 import Data.Aeson (Value)
 import Data.Kind (Type)
 import Data.Text (Text)

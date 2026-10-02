@@ -8,8 +8,7 @@ module Bridge.Settlement
   ) where
 
 import Bridge.Config
-import Bridge.Legacy.ObservationPreparation ()
-import Bridge.Ledger
+import Bridge.Ledger.Model
 import Bridge.Native
 import Bridge.NativePayment
 import Bridge.NativeReplacement
@@ -31,7 +30,6 @@ import Data.List (nub)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Database.SQLite.Simple
 import Network.HTTP.Client (Manager)
 import Text.Read (readMaybe)
 
@@ -181,23 +179,6 @@ solanaExpiryEvidence transport c signed = do
     pure $ object ["genesis" .= genesis,"finalizedHeight" .= height,"minimumFinalizedSlot" .= slot
       ,"blockhashValid" .= False,"histories" .= history,"transaction" .= Null,"signatureStatuses" .= statuses]
 
-sourceContext :: Ledger -> Obligation -> IO (Deposit,OrderRequest,PolicySnapshot,Text)
-sourceContext ledger ob=ledgerAction ledger $ \db -> do
-  obligations <- query db "SELECT id,order_id,deposit_id,kind,asset,amount,recipient FROM obligations WHERE id=?" (Only $ obligationId ob)
-  require (obligations==[ob]) "obligation_mismatch"
-  orders <- query db "SELECT request_json,policy_json,instruction FROM orders WHERE id=?" (Only $ obligationOrder ob) :: IO [(Text,Text,Maybe Text)]
-  (request,policy,instruction) <- case orders of
-    [(r,p,Just i)] -> (,,) <$> stored r <*> stored p <*> pure i
-    _ -> reject "source_instruction_missing"
-  rows <- query db "SELECT order_id,asset,amount,anchor,confirmations,eligible,first_seen FROM deposits WHERE id=?" (Only $ obligationDeposit ob) :: IO [(Maybe Text,Text,Int64,Text,Int,Bool,Int64)]
-  deposit <- case rows of
-    [(Just oid,asset,n,anchor,depth,eligible,seen)] -> do
-      require (oid==obligationOrder ob && asset==T.pack(show $ sourceAsset $ direction request)) "source_binding_mismatch"
-      quantity <- either reject pure (amount $ toInteger n)
-      pure $ Deposit (obligationDeposit ob) (Just oid) (sourceAsset $ direction request) quantity anchor depth eligible seen
-    _ -> reject "source_deposit_missing"
-  pure (deposit,request,policy,instruction)
-
 -- Read the exact original transaction immediately before send, including after
 -- a backup wait. A focused read never changes a scanner's global checkpoint.
 recheckSourceWith :: SettlementStore ledger => PaymentTransport -> Config -> ledger -> Obligation -> IO ()
@@ -268,13 +249,6 @@ class PaymentStore ledger where
   paymentSourceContext :: ledger -> Obligation -> IO (Deposit,OrderRequest,PolicySnapshot,Text)
   paymentNativeFamily :: ledger -> Text -> IO [Attempt]
 
-instance PaymentStore Ledger where
-  paymentObligation ledger oid = do
-    rows <- ledgerAction ledger $ \db -> query db "SELECT id,order_id,deposit_id,kind,asset,amount,recipient FROM obligations WHERE id=?" (Only oid)
-    case rows of [ob]->pure ob; _->reject "obligation_not_found"
-  paymentSourceContext = sourceContext
-  paymentNativeFamily = nativeFamilyAttempts
-
 class (PaymentStore ledger, PreparationStore ledger) => SettlementStore ledger where
   settlementRetryReasons :: ledger -> Text -> IO [Text]
   settlementRetryAttempts :: ledger -> Text -> IO [Attempt]
@@ -293,25 +267,6 @@ class (PaymentStore ledger, PreparationStore ledger) => SettlementStore ledger w
   settlementExpiryOrigins :: ledger -> Config -> IO ()
   settlementBroadcast :: ledger -> Text -> IO Int64
   settlementAuthorize :: ledger -> Bool -> Text -> IO Attempt
-
-instance SettlementStore Ledger where
-  settlementRetryReasons ledger txid = ledgerAction ledger $ \db -> map fromOnly <$> (query db "SELECT reason FROM solana_retry_approvals WHERE expired_txid=?" (Only txid) :: IO [Only Text])
-  settlementRetryAttempts ledger txid = ledgerAction ledger $ \db -> query db "SELECT a.txid,a.intent_id,i.chain,a.signed_bytes,a.policy_json,a.fee_limit,a.state,a.critical_sequence FROM attempts a JOIN intents i ON i.id=a.intent_id JOIN obligations o ON o.id=i.obligation_id JOIN solana_expiries e ON e.txid=a.txid WHERE a.txid=? AND i.resolved=1 AND a.state='review' AND o.status='review' AND a.preparation_generation=(SELECT MAX(generation) FROM preparations WHERE intent_id=i.id)" (Only txid)
-  settlementRecordRetry = recordSolanaRetryApproval
-  settlementWinner ledger intent = ledgerAction ledger $ \db->do
-    rows <- query db "SELECT txid FROM attempts WHERE intent_id=? AND state='settled'" (Only intent) :: IO [Only Text]
-    case rows of [Only winner]->pure winner; _->reject "settled_payment_missing"
-  settlementReady = readyObligations
-  settlementBusy ledger chain = ledgerAction ledger $ \db->do
-    rows <- query db "SELECT id FROM intents WHERE chain=? AND resolved=0" (Only chain) :: IO [Only Text]
-    pure(not $ null rows)
-  settlementRefresh = refreshDeposit
-  settlementRecord = recordSettlement
-  settlementFailed = recordFailedSolana
-  settlementExpiry = recordSolanaExpiry
-  settlementExpiryOrigins = checkExpiryOrigins
-  settlementBroadcast = markBroadcastIntent
-  settlementAuthorize = authorizeRecordedSend
 
 data SavedPayment = NativePayment NativeSigned | SolanaPayment SolanaSigned
 readSavedPayment :: PaymentStore ledger => PaymentTransport -> Config -> ledger -> Attempt -> IO (Obligation,SavedPayment)
@@ -481,12 +436,7 @@ settleAttemptWith transport c ledger attempt = work `onException` preparationPau
       ["encoding" .= ("base64"::Text),"skipPreflight" .= False,"preflightCommitment" .= ("confirmed"::Text),"maxRetries" .= (0::Int)]] >>= parseValue parseJSON
     _ -> reject "wrong_destination_chain"
 
-checkExpiryOrigins :: Ledger -> Config -> IO ()
-checkExpiryOrigins ledger c=do
-  origins <- ledgerAction ledger $ \db -> query_ db "SELECT chain,anchor FROM scan_origins WHERE chain IN('Solana','SolanaOperating') ORDER BY chain" :: IO [(Text,Text)]
-  require (map (\(chain,anchor)->(chain,Just anchor)) origins==[("Solana",solanaHistoryStart c),("SolanaOperating",solanaOperatingHistoryStart c)]) "expiry_scan_origin_mismatch"
-
-approveSolanaRetry :: Manager -> Config -> Ledger -> Text -> Text -> IO ()
+approveSolanaRetry :: SettlementStore ledger => Manager -> Config -> ledger -> Text -> Text -> IO ()
 approveSolanaRetry manager c=approveSolanaRetryWith (realPaymentTransport manager c (const $ reject "unexpected_backup_callback")) c
 
 -- Private operator command only. Revalidate the saved signed message, source,

@@ -1,8 +1,6 @@
 module Bridge.Deposit (DepositStore(..), solanaDepositMemo, prepareSolanaDeposit, prepareSolanaDepositWith) where
 
 import Bridge.Config
-import Bridge.Legacy.ObservationPreparation ()
-import Bridge.Ledger
 import Bridge.Native (nativeIdentity)
 import Bridge.RPC
 import Bridge.Solana
@@ -21,12 +19,6 @@ class DepositStore ledger where
   depositExpose :: ledger -> Bool -> Text -> Text -> IO OrderView
   depositPause :: ledger -> Text -> IO ()
   depositReadiness :: ledger -> IO Availability
-instance DepositStore Ledger where
-  depositRead = readOrder
-  depositExpose = exposeOrder
-  depositPause = pause
-  depositReadiness = readiness
-
 solanaDepositMemo :: Config -> Text -> Text
 solanaDepositMemo c oid="ecx-bridge:v1:"<>deploymentId c<>":deposit:"<>oid
 

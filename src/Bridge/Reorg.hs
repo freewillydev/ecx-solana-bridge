@@ -2,8 +2,7 @@
 module Bridge.Reorg (NativeSettlementStore(..),NativeSourceStore(..),reconcileNativeSettlements,reconcileNativeSettlementsWith,reconcileNativeSources,reconcileNativeSourcesWith,inspectNativeSourceWith) where
 
 import Bridge.Config
-import Bridge.Legacy.ObservationPreparation ()
-import Bridge.Ledger
+import Bridge.Ledger.Model
 import Bridge.Native (nativeIdentity,nativeAmount)
 import Bridge.NativePayment (ownedScript,transactionId,signedNativePlan,planDepth,signedNativeFee)
 import Bridge.RPC
@@ -17,13 +16,12 @@ import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Database.SQLite.Simple
 import Network.HTTP.Client (Manager)
 import Text.Read (readMaybe)
 
 -- A missing RPC response cannot prove that credited source value disappeared.
 -- Only a canonical native wallet conflict creates a financial deficit here.
-reconcileNativeSources :: Manager -> Config -> Ledger -> IO Value
+reconcileNativeSources :: NativeSourceStore ledger => Manager -> Config -> ledger -> IO Value
 reconcileNativeSources manager c=reconcileNativeSourcesWith
   (realPaymentTransport manager c (const $ reject "unexpected_source_recovery_backup"))
     {paymentIdentity=nativeIdentity manager c >> pure ()} c
@@ -34,17 +32,6 @@ class NativeSourceStore ledger where
   sourceRecordCheck :: ledger -> Deposit -> SourceCheck -> IO ()
   sourceOrderBinding :: ledger -> Text -> IO (Text,Text)
   sourceEventEvidence :: ledger -> Text -> IO (Text,Text)
-instance NativeSourceStore Ledger where
-  sourceCandidates = nativeSourceCandidates
-  sourcePause = pause
-  sourceRecordCheck = recordSourceCheck
-  sourceOrderBinding ledger oid = do
-    rows <- ledgerAction ledger $ \db->query db "SELECT instruction,policy_json FROM orders WHERE id=?" (Only oid)
-    case rows of [binding]->pure binding; _->reject "native_source_binding_missing"
-  sourceEventEvidence ledger txid = do
-    rows <- ledgerAction ledger $ \db->query db "SELECT e.evidence_hash,o.evidence_json FROM chain_events e JOIN observation_evidence o ON o.hash=e.evidence_hash WHERE e.chain='Native' AND e.event_id=? AND e.kind IN('incoming','unmatched_incoming') AND e.needs_review=0" (Only txid)
-    case rows of [evidence]->pure evidence; _->reject "source_recovery_scan_not_current"
-
 reconcileNativeSourcesWith :: NativeSourceStore ledger => PaymentTransport -> Config -> ledger -> IO Value
 reconcileNativeSourcesWith transport c ledger=do
   sources <- sourceCandidates ledger
@@ -152,7 +139,7 @@ inspectNativeSourceWith transport c ledger source=do
 
 -- Recheck previously settled native bytes when their recorded finality changed.
 -- A different proved family winner adjusts its fee only, without a new payment.
-reconcileNativeSettlements :: Manager -> Config -> Ledger -> IO Value
+reconcileNativeSettlements :: NativeSettlementStore ledger => Manager -> Config -> ledger -> IO Value
 reconcileNativeSettlements manager c=reconcileNativeSettlementsWith
   (realPaymentTransport manager c (const $ reject "unexpected_reorg_backup"))
     {paymentIdentity=nativeIdentity manager c >> pure ()} c
@@ -162,14 +149,6 @@ class PaymentStore ledger => NativeSettlementStore ledger where
   recoveryPause :: ledger -> Text -> IO ()
   recoveryObservation :: ledger -> Text -> IO Text
   recoveryCheck :: ledger -> Attempt -> Text -> NativeSettlementCheck -> IO ()
-instance NativeSettlementStore Ledger where
-  recoveryCandidates = nativeSettlementCandidates
-  recoveryPause = pause
-  recoveryObservation ledger txid = do
-    rows <- ledgerAction ledger $ \db->query db "SELECT observation_json FROM attempts WHERE txid=?" (Only txid)
-    case rows of [Only saved]->pure saved; _->reject "native_settlement_missing"
-  recoveryCheck = recordNativeSettlementCheck
-
 reconcileNativeSettlementsWith :: NativeSettlementStore ledger => PaymentTransport -> Config -> ledger -> IO Value
 reconcileNativeSettlementsWith transport c ledger=do
   candidates <- recoveryCandidates ledger

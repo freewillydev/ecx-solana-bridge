@@ -1,6 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main where
-import Bridge.Legacy.ObservationPreparation ()
+import Bridge.Legacy.PaymentLifecycle ()
 import Bridge.Types
 import Bridge.Config
 import qualified Bridge.Postgres.Maintenance as Maintenance

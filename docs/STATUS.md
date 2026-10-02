@@ -1561,3 +1561,20 @@ The production package still links SQLite through the remaining settlement,
 reconciliation, recovery and diagnostic paths. Their adapters and tools still
 need separation before the Cabal components and installer can drop the dependency.
 No new Linux package or broader runtime-removal acceptance is claimed here.
+
+### Settlement, native reorg and deposit adapters isolated
+
+`Bridge.Settlement`, `Bridge.Reorg` and `Bridge.Deposit` now contain shared chain
+algorithms and store typeclasses without SQLite or legacy adapter imports. Five
+SQLite instances and their source-context/expiry-origin queries moved unchanged
+to `Bridge.Legacy.PaymentLifecycle`. The existing convenience entry points use
+the corresponding store constraints rather than a concrete SQLite ledger.
+Legacy recovery/reconciliation/worker consumers and tests load the adapter;
+PostgreSQL consumers use their existing typed implementations. The internal DSL
+also imports loss-capital records directly from the pure model.
+
+The executable and regression suite compile, with all 373 examples passing.
+Remaining SQLite dependencies include recovery and reconciliation adapters,
+legacy order provisioning, diagnostics and maintenance/import tooling. The Cabal
+component split and production installer dependency removal remain unfinished.
+No Linux rebuild or new chain transfer was needed for this source refactor.
