@@ -1,5 +1,5 @@
 module Bridge.Postgres.Observation
-  ( refreshDeposit, recordScan, readCheckpoint, lookupInstruction, maximumNativeDepth, commitScan, recordScanFailure, promoteDeposit ) where
+  ( refreshDeposit, recordScan, readCheckpoint, lookupInstruction, maximumNativeDepth, pendingVerification, lookupReferences, promotionCandidates, scannerHealth, commitScan, recordScanFailure, promoteDeposit ) where
 
 import Bridge.Types
 import Bridge.Ledger.Model (Deposit(..), SourceCheck(..), ScanBatch(..), ChainEvent(..), economicOutflow)
@@ -7,7 +7,7 @@ import Bridge.Postgres.Source (recordSourceCheckC, sourceWorkHashC)
 import Bridge.Postgres.Ledger (Ledger, ledgerAction, posting)
 import Bridge.Postgres.Schema
 import Control.Monad (when, forM, forM_)
-import Data.Aeson (FromJSON, eitherDecodeStrict', object, (.=), ToJSON, encode)
+import Data.Aeson (FromJSON, eitherDecodeStrict', object, (.=), ToJSON, encode, Value)
 import Data.List (sortOn)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
@@ -327,3 +327,52 @@ promoteDeposit ledger now did = ledgerAction ledger $ \connection->do
         _ <- O.runUpdate connection O.Update {O.uTable=ordersTable,O.uUpdateWith= \row->row {ordersStatus=O.sqlStrictText "Ready"},O.uWhere= \row->ordersId row O..== O.sqlStrictText oid,O.uReturning=O.rCount}
         pure True
     _->reject "deposit_not_found"
+
+pendingVerification :: Ledger -> IO [Text]
+pendingVerification ledger = ledgerAction ledger $ \connection->do
+  rows <- O.runSelect connection $ do
+    row <- O.selectTable chaineventsTable
+    O.where_ (chaineventsChain row O..== O.sqlStrictText "Solana" O..&& chaineventsKind row O..== O.sqlStrictText "awaiting_verifier")
+    pure (chaineventsFirstSeen row,chaineventsEventId row)
+    :: IO [(Int64,Text)]
+  pure (map snd (take 1000 (sortOn fst rows)))
+
+lookupReferences :: Ledger -> [Text] -> IO (Maybe (Text,OrderRequest,PolicySnapshot,Text))
+lookupReferences ledger keys = ledgerAction ledger $ \connection->do
+  rows <- O.runSelect connection $ do
+    row <- O.selectTable ordersTable
+    O.where_ (O.matchNullable (O.sqlBool False) (\instruction->foldr (O..||) (O.sqlBool False) [instruction O..== O.sqlStrictText ("solana-pay:"<>key) | key<-keys]) (ordersInstruction row))
+    pure(ordersId row,ordersRequestJson row,ordersPolicyJson row,ordersInstruction row)
+    :: IO [(Text,Text,Text,Maybe Text)]
+  case rows of
+    [(oid,request,policy,Just instruction)] | Just reference<-T.stripPrefix "solana-pay:" instruction->do
+      req <- either (const $ reject "corrupt_ledger_json") pure(eitherDecodeStrict' $ TE.encodeUtf8 request)
+      saved <- either (const $ reject "corrupt_ledger_json") pure(eitherDecodeStrict' $ TE.encodeUtf8 policy)
+      pure(Just(oid,req,saved,reference))
+    _->pure Nothing
+
+promotionCandidates :: Ledger -> IO [Text]
+promotionCandidates ledger = do
+  candidates <- ledgerAction ledger $ \connection->O.runSelect connection $ do
+    deposit <- O.selectTable depositsTable
+    order <- O.selectTable ordersTable
+    O.where_ (O.matchNullable (O.sqlBool False) (\oid->oid O..== ordersId order) (depositsOrderId deposit) O..&&
+      depositsEligible deposit O..== O.sqlInt8 1 O..&& depositsAllocated deposit O..== O.sqlInt8 0 O..&&
+      (ordersStatus order O..== O.sqlStrictText "Provisioning" O..|| ordersStatus order O..== O.sqlStrictText "AwaitingDeposit"))
+    pure (depositsFirstSeen deposit,depositsId deposit)
+    :: IO [(Int64,Text)]
+  pure (map snd (take 1000 (sortOn id candidates)))
+
+scannerHealth :: Ledger -> IO Value
+scannerHealth ledger = ledgerAction ledger $ \connection->do
+  health <- O.runSelect connection (O.selectTable scanhealthTable) :: IO [ScanHealth]
+  checkpoints <- O.runSelect connection (O.selectTable checkpointsTable) :: IO [Checkpoints]
+  reviews <- O.runSelect connection $ do
+    row <- O.selectTable chaineventsTable
+    O.where_ (chaineventsNeedsReview row O..== O.sqlInt8 1)
+    pure (chaineventsFirstSeen row,chaineventsChain row,chaineventsEventId row,chaineventsKind row)
+    :: IO [(Int64,Text,Text,Text)]
+  let cursor chain=lookup chain [(checkpointsChain row,checkpointsAnchor row) | row<-checkpoints]
+      scanners=[object ["chain" .= scanhealthChain row,"lastSuccess" .= scanhealthLastSuccess row,"lastError" .= scanhealthLastError row,"checkedAt" .= scanhealthCheckedAt row,"cursor" .= cursor (scanhealthChain row)] | row<-sortOn scanhealthChain health]
+      reviewed=[object ["chain" .= chain,"event" .= event,"kind" .= kind] | (_,chain,event,kind)<-take 100 (sortOn (\(time,_,_,_)->time) reviews)]
+  pure (object ["scanners" .= scanners,"review" .= reviewed])

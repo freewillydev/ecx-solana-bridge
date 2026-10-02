@@ -7,9 +7,9 @@ module Bridge.Ledger
   , createOrder, readOrder, bindInstruction, criticalSequence, acknowledgeBackup
   , checkIntakeReady
   , freeInventory, expireQuotes
-  , Deposit(..), observeDeposit, refreshDeposit, recordScan, readCheckpoint, promoteDeposit
-  , economicOutflow, ChainEvent(..), ScanBatch(..), commitScan, recordScanFailure, custodyHealth
-  , maximumNativeDepth, pendingVerification
+  , Deposit(..), observeDeposit, refreshDeposit, readCheckpoint, promoteDeposit
+  , economicOutflow, ChainEvent(..), ScanBatch(..), commitScan, custodyHealth
+  , maximumNativeDepth
   , Obligation(..), readyObligations, Attempt(..), storeAttempt, markBroadcastIntent, authorizeRecordedSend
   , Preparation(..), beginPreparation, storeDraft, pendingPreparations, activePreparationGeneration
   , preparationCancellation, beginPreparationCancellation, finishPreparationCancellation, checkCustodyFresh
@@ -321,17 +321,6 @@ refreshDeposit l deposit = ledgerAction l $ \c -> do
   require (existing==[Only $ depositId deposit]) "source_deposit_missing"
   observeDepositC c deposit
 
--- The whole page and its continuation commit together. A stale scanner cannot
--- advance a newer cursor, and one invalid receipt rolls back the complete page.
-recordScan :: Ledger -> Text -> Maybe Text -> Text -> [Deposit] -> IO ()
-recordScan l chain previous next deposits = ledgerAction l $ \c -> do
-  require (chain `elem` map fst scanAssets && not (T.null next) && T.length next<=128 && length deposits<=1000) "invalid_scan_batch"
-  require (all (\d -> Just (depositAsset d)==lookup chain scanAssets) deposits) "scan_asset_mismatch"
-  actual <- readCheckpointC c chain
-  require (actual==previous) "stale_scan_cursor"
-  mapM_ (observeDepositC c) deposits
-  checkpoint c chain next
-
 -- Immutable evidence is separate from the latest observation's classification.
 -- Neither an unknown receipt nor a provider's history cursor authorizes spending.
 
@@ -368,23 +357,10 @@ commitScan l ScanBatch{..} = ledgerAction l $ \c -> do
   checkpoint c scanChain scanNext
   execute c "INSERT INTO scan_health(chain,last_success,last_error,checked_at) VALUES(?,?,NULL,?) ON CONFLICT(chain) DO UPDATE SET last_success=excluded.last_success,last_error=NULL,checked_at=excluded.checked_at" (scanChain,scanTime,scanTime)
 
-recordScanFailure :: Ledger -> Text -> Int64 -> Text -> IO ()
-recordScanFailure l chain now code = ledgerAction l $ \c -> do
-  require (chain `elem` map fst scanAssets && T.length code<=160) "invalid_scan_failure"
-  previous <- query c "SELECT last_error FROM scan_health WHERE chain=?" (Only chain) :: IO [Only (Maybe Text)]
-  when (previous/=[Only (Just code)]) $ execute c "INSERT INTO audit(action,detail) VALUES('scanner_failure',?)" (Only (chain<>":"<>code))
-  execute c "INSERT INTO scan_health(chain,last_error,checked_at) VALUES(?,?,?) ON CONFLICT(chain) DO UPDATE SET last_error=excluded.last_error,checked_at=excluded.checked_at" (chain,code,now)
-  execute c "UPDATE deployment SET paused=1,pause_reason=?" (Only ("scanner_unavailable:"<>chain))
-
 maximumNativeDepth :: Ledger -> Int -> IO Int
 maximumNativeDepth l minimumDepth = ledgerAction l $ \c -> do
   rows <- query_ c "SELECT MAX(json_extract(policy_json,'$.nativeDepth')) FROM orders" :: IO [Only (Maybe Int)]
   case rows of [Only depth] -> pure (max minimumDepth (maybe 1 id depth)); _ -> reject "invalid_confirmation_policy"
-
-pendingVerification :: Ledger -> IO [Text]
-pendingVerification l = ledgerAction l $ \c -> do
-  rows <- query_ c "SELECT event_id FROM chain_events WHERE chain='Solana' AND kind='awaiting_verifier' ORDER BY first_seen LIMIT 1000" :: IO [Only Text]
-  pure [sig | Only sig<-rows]
 
 readCheckpoint :: Ledger -> Text -> IO (Maybe Text)
 readCheckpoint l chain = ledgerAction l (\c -> readCheckpointC c chain)

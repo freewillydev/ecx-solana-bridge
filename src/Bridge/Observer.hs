@@ -4,11 +4,8 @@ module Bridge.Observer
   ) where
 
 import Bridge.Config
-import Bridge.Postgres.Ledger (Ledger,ledgerAction)
+import Bridge.Postgres.Ledger (Ledger)
 import qualified Bridge.Postgres.Observation as Store
-import Bridge.Postgres.Schema
-import qualified Opaleye as O
-import qualified Data.Text.Encoding as TE
 import Bridge.Ledger.Model (Deposit(..), ScanBatch(..), ChainEvent(..))
 import Bridge.Native
 import Bridge.RPC
@@ -24,7 +21,7 @@ import Data.Aeson
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
-import Data.List (nub,sortOn)
+import Data.List (nub)
 import qualified Data.Set as Set
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -173,7 +170,7 @@ observeSolana manager c ledger = do
   previous <- Store.readCheckpoint ledger "Solana"
   history <- collectSignatures origin previous $ \before ->
     solanaHistory manager c before Nothing >>= parseValue parseJSON
-  pending <- pendingVerification ledger
+  pending <- Store.pendingVerification ledger
   let historyIds=map historySignature history
       work=[(historySignature h,Just h) | h<-history] <> [(sig,Nothing) | sig<-pending,sig `notElem` historyIds]
   require (length work<=1000) "solana_verification_backlog"
@@ -208,7 +205,7 @@ observeSolana manager c ledger = do
               legacy <- maybe (pure Nothing) (Store.lookupInstruction ledger) memo
               referenced <- case Pay.transactionKeys value of
                 Left _->pure Nothing
-                Right keys->lookupReferences ledger keys
+                Right keys->Store.lookupReferences ledger keys
               authorized <- case (legacy,referenced) of
                 (Nothing,Just (oid,request,_,reference)) | direction request==WrappedToNative ->
                   authorize sig value oid (Just ("solana-pay:"<>reference)) (Pay.verifyPay (Pay.PayBinding sig (mint c) (custodyAta c) (custodyOwner c) reference))
@@ -292,52 +289,10 @@ observeOnce manager c ledger = do
       Right () -> pure ()
       Left (BridgeError code) -> epochSeconds >>= \now -> Store.recordScanFailure ledger chain now code
   promoteObserved ledger
-  scannerHealth ledger
+  Store.scannerHealth ledger
 
--- Concrete PostgreSQL implementations used only by the scan workflow.
-lookupReferences :: Ledger -> [Text] -> IO (Maybe (Text,OrderRequest,PolicySnapshot,Text))
-lookupReferences ledger keys = ledgerAction ledger $ \connection->do
-  rows <- O.runSelect connection $ do
-    row <- O.selectTable ordersTable
-    O.where_ (O.matchNullable (O.sqlBool False) (\instruction->foldr (O..||) (O.sqlBool False) [instruction O..== O.sqlStrictText ("solana-pay:"<>key) | key<-keys]) (ordersInstruction row))
-    pure(ordersId row,ordersRequestJson row,ordersPolicyJson row,ordersInstruction row)
-    :: IO [(Text,Text,Text,Maybe Text)]
-  case rows of
-    [(oid,request,policy,Just instruction)] | Just reference<-T.stripPrefix "solana-pay:" instruction->do
-      req <- either (const $ reject "corrupt_ledger_json") pure(eitherDecodeStrict' $ TE.encodeUtf8 request)
-      saved <- either (const $ reject "corrupt_ledger_json") pure(eitherDecodeStrict' $ TE.encodeUtf8 policy)
-      pure(Just(oid,req,saved,reference))
-    _->pure Nothing
-pendingVerification :: Ledger -> IO [Text]
-pendingVerification ledger = ledgerAction ledger $ \connection->do
-  rows <- O.runSelect connection $ do
-    row <- O.selectTable chaineventsTable
-    O.where_ (chaineventsChain row O..== O.sqlStrictText "Solana" O..&& chaineventsKind row O..== O.sqlStrictText "awaiting_verifier")
-    pure (chaineventsFirstSeen row,chaineventsEventId row)
-    :: IO [(Int64,Text)]
-  pure (map snd (take 1000 (sortOn fst rows)))
 promoteObserved :: Ledger -> IO ()
 promoteObserved ledger = do
-  candidates <- ledgerAction ledger $ \connection->O.runSelect connection $ do
-    deposit <- O.selectTable depositsTable
-    order <- O.selectTable ordersTable
-    O.where_ (O.matchNullable (O.sqlBool False) (\oid->oid O..== ordersId order) (depositsOrderId deposit) O..&&
-      depositsEligible deposit O..== O.sqlInt8 1 O..&& depositsAllocated deposit O..== O.sqlInt8 0 O..&&
-      (ordersStatus order O..== O.sqlStrictText "Provisioning" O..|| ordersStatus order O..== O.sqlStrictText "AwaitingDeposit"))
-    pure (depositsFirstSeen deposit,depositsId deposit)
-    :: IO [(Int64,Text)]
+  candidates <- Store.promotionCandidates ledger
   now <- epochSeconds
-  forM_ (take 1000 (sortOn id candidates)) $ \(_,did)->Store.promoteDeposit ledger now did >> pure ()
-scannerHealth :: Ledger -> IO Value
-scannerHealth ledger = ledgerAction ledger $ \connection->do
-  health <- O.runSelect connection (O.selectTable scanhealthTable) :: IO [ScanHealth]
-  checkpoints <- O.runSelect connection (O.selectTable checkpointsTable) :: IO [Checkpoints]
-  reviews <- O.runSelect connection $ do
-    row <- O.selectTable chaineventsTable
-    O.where_ (chaineventsNeedsReview row O..== O.sqlInt8 1)
-    pure (chaineventsFirstSeen row,chaineventsChain row,chaineventsEventId row,chaineventsKind row)
-    :: IO [(Int64,Text,Text,Text)]
-  let cursor chain=lookup chain [(checkpointsChain row,checkpointsAnchor row) | row<-checkpoints]
-      scanners=[object ["chain" .= scanhealthChain row,"lastSuccess" .= scanhealthLastSuccess row,"lastError" .= scanhealthLastError row,"checkedAt" .= scanhealthCheckedAt row,"cursor" .= cursor (scanhealthChain row)] | row<-sortOn scanhealthChain health]
-      reviewed=[object ["chain" .= chain,"event" .= event,"kind" .= kind] | (_,chain,event,kind)<-take 100 (sortOn (\(time,_,_,_)->time) reviews)]
-  pure (object ["scanners" .= scanners,"review" .= reviewed])
+  forM_ candidates $ \did->Store.promoteDeposit ledger now did >> pure ()

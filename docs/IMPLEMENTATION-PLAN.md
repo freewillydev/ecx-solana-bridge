@@ -129,6 +129,10 @@ and existing backup tooling are explicit dependencies rather than custom framewo
    the PostgreSQL operator DSL; duplicate SQLite treasury allocation/spend mutations
    and the separate treasury runner are retired. Funding guarantees are checked by
    the consolidated PostgreSQL journal contract, including immutable replay across restart.
+   Receipt/page atomicity and delayed verification also use the PostgreSQL contract;
+   legacy resume-policy checks remain until their whole workflow is migrated.
+   Chain scanning no longer executes Opaleye directly: reference lookup, promotion
+   selection and scanner diagnostics are named operations in the observation store.
 
 4. **Make the domain and DSL the entry point for auditing.** Consolidate duplicate
    Plan/Request/DSL layers only when they add no distinct guarantee. Use explicit

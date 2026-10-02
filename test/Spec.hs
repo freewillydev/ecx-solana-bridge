@@ -819,48 +819,7 @@ main=hspec $ do
         ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` 90000
         ledgerAction l (\db->freeOperating db "Native") `shouldReturn` 99000
         available <$> readiness l `shouldReturn` False
-  describe "atomic observer checkpoints" $ do
-    it "rolls back an entire page and its cursor if any receipt conflicts" $ withFunded $ \l c -> do
-      o<-createOrder l c 100 cap req
-      let deposit=Deposit "observed:0" (Just $ orderId o) Native (input req) "block-a" 1 True 100
-      recordScan l "Native" Nothing "cursor-a" [deposit]
-      let fresh=deposit{depositId="fresh:0"}
-      recordScan l "Native" (Just "cursor-a") "cursor-b" [fresh,deposit{depositAmount=amt 1}]
-        `shouldThrow` isError "conflicting_deposit_evidence"
-      readCheckpoint l "Native" `shouldReturn` Just "cursor-a"
-      ledgerAction l (\db->query_ db "SELECT id FROM deposits ORDER BY id" :: IO [Only Text]) `shouldReturn` [Only "observed:0"]
-      recordScan l "Native" Nothing "old-cursor" [] `shouldThrow` isError "stale_scan_cursor"
-    it "quarantines receipts without durable order bindings, including on replay" $ withFunded $ \l c -> do
-      let unknown=Deposit "unrecognized:0" Nothing Native (amt 50000) "block-a" 1 True 100
-      recordScan l "Native" Nothing "cursor-a" [unknown]
-      recordScan l "Native" (Just "cursor-a") "cursor-b" [unknown]
-      ledgerAction l (\db->freeInventory db Native) `shouldReturn` 1000000
-      ledgerAction l (\db->query_ db "SELECT delta FROM postings WHERE account='unallocated'" :: IO [Only Int64]) `shouldReturn` [Only 50000]
-      promoteDeposit l 101 "unrecognized:0" `shouldReturn` False
-      createRefund l "unrecognized:0" `shouldThrow` isError "refundable_deposit_not_found"
-      o<-createOrder l c 100 cap req
-      recordScan l "Native" (Just "cursor-b") "cursor-c" [unknown{depositOrder=Just $ orderId o}]
-        `shouldThrow` isError "conflicting_deposit_evidence"
-    it "requires each order's snapshotted confirmation depth before eligibility" $ withFunded $ \l c -> do
-      o<-createOrder l c{nativeConfirmations=6} 100 cap req
-      let deposit=Deposit "shallow:0" (Just $ orderId o) Native (input req) "block-a" 1 True 100
-      recordScan l "Native" Nothing "cursor-a" [deposit] `shouldThrow` isError "deposit_confirmation_policy_mismatch"
-      readCheckpoint l "Native" `shouldReturn` Nothing
-      recordScan l "Native" Nothing "cursor-a" [deposit{depositConfirmations=6}]
-      promoteDeposit l 110 "shallow:0" `shouldReturn` True
-    it "commits immutable evidence, cursor and receipts together and preserves scan origin" $ withFunded $ \l _ -> do
-      let receipt=Deposit "native:fixture:0" Nothing Native (amt 30) "block-a" 1 True 100
-          event=ChainEvent "fixture" "unmatched_incoming" "block-a" (object ["amount" .= ("30"::Text)])
-          batch=ScanBatch "Native" "origin" Nothing "cursor-a" 100 [receipt] [event]
-      commitScan l batch
-      commitScan l batch{scanPrevious=Just "cursor-a",scanNext="cursor-b",scanTime=200}
-      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM observation_evidence" :: IO [Only Int]) `shouldReturn` [Only 1]
-      ledgerAction l (\db->query_ db "SELECT first_seen FROM deposits" :: IO [Only Int64]) `shouldReturn` [Only 100]
-      commitScan l batch{scanPrevious=Just "cursor-b",scanOrigin="changed",scanNext="cursor-c"}
-        `shouldThrow` isError "scan_origin_mismatch"
-      readCheckpoint l "Native" `shouldReturn` Just "cursor-b"
-      changed<-try (ledgerAction l $ \db->execute_ db "UPDATE observation_evidence SET evidence_json='tampered'") :: IO (Either SomeException ())
-      changed `shouldSatisfy` either (const True) (const False)
+  describe "observer review and resume policy" $ do
     it "keeps scanner progress moving past unsupported activity while blocking spending" $ withFunded $ \l _ -> do
       let receipt=Deposit "solana:valid" Nothing Wrapped (amt 30) "123" 1 True 100
           unsupported=ChainEvent "unsupported-sig" "unsupported" "122" (object ["reason" .= ("unsupported_version"::Text)])
@@ -872,24 +831,6 @@ main=hspec $ do
       commitScan l (ScanBatch "Solana" "origin-sig" (Just "valid-sig") "newest-sig" 110 [] [])
       readCheckpoint l "Solana" `shouldReturn` Just "newest-sig"
       ledgerAction l (\db->freeInventory db Wrapped) `shouldReturn` 1000000
-    it "retains first-seen time while waiting for independent verification" $ withFunded $ \l c -> do
-      let redeem=req{direction=WrappedToNative,recipient="native-recipient",refund="bound-owner",sourceOwner=Just "bound-owner"}
-      o<-createOrder l c 100 cap redeem
-      let deposit=Deposit "solana:pending" (Just $ orderId o) Wrapped (input redeem) "123" 1 False 390
-          event=ChainEvent "pending" "awaiting_verifier" "123" Null
-      commitScan l (ScanBatch "Solana" "origin" Nothing "pending" 391 [deposit] [event])
-      pendingVerification l `shouldReturn` ["pending"]
-      promoteDeposit l 391 "solana:pending" `shouldReturn` False
-      commitScan l (ScanBatch "Solana" "origin" (Just "pending") "pending" 450 [deposit{depositEligible=True,depositSeenAt=450}] [event{chainEventKind="incoming"}])
-      pendingVerification l `shouldReturn` []
-      promoteDeposit l 450 "solana:pending" `shouldReturn` True
-    it "records provider failures without moving a successful cursor or duplicating alerts" $ withFunded $ \l _ -> do
-      commitScan l (ScanBatch "Native" "origin" Nothing "cursor-a" 100 [] [])
-      recordScanFailure l "Native" 110 "rpc_transport_unknown_outcome"
-      recordScanFailure l "Native" 120 "rpc_transport_unknown_outcome"
-      readCheckpoint l "Native" `shouldReturn` Just "cursor-a"
-      ledgerAction l (\db->query_ db "SELECT last_success,checked_at FROM scan_health" :: IO [(Int64,Int64)]) `shouldReturn` [(100,120)]
-      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM audit WHERE action='scanner_failure'" :: IO [Only Int]) `shouldReturn` [Only 1]
     it "quarantines a custody spend with no recorded intent" $ withFunded $ \l _ -> do
       commitScan l (ScanBatch "Native" "origin" Nothing "cursor" 100 [] [ChainEvent "unknown-spend" "outgoing" "block" Null])
       available <$> readiness l `shouldReturn` False

@@ -3,6 +3,7 @@ module Main (main) where
 
 import Bridge.Types hiding (deploymentFingerprint)
 import Bridge.Ledger.Model (Deposit(..),Obligation(..),CostLimits(..),ScanBatch(..),ChainEvent(..))
+import qualified Bridge.Postgres.Refund as Refund
 import qualified Bridge.Postgres.Treasury as Treasury
 import qualified Bridge.Postgres.Preparation as Preparation
 import qualified Bridge.Postgres.Settlement as Settlement
@@ -109,7 +110,8 @@ main = do
   provisioningContracts settings
   rollbackContract settings
   treasuryContracts settings
-  putStrLn "PostgreSQL journal and backup acknowledgment: balanced writes, row locking, ownership, exact coverage, identity/receipt/stale refusal, idempotence, durable reopen, order/provisioning contracts, interruption, commit/capacity failure, send-authority rollback/fencing and treasury classification passed"
+  observerContracts settings
+  putStrLn "PostgreSQL journal and backup acknowledgment: balanced writes, row locking, ownership, exact coverage, identity/receipt/stale refusal, idempotence, durable reopen, order/provisioning contracts, interruption, commit/capacity failure, send-authority rollback/fencing, treasury classification and observer page contracts passed"
 
 
 -- Closed test operations: no arbitrary SQL/query callback in fixture access.
@@ -127,11 +129,13 @@ data Fixture a where
   Inventory :: Asset -> Fixture Integer
   TreasuryState :: Fixture ([TreasurySpends],[ChainEvents])
   ReceiptState :: Fixture ([Deposits],[TreasuryAllocations])
+  ScanState :: Fixture ([ScanOrigins],[ScanHealth],[ObservationEvidence],[ChainEvents],[Audit])
   ReceiptCounts :: Fixture (Int,Int)
   FailTransaction :: Fixture ()
   FailCommit :: IORef Bool -> Fixture ()
   FailCapacity :: Fixture ()
   FailCostPolicy :: Fixture ()
+  FailEvidence :: Fixture ()
   OperatingFunds :: Fixture (Integer,Integer)
   InterruptedWrite :: MVar () -> MVar () -> Fixture ()
   FundedObligation :: Fixture Obligation
@@ -234,6 +238,12 @@ fixture connection = \case
     <$> (sortOn (\r->(treasuryspendsChain r,treasuryspendsEventId r)) <$> O.runSelect connection (O.selectTable treasuryspendsTable))
     <*> (sortOn (\r->(chaineventsChain r,chaineventsEventId r)) <$> O.runSelect connection (O.selectTable chaineventsTable))
 
+  ScanState -> (,,,,)
+    <$> (sortOn scanoriginsChain <$> O.runSelect connection (O.selectTable scanoriginsTable))
+    <*> (sortOn scanhealthChain <$> O.runSelect connection (O.selectTable scanhealthTable))
+    <*> (sortOn observationevidenceHash <$> O.runSelect connection (O.selectTable observationevidenceTable))
+    <*> (sortOn (\r->(chaineventsChain r,chaineventsEventId r)) <$> O.runSelect connection (O.selectTable chaineventsTable))
+    <*> (sortOn auditId <$> O.runSelect connection (O.selectTable auditTable))
   ReceiptState -> (,)
     <$> (sortOn depositsId <$> O.runSelect connection (O.selectTable depositsTable))
     <*> (sortOn treasuryallocationsDepositId <$> O.runSelect connection (O.selectTable treasuryallocationsTable))
@@ -293,6 +303,10 @@ fixture connection = \case
       , O.iRows=[O.sqlStrictText "missing-event"],O.iReturning=O.rCount,O.iOnConflict=Nothing }
     writeIORef bodyCompleted True
   OperatingFunds -> (,) <$> L.freeOperating connection "Native" <*> L.freeOperating connection "Sol"
+  FailEvidence -> void $ O.runUpdate connection O.Update
+    { O.uTable=observationevidenceTable
+    , O.uUpdateWith= \row->row {observationevidenceEvidenceJson=O.sqlStrictText "tampered"}
+    , O.uWhere=const(O.sqlBool True),O.uReturning=O.rCount }
   FailCostPolicy -> void $ O.runUpdate connection O.Update
     { O.uTable=ordercostlimitsTable,O.uUpdateWith= \row->row {ordercostlimitsNativeFee=O.sqlInt8 5}
     , O.uWhere=const(O.sqlBool True),O.uReturning=O.rCount }
@@ -675,6 +689,105 @@ treasuryContracts settings = do
     (spends,events) <- state ledger TreasuryState
     require (length spends==3) "treasury_decisions_lost_on_restart"
     require (any (\e->chaineventsEventId e=="operator-payment" && chaineventsNeedsReview e==1) events) "treasury_review_lost_on_restart"
+
+-- Receipt/page contracts on the production PostgreSQL observer store.
+observerContracts :: PG.ConnectInfo -> IO ()
+observerContracts settings = do
+  base <- BS.readFile "config/l2l-devnet.example.json" >>= either fail pure . eitherDecodeStrict'
+  let quantity n=either (error . T.unpack) id (amount n)
+      cfg=base{maxQueued=100,maxSolAccountRent=quantity 0,
+        maxNativeDailyCost=quantity 1000000,maxSolDailyCost=quantity 1000000}
+      state ledger operation=L.ledgerAction ledger (\connection->fixture connection operation)
+      snapshot ledger=(,,) <$> state ledger JournalState <*> state ledger ReceiptState <*> state ledger ScanState
+      rejected ledger code action=do
+        before <- snapshot ledger
+        expectError code action
+        after <- snapshot ledger
+        require (before==after) "rejected_scan_published_partial_page"
+      request=OrderRequest NativeToWrapped (quantity 10000) "destination" "refund" Nothing "observer-depth"
+      cap=T.replicate 64 "e"
+  originalEvidence <- L.withLedger settings "journal-contract" $ \ledger->do
+    state ledger (ReadyAt 100)
+    order <- Order.createOrder ledger cfg{nativeConfirmations=6} 100 cap request
+    previous <- Observation.readCheckpoint ledger "Native"
+    let receipt=Deposit "observer-shallow:0" (Just $ ordersId order) Native (quantity 10000) "block" 1 True 100
+    rejected ledger "deposit_confirmation_policy_mismatch"
+      (Observation.recordScan ledger "Native" previous "observer-native" [receipt])
+    Observation.recordScan ledger "Native" previous "observer-native" [receipt{depositConfirmations=6}]
+    candidates <- Observation.promotionCandidates ledger
+    require (depositId receipt `elem` candidates) "eligible_receipt_missing_from_promotion"
+    rejected ledger "conflicting_deposit_evidence" (Observation.recordScan ledger "Native" (Just "observer-native") "invalid-page"
+      [receipt{depositId="must-not-commit:0",depositConfirmations=6},receipt{depositAmount=quantity 1,depositConfirmations=6}])
+    rejected ledger "stale_scan_cursor" (Observation.recordScan ledger "Native" previous "stale" [])
+    accepted <- Observation.promoteDeposit ledger 110 (depositId receipt)
+    require accepted "saved_confirmation_depth_not_promoted"
+
+    beforeFloat <- state ledger (Inventory Native)
+    let unknown=Deposit "observer-unbound:0" Nothing Native (quantity 50000) "block" 1 True 100
+    Observation.recordScan ledger "Native" (Just "observer-native") "unbound" [unknown]
+    booked <- L.ledgerAction ledger L.balances
+    Observation.recordScan ledger "Native" (Just "unbound") "unbound-replay" [unknown]
+    replayed <- L.ledgerAction ledger L.balances
+    afterFloat <- state ledger (Inventory Native)
+    require (booked==replayed && beforeFloat==afterFloat) "unbound_receipt_became_float_or_replayed"
+    promoted <- Observation.promoteDeposit ledger 110 (depositId unknown)
+    require (not promoted) "unbound_receipt_created_obligation"
+    candidatesAfter <- Observation.promotionCandidates ledger
+    require (all (`notElem` candidatesAfter) [depositId receipt,depositId unknown]) "allocated_or_unbound_receipt_queued"
+    expectError "refundable_deposit_not_found" (Refund.createRefund ledger $ depositId unknown)
+    rejected ledger "conflicting_deposit_evidence" (Observation.recordScan ledger "Native" (Just "unbound-replay") "rebound"
+      [unknown{depositOrder=Just $ ordersId order,depositConfirmations=6}])
+
+    let event=ChainEvent "observer-unbound" "unmatched_incoming" "block" (object["amount" .= ("50000"::T.Text)])
+        batch=ScanBatch "Native" "treasury-contract" (Just "unbound-replay") "evidence" 100 [unknown] [event]
+    Observation.commitScan ledger batch
+    (_,_,proofsBefore,_,_) <- state ledger ScanState
+    Observation.commitScan ledger batch{scanPrevious=Just "evidence",scanNext="evidence-replay",scanTime=110}
+    (_,_,proofsAfter,_,_) <- state ledger ScanState
+    require (proofsBefore==proofsAfter) "scan_replay_duplicated_evidence"
+    rejected ledger "scan_origin_mismatch"
+      (Observation.commitScan ledger batch{scanPrevious=Just "evidence-replay",scanOrigin="changed",scanNext="invalid-origin"})
+    Observation.recordScanFailure ledger "Native" 120 "rpc_transport_unknown_outcome"
+    Observation.recordScanFailure ledger "Native" 130 "rpc_transport_unknown_outcome"
+    cursor <- Observation.readCheckpoint ledger "Native"
+    (_,health,_,_,audits) <- state ledger ScanState
+    require (cursor==Just "evidence-replay" &&
+      [(scanhealthLastSuccess r,scanhealthCheckedAt r) | r<-health,scanhealthChain r=="Native"]==[(Just 110,130)] &&
+      length [r | r<-audits,auditAction r=="scanner_failure",auditDetail r=="Native:rpc_transport_unknown_outcome"]==1)
+      "scan_failure_moved_cursor_or_repeated_alert"
+
+    state ledger (ReadyAt 100)
+    redeem <- Order.createOrder ledger cfg 100 cap
+      request{direction=WrappedToNative,recipient="native-destination",refund="",idempotencyKey="observer-pending"}
+    Order.bindInstruction ledger (ordersId redeem) "solana-pay:observer-reference"
+    binding <- Observation.lookupReferences ledger ["unrelated","observer-reference"]
+    require (case binding of Just(oid,_,_,reference)->oid==ordersId redeem && reference=="observer-reference"; _->False)
+      "reference_not_bound_to_saved_order"
+    Observation.lookupReferences ledger ["unrelated"] >>= \unmatched->require (unmatched==Nothing) "unmatched_reference_bound"
+    tokenCursor <- Observation.readCheckpoint ledger "Solana"
+    let pending=Deposit "solana:observer-pending" (Just $ ordersId redeem) Wrapped (quantity 10000) "slot" 1 False 390
+        waiting=ChainEvent "observer-pending" "awaiting_verifier" "slot" Null
+        tokenBatch=ScanBatch "Solana" "treasury-contract" tokenCursor "observer-pending" 391 [pending] [waiting]
+    Observation.commitScan ledger tokenBatch
+    queue <- Observation.pendingVerification ledger
+    require (queue==["observer-pending"]) "pending_verification_not_retained"
+    immature <- Observation.promoteDeposit ledger 391 (depositId pending)
+    require (not immature) "unverified_deposit_promoted"
+    Observation.commitScan ledger tokenBatch{scanPrevious=Just "observer-pending",scanTime=450,
+      scanDeposits=[pending{depositEligible=True,depositSeenAt=450}],scanEvents=[waiting{chainEventKind="incoming"}]}
+    remaining <- Observation.pendingVerification ledger
+    matured <- Observation.promoteDeposit ledger 450 (depositId pending)
+    (deposits,_) <- state ledger ReceiptState
+    require (null remaining && matured &&
+      [depositsFirstSeen r | r<-deposits,depositsId r==depositId pending]==[390]) "verification_changed_first_seen_or_missed_grace"
+    (_,_,evidence,_,_) <- state ledger ScanState
+    tamper <- try (state ledger FailEvidence) :: IO (Either PG.SqlError ())
+    require (case tamper of Left err->PG.sqlState err=="23514"; _->False) "immutable_observation_changed"
+    expectFenced (state ledger ScanState)
+    pure evidence
+  L.withLedger settings "journal-contract" $ \ledger->do
+    (_,_,reopenedEvidence,_,_) <- state ledger ScanState
+    require (originalEvidence==reopenedEvidence) "failed_evidence_write_survived_restart"
 
 -- Offline RPC contracts against the production PostgreSQL order workflow.
 -- The in-memory node below models uncertain replies, not a real network.
