@@ -303,6 +303,51 @@ winnerContract ledger = do
     states <- PG.query c "SELECT txid,state FROM attempts WHERE intent_id=?" (PG.Only oid) :: IO [(Text,Text)]
     require (lookup oldId states==Just "settled" && lookup newId states==Just "review") "contract_older_winner_not_canonical"
     pure ()
+  rebroadcastContract ledger oid oldId
+
+-- Storage-only acceptance: existing typed fixture family, no chain transport.
+rebroadcastContract :: L.Ledger -> Text -> Text -> IO ()
+rebroadcastContract ledger oid txid = do
+  family <- L.ledgerAction ledger $ \c->Family.familyC c oid
+  saved <- case filter ((==txid).attemptId) family of [a]->pure a; _->reject "contract_rebroadcast_winner_missing"
+  old <- NativeRecovery.observation ledger txid
+  NativeRecovery.recordCheck ledger saved old NativeSettlementConfirming
+  anchor <- L.ledgerAction ledger $ \c->do
+    [PG.Only sequenceNo] <- PG.query c "SELECT critical_sequence FROM native_payment_recoveries WHERE txid=? ORDER BY id DESC LIMIT 1" (PG.Only txid)
+    pure sequenceNo
+  let proof=object["transaction" .= txid,"bytesHash" .= digest(TE.encodeUtf8 $ attemptBytes saved),"fixtureOnly" .= True]
+      reason="database-only exact-byte repair contract"
+      economicSnapshot=L.ledgerAction ledger $ \c->do
+        [PG.Only value] <- PG.query_ c "SELECT jsonb_build_object('orders',(SELECT jsonb_agg(to_jsonb(o) ORDER BY id) FROM orders o),'intents',(SELECT jsonb_agg(to_jsonb(i) ORDER BY id) FROM intents i),'obligations',(SELECT jsonb_agg(to_jsonb(o) ORDER BY id) FROM obligations o),'attempts',(SELECT jsonb_agg(to_jsonb(a) ORDER BY txid) FROM attempts a),'postings',(SELECT jsonb_agg(to_jsonb(p) ORDER BY event_id,account) FROM postings p),'reservations',(SELECT jsonb_agg(to_jsonb(r) ORDER BY intent_id) FROM fee_reservations r))::text"
+        pure(value::Text)
+  economicBefore <- economicSnapshot
+  before <- snapshot ledger
+  expectError "native_rebroadcast_review_changed" $ NativeRecovery.recordRebroadcast ledger saved family (anchor+1) reason proof >> pure ()
+  expectError "native_rebroadcast_proof_mismatch" $ NativeRecovery.recordRebroadcast ledger saved family anchor reason (object["transaction" .= txid,"bytesHash" .= ("wrong"::Text)]) >> pure ()
+  snapshot ledger >>= \after->require (before==after) "contract_rebroadcast_refusal_mutated"
+  approved <- NativeRecovery.recordRebroadcast ledger saved family anchor reason proof
+  L.ledgerAction ledger NativeRecovery.reviewSequences >>= \reviews->require ((txid,"confirming",approved) `elem` reviews) "contract_rebroadcast_diagnostic_anchor_missing"
+  NativeRecovery.rebroadcastDecision ledger txid anchor reason >>= \value->require (value==Just approved) "contract_rebroadcast_decision_missing"
+  recorded <- snapshot ledger
+  NativeRecovery.recordRebroadcast ledger saved family anchor reason proof >>= \value->require (value==approved) "contract_rebroadcast_replay_changed_sequence"
+  NativeRecovery.recordCheck ledger saved old NativeSettlementConfirming
+  snapshot ledger >>= \after->require (recorded==after) "contract_rebroadcast_repeat_scan_erased_decision"
+  expectError "native_rebroadcast_conflict" $ NativeRecovery.recordRebroadcast ledger saved family anchor "different operator reason" proof >> pure ()
+  expectError "backup_pending" $ NativeRecovery.authorizeRebroadcast ledger True saved family approved
+  L.acknowledgeBackup ledger identity approved (T.replicate 64 "d")
+  NativeRecovery.authorizeRebroadcast ledger True saved family approved
+  expectError "native_rebroadcast_payment_changed" $ NativeRecovery.authorizeRebroadcast ledger True saved{attemptBytes="changed"} family approved
+  L.ledgerAction ledger $ \c->PG.execute_ c "UPDATE deployment SET paused=0" >> pure ()
+  expectError "pause_before_operator_action" $ NativeRecovery.authorizeRebroadcast ledger True saved family approved
+  L.pause ledger "database-only repair stays paused"
+  NativeRecovery.recordCheck ledger saved old (NativeSettlementUnavailable "contract uncertain RPC")
+  expectError "native_rebroadcast_not_missing" $ NativeRecovery.authorizeRebroadcast ledger True saved family approved
+  economicSnapshot >>= \after->require (economicBefore==after) "contract_rebroadcast_changed_economic_records"
+  L.ledgerAction ledger $ \c->do
+    rows <- PG.query c "SELECT i.resolved,o.status FROM intents i JOIN obligations o ON o.id=i.obligation_id WHERE i.id=?" (PG.Only oid) :: IO [(Int64,Text)]
+    require (rows==[(1,"paid")]) "contract_rebroadcast_reopened_principal"
+    [PG.Only total] <- PG.query_ c "SELECT sum(delta)::bigint FROM postings WHERE event_id LIKE 'native-winner-fee:%' AND account='operating'" :: IO [PG.Only Int64]
+    require (total==0) "contract_rebroadcast_reposted_money"
 
 lossCoverContract :: L.Ledger -> IO ()
 lossCoverContract ledger = do

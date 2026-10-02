@@ -1,4 +1,4 @@
-module Bridge.Postgres.NativeRecovery (candidates,observation,recordCheck) where
+module Bridge.Postgres.NativeRecovery (candidates,observation,recordCheck,reviewSequences,rebroadcastDecision,recordRebroadcast,authorizeRebroadcast) where
 import Bridge.Types
 import Bridge.NativePayment
 import qualified Bridge.Postgres.NativeFamily as Family
@@ -7,13 +7,14 @@ import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
 import Bridge.RPC (fieldValue)
 import Control.Monad (when)
-import Data.Aeson (FromJSON,ToJSON,Value,object,(.=),encode,eitherDecodeStrict')
+import Data.Aeson (FromJSON,ToJSON,Value(..),object,(.=),toJSON,encode,eitherDecodeStrict')
+import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text.Encoding as TE
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Int (Int64)
-import Data.Profunctor.Product (p2)
+import Data.Profunctor.Product (p2,p3)
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Opaleye as O
 import qualified Opaleye.Exists as E
@@ -26,6 +27,15 @@ jsonInt :: O.FieldNullable O.SqlText -> Int64 -> O.Field O.SqlInt8
 jsonInt value fallback = O.unsafeCast "bigint" (O.fromNullable (text $ T.pack $ show fallback) value)
 recoveryStateTable :: O.Table (O.Field O.SqlText,O.Field O.SqlText) (O.Field O.SqlText,O.Field O.SqlText)
 recoveryStateTable = O.table "native_payment_recovery_state" (p2 (O.requiredTableField "txid",O.requiredTableField "state"))
+
+-- SELECT-only diagnostics expose the exact anchor an operator must approve.
+reviewSequences :: PG.Connection -> IO [(Text,Text,Int64)]
+reviewSequences c = O.runSelect c $ O.limit 1001 $ O.orderBy(O.desc $ \(_,_,sequenceNo)->sequenceNo) $ do
+  row@(_,state,_) <- O.selectTable table
+  O.where_(state O../= text "reconfirmed")
+  pure row
+ where table :: O.Table (O.Field O.SqlText,O.Field O.SqlText,O.Field O.SqlInt8) (O.Field O.SqlText,O.Field O.SqlText,O.Field O.SqlInt8)
+       table=O.table "native_payment_recovery_state" (p3 (O.requiredTableField "txid",O.requiredTableField "state",O.requiredTableField "critical_sequence"))
 
 candidates :: Ledger -> IO [Attempt]
 candidates ledger = ledgerAction ledger $ \c->do
@@ -113,7 +123,18 @@ finalityC c expected previous check = do
     O.where_(nativepaymentrecoveriesTxid row O..== text(attemptId expected))
     pure row
     :: IO [NativePaymentRecoveries]
-  let unchanged=map (\r->(nativepaymentrecoveriesState r,nativepaymentrecoveriesObservationJson r)) oldReview==[(state,saved)] || null oldReview && state=="reconfirmed" && previous==saved
+  unchangedReview <- case oldReview of
+    [row] | nativepaymentrecoveriesState row==state->do
+      old <- stored(nativepaymentrecoveriesObservationJson row) :: IO Value
+      new <- stored saved :: IO Value
+      -- The decision authorizes only the same saved bytes. A repeat scan of
+      -- the identical unresolved state must not erase its journal binding.
+      pure $ old==new || case old of
+        Object fields | KM.member "rebroadcastRecovery" fields->
+          Object (foldr KM.delete fields ["rebroadcastRecovery","operatorReason","rebroadcastProof"])==new
+        _->False
+    _->pure False
+  let unchanged=unchangedReview || null oldReview && state=="reconfirmed" && previous==saved
   when (not unchanged) $ do
     sequenceNo <- criticalSequence c
     _ <- O.runInsert c O.Insert {O.iTable=nativepaymentrecoveriesTable,O.iRows=[NativePaymentRecoveries Nothing (text $ attemptId expected) (text previous) (text state) (text saved) (num sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
@@ -123,6 +144,92 @@ finalityC c expected previous check = do
     _ <- O.runUpdate c O.Update {O.uTable=deploymentTable,O.uUpdateWith= \row->row {deploymentPaused=num 1,deploymentPauseReason=text "native_settlement_recovery"},O.uWhere=const(O.sqlBool True),O.uReturning=O.rCount}
     _ <- O.runInsert c O.Insert {O.iTable=auditTable,O.iRows=[Audit Nothing (text "native_settlement_recovery") (text $ attemptId expected<>":"<>state)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
     pure ()
+
+-- Decisions share the immutable recovery journal, without changing settlement
+-- or creating another economic intent. Only the exact original bytes qualify.
+rebroadcastDecision :: Ledger -> Text -> Int64 -> Text -> IO (Maybe Int64)
+rebroadcastDecision ledger txid anchor reason = ledgerAction ledger $ \c->do
+  rows <- decisionRowsC c txid anchor
+  case rows of
+    []->pure Nothing
+    [row]->do
+      value <- stored(nativepaymentrecoveriesObservationJson row) :: IO Value
+      saved <- fieldValue "operatorReason" value
+      require (saved==reason) "native_rebroadcast_conflict"
+      pure(Just $ nativepaymentrecoveriesCriticalSequence row)
+    _->reject "duplicate_native_rebroadcast_decision"
+
+decisionRowsC :: PG.Connection -> Text -> Int64 -> IO [NativePaymentRecoveries]
+decisionRowsC c txid anchor = O.runSelect c $ O.limit 2 $ do
+  row <- O.selectTable nativepaymentrecoveriesTable
+  let value=jsonField(nativepaymentrecoveriesObservationJson row)
+  O.where_(nativepaymentrecoveriesTxid row O..== text txid O..&&
+    O.fromNullable (text "") (O.toNullable value O..->> text "rebroadcastRecovery") O..== text(T.pack $ show anchor))
+  pure row
+
+rebroadcastContextC :: PG.Connection -> Attempt -> [Attempt] -> IO NativePaymentRecoveries
+rebroadcastContextC c expected family = do
+  state <- O.runSelect c (O.selectTable deploymentTable) :: IO [Deployment]
+  require (map deploymentPaused state==[1]) "pause_before_operator_action"
+  actual <- Family.familyC c (attemptIntent expected)
+  require (actual==family && expected `elem` actual && attemptChain expected=="Native" && attemptState expected=="settled" && maybe False (>0) (attemptSequence expected)) "native_rebroadcast_payment_changed"
+  contexts <- O.runSelect c $ do
+    intent <- O.selectTable intentsTable
+    ob <- O.selectTable obligationsTable
+    O.where_(intentsId intent O..== text(attemptIntent expected) O..&& intentsObligationId intent O..== obligationsId ob)
+    pure(intentsResolved intent,obligationsStatus ob)
+    :: IO [(Int64,Text)]
+  require (contexts==[(1,"paid")]) "native_rebroadcast_payment_changed"
+  reviews <- O.runSelect c $ O.limit 1 $ O.orderBy(O.desc nativepaymentrecoveriesId) $ do
+    row <- O.selectTable nativepaymentrecoveriesTable
+    O.where_(nativepaymentrecoveriesTxid row O..== text(attemptId expected))
+    pure row
+    :: IO [NativePaymentRecoveries]
+  review <- case reviews of [row]->pure row; _->reject "native_rebroadcast_review_missing"
+  value <- stored(nativepaymentrecoveriesObservationJson review) :: IO Value
+  why <- fieldValue "reason" value :: IO Text
+  require ((nativepaymentrecoveriesState review=="confirming" && why=="native_confirmation_policy_pending") ||
+    (nativepaymentrecoveriesState review=="unavailable" && why=="native_settled_payment_unseen")) "native_rebroadcast_not_missing"
+  pure review
+
+recordRebroadcast :: Ledger -> Attempt -> [Attempt] -> Int64 -> Text -> Value -> IO Int64
+recordRebroadcast ledger expected family anchor reason proof = ledgerAction ledger $ \c->do
+  require (anchor>0 && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_native_rebroadcast_approval"
+  rows <- decisionRowsC c (attemptId expected) anchor
+  case rows of
+    [row]->do
+      value <- stored(nativepaymentrecoveriesObservationJson row) :: IO Value
+      saved <- fieldValue "operatorReason" value
+      require (saved==reason) "native_rebroadcast_conflict"
+      pure(nativepaymentrecoveriesCriticalSequence row)
+    []->do
+      review <- rebroadcastContextC c expected family
+      require (nativepaymentrecoveriesCriticalSequence review==anchor) "native_rebroadcast_review_changed"
+      txid <- fieldValue "transaction" proof
+      bytesHash <- fieldValue "bytesHash" proof
+      require (txid==attemptId expected && bytesHash==digest(TE.encodeUtf8 $ attemptBytes expected)) "native_rebroadcast_proof_mismatch"
+      old <- stored(nativepaymentrecoveriesObservationJson review) :: IO Value
+      fields <- case old of Object values->pure values; _->reject "invalid_native_recovery_evidence"
+      let saved=json $ Object $ KM.insert "rebroadcastRecovery" (toJSON anchor) $
+            KM.insert "operatorReason" (toJSON reason) $ KM.insert "rebroadcastProof" proof fields
+      require (T.length saved<=32768) "native_recovery_evidence_too_large"
+      sequenceNo <- criticalSequence c
+      _ <- O.runInsert c O.Insert {O.iTable=nativepaymentrecoveriesTable,O.iRows=[NativePaymentRecoveries Nothing (text $ attemptId expected) (text $ nativepaymentrecoveriesPreviousObservation review) (text $ nativepaymentrecoveriesState review) (text saved) (num sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      _ <- O.runInsert c O.Insert {O.iTable=auditTable,O.iRows=[Audit Nothing (text "native_rebroadcast_approved") (text $ attemptId expected<>":"<>T.pack(show sequenceNo))],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      pure sequenceNo
+    _->reject "duplicate_native_rebroadcast_decision"
+
+authorizeRebroadcast :: Ledger -> Bool -> Attempt -> [Attempt] -> Int64 -> IO ()
+authorizeRebroadcast ledger backed expected family approved = ledgerAction ledger $ \c->do
+  review <- rebroadcastContextC c expected family
+  require (nativepaymentrecoveriesCriticalSequence review==approved) "native_rebroadcast_review_changed"
+  value <- stored(nativepaymentrecoveriesObservationJson review) :: IO Value
+  _ <- fieldValue "rebroadcastRecovery" value :: IO Int64
+  proof <- fieldValue "rebroadcastProof" value :: IO Value
+  bytesHash <- fieldValue "bytesHash" proof
+  require (bytesHash==digest(TE.encodeUtf8 $ attemptBytes expected)) "native_rebroadcast_payment_changed"
+  state <- O.runSelect c (O.selectTable deploymentTable) :: IO [Deployment]
+  require (not backed || case state of [row]->deploymentBackupSequence row>=approved; _->False) "backup_pending"
 
 eventRows :: PG.Connection -> Text -> IO [(ChainEvents,ObservationEvidence)]
 eventRows c txid = O.runSelect c $ do

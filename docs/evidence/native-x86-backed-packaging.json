@@ -1,0 +1,14 @@
+{
+  "runUrl": "https://github.com/ekulkisnek/ecx-solana-bridge/actions/runs/36956999769",
+  "sourceCommit": "fb5d4fbac8fcb80f1f78c6293a49c8494db50620",
+  "arch": "x86_64",
+  "releaseId": "8aa913ae5b7b2721f6f595ca",
+  "checksum": "9618ceb3b76e35addf58fb5effe9d07927e106319378f0b1d083c8da641c913f",
+  "checksumVerified": true,
+  "buildAndTestsPassed": true,
+  "noticeCollectionPassed": true,
+  "backupRuntimeIncluded": true,
+  "coveredSourceIncluded": true,
+  "nativeRebroadcastIncluded": false,
+  "installUpgradeAcceptancePassed": false
+}

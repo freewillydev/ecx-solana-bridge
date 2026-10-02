@@ -9,6 +9,8 @@ import Bridge.Postgres.Ledger (Ledger,withLedger,ledgerAction,pause,readiness)
 import Bridge.Postgres.Schema hiding (Audit)
 import qualified Bridge.Postgres.Backup as Backup
 import qualified Bridge.Postgres.CoveredSource as CoveredSource
+import qualified Bridge.Postgres.NativeRebroadcast as NativeRebroadcast
+import qualified Bridge.Postgres.NativeRecovery as NativeRecovery
 import Data.Int (Int64)
 import qualified Bridge.Postgres.Order as Order
 import qualified Bridge.Postgres.Observer as Observer
@@ -110,8 +112,9 @@ evalSafe context@(SafeContext _ public remote paying) (SafeDSL operation) = case
   Audit->readOnly context $ \connection->do
     rows <- O.runSelect connection (O.selectTable postingsTable) :: IO [Postings]
     obligations <- O.runSelect connection (O.selectTable obligationsTable) :: IO [Obligations]
+    nativeReviews <- NativeRecovery.reviewSequences connection
     let totals=M.fromListWith (+) [((postingsAsset row,postingsAccount row),toInteger(postingsDelta row)) | row<-rows]
-    pure(object["balances" .= [object["asset" .= asset,"allocation" .= account,"units" .= T.pack(show n)] | ((asset,account),n)<-M.toList totals],"unresolved" .= [object["id" .= obligationsId row,"status" .= obligationsStatus row] | row<-obligations,obligationsStatus row/="paid"]])
+    pure(object["balances" .= [object["asset" .= asset,"allocation" .= account,"units" .= T.pack(show n)] | ((asset,account),n)<-M.toList totals],"unresolved" .= [object["id" .= obligationsId row,"status" .= obligationsStatus row] | row<-obligations,obligationsStatus row/="paid"],"nativeRecoveryReviews" .= [object["transaction" .= txid,"state" .= state,"recoverySequence" .= sequenceNo] | (txid,state,sequenceNo)<-take 1000 nativeReviews],"nativeRecoveryBacklog" .= (length nativeReviews>1000)])
 
 evalCritical :: CriticalContext -> DSL 'Critical a -> IO a
 -- Observer mode can retain payment hints, pause and reconcile recorded effects.
@@ -153,6 +156,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
       pure(object["approvedRetryOf" .= txid,"signedOrSent" .= False])
     ApproveSourceRecovery intent restoration reason->approveSourceRecoveryWith epochSeconds (realPaymentTransport manager cfg backup) cfg (Store ledger) intent restoration reason
     ApproveCoveredSource intent loss reason->CoveredSource.approveWith epochSeconds (realPaymentTransport manager cfg backup) cfg ledger intent loss reason
+    RebroadcastNative txid recovery reason->NativeRebroadcast.rebroadcastWith (realPaymentTransport manager cfg backup) cfg ledger txid recovery reason
     PrepareNativeReplacement parent fee reason->
       prepareNativeReplacementWith epochSeconds (realPaymentTransport manager cfg backup) cfg (Store ledger) parent fee reason
     SignNativeReplacement sequenceNo->do

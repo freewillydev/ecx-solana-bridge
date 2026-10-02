@@ -289,3 +289,36 @@ native source evidence and reconciled custody are required. Explicit resume runs
 the normal global reconciliation and reservation checks. Later signing/sending
 uses the existing engine and its backup barriers; an already saved payment stays
 the same payment. A returned capital cover cannot authorize a subsequent loss.
+
+### Rebroadcasting a recoverable missing native payout
+
+The private `GET /audit` response includes `nativeRecoveryReviews` with each
+current transaction, state and exact recovery sequence. While paused, use the
+private `POST /rebroadcast-native` action for an already settled native payment
+whose original inputs are again unspent and whose family has no active payment:
+
+```json
+{
+  "rebroadcastTransaction": "ORIGINAL_NATIVE_TRANSACTION_ID",
+  "rebroadcastRecoverySequence": 123,
+  "rebroadcastReason": "Reviewed missing original payment and current input evidence"
+}
+```
+
+Send that JSON through the same protected operator socket as the other actions.
+Replace 123 with the exact current diagnostic sequence. This action **broadcasts
+the existing signed transaction** and leaves intake paused. It creates no new
+signature, economic intent, principal posting, input or payout destination.
+The immutable recovery journal records the decision before sending; configured
+backup coverage must include that decision. Identity, finalized source,
+wallet/tip, exact saved bytes, previous output amounts/scripts and absence of an
+active family transaction are checked again after the backup completes.
+
+An active/mempool payment, spent input, unrelated conflict, uncertain RPC response
+or changed review cannot authorize another send. A lost send reply retains the
+decision and bytes; reconcile before issuing another action. Confirmation uses
+the existing finality recovery workflow, followed by separate explicit resume.
+This does not repair an irrecoverable payout whose inputs have been consumed by
+an unrelated confirmed transaction. It also does not prove general custody
+readiness while the original settlement remains under review. Database and
+authority checks pass; live missing-payment acceptance remains required.

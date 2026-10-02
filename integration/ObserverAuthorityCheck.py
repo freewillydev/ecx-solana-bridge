@@ -45,17 +45,20 @@ try:
             public=api('/api/v1/config',customer=True)
             assert public['profile']==c['profile'] and not public['intakeEnabled']
             assert public['availability']=={'available':False,'reason':'observation_only'}
+            audit=api('/audit')
+            assert audit['nativeRecoveryReviews']==[] and not audit['nativeRecoveryBacklog']
             request={'direction':'WrappedToNative','input':'10000','recipient':'unused-observer-destination','refund':'','sourceOwner':None,'idempotencyKey':secrets.token_hex(16)}
             refused={'createOrder':api('/api/v1/orders',request,True),
                      'resume':api('/resume'),
                      'sign':api('/sign-native-replacement',{'draftSequence':1}),
                      'send':api('/send-native-replacement',{'draftSequence':1}),
                      'refund':api('/refund',{'depositId':'no-observer-payment'}),
-                     'coveredSource':api('/approve-covered-source',{'coveredObligation':'no-observer-payment','coveredLossSequence':1,'coveredApprovalReason':'observer cannot grant covered payment authority'})}
+                     'coveredSource':api('/approve-covered-source',{'coveredObligation':'no-observer-payment','coveredLossSequence':1,'coveredApprovalReason':'observer cannot grant covered payment authority'}),
+                     'nativeRebroadcast':api('/rebroadcast-native',{'rebroadcastTransaction':'no-observer-payment','rebroadcastRecoverySequence':1,'rebroadcastReason':'observer cannot rebroadcast settled payments'})}
             assert all(v=={'error':'payment_worker_required'} for v in refused.values()),refused
             result=json.loads(run('psql','-XqAt','-c',"SELECT json_build_object('orders',(SELECT count(*) FROM orders),'attempts',(SELECT count(*) FROM attempts),'criticalSequence',(SELECT critical_sequence FROM deployment));").stdout)
             assert result=={'orders':0,'attempts':0,'criticalSequence':0}
-            report={'actualProfile':c['profile'],'canonicalOperationEnabled':False,'observationOnlyAvailabilityPassed':True,'orderCreationRefused':True,'resumeRefused':True,'signatureRefused':True,'broadcastRefused':True,'refundRefused':True,'coveredSourceApprovalRefused':True,'orders':0,'attempts':0,'criticalSequence':0,'walletsModified':False,'roundTripVerified':False}
+            report={'actualProfile':c['profile'],'canonicalOperationEnabled':False,'observationOnlyAvailabilityPassed':True,'orderCreationRefused':True,'resumeRefused':True,'signatureRefused':True,'broadcastRefused':True,'refundRefused':True,'coveredSourceApprovalRefused':True,'nativeRebroadcastRefused':True,'orders':0,'attempts':0,'criticalSequence':0,'walletsModified':False,'roundTripVerified':False}
             print(json.dumps(report))
             if args.report:Path(args.report).write_text(json.dumps(report,indent=2)+'\n')
 finally:

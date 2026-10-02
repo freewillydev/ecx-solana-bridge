@@ -889,7 +889,33 @@ so the durable comparison waits for established origins and excludes changing
 observation/freshness tables. This is same-host observation acceptance, not key or
 off-host recovery. The VM was stopped after acceptance.
 
-A single consolidated native CI build at `fb5d4fb` has been dispatched using the
-existing toolchain/dependency caches. Its result and current package acceptance
-remain pending; the older successful package must not be presented as containing
-the later backup or covered-source features.
+The consolidated native CI build at `fb5d4fb` used the existing toolchain and
+dependency caches and completed successfully. Its current package installation
+acceptance remains pending; source/artifact scope is recorded below.
+
+## Recoverable missing native payout workflow
+
+The private `rebroadcast-native` action now resolves to the closed critical DSL.
+It records an explicit operator decision in the existing immutable native recovery
+journal, requires configured backup coverage, revalidates the actual identity,
+source and original family inputs, then sends only the original saved bytes.
+No signature, economic intent, principal posting, reservation release or resume is
+created. Private read-only diagnostics expose the exact recovery sequence.
+Repeated identical pending scans preserve the decision; changed or uncertain
+recovery evidence invalidates authority. Mempool/confirmed family payments,
+spent inputs and unrelated conflicts cannot authorize this action.
+
+The real PostgreSQL contract preserves all economic records through approval,
+replay and refusal; tests exact sequence, proof, byte, pause and backup gates; and
+tests invalidation by uncertainty. The actual betanet/Devnet observer API refuses
+the new action and exposes empty read-only recovery diagnostics. The 371-example
+application suite passes. Evidence: `evidence/postgres-native-rebroadcast-contract.json`
+and `evidence/postgres-native-rebroadcast-observer.json`. No live ledger or signer
+was changed. Live missing-payment/lost-reply acceptance and permanently conflicting
+input resolution remain, along with the other R2/R3 requirements.
+
+The consolidated native build at `fb5d4fb` completed successfully, and its private
+installer checksum was independently verified after download. It includes the
+mandatory backup runtime and covered-source changes but predates the new native
+rebroadcast action. See `evidence/native-x86-backed-packaging.json`; installation
+acceptance of that consolidated package is still separate from compilation.
