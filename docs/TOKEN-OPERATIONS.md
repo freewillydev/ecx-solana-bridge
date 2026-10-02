@@ -86,3 +86,24 @@ An October 2 read-only upstream refresh found the same reviewed commit
 `b980b4372c4844d3d42ff1926fd0da848631cebc`. The server conversion contract still
 uses native per-order addresses and Solana Pay references, with no bridge
 mint/burn authority. See `evidence/upstream-replacement-refresh.json`.
+
+## Published pool readback
+
+The pool from the September 30 conversation,
+`nNKg814Wq3uTkoG4fM8LzvBQv4Fu2iCgKFmK2YmPQzM`, was read at finalized
+mainnet state on October 2. Its Orca Whirlpool account binds USDC
+`EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v` to
+`EVHqNdzjCupKi4rQkbuYw52sa1m8A7jeUAMP23S9AVVq`. The latter has eight
+decimals, no freeze authority, and mint authority
+`6Av9JtnZGADBATo3uyLVC12XojJYKJhZxv578cJR2sKT`. Both vaults are initialized
+classic SPL accounts owned by the pool and bind to their exact respective mints.
+Recorded vault balances are 33365.220290 USDC and 11000.17981711 wrapped tokens.
+These balances are a snapshot, not the initial funding or all circulating backing.
+
+The account's tick spacing is 32896, above Orca's upstream full-range-only
+threshold of 32768; its fee-rate field is 10000 hundredths of a basis point
+(1%). Layout/discriminator/owner and source hashes are recorded in
+`evidence/published-orca-pool-readback.json`. This single-provider read does not
+prove issuer approval, reserve backing, LP ownership/lock, auto-compounding or
+Jupiter routing. It does not change the bridge's configured dedicated Devnet
+mint or authorize mainnet operations.
