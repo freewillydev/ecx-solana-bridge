@@ -6,6 +6,7 @@ import Bridge.Config
 import Bridge.Types
 import Bridge.Operation.Internal
 import Bridge.Postgres.Ledger (Ledger,withGuardedLedger,ledgerAction,pause,readiness)
+import qualified Bridge.Postgres.Treasury as Treasury
 import qualified Bridge.Postgres.Fence as Fence
 import Bridge.Postgres.Schema hiding (Audit)
 import qualified Bridge.Postgres.Backup as Backup
@@ -113,9 +114,14 @@ evalSafe context@(SafeContext _ public remote paying) (SafeDSL operation) = case
   Audit->readOnly context $ \connection->do
     rows <- O.runSelect connection (O.selectTable postingsTable) :: IO [Postings]
     obligations <- O.runSelect connection (O.selectTable obligationsTable) :: IO [Obligations]
+    treasuryReceipts <- O.runSelect connection $ O.limit 1001 $ do
+      row<-O.selectTable depositsTable
+      O.where_(O.isNull(depositsOrderId row) O..&& depositsEligible row O..== O.sqlInt8 1 O..&& depositsAllocated row O..== O.sqlInt8 0)
+      pure row
+      :: IO [Deposits]
     nativeReviews <- NativeRecovery.reviewSequences connection
     let totals=M.fromListWith (+) [((postingsAsset row,postingsAccount row),toInteger(postingsDelta row)) | row<-rows]
-    pure(object["balances" .= [object["asset" .= asset,"allocation" .= account,"units" .= T.pack(show n)] | ((asset,account),n)<-M.toList totals],"unresolved" .= [object["id" .= obligationsId row,"status" .= obligationsStatus row] | row<-obligations,obligationsStatus row/="paid"],"nativeRecoveryReviews" .= [object["transaction" .= txid,"state" .= state,"recoverySequence" .= sequenceNo] | (txid,state,sequenceNo)<-take 1000 nativeReviews],"nativeRecoveryBacklog" .= (length nativeReviews>1000)])
+    pure(object["treasuryReceipts" .= [object["receipt" .= depositsId row,"asset" .= depositsAsset row,"units" .= T.pack(show $ depositsAmount row),"ownershipRequiresAttestation" .= True] | row<-take 1000 treasuryReceipts],"treasuryBacklog" .= (length treasuryReceipts>1000),"balances" .= [object["asset" .= asset,"allocation" .= account,"units" .= T.pack(show n)] | ((asset,account),n)<-M.toList totals],"unresolved" .= [object["id" .= obligationsId row,"status" .= obligationsStatus row] | row<-obligations,obligationsStatus row/="paid"],"nativeRecoveryReviews" .= [object["transaction" .= txid,"state" .= state,"recoverySequence" .= sequenceNo] | (txid,state,sequenceNo)<-take 1000 nativeReviews],"nativeRecoveryBacklog" .= (length nativeReviews>1000)])
 
 evalCritical :: CriticalContext -> DSL 'Critical a -> IO a
 -- Observer mode can retain payment hints, pause and reconcile recorded effects.
@@ -173,6 +179,10 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
       pure(object["transaction" .= Domain.attemptId a,"outcome" .= outcome])
     CoverSourceLoss did recovery capital reason->
       coverSourceLossWith epochSeconds (realPaymentTransport manager cfg backup) cfg (Store ledger) did recovery capital reason
+    AllocateTreasury did split reason->do
+      _<-Reconciliation.reconcileCustodyWith epochSeconds (realPaymentTransport manager cfg backup) cfg ledger
+      now<-epochSeconds
+      Treasury.allocate ledger now did split reason
     RefundDeposit did->do
       obligation <- Refund.createRefund ledger did
       pure(object["obligation" .= Domain.obligationId obligation,"recipient" .= Domain.obligationRecipient obligation,"amount" .= T.pack(show $ Domain.obligationAmount obligation)])

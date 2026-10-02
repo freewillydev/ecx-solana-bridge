@@ -368,3 +368,25 @@ SQLite financial CLI commands are disabled; recovery actions use the private
 operator API. Legacy SQLite library code remains for migration/regression work.
 Fresh-install treasury allocation still needs its PostgreSQL operator workflow;
 the prior SQLite treasury utility must not be used on the PostgreSQL deployment.
+
+### Allocating fresh treasury funding (PostgreSQL)
+
+Send operator-owned Native/Wrapped inventory and SOL network-fee funding to the
+configured custody addresses. Let the real observers record and finalize them.
+Pause the paying worker through its private operator socket, then inspect
+`/audit`: `treasuryReceipts` lists eligible unallocated receipts, not a claim of
+operator ownership. Confirm ownership independently before allocation.
+
+POST `/allocate-treasury` through the private operator socket, for example:
+
+```json
+{"treasuryReceipt":"sol-operating:ACTUAL_SIGNATURE","treasurySplit":[["operating","10000"]],"ownershipAttestation":"Operator-owned network fee capital; source checked"}
+```
+
+Amounts are integer base-unit strings. Allocate the entire receipt, with positive
+unique splits into `float`, `backing`, `operating` or `lp`; SOL is restricted to
+`operating`. This action reconciles real custody, verifies current observation
+and eligibility, refuses customer-bound receipts and obligations, and atomically
+journals the allocation. It does not sign, send or resume. Matching saved terms
+are idempotent; conflicting terms are refused. Observer-only mode cannot allocate.
+Resume separately after funding and operational checks succeed.

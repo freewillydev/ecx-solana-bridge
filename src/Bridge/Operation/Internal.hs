@@ -39,6 +39,7 @@ data OperatorOperation a where
   CancelNativeReplacement :: Int64 -> Text -> OperatorOperation Value
   SendNativeReplacement :: Int64 -> OperatorOperation Value
   CoverSourceLoss :: Text -> Int64 -> LossCapital -> Text -> OperatorOperation Value
+  AllocateTreasury :: Text -> [(Text,Amount)] -> Text -> OperatorOperation Value
   RefundDeposit :: Text -> OperatorOperation Value
 
 data WorkerOperation a where
