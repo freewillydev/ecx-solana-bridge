@@ -1730,3 +1730,18 @@ See `evidence/dsl-public-boundary-audit.json` and
 `evidence/observer-separated-reader-authority.json`. The authorization source
 batch is verified locally; the signed Linux review pair still predates it and
 needs one consolidated rebuild/installed acceptance after related audit changes.
+
+## Restored Solana ledger: paying reconciliation and resume
+
+On 2026-10-02 the retained `solrestore` destination was switched from observation
+to the existing installed public-test payment worker without a package rebuild.
+Before resume its ledger held six orders, five attempts, sequence 19 and zero
+unbalanced posting groups. The actual Signet node was synchronized; real scanner
+health recovered, and explicit resume and subsequent health both returned ready.
+The worker was active and the critical sequence remained 19 after resume.
+See `evidence/installed-solana-restored-paying-resume.json`. This closes the
+post-restore paying reconciliation/resume check for the completed retry ledger;
+it does not prove in-flight Solana restoration or off-host durability. A fresh
+dedicated signed-but-unsent acceptance run is now being prepared on this active
+destination; retired source guests remain prohibited. Final packaging is deferred
+under the revised execution sequence.

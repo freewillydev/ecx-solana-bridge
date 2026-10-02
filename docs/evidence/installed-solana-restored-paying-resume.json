@@ -1,0 +1,31 @@
+{
+  "date": "2026-10-02",
+  "source": "retained solrestore guest; existing installed runtime",
+  "networks": [
+    "actual L2L Signet",
+    "actual Solana Devnet"
+  ],
+  "restoredLedgerOrdersBeforeResume": 6,
+  "restoredLedgerAttemptsBeforeResume": 5,
+  "criticalSequenceBeforeResume": 19,
+  "unbalancedPostingGroupsBeforeResume": 0,
+  "installedTestWorkerPreflight": true,
+  "nativeNode": {
+    "chain": "signet",
+    "blocks": 16602,
+    "headers": 16602,
+    "initialBlockDownload": false
+  },
+  "explicitResumeResponse": {
+    "available": true,
+    "reason": "ready"
+  },
+  "subsequentHealth": {
+    "available": true,
+    "reason": "ready"
+  },
+  "criticalSequenceAfterResume": 19,
+  "pauseAfterResume": false,
+  "inFlightSolanaRestoreProved": false,
+  "offHostDurabilityProved": false
+}
