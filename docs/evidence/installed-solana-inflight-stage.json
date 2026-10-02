@@ -1,0 +1,26 @@
+{
+  "networks": [
+    "actual L2L Signet",
+    "actual Solana Devnet"
+  ],
+  "orderId": "9752da9c4b027546940ade25945433e1a22fc82e051ec0e3631677c40e9cca98",
+  "solanaPayout": "TtSqp7oy2ExKJzjux8BfkVxXf3yfrU3SLpzebQ7JLnDSby9yFphmh9Ag9GEkqkYTzP28X5Q14Cp9CeyaBWXSFvf",
+  "solanaSignedBytesSha256": "dead3008fcaed7784f2976c4a0c86ce745c2615c4c73713d4bc1a1b8da26c9dc",
+  "quote": {
+    "fee": "100",
+    "gross": "10000",
+    "net": "9900"
+  },
+  "customerDepositTransaction": "aa8b976744415eac8d9e4697dab0ba980591edf0391497eda89437fcda76c546",
+  "signedSolanaAttemptDurable": true,
+  "replayWithoutSignerOrRpcPassed": true,
+  "observerOnlyOverrideRetained": true,
+  "solanaBroadcast": false,
+  "workerStopped": true,
+  "interruptedHostRestoreVerified": false,
+  "sourceRetired": true,
+  "sourcePayingWorkerRefused": true,
+  "sourceServicesDisabled": true,
+  "sourceCriticalSequence": 23,
+  "archivedLedgerTables": 38
+}

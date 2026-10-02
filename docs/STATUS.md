@@ -1905,3 +1905,39 @@ actual L2L Signet block 16607, with one confirmation and the exact 10000-unit
 tester output; see `evidence/l2l-faucet-funding.json`. The expired unfunded order
 and its unsigned preparation journal are retained; a distinct fresh order is
 required for the next recovery acceptance.
+
+## Actual in-flight Solana clean-host restoration
+
+Confirmed official faucet funding enabled a new dedicated tester deposit and
+quote. The real native deposit was observed before its deadline and confirmed;
+the guarded driver saved one Solana payout at 10000 gross / 100 fee / 9900 net.
+Replay preserved its original bytes without signing or RPC. No Solana broadcast
+was performed. The source services were disabled, the source fence retired at
+sequence 23, and direct paying startup refused before the four-file archive was
+transferred into private SSH staging. See
+`evidence/installed-solana-inflight-stage.json`.
+
+A fresh 3GiB Ubuntu guest restored all 38 ledger tables byte-for-byte, three native
+wallet databases and the validated custody key. A new destination fence retained
+sequence 23 without the source retirement marker or service overrides. The
+restored signed payout replay retained its original hash, with no signer/RPC
+call or broadcast; the actual native node synchronized through height 16609.
+See `evidence/installed-solana-inflight-restore.json`.
+
+Paying reconciliation/resume remains to be accepted. The first private resume
+was refused for stale scanners; a subsequent read reported unavailable RPC
+transport. The worker remains paused, and this restoration does not prove
+off-host durability or key revocation. Only the destination task VM is running.
+
+The restored worker subsequently recorded actual two-provider expiry/absence
+evidence at sequence 24, retained the original signature, and refused resume
+until explicit retry approval. Approval at sequence 25 signed/sent nothing; a
+fresh private resume passed, and the normal worker settled one replacement at
+sequence 26. Both actual finalized providers agree: custody -9900, tester +9900,
+network fee 5000 lamports. Ledger postings book the saved 100-unit bridge fee
+once, all events balance, holds are released, and the original bytes are unchanged.
+Restart preserves the terminal customer view, sequence 26 and all rows in 13
+financial tables. See the updated in-flight restore evidence. This closes the
+signed-unsent Solana local clean-host recovery/resume checkpoint, including the
+expired-signature path; off-host durability, key revocation, broader recovery
+gates and the consolidated source release remain open.

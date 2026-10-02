@@ -38,7 +38,12 @@ compilation and checks during this phase. Completed build artifacts are retained
    authenticate a fresh private review candidate. Public activation remains a
    separate authorized decision.
 
-The next task is item 1. Packaging does not become the default fallback when an
+The signed-but-unsent Solana local clean-host restore, explicit expired retry,
+normal-worker settlement and restart checkpoint passed on the real chains; see
+[evidence](evidence/installed-solana-inflight-restore.json). Item 1 still includes
+the remaining concrete replacement/reorg/loss acceptance gaps.
+
+The next task remains item 1. Packaging does not become the default fallback when an
 external acceptance prerequisite is unavailable: continue another substantive
 item and record the prerequisite without repeating completed installer checks.
 
