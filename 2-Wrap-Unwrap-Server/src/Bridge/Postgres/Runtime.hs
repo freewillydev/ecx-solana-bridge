@@ -1,6 +1,8 @@
 {-# LANGUAGE DataKinds,GADTs #-}
 module Bridge.Postgres.Runtime (runAPI,runTestWorker,runBackedTestWorker,doctor,checkDatabase) where
 
+import qualified Bridge.Postgres.Replacement as PgReplacement
+import qualified Bridge.Postgres.Source as PgSource
 import Bridge.API (customerAPI)
 import Bridge.BrowserBuild (browserAssetsDirectory)
 import qualified Bridge.API as API
@@ -21,18 +23,18 @@ import qualified Data.Text.Encoding as TE
 import Data.Int (Int64)
 import qualified Bridge.Postgres.Order as Order
 import qualified Bridge.Observer as Observer
-import qualified Bridge.Postgres.PaymentStore as Payments
 import qualified Bridge.Postgres.Server as Server
 import qualified Bridge.Postgres.Refund as Refund
 import qualified Bridge.Ledger.Model as Domain
-import Bridge.Postgres.PaymentStore (Store(..))
-import Bridge.Settlement (realPaymentTransport,settleAttemptWith,paymentPass,reconcilePaymentsWith,PaymentTransport(..),approveSolanaRetryWith,readSavedPayment,readSavedNativeFamily,recheckSourceWith,paymentNativeFamily)
+import Bridge.Postgres.PaymentStore (paymentNativeFamily)
+import qualified Bridge.Reconciliation as CustodyWorkflow
+import Bridge.Settlement (realPaymentTransport,settleAttemptWith,paymentPass,reconcilePaymentsWith,PaymentTransport(..),approveSolanaRetryWith,readSavedPayment,readSavedNativeFamily,recheckSourceWith)
 import qualified Bridge.Postgres.Startup as Startup
-import Bridge.Recovery (cancelPreparationWith,reconcileNativeLocksWith,approveSourceRecoveryWith,prepareNativeReplacementUsing,signNativeReplacementUsing,NativeReplacementStore(..),coverSourceLossWith)
+import Bridge.Recovery (cancelPreparationWith,reconcileNativeLocksWith,approveSourceRecoveryWith,prepareNativeReplacementUsing,signNativeReplacementUsing,coverSourceLossWith)
 import Bridge.Native (nativeIdentity)
 import Bridge.Payment (prepareNativeWithSigner,prepareSolanaWithSigner)
 import Bridge.Solana (solanaIdentity)
-import Bridge.Reorg (reconcileNativeSourcesWith,reconcileNativeSettlementsWith,sourceCandidates,inspectNativeSourceWith)
+import Bridge.Reorg (reconcileNativeSourcesWith,reconcileNativeSettlementsWith,inspectNativeSourceWith)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar,newMVar,withMVar)
 import Control.Monad (forever,when,forM_)
@@ -150,36 +152,36 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
     CreateOrder header request->bearer header >>= \token->OrderWorkflow.createCustomerOrder manager cfg ledger backup token request
   OperatorDSL operation->case operation of
     Pause reason->pause ledger reason >> readiness ledger
-    CancelPreparation intent generation reason->cancelPreparationWith epochSeconds transport cfg store intent generation reason
+    CancelPreparation intent generation reason->cancelPreparationWith epochSeconds transport cfg ledger intent generation reason
     Resume->do
       verifyNativeBoundary
       Startup.resumeAfterReview epochSeconds transport cfg ledger
       readiness ledger
     ApproveSolanaRetry txid reason->do
-      approveSolanaRetryWith transport cfg store txid reason
+      approveSolanaRetryWith transport cfg ledger txid reason
       pure(object["approvedRetryOf" .= txid,"signedOrSent" .= False])
-    ApproveSourceRecovery intent restoration reason->approveSourceRecoveryWith epochSeconds transport cfg store intent restoration reason
+    ApproveSourceRecovery intent restoration reason->approveSourceRecoveryWith epochSeconds transport cfg ledger intent restoration reason
     ApproveCoveredSource intent loss reason->approveCoveredSource intent loss reason
     RebroadcastNative txid recovery reason->rebroadcastNative txid recovery reason
     PrepareNativeReplacement parent fee reason->
       prepareNativeReplacementUsing epochSeconds transport
-        (\parent' _ fee'->signerRequest "draft-replacement" (toJSON(fingerprint cfg,parent',fee'))) cfg store parent fee reason
+        (\parent' _ fee'->signerRequest "draft-replacement" (toJSON(fingerprint cfg,parent',fee'))) cfg ledger parent fee reason
     SignNativeReplacement sequenceNo->do
       a <- signNativeReplacementUsing epochSeconds transport
-        (\sequenceNo' _ _->signerRequest "sign-replacement" (toJSON(fingerprint cfg,sequenceNo'))) cfg store sequenceNo
+        (\sequenceNo' _ _->signerRequest "sign-replacement" (toJSON(fingerprint cfg,sequenceNo'))) cfg ledger sequenceNo
       pure(object["transaction" .= Domain.attemptId a,"draftSequence" .= sequenceNo,"signed" .= True,"sent" .= False])
     CancelNativeReplacement sequenceNo reason->do
-      replacementCancel store sequenceNo reason
+      PgReplacement.cancel ledger sequenceNo reason
       pure(object["draftSequence" .= sequenceNo,"cancelled" .= True,"signedOrSent" .= False])
     SendNativeReplacement sequenceNo->do
-      saved <- replacementMember store sequenceNo
+      saved <- PgReplacement.member ledger sequenceNo
       a <- maybe (reject "native_replacement_member_missing") pure saved
-      outcome <- settleAttemptWith transport cfg store a
+      outcome <- settleAttemptWith transport cfg ledger a
       pure(object["transaction" .= Domain.attemptId a,"outcome" .= outcome])
     CoverSourceLoss did recovery capital reason->
-      coverSourceLossWith epochSeconds transport cfg store did recovery capital reason
+      coverSourceLossWith epochSeconds transport cfg ledger did recovery capital reason
     AllocateTreasury did split reason->do
-      _<-Payments.reconcileCustodyWith epochSeconds transport cfg ledger
+      _<-CustodyWorkflow.reconcileCustodyWith epochSeconds transport cfg ledger
       now<-epochSeconds
       Treasury.allocate ledger now did split reason
     ClassifyTreasurySpend stream txid reason->Treasury.classifySpend ledger stream txid reason
@@ -190,21 +192,21 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
     -- Advisory native locks must be restored independently of Solana RPC health.
     _ <- reconcileNativeLocksWith
       transport
-        {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg store
+        {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg ledger
     _ <- Observer.observeOnce manager cfg ledger
     _ <- reconcileNativeSourcesWith
       transport
-        {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg store
+        {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg ledger
     _ <- reconcileNativeSettlementsWith
       transport
-        {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg store
+        {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg ledger
     now <- epochSeconds
     Order.expireQuotes ledger now
-    _ <- reconcilePaymentsWith transport cfg store
-    Payments.reconcileCustodyWith epochSeconds transport cfg ledger
+    _ <- reconcilePaymentsWith transport cfg ledger
+    CustodyWorkflow.reconcileCustodyWith epochSeconds transport cfg ledger
   WorkerDSL StartPayments->do
     verifyNativeBoundary
-    lockResult <- reconcileNativeLocksWith transport {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg store
+    lockResult <- reconcileNativeLocksWith transport {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg ledger
     lockError <- fieldValue "error" lockResult :: IO (Maybe Text)
     maybe (pure ()) reject lockError
     now <- epochSeconds
@@ -215,12 +217,11 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
       now <- epochSeconds
       fresh <- try (Order.checkIntakeReady ledger now) :: IO (Either BridgeError ())
       case fresh of
-        Right ()->paymentPass transport cfg store prepare
+        Right ()->paymentPass transport cfg ledger prepare
         Left (BridgeError "custody_not_reconciled")->pure ()
         Left (BridgeError reason)->reject reason
  where
   transport=realPaymentTransport manager cfg backup
-  store=Store ledger
 
   verifyNativeBoundary :: IO ()
   verifyNativeBoundary = do
@@ -233,9 +234,9 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
 
   prepare ob = if Domain.obligationAsset ob=="Native"
     then prepareNativeWithSigner (paymentNative transport)
-      (\intent generation _ _->signerRequest "sign-preparation" (toJSON(fingerprint cfg,intent,generation))) cfg store ob
+      (\intent generation _ _->signerRequest "sign-preparation" (toJSON(fingerprint cfg,intent,generation))) cfg ledger ob
     else prepareSolanaWithSigner (paymentSolana transport)
-      (\intent generation _->signerRequest "sign-preparation" (toJSON(fingerprint cfg,intent,generation))) cfg store ob
+      (\intent generation _->signerRequest "sign-preparation" (toJSON(fingerprint cfg,intent,generation))) cfg ledger ob
 
   -- The sole signer client lives inside this critical evaluator. Safe contexts,
   -- handlers and exported modules receive neither it nor its socket manager.
@@ -272,17 +273,17 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
       Nothing->do
         ob <- Source.coveredObligation ledger intent loss
         paymentIdentity transport
-        payments <- reconcilePaymentsWith transport cfg store
+        payments <- reconcilePaymentsWith transport cfg ledger
         attempts <- fieldValue "attempts" payments :: IO [Value]
         failures <- mapM (fieldValue "error") attempts :: IO [Maybe Text]
         require (all (==Nothing) failures) "source_approval_payment_requires_review"
-        _ <- Payments.reconcileCustodyWith epochSeconds transport cfg ledger
-        candidates <- sourceCandidates store
+        _ <- CustodyWorkflow.reconcileCustodyWith epochSeconds transport cfg ledger
+        candidates <- PgSource.candidates ledger
         require (length candidates<=1000) "source_recovery_backlog"
         source <- case filter ((==Domain.obligationDeposit ob).Domain.depositId) candidates of
           [row]->pure row
           _->reject "source_loss_not_proven"
-        proof <- inspectNativeSourceWith transport cfg store source >>= \case
+        proof <- inspectNativeSourceWith transport cfg ledger source >>= \case
           Domain.SourceMissing evidence->pure evidence
           _->reject "source_loss_not_proven"
         now <- epochSeconds
@@ -308,10 +309,10 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
         [saved]->pure saved
         _->reject "native_rebroadcast_payment_not_in_review"
       paymentIdentity transport
-      (ob,_) <- readSavedPayment transport cfg store attempt
-      family <- paymentNativeFamily store (Domain.attemptIntent attempt)
+      (ob,_) <- readSavedPayment transport cfg ledger attempt
+      family <- paymentNativeFamily ledger (Domain.attemptIntent attempt)
       view <- missing family
-      recheckSourceWith transport cfg store ob
+      recheckSourceWith transport cfg ledger ob
       block <- paymentNative transport False "getblockchaininfo" [] >>= fieldValue "bestblockhash" :: IO Text
       let proof=object["transaction" .= txid,"bytesHash" .= digest(TE.encodeUtf8 $ Domain.attemptBytes attempt),
             "nodeBlock" .= block,"family" .= map Domain.attemptId family,
@@ -323,7 +324,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
       -- Upload can take time. Repeat actual identity, source and input/tip proofs
       -- immediately before the short ledger authorization and exact-byte send.
       paymentIdentity transport
-      recheckSourceWith transport cfg store ob
+      recheckSourceWith transport cfg ledger ob
       _ <- missing family
       NativeRecovery.authorizeRebroadcast ledger (backupRequired cfg) attempt family approved
       actual <- paymentNative transport True "sendrawtransaction" [toJSON $ Domain.attemptBytes attempt] >>= parseValue parseJSON
@@ -332,7 +333,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
         "outcome" .= ("rebroadcast"::Text),"paused" .= True,"newSignature" .= False,
         "newPrincipalPosting" .= False])
     missing family=do
-      (_,view) <- readSavedNativeFamily transport cfg store family
+      (_,view) <- readSavedNativeFamily transport cfg ledger family
       require (familyActive view==Nothing) "native_rebroadcast_payment_not_missing"
       pure view
 

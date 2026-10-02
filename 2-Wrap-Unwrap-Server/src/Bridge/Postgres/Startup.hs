@@ -7,8 +7,8 @@ import qualified Bridge.Postgres.Custody as Custody
 import qualified Bridge.Postgres.Order as Order
 import Control.Monad (forM_)
 import Bridge.Settlement (PaymentTransport,reconcilePaymentsWith,readSavedPayment,recheckSourceWith)
-import Bridge.Postgres.PaymentStore (Store(..),pendingAttempts)
-import qualified Bridge.Postgres.PaymentStore as Payments
+import Bridge.Postgres.PaymentStore (pendingAttempts)
+import qualified Bridge.Reconciliation as Payments
 import qualified Bridge.Ledger.Model as Domain
 import Bridge.RPC (fieldValue)
 import Data.Aeson (Value)
@@ -29,16 +29,16 @@ resumeAfterReview :: IO Int64 -> PaymentTransport -> Config -> Ledger -> IO ()
 resumeAfterReview clock transport cfg ledger = do
   state <- readiness ledger
   require (not $ available state) "pause_before_operator_action"
-  result <- reconcilePaymentsWith transport cfg (Store ledger)
+  result <- reconcilePaymentsWith transport cfg ledger
   outcomes <- fieldValue "attempts" result :: IO [Value]
   failures <- mapM (fieldValue "error") outcomes :: IO [Maybe Text]
   require (all (==Nothing) failures) "resume_payment_requires_review"
-  saved <- pendingAttempts (Store ledger)
+  saved <- pendingAttempts ledger
   require (length saved<=1000) "resume_payment_backlog"
   forM_ saved $ \attempt->do
     require (Domain.attemptState attempt `elem` ["signed","broadcast_intent"]) "resume_payment_requires_review"
-    (obligation,_) <- readSavedPayment transport cfg (Store ledger) attempt
-    recheckSourceWith transport cfg (Store ledger) obligation
+    (obligation,_) <- readSavedPayment transport cfg ledger attempt
+    recheckSourceWith transport cfg ledger obligation
   _ <- Payments.reconcileCustodyWith clock transport cfg ledger
   now <- clock
   resumeChecked cfg ledger now (Just saved)

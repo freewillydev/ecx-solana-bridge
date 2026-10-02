@@ -1,6 +1,9 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module Bridge.Reconciliation (CustodyStore(..), View(..), inspectCustodyWith, inspectSourceLossCustodyWith) where
+module Bridge.Reconciliation (View(..), reconcileCustodyWith, inspectCustodyWith, inspectSourceLossCustodyWith) where
 
+import qualified Bridge.Postgres.Custody as PgCustody
+import qualified Bridge.Postgres.Observation as PgObservation
+import qualified Bridge.Postgres.PaymentStore as PgPaymentStore
 import Bridge.Config
 import Bridge.Ledger.Model
 import Bridge.Native
@@ -11,7 +14,10 @@ import Bridge.Settlement
 import Bridge.Solana
 import Bridge.SolanaPayment
 import Bridge.Types
-import Control.Exception (IOException,catch)
+import Bridge.Postgres.Ledger (Ledger)
+import Bridge.Postgres.PaymentStore
+import Control.Exception (IOException,catch,try)
+import qualified Bridge.Postgres.Custody as C
 import Control.Monad (forM_,when)
 import Data.Aeson hiding (decode)
 import Data.Int (Int64)
@@ -21,38 +27,26 @@ import qualified Data.Text as T
 
 -- Read-only on both chains: a check cannot authorize a payout, allocate a
 -- receipt, clear a review flag, or resume a paused deployment.
-data View = View
-  { viewRevision :: !Int64, viewTotals :: !(M.Map Text Integer)
-  , viewHeads :: ![(Text,Text)], viewSlot :: !Int64
-  }
-class PaymentStore ledger => CustodyStore ledger where
-  custodyView :: Config -> ledger -> Int64 -> Bool -> IO View
-  custodyPending :: ledger -> IO [Attempt]
-  custodyProof :: ledger -> Text -> Text -> IO (Text,Text,Value)
-  custodyDepth :: ledger -> Int -> IO Int
-  custodyRevision :: ledger -> IO Int64
-  custodyHasEvent :: ledger -> Text -> Text -> IO Bool
-
 headFor :: View -> Text -> IO Text
 headFor v stream=maybe (reject "custody_history_anchor_missing") pure (lookup stream $ viewHeads v)
 
 -- No RPC holds a database transaction. Concurrent observations or settlements
 -- invalidate this revision before it can be certified. A newer history head
 -- requires a fresh scan; other failures also impose an operator pause.
-inspectSourceLossCustodyWith :: CustodyStore ledger => IO Int64 -> PaymentTransport -> Config -> ledger -> IO Value
+inspectSourceLossCustodyWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> IO Value
 inspectSourceLossCustodyWith clock transport c ledger=do
   (revision,at,matches,report) <- inspectCustodyWith clock transport c ledger True
     `catch` (\(_::IOException)->reject "custody_rpc_unavailable")
   require matches "custody_balance_mismatch"
   pure $ object ["revision" .= revision,"checkedAt" .= at,"report" .= report]
 
-inspectCustodyWith :: CustodyStore ledger => IO Int64 -> PaymentTransport -> Config -> ledger -> Bool -> IO (Int64,Int64,Bool,Value)
+inspectCustodyWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> Bool -> IO (Int64,Int64,Bool,Value)
 inspectCustodyWith clock transport c ledger inspectLosses=do
   at <- clock
   view <- custodyView c ledger at inspectLosses
   paymentIdentity transport
   before <- nativeBalance native
-  attempts <- custodyPending ledger
+  attempts <- PgPaymentStore.pendingAttempts ledger
   groups <- either (const $ reject "custody_attempt_bounds") pure (paymentAttemptGroups attempts)
   effects <- concat <$> mapM (pendingFamilyEffect transport c ledger) groups
   (slot,wrapped,sol) <- solanaBalances (paymentSolana transport) c ledger view
@@ -96,10 +90,10 @@ nativeBalance call=do
   require (transactionId hash && height>=0) "custody_native_anchor_missing"
   pure (sum $ map (toInteger.units) values,hash,height)
 
-nativeFence :: CustodyStore ledger => NativeRPC -> Config -> ledger -> View -> IO ()
+nativeFence :: NativeRPC -> Config -> Ledger -> View -> IO ()
 nativeFence call c ledger view=do
   cursor <- headFor view "Native"
-  depth <- custodyDepth ledger (nativeConfirmations c)
+  depth <- PgObservation.maximumNativeDepth ledger (nativeConfirmations c)
   history <- call True "listsinceblock" [toJSON cursor,toJSON depth,Bool False,Bool True]
   next <- fieldValue "lastblock" history
   require (next==cursor) "custody_native_history_advanced"
@@ -111,11 +105,11 @@ nativeFence call c ledger view=do
     txid <- fieldValue "txid" entry
     confirmations <- fieldValue "confirmations" entry :: IO Int
     anchor <- parseValue (withObject "transaction" (.:? "blockhash")) entry
-    (_,savedAnchor,proof) <- custodyProof ledger "Native" txid
+    (_,savedAnchor,proof) <- PgCustody.eventProof ledger "Native" txid
     old <- fieldValue "confirmations" proof
     require (old==confirmations && savedAnchor==maybe "unconfirmed" id anchor) "custody_native_history_changed"
 
-solanaBalances :: CustodyStore ledger => SolanaRPC -> Config -> ledger -> View -> IO (Int64,Integer,Integer)
+solanaBalances :: SolanaRPC -> Config -> Ledger -> View -> IO (Int64,Integer,Integer)
 solanaBalances call c ledger view=do
   (slot,value) <- call "getMultipleAccounts" [toJSON [custodyAta c,custodyOwner c]
     ,object ["commitment" .= ("finalized"::Text),"encoding" .= ("jsonParsed"::Text),"minContextSlot" .= viewSlot view]] >>= contextValue (viewSlot view)
@@ -128,13 +122,13 @@ solanaBalances call c ledger view=do
     response <- call "getSignaturesForAddress" [toJSON address,object
       ["commitment" .= ("finalized"::Text),"minContextSlot" .= slot,"limit" .= (1::Int)]] >>= parseValue parseJSON
     h <- case response of [a]->pure a; _->reject "custody_history_head_unavailable"
-    (_,anchor,_) <- custodyProof ledger stream headSignature
+    (_,anchor,_) <- PgCustody.eventProof ledger stream headSignature
     require (historySignature h==headSignature && T.pack(show $ historySlot h)==anchor && historySlot h<=slot) "custody_solana_history_advanced"
   pure (slot,toInteger $ units wrapped,toInteger $ units sol)
 
 -- Normalize only verified effects of the immutable saved payment. Unsigned
 -- preparations and unseen signatures have no outgoing effect.
-pendingFamilyEffect :: CustodyStore ledger => PaymentTransport -> Config -> ledger -> [Attempt] -> IO [(Text,Text,Integer)]
+pendingFamilyEffect :: PaymentTransport -> Config -> Ledger -> [Attempt] -> IO [(Text,Text,Integer)]
 pendingFamilyEffect transport c ledger [attempt]=pendingEffect transport c ledger attempt
 pendingFamilyEffect transport c ledger attempts=do
   (members,view) <- readSavedNativeFamily transport c ledger attempts
@@ -143,11 +137,11 @@ pendingFamilyEffect transport c ledger attempts=do
     Nothing->pure []
     Just (attempt,signed,depth,value)->nativeObservedEffect ledger attempt signed depth value
 
-nativeObservedEffect :: CustodyStore ledger => ledger -> Attempt -> NativeSigned -> Int -> Value -> IO [(Text,Text,Integer)]
+nativeObservedEffect :: Ledger -> Attempt -> NativeSigned -> Int -> Value -> IO [(Text,Text,Integer)]
 nativeObservedEffect ledger attempt signed confirmations value=do
   require (attemptState attempt=="broadcast_intent") "unrecorded_broadcast_observed"
   let txid=attemptId attempt
-  (kind,anchor,proof) <- custodyProof ledger "Native" txid
+  (kind,anchor,proof) <- PgCustody.eventProof ledger "Native" txid
   actualAnchor <- parseValue (withObject "transaction" (.:? "blockhash")) value
   oldDepth <- fieldValue "confirmations" proof
   net <- fieldValue "walletNetUnits" proof
@@ -158,7 +152,7 @@ nativeObservedEffect ledger attempt signed confirmations value=do
     && net==T.pack(show $ negate n) && fee==signedNativeFee signed) "custody_payment_observation_mismatch"
   pure [(txid,"Native",negate $ n+cost)]
 
-pendingEffect :: CustodyStore ledger => PaymentTransport -> Config -> ledger -> Attempt -> IO [(Text,Text,Integer)]
+pendingEffect :: PaymentTransport -> Config -> Ledger -> Attempt -> IO [(Text,Text,Integer)]
 pendingEffect transport c ledger attempt=do
   (_,payment) <- readSavedPayment transport c ledger attempt
   let txid=attemptId attempt
@@ -190,8 +184,23 @@ pendingEffect transport c ledger attempt=do
             cost=toInteger (units $ outcomeFee outcome)+toInteger (units $ outcomeRent outcome)
             anchor=T.pack(show $ outcomeSlot outcome)
         forM_ [("Solana",negate n),("SolanaOperating",negate cost)] $ \(stream,delta)->do
-          (kind,observedAnchor,evidence) <- custodyProof ledger stream txid
+          (kind,observedAnchor,evidence) <- PgCustody.eventProof ledger stream txid
           actual <- fieldValue "delta" evidence
           require (observedAnchor==anchor && actual==T.pack(show delta)
             && kind==(if stream=="Solana" && n==0 then "failed" else "outgoing")) "custody_payment_observation_mismatch"
         pure [(txid,"Wrapped",negate n),(txid,"Sol",negate cost)]
+
+-- One custody inspection/recording path for scanning, cancellation, source
+-- recovery and replacement. Callers cannot inject a different recording action.
+reconcileCustodyWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> IO Value
+reconcileCustodyWith clock transport cfg ledger = do
+  expected <- custodyRevision ledger
+  result <- try (inspectCustodyWith clock transport cfg ledger False `catch` (\(_::IOException)->reject "custody_rpc_unavailable")) :: IO (Either BridgeError (Int64,Int64,Bool,Value))
+  case result of
+    Right (revision,at,matches,report)->do
+      C.recordCheck ledger revision at (if matches then Nothing else Just "custody_balance_mismatch") (Just report)
+      pure(object["matches" .= matches,"revision" .= revision,"report" .= report])
+    Left (BridgeError code)->do
+      at <- clock
+      C.recordCheck ledger expected at (Just code) Nothing
+      pure(object["matches" .= False,"error" .= code])

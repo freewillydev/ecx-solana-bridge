@@ -1,22 +1,31 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.Recovery
-  ( NativeLockStore(..), reconcileNativeLocksWith
-  , CancellationStore(..), cancelPreparationWith, SourceRecoveryStore(..), approveSourceRecoveryWith
-  , LossCoverStore(..), coverSourceLossWith, prepareNativeReplacementUsing
-  , NativeReplacementStore(..), signNativeReplacementUsing ) where
+  ( reconcileNativeLocksWith
+  , cancelPreparationWith, approveSourceRecoveryWith
+  , coverSourceLossWith, prepareNativeReplacementUsing
+  , signNativeReplacementUsing ) where
 
+import qualified Bridge.Postgres.Cancellation as PgCancellation
+import qualified Bridge.Postgres.Ledger as PgLedger
+import qualified Bridge.Postgres.LossCover as PgLossCover
+import qualified Bridge.Postgres.PaymentStore as PgPaymentStore
+import qualified Bridge.Postgres.Preparation as PgPreparation
+import qualified Bridge.Postgres.Replacement as PgReplacement
+import qualified Bridge.Postgres.Source as PgSource
 import Bridge.Config
 import Bridge.Ledger.Model
 import Bridge.Native (nativeAmount)
 import Bridge.NativePayment
 import Bridge.NativeReplacement
-import Bridge.Payment (payoutReference,PreparationStore(..))
-import Bridge.Reconciliation hiding (custodyProof)
+import Bridge.Payment (payoutReference)
+import Bridge.Reconciliation
 import Bridge.Reorg
 import Bridge.RPC
 import Bridge.Settlement
 import Bridge.SolanaPayment
 import Bridge.Types
+import Bridge.Postgres.Ledger (Ledger)
+import Bridge.Postgres.PaymentStore
 import Control.Exception (IOException,catch,try)
 import Control.Monad (when)
 import Data.Aeson
@@ -30,21 +39,16 @@ stored=either (const $ reject "invalid_saved_preparation") pure . eitherDecodeSt
 
 -- Reconstruct from durable records on every startup/pass. Observing and booking
 -- a recorded outcome continue during a pause; this never prepares or broadcasts.
-class (SettlementStore ledger,CustodyStore ledger) => SourceRecoveryStore ledger where
-  recoveryApproval :: ledger -> Text -> Int64 -> IO (Maybe Text)
-  recoveryObligation :: ledger -> Text -> Int64 -> IO Obligation
-  recoveryRecord :: ledger -> Text -> Int64 -> Int64 -> Text -> IO ()
-  recoveryReconcile :: IO Int64 -> PaymentTransport -> Config -> ledger -> IO Value
-approveSourceRecoveryWith :: SourceRecoveryStore ledger => IO Int64 -> PaymentTransport -> Config -> ledger -> Text -> Int64 -> Text -> IO Value
+approveSourceRecoveryWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> Text -> Int64 -> Text -> IO Value
 approveSourceRecoveryWith clock transport c ledger intent restoration reason=do
   require (restoration>0 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_source_approval"
-  health <- preparationReadiness ledger
+  health <- PgLedger.readiness ledger
   require (not $ available health) "pause_before_operator_action"
-  previous <- recoveryApproval ledger intent restoration
+  previous <- PgSource.recoveryApproval ledger intent restoration
   case previous of
     Just old->require (old==reason) "source_approval_conflict"
     Nothing->do
-      ob <- recoveryObligation ledger intent restoration
+      ob <- PgSource.recoveryObligation ledger intent restoration
       paymentIdentity transport
       recheckSourceWith transport c ledger ob
       -- A saved payment may have finalized or expired since the source was
@@ -53,33 +57,23 @@ approveSourceRecoveryWith clock transport c ledger intent restoration reason=do
       attempts <- fieldValue "attempts" payments :: IO [Value]
       failures <- mapM (fieldValue "error") attempts :: IO [Maybe Text]
       require (all (==Nothing) failures) "source_approval_payment_requires_review"
-      _ <- recoveryReconcile clock transport c ledger
+      _ <- reconcileCustodyWith clock transport c ledger
       now <- clock
-      recoveryRecord ledger intent restoration now reason
+      PgSource.recoveryRecord ledger intent restoration now reason
   pure $ object ["approvedSourceRecovery" .= intent,"restorationSequence" .= restoration
     ,"paused" .= True,"signedOrSent" .= False]
 
-class (SettlementStore ledger,CustodyStore ledger) => NativeReplacementStore ledger where
-  replacementDecision :: ledger -> Text -> Amount -> Text -> IO (Maybe(Int64,Bool))
-  replacementParent :: ledger -> Config -> Text -> IO Attempt
-  replacementRecordDraft :: ledger -> Config -> Attempt -> NativeDraft -> Text -> Int64 -> IO Int64
-  replacementMember :: ledger -> Int64 -> IO (Maybe Attempt)
-  replacementSigningContext :: ledger -> Config -> Int64 -> IO ([Attempt],NativeDraft)
-  replacementRecordMember :: ledger -> Config -> Int64 -> [Attempt] -> NativeSigned -> Int64 -> IO Attempt
-  replacementCustody :: IO Int64 -> PaymentTransport -> Config -> ledger -> IO Value
-  replacementFresh :: ledger -> Int64 -> IO ()
-  replacementCancel :: ledger -> Int64 -> Text -> IO ()
-prepareNativeReplacementUsing :: NativeReplacementStore ledger => IO Int64 -> PaymentTransport
-  -> (Text -> [NativeSigned] -> Amount -> IO NativeDraft) -> Config -> ledger -> Text -> Amount -> Text -> IO Value
+prepareNativeReplacementUsing :: IO Int64 -> PaymentTransport
+  -> (Text -> [NativeSigned] -> Amount -> IO NativeDraft) -> Config -> Ledger -> Text -> Amount -> Text -> IO Value
 prepareNativeReplacementUsing clock transport drafter c ledger parent fee reason=do
   require (units fee>0 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_native_replacement_draft"
-  health <- preparationReadiness ledger
+  health <- PgLedger.readiness ledger
   require (not $ available health) "pause_before_operator_action"
-  previous <- replacementDecision ledger parent fee reason
+  previous <- PgReplacement.decision ledger parent fee reason
   (sequenceNo,cancelled) <- case previous of
     Just saved->pure saved
     Nothing->do
-      expected <- replacementParent ledger c parent
+      expected <- PgReplacement.parent ledger c parent
       paymentIdentity transport
       (ob,payment) <- readSavedPayment transport c ledger expected
       signed <- case payment of NativePayment s->pure s; _->reject "wrong_destination_chain"
@@ -97,58 +91,54 @@ prepareNativeReplacementUsing clock transport drafter c ledger parent fee reason
       failures <- mapM (fieldValue "error") outcomes :: IO [Maybe Text]
       require (all (==Nothing) failures) "native_replacement_payment_requires_review"
       recheckSourceWith transport c ledger ob
-      _ <- replacementCustody clock transport c ledger
+      _ <- reconcileCustodyWith clock transport c ledger
       now <- clock
-      sequenceNo <- replacementRecordDraft ledger c expected draft reason now
+      sequenceNo <- PgReplacement.recordDraft ledger c expected draft reason now
       pure(sequenceNo,False)
   pure $ object ["parentTransaction" .= parent,"draftSequence" .= sequenceNo,"fee" .= fee
     ,"cancelled" .= cancelled,"paused" .= True,"signedOrSent" .= False]
 
 -- Signing is an explicit paused operator call, never a worker task. Saved
 -- members advance only through the ordinary durable send/observation engine.
-signNativeReplacementUsing :: NativeReplacementStore ledger => IO Int64 -> PaymentTransport
-  -> (Int64 -> [NativeSigned] -> NativeDraft -> IO NativeSigned) -> Config -> ledger -> Int64 -> IO Attempt
+signNativeReplacementUsing :: IO Int64 -> PaymentTransport
+  -> (Int64 -> [NativeSigned] -> NativeDraft -> IO NativeSigned) -> Config -> Ledger -> Int64 -> IO Attempt
 signNativeReplacementUsing clock transport signer c ledger sequenceNo=do
-  previous <- replacementMember ledger sequenceNo
+  previous <- PgReplacement.member ledger sequenceNo
   case previous of
     Just member->pure member
     Nothing->do
-      (expected,draft) <- replacementSigningContext ledger c sequenceNo
+      (expected,draft) <- PgReplacement.signingContext ledger c sequenceNo
       paymentIdentity transport
       (members,_) <- readSavedNativeFamily transport c ledger expected
       (ob,_) <- readSavedPayment transport c ledger (last expected)
       recheckSourceWith transport c ledger ob
       reconcile
-      _ <- replacementSigningContext ledger c sequenceNo
+      _ <- PgReplacement.signingContext ledger c sequenceNo
       signed <- signer sequenceNo (map snd members) draft
       recheckSourceWith transport c ledger ob
       reconcile
       now <- clock
-      replacementRecordMember ledger c sequenceNo expected signed now
+      PgReplacement.recordMember ledger c sequenceNo expected signed now
  where
   reconcile=do
     payments <- reconcilePaymentsWith transport c ledger
     outcomes <- fieldValue "attempts" payments :: IO [Value]
     failures <- mapM (fieldValue "error") outcomes :: IO [Maybe Text]
     require (all (==Nothing) failures) "native_replacement_payment_requires_review"
-    _ <- replacementCustody clock transport c ledger
+    _ <- reconcileCustodyWith clock transport c ledger
     now <- clock
-    replacementFresh ledger now
+    PgCancellation.checkFresh ledger now
 
-class (NativeSourceStore ledger,CustodyStore ledger) => LossCoverStore ledger where
-  lossReadiness :: ledger -> IO Availability
-  lossDecision :: ledger -> Text -> Int64 -> IO (Maybe(LossCapital,Text))
-  lossRecord :: ledger -> Deposit -> Int64 -> Int64 -> LossCapital -> Text -> Value -> Value -> IO ()
-coverSourceLossWith :: LossCoverStore ledger => IO Int64 -> PaymentTransport -> Config -> ledger -> Text -> Int64 -> LossCapital -> Text -> IO Value
+coverSourceLossWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> Text -> Int64 -> LossCapital -> Text -> IO Value
 coverSourceLossWith clock transport c ledger did recovery capital reason=do
   require (recovery>0 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_source_loss_cover"
-  health <- lossReadiness ledger
+  health <- PgLedger.readiness ledger
   require (not $ available health) "pause_before_operator_action"
-  old <- lossDecision ledger did recovery
+  old <- PgLossCover.decision ledger did recovery
   case old of
     Just previous->require (previous==(capital,reason)) "source_loss_cover_conflict"
     Nothing->do
-      candidates <- sourceCandidates ledger
+      candidates <- PgSource.candidates ledger
       require (length candidates<=1000) "source_recovery_backlog"
       source <- case filter ((==did).depositId) candidates of [s]->pure s; _->reject "source_loss_not_proven"
       sourceProof <- inspectNativeSourceWith transport c ledger source >>= \case
@@ -156,25 +146,23 @@ coverSourceLossWith clock transport c ledger did recovery capital reason=do
         _->reject "source_loss_not_proven"
       -- This separate inspection includes proved deficits but cannot make
       -- ordinary custody readiness pass before the actual capital allocation.
-      custodyProof <- inspectSourceLossCustodyWith clock transport c ledger
+      custodyReport <- inspectSourceLossCustodyWith clock transport c ledger
       now <- clock
-      lossRecord ledger source recovery now capital reason sourceProof custodyProof
+      PgLossCover.record ledger source recovery now capital reason sourceProof custodyReport
   pure $ object ["coveredSourceLoss" .= did,"recoverySequence" .= recovery,"capital" .= capital
     ,"paused" .= True,"signedOrSent" .= False]
 
 -- Holding saved native inputs is independent of Solana availability. This may
 -- restore advisory locks, but cannot sign, broadcast, unlock or release funds.
-class CancellationStore ledger => NativeLockStore ledger where
-  nativeLockAudit :: ledger -> Text -> IO ()
-reconcileNativeLocksWith :: NativeLockStore ledger => PaymentTransport -> Config -> ledger -> IO Value
+reconcileNativeLocksWith :: PaymentTransport -> Config -> Ledger -> IO Value
 reconcileNativeLocksWith transport c ledger=do
   result <- try (work `catch` (\(_::IOException)->reject "native_lock_recovery_io_unavailable")) :: IO (Either BridgeError Value)
   case result of
     Right value->pure value
     Left (BridgeError code)->do
       let reason="native_lock_recovery:"<>code
-      health <- preparationReadiness ledger
-      when (health/=Availability False reason) $ preparationPause ledger reason
+      health <- PgLedger.readiness ledger
+      when (health/=Availability False reason) $ PgLedger.pause ledger reason
       pure $ object ["state" .= ("requires_review"::Text),"error" .= code,"signedOrSent" .= False]
  where
   call=paymentNative transport
@@ -185,14 +173,14 @@ reconcileNativeLocksWith transport c ledger=do
     descriptors <- fieldValue "descriptors" wallet
     scanning <- fieldValue "scanning" wallet :: IO Value
     require (name==nativeWallet c && descriptors && scanning==Bool False) "native_wallet_not_ready"
-    preparations <- filter ((=="Native").preparationChain) <$> preparationPending ledger
-    attempts <- filter ((=="Native").attemptChain) <$> preparationAttempts ledger
+    preparations <- filter ((=="Native").preparationChain) <$> PgPreparation.pending ledger
+    attempts <- filter ((=="Native").attemptChain) <$> PgPaymentStore.pendingAttempts ledger
     case (preparations,attempts) of
       ([],[])->verifyOnly "idle" []
       ([p],[])->do
         policy <- preparationPolicyFor c ledger p
         (plan,draft) <- readNativePreparation call c p policy
-        cancelling <- cancellationRead ledger (obligationId $ preparationObligation p) (preparationGeneration p)
+        cancelling <- PgCancellation.readCancellation ledger (obligationId $ preparationObligation p) (preparationGeneration p)
         let subject=obligationId (preparationObligation p)<>"@"<>T.pack(show $ preparationGeneration p)
         case draft of
           Nothing->verifyOnly (if cancelling==Nothing then "awaiting_draft" else "cancellation_pending") []
@@ -246,29 +234,23 @@ reconcileNativeLocksWith transport c ledger=do
 
 -- Private operator action under the exclusive ledger lock. This cannot sign,
 -- send, release customer principal, or resume the deployment.
-class (SettlementStore ledger,CustodyStore ledger) => CancellationStore ledger where
-  cancellationReconcile :: IO Int64 -> PaymentTransport -> Config -> ledger -> IO Value
-  cancellationRead :: ledger -> Text -> Int -> IO (Maybe(Text,Text,Bool))
-  cancellationCheckFresh :: ledger -> Int64 -> IO ()
-  cancellationBegin :: ledger -> Preparation -> Int64 -> Text -> Value -> IO ()
-  cancellationFinish :: ledger -> Preparation -> IO ()
-cancelPreparationWith :: CancellationStore ledger => IO Int64 -> PaymentTransport -> Config -> ledger -> Text -> Int -> Text -> IO Value
+cancelPreparationWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> Text -> Int -> Text -> IO Value
 cancelPreparationWith clock transport c ledger intent generation reason=do
   require (generation>=0 && generation<8 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_preparation_cancellation"
-  state <- preparationReadiness ledger
+  state <- PgLedger.readiness ledger
   require (not $ available state) "pause_before_operator_action"
-  old <- cancellationRead ledger intent generation
+  old <- PgCancellation.readCancellation ledger intent generation
   case old of
     Just (previous,_,_) -> require (previous==reason) "preparation_cancellation_conflict"
     Nothing -> pure ()
   case old of
     Just (_,_,True) -> pure result
     _ -> do
-      rows <- filter (\p -> obligationId (preparationObligation p)==intent && preparationGeneration p==generation) <$> preparationPending ledger
+      rows <- filter (\p -> obligationId (preparationObligation p)==intent && preparationGeneration p==generation) <$> PgPreparation.pending ledger
       preparation <- case rows of [p]->pure p; _->reject "preparation_cancellation_not_expected"
       paymentIdentity transport
       recheckSourceWith transport c ledger (preparationObligation preparation)
-      _ <- cancellationReconcile clock transport c ledger
+      _ <- reconcileCustodyWith clock transport c ledger
       expected <- cleanupPlan (paymentNative transport) c ledger preparation
       -- Even a retry must match the same immutable policy/draft and pass the
       -- current custody check; a lost response is never evidence of cleanup.
@@ -276,12 +258,12 @@ cancelPreparationWith clock transport c ledger intent generation reason=do
         Just (_,encoded,False) -> stored encoded >>= \saved -> require (saved==expected) "preparation_cancellation_conflict"
         _ -> pure ()
       now <- clock
-      cancellationCheckFresh ledger now
-      cancellationBegin ledger preparation now reason expected
+      PgCancellation.checkFresh ledger now
+      PgCancellation.begin ledger preparation now reason expected
       when (preparationChain preparation=="Native") $ do
         inputs <- fieldValue "nativeInputs" expected
         cleanupLocks (paymentNative transport) inputs
-      cancellationFinish ledger preparation
+      PgCancellation.finish ledger preparation
       pure result
  where
   result=object ["cancelledPreparation" .= intent,"generation" .= generation,"paused" .= True
@@ -289,10 +271,10 @@ cancelPreparationWith clock transport c ledger intent generation reason=do
 
 -- Reconstruct cleanup from the saved economic policy, not from caller-supplied
 -- outpoints. A stale Solana blockhash is harmless here: no signed attempt exists.
-preparationPolicyFor :: PreparationStore ledger => Config -> ledger -> Preparation -> IO PolicySnapshot
+preparationPolicyFor :: Config -> Ledger -> Preparation -> IO PolicySnapshot
 preparationPolicyFor c ledger p=do
   let ob=preparationObligation p
-  policy <- preparationOrderPolicy ledger (obligationOrder ob)
+  policy <- PgPreparation.orderPolicy ledger (obligationOrder ob)
   require (deploymentFingerprint policy==fingerprint c && solanaCommitment policy=="finalized") "payment_profile_mismatch"
   pure policy
 
@@ -314,7 +296,7 @@ readNativePreparation call c p policy=do
     pure saved) (preparationDraft p)
   pure (plan,draft)
 
-cleanupPlan :: PreparationStore ledger => NativeRPC -> Config -> ledger -> Preparation -> IO Value
+cleanupPlan :: NativeRPC -> Config -> Ledger -> Preparation -> IO Value
 cleanupPlan call c ledger p=do
   let ob=preparationObligation p
   policy <- preparationPolicyFor c ledger p

@@ -1,6 +1,9 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module Bridge.Reorg (NativeSettlementStore(..),NativeSourceStore(..),reconcileNativeSettlementsWith,reconcileNativeSourcesWith,inspectNativeSourceWith) where
+module Bridge.Reorg (reconcileNativeSettlementsWith,reconcileNativeSourcesWith,inspectNativeSourceWith) where
 
+import qualified Bridge.Postgres.Ledger as PgLedger
+import qualified Bridge.Postgres.NativeRecovery as PgNativeRecovery
+import qualified Bridge.Postgres.Source as PgSource
 import Bridge.Config
 import Bridge.Ledger.Model
 import Bridge.Native (nativeAmount)
@@ -8,6 +11,8 @@ import Bridge.NativePayment (ownedScript,transactionId,signedNativePlan,planDept
 import Bridge.RPC
 import Bridge.Settlement
 import Bridge.Types
+import Bridge.Postgres.Ledger (Ledger)
+import Bridge.Postgres.PaymentStore
 import Control.Exception (IOException,catch,try)
 import Control.Monad (when,filterM)
 import Data.Aeson
@@ -20,16 +25,10 @@ import Text.Read (readMaybe)
 
 -- A missing RPC response cannot prove that credited source value disappeared.
 -- Only a canonical native wallet conflict creates a financial deficit here.
-class NativeSourceStore ledger where
-  sourceCandidates :: ledger -> IO [Deposit]
-  sourcePause :: ledger -> Text -> IO ()
-  sourceRecordCheck :: ledger -> Deposit -> SourceCheck -> IO ()
-  sourceOrderBinding :: ledger -> Text -> IO (Text,Text)
-  sourceEventEvidence :: ledger -> Text -> IO (Text,Text)
-reconcileNativeSourcesWith :: NativeSourceStore ledger => PaymentTransport -> Config -> ledger -> IO Value
+reconcileNativeSourcesWith :: PaymentTransport -> Config -> Ledger -> IO Value
 reconcileNativeSourcesWith transport c ledger=do
-  sources <- sourceCandidates ledger
-  when (length sources>1000) $ sourcePause ledger "source_recovery_backlog"
+  sources <- PgSource.candidates ledger
+  when (length sources>1000) $ PgLedger.pause ledger "source_recovery_backlog"
   require (length sources<=1000) "source_recovery_backlog"
   reports <- mapM reconcile sources
   pure $ object ["sources" .= reports,"signedOrSent" .= False]
@@ -38,20 +37,20 @@ reconcileNativeSourcesWith transport c ledger=do
   reconcile source=do
     checked <- try (inspectNativeSourceWith transport c ledger source `catch` (\(_::IOException)->reject "source_recovery_io_unavailable")) :: IO (Either BridgeError SourceCheck)
     let result=either (\(BridgeError code)->unavailable code) id checked
-    committed <- try (sourceRecordCheck ledger source result) :: IO (Either BridgeError ())
+    committed <- try (PgSource.recordCheck ledger source result) :: IO (Either BridgeError ())
     case committed of
       Right ()->pure $ report source result
       Left (BridgeError code)->do
-        saved <- try (sourceRecordCheck ledger source $ unavailable code) :: IO (Either BridgeError ())
+        saved <- try (PgSource.recordCheck ledger source $ unavailable code) :: IO (Either BridgeError ())
         case saved of
           Right ()->pure ()
-          Left (BridgeError changed)->sourcePause ledger ("source_recovery:"<>changed)
+          Left (BridgeError changed)->PgLedger.pause ledger ("source_recovery:"<>changed)
         pure $ report source (unavailable code)
   report source check=object ["deposit" .= depositId source,"state" .= (case check of
     SourcePending _->"pending"; SourceMissing _->"missing"; SourceRestored _->"restored"; SourceUnavailable _->"requires_review"::Text)]
 
 
-inspectNativeSourceWith :: NativeSourceStore ledger => PaymentTransport -> Config -> ledger -> Deposit -> IO SourceCheck
+inspectNativeSourceWith :: PaymentTransport -> Config -> Ledger -> Deposit -> IO SourceCheck
 inspectNativeSourceWith transport c ledger source=do
   paymentIdentity transport
   wallet <- call True "getwalletinfo" []
@@ -91,7 +90,7 @@ inspectNativeSourceWith transport c ledger source=do
   needed <- case depositOrder source of
     Nothing->pure $ if category=="receive" then nativeConfirmations c else max 101 (nativeConfirmations c)
     Just oid->do
-      (instruction,saved)<-sourceOrderBinding ledger oid
+      (instruction,saved)<-PgSource.orderBinding ledger oid
       policy<-either (const $ reject "native_source_policy_invalid") pure (eitherDecodeStrict' $ TE.encodeUtf8 saved)
       require (category=="receive" && instruction==address && deploymentFingerprint policy==fingerprint c) "native_source_binding_mismatch"
       pure (nativeDepth policy)
@@ -99,7 +98,7 @@ inspectNativeSourceWith transport c ledger source=do
   anchor <- parseValue (withObject "source" (.:? "blockhash")) value :: IO (Maybe Text)
   conflicts <- fieldValue "walletconflicts" value :: IO [Text]
   require (length conflicts<=100 && all transactionId conflicts) "invalid_native_source_conflicts"
-  (observationHash,old)<-sourceEventEvidence ledger txid
+  (observationHash,old)<-PgSource.eventEvidence ledger txid
   event <- either (const $ reject "source_recovery_scan_not_current") pure (eitherDecodeStrict' $ TE.encodeUtf8 old)
   recordedDepth <- fieldValue "proof" event >>= fieldValue "confirmations"
   recordedAnchor <- fieldValue "anchor" event
@@ -133,31 +132,26 @@ inspectNativeSourceWith transport c ledger source=do
 
 -- Recheck previously settled native bytes when their recorded finality changed.
 -- A different proved family winner adjusts its fee only, without a new payment.
-class PaymentStore ledger => NativeSettlementStore ledger where
-  recoveryCandidates :: ledger -> IO [Attempt]
-  recoveryPause :: ledger -> Text -> IO ()
-  recoveryObservation :: ledger -> Text -> IO Text
-  recoveryCheck :: ledger -> Attempt -> Text -> NativeSettlementCheck -> IO ()
-reconcileNativeSettlementsWith :: NativeSettlementStore ledger => PaymentTransport -> Config -> ledger -> IO Value
+reconcileNativeSettlementsWith :: PaymentTransport -> Config -> Ledger -> IO Value
 reconcileNativeSettlementsWith transport c ledger=do
-  candidates <- recoveryCandidates ledger
-  when (length candidates>1000) $ recoveryPause ledger "native_settlement_recovery_backlog"
+  candidates <- PgNativeRecovery.candidates ledger
+  when (length candidates>1000) $ PgLedger.pause ledger "native_settlement_recovery_backlog"
   require (length candidates<=1000) "native_settlement_recovery_backlog"
   reports <- mapM reconcile candidates
   pure $ object ["payments" .= map fst reports,"signedOrSent" .= False,"monetaryPostings" .= any snd reports]
  where
   reconcile attempt=do
-    previous <- recoveryObservation ledger (attemptId attempt)
+    previous <- PgNativeRecovery.observation ledger (attemptId attempt)
     checked <- try (inspect attempt `catch` (\(_::IOException)->reject "native_recovery_io_unavailable")) :: IO (Either BridgeError NativeSettlementCheck)
     let result=either (\(BridgeError code)->NativeSettlementUnavailable code) id checked
-    committed <- try (recoveryCheck ledger attempt previous result) :: IO (Either BridgeError ())
+    committed <- try (PgNativeRecovery.recordCheck ledger attempt previous result) :: IO (Either BridgeError ())
     case committed of
       Left (BridgeError code)->do
-        pending <- try (recoveryCheck ledger attempt previous (NativeSettlementUnavailable code)) :: IO (Either BridgeError ())
+        pending <- try (PgNativeRecovery.recordCheck ledger attempt previous (NativeSettlementUnavailable code)) :: IO (Either BridgeError ())
         case pending of
           Right ()->pure $ report attempt "requires_review" (Just code)
           Left (BridgeError changed)->do
-            recoveryPause ledger ("native_settlement_recovery:"<>changed)
+            PgLedger.pause ledger ("native_settlement_recovery:"<>changed)
             pure $ report attempt "requires_review" (Just changed)
       Right ()->pure $ case result of
         NativeSettlementConfirming->report attempt "confirming" Nothing

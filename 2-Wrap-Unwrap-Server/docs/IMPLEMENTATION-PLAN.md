@@ -239,7 +239,13 @@ The sequence below remains the broader refactor checklist, subject to that prior
    component, sqlite-simple, obsolete SQLite migrations and active import tooling.
    Historical migration tools remain available at the baseline revision. Replace
    PreparationStore, SettlementStore and similar backend-compatibility classes with
-   concrete PostgreSQL functions where abstraction no longer pays for itself.
+   concrete PostgreSQL functions where abstraction no longer pays for itself. All eleven
+   single-instance storage typeclasses and the Store newtype are now removed.
+   Fifty forwarding bindings are removed; workflows call their concrete PostgreSQL
+   operations directly. The severity-indexed Operation dictionary is retained.
+   Custody inspection/recording now lives together in Reconciliation, rather than
+   creating a cycle through a backend adapter. Ledger queries and transaction
+   boundaries are unchanged by this consolidation.
    Remove redundant wrappers immediately after their replacement works.
    Core PostgreSQL budgeting is now part of Ledger, so allowance and journal
    arithmetic share one implementation. Retain remaining unique SQLite assertions

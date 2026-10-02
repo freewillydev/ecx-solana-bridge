@@ -1,6 +1,6 @@
 -- Shared economic records and evidence decoding; no database capability.
 module Bridge.Ledger.Model
-  ( CostLimits(..), Deposit(..), ChainEvent(..), ScanBatch(..), SourceCheck(..)
+  ( View(..), CostLimits(..), Deposit(..), ChainEvent(..), ScanBatch(..), SourceCheck(..)
   , LossCapital(..), Obligation(..), Attempt(..), Preparation(..), PaymentCosts(..)
   , NativeSettlementCheck(..), economicOutflow
   ) where
@@ -9,11 +9,16 @@ import Bridge.Types
 import Data.Aeson
 import Data.Aeson.Types (parseEither,Parser)
 import Data.Int (Int64)
+import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
 import GHC.Generics (Generic)
 import Text.Read (readMaybe)
 
+data View = View
+  { viewRevision :: !Int64, viewTotals :: !(M.Map Text Integer)
+  , viewHeads :: ![(Text,Text)], viewSlot :: !Int64
+  }
 data CostLimits = CostLimits
   { savedNativeFee :: !Amount, savedSolanaFee :: !Amount, savedSolanaRent :: !Amount }
   deriving (Eq,Show)

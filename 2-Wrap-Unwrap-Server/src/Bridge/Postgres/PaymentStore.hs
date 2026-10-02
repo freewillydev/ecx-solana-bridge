@@ -1,25 +1,11 @@
-module Bridge.Postgres.PaymentStore (Store(..), pendingAttempts, reconcileCustodyWith) where
+module Bridge.Postgres.PaymentStore
+  ( pendingAttempts, paymentObligation, paymentSourceContext, paymentNativeFamily, settlementWinner, settlementReady, settlementBusy, settlementCoveredSource, custodyView, custodyRevision, custodyHasEvent, nativeLockAudit ) where
 
 import Bridge.Types
-import Bridge.Config (Config)
-import Bridge.Ledger.Model (Attempt(..),Obligation(..),Deposit(..))
-import Bridge.Settlement (PaymentTransport,PaymentStore(..),SettlementStore(..))
-import Control.Exception (IOException,catch,try)
-import Data.Aeson (Value,object,(.=))
-import qualified Bridge.Postgres.Settlement as S
-import qualified Bridge.Postgres.Retry as Retry
 import qualified Bridge.Postgres.Source as Source
-import Bridge.Reorg (NativeSourceStore(..),NativeSettlementStore(..))
-import qualified Bridge.Postgres.NativeRecovery as NativeRecovery
-import Bridge.Recovery (CancellationStore(..),NativeLockStore(..),SourceRecoveryStore(..),NativeReplacementStore(..),LossCoverStore(..))
-import qualified Bridge.Postgres.Cancellation as Cancellation
-import qualified Bridge.Postgres.Replacement as Replacement
-import qualified Bridge.Postgres.LossCover as LossCover
-import Bridge.Payment (PreparationStore(..))
-import qualified Bridge.Postgres.Preparation as P
-import Bridge.Reconciliation (CustodyStore(..),View(..),inspectCustodyWith)
+import Bridge.Config (Config)
+import Bridge.Ledger.Model
 import qualified Bridge.Postgres.Custody as C
-import qualified Bridge.Postgres.Observation as Observation
 import Data.Int (Int64)
 import qualified Bridge.Postgres.NativeFamily as NativeFamily
 import Bridge.Postgres.Ledger
@@ -32,40 +18,41 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Opaleye as O
 
-newtype Store = Store Ledger
 
-instance PaymentStore Store where
-  paymentObligation (Store ledger) oid = ledgerAction ledger $ \connection->do
-    rows <- O.runSelect connection $ do
-      row <- O.selectTable obligationsTable
-      O.where_ (obligationsId row O..== O.sqlStrictText oid)
-      pure row
-      :: IO [Obligations]
-    case rows of [row]->pure (obligation row); _->reject "obligation_not_found"
-  paymentSourceContext (Store ledger) expected = ledgerAction ledger $ \connection->do
-    rows <- O.runSelect connection $ do
-      ob <- O.selectTable obligationsTable
-      order <- O.selectTable ordersTable
-      deposit <- O.selectTable depositsTable
-      O.where_ (obligationsId ob O..== O.sqlStrictText (obligationId expected) O..&&
-        obligationsOrderId ob O..== ordersId order O..&& obligationsDepositId ob O..== depositsId deposit)
-      pure (ob,order,deposit)
-      :: IO [(Obligations,Orders,Deposits)]
-    (ob,order,deposit) <- case rows of [row]->pure row; _->reject "source_deposit_missing"
-    require (obligation ob==expected) "obligation_mismatch"
-    request <- stored (ordersRequestJson order)
-    policy <- stored (ordersPolicyJson order)
-    instruction <- maybe (reject "source_instruction_missing") pure (ordersInstruction order)
-    let asset=sourceAsset (direction request)
-    require (depositsOrderId deposit==Just (obligationOrder expected) && depositsAsset deposit==T.pack(show asset)) "source_binding_mismatch"
-    quantity <- either reject pure (amount $ toInteger $ depositsAmount deposit)
-    require (depositsConfirmations deposit>=0 && toInteger (depositsConfirmations deposit)<=toInteger(maxBound::Int)) "source_depth_overflow"
-    pure (Deposit (depositsId deposit) (depositsOrderId deposit) asset quantity (depositsAnchor deposit)
-      (fromIntegral $ depositsConfirmations deposit) (depositsEligible deposit==1) (depositsFirstSeen deposit),request,policy,instruction)
-  paymentNativeFamily (Store ledger) intent = ledgerAction ledger $ \connection->NativeFamily.familyC connection intent
+paymentObligation :: Ledger -> Text -> IO Obligation
+paymentObligation ledger oid = ledgerAction ledger $ \connection->do
+  rows <- O.runSelect connection $ do
+    row <- O.selectTable obligationsTable
+    O.where_ (obligationsId row O..== O.sqlStrictText oid)
+    pure row
+    :: IO [Obligations]
+  case rows of [row]->pure (obligation row); _->reject "obligation_not_found"
+paymentSourceContext :: Ledger -> Obligation -> IO (Deposit,OrderRequest,PolicySnapshot,Text)
+paymentSourceContext ledger expected = ledgerAction ledger $ \connection->do
+  rows <- O.runSelect connection $ do
+    ob <- O.selectTable obligationsTable
+    order <- O.selectTable ordersTable
+    deposit <- O.selectTable depositsTable
+    O.where_ (obligationsId ob O..== O.sqlStrictText (obligationId expected) O..&&
+      obligationsOrderId ob O..== ordersId order O..&& obligationsDepositId ob O..== depositsId deposit)
+    pure (ob,order,deposit)
+    :: IO [(Obligations,Orders,Deposits)]
+  (ob,order,deposit) <- case rows of [row]->pure row; _->reject "source_deposit_missing"
+  require (obligation ob==expected) "obligation_mismatch"
+  request <- stored (ordersRequestJson order)
+  policy <- stored (ordersPolicyJson order)
+  instruction <- maybe (reject "source_instruction_missing") pure (ordersInstruction order)
+  let asset=sourceAsset (direction request)
+  require (depositsOrderId deposit==Just (obligationOrder expected) && depositsAsset deposit==T.pack(show asset)) "source_binding_mismatch"
+  quantity <- either reject pure (amount $ toInteger $ depositsAmount deposit)
+  require (depositsConfirmations deposit>=0 && toInteger (depositsConfirmations deposit)<=toInteger(maxBound::Int)) "source_depth_overflow"
+  pure (Deposit (depositsId deposit) (depositsOrderId deposit) asset quantity (depositsAnchor deposit)
+    (fromIntegral $ depositsConfirmations deposit) (depositsEligible deposit==1) (depositsFirstSeen deposit),request,policy,instruction)
+paymentNativeFamily :: Ledger -> Text -> IO [Attempt]
+paymentNativeFamily ledger intent = ledgerAction ledger $ \connection->NativeFamily.familyC connection intent
 
-pendingAttempts :: Store -> IO [Attempt]
-pendingAttempts (Store ledger) = ledgerAction ledger $ \connection->do
+pendingAttempts :: Ledger -> IO [Attempt]
+pendingAttempts ledger = ledgerAction ledger $ \connection->do
   rows <- O.runSelect connection $ do
     a <- O.selectTable attemptsTable
     i <- O.selectTable intentsTable
@@ -86,132 +73,56 @@ attempt row chain = Attempt (attemptsTxid row) (attemptsIntentId row) chain (att
 stored :: FromJSON a => Text -> IO a
 stored = either (const $ reject "invalid_saved_payment") pure . eitherDecodeStrict' . TE.encodeUtf8
 
-instance CustodyStore Store where
-  custodyView cfg (Store ledger) now losses = do
-    snapshot <- C.readSnapshot cfg ledger now losses
-    pure (View (C.revision snapshot) (C.totals snapshot) (C.heads snapshot) (C.slot snapshot))
-  custodyPending = pendingAttempts
-  custodyProof (Store ledger) = C.eventProof ledger
-  custodyDepth (Store ledger) = Observation.maximumNativeDepth ledger
-  custodyRevision (Store ledger) = ledgerAction ledger $ \connection->do
-    rows <- O.runSelect connection (fmap custodycheckRevision $ O.selectTable custodycheckTable) :: IO [Int64]
-    case rows of [revision]->pure revision; _->reject "custody_check_missing"
-  custodyHasEvent (Store ledger) txid chain = ledgerAction ledger $ \connection->do
-    rows <- O.runSelect connection $ do
-      row <- O.selectTable chaineventsTable
-      O.where_ (chaineventsEventId row O..== O.sqlStrictText txid O..&&
-        (chaineventsChain row O..== O.sqlStrictText chain O..|| chaineventsChain row O..== O.sqlStrictText (if chain=="Solana" then "SolanaOperating" else "Native")))
-      pure (chaineventsEventId row)
-      :: IO [Text]
-    pure (not $ null rows)
+custodyView :: Config -> Ledger -> Int64 -> Bool -> IO View
+custodyView cfg ledger now losses = do
+  snapshot <- C.readSnapshot cfg ledger now losses
+  pure (View (C.revision snapshot) (C.totals snapshot) (C.heads snapshot) (C.slot snapshot))
+custodyRevision :: Ledger -> IO Int64
+custodyRevision ledger = ledgerAction ledger $ \connection->do
+  rows <- O.runSelect connection (fmap custodycheckRevision $ O.selectTable custodycheckTable) :: IO [Int64]
+  case rows of [revision]->pure revision; _->reject "custody_check_missing"
+custodyHasEvent :: Ledger -> Text -> Text -> IO Bool
+custodyHasEvent ledger txid chain = ledgerAction ledger $ \connection->do
+  rows <- O.runSelect connection $ do
+    row <- O.selectTable chaineventsTable
+    O.where_ (chaineventsEventId row O..== O.sqlStrictText txid O..&&
+      (chaineventsChain row O..== O.sqlStrictText chain O..|| chaineventsChain row O..== O.sqlStrictText (if chain=="Solana" then "SolanaOperating" else "Native")))
+    pure (chaineventsEventId row)
+    :: IO [Text]
+  pure (not $ null rows)
 
 
-instance PreparationStore Store where
-  preparationPause (Store ledger) = pause ledger
-  preparationReadiness (Store ledger) = readiness ledger
-  preparationOrderPolicy (Store ledger) = P.orderPolicy ledger
-  preparationCostLimits (Store ledger) = P.costLimits ledger
-  preparationAttempts = pendingAttempts
-  preparationPending (Store ledger) = P.pending ledger
-  preparationBegin (Store ledger) = P.begin ledger
-  preparationActive (Store ledger) = P.active ledger
-  preparationStoreDraft (Store ledger) = P.storeDraft ledger
-  preparationStoreAttempt (Store ledger) = P.storeAttempt ledger
 
-instance SettlementStore Store where
-  settlementRetryReasons (Store ledger) = Retry.reasons ledger
-  settlementRetryAttempts (Store ledger) = Retry.candidates ledger
-  settlementRecordRetry (Store ledger) = Retry.recordApproval ledger
-  settlementWinner (Store ledger) intent = ledgerAction ledger $ \connection->do
-    rows <- O.runSelect connection $ do
-      row <- O.selectTable attemptsTable
-      O.where_(attemptsIntentId row O..== O.sqlStrictText intent O..&& attemptsState row O..== O.sqlStrictText "settled")
-      pure(attemptsTxid row)
-      :: IO [Text]
-    case rows of [winner]->pure winner; _->reject "settled_payment_missing"
-  settlementReady (Store ledger) = ledgerAction ledger $ \c->do
-    rows <- O.runSelect c $ O.limit 100 $ do
-      row <- O.selectTable obligationsTable
-      O.where_ (obligationsStatus row O..== O.sqlStrictText "ready")
-      pure row
-      :: IO [Obligations]
-    pure(map obligation rows)
-  settlementBusy (Store ledger) chain = ledgerAction ledger $ \c->do
-    rows <- O.runSelect c $ do
-      row <- O.selectTable intentsTable
-      O.where_ (intentsChain row O..== O.sqlStrictText chain O..&& intentsResolved row O..== O.sqlInt8 0)
-      pure(intentsId row)
-      :: IO [Text]
-    pure(not $ null rows)
-  settlementRefresh (Store ledger) = Observation.refreshDeposit ledger
-  settlementCoveredSource (Store ledger) ob = Source.coveredAuthorized ledger (obligationId ob)
-  settlementRecord (Store ledger) = S.recordSettlement ledger
-  settlementFailed (Store ledger) = S.recordFailedSolana ledger
-  settlementExpiry (Store ledger) = S.recordSolanaExpiry ledger
-  settlementExpiryOrigins (Store ledger) = S.checkExpiryOrigins ledger
-  settlementBroadcast (Store ledger) = S.markBroadcastIntent ledger
-  settlementAuthorize (Store ledger) = S.authorizeRecordedSend ledger
+settlementWinner :: Ledger -> Text -> IO Text
+settlementWinner ledger intent = ledgerAction ledger $ \connection->do
+  rows <- O.runSelect connection $ do
+    row <- O.selectTable attemptsTable
+    O.where_(attemptsIntentId row O..== O.sqlStrictText intent O..&& attemptsState row O..== O.sqlStrictText "settled")
+    pure(attemptsTxid row)
+    :: IO [Text]
+  case rows of [winner]->pure winner; _->reject "settled_payment_missing"
+settlementReady :: Ledger -> IO [Obligation]
+settlementReady ledger = ledgerAction ledger $ \c->do
+  rows <- O.runSelect c $ O.limit 100 $ do
+    row <- O.selectTable obligationsTable
+    O.where_ (obligationsStatus row O..== O.sqlStrictText "ready")
+    pure row
+    :: IO [Obligations]
+  pure(map obligation rows)
+settlementBusy :: Ledger -> Text -> IO Bool
+settlementBusy ledger chain = ledgerAction ledger $ \c->do
+  rows <- O.runSelect c $ do
+    row <- O.selectTable intentsTable
+    O.where_ (intentsChain row O..== O.sqlStrictText chain O..&& intentsResolved row O..== O.sqlInt8 0)
+    pure(intentsId row)
+    :: IO [Text]
+  pure(not $ null rows)
+settlementCoveredSource :: Ledger -> Obligation -> IO Bool
+settlementCoveredSource ledger ob = Source.coveredAuthorized ledger (obligationId ob)
 
-instance CancellationStore Store where
-  cancellationReconcile clock transport cfg (Store ledger) = reconcileCustodyWith clock transport cfg ledger
-  cancellationRead (Store ledger) = Cancellation.readCancellation ledger
-  cancellationCheckFresh (Store ledger) = Cancellation.checkFresh ledger
-  cancellationBegin (Store ledger) = Cancellation.begin ledger
-  cancellationFinish (Store ledger) = Cancellation.finish ledger
 
-instance NativeLockStore Store where
-  nativeLockAudit (Store ledger) subject = ledgerAction ledger $ \connection->do
-    _ <- O.runInsert connection O.Insert
-      {O.iTable=auditTable,O.iRows=[Audit Nothing (O.sqlStrictText "native_locks_restored") (O.sqlStrictText subject)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-    pure ()
-
-instance SourceRecoveryStore Store where
-  recoveryApproval (Store ledger) = Source.recoveryApproval ledger
-  recoveryObligation (Store ledger) = Source.recoveryObligation ledger
-  recoveryRecord (Store ledger) = Source.recoveryRecord ledger
-  recoveryReconcile = cancellationReconcile
-
-instance NativeSourceStore Store where
-  sourceCandidates (Store ledger) = Source.candidates ledger
-  sourcePause (Store ledger) = pause ledger
-  sourceRecordCheck (Store ledger) = Source.recordCheck ledger
-  sourceOrderBinding (Store ledger) = Source.orderBinding ledger
-  sourceEventEvidence (Store ledger) = Source.eventEvidence ledger
-
-instance NativeSettlementStore Store where
-  recoveryCandidates (Store ledger) = NativeRecovery.candidates ledger
-  recoveryPause (Store ledger) = pause ledger
-  recoveryObservation (Store ledger) = NativeRecovery.observation ledger
-  recoveryCheck (Store ledger) = NativeRecovery.recordCheck ledger
-
-instance NativeReplacementStore Store where
-  replacementDecision (Store ledger) = Replacement.decision ledger
-  replacementParent (Store ledger) = Replacement.parent ledger
-  replacementRecordDraft (Store ledger) = Replacement.recordDraft ledger
-  replacementMember (Store ledger) = Replacement.member ledger
-  replacementSigningContext (Store ledger) = Replacement.signingContext ledger
-  replacementRecordMember (Store ledger) = Replacement.recordMember ledger
-  replacementCustody = cancellationReconcile
-  replacementFresh (Store ledger) = Cancellation.checkFresh ledger
-  replacementCancel (Store ledger) = Replacement.cancel ledger
-
-instance LossCoverStore Store where
-  lossReadiness (Store ledger) = readiness ledger
-  lossDecision (Store ledger) = LossCover.decision ledger
-  lossRecord (Store ledger) = LossCover.record ledger
-
--- One custody inspection/recording path for scanning, cancellation, source
--- recovery and replacement. Callers cannot inject a different recording action.
-reconcileCustodyWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> IO Value
-reconcileCustodyWith clock transport cfg ledger = do
-  let store=Store ledger
-  expected <- custodyRevision store
-  result <- try (inspectCustodyWith clock transport cfg store False `catch` (\(_::IOException)->reject "custody_rpc_unavailable")) :: IO (Either BridgeError (Int64,Int64,Bool,Value))
-  case result of
-    Right (revision,at,matches,report)->do
-      C.recordCheck ledger revision at (if matches then Nothing else Just "custody_balance_mismatch") (Just report)
-      pure(object["matches" .= matches,"revision" .= revision,"report" .= report])
-    Left (BridgeError code)->do
-      at <- clock
-      C.recordCheck ledger expected at (Just code) Nothing
-      pure(object["matches" .= False,"error" .= code])
+nativeLockAudit :: Ledger -> Text -> IO ()
+nativeLockAudit ledger subject = ledgerAction ledger $ \connection->do
+  _ <- O.runInsert connection O.Insert
+    {O.iTable=auditTable,O.iRows=[Audit Nothing (O.sqlStrictText "native_locks_restored") (O.sqlStrictText subject)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  pure ()

@@ -241,7 +241,7 @@ winnerContract ledger = do
   signedMember <- Replacement.recordMember ledger cfg draftSequence expectedFamily newer 100
   beforeSignedReplay <- snapshot ledger
   Replacement.recordMember ledger cfg draftSequence expectedFamily newer 100 >>= \a->require (a==signedMember) "contract_replacement_signed_replay_changed"
-  pendingFamily <- PaymentStore.pendingAttempts (PaymentStore.Store ledger)
+  pendingFamily <- PaymentStore.pendingAttempts ledger
   canonicalFamily <- L.ledgerAction ledger (\c->Family.familyC c $ attemptIntent signedMember)
   require (filter ((==attemptIntent signedMember).attemptIntent) pendingFamily==canonicalFamily) "contract_pending_family_lineage_order"
   expectError "native_replacement_already_signed" $ Replacement.cancel ledger draftSequence "cannot cancel signature"

@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module Bridge.RPC (newRpcManager, rpc, retryRateLimitedRead, parseValue, fieldValue, boundedBody, unixManager) where
+module Bridge.RPC (PaymentTransport(..), newRpcManager, rpc, retryRateLimitedRead, parseValue, fieldValue, boundedBody, unixManager) where
 
 import Bridge.Types
 import Control.Exception (bracketOnError, catch)
@@ -9,6 +9,7 @@ import Data.Aeson
 import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
+import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.HTTP.Client
@@ -17,6 +18,13 @@ import Network.HTTP.Types.Status (statusCode)
 import qualified Network.Socket as NS
 import Text.Read (readMaybe)
 
+-- RPC seams are for contract tests. The worker always supplies these two real
+-- chain adapters; there is no configurable alternate or simulated network.
+data PaymentTransport = PaymentTransport
+  { paymentNative :: (Bool -> Text -> [Value] -> IO Value), paymentSolana :: (Text -> [Value] -> IO Value)
+  , paymentVerifier :: Maybe (Text -> [Value] -> IO Value), paymentIdentity :: IO ()
+  , paymentBackup :: Int64 -> IO ()
+  }
 newRpcManager :: IO Manager
 newRpcManager = newManager $ managerSetProxy noProxy tlsManagerSettings
   { managerRetryableException = const False, managerConnCount = 4
