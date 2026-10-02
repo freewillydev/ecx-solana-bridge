@@ -123,6 +123,9 @@ and existing backup tooling are explicit dependencies rather than custom framewo
    PreparationStore, SettlementStore and similar backend-compatibility classes with
    concrete PostgreSQL functions where abstraction no longer pays for itself.
    Remove redundant wrappers immediately after their replacement works.
+   Core PostgreSQL budgeting is now part of Ledger, so allowance and journal
+   arithmetic share one implementation. Retain remaining unique SQLite assertions
+   until their production equivalent exists, including treasury-spend classification.
 
 4. **Make the domain and DSL the entry point for auditing.** Consolidate duplicate
    Plan/Request/DSL layers only when they add no distinct guarantee. Use explicit

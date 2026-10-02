@@ -2,7 +2,7 @@
 module Main (main) where
 
 import Bridge.Types hiding (deploymentFingerprint)
-import Bridge.Ledger.Model (Deposit(..),Obligation(..))
+import Bridge.Ledger.Model (Deposit(..),Obligation(..),CostLimits(..))
 import qualified Bridge.Postgres.Preparation as Preparation
 import qualified Bridge.Postgres.Settlement as Settlement
 import Bridge.Config
@@ -125,13 +125,15 @@ data Fixture a where
   FailTransaction :: Fixture ()
   FailCommit :: IORef Bool -> Fixture ()
   FailCapacity :: Fixture ()
+  FailCostPolicy :: Fixture ()
+  OperatingFunds :: Fixture (Integer,Integer)
   InterruptedWrite :: MVar () -> MVar () -> Fixture ()
   FundedObligation :: Fixture Obligation
   SendState :: Fixture ([Attempts],[FeeReservations],[Reservations],[OperatingReservations])
   JournalState :: Fixture JournalSnapshot
 
 data JournalSnapshot = JournalSnapshot [Events] [Postings] [(Int64,Int64,Int64)]
-  [CustodyCheck] [Checkpoints] deriving (Eq,Show)
+  [CustodyCheck] [Checkpoints] [OrderCostLimits] [Orders] deriving (Eq,Show)
 
 fixture :: PG.Connection -> Fixture a -> IO a
 fixture connection = \case
@@ -244,8 +246,10 @@ fixture connection = \case
     coverage <- fixture connection ReadCoverage
     custody <- O.runSelect connection (O.selectTable custodycheckTable)
     checkpoints <- O.runSelect connection (O.selectTable checkpointsTable)
+    limits <- O.runSelect connection (O.selectTable ordercostlimitsTable)
+    orders <- O.runSelect connection (O.selectTable ordersTable)
     pure (JournalSnapshot (sortOn eventsId events) (sortOn postingsId postings) coverage
-      custody (sortOn checkpointsChain checkpoints))
+      custody (sortOn checkpointsChain checkpoints) (sortOn ordercostlimitsOrderId limits) (sortOn ordersId orders))
   SendState -> (,,,)
     <$> (sortOn attemptsTxid <$> O.runSelect connection (O.selectTable attemptsTable))
     <*> (sortOn feereservationsIntentId <$> O.runSelect connection (O.selectTable feereservationsTable))
@@ -283,6 +287,10 @@ fixture connection = \case
       { O.iTable=O.table "contract_deferred_commit" (O.requiredTableField "event_id")
       , O.iRows=[O.sqlStrictText "missing-event"],O.iReturning=O.rCount,O.iOnConflict=Nothing }
     writeIORef bodyCompleted True
+  OperatingFunds -> (,) <$> L.freeOperating connection "Native" <*> L.freeOperating connection "Sol"
+  FailCostPolicy -> void $ O.runUpdate connection O.Update
+    { O.uTable=ordercostlimitsTable,O.uUpdateWith= \row->row {ordercostlimitsNativeFee=O.sqlInt8 5}
+    , O.uWhere=const(O.sqlBool True),O.uReturning=O.rCount }
   FailCapacity -> do
     -- PostgreSQL reports its actual disk_full SQLSTATE, without filling the
     -- host disk. This exercises error preservation, not filesystem durability.
@@ -319,8 +327,11 @@ orderContracts settings = do
     expect "order_not_found" (Order.exposeOrder ledger False (T.replicate 64 "b") (ordersId first))
     view <- Order.exposeOrder ledger False capability (ordersId first)
     require (nativeDepth(policy view)==1 && fee(quote view)==quantity 1000 && net(quote view)==quantity 99000) "saved_order_terms_wrong"
-    saved <- Order.createOrder ledger cfg{nativeConfirmations=6} 100 capability request
+    saved <- Order.createOrder ledger cfg{nativeConfirmations=6,maxNativeFee=quantity 5,
+      maxSolFee=quantity 1,maxSolAccountRent=quantity 999999} 100 capability request
     require (saved==first) "configuration_changed_existing_order"
+    limits <- Preparation.costLimits ledger (ordersId first)
+    require (limits==CostLimits (quantity 1000) (quantity 10000) (quantity 0)) "saved_fee_ceilings_changed"
     fresh <- Order.createOrder ledger cfg{nativeConfirmations=6} 100 capability request{idempotencyKey="new-policy"}
     newView <- Order.exposeOrder ledger False capability (ordersId fresh)
     depth <- Observation.maximumNativeDepth ledger 1
@@ -340,6 +351,35 @@ orderContracts settings = do
     expect "order_no_longer_provisioning" (Order.bindInstruction ledger (ordersId fresh) "late-address")
     free <- L.ledgerAction ledger (\connection->fixture connection FreeWrapped)
     require (free==1000000) "expiry_did_not_release_inventory"
+    -- Both payout and refund funds must be admitted atomically; rejection
+    -- leaves every hold unchanged. The funded inventory alone is insufficient.
+    let state :: Fixture a -> IO a
+        state operation=L.ledgerAction ledger (\connection->fixture connection operation)
+        largeRent=cfg{maxSolAccountRent=quantity 980000}
+    rentOrder <- Order.createOrder ledger largeRent 100 capability request{idempotencyKey="rent"}
+    funds <- state OperatingFunds
+    require (funds==(999000,10000)) "quote_did_not_reserve_rent_and_refund"
+    before <- state JournalState
+    beforeHolds <- state SendState
+    expect "insufficient_fee_budget" (Order.createOrder ledger largeRent 100 capability request{idempotencyKey="no-fee-capacity"})
+    after <- state JournalState
+    afterHolds <- state SendState
+    require (before==after && beforeHolds==afterHolds) "rejected_fee_quote_changed_holds"
+    holds <- state (OrderHoldCounts $ ordersId rentOrder)
+    require (holds==(1,1)) "quote_inventory_hold_missing"
+    (_,_,_,allowances) <- state SendState
+    require (sortOn id [operatingreservationsKind r | r<-allowances,operatingreservationsOrderId r==ordersId rentOrder]==["conversion","refund"]) "quote_outcome_allowances_missing"
+    Order.expireQuotes ledger 100000
+    expect "insufficient_fee_budget" (Order.createOrder ledger cfg{maxNativeFee=quantity 1000001} 100 capability request{idempotencyKey="unfunded-refund"})
+    state FreeWrapped >>= \n->require (n==1000000) "rejected_refund_quote_reserved_inventory"
+    let limited=cfg{maxSolDailyCost=quantity 25000}
+        small=request{input=quantity 10000}
+    admitted <- mapConcurrently (\n->try (Order.createOrder ledger limited 100 capability
+      small{idempotencyKey="daily-"<>T.pack(show n)}) :: IO (Either BridgeError Orders)) [1..20::Int]
+    require (length [() | Right _<-admitted]==2 &&
+      all (\case Left(BridgeError code)->code=="operating_daily_limit"; Right _->True) admitted) "concurrent_daily_cap_not_serialized"
+    state OperatingFunds >>= \fundsAfter->require (fundsAfter==(998000,980000)) "concurrent_daily_holds_wrong"
+    Order.expireQuotes ledger 100000
     results <- mapConcurrently (\n->try (Order.createOrder ledger cfg 100 capability
       request{idempotencyKey=T.pack(show n)}) :: IO (Either BridgeError Orders)) [1..20::Int]
     require (length [() | Right _<-results]==10 &&
@@ -399,7 +439,7 @@ rollbackContract settings = do
     after <- state ledger JournalState
     require (before==after) "interruption_published_uncommitted_state"
   bodyCompleted <- newIORef False
-  forM_ [("23505",FailTransaction),("23503",FailCommit bodyCompleted),("53100",FailCapacity)] $ \(code,operation)->do
+  forM_ [("23505",FailTransaction),("23503",FailCommit bodyCompleted),("53100",FailCapacity),("23514",FailCostPolicy)] $ \(code,operation)->do
     before <- L.withLedger settings "journal-contract" $ \ledger->do
       original <- state ledger JournalState
       result <- try (state ledger operation) :: IO (Either PG.SqlError ())

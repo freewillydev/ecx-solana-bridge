@@ -71,6 +71,9 @@ is unresolved. Bincode is pinned and unmaintained; no migration or waiver is imp
    betanet/canonical flows. Verify the full-range pool and executable market route
    before claiming Jupiter/Orca availability. No canonical funds are allocated here.
 5. Complete dependency/license applicability and independent security review.
+   Port treasury-spend classification: PostgreSQL preserves its schema and scanner
+   recognition, but the checked mutation exists only in the legacy test backend.
+   Retain its reservation/ownership guards when integrating it into the operator DSL.
    The plan's bounded fee-sweeping requirement still needs a
    supported ledger/signing workflow and acceptance; no general fee-withdrawal
    command is implemented or certified by the current evidence.

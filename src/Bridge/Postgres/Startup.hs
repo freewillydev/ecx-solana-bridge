@@ -4,7 +4,6 @@ import Bridge.Types
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
 import qualified Bridge.Postgres.Custody as Custody
-import qualified Bridge.Postgres.Budget as Budget
 import qualified Bridge.Postgres.Order as Order
 import Control.Monad (forM_)
 import Bridge.Settlement (PaymentTransport,reconcilePaymentsWith,readSavedPayment,recheckSourceWith)
@@ -89,7 +88,7 @@ resumeChecked cfg ledger now reviewed = do
     limits <- O.runSelect c (O.selectTable ordercostlimitsTable) :: IO [OrderCostLimits]
     require (all (\row->any ((==ordersId row).ordercostlimitsOrderId) limits ||
       ordersStatus row `elem` ["Paid","Refunded","ExpiredUnfunded"] && all (\ob->obligationsOrderId ob/=ordersId row || obligationsStatus ob `elem` ["paid","cancelled"]) obligations) orders) "legacy_order_cost_review_required"
-    forM_ ["Native","Sol"] $ \asset->Budget.freeOperating c asset >>= \free->require (free>=0) "operating_allocation_requires_funding"
+    forM_ ["Native","Sol"] $ \asset->freeOperating c asset >>= \free->require (free>=0) "operating_allocation_requires_funding"
     _ <- O.runUpdate c O.Update {O.uTable=deploymentTable,O.uUpdateWith= \row->row {deploymentPaused=O.sqlInt8 0,deploymentPauseReason=O.sqlStrictText "ready"},O.uWhere= \row->deploymentSingleton row O..== O.sqlInt8 1,O.uReturning=O.rCount}
     Order.checkIntakeReadyC c now
     _ <- O.runInsert c O.Insert {O.iTable=auditTable,O.iRows=[Audit Nothing (O.sqlStrictText "resume") (O.sqlStrictText "checks_complete")],O.iReturning=O.rCount,O.iOnConflict=Nothing}

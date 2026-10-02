@@ -2,7 +2,6 @@ module Bridge.Postgres.Order
   ( recoveryPayments, recoverySources, accountedLosses, checkIntakeReadyC, exposeOrderC, readSavedOrder, findSavedOrder, bindInstruction, instructionBackup, createOrder, checkIntakeReady, exposeOrder, readOrderC, claimNativeAllocation, recordNativeInstruction, issueInstruction, expireQuotes ) where
 
 import Bridge.Config
-import qualified Bridge.Postgres.Budget as Budget
 import qualified Bridge.Postgres.Ledger as Ledger
 import Control.Monad (when, forM_)
 import Data.List (nub, sortOn)
@@ -10,7 +9,7 @@ import qualified Data.Map.Strict as M
 import Bridge.Types
 import qualified Bridge.Types as Types
 import Bridge.Postgres.Schema
-import Bridge.Postgres.Ledger (Ledger, ledgerAction, criticalSequence)
+import Bridge.Postgres.Ledger (Ledger, ledgerAction, criticalSequence, reserveOrderCosts)
 import Data.Aeson (encode, ToJSON, FromJSON, eitherDecodeStrict')
 import Data.Profunctor.Product (p2)
 import Data.Int (Int64)
@@ -130,7 +129,7 @@ createOrder ledger cfg now capability req = do
         _ <- O.runInsert connection O.Insert {O.iTable=ordersTable,O.iRows=[row],O.iReturning=O.rCount,O.iOnConflict=Nothing}
         _ <- O.runInsert connection O.Insert
           {O.iTable=reservationsTable,O.iRows=[Reservations (O.sqlStrictText oid) (O.sqlStrictText asset) (O.sqlInt8 (units netAmount)) (O.sqlStrictText "quote")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-        Budget.reserveOrderCosts connection cfg oid (direction req)
+        reserveOrderCosts connection cfg oid (direction req)
         readSavedOrder connection cap oid
       _->reject "duplicate_idempotency"
 

@@ -8,7 +8,6 @@ import Bridge.Ledger.Model (Obligation(..),Preparation(..))
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
 import qualified Bridge.Postgres.Source as Source
-import Bridge.Postgres.Budget (transferOrderCosts)
 import Data.Aeson (FromJSON,eitherDecodeStrict')
 import Data.Int (Int64)
 import Data.List (sortOn)

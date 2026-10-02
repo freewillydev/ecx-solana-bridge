@@ -741,33 +741,6 @@ main=hspec $ do
     it "conserves principal and bounds upward rounding in both directions" $ property $ forAll (chooseInteger (1000,1000000000000)) $ \n -> all (valid n) [NativeToWrapped,WrappedToNative]
     it "never quotes an input consumed entirely by its fee" $ makeQuote NativeToWrapped (amt 1) `shouldBe` Left "nonpositive_net"
   describe "quote allowances and rolling operating budgets" $ do
-    it "reserves payout rent and refund costs before accepting a quote" $ withFunded $ \l c -> do
-      o<-createOrder l c{maxSolAccountRent=amt 80000} 100 cap req
-      ledgerAction l (\db->query_ db "SELECT kind,asset,amount,phase FROM operating_reservations ORDER BY kind" :: IO [(Text,Text,Int64,Text)])
-        `shouldReturn` [("conversion","Sol",90000,"quote"),("refund","Native",1000,"quote")]
-      ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` 10000
-      ledgerAction l (\db->freeOperating db "Native") `shouldReturn` 99000
-      createOrder l c{maxSolAccountRent=amt 80000} 100 cap req{idempotencyKey="no-capacity"} `shouldThrow` isError "insufficient_fee_budget"
-      ledgerAction l (\db->query_ db "SELECT id FROM orders" :: IO [Only Text]) `shouldReturn` [Only $ orderId o]
-    it "refuses a quote without refund funds even when its payout is funded" $ withFunded $ \l c -> do
-      createOrder l c{maxNativeFee=amt 100001} 100 cap req `shouldThrow` isError "insufficient_fee_budget"
-      ledgerAction l (\db->freeInventory db Wrapped) `shouldReturn` 1000000
-      ledgerAction l (\db->query_ db "SELECT count(*) FROM orders" :: IO [Only Int]) `shouldReturn` [Only 0]
-    it "serializes concurrent admission against the shared daily cap" $ withFunded $ \l c -> do
-      let limited=c{maxSolDailyCost=amt 25000}
-          create i=try (createOrder l limited 100 cap req{idempotencyKey=T.pack(show i)}) :: IO (Either BridgeError OrderView)
-      results<-mapConcurrently create [1..20::Int]
-      length [o|Right o<-results] `shouldBe` 2
-      [err|Left err<-results] `shouldBe` replicate 18 (BridgeError "operating_daily_limit")
-      ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` 80000
-      ledgerAction l (\db->query_ db "SELECT count(*) FROM operating_reservations" :: IO [Only Int]) `shouldReturn` [Only 4]
-    it "snapshots fee ceilings and never reserves twice on a repeated request" $ withFunded $ \l c -> do
-      o<-createOrder l c 100 cap req
-      createOrder l c{maxNativeFee=amt 5,maxSolFee=amt 1,maxSolAccountRent=amt 999999} 100 cap req `shouldReturn` o
-      ledgerAction l (\db->orderCostLimits db $ orderId o) `shouldReturn` CostLimits (amt 1000) (amt 10000) (amt 0)
-      ledgerAction l (\db->freeOperating db "Sol") `shouldReturn` 90000
-      result<-try (ledgerAction l $ \db->execute_ db "UPDATE order_cost_limits SET native_fee=5") :: IO (Either SomeException ())
-      result `shouldSatisfy` either (const True) (const False)
     it "transfers the allowance once and charges only actual settled costs" $ withFunded $ \l c -> do
       let limited=c{maxSolFee=amt 9000,maxSolAccountRent=amt 1000,maxSolDailyCost=amt 10000}
       (_,ob)<-fundOrder l limited
