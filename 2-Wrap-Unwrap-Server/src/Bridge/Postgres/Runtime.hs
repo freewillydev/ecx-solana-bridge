@@ -204,10 +204,10 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
       transport
         {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg ledger
     _ <- Observer.observeOnce manager cfg ledger
-    _ <- reconcileNativeSourcesWith
+    reconcileNativeSourcesWith
       transport
         {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg ledger
-    _ <- reconcileNativeSettlementsWith
+    reconcileNativeSettlementsWith
       transport
         {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg ledger
     now <- epochSeconds
@@ -216,8 +216,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
     CustodyWorkflow.reconcileCustodyWith epochSeconds transport cfg ledger
   WorkerDSL StartPayments->do
     verifyNativeBoundary
-    lockResult <- reconcileNativeLocksWith transport {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg ledger
-    lockError <- fieldValue "error" lockResult :: IO (Maybe Text)
+    lockError <- reconcileNativeLocksWith transport {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg ledger
     maybe (pure ()) reject lockError
     now <- epochSeconds
     Startup.resumeAfterChecks cfg ledger now

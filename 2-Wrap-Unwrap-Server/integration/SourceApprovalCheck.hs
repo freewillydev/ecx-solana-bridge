@@ -8,6 +8,7 @@ import qualified Bridge.Postgres.Settlement as Settlement
 import Bridge.NativePayment
 import Bridge.RPC (fieldValue,PaymentTransport(..))
 import qualified Bridge.Settlement as Workflow
+import qualified Bridge.Recovery as Recovery
 import Data.IORef (newIORef,modifyIORef',readIORef)
 import qualified Data.ByteString as BS
 import qualified Bridge.Postgres.Ledger as L
@@ -254,6 +255,13 @@ winnerContract ledger = do
         (\_ _->reject "unexpected_contract_rpc") Nothing
         (modifyIORef' calls (+1) >> reject "contract_identity_unavailable")
         (\_->reject "unexpected_contract_backup")
+  lockError <- Recovery.reconcileNativeLocksWith unavailable cfg ledger
+  require (lockError==Just "contract_identity_unavailable") "contract_lock_recovery_error_lost"
+  L.readiness ledger >>= \state->require (state==Availability False "native_lock_recovery:contract_identity_unavailable") "contract_lock_recovery_not_paused"
+  beforeLocks <- snapshot ledger
+  _ <- Recovery.reconcileNativeLocksWith unavailable cfg ledger
+  snapshot ledger >>= \after->require (beforeLocks==after) "contract_lock_recovery_repeat_mutated"
+  modifyIORef' calls (const 0)
   failures <- Workflow.reconcilePaymentsWith unavailable cfg ledger
   require (failures==replicate (length groups) "contract_identity_unavailable") "contract_reconciliation_errors_lost"
   readIORef calls >>= \n->require (n==length groups) "contract_reconciliation_skipped_family"

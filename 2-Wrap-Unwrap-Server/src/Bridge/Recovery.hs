@@ -26,7 +26,7 @@ import Bridge.SolanaPayment
 import Bridge.Types
 import Bridge.Postgres.Ledger (Ledger)
 import Control.Exception (IOException,catch,try)
-import Control.Monad (when)
+import Control.Monad (when,void)
 import Data.Aeson
 import Data.Int (Int64)
 import Data.Text (Text)
@@ -147,16 +147,16 @@ coverSourceLossWith clock transport c ledger did recovery capital reason=do
 
 -- Holding saved native inputs is independent of Solana availability. This may
 -- restore advisory locks, but cannot sign, broadcast, unlock or release funds.
-reconcileNativeLocksWith :: PaymentTransport -> Config -> Ledger -> IO Value
+reconcileNativeLocksWith :: PaymentTransport -> Config -> Ledger -> IO (Maybe Text)
 reconcileNativeLocksWith transport c ledger=do
-  result <- try (work `catch` (\(_::IOException)->reject "native_lock_recovery_io_unavailable")) :: IO (Either BridgeError Value)
+  result <- try (work `catch` (\(_::IOException)->reject "native_lock_recovery_io_unavailable")) :: IO (Either BridgeError ())
   case result of
-    Right value->pure value
+    Right ()->pure Nothing
     Left (BridgeError code)->do
       let reason="native_lock_recovery:"<>code
       health <- PgLedger.readiness ledger
       when (health/=Availability False reason) $ PgLedger.pause ledger reason
-      pure $ object ["state" .= ("requires_review"::Text),"error" .= code,"signedOrSent" .= False]
+      pure (Just code)
  where
   call=paymentNative transport
   work=do
@@ -165,21 +165,21 @@ reconcileNativeLocksWith transport c ledger=do
     preparations <- filter ((=="Native").preparationChain) <$> PgPreparation.pending ledger
     attempts <- filter ((=="Native").attemptChain) <$> PgSettlement.pendingAttempts ledger
     case (preparations,attempts) of
-      ([],[])->verifyOnly "idle" []
+      ([],[])->verifyOnly []
       ([p],[])->do
         policy <- preparationPolicyFor c ledger p
         (plan,draft) <- readNativePreparation call c p policy
         cancelling <- PgPreparation.readCancellation ledger (obligationId $ preparationObligation p) (preparationGeneration p)
         let subject=obligationId (preparationObligation p)<>"@"<>T.pack(show $ preparationGeneration p)
         case draft of
-          Nothing->verifyOnly (if cancelling==Nothing then "awaiting_draft" else "cancellation_pending") []
-          Just saved | cancelling/=Nothing->verifyOnly "cancellation_pending" (map nativeOutpoint $ nativeInputs $ draftTransaction saved)
+          Nothing->verifyOnly []
+          Just saved | cancelling/=Nothing->verifyOnly (map nativeOutpoint $ nativeInputs $ draftTransaction saved)
           Just saved->restore subject plan (draftTransaction saved) (draftPrevouts saved)
       ([],[a])->do
         (_,payment) <- readSavedPayment transport c ledger a
         signed <- case payment of NativePayment s->pure s; _->reject "wrong_destination_chain"
         spent <- recordedNativeSpend a signed
-        if spent then verifyOnly "spent_by_recorded_payment" (map nativeOutpoint $ nativeInputs $ signedNativeTransaction signed)
+        if spent then verifyOnly (map nativeOutpoint $ nativeInputs $ signedNativeTransaction signed)
           else restore (attemptId a) (signedNativePlan signed) (signedNativeTransaction signed) (signedNativePrevouts signed)
       ([],family) | length family>1->do
         _ <- either reject pure (paymentAttemptGroups family)
@@ -187,18 +187,15 @@ reconcileNativeLocksWith transport c ledger=do
         (first,signed) <- case members of m:_->pure m; _->reject "native_lock_recovery_bounds"
         let points=map nativeOutpoint $ nativeInputs $ signedNativeTransaction signed
         case familyActive view of
-          Just _->verifyOnly "spent_by_recorded_family" points
+          Just _->verifyOnly points
           Nothing->restore (attemptId first) (signedNativePlan signed) (signedNativeTransaction signed) (signedNativePrevouts signed)
       _->reject "native_lock_recovery_bounds"
-  verifyOnly state points=do
-    locked <- ownedNativeLocks call points
-    pure $ report state (length locked) 0
+  verifyOnly points=void $ ownedNativeLocks call points
   restore subject plan tx previous=do
     current <- readNativePrevouts call (planDepth plan) (nativeInputs tx)
     require (sameNativePrevouts current previous) "native_previous_output_changed"
     restored <- restoreNativeInputLocks call (map nativeOutpoint $ nativeInputs tx)
     when (restored>0) $ PgPreparation.nativeLockAudit ledger subject
-    pure $ report "locked" (length $ nativeInputs tx) restored
   recordedNativeSpend attempt signed=do
     found <- readNativePayment call signed
     case found of
@@ -218,8 +215,6 @@ reconcileNativeLocksWith transport c ledger=do
               size <- fieldValue "vsize" entry :: IO Int
               require (size>0) "native_mempool_evidence_invalid"
               pure True
-  report state owned restored=object ["state" .= (state::Text),"ownedInputs" .= (owned::Int)
-    ,"restoredInputs" .= (restored::Int),"error" .= (Nothing::Maybe Text),"signedOrSent" .= False]
 
 -- Private operator action under the exclusive ledger lock. This cannot sign,
 -- send, release customer principal, or resume the deployment.

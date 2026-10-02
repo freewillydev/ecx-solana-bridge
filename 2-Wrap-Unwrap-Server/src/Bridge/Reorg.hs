@@ -25,13 +25,12 @@ import Text.Read (readMaybe)
 
 -- A missing RPC response cannot prove that credited source value disappeared.
 -- Only a canonical native wallet conflict creates a financial deficit here.
-reconcileNativeSourcesWith :: PaymentTransport -> Config -> Ledger -> IO Value
+reconcileNativeSourcesWith :: PaymentTransport -> Config -> Ledger -> IO ()
 reconcileNativeSourcesWith transport c ledger=do
   sources <- PgSource.candidates ledger
   when (length sources>1000) $ PgLedger.pause ledger "source_recovery_backlog"
   require (length sources<=1000) "source_recovery_backlog"
-  reports <- mapM reconcile sources
-  pure $ object ["sources" .= reports,"signedOrSent" .= False]
+  mapM_ reconcile sources
  where
   unavailable code=SourceUnavailable $ object ["reason" .= code]
   reconcile source=do
@@ -39,15 +38,12 @@ reconcileNativeSourcesWith transport c ledger=do
     let result=either (\(BridgeError code)->unavailable code) id checked
     committed <- try (PgSource.recordCheck ledger source result) :: IO (Either BridgeError ())
     case committed of
-      Right ()->pure $ report source result
+      Right ()->pure ()
       Left (BridgeError code)->do
         saved <- try (PgSource.recordCheck ledger source $ unavailable code) :: IO (Either BridgeError ())
         case saved of
           Right ()->pure ()
           Left (BridgeError changed)->PgLedger.pause ledger ("source_recovery:"<>changed)
-        pure $ report source (unavailable code)
-  report source check=object ["deposit" .= depositId source,"state" .= (case check of
-    SourcePending _->"pending"; SourceMissing _->"missing"; SourceRestored _->"restored"; SourceUnavailable _->"requires_review"::Text)]
 
 
 inspectNativeSourceWith :: PaymentTransport -> Config -> Ledger -> Deposit -> IO SourceCheck
@@ -128,13 +124,12 @@ inspectNativeSourceWith transport c ledger source=do
 
 -- Recheck previously settled native bytes when their recorded finality changed.
 -- A different proved family winner adjusts its fee only, without a new payment.
-reconcileNativeSettlementsWith :: PaymentTransport -> Config -> Ledger -> IO Value
+reconcileNativeSettlementsWith :: PaymentTransport -> Config -> Ledger -> IO ()
 reconcileNativeSettlementsWith transport c ledger=do
   candidates <- PgNativeRecovery.candidates ledger
   when (length candidates>1000) $ PgLedger.pause ledger "native_settlement_recovery_backlog"
   require (length candidates<=1000) "native_settlement_recovery_backlog"
-  reports <- mapM reconcile candidates
-  pure $ object ["payments" .= map fst reports,"signedOrSent" .= False,"monetaryPostings" .= any snd reports]
+  mapM_ reconcile candidates
  where
   reconcile attempt=do
     previous <- PgNativeRecovery.observation ledger (attemptId attempt)
@@ -145,16 +140,9 @@ reconcileNativeSettlementsWith transport c ledger=do
       Left (BridgeError code)->do
         pending <- try (PgNativeRecovery.recordCheck ledger attempt previous (NativeSettlementUnavailable code)) :: IO (Either BridgeError ())
         case pending of
-          Right ()->pure $ report attempt "requires_review" (Just code)
-          Left (BridgeError changed)->do
-            PgLedger.pause ledger ("native_settlement_recovery:"<>changed)
-            pure $ report attempt "requires_review" (Just changed)
-      Right ()->pure $ case result of
-        NativeSettlementConfirming->report attempt "confirming" Nothing
-        NativeSettlementUnavailable code->report attempt "requires_review" (Just code)
-        NativeSettlementReconfirmed _ _->report attempt "reconfirmed" Nothing
-        NativeSettlementReplaced _ winner _ _->(object ["transaction" .= winner,"previousTransaction" .= attemptId attempt
-          ,"state" .= ("winner_changed"::Text),"error" .= (Nothing::Maybe Text)],True)
+          Right ()->pure ()
+          Left (BridgeError changed)->PgLedger.pause ledger ("native_settlement_recovery:"<>changed)
+      Right ()->pure ()
   inspect attempt=do
     paymentIdentity transport
     _ <- nativeWalletInfoWith (paymentNative transport) c
@@ -181,4 +169,3 @@ reconcileNativeSettlementsWith transport c ledger=do
       PaymentWaiting->pure NativeSettlementConfirming
       PaymentUnseen->pure $ NativeSettlementUnavailable "native_settled_payment_unseen"
       PaymentFailed _ _->reject "unexpected_native_payment_failure"
-  report attempt state failure=(object ["transaction" .= attemptId attempt,"state" .= (state::Text),"error" .= (failure::Maybe Text)],False)
