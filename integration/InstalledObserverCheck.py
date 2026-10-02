@@ -19,10 +19,21 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('baseline', type=Path)
     parser.add_argument('--capture', action='store_true')
+    parser.add_argument('--port', type=int, help='override the managed loopback web port')
     parser.add_argument('--require-fence', action='store_true', help='require the current installed host fence; omit only when capturing older pre-fence releases')
     parser.add_argument('--upgrade-from', type=Path, help='compare original durable state/configuration before capturing the new release')
     args = parser.parse_args()
     assert os.geteuid() == 0, 'root required for protected configuration hashes'
+    port = args.port
+    if port is None:
+        managed = Path('/etc/ecx-bridge/web.env')
+        if managed.exists():
+            line = managed.read_text().strip()
+            assert line.startswith('ECX_PORT=') and line[9:].isdecimal(), 'invalid managed web port'
+            port = int(line[9:])
+        else:
+            port = 8080
+    assert 1024 <= port <= 65535
     env = dict(os.environ, PGHOST='/run/ecx-postgres', PGPORT='29436',
                PGUSER='postgres', PGDATABASE='ecx_bridge')
 
@@ -35,7 +46,7 @@ def main():
 
     def status(path):
         try:
-            with urllib.request.urlopen('http://127.0.0.1:8080/' + path, timeout=10) as response:
+            with urllib.request.urlopen(f'http://127.0.0.1:{port}/' + path, timeout=10) as response:
                 return response.status
         except urllib.error.HTTPError as error:
             return error.code

@@ -97,6 +97,24 @@ class ReleaseIntegrity(unittest.TestCase):
         self.assertEqual(config.read_bytes(), b"original private configuration")
 
 
+class ConfigurationOrigins(unittest.TestCase):
+    def test_wizard_refuses_missing_origins_before_writing_configuration(self):
+        root = Path(__file__).resolve().parents[1]
+        spec = importlib.util.spec_from_file_location("configure", root / "deploy/configure.py")
+        configure = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(configure)
+        for missing in ("token", "SOL"):
+            with self.subTest(missing=missing), tempfile.TemporaryDirectory() as folder:
+                output = Path(folder) / "setup"
+                def ask(label, default=None, secret=False):
+                    if "history origin signature" in label:
+                        return "" if label.startswith("Verified " + missing) else "explicit operator origin"
+                    return str(default) if default is not None else "test-only input"
+                with self.assertRaisesRegex(ValueError, "Verified history origin required"):
+                    configure.create_setup("unused-validator", root / "config/l2l-devnet.example.json", output, True, ask)
+                self.assertEqual(list(output.iterdir()), [])
+
+
 class UpgradeFiles(unittest.TestCase):
     def setUp(self):
         spec = importlib.util.spec_from_file_location("upgrade", Path(__file__).resolve().parents[1] / "deploy/upgrade.py")

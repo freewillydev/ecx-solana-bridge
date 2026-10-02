@@ -166,6 +166,7 @@ Jupiter was part of the intended market path, not a replacement for native wrapp
 
 ## Documentation and license
 
+- [`docs/TOKEN-OPERATIONS.md`](docs/TOKEN-OPERATIONS.md): pinned upstream token tools, separate authorities, inventory funding and external liquidity.
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md): customer flow, restricted diagnostics, backup limitations, separate token and liquidity administration.
 - [`docs/STATUS.md`](docs/STATUS.md): implemented behavior, real evidence and remaining gates.
 - [`docs/CONTRACTS.md`](docs/CONTRACTS.md): accounting, amount, API and recovery contracts; historical checkpoints are explicitly distinguished from current public-test operation in STATUS.

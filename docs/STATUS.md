@@ -1,4 +1,4 @@
-# Implementation status — 2026-10-01
+# Implementation status — 2026-10-02
 
 **The PostgreSQL local public-test product is now the active runtime.** The
 SQLite baseline was stopped and its final snapshot imported with every record
@@ -16,7 +16,7 @@ code now provisions private PostgreSQL, read/write roles, typed initialization,
 explicit legacy import and private dump backups. ARM64 installation, repeat
 installation, reboot, role restrictions and same-host restoration of all 38
 tables passed. See [installer evidence](evidence/postgres-installer-arm64.json).
-Current ARM64 and installed paying acceptance, full recovery/audit, actual supported-wallet
+Installed paying acceptance, full recovery/audit, actual supported-wallet
 signing and canonical deployment
 remain open. Canonical `implementationReady` remains false.
 
@@ -52,8 +52,7 @@ and retirement contracts passed on Ubuntu. See
 [consolidated installer evidence](evidence/postgres-installer-consolidated-x86.json)
 and [Linux fence evidence](evidence/postgres-worker-fence-linux.json). The
 observation-only installation had no signer and remained unavailable for
-payments. Current ARM64 packaging, installed paying flows and off-host/key
-restoration remain separate checks.
+payments. The consolidated native ARM64 build also passed 371 Haskell examples, seven Rust tests and the browser build. Its deployment-only repack requires both actual Solana history origins in the wizard; 17 installer tests pass. ARM64 upgrade/reinstall preserved 31 durable tables and existing configuration. After initial real-chain history ingestion settled, cold reboot preserved the exact baseline with all three scanners healthy and the protected fence verified. Installed ARM64 stale-ledger and retirement contracts passed. See [ARM build](evidence/native-arm-consolidated-build.json), [ARM installation](evidence/postgres-installer-consolidated-arm.json) and [ARM fence](evidence/postgres-worker-fence-linux-arm.json). The fixture remained observation-only, without a signer. Installed paying flows, off-host/key restoration and an x86 deployment-only repack of the wizard fix remain separate checks.
 
 ## Verified locally
 

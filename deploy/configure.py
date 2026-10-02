@@ -58,8 +58,10 @@ def create_setup(binary, template, output, managed_node, ask=prompt):
     worker["solanaVerifierRpc"] = ask("Independent Devnet HTTPS RPC (hidden; optional)", secret=True) or None
     for field, label in [("mint", "Actual Devnet token mint"), ("custodyOwner", "Actual custody public key"), ("custodyAta", "Actual custody associated token account")]:
         worker[field] = ask(label)
-    for field, label in [("solanaHistoryStart", "Verified token history origin signature (optional)"), ("solanaOperatingHistoryStart", "Verified SOL history origin signature (optional)")]:
-        worker[field] = ask(label) or None
+    for field, label in [("solanaHistoryStart", "Verified token history origin signature (required)"), ("solanaOperatingHistoryStart", "Verified SOL history origin signature (required)")]:
+        worker[field] = ask(label)
+        if not worker[field]:
+            raise ValueError("Verified history origin required: " + field)
     policies = [
         ("minInput", "Minimum input, integer base units", 1, 10**15),
         ("maxInput", "Maximum input, integer base units", 1, 10**15),
