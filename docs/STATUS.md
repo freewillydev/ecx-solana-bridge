@@ -16,19 +16,41 @@ code now provisions private PostgreSQL, read/write roles, typed initialization,
 explicit legacy import and private dump backups. ARM64 installation, repeat
 installation, reboot, role restrictions and same-host restoration of all 38
 tables passed. See [installer evidence](evidence/postgres-installer-arm64.json).
-x86-64 PostgreSQL acceptance, full recovery/audit, actual supported-wallet
+Current consolidated installed-release acceptance, full recovery/audit, actual supported-wallet
 signing and canonical deployment
 remain open. Canonical `implementationReady` remains false.
 
 Earlier SQLite launch/transfer/restart evidence below is historical baseline
 coverage. It does not prove the revised PostgreSQL installer or full recovery.
 
+## Current product completion batch
+
+The paying PostgreSQL runtime now includes the host-local sequence/retirement
+fence, original-byte native rebroadcast and private treasury allocation through
+the critical DSL. Allocation preserves the existing financial journal and uses
+current real observation evidence, custody freshness and explicit operator
+ownership attestation. No schema version or financial protocol changed.
+[Allocation contract](evidence/postgres-treasury-contract.json) and
+[actual betanet/Devnet observer authority](evidence/postgres-treasury-observer.json)
+pass; observer mode cannot allocate, sign or send.
+
+Fresh-ledger acceptance uses a new dedicated native wallet and Solana custody
+account, the existing real Devnet mint, and journaled real funding transactions.
+It imports no legacy ledger and submits no customer payouts. All three actual finalized receipts were allocated through the private API,
+with stable replays, exactly three allocation records, zero orders/attempts and
+a final paused state. The test worker then stopped. See
+[fresh treasury evidence](evidence/postgres-fresh-treasury-live.json).
+This proves fresh funding/allocation, not another customer round trip.
+The stopped older test VMs and prior installed artifacts do not prove this new
+consolidated source. Package this batch once for native Linux, then run installed
+upgrade/repeat/reboot acceptance rather than rebuilding separately per feature.
+
 ## Verified locally
 
 | Check | Result and evidence |
 | --- | --- |
 | Haskell application | Builds on macOS arm64 / GHC 9.14.1 with the frozen Cabal graph |
-| Financial/state tests | 367 examples pass, plus 100 generated arithmetic cases; [test output](evidence/haskell-tests.txt) |
+| Financial/state tests | 371 examples pass, plus 100 generated arithmetic cases; [test output](evidence/haskell-tests.txt) |
 | SQLite actually linked | 3.53.4, exact upstream source identity checked by the application; [doctor](evidence/doctor.json) |
 | Rust helper | Seven tests pass, including unsigned payout previews with an unavailable signer; the separate Devnet setup and deposit-client examples compile; fixed SDK/interface graph in `Cargo.lock` |
 | Browser build | TypeScript strict check and esbuild succeed; generated module about 11.6 KiB |
