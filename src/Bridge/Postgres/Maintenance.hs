@@ -1,10 +1,12 @@
 -- Explicit offline installation authority; never reachable from Servant/DSL.
-module Bridge.Postgres.Maintenance (initialize,verifySigner) where
+module Bridge.Postgres.Maintenance (initialize,verifySigner,initializeWorkerFence,retireWorkerFence) where
 import Bridge.Config (Config,fingerprint,custodyOwner)
 import Bridge.SolanaMessage (publicKey)
 import Bridge.Types (require,reject)
 import Bridge.Observer (epochSeconds)
 import Bridge.Postgres.Schema
+import qualified Bridge.Postgres.Fence as Fence
+import Bridge.Postgres.Ledger (withLedger,ledgerAction)
 import Control.Exception (bracket)
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Opaleye as O
@@ -17,6 +19,26 @@ import Data.Bits ((.&.))
 import Data.Word (Word8)
 import System.IO (withBinaryFile,IOMode(ReadMode))
 import System.Posix.Files (getFileStatus,fileMode)
+
+-- Explicit stopped-worker first adoption. The existing database identity and
+-- ownership are checked before a host-local watermark can be initialized.
+initializeWorkerFence :: PG.ConnectInfo -> Config -> IO ()
+initializeWorkerFence settings cfg=do
+  directory <- Fence.fenceDirectory
+  withLedger settings (fingerprint cfg) $ \ledger->do
+    sequenceNo <- ledgerAction ledger $ \c->do
+      rows <- O.runSelect c $ fmap deploymentCriticalSequence (O.selectTable deploymentTable)
+      case rows of [value]->pure value; _->reject "corrupt_sequence"
+    Fence.initializeFence directory (fingerprint cfg) sequenceNo
+
+retireWorkerFence :: PG.ConnectInfo -> Config -> IO ()
+retireWorkerFence settings cfg=do
+  directory <- Fence.fenceDirectory
+  withLedger settings (fingerprint cfg) $ \ledger->do
+    sequenceNo <- ledgerAction ledger $ \c->do
+      rows <- O.runSelect c $ fmap deploymentCriticalSequence (O.selectTable deploymentTable)
+      case rows of [value]->pure value; _->reject "corrupt_sequence"
+    Fence.retireFence directory (fingerprint cfg) sequenceNo
 
 -- Offline identity validation only: no signature, chain send or ledger mutation.
 verifySigner :: Config -> FilePath -> IO ()

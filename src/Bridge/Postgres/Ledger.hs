@@ -1,6 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.Postgres.Ledger
-  ( Ledger, withLedger, ledgerAction, readiness, pause, criticalSequence, acknowledgeBackup, balances, posting ) where
+  ( Ledger, withLedger, withGuardedLedger, ledgerAction, readiness, pause, criticalSequence, acknowledgeBackup, balances, posting ) where
 
 import Bridge.Postgres.Schema
 import Bridge.Types (Availability(..), Asset, require, reject)
@@ -15,22 +15,28 @@ import qualified Database.PostgreSQL.Simple as PG
 import qualified Opaleye as O
 
 -- Internal financial capability. Do not pass it to safe HTTP interpreters.
-newtype Ledger = Ledger (MVar (Maybe PG.Connection))
+data Ledger = Ledger (MVar (Maybe PG.Connection)) (Maybe (Int64 -> IO ()))
 
 withLedger :: PG.ConnectInfo -> Text -> (Ledger -> IO a) -> IO a
-withLedger settings identity action = bracket (PG.connect settings) PG.close $ \connection -> do
+withLedger settings identity = withGuardedLedger settings identity Nothing
+
+withGuardedLedger :: PG.ConnectInfo -> Text -> Maybe (Int64 -> IO ()) -> (Ledger -> IO a) -> IO a
+withGuardedLedger settings identity guard action = bracket (PG.connect settings) PG.close $ \connection -> do
   -- Session ownership survives individual commits and is released on close.
   locked <- PG.query_ connection "SELECT pg_try_advisory_lock(1162041393,18)" :: IO [PG.Only Bool]
   require (locked == [PG.Only True]) "worker_already_running"
   metadata <- O.runSelect connection (O.selectTable deploymentTable)
     :: IO [Deployment]
   require (case metadata of [row]->deploymentSingleton row==1 && deploymentSchemaVersion row==18 && deploymentFingerprint row==identity; _->False) "ledger_profile_or_schema_mismatch"
-  ledger <- Ledger <$> newMVar (Just connection)
+  case (guard,metadata) of
+    (Just checkpoint,[row])->checkpoint(deploymentCriticalSequence row)
+    _->pure ()
+  ledger <- flip Ledger guard <$> newMVar (Just connection)
   pause ledger "restart_requires_reconciliation"
   action ledger
 
 ledgerAction :: Ledger -> (PG.Connection -> IO a) -> IO a
-ledgerAction (Ledger cell) action = do
+ledgerAction (Ledger cell guard) action = do
   result <- modifyMVar cell $ \case
     Nothing -> pure (Nothing,Left (toException (userError "ledger_connection_fenced")))
     Just connection -> mask $ \restore -> do
@@ -39,6 +45,11 @@ ledgerAction (Ledger cell) action = do
         -- Serialize mutations even if a maintenance session also accesses state.
         _ <- PG.query_ connection "SELECT singleton FROM deployment WHERE singleton=1 FOR UPDATE" :: IO [PG.Only Int64]
         value <- restore (action connection)
+        case guard of
+          Nothing->pure ()
+          Just checkpoint->do
+            sequences <- O.runSelect connection $ fmap deploymentCriticalSequence (O.selectTable deploymentTable) :: IO [Int64]
+            case sequences of [sequenceNo]->checkpoint sequenceNo; _->reject "corrupt_sequence"
         _ <- PG.execute_ connection "COMMIT"
         pure value
       case outcome of

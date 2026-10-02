@@ -120,3 +120,14 @@ def install(target, config, mkdir, keep_file, snapshot=None):
             copy.chmod(0o600)
             run("runuser", "-u", "postgres", "--", str(target / "bin/ecx-bridge"), "postgres-init", str(copy))
     keep_file("/etc/ecx-bridge/postgres.env", b"PGHOST=/run/ecx-postgres\nPGPORT=29436\nPGDATABASE=ecx_bridge\nPGUSER=ecx_worker\nPGREADUSER=ecx_read\n", 0o640, "ecx-worker")
+    # Host-local anti-rollback state is intentionally outside ledger/private
+    # backup archives. Upgrades retain it; an old snapshot must never lower it.
+    fence = Path("/var/lib/ecx-bridge/fence")
+    mkdir(fence, 0o700, "ecx-worker", "ecx-worker")
+    keep_file("/etc/ecx-bridge/fence.env", b"ECX_WORKER_FENCE_DIR=/var/lib/ecx-bridge/fence\n", 0o640, "ecx-worker")
+    if config.is_file() and not (fence / "sequence.json").exists():
+        if subprocess.run(["systemctl", "is-active", "--quiet", "ecx-bridge-worker.service"]).returncode == 0:
+            raise ValueError("Stop the worker before first adoption of host-local custody fencing")
+        run("runuser", "-u", "ecx-worker", "--", "env", "PGUSER=ecx_worker",
+            "ECX_WORKER_FENCE_DIR=" + str(fence), str(target / "bin/ecx-bridge"),
+            "postgres-init-worker-fence", str(config))

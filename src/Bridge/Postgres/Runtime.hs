@@ -5,7 +5,8 @@ import Bridge.API
 import Bridge.Config
 import Bridge.Types
 import Bridge.Operation.Internal
-import Bridge.Postgres.Ledger (Ledger,withLedger,ledgerAction,pause,readiness)
+import Bridge.Postgres.Ledger (Ledger,withGuardedLedger,ledgerAction,pause,readiness)
+import qualified Bridge.Postgres.Fence as Fence
 import Bridge.Postgres.Schema hiding (Audit)
 import qualified Bridge.Postgres.Backup as Backup
 import qualified Bridge.Postgres.CoveredSource as CoveredSource
@@ -253,7 +254,11 @@ runRuntime paying remote settings cfg = do
     Nothing->require (publicTestProfile cfg) "public_test_profile_required"
     Just _->require (paying && profile cfg `elem` [L2LSignetDevnet,ECXBetanetDevnet] && backupRequired cfg) "backed_test_profile_required"
   links <- lookupEnv "ECX_INTERFACE_CONFIG" >>= loadInterface cfg
-  withLedger settings (fingerprint cfg) $ \ledger->do
+  let ownership action=if paying then do
+        directory <- Fence.fenceDirectory
+        Fence.withFence directory (fingerprint cfg) $ \guard->withGuardedLedger settings (fingerprint cfg) (Just guard) action
+       else withGuardedLedger settings (fingerprint cfg) Nothing action
+  ownership $ \ledger->do
     manager <- newRpcManager
     gate <- newMVar ()
     readUser <- fromMaybe (PG.connectUser settings) <$> lookupEnv "PGREADUSER"

@@ -919,3 +919,33 @@ installer checksum was independently verified after download. It includes the
 mandatory backup runtime and covered-source changes but predates the new native
 rebroadcast action. See `evidence/native-x86-backed-packaging.json`; installation
 acceptance of that consolidated package is still separate from compilation.
+
+## Host-local worker ownership and anti-rollback
+
+Paying runtime ownership now includes a protected host `flock` across database
+clones and an external deployment/critical-sequence watermark. The ledger persists
+each higher critical sequence before commit; ordinary transactions only compare
+the in-memory watermark. Stale starts fail before ledger mutation or API creation.
+Uncertain commits retain the higher watermark rather than silently lower it.
+The installer and local launcher initialize and retain the fence, and an explicit
+stopped-worker retirement command prevents cooperating old-host paying workers
+from restarting. No new database table, signer protocol or financial format was
+introduced. Worker aliases now use the same fenced PostgreSQL runtime; obsolete
+direct SQLite financial CLI paths are disabled.
+
+Actual host locks/fsync, two cloned disposable databases, precommit ordering,
+identity/permission/symlink guards, uncertain-commit refusal and retirement replay
+pass. The actual betanet/Devnet CLI checks refuse missing/stale/retired fences and
+different identities before any chain call or API socket. The existing source and
+rebroadcast database contracts, 371 application examples and 16 installer examples
+pass. Evidence: `evidence/postgres-worker-fence-contract.json` and
+`evidence/postgres-worker-fence-runtime.json`. No live deployment was adopted or
+retired, and no keys were copied. Linux packaging/installation of this batch,
+independent-host handoff, key restoration and the complete R3 acceptance remain.
+
+Reviewing the removed legacy entry points also identified a main-product gap:
+fresh PostgreSQL installations currently lack the supported treasury-receipt
+allocation workflow for float and operating budgets. The earlier actual round
+trips used a migrated, already allocated ledger. Porting that allocation through
+Opaleye and the critical operator DSL takes priority before further restore drills;
+it is part of completing U1/new-server operation, not an optional enhancement.

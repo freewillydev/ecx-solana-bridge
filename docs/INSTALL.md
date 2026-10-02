@@ -322,3 +322,49 @@ This does not repair an irrecoverable payout whose inputs have been consumed by
 an unrelated confirmed transaction. It also does not prove general custody
 readiness while the original settlement remains under review. Database and
 authority checks pass; live missing-payment acceptance remains required.
+
+### Host-local custody ownership and stale-ledger fencing
+
+Paying PostgreSQL workers require `ECX_WORKER_FENCE_DIR` and a deliberately
+initialized fence. The installer creates `/var/lib/ecx-bridge/fence`, owned by
+the worker with mode 0700, and records the fixed path in protected `fence.env`.
+It initializes the fence from the checked ledger only while the worker is stopped.
+Upgrade/reinstall preserve it. The local launcher now always uses PostgreSQL and
+defaults to one shared `~/.local/state/ecx-bridge/worker-fence` for the OS account.
+Direct CLI users must supply the same directory used by the other workers for
+those custody keys; changing directories is not a safe way to bypass ownership.
+
+The host lock spans database clones. Its mode-0600 watermark binds the deployment
+fingerprint and greatest critical sequence. Every new critical sequence reaches
+an atomic, fsynced file before database commit. A stale ledger is refused before
+startup mutates it or creates API sockets. An uncertain commit may leave the
+watermark ahead of the database; preserve it and recover the missing decisions.
+There is no automatic lowering/reset to make an old ledger runnable.
+
+First adoption for an existing local deployment requires stopping all old
+workers before this explicit command, using the normal private PG environment:
+
+```sh
+ECX_WORKER_FENCE_DIR=/absolute/protected/host-fence ecx-bridge postgres-init-worker-fence CONFIG
+```
+
+For a host handoff, stop the paying worker, then use
+`postgres-retire-worker CONFIG` with that same environment. It pauses the checked
+ledger and durably retires the source host's paying-worker fence. Repeating the
+command preserves the retirement marker; initialization cannot reactivate it.
+The retirement record is necessary handoff evidence, not a replacement for a
+verified latest ledger/key backup, disabling the old host's key/RPC access and
+reviewing restored custody before resume.
+
+Keep the local fence outside ledger rollback archives, and never overwrite it
+with an older backup. Do not restore a retired source-host fence verbatim as an
+active destination fence. Independent-host fencing, the destination's reviewed
+first adoption and actual key restoration remain part of restore acceptance.
+Updated runtime fences cannot constrain old binaries or other software that
+already holds a private key; the initial stop/access handoff remains required.
+
+The old `worker`/`test-worker` names now resolve to PostgreSQL modes. Direct
+SQLite financial CLI commands are disabled; recovery actions use the private
+operator API. Legacy SQLite library code remains for migration/regression work.
+Fresh-install treasury allocation still needs its PostgreSQL operator workflow;
+the prior SQLite treasury utility must not be used on the PostgreSQL deployment.

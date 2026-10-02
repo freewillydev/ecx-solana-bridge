@@ -44,6 +44,8 @@ flowchart LR
 
 ### Process and key boundaries
 
+Paying workers now use a shared host lock and durable critical-sequence watermark across database clones. The installer manages their protected fence; local startup uses PostgreSQL by default. Explicit stopped-worker retirement supports a handoff, while independent-host/key restoration remains unproved. Fresh PostgreSQL treasury allocation is the next main-product workflow; the prior real round trips used already allocated migrated inventory.
+
 | Component | Responsibility and access |
 | --- | --- |
 | `ecx-bridge postgres-api` | Exclusively owns the ledger; scans and reconciles while intake is paused. Serves separate customer and administrator Unix sockets. |
@@ -103,7 +105,7 @@ sha256sum -c ecx-bridge-ubuntu-24.04-aarch64.run.sha256
 sh ecx-bridge-ubuntu-24.04-aarch64.run --with-signet --config-dir /absolute/private/setup
 ```
 
-Target hosts need no compiler or Node installation. Default worker mode observes with intake paused; `--test-worker` explicitly enables the funded public-test mode. Use the package matching the server CPU. **The PostgreSQL ARM64 package passed installation, repeat installation, reboot, private-role checks and same-host backup restoration. x86-64 PostgreSQL acceptance remains pending.** The locally built installers are checksummed, not signed published releases; no public download endpoint exists yet.
+Target hosts need no compiler or Node installation. Default worker mode observes with intake paused; `--test-worker` explicitly enables the funded public-test mode. Use the package matching the server CPU. **The earlier PostgreSQL ARM64 and native x86-64 packages passed installation, repeat installation, restart, private-role checks and same-host backup restoration. Newer backup/recovery/fencing batches still require consolidated installation acceptance.** The locally built installers are checksummed, not signed published releases; no public download endpoint exists yet.
 
 Repeated installation of the same release/configuration preserves services and the ledger. Different releases/configuration are refused rather than silently upgrading a funded deployment. The web endpoint binds to `127.0.0.1:8080`; remote access uses an SSH tunnel unless a separately configured TLS proxy is provided. No public firewall port or native RPC endpoint is opened.
 

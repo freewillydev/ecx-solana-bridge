@@ -1,0 +1,19 @@
+{
+  "actualProfile": "ECXBetanetDevnet",
+  "missingFenceRefused": true,
+  "firstInitializationPassed": true,
+  "repeatedInitializationRefused": true,
+  "staleDatabaseRefusedBeforeStartupMutation": true,
+  "workerAliasFenced": true,
+  "legacyDirectLedgerCommandDisabled": true,
+  "differentIdentityRefused": true,
+  "watermarkPreserved": true,
+  "stoppedWorkerRetirementPassed": true,
+  "retiredWorkerRefused": true,
+  "retirementCannotBeReinitialized": true,
+  "apiNeverOpened": true,
+  "chainCalls": 0,
+  "signedOrSent": false,
+  "liveLedgerModified": false,
+  "independentHostFencing": false
+}
