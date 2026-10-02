@@ -1,8 +1,8 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.Settlement
-  ( PaymentTransport(..), realPaymentTransport, paymentPass, settleAttemptWith, reconcilePayments, reconcilePaymentsWith
+  ( PaymentTransport(..), realPaymentTransport, paymentPass, settleAttemptWith, reconcilePaymentsWith
   , recheckSourceWith, observeNativePayment, observeSolanaPayment, solanaExpiryEvidence, PaymentObservation(..)
-  , approveSolanaRetry, approveSolanaRetryWith
+  , approveSolanaRetryWith
   , SettlementStore(..), PaymentStore(..), SavedPayment(..), readSavedPayment, readNativePayment, activeNativeBlock
   , paymentAttemptGroups, readSavedNativeFamily, activeFamilyPayment
   ) where
@@ -336,10 +336,6 @@ activeFamilyPayment family view=case familyActive view of
 
 -- Reconcile only already-recorded attempts. This path never invokes signing,
 -- backup or send, even if the deployment happens to be available.
-reconcilePayments :: SettlementStore ledger => Manager -> Config -> ledger -> IO Value
-reconcilePayments manager c = reconcilePaymentsWith
-  (realPaymentTransport manager c (const $ reject "unexpected_recovery_backup")) c
-
 reconcilePaymentsWith :: SettlementStore ledger => PaymentTransport -> Config -> ledger -> IO Value
 reconcilePaymentsWith transport c ledger = do
   attempts <- preparationAttempts ledger
@@ -435,9 +431,6 @@ settleAttemptWith transport c ledger attempt = work `onException` preparationPau
     "Solana" -> paymentSolana transport "sendTransaction" [toJSON $ attemptBytes saved,object
       ["encoding" .= ("base64"::Text),"skipPreflight" .= False,"preflightCommitment" .= ("confirmed"::Text),"maxRetries" .= (0::Int)]] >>= parseValue parseJSON
     _ -> reject "wrong_destination_chain"
-
-approveSolanaRetry :: SettlementStore ledger => Manager -> Config -> ledger -> Text -> Text -> IO ()
-approveSolanaRetry manager c=approveSolanaRetryWith (realPaymentTransport manager c (const $ reject "unexpected_backup_callback")) c
 
 -- Private operator command only. Revalidate the saved signed message, source,
 -- immutable origins and complete expiry evidence before journaling permission.

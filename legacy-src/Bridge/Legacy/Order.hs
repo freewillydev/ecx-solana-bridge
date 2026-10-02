@@ -1,17 +1,11 @@
-module Bridge.Legacy.Order (createCustomerOrder,createCustomerOrderWith) where
+module Bridge.Legacy.Order (createCustomerOrderWith) where
 import Bridge.Order
 import Bridge.Config
 import Bridge.Deposit (solanaDepositMemo)
 import Bridge.Ledger
 import Bridge.Native (recoverNativeAddressWith)
 import Bridge.Types
-import Data.Int (Int64)
-import Network.HTTP.Client (Manager)
 import Data.Text (Text)
-
-createCustomerOrder :: Manager -> Config -> Ledger -> (Int64 -> IO ()) -> Text -> OrderRequest -> IO OrderView
-createCustomerOrder manager c ledger backup = createCustomerOrderWith (realOrderTransport manager c backup) c ledger
-
 
 createCustomerOrderWith :: OrderTransport -> Config -> Ledger -> Text -> OrderRequest -> IO OrderView
 createCustomerOrderWith transport c ledger capability requested = do

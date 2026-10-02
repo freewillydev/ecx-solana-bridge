@@ -31,11 +31,14 @@ import Bridge.Legacy.Order
 import Bridge.Process (runBounded)
 import Bridge.RPC
 import Bridge.API
-import Bridge.Worker
+import qualified Bridge.Postgres.Runtime as Runtime
+import Bridge.Web (runUnix,securityBoundary)
+import qualified Database.PostgreSQL.Simple as PG
+import Servant (serve,throwError,err409,Handler)
 import Bridge.Backup
 import Bridge.Observer
 import Control.Concurrent (threadDelay,newEmptyMVar,putMVar,takeMVar)
-import Control.Concurrent.Async (mapConcurrently,withAsync,cancel)
+import Control.Concurrent.Async (mapConcurrently,withAsync,cancel,concurrently_)
 import Control.Exception (bracket,try,SomeException)
 import Control.Monad (forM_,when)
 import Data.Aeson
@@ -64,6 +67,23 @@ import System.Timeout (timeout)
 import Data.Bits ((.&.))
 import Test.Hspec hiding (before,after)
 import Test.QuickCheck hiding ((.&.))
+
+-- Transport-only fixture: exercises real Servant routing, Unix permissions and
+-- reconnects, with no ledger, chain model, wallet or financial implementation.
+socketFixture :: Config -> IO ()
+socketFixture c = do
+  let unavailable :: Handler a
+      unavailable = throwError err409
+      health = pure (Availability True "process_running")
+      customer = pure (object ["intakeEnabled" .= False])
+        :<|> (\_ _ -> unavailable) :<|> (\_ _ -> unavailable)
+        :<|> (\_ _ -> unavailable) :<|> (\_ _ _ -> unavailable)
+        :<|> health :<|> health
+      admin = health :<|> (\_ -> unavailable) :<|> unavailable :<|> unavailable
+  customerApp <- securityBoundary (serve customerAPI customer)
+  adminApp <- securityBoundary (serve adminAPI admin)
+  concurrently_ (runUnix (customerSocket c) 0o660 customerApp)
+                (runUnix (adminSocket c) 0o600 adminApp)
 
 amt :: Integer -> Amount
 amt n = either (error . T.unpack) id (amount n)
@@ -4377,11 +4397,11 @@ main=hspec $ do
       publicTestProfile (cfg dir){profile=ECXBetanetDevnet} `shouldBe` True
       publicTestProfile (cfg dir){profile=CanonicalBeta} `shouldBe` False
       publicTestProfile (cfg dir){backupRequired=True} `shouldBe` False
-      runTestWorker (cfg dir){profile=CanonicalBeta} `shouldThrow` isError "public_test_profile_required"
-      runTestWorker (cfg dir){backupRequired=True} `shouldThrow` isError "public_test_profile_required"
+      Runtime.runTestWorker PG.defaultConnectInfo (cfg dir){profile=CanonicalBeta} `shouldThrow` isError "public_test_profile_required"
+      Runtime.runTestWorker PG.defaultConnectInfo (cfg dir){backupRequired=True} `shouldThrow` isError "public_test_profile_required"
     it "uses the shared Servant contract and separate admin socket" $ withDir $ \dir -> do
       let c=cfg dir
-      withAsync (runWorkerWith c (const $ pure ())) $ \_ -> do
+      withAsync (socketFixture c) $ \_ -> do
         awaitFile (customerSocket c) 100
         awaitFile (adminSocket c) 100
         manager <- unixManager (customerSocket c)
@@ -4412,7 +4432,7 @@ main=hspec $ do
       writer <- unixManager (customerSocket c)
       let readEnv=mkClientEnv reader (BaseUrl Http "localhost" 80 "")
           writeEnv=mkClientEnv writer (BaseUrl Http "localhost" 80 "")
-      withAsync (runWorkerWith c (const $ pure ())) $ \_ -> do
+      withAsync (socketFixture c) $ \_ -> do
         awaitFile (customerSocket c) 100
         runClientM healthCall readEnv `shouldReturn` Right (Availability True "process_running")
         runClientM healthCall writeEnv `shouldReturn` Right (Availability True "process_running")
@@ -4420,7 +4440,7 @@ main=hspec $ do
       -- across the worker's replacement reproduces the live stale-pool error.
       removeFile (customerSocket c)
       removeFile (adminSocket c)
-      withAsync (runWorkerWith c (const $ pure ())) $ \_ -> do
+      withAsync (socketFixture c) $ \_ -> do
         awaitFile (customerSocket c) 100
         awaitFile (adminSocket c) 100
         runClientM healthCall readEnv `shouldReturn` Right (Availability True "process_running")

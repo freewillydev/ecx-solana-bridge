@@ -1,13 +1,12 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# OPTIONS_GHC -Wno-orphans #-}
-module Bridge.Legacy.Reconciliation (reconcileCustody,reconcileCustodyWith) where
+module Bridge.Legacy.Reconciliation (reconcileCustodyWith) where
 import Bridge.Legacy.PaymentLifecycle ()
 import Bridge.Reconciliation
 import Bridge.Ledger
 import Bridge.Config
 import Bridge.Types
 import Bridge.Settlement
-import Bridge.Observer (epochSeconds)
 import Bridge.RPC (fieldValue)
 import Control.Exception (IOException,catch,try)
 import Control.Monad (when)
@@ -19,17 +18,12 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Database.SQLite.Simple
-import Network.HTTP.Client (Manager)
 import Text.Read (readMaybe)
 
 json :: ToJSON a => a -> Text
 json=TE.decodeUtf8 . LBS.toStrict . encode
 decode :: FromJSON a => Text -> IO a
 decode=either (const $ reject "invalid_reconciliation_evidence") pure . eitherDecodeStrict' . TE.encodeUtf8
-
-reconcileCustody :: Manager -> Config -> Ledger -> IO Value
-reconcileCustody manager c = reconcileCustodyWith epochSeconds
-  (realPaymentTransport manager c (const $ reject "unexpected_reconciliation_backup")) c
 
 readView :: Config -> Ledger -> Int64 -> Bool -> IO View
 readView c ledger now inspectLosses=ledgerAction ledger $ \db -> do

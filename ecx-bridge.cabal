@@ -42,7 +42,7 @@ library
 library legacy
   import: settings
   hs-source-dirs: legacy-src
-  exposed-modules: Bridge.Legacy.Order, Bridge.Legacy.Reconciliation, Bridge.Legacy.Recovery, Bridge.Legacy.PaymentLifecycle, Bridge.Legacy.ObservationPreparation, Bridge.Budget, Bridge.Ledger, Bridge.Backup, Bridge.Worker
+  exposed-modules: Bridge.Legacy.Order, Bridge.Legacy.Reconciliation, Bridge.Legacy.Recovery, Bridge.Legacy.PaymentLifecycle, Bridge.Legacy.ObservationPreparation, Bridge.Budget, Bridge.Ledger, Bridge.Backup
   build-depends:
     ecx-bridge,
     base >=4.20 && <4.23, aeson >=2.2 && <2.4, async >=2.2 && <2.3,
@@ -77,7 +77,7 @@ test-suite bridge-test
   ghc-options: -threaded
   build-depends: base, ecx-bridge, ecx-bridge:legacy, aeson, bytestring, directory, filepath,
     hspec >=2.11 && <2.12, QuickCheck >=2.15 && <2.19, sqlite-simple,
-    text, time, async, network, http-client, servant-client, servant, unix, scientific, base64-bytestring,
+    text, time, async, network, http-client, servant-client, servant, servant-server, postgresql-simple, unix, scientific, base64-bytestring,
     crypton, ram
 
 executable ecx-postgres-journal-check

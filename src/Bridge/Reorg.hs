@@ -1,9 +1,9 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module Bridge.Reorg (NativeSettlementStore(..),NativeSourceStore(..),reconcileNativeSettlements,reconcileNativeSettlementsWith,reconcileNativeSources,reconcileNativeSourcesWith,inspectNativeSourceWith) where
+module Bridge.Reorg (NativeSettlementStore(..),NativeSourceStore(..),reconcileNativeSettlementsWith,reconcileNativeSourcesWith,inspectNativeSourceWith) where
 
 import Bridge.Config
 import Bridge.Ledger.Model
-import Bridge.Native (nativeIdentity,nativeAmount)
+import Bridge.Native (nativeAmount)
 import Bridge.NativePayment (ownedScript,transactionId,signedNativePlan,planDepth,signedNativeFee)
 import Bridge.RPC
 import Bridge.Settlement
@@ -16,16 +16,10 @@ import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Network.HTTP.Client (Manager)
 import Text.Read (readMaybe)
 
 -- A missing RPC response cannot prove that credited source value disappeared.
 -- Only a canonical native wallet conflict creates a financial deficit here.
-reconcileNativeSources :: NativeSourceStore ledger => Manager -> Config -> ledger -> IO Value
-reconcileNativeSources manager c=reconcileNativeSourcesWith
-  (realPaymentTransport manager c (const $ reject "unexpected_source_recovery_backup"))
-    {paymentIdentity=nativeIdentity manager c >> pure ()} c
-
 class NativeSourceStore ledger where
   sourceCandidates :: ledger -> IO [Deposit]
   sourcePause :: ledger -> Text -> IO ()
@@ -139,11 +133,6 @@ inspectNativeSourceWith transport c ledger source=do
 
 -- Recheck previously settled native bytes when their recorded finality changed.
 -- A different proved family winner adjusts its fee only, without a new payment.
-reconcileNativeSettlements :: NativeSettlementStore ledger => Manager -> Config -> ledger -> IO Value
-reconcileNativeSettlements manager c=reconcileNativeSettlementsWith
-  (realPaymentTransport manager c (const $ reject "unexpected_reorg_backup"))
-    {paymentIdentity=nativeIdentity manager c >> pure ()} c
-
 class PaymentStore ledger => NativeSettlementStore ledger where
   recoveryCandidates :: ledger -> IO [Attempt]
   recoveryPause :: ledger -> Text -> IO ()
