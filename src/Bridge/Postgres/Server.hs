@@ -24,6 +24,7 @@ customerServer = safe PublicConfig
   :<|> safe ReadyEndpoint
 
 data TreasuryRequest = TreasuryRequest { treasuryReceipt :: Text, treasurySplit :: [(Text,Amount)], ownershipAttestation :: Text } deriving (Generic,FromJSON)
+data TreasurySpendRequest = TreasurySpendRequest { observationStream :: Text, observedTransaction :: Text, spendOwnershipAttestation :: Text } deriving (Generic,FromJSON)
 data RefundRequest = RefundRequest { depositId :: Text } deriving (Generic,FromJSON)
 data RetryRequest = RetryRequest { transaction :: Text, reason :: Text } deriving (Generic,FromJSON)
 data CancelRequest = CancelRequest { intent :: Text, generation :: Int, cancellationReason :: Text } deriving (Generic,FromJSON)
@@ -46,6 +47,7 @@ type OperatorAPI = AdminAPI :<|> "refund" :> ReqBody '[JSON] RefundRequest :> Po
   :<|> "send-native-replacement" :> ReqBody '[JSON] ReplacementRequest :> Post '[JSON] Data.Aeson.Value
   :<|> "cover-source-loss" :> ReqBody '[JSON] LossCoverRequest :> Post '[JSON] Data.Aeson.Value
   :<|> "allocate-treasury" :> ReqBody '[JSON] TreasuryRequest :> Post '[JSON] Data.Aeson.Value
+  :<|> "classify-treasury-spend" :> ReqBody '[JSON] TreasurySpendRequest :> Post '[JSON] Data.Aeson.Value
   :<|> "resume" :> Post '[JSON] Availability
 operatorAPI :: Proxy OperatorAPI
 operatorAPI = Proxy
@@ -66,4 +68,5 @@ adminServer = (safe Readiness
   :<|> (\request->operator(SendNativeReplacement(draftSequence request)))
   :<|> (\request->operator(CoverSourceLoss(lossDeposit request)(lossRecoverySequence request)(lossCapital request)(lossReason request)))
   :<|> (\request->operator(AllocateTreasury(treasuryReceipt request)(treasurySplit request)(ownershipAttestation request)))
+  :<|> (\request->operator(ClassifyTreasurySpend(observationStream request)(observedTransaction request)(spendOwnershipAttestation request)))
   :<|> operator Resume

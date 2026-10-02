@@ -6,7 +6,7 @@ module Bridge.Ledger
   ( Ledger, withLedger, ledgerAction, readiness, pause, resumeAfterChecks
   , createOrder, readOrder, bindInstruction, criticalSequence, acknowledgeBackup
   , checkIntakeReady
-  , freeInventory, allocateTreasuryReceipt, allocateSolOperatingReceipt, recordTreasurySpend, expireQuotes
+  , freeInventory, allocateTreasuryReceipt, allocateSolOperatingReceipt, expireQuotes
   , Deposit(..), observeDeposit, refreshDeposit, recordScan, readCheckpoint, promoteDeposit
   , economicOutflow, ChainEvent(..), ScanBatch(..), commitScan, recordScanFailure, custodyHealth
   , maximumNativeDepth, pendingVerification
@@ -280,44 +280,6 @@ allocateTreasuryReceiptC c did allocation evidence = do
 
 scanAssets :: [(Text,Asset)]
 scanAssets=[("Native",Native),("Solana",Wrapped),("SolanaOperating",Sol)]
-
--- Only already-observed, verified operator spends can be classified here.
--- A customer attempt must settle through its own obligation, never this path.
-recordTreasurySpend :: Ledger -> Text -> Text -> Value -> IO ()
-recordTreasurySpend l stream txid proof = ledgerAction l $ \c -> do
-  let proofJSON=jsonText proof
-  require (proof/=Null && T.length proofJSON<=16384) "invalid_treasury_spend_proof"
-  rows <- query c "SELECT e.kind,e.anchor,o.evidence_json FROM chain_events e JOIN observation_evidence o ON o.hash=e.evidence_hash WHERE e.chain=? AND e.event_id=?"
-    (stream,txid) :: IO [(Text,Text,Text)]
-  (anchor,evidence) <- case rows of
-    [("outgoing",a,e)] -> do
-      value <- fromText e
-      nested <- either (const $ reject "invalid_observation_evidence") pure $ parseEither (withObject "observation" (.: "proof")) value
-      pure (a,nested)
-    _ -> reject "treasury_spend_not_observed"
-  economic@(asset,outflow,networkFee) <- either reject pure (economicOutflow stream evidence)
-  let economicJSON=jsonText economic
-  old <- query c "SELECT anchor,economic_json,proof_json FROM treasury_spends WHERE chain=? AND event_id=?" (stream,txid) :: IO [(Text,Text,Text)]
-  case old of
-    [(a,e,p)] -> require ((a,e,p)==(anchor,economicJSON,proofJSON)) "treasury_spend_conflict"
-    [] -> do
-      state <- query_ c "SELECT paused FROM deployment" :: IO [Only Bool]
-      require (state==[Only True]) "treasury_spend_requires_pause"
-      attempts <- query c "SELECT txid FROM attempts WHERE txid=?" (Only txid) :: IO [Only Text]
-      require (null attempts) "customer_attempt_cannot_be_treasury_spend"
-      let costs | asset==Native = [("float",toInteger (units outflow)-toInteger (units networkFee)),("operating",toInteger $ units networkFee)]
-                | asset==Wrapped = [("float",toInteger $ units outflow)]
-                | otherwise = [("operating",toInteger $ units outflow)]
-      forM_ costs $ \(account,cost) -> do
-        usable <- if account=="float" then freeInventory c asset else freeOperating c (T.pack $ show asset)
-        require (cost>=0 && usable>=cost) "treasury_spend_exceeds_free_allocation"
-      sequenceNumber <- criticalSequence c
-      posting c ("treasury-spend:"<>stream<>":"<>txid) "verified operator spend and network costs"
-        ([(asset,account,negate cost) | (account,cost)<-costs]<>[(asset,"external",toInteger $ units outflow)])
-      execute c "INSERT INTO treasury_spends(chain,event_id,anchor,economic_json,proof_json,critical_sequence) VALUES(?,?,?,?,?,?)"
-        (stream,txid,anchor,economicJSON,proofJSON,sequenceNumber)
-      execute c "UPDATE chain_events SET needs_review=0 WHERE chain=? AND event_id=?" (stream,txid)
-    _ -> reject "duplicate_treasury_spend"
 
 createOrder :: Ledger -> Config -> Int64 -> Text -> OrderRequest -> IO OrderView
 createOrder l cfg now capability req = do

@@ -5,7 +5,6 @@ import Bridge.Config
 import qualified Bridge.Postgres.Ledger as Ledger
 import Control.Monad (when, forM_)
 import Data.List (nub, sortOn)
-import qualified Data.Map.Strict as M
 import Bridge.Types
 import qualified Bridge.Types as Types
 import Bridge.Postgres.Schema
@@ -111,14 +110,9 @@ createOrder ledger cfg now capability req = do
           pure (obligationsOrderId row)
           :: IO [Text]
         require (length (nub (pending<>obligations))<maxQueued cfg) "queue_full"
-        bs <- Ledger.balances connection
         let asset=T.pack (show (destinationAsset (direction req)))
-        holds <- O.runSelect connection $ do
-          row <- O.selectTable reservationsTable
-          O.where_ (reservationsAsset row O..== O.sqlStrictText asset O..&& reservationsPhase row O../= O.sqlStrictText "released")
-          pure (reservationsAmount row)
-          :: IO [Int64]
-        require (M.findWithDefault 0 (asset,"float") bs-sum (map toInteger holds)>=toInteger (units netAmount)) "insufficient_inventory"
+        inventory <- Ledger.freeInventory connection (destinationAsset (direction req))
+        require (inventory>=toInteger (units netAmount)) "insufficient_inventory"
         require (now>=0 && toInteger now+toInteger (quoteSeconds cfg)+toInteger (confirmationGraceSeconds cfg)<=toInteger (maxBound::Int64)) "invalid_order_time"
         let end=now+quoteSeconds cfg
             row=Orders (O.sqlStrictText oid) (O.sqlStrictText cap) (O.sqlStrictText (idempotencyKey req)) (O.sqlStrictText hash)

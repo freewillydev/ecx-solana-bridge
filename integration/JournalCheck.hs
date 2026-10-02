@@ -2,7 +2,8 @@
 module Main (main) where
 
 import Bridge.Types hiding (deploymentFingerprint)
-import Bridge.Ledger.Model (Deposit(..),Obligation(..),CostLimits(..))
+import Bridge.Ledger.Model (Deposit(..),Obligation(..),CostLimits(..),ScanBatch(..),ChainEvent(..))
+import qualified Bridge.Postgres.Treasury as Treasury
 import qualified Bridge.Postgres.Preparation as Preparation
 import qualified Bridge.Postgres.Settlement as Settlement
 import Bridge.Config
@@ -12,6 +13,7 @@ import Bridge.RPC (fieldValue)
 import qualified Bridge.Order as Workflow
 import qualified Bridge.SolanaPay as Pay
 import qualified Bridge.Postgres.Observation as Observation
+import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString as BS
 import Data.Aeson (eitherDecodeStrict', Value(..), object, (.=))
 import qualified Data.Aeson.Key as Key
@@ -106,7 +108,8 @@ main = do
   orderContracts settings
   provisioningContracts settings
   rollbackContract settings
-  putStrLn "PostgreSQL journal and backup acknowledgment: balanced writes, row locking, ownership, exact coverage, identity/receipt/stale refusal, idempotence, durable reopen, order/provisioning contracts, interruption, commit/capacity failure and send-authority rollback/fencing passed"
+  treasuryContracts settings
+  putStrLn "PostgreSQL journal and backup acknowledgment: balanced writes, row locking, ownership, exact coverage, identity/receipt/stale refusal, idempotence, durable reopen, order/provisioning contracts, interruption, commit/capacity failure, send-authority rollback/fencing and treasury classification passed"
 
 
 -- Closed test operations: no arbitrary SQL/query callback in fixture access.
@@ -121,6 +124,8 @@ data Fixture a where
   OrderHoldCounts :: T.Text -> Fixture (Int,Int)
   ReplaceInstruction :: T.Text -> Fixture ()
   FreeWrapped :: Fixture Integer
+  Inventory :: Asset -> Fixture Integer
+  TreasuryState :: Fixture ([TreasurySpends],[ChainEvents])
   ReceiptCounts :: Fixture (Int,Int)
   FailTransaction :: Fixture ()
   FailCommit :: IORef Bool -> Fixture ()
@@ -222,15 +227,11 @@ fixture connection = \case
     { O.uTable=ordersTable
     , O.uUpdateWith= \row->row {ordersInstruction=O.toNullable(O.sqlStrictText "replacement")}
     , O.uWhere= \row->ordersId row O..== O.sqlStrictText oid,O.uReturning=O.rCount }
-  FreeWrapped -> do
-    balances <- L.balances connection
-    held <- O.runSelect connection $ do
-      row <- O.selectTable reservationsTable
-      O.where_ (reservationsAsset row O..== O.sqlStrictText "Wrapped" O..&&
-                reservationsPhase row O../= O.sqlStrictText "released")
-      pure (reservationsAmount row)
-      :: IO [Int64]
-    pure (M.findWithDefault 0 ("Wrapped","float") balances-sum(map toInteger held))
+  FreeWrapped -> L.freeInventory connection Wrapped
+  Inventory asset -> L.freeInventory connection asset
+  TreasuryState -> (,)
+    <$> (sortOn (\r->(treasuryspendsChain r,treasuryspendsEventId r)) <$> O.runSelect connection (O.selectTable treasuryspendsTable))
+    <*> (sortOn (\r->(chaineventsChain r,chaineventsEventId r)) <$> O.runSelect connection (O.selectTable chaineventsTable))
 
   ReceiptCounts -> do
     obligations <- O.runSelect connection (O.selectTable obligationsTable) :: IO [Obligations]
@@ -490,6 +491,129 @@ broadcastWriteContract settings = do
     attempts <- state ledger SendState
     require (before==after && saved==attempts) "failed_broadcast_write_changed_bytes_or_holds"
     expectError "broadcast_intent_required" (Settlement.authorizeRecordedSend ledger False txid)
+
+-- Database-only scanner observations, not a live-chain acceptance claim.
+-- Reuse the production scanner, allocation, quote and spend transactions.
+treasuryContracts :: PG.ConnectInfo -> IO ()
+treasuryContracts settings = do
+  base <- BS.readFile "config/l2l-devnet.example.json" >>= either fail pure . eitherDecodeStrict'
+  let quantity n=either (error . T.unpack) id (amount n)
+      cfg=base{maxQueued=100,maxSolAccountRent=quantity 0,
+        maxNativeDailyCost=quantity 1000000,maxSolDailyCost=quantity 1000000}
+      state ledger operation=L.ledgerAction ledger (\connection->fixture connection operation)
+      scan ledger chain deposits events=do
+        previous <- Observation.readCheckpoint ledger chain
+        Observation.commitScan ledger (ScanBatch chain "treasury-contract" previous "treasury-cursor" 100 deposits events)
+      reason="dedicated database contract: operator-owned outflow"
+      spend ledger chain txid=Treasury.classifySpend ledger chain txid reason
+      checkReview ledger chain txid expected=do
+        (_,events) <- state ledger TreasuryState
+        require ([chaineventsNeedsReview e | e<-events,chaineventsChain e==chain,chaineventsEventId e==txid]==[expected]) "treasury_review_wrong"
+  L.withLedger settings "journal-contract" $ \ledger->do
+    -- Replace the retired standalone treasury runner's raw-SQL fixture with
+    -- the same closed scanner and allocation operations used by the worker.
+    scan ledger "SolanaOperating"
+      [Deposit "sol-operating:treasury-fund" Nothing Sol (quantity 10000) "slot" 1 True 100]
+      [ChainEvent "treasury-fund" "unmatched_incoming" "slot" (object["delta" .= ("10000"::T.Text),"failed" .= False])]
+    L.pause ledger "treasury contract"
+    let allocate split owner=Treasury.allocate ledger 100 "sol-operating:treasury-fund" split owner
+    expectError "custody_not_reconciled" (allocate [("operating",quantity 10000)] "operator capital")
+    state ledger (ReadyAt 100)
+    L.pause ledger "treasury contract"
+    expectError "sol_reserved_for_operating" (allocate [("float",quantity 10000)] "operator capital")
+    allocated <- allocate [("operating",quantity 10000)] "operator capital"
+    before <- state ledger JournalState
+    replay <- allocate [("operating",quantity 10000)] "operator capital"
+    after <- state ledger JournalState
+    require (allocated==replay && before==after) "treasury_allocation_replay_mutated_journal"
+    expectError "treasury_allocation_conflict" (allocate [("operating",quantity 10000)] "different owner")
+
+    -- Separate customer attempts, provisional quote holds and transferred
+    -- fee holds from operator funds, even while the worker is paused.
+    state ledger (ReadyAt 100)
+    let request=OrderRequest NativeToWrapped (quantity 10000) "destination" "refund" Nothing "treasury-reserved"
+    (_,priorSol) <- state ledger OperatingFunds
+    priorWrapped <- state ledger (Inventory Wrapped)
+    _ <- Order.createOrder ledger cfg 100 (T.replicate 64 "d") request
+    (_,quotedSol) <- state ledger OperatingFunds
+    require (priorSol-quotedSol==10000) "treasury_contract_quote_cost_not_held"
+    scan ledger "SolanaOperating" [] [ChainEvent "quote-spend" "outgoing" "slot"
+      (object["delta" .= T.pack(show $ negate priorSol),"feeUnits" .= quantity 5000])]
+    expectError "treasury_spend_exceeds_free_allocation" (spend ledger "SolanaOperating" "quote-spend")
+    scan ledger "Solana" [] [ChainEvent "float-spend" "outgoing" "slot"
+      (object["delta" .= T.pack(show $ negate priorWrapped)])]
+    expectError "treasury_spend_exceeds_free_allocation" (spend ledger "Solana" "float-spend")
+    Order.expireQuotes ledger 100000
+    (_,reservedSol) <- state ledger OperatingFunds
+    scan ledger "SolanaOperating" [] [ChainEvent "reserved-spend" "outgoing" "slot"
+      (object["delta" .= T.pack(show $ negate $ reservedSol+1),"feeUnits" .= quantity 5000])]
+    expectError "treasury_spend_exceeds_free_allocation" (spend ledger "SolanaOperating" "reserved-spend")
+    let customerId="contract-send-write-failure"
+    scan ledger "Solana" [] [ChainEvent customerId "outgoing" "slot" (object["delta" .= ("-99000"::T.Text)])]
+    checkReview ledger "Solana" customerId 1
+    scan ledger "SolanaOperating" [] [ChainEvent customerId "outgoing" "slot"
+      (object["delta" .= ("-5000"::T.Text),"feeUnits" .= quantity 5000])]
+    checkReview ledger "SolanaOperating" customerId 1
+    expectError "customer_attempt_cannot_be_treasury_spend" (spend ledger "Solana" customerId)
+    expectError "customer_attempt_cannot_be_treasury_spend" (spend ledger "SolanaOperating" customerId)
+    readiness <- L.readiness ledger
+    require (not $ available readiness) "premature_customer_observation_did_not_pause"
+
+    let economic=object["walletNetUnits" .= ("-100"::T.Text),"feeUnits" .= quantity 2,"confirmations" .= (1::Int)]
+        event=ChainEvent "operator-payment" "outgoing" "database-block" economic
+    scan ledger "Native" [] [event]
+    expectError "treasury_spend_not_observed" (spend ledger "Native" "unknown")
+    expectError "invalid_treasury_spend_attestation" (Treasury.classifySpend ledger "Native" "operator-payment" " ")
+    -- Stored evidence alone does not authorize an operator mutation in live mode.
+    state ledger (ReadyAt 100)
+    expectError "treasury_spend_requires_pause" (spend ledger "Native" "operator-payment")
+    L.pause ledger "operator outflow review"
+    balances <- L.ledgerAction ledger L.balances
+    decision <- spend ledger "Native" "operator-payment"
+    afterBalances <- L.ledgerAction ledger L.balances
+    let expected=M.adjust (subtract 100) ("Native","float") $
+          M.adjust (subtract 2) ("Native","operating") $
+          M.adjust (+102) ("Native","external") balances
+    require (afterBalances==expected) "treasury_outflow_not_balanced_or_fee_wrong"
+    (savedSpends,_) <- state ledger TreasuryState
+    savedSpend <- case savedSpends of [row]->pure row; _->reject "treasury_spend_record_missing_or_duplicated"
+    savedProof <- either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ treasuryspendsProofJson savedSpend)
+    savedOwner <- fieldValue "ownershipAttestation" savedProof
+    savedObservation <- fieldValue "observation" savedProof
+    savedAnchor <- fieldValue "anchor" savedObservation
+    require (savedOwner==reason && savedAnchor==("database-block"::T.Text)) "treasury_saved_proof_not_bound"
+    beforeReplay <- state ledger JournalState
+    repeated <- spend ledger "Native" "operator-payment"
+    afterReplay <- state ledger JournalState
+    require (decision==repeated && beforeReplay==afterReplay) "treasury_spend_replay_mutated_journal"
+    checkReview ledger "Native" "operator-payment" 0
+    -- This decision must not clear the other stream's outstanding review.
+    checkReview ledger "SolanaOperating" "reserved-spend" 1
+    expectError "treasury_spend_conflict" (Treasury.classifySpend ledger "Native" "operator-payment" "changed owner")
+    scan ledger "Native" [] [event{chainEventEvidence=object["walletNetUnits" .= ("-100"::T.Text),"feeUnits" .= quantity 2,"confirmations" .= (2::Int)]}]
+    checkReview ledger "Native" "operator-payment" 0
+    scan ledger "Native" [] [event{chainEventAnchor="different-block"}]
+    checkReview ledger "Native" "operator-payment" 1
+    expectError "treasury_spend_conflict" (spend ledger "Native" "operator-payment")
+    -- Token principal comes from float; a SOL wallet outflow (including its
+    -- fee) comes wholly from operating. Neither can touch another allocation.
+    forM_ [("Solana",Wrapped,"float","token-operator",object["delta" .= ("-100"::T.Text)]),
+           ("SolanaOperating",Sol,"operating","sol-operator",object["delta" .= ("-100"::T.Text),"feeUnits" .= quantity 2])] $
+      \(chain,asset,account,txid,proof)->do
+        scan ledger chain [] [ChainEvent txid "outgoing" "slot" proof]
+        before <- L.ledgerAction ledger L.balances
+        _ <- spend ledger chain txid
+        after <- L.ledgerAction ledger L.balances
+        require (after==M.adjust (subtract 100) (T.pack(show asset),account)
+          (M.adjust (+100) (T.pack(show asset),"external") before)) "treasury_stream_debited_wrong_allocation"
+        checkReview ledger chain txid 0
+  -- Saved decisions, bytes and reservations survive reconnect. Conflicting
+  -- observed anchors still refuse replay after restart.
+  L.withLedger settings "journal-contract" $ \ledger->do
+    expectError "treasury_spend_conflict" (spend ledger "Native" "operator-payment")
+    (spends,events) <- state ledger TreasuryState
+    require (length spends==3) "treasury_decisions_lost_on_restart"
+    require (any (\e->chaineventsEventId e=="operator-payment" && chaineventsNeedsReview e==1) events) "treasury_review_lost_on_restart"
 
 -- Offline RPC contracts against the production PostgreSQL order workflow.
 -- The in-memory node below models uncertain replies, not a real network.

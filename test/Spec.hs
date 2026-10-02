@@ -792,11 +792,6 @@ main=hspec $ do
       _<-createRefund l "extra:0"
       status <$> readOrder l cap (orderId o) `shouldReturn` "Paid"
       createOrder l c{maxQueued=1} 120 cap req{idempotencyKey="queue-full"} `shouldThrow` isError "queue_full"
-    it "cannot classify a treasury spend that consumes quoted operating funds" $ withFunded $ \l c -> do
-      _<-createOrder l c 100 cap req
-      commitScan l (ScanBatch "SolanaOperating" "origin" Nothing "quote-spend" 100 []
-        [ChainEvent "quote-spend" "outgoing" "100" (object ["delta" .= ("-95000"::Text),"feeUnits" .= amt 5000])])
-      recordTreasurySpend l "SolanaOperating" "quote-spend" (object ["fixture" .= True]) `shouldThrow` isError "treasury_spend_exceeds_free_allocation"
     it "counts fees once until the full rolling day ends, including future bookings" $ withFunded $ \l c -> do
       (_,ob)<-fundOrder l c
       testAttempt l c ob "Solana" "window-failure" "bytes" "{}" 10000 Nothing
@@ -2100,48 +2095,6 @@ main=hspec $ do
         commitScan l batch{scanPrevious=Just "fund"}
         ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM deposits" :: IO [Only Int]) `shouldReturn` [Only 1]
         commitScan l batch{scanChain="Solana",scanPrevious=Nothing} `shouldThrow` isError "scan_asset_mismatch"
-    it "books a verified operator payment and fee once, preserving its review decision across scans" $ withDir $ \dir -> do
-      let c=cfg dir
-      withLedger (dbPath c) (fingerprint c) $ \l -> do
-        observeDeposit l (Deposit "capital" Nothing Native (amt 1000) "fixture-block" 1 True 100) "cursor"
-        let proof=object ["verifiedOperatorPayment" .= ("fixture"::Text)]
-            economic=object ["walletNetUnits" .= ("-100"::Text),"feeUnits" .= amt 2,"confirmations" .= (1::Int)]
-            event=ChainEvent "operator-payment" "outgoing" "fixture-block" economic
-            batch=ScanBatch "Native" "origin" (Just "cursor") "cursor" 101 [] [event]
-        allocateTreasuryReceipt l "capital" [("float",amt 900),("operating",amt 100)] proof
-        commitScan l batch
-        recordTreasurySpend l "Native" "operator-payment" proof
-        recordTreasurySpend l "Native" "operator-payment" proof
-        ledgerAction l (\db->freeInventory db Native) `shouldReturn` 800
-        ledgerAction l (\db->query_ db "SELECT SUM(delta) FROM postings WHERE account<>'external'" :: IO [Only Int64]) `shouldReturn` [Only 898]
-        commitScan l batch{scanEvents=[event{chainEventEvidence=setPath ["confirmations"] (Number 2) economic}]}
-        ledgerAction l (\db->query_ db "SELECT needs_review FROM chain_events" :: IO [Only Bool]) `shouldReturn` [Only False]
-        -- Changed block identity cannot inherit the earlier financial approval.
-        commitScan l batch{scanEvents=[event{chainEventAnchor="different-block"}]}
-        ledgerAction l (\db->query_ db "SELECT needs_review FROM chain_events" :: IO [Only Bool]) `shouldReturn` [Only True]
-        recordTreasurySpend l "Native" "operator-payment" proof `shouldThrow` isError "treasury_spend_conflict"
-    it "cannot classify an existing customer attempt as an operator spend" $ withFunded $ \l c -> do
-      (_,ob)<-fundOrder l c
-      testAttempt l c ob "Solana" "customer-signature" "bytes" "{}" 5000 Nothing
-      pause l "fixture-review"
-      commitScan l (ScanBatch "Solana" "origin" Nothing "customer-signature" 100 []
-        [ChainEvent "customer-signature" "outgoing" "100" (object ["delta" .= ("-99800"::Text)])])
-      recordTreasurySpend l "Solana" "customer-signature" (object ["fixture" .= True])
-        `shouldThrow` isError "customer_attempt_cannot_be_treasury_spend"
-    it "requires review when signed bytes appear on-chain before a recorded broadcast intent" $ withFunded $ \l c -> do
-      (_,ob)<-fundOrder l c
-      testAttempt l c ob "Solana" "premature-signature" "bytes" "{}" 5000 Nothing
-      commitScan l (ScanBatch "SolanaOperating" "origin" Nothing "premature-signature" 100 []
-        [ChainEvent "premature-signature" "outgoing" "100" (object ["delta" .= ("-5000"::Text),"feeUnits" .= amt 5000])])
-      ledgerAction l (\db->query_ db "SELECT needs_review FROM chain_events" :: IO [Only Bool]) `shouldReturn` [Only True]
-      available <$> readiness l `shouldReturn` False
-    it "preserves reserved operating funds when reconciling a separate operator spend" $ withFunded $ \l c -> do
-      (_,ob)<-fundOrder l c
-      beginPreparation l c ob "Solana" 5000 "fixture-policy"
-      commitScan l (ScanBatch "SolanaOperating" "origin" Nothing "operator-sig" 100 []
-        [ChainEvent "operator-sig" "outgoing" "100" (object ["delta" .= ("-96000"::Text),"feeUnits" .= amt 5000])])
-      recordTreasurySpend l "SolanaOperating" "operator-sig" (object ["fixture" .= True])
-        `shouldThrow` isError "treasury_spend_exceeds_free_allocation"
   describe "continuous custody reconciliation (offline RPC contracts)" $ do
     it "checks all three assets without resuming or changing any financial records" $ withFunded $ \l original -> do
       let c=expiryConfig original

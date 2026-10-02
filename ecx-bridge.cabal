@@ -114,9 +114,3 @@ executable ecx-tls-constraints-check
   main-is: TLSConstraintsCheck.hs
   build-depends: base, bytestring, filepath, data-default,
     crypton-pem, crypton-x509, crypton-x509-store, crypton-x509-validation
-
-executable ecx-postgres-treasury-check
-  import: settings
-  hs-source-dirs: integration
-  main-is: TreasuryCheck.hs
-  build-depends: base, ecx-bridge, aeson, bytestring, text, unix, postgresql-simple

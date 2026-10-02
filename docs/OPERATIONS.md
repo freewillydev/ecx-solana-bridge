@@ -202,6 +202,15 @@ SOL fees and account rent need operating budgets; the 1% bridge fee is not proof
 that a transaction can pay its network costs. Never repair a balance by changing
 rows directly or silently treating an unexplained inflow as earned fees.
 
+For an independently reviewed operator outflow already recorded by the scanner,
+pause and POST `/classify-treasury-spend` on the private operator socket with
+`observationStream` (`Native`, `Solana` or `SolanaOperating`), `observedTransaction`
+and `spendOwnershipAttestation`. This books the observed principal/network cost
+against available operator allocations and clears only that event's review. It
+never signs or sends a transaction and rejects customer attempts or reserved funds.
+Exact replay returns the saved sequence; a changed anchor, economic effect or
+attestation conflicts. Reconcile before resuming.
+
 Liquidity is a separate operator workflow using the actual approved mint and
 counter-asset. Use the existing [Orca documentation](https://docs.orca.so/) to choose
 and create a compatible pool, record its program/address, deposits, fee tier and

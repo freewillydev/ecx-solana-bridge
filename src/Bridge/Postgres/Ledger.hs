@@ -1,7 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.Postgres.Ledger
   ( Ledger, withLedger, withGuardedLedger, ledgerAction, readiness, pause, criticalSequence, acknowledgeBackup, balances, posting
-  , reserveOrderCosts, freeOperating, checkOperatingCapacity, transferOrderCosts ) where
+  , reserveOrderCosts, freeInventory, freeOperating, checkOperatingCapacity, transferOrderCosts ) where
 
 import Bridge.Postgres.Schema
 import Bridge.Postgres.Catalog (claimWorkerSession)
@@ -143,6 +143,15 @@ posting connection event note rows = do
     when (inserted/=fromIntegral (length entries)) (reject "posting_insert_failed")
 
 -- Operating allowances share the journal transaction and lock.
+freeInventory :: PG.Connection -> Asset -> IO Integer
+freeInventory connection asset = do
+  let name=T.pack(show asset)
+  bs <- balances connection
+  held <- O.runSelect connection $ fmap reservationsAmount $ selectWhere
+    (\row->reservationsAsset row O..== O.sqlStrictText name O..&& reservationsPhase row O../= O.sqlStrictText "released")
+    (O.selectTable reservationsTable) :: IO [Int64]
+  pure (M.findWithDefault 0 (name,"float") bs-sum(map toInteger held))
+
 operatingHolds :: PG.Connection -> Text -> IO Integer
 operatingHolds connection asset = do
   fees <- O.runSelect connection $ fmap feereservationsAmount $ selectWhere

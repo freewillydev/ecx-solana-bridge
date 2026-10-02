@@ -1,5 +1,7 @@
-module Bridge.Postgres.Treasury (allocate) where
+module Bridge.Postgres.Treasury (allocate, classifySpend) where
 
+import Bridge.Ledger.Model (economicOutflow)
+import Control.Monad (forM_)
 import Bridge.Types
 import Bridge.RPC (fieldValue)
 import Bridge.Postgres.Ledger
@@ -102,5 +104,69 @@ allocate ledger now did split reason = ledgerAction ledger $ \c->do
  where
   text=O.sqlStrictText
   num=O.sqlInt8
+  json :: ToJSON a => a -> Text
+  json=TE.decodeUtf8.LBS.toStrict.encode
+
+-- Record an already-observed operator outflow; never sign or broadcast here.
+-- The scanner supplies economic facts, the operator supplies ownership only.
+classifySpend :: Ledger -> Text -> Text -> Text -> IO Value
+classifySpend ledger stream txid reason = ledgerAction ledger $ \c->do
+  require (not(T.null $ T.strip reason) && T.length reason<=512) "invalid_treasury_spend_attestation"
+  paused <- O.runSelect c (fmap deploymentPaused $ O.selectTable deploymentTable) :: IO [Int64]
+  require (paused==[1]) "treasury_spend_requires_pause"
+  rows <- O.runSelect c $ do
+    event <- O.selectTable chaineventsTable
+    proof <- O.selectTable observationevidenceTable
+    O.where_ (chaineventsChain event O..== text stream O..&& chaineventsEventId event O..== text txid O..&&
+      chaineventsKind event O..== text "outgoing" O..&& chaineventsEvidenceHash event O..== observationevidenceHash proof O..&&
+      observationevidenceChain proof O..== text stream O..&& observationevidenceEventId proof O..== text txid)
+    pure (chaineventsAnchor event,observationevidenceEvidenceJson proof)
+    :: IO [(Text,Text)]
+  (anchor,raw) <- case rows of [row]->pure row; _->reject "treasury_spend_not_observed"
+  observation <- either (const $ reject "invalid_observation_evidence") pure (eitherDecodeStrict' $ TE.encodeUtf8 raw)
+  proof <- fieldValue "proof" observation
+  economic@(asset,outflow,fee) <- either reject pure (economicOutflow stream proof)
+  attempts <- O.runSelect c $ do
+    a <- O.selectTable attemptsTable
+    O.where_ (attemptsTxid a O..== text txid)
+    pure (attemptsTxid a)
+    :: IO [Text]
+  require (null attempts) "customer_attempt_cannot_be_treasury_spend"
+  old <- O.runSelect c $ do
+    row <- O.selectTable treasuryspendsTable
+    O.where_ (treasuryspendsChain row O..== text stream O..&& treasuryspendsEventId row O..== text txid)
+    pure row
+    :: IO [TreasurySpends]
+  sequenceNo <- case old of
+    [row]->do
+      saved <- either (const $ reject "invalid_saved_treasury_proof") pure (eitherDecodeStrict' $ TE.encodeUtf8 $ treasuryspendsProofJson row)
+      savedReason <- fieldValue "ownershipAttestation" saved
+      require (treasuryspendsAnchor row==anchor && treasuryspendsEconomicJson row==json economic && savedReason==reason) "treasury_spend_conflict"
+      pure (treasuryspendsCriticalSequence row)
+    []->do
+      let costs | asset==Native = [("float",toInteger(units outflow)-toInteger(units fee)),("operating",toInteger(units fee))]
+                | asset==Wrapped = [("float",toInteger(units outflow))]
+                | otherwise = [("operating",toInteger(units outflow))]
+      forM_ costs $ \(account,cost)->do
+        free <- if account=="float" then freeInventory c asset else freeOperating c (T.pack(show asset))
+        require (cost>=0 && free>=cost) "treasury_spend_exceeds_free_allocation"
+      n <- criticalSequence c
+      posting c ("treasury-spend:"<>stream<>":"<>txid) "verified operator spend and network costs"
+        ([(asset,account,negate cost) | (account,cost)<-costs]<>[(asset,"external",toInteger(units outflow))])
+      let evidence=json(object["ownershipAttestation" .= reason,"observation" .= observation])
+      _ <- O.runInsert c O.Insert
+        { O.iTable=treasuryspendsTable,O.iRows=[TreasurySpends (text stream) (text txid) (text anchor) (text $ json economic) (text evidence) (O.sqlInt8 n)]
+        , O.iReturning=O.rCount,O.iOnConflict=Nothing }
+      pure n
+    _->reject "duplicate_treasury_spend"
+  -- Clear only this event. A changed anchor/economic effect conflicts above.
+  -- Skip a no-op update so exact replay also preserves custody revision.
+  _ <- O.runUpdate c O.Update
+    { O.uTable=chaineventsTable,O.uUpdateWith= \row->row {chaineventsNeedsReview=O.sqlInt8 0}
+    , O.uWhere= \row->chaineventsChain row O..== text stream O..&& chaineventsEventId row O..== text txid O..&& chaineventsNeedsReview row O../= O.sqlInt8 0
+    , O.uReturning=O.rCount }
+  pure(object["transaction" .= txid,"criticalSequence" .= sequenceNo,"signedOrSent" .= False])
+ where
+  text=O.sqlStrictText
   json :: ToJSON a => a -> Text
   json=TE.decodeUtf8.LBS.toStrict.encode

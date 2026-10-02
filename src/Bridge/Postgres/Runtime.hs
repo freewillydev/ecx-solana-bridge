@@ -193,6 +193,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
       _<-Payments.reconcileCustodyWith epochSeconds transport cfg ledger
       now<-epochSeconds
       Treasury.allocate ledger now did split reason
+    ClassifyTreasurySpend stream txid reason->Treasury.classifySpend ledger stream txid reason
     RefundDeposit did->do
       obligation <- Refund.createRefund ledger did
       pure(object["obligation" .= Domain.obligationId obligation,"recipient" .= Domain.obligationRecipient obligation,"amount" .= T.pack(show $ Domain.obligationAmount obligation)])
