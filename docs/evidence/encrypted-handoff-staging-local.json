@@ -1,0 +1,16 @@
+{
+  "snapshotId": "779386641ac40c1b64c7181b92bc9e6a886fbc03b4d55e70875b17112de922ff",
+  "criticalSequence": 19,
+  "verifiedFiles": 4,
+  "protectedStagingComplete": true,
+  "custodyKeysRestoredIntoService": false,
+  "workerCoverageAcknowledged": false,
+  "offHostDurabilityVerified": false,
+  "realRestic": true,
+  "actualRetiredDedicatedFixture": true,
+  "localDisposableRepository": true,
+  "allOriginalFileBytesMatched": true,
+  "privateFileModesVerified": true,
+  "existingDestinationRefused": true,
+  "tamperedReceiptRefusedBeforeStaging": true
+}

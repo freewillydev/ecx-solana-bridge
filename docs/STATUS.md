@@ -1888,3 +1888,16 @@ the disposable encrypted repository were removed. See
 The CLI still requires real remote operator credentials for off-host acceptance;
 local encryption does not prove physical durability, escrow-password recovery,
 clean-host resume or revocation of old key copies.
+
+## Verified encrypted handoff download and staging
+
+The same escrow tool now downloads from a protected trusted receipt, verifies
+remote association and all four file hashes, checks restored manifest/fence
+identity, and produces a new protected bundle for the existing restore procedure.
+It refuses existing destinations and never installs keys or starts a worker.
+Actual local restic acceptance against the retired dedicated archive matched all
+original bytes and private file modes; existing destinations and a tampered
+receipt were refused, the latter before exposing a staged bundle. See
+`evidence/encrypted-handoff-staging-local.json`. No VM or package build was used.
+The real off-host/host-loss drill and paying reconciliation for an in-flight
+Solana payment remain open; faucet funding is still awaiting confirmation.

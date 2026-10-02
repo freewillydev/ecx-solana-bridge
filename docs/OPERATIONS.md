@@ -307,3 +307,28 @@ restic round trip, including the signing-material archive; see
 removed after hash comparison. Actual independent-host storage, password recovery,
 host-loss restoration and old-key revocation remain release requirements. Do not
 use an old ledger merely because its keys can still sign.
+
+### Download and verify escrow before host restoration
+
+Save the upload receipt in a private regular file (mode 0600). On the recovery
+host, use the independently recovered operator repository/password files:
+
+```sh
+sudo python3 deploy/encrypted-handoff.py --restore-receipt /absolute/private/handoff-receipt.json --restore-to /absolute/private/verified-handoff --repository-file /absolute/private/operator-escrow.repository --password-file /absolute/private/operator-escrow.password
+```
+
+The destination must not exist. The command checks snapshot ID, deployment and
+sequence tags, exact four-file association, every pinned file hash, and restored
+handoff/manifest identity before placing files in a new 0700 directory with 0600
+file modes. Existing recovery archives are refused. A filesystem failure while
+placing files can leave an incomplete private destination; preserve it for
+inspection rather than treating it as a verified restore. Success is returned
+only after every file is staged. This does not start services or authorize keys.
+
+Use the existing stopped-source/fresh-host restore procedure only after this
+verification, matching the reviewed application release and reconciling chains,
+obligations, signer identities and custody before any paying resume. Local real
+restic acceptance matched all original bytes, verified private modes, refused an
+existing destination and rejected a tampered receipt before staging. See
+`evidence/encrypted-handoff-staging-local.json`. Remote storage and actual host
+loss remain distinct unverified gates.
