@@ -7,8 +7,12 @@ The revised PostgreSQL package passed ARM64 installation, repeat installation,
 reboot, private-role and same-host backup restoration checks in an Ubuntu VM on
 the development Mac. See [the recorded checks](evidence/postgres-installer-arm64.json).
 This run used observation mode and a fresh ledger; it did not authorize payments.
-x86-64 requires its own PostgreSQL acceptance run. Earlier installer evidence
-covers the SQLite baseline, not this replacement.
+The native x86-64 package also passed fresh bridge installation, repeat installation,
+cold restart, configuration/financial-record preservation and isolated same-host
+restoration; see [x86 evidence](evidence/postgres-installer-x86.json).
+That package predates the latest mandatory backup runtime and covered-source
+changes, which require consolidated package acceptance. Neither architecture's
+observation-only installation proves signer or independent-host recovery.
 
 ## One command
 

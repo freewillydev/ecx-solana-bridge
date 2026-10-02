@@ -101,10 +101,10 @@ The current architecture is the approved Haskell application, two real-chain ada
 | --- | --- | --- |
 | U1 — Usable local test bridge — **first priority** | Existing real-chain core exposed through customer API and thin UI; both automatic transfer directions; saved-order reload; simple start command; actual supported-wallet signing | API, UI and launcher implemented; both real customer-API transfers and a clean restart pass with matching custody. Actual supported-wallet Solana Pay acceptance remains unverified. Additional recovery gates below follow this explicitly authorized local test milestone. |
 | R1 — Complete native replacement workflow | Exact private operator draft/sign/send; backup and source gates; one actual Signet replacement family, confirmation, paused restart and matched custody | Winner-change accounting and signer guards pass contract tests; schema 18 is applied. Private PostgreSQL draft/sign/send/cancel workflows are integrated; Actual family signing/send/mempool replacement/confirmation and completed restart pass; winner-changing reorg and broader recovery acceptance remain. |
-| R2 — Close recovery state transitions | Explicit covered-source resolution, proved missing-destination treatment, finalized Solana history-loss handling, and unchanged claims during ambiguous evidence | Partial; existing source/finality/capital journals are the implementation base. Follow U1. |
+| R2 — Close recovery state transitions | Explicit covered-source resolution, proved missing-destination treatment, finalized Solana history-loss handling, and unchanged claims during ambiguous evidence | Explicit covered-source approval is implemented and passes real PostgreSQL ready/paying, backup and authority contracts. Live source-conflict acceptance, missing-destination recovery and broader finality/interruption acceptance remain. |
 | R3 — Complete restore and resume | Critical backup coverage, old-ledger/old-signer fencing, key restore, exact-byte recovery and a final resume decision; independent-provider Solana expiry, in-flight and backlog acceptance | Partial; follow U1. Remote and clean-host checks also close D1. |
-| N1 — Actual ECX betanet | Official node/provenance/checkpoint, separate funded profile, replay fields and real deposit/payout/refund | Not started; real node and test allocation required. |
-| D1 — Reproducible installation and recovery | One-line Ubuntu installation from verified pinned artifacts; service/helper isolation; retained remote backups; fresh-host/key restoration and affected fault checks | One-command source and compiled installers pass on local Ubuntu 24.04 ARM64, including separate users, sandboxed helper, real-chain doctor, repeated installation and VM reboot. Signed publication, x86-64 acceptance, remote backups and full host/key restore remain. The x86 Ubuntu VM is retained for installation acceptance. Compilation now runs on native Ubuntu CI; all task VMs are stopped while that build runs. |
+| N1 — Actual ECX betanet | Official node/provenance/checkpoint, separate funded profile, replay fields and real deposit/payout/refund | Actual official node identity/checkpoint and betanet/Devnet runtime/observer authority checks pass. A dedicated funded custody wallet and real betanet deposit/payout/refund acceptance remain; no existing beta wallet was modified. |
+| D1 — Reproducible installation and recovery | One-line Ubuntu installation from verified pinned artifacts; service/helper isolation; retained remote backups; fresh-host/key restoration and affected fault checks | One-command source and compiled installers pass on local Ubuntu 24.04 ARM64, including separate users, sandboxed helper, real-chain doctor, repeated installation and VM reboot. Native x86-64 observation installation, repeat installation, cold restart and same-host ledger restoration now pass. Current consolidated packages, signed publication, off-host backups and full host/key restore remain. Compilation runs on cached native Ubuntu CI; acceptance VMs are stopped after use. |
 | S1 — Reviewable open-source test release | Frozen source and dependency/license/advisory evidence; installed-release acceptance and independent review; material findings resolved with focused regression checks | Not complete. Reproducible notice collection covers all 333 dependency entries; Bitcoin Core source notices and SQLite disclaimer excerpts are recorded with provenance; system-library notices and native applicability review remain. The completed ARM64 package covers 369 dependency notices; system-library applicability and independent review remain. See THIRD-PARTY.md. Publication and valuable-fund deployment are not implied. |
 | C1 — Remaining approved rollout | Canonical mint/reserves/identities and explicitly authorized pilot; separately authorized real market/liquidity integrations; conditional official mainnet activation | Preserved in the full plan; external facts and explicit valuable-fund authorization required. |
 
@@ -877,5 +877,19 @@ upstream TLS remediation, notices, tests and installer checksum verification.
 The downloaded private artifact's checksum was independently verified. Its
 release ID is `d23dd6bb3158c92fceace861`; it does not yet contain the subsequent
 backup/runtime and covered-source batches. Evidence:
-`evidence/native-x86-packaging.json`. Clean installation/reboot and a current
-consolidated package remain required.
+`evidence/native-x86-packaging.json`. Fresh x86 bridge installation, repeat
+installation and cold restart now pass in a single 3 GiB Ubuntu VM, preserving
+seven configuration hashes, 31 durable table hashes and critical sequence zero.
+All three actual Signet/Devnet scanners are healthy; health is 200, readiness is
+503 and no signer is installed. PostgreSQL remains Unix-socket-only with restricted
+roles. The installed backup service's archive passes isolated restoration matching
+all 38 table counts. See `evidence/postgres-installer-x86.json` and the reusable
+`integration/InstalledObserverCheck.py`. Initial history scans populate observations,
+so the durable comparison waits for established origins and excludes changing
+observation/freshness tables. This is same-host observation acceptance, not key or
+off-host recovery. The VM was stopped after acceptance.
+
+A single consolidated native CI build at `fb5d4fb` has been dispatched using the
+existing toolchain/dependency caches. Its result and current package acceptance
+remain pending; the older successful package must not be presented as containing
+the later backup or covered-source features.

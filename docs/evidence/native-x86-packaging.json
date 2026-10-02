@@ -7,6 +7,7 @@
   "releaseId": "d23dd6bb3158c92fceace861",
   "buildAndTestsPassed": true,
   "noticeCollectionPassed": true,
-  "cleanInstallRebootTested": false,
-  "laterBackupAndCoveredSourceChangesIncluded": false
+  "cleanInstallRebootTested": true,
+  "laterBackupAndCoveredSourceChangesIncluded": false,
+  "installationEvidence": "postgres-installer-x86.json"
 }
