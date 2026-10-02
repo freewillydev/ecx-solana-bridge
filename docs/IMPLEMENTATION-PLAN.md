@@ -1,8 +1,46 @@
 # Integrated implementation plan
 
-Revised 2026-10-01. This plan replaces the earlier thirteen-stage sequencing.
+Revised 2026-10-02. The execution sequence below takes precedence over the older numbered stages retained as a requirement inventory.
 Build the complete test-network product first, then audit its completed pieces.
 Implementation, integration, verification and audit are distinct checkpoints.
+
+## Remaining execution sequence — functionality before packaging
+
+Installer upgrades, repeated architecture acceptance, signed-candidate refreshes
+and release uploads are deferred until the substantive work below is consolidated.
+Existing packages remain development baselines; source changes need only scoped
+compilation and checks during this phase. Completed build artifacts are retained.
+
+1. **Finish payment and recovery workflows.** Complete the outstanding Solana
+   signed-but-unsent clean-host recovery and paying reconciliation, then address
+   remaining concrete replacement/reorg/loss and interrupted-operation gaps.
+   Reuse existing real Signet/Devnet fixtures, ledger and adapters; do not create
+   a parallel payment implementation. Verify each complete workflow once.
+2. **Finish customer acceptance.** Exercise the connection-free browser journey,
+   clipboard/private recovery links and an actual supported Solana Pay wallet.
+   Keep external wallet signing pending until it can be performed with the
+   dedicated test identity; do not introduce wallet connection to solve testing.
+3. **Finish operational recovery.** Complete remote backup/retention, receipt
+   barriers, stopped-source fencing, key recovery and clean-host resume. Prepare
+   all code and procedures locally; an actual off-host repository and restoration
+   require real repository access. Local backups do not prove this requirement.
+4. **Finish real deployment/market integration.** Verify canonical network/token
+   configuration, authority, supply/backing and usable market integration. Run
+   funded betanet/canonical acceptance only with allocated test funding and the
+   required operator authorization. Keep unavailable external prerequisites
+   explicit while completing independent implementation.
+5. **Audit the consolidated product.** Review financial invariants, authorization,
+   chain validation, dependency/license findings and the collected recovery
+   evidence in bounded batches. Obtain independent security review; self-review
+   cannot satisfy that gate. Fix related findings together.
+6. **Package once at the end.** Build the consolidated source for ARM64/x86,
+   verify install/upgrade/repeat/reboot and restoration where affected, then
+   authenticate a fresh private review candidate. Public activation remains a
+   separate authorized decision.
+
+The next task is item 1. Packaging does not become the default fallback when an
+external acceptance prerequisite is unavailable: continue another substantive
+item and record the prerequisite without repeating completed installer checks.
 
 ## Product contract
 

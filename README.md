@@ -146,14 +146,14 @@ The current public-test mint is independently created Devnet test inventory, **n
 
 ## Remaining challenges and delivery sequence
 
-The [current implementation plan](docs/IMPLEMENTATION-PLAN.md) orders delivery as
-complete runtime/customer flows, one-command installation, then bounded audits.
+The [current implementation plan](docs/IMPLEMENTATION-PLAN.md) now puts remaining payment recovery, customer acceptance, operational recovery
+and canonical integration before consolidated audits and final packaging.
 The following inventory retains the broader release scope. These are not equal-sized percentages; [`docs/STATUS.md`](docs/STATUS.md) is the detailed evidence/backlog record.
 
 | Order | Remaining work | Why it matters |
 | --- | --- | --- |
 | 1. Finish the usable test product | Actual external Solana Pay wallet signing and clipboard/private recovery-link verification. Installed browser forms, QR/payment instructions, saved-order reload and history switching now pass. | Browser acceptance now complements API round trips; external wallet approval/signing remains unverified. |
-| 2. Finish installer acceptance | Prepare authenticated release distribution; current ARM64/x86-64 upgrades and a clean-guest key/ledger handoff pass. | A source build or ARM64 result does not prove an Intel/AMD server installation. |
+| Final packaging (deferred) | Prepare authenticated release distribution; current ARM64/x86-64 upgrades and a clean-guest key/ledger handoff pass. | A source build or ARM64 result does not prove an Intel/AMD server installation. |
 | 3. Complete payment/reorg recovery | Integrated private native replacement send with a real Signet family; covered-source resolution, missing-destination treatment and finalized Solana history-loss handling. | Ambiguous or changed chain evidence must preserve customer claims and prevent duplicate payout. |
 | 4. Complete backup, restore and resume | Remote critical backups/retention, old-ledger/old-signer fencing, key restoration, exact-byte recovery, independent-provider expiry and clean-host acceptance. | Process restart is much narrower than losing a host and recovering a hot wallet. |
 | 5. Exercise actual ECX betanet | Official daemon provenance/checkpoint, separate funded deployment, replay policy and real deposit/payout/refund. | Actual betanet checkpoint and compiled adapter identity now pass; a separate funded betanet round trip remains unverified. |

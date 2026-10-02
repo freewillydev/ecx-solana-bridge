@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Journal one real Signet wrap and stage its Solana payout without sending.
 
-Dedicated installed inflight fixture only. Retains private exact deposit bytes and customer
+Dedicated installed Signet/Devnet fixture only. Retains private exact deposit bytes and customer
 capability. A failed run leaves the worker stopped; never deletes or resets work.
 """
 import argparse
@@ -17,9 +17,14 @@ from InstalledTestTransport import InstalledTestTransport
 
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('state', type=Path)
+parser.add_argument('--vm', required=True, help='Active dedicated test guest; retired sources are refused')
+parser.add_argument('--run-id', required=True, help='Distinct durable journal and order identity')
 parser.add_argument('--devnet-dir', type=Path, required=True)
 parser.add_argument('--report', type=Path, required=True)
 args = parser.parse_args()
+assert re.fullmatch(r'[a-z][a-z0-9-]{0,62}', args.vm)
+assert args.vm not in ('inflight', 'restore', 'pg-install'), 'Retired source guest refused'
+assert re.fullmatch(r'[a-z][a-z0-9-]{0,62}', args.run_id)
 os.umask(0o077)
 state = args.state.resolve(strict=True)
 cfg = json.loads((state / 'config.json').read_text())
@@ -28,10 +33,10 @@ assert cfg['profile'] == 'L2LSignetDevnet' and not cfg['backupRequired']
 assert cfg['custodyOwner'] == '6vKbKHaYS393gQdjKysZFuyvn6cZ5p4vSwK2kMsQFuZY'
 assert cfg['mint'] == 'Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM'
 assert cfg['solanaVerifierRpc'] == 'https://solana-devnet.api.onfinality.io/public'
-private = state / 'signed-solana-recovery'
+private = state / args.run_id
 private.mkdir(mode=0o700, exist_ok=True)
 private.chmod(0o700)
-transport = InstalledTestTransport('inflight', cfg)
+transport = InstalledTestTransport(args.vm, cfg)
 
 
 def save(name, value):
@@ -51,7 +56,7 @@ def save(name, value):
 
 
 def guest(*command, input=None):
-    result = subprocess.run(['limactl', 'shell', 'inflight', *command], input=input,
+    result = subprocess.run(['limactl', 'shell', args.vm, *command], input=input,
                             capture_output=True, text=True, timeout=120)
     if result.returncode:
         codes = re.findall(r'BridgeError "([a-z0-9_-]{1,100})"', result.stderr)
@@ -111,7 +116,7 @@ print('guest-providers-ready')
             address = json.loads((state / 'product/native-recipient.json').read_text())['address']
             save('request.json', dict(capability=secrets.token_hex(32), request=dict(
                 direction='NativeToWrapped', input='10000', recipient=manifest['tester'],
-                refund=address, sourceOwner=None, idempotencyKey='signed-solana-recovery-1')))
+                refund=address, sourceOwner=None, idempotencyKey=args.run_id)))
         auth = json.loads((private / 'request.json').read_text())
         order = transport.api('/api/v1/orders', auth['request'], auth['capability'], False)
         assert order['quote'] == dict(gross='10000', fee='100', net='9900')
