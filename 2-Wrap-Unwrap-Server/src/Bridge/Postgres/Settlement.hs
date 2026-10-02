@@ -1,4 +1,4 @@
-module Bridge.Postgres.Settlement (recordSettlement,recordFailedSolana,markBroadcastIntent,authorizeRecordedSend,recordSolanaExpiry,checkExpiryOrigins, pendingAttempts, readObligation, sourceContext, winner, ready, busy
+module Bridge.Postgres.Settlement (recordSettlement,recordFailedSolana,markBroadcastIntent,authorizeRecordedSend,recordSolanaExpiry,checkExpiryOrigins, pendingAttempts, readObligation, sourceContext, ready, busy
   , retryReasons, retryCandidates, approveRetry, createRefund) where
 
 import Bridge.Config
@@ -225,14 +225,6 @@ pendingAttempts ledger = ledgerAction ledger $ \connection->do
   -- Use the same verified family order as signing, settlement and recovery.
   pure $ native <> [asAttempt a chain | (a,chain)<-sortOn (\(a,_)->(attemptsPreparationGeneration a,attemptsCriticalSequence a,attemptsTxid a)) rows,chain/="Native",not(any ((==attemptsTxid a).solanaexpiriesTxid) expired)]
 
-winner :: Ledger -> Text -> IO Text
-winner ledger intent = ledgerAction ledger $ \connection->do
-  rows <- O.runSelect connection $ do
-    row <- O.selectTable attemptsTable
-    O.where_(attemptsIntentId row O..== O.sqlStrictText intent O..&& attemptsState row O..== O.sqlStrictText "settled")
-    pure(attemptsTxid row)
-    :: IO [Text]
-  case rows of [txid]->pure txid; _->reject "settled_payment_missing"
 ready :: Ledger -> IO [Obligation]
 ready ledger = ledgerAction ledger $ \c->do
   rows <- O.runSelect c $ O.limit 100 $ do

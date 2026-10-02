@@ -52,10 +52,8 @@ approveSourceRecoveryWith clock transport c ledger intent restoration reason=do
       recheckSourceWith transport c ledger ob
       -- A saved payment may have finalized or expired since the source was
       -- restored. Reconcile it first; the ledger snapshot then refuses revival.
-      payments <- reconcilePaymentsWith transport c ledger
-      attempts <- fieldValue "attempts" payments :: IO [Value]
-      failures <- mapM (fieldValue "error") attempts :: IO [Maybe Text]
-      require (all (==Nothing) failures) "source_approval_payment_requires_review"
+      failures <- reconcilePaymentsWith transport c ledger
+      require (null failures) "source_approval_payment_requires_review"
       _ <- reconcileCustodyWith clock transport c ledger
       now <- clock
       PgSource.recoveryRecord ledger intent restoration now reason
@@ -85,10 +83,8 @@ prepareNativeReplacementUsing clock transport drafter c ledger parent fee reason
       either reject pure (validateNativeReplacementDraft family fee draft)
       -- The original can confirm during drafting. Reconcile it and reject a
       -- stale parent before committing an operator decision for new work.
-      payments <- reconcilePaymentsWith transport c ledger
-      outcomes <- fieldValue "attempts" payments :: IO [Value]
-      failures <- mapM (fieldValue "error") outcomes :: IO [Maybe Text]
-      require (all (==Nothing) failures) "native_replacement_payment_requires_review"
+      failures <- reconcilePaymentsWith transport c ledger
+      require (null failures) "native_replacement_payment_requires_review"
       recheckSourceWith transport c ledger ob
       _ <- reconcileCustodyWith clock transport c ledger
       now <- clock
@@ -120,10 +116,8 @@ signNativeReplacementUsing clock transport signer c ledger sequenceNo=do
       PgReplacement.recordMember ledger c sequenceNo expected signed now
  where
   reconcile=do
-    payments <- reconcilePaymentsWith transport c ledger
-    outcomes <- fieldValue "attempts" payments :: IO [Value]
-    failures <- mapM (fieldValue "error") outcomes :: IO [Maybe Text]
-    require (all (==Nothing) failures) "native_replacement_payment_requires_review"
+    failures <- reconcilePaymentsWith transport c ledger
+    require (null failures) "native_replacement_payment_requires_review"
     _ <- reconcileCustodyWith clock transport c ledger
     now <- clock
     PgCustody.checkFresh ledger now

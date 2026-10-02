@@ -6,7 +6,9 @@ import Bridge.Config (Config,fingerprint)
 import qualified Bridge.Postgres.Replacement as Replacement
 import qualified Bridge.Postgres.Settlement as Settlement
 import Bridge.NativePayment
-import Bridge.RPC (fieldValue)
+import Bridge.RPC (fieldValue,PaymentTransport(..))
+import qualified Bridge.Settlement as Workflow
+import Data.IORef (newIORef,modifyIORef',readIORef)
 import qualified Data.ByteString as BS
 import qualified Bridge.Postgres.Ledger as L
 import qualified Bridge.Postgres.Source as Source
@@ -244,6 +246,21 @@ winnerContract ledger = do
   expectError "native_replacement_already_signed" $ Replacement.cancel ledger draftSequence "cannot cancel signature"
   snapshot ledger >>= \after->require (beforeSignedReplay==after) "contract_replacement_signed_replay_mutated"
   Replacement.member ledger draftSequence >>= \a->require (a==Just signedMember) "contract_replacement_member_missing"
+  -- Inject an identity failure before any RPC. Every pending family must still
+  -- be inspected, reported as a typed error, and leave the worker paused.
+  calls <- newIORef (0::Int)
+  groups <- either reject pure (Workflow.paymentAttemptGroups pendingFamily)
+  let unavailable=PaymentTransport (\_ _ _->reject "unexpected_contract_rpc")
+        (\_ _->reject "unexpected_contract_rpc") Nothing
+        (modifyIORef' calls (+1) >> reject "contract_identity_unavailable")
+        (\_->reject "unexpected_contract_backup")
+  failures <- Workflow.reconcilePaymentsWith unavailable cfg ledger
+  require (failures==replicate (length groups) "contract_identity_unavailable") "contract_reconciliation_errors_lost"
+  readIORef calls >>= \n->require (n==length groups) "contract_reconciliation_skipped_family"
+  L.readiness ledger >>= \state->require (state==Availability False "payment_recovery:contract_identity_unavailable") "contract_reconciliation_not_paused"
+  beforeRepeat <- snapshot ledger
+  _ <- Workflow.reconcilePaymentsWith unavailable cfg ledger
+  snapshot ledger >>= \after->require (beforeRepeat==after) "contract_reconciliation_repeat_mutated"
   L.ledgerAction ledger $ \c->do
     broadcastSequence <- L.criticalSequence c
     fixtureOperation c (AttemptSequence newId broadcastSequence)

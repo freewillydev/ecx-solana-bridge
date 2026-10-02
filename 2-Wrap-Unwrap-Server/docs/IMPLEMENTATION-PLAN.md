@@ -304,6 +304,9 @@ The sequence below remains the broader refactor checklist, subject to that prior
 4. **Make the domain and DSL the entry point for auditing.** Consolidate duplicate
    Plan/Request/DSL layers only when they add no distinct guarantee. Use explicit
    business ADTs/records instead of scattered state strings and Value blobs.
+   Payment reconciliation now returns typed error codes directly; recovery and
+   resume checks no longer build/parse an unused JSON report or query its winner
+   solely for formatting. Settlement retains its transactional uniqueness checks.
    Confine raw chain JSON to adapters. Put the operation vocabulary and permission
    table in one place. Preserve separate safe/critical evaluators and compile-time
    authority checks. Cabal now separates private types, customer API and runtime

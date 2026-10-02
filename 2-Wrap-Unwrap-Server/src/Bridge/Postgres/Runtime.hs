@@ -302,10 +302,8 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
       Nothing->do
         ob <- Source.coveredObligation ledger intent loss
         paymentIdentity transport
-        payments <- reconcilePaymentsWith transport cfg ledger
-        attempts <- fieldValue "attempts" payments :: IO [Value]
-        failures <- mapM (fieldValue "error") attempts :: IO [Maybe Text]
-        require (all (==Nothing) failures) "source_approval_payment_requires_review"
+        failures <- reconcilePaymentsWith transport cfg ledger
+        require (null failures) "source_approval_payment_requires_review"
         _ <- CustodyWorkflow.reconcileCustodyWith epochSeconds transport cfg ledger
         candidates <- PgSource.candidates ledger
         require (length candidates<=1000) "source_recovery_backlog"

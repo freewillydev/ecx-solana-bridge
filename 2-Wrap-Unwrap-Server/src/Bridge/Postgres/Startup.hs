@@ -10,8 +10,6 @@ import Bridge.Settlement (PaymentTransport,reconcilePaymentsWith,readSavedPaymen
 import Bridge.Postgres.Settlement (pendingAttempts)
 import qualified Bridge.Reconciliation as Payments
 import qualified Bridge.Ledger.Model as Domain
-import Bridge.RPC (fieldValue)
-import Data.Aeson (Value)
 import Data.Text (Text)
 import Data.List (sort)
 import Data.Int (Int64)
@@ -29,10 +27,8 @@ resumeAfterReview :: IO Int64 -> PaymentTransport -> Config -> Ledger -> IO ()
 resumeAfterReview clock transport cfg ledger = do
   state <- readiness ledger
   require (not $ available state) "pause_before_operator_action"
-  result <- reconcilePaymentsWith transport cfg ledger
-  outcomes <- fieldValue "attempts" result :: IO [Value]
-  failures <- mapM (fieldValue "error") outcomes :: IO [Maybe Text]
-  require (all (==Nothing) failures) "resume_payment_requires_review"
+  failures <- reconcilePaymentsWith transport cfg ledger
+  require (null failures) "resume_payment_requires_review"
   saved <- pendingAttempts ledger
   require (length saved<=1000) "resume_payment_backlog"
   forM_ saved $ \attempt->do

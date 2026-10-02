@@ -33,6 +33,7 @@ import Data.Aeson
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
 import Data.List (nub)
+import Data.Maybe (catMaybes)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.HTTP.Client (Manager)
@@ -306,31 +307,26 @@ activeFamilyPayment family view=case familyActive view of
 
 -- Reconcile only already-recorded attempts. This path never invokes signing,
 -- backup or send, even if the deployment happens to be available.
-reconcilePaymentsWith :: PaymentTransport -> Config -> Ledger -> IO Value
+-- Return only observation errors; pending/unseen payments are not failures.
+-- Observe every family even after an error, preserving pause and recovery work.
+reconcilePaymentsWith :: PaymentTransport -> Config -> Ledger -> IO [Text]
 reconcilePaymentsWith transport c ledger = do
   attempts <- PgSettlement.pendingAttempts ledger
   groups <- case paymentAttemptGroups attempts of
     Left code->PgLedger.pause ledger code >> reject code
     Right groups->pure groups
-  reports <- mapM (reconcile.last) groups
-  pure $ object ["attempts" .= reports,"signedOrSent" .= False]
+  catMaybes <$> mapM (reconcile.last) groups
  where
   reconcile attempt = do
     outcome <- try (reconcileRecordedAttempt transport c ledger attempt
       `catch` (\(_::IOException)->reject "payment_observation_io_unavailable")) :: IO (Either BridgeError (Either Text (Obligation,SavedPayment)))
     case outcome of
-      Right result -> do
-        txid <- case result of
-          Left "settled"->PgSettlement.winner ledger (attemptIntent attempt)
-          _->pure $ attemptId attempt
-        pure $ report txid attempt (either id (const "unseen") result) Nothing
+      Right _ -> pure Nothing
       Left (BridgeError code) -> do
         health <- PgLedger.readiness ledger
         let reason="payment_recovery:"<>code
         when (health/=Availability False reason) $ PgLedger.pause ledger reason
-        pure $ report (attemptId attempt) attempt "requires_review" (Just code)
-  report txid attempt state failure = object ["transaction" .= txid,"chain" .= attemptChain attempt
-    ,"outcome" .= (state::Text),"error" .= (failure::Maybe Text)]
+        pure (Just code)
 
 -- A Right result means the same saved transaction is unseen and has no proven
 -- expiry. Only the separate authorized send path may act on those bytes.
