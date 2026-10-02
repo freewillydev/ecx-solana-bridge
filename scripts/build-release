@@ -130,8 +130,6 @@ for directory in ("bin", "lib", "web/dist", "deploy", "config", "migrations/post
     (bundle / directory).mkdir(parents=True, exist_ok=True)
 shutil.copy2(binary, bundle / "bin/ecx-bridge")
 shutil.copy2(cache / "cargo-target/release/ecx-solana-helper", bundle / "bin/ecx-solana-helper")
-shutil.copy2((sqlite / "lib/libsqlite3.so").resolve(), bundle / "lib/libsqlite3.so.0")
-shutil.copy2(sqlite / "bin/sqlite3", bundle / "bin/sqlite3")
 for name in ("bitcoind", "bitcoin-cli"):
     shutil.copy2(fetch("bitcoin") / "bin" / name, bundle / "bin" / name)
 for path in (root / "web").iterdir():
@@ -151,27 +149,21 @@ run(str(root / "scripts/collect-notices"), str(cache), str(bundle / "notices"), 
 coverage = json.loads((bundle / "notices/coverage.json").read_text())
 if coverage["missing"]:
     raise ValueError("Release dependency notices are incomplete: " + ", ".join(coverage["missing"]))
-for component in ("bitcoin-core", "sqlite"):
+for component in ("bitcoin-core",):
     notices = root / "docs/third-party" / component
     provenance = json.loads((notices / "provenance.json").read_text())
     for entry in provenance["files"]:
         if hashlib.sha256((notices / entry["path"]).read_bytes()).hexdigest() != entry["sha256"]:
             raise ValueError(component + " notice differs from its recorded source")
     shutil.copytree(notices, bundle / "notices" / component)
-# The runtime must not regain the legacy SQLite dependency. SQLite remains
-# bundled only for explicit legacy snapshot maintenance until that tooling splits.
+# SQLite is needed only in the build cache for legacy regression tests.
+# Explicit old-ledger import uses Python's standard-library read-only adapter.
 needed = subprocess.check_output(["patchelf", "--print-needed", str(bundle / "bin/ecx-bridge")], text=True)
 if "sqlite" in needed.lower():
     raise ValueError("Production runtime links legacy SQLite")
-# Relative RUNPATH makes the maintenance SQLite authoritative without global changes.
-for name in ("ecx-bridge", "sqlite3"):
-    run("patchelf", "--set-rpath", "$ORIGIN/../lib", str(bundle / "bin" / name))
-run("patchelf", "--replace-needed", "libsqlite3.so", "libsqlite3.so.0", str(bundle / "bin/sqlite3"))
-run("patchelf", "--set-soname", "libsqlite3.so.0", str(bundle / "lib/libsqlite3.so.0"))
 clean_env = dict(os.environ)
 clean_env.pop("LD_LIBRARY_PATH", None)
 run(str(bundle / "bin/ecx-bridge"), "version", env=clean_env)
-run(str(bundle / "bin/sqlite3"), ":memory:", "SELECT sqlite_version();", env=clean_env)
 files = {str(p.relative_to(bundle)): hashlib.sha256(p.read_bytes()).hexdigest() for p in sorted(bundle.rglob("*")) if p.is_file()}
 (bundle / "manifest.json").write_text(json.dumps({"format": 1, "os": "ubuntu-24.04", "arch": arch, "files": files}, indent=2) + "\n")
 print(f"Release built and tested: {bundle}")
