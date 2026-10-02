@@ -293,6 +293,9 @@ The sequence below remains the broader refactor checklist, subject to that prior
    ecx-postgres-check executable. Fence fixtures initialize only explicitly named
    fresh disposable databases and use Opaleye for every row read/write; the last
    Haskell raw row queries are removed. Fault-injection DDL stays explicit.
+   The obsolete Python worker-fence runner is also replaced by a mode in this
+   executable: actual CLI startup/alias refusals use the current schema, a restricted
+   reader and closed Opaleye rollback fixtures.
    Receipt/page atomicity and delayed verification also use the PostgreSQL contract;
    legacy resume-policy checks remain until their whole workflow is migrated.
    Chain scanning no longer executes Opaleye directly: reference lookup, promotion

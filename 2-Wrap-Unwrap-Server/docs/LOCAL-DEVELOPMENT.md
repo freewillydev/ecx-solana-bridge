@@ -64,6 +64,15 @@ directory. It checks cross-process/cross-database ownership, precommit durabilit
 stale/identity/permission/symlink refusal, uncertain-commit fencing and retirement.
 Drop both disposable databases and remove that temporary directory after use.
 
+`fence runtime BRIDGE_BINARY CONFIG DATABASE DIRECTORY` checks the actual CLI
+startup refusals and aliases, using a fresh migrated `ecx_fence_contract_…` database
+and an unused temporary directory. Supply a valid public-test config with backups
+disabled and a separately provisioned SELECT-only `PGREADUSER`; the cluster must
+allow that reader to connect. The runner copies the config and uses Opaleye for
+its rollback fixture. It verifies missing/stale/wrong-identity/retired fences,
+unchanged journal/watermarks and unopened API sockets. No chain or signer is used.
+Drop the disposable database/reader role and remove the temporary directory afterward.
+
 Other `integration/` runners cover recovery, snapshot/restore and real chains.
 Read their restrictions before running them; some sign or transfer test funds.
 Historical acceptance applies only to its recorded source/configuration/network.
