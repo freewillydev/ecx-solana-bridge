@@ -275,3 +275,35 @@ Devnet acceptance passes for the dedicated test mint; see
 proof of global reserve backing. Issuer approval, native reserve locations,
 outstanding redemption obligations and issuance reconciliation must be reviewed
 separately; the report explicitly leaves those claims unverified.
+
+## Encrypted custody handoff escrow
+
+A retired-host recovery bundle must include the ledger, native wallet/Solana key
+archive, manifest and reviewed handoff journal. Use operator-owned encrypted
+restic storage and credentials separate from the online worker's ledger-upload
+repository. Keep the repository/password files private; do not give the worker
+access to this escrow repository or its decryption password.
+
+From the source checkout, after preparing and verifying the stopped-source
+handoff:
+
+```sh
+sudo python3 deploy/encrypted-handoff.py /absolute/private/handoff --repository-file /absolute/private/operator-escrow.repository --password-file /absolute/private/operator-escrow.password
+```
+
+The command requires an existing HTTPS restic repository and protected regular
+credential files. It refuses non-retired or mismatched source journals and
+archive hashes, backs up all four files together, reads authenticated snapshot
+metadata, restores into temporary private storage and compares every file hash.
+It does not initialize storage, alter the original bundle, acknowledge worker
+coverage, resume payments or install restored keys. Preserve its returned receipt
+privately alongside the independently maintained decryption-key recovery policy.
+It uses the `ecx-bridge-handoff` tag; critical-ledger retention does not delete
+these custody archives. Review escrow retention separately.
+
+The actual retired dedicated test-host bundle passed a real encrypted local
+restic round trip, including the signing-material archive; see
+`evidence/encrypted-handoff-local.json`. The temporary restored material was
+removed after hash comparison. Actual independent-host storage, password recovery,
+host-loss restoration and old-key revocation remain release requirements. Do not
+use an old ledger merely because its keys can still sign.

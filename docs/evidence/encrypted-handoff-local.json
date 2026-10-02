@@ -1,0 +1,19 @@
+{
+  "format": 1,
+  "fingerprint": "f23f5cc6615be67d0563dc74695cf065b98161c96c94fb6d4142d0d0c20fa4bb",
+  "criticalSequence": 19,
+  "snapshotId": "88a1a05789ab003332eaaac421676e43a91b0071fbc52f1220ea2b41cbf5a9b4",
+  "fileHashes": {
+    "handoff.json": "125b8371716e6915618111526a61f97f3063dc53f0a4d875db80f8470c61d4cc",
+    "manifest.json": "66b425531d3230cb83061080ffcddb5f807cbf9b5aa624d6f7a5c5745b459712",
+    "ledger.dump": "583bb86fc89e692de82a6f27fddfe8a0298e18552cc9274d5f2e00f14fab4fb9",
+    "private-state.tar.gz": "384a11e8ff9f7d304ef9f32363af6927cab2b27e21e72cc7d64c490168aa5aa6"
+  },
+  "snapshotAssociationVerified": true,
+  "restoredArchiveHashesVerified": true,
+  "custodyKeysRestoredIntoService": false,
+  "workerCoverageAcknowledged": false,
+  "offHostDurabilityVerified": false,
+  "actualRetiredDedicatedFixture": true,
+  "repositoryLocation": "local disposable storage"
+}

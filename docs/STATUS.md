@@ -1871,3 +1871,20 @@ The unfunded order `9b3fbf73edf358d5e66b314758422a54e67998584fe8b618222d4e7537d4
 has expired, and its preparation journal contains no signed bytes. Preserve it
 for review; after funding confirms, a fresh quoted test order is needed rather
 than broadcasting against that expired quote. No task VM was started here.
+
+## Encrypted ledger-and-key handoff implemented
+
+`deploy/encrypted-handoff.py` completes the operator escrow upload/readback path
+for a reviewed retired-source bundle. It verifies retirement/start fencing,
+manifest identity, sequence/schema and archive digests; uploads ledger, signing
+archive, manifest and journal together; authenticates snapshot association; and
+restores all four files into private temporary storage for exact hash comparison.
+Keys are never installed into a live service and worker coverage is not changed.
+
+Real restic acceptance used the actual retained retired test-host archive at
+sequence 19. All four restored hashes matched; temporary plaintext copies and
+the disposable encrypted repository were removed. See
+`evidence/encrypted-handoff-local.json`. No VM or package build was needed.
+The CLI still requires real remote operator credentials for off-host acceptance;
+local encryption does not prove physical durability, escrow-password recovery,
+clean-host resume or revocation of old key copies.
