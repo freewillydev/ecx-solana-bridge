@@ -14,6 +14,13 @@
   "bundledSqliteSharedLibrary": false,
   "archiveSha256": "43415f34c050a6f800cd89da2ed35a1bd99978181a03a6f26b1208d5b006771d",
   "archiveBytes": 26582323,
-  "installedUpgradeAccepted": false,
-  "publicRelease": false
+  "installedUpgradeAccepted": true,
+  "publicRelease": false,
+  "installedRepeatAccepted": true,
+  "installedReleaseId": "6db15f4e31d2ee2584bc8140",
+  "preservedFinancialGroups": 8,
+  "preservedConfigurationFiles": 11,
+  "preservedCriticalSequence": 19,
+  "installedApplicationSqliteLinkage": false,
+  "observationOnly": true
 }

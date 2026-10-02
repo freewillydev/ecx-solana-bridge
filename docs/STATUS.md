@@ -1655,3 +1655,11 @@ Installed upgrade/repeat acceptance is still pending. Native x86 CI run
 37011612013 targets the same source and was confirmed running; do not represent
 that artifact as completed until its result and checksum are inspected. The
 existing private draft review release still contains the preceding candidate.
+
+The PostgreSQL-only ARM installer subsequently passed actual upgrade and repeat
+installation on the retained clean-host restored fixture. Both checks preserved
+eight financial table groups, eleven configuration files, fence contents and
+sequence 19. The installed application's dynamic linkage has no SQLite, and the
+release contains no standalone SQLite CLI/library. These checks ran with the
+worker stopped against its existing observation-only configuration; they do not
+prove a new payout or complete cold-start reconciliation. The guest was shut down.
