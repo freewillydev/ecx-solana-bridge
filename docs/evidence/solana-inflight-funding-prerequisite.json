@@ -1,0 +1,19 @@
+{
+  "date": "2026-10-02",
+  "realGuestProviderIdentityChecksPassed": true,
+  "orderId": "9b3fbf73edf358d5e66b314758422a54e67998584fe8b618222d4e7537d4fcab",
+  "quote": {
+    "gross": "10000",
+    "fee": "100",
+    "net": "9900"
+  },
+  "testerConfirmedBaseUnits": 8820,
+  "testerLockedOutputs": 0,
+  "testerPendingFunds": false,
+  "depositJournalPhase": "preparing",
+  "signedDepositBytesPresent": false,
+  "bridgePayoutStaged": false,
+  "workerStopped": true,
+  "dedicatedFundingAddress": "tb1q9vl0cpvddncs78537mrpxawydzsgkz7k5hgj7w",
+  "network": "actual L2L Signet"
+}

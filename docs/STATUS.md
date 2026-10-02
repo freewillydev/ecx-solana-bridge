@@ -1825,3 +1825,18 @@ See `evidence/token-policy-devnet.json`. No transaction, authority change, VM
 or package build was involved. The same command can inspect an issuer-approved
 canonical configuration; no such canonical acceptance is claimed here. Global
 backing, issuer authorization and funded canonical/betanet round trips remain open.
+
+## Fresh in-flight Solana acceptance: funding prerequisite
+
+Both actual guest provider genesis checks passed. The dedicated API created
+order `9b3fbf73edf358d5e66b314758422a54e67998584fe8b618222d4e7537d4fcab`
+with the saved 10000/100/9900 quote. Native test-deposit preparation then refused: the
+restored tester has only 8820 confirmed base units, no pending funds and no locked
+outputs. Its retained journal is `preparing`, with no signed deposit bytes. The
+worker stopped and no bridge payout was staged. Additional dedicated L2L Signet
+test funding is requested; no custody reserve or personal wallet was used.
+
+See `evidence/solana-inflight-funding-prerequisite.json`. After funding, inspect
+and resolve the unsigned preparation journal and quote deadline explicitly before
+continuing; do not blindly reset it or treat the created order as funded. The
+guarded in-flight handoff and actual clean-host recovery still require acceptance.
