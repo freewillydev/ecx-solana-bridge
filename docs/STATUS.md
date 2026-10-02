@@ -1634,3 +1634,24 @@ maintenance SQLite CLI. Existing installers still contain that CLI/library for
 explicit legacy snapshot import, and have not yet been rebuilt or accepted with
 this new component layout. Separating/removing bundled maintenance dependencies
 and repeating real Linux package/upgrade acceptance remain required.
+
+### PostgreSQL-only ARM production installer built
+
+Source f24ed37 removes the separately bundled SQLite CLI/shared library from the
+production release. The retained explicit legacy importer uses Python's standard
+library read-only SQLite adapter; it never depended on those bundled binaries.
+Pinned SQLite remains a build-cache dependency for the separate legacy regression
+component. This does not remove SQLite internally used by the upstream native
+node or Python's optional maintenance adapter.
+
+The actual Ubuntu ARM64 package passed 373 Haskell examples, seven Rust tests,
+TLS trust regression, strict frontend build and 21 installer tests. All 377
+package notices were collected. Its manifest contains neither `bin/sqlite3` nor
+a standalone `libsqlite` file, and the actual packaged application ELF reports
+no SQLite dependency. The copied installer checksum matches its producer digest;
+see `evidence/sqlite-free-arm-build.json`. The builder guest was shut down.
+
+Installed upgrade/repeat acceptance is still pending. Native x86 CI run
+37011612013 targets the same source and was confirmed running; do not represent
+that artifact as completed until its result and checksum are inspected. The
+existing private draft review release still contains the preceding candidate.
