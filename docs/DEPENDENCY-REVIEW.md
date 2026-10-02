@@ -2,7 +2,7 @@
 
 This review checks published advisories against the actual frozen build inputs.
 It is not independent application review or a claim that unknown vulnerabilities
-are absent. [Machine evidence](evidence/dependency-advisory-review.json) records
+are absent. [Machine evidence](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/dependency-advisory-review.json) records
 lockfile hashes, database revisions and the remaining review items.
 
 On October 1, npm audit reported zero advisories across the locked web graph.
@@ -61,7 +61,7 @@ fixed versions in [HSEC-2026-0007](https://github.com/haskell/security-advisorie
 That distinct negative-exponent JSON finding does not match these frozen versions.
 No deliberately memory-exhausting proof-of-concept was executed.
 
-See [pinned source inventory](evidence/readfloat-source-inventory.json). Reproduce
+See [pinned source inventory](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/readfloat-source-inventory.json). Reproduce
 with `scripts/check-readfloat-sources PLAN --cache SOURCE_CACHE --report REPORT`;
 `--download` fetches missing official Hackage archives and refuses checksum
 mismatches. Optional `--ghc-source ARCHIVE` inventories the separately pinned boot

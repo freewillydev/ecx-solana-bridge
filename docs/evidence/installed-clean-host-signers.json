@@ -1,9 +1,0 @@
-{
-  "restoredNativeSignerReproducesOriginalBytes": true,
-  "restoredSolanaSignerReproducesOriginalBytesAndSignature": true,
-  "onlySettledSavedDraftsUsed": true,
-  "newEconomicIntent": false,
-  "broadcast": false,
-  "criticalSequenceUnchanged": true,
-  "workerStopped": true
-}

@@ -9,17 +9,17 @@ No independent reviewer has signed off, and canonical intake remains disabled.
 
 | Requirement | Evidence and practical limit |
 | --- | --- |
-| Connection-free conversions, 1% new fees, preserved historical terms | `evidence/postgres-fresh-product-live.json`, `evidence/installed-paying-product.json`: real API/worker transfers on L2L Signet and Solana Devnet; dedicated clients supplied deposits. |
-| Verified-owner refund, canceled unsigned preparation | `evidence/postgres-product-flows.json`: real finalized refund; does not prove every ambiguous/late receipt case. |
-| Customer saved-order recovery | `evidence/customer-manual-recovery-link.json`: actual browser recovery/reload and selectable private-link text; external wallet signing and clipboard bytes remain unverified. |
-| Severity DSL, separate read identity and one critical dispatcher | `evidence/dsl-public-boundary-audit.json`, `evidence/observer-separated-reader-authority.json`: compiler consumer probes and actual restricted PostgreSQL/API checks. New source must still receive consolidated Linux acceptance. |
-| Native replacement and confirmation recovery | `evidence/postgres-native-family-live.json`: actual replacement/confirmation and same-member loss/reconfirmation; not a public winner-changing reorg. |
-| Native signed-unsent host recovery | `evidence/installed-native-inflight-restore.json`: actual retired-source archive and new-host saved-byte recovery. |
-| Solana signed-unsent host recovery | `evidence/installed-solana-inflight-restore.json`: 38 tables restored, retained bytes, actual two-provider expiry, explicit retry, one finalized replacement and restart. Off-host durability/key revocation excluded. |
-| PostgreSQL source loss/restoration | `evidence/postgres-source-local-disconnect.json`: actual local Signet block invalidation/reconnection, unchanged postings/attempts. No permanent loss or double spend. |
-| Encrypted escrow and retention tools | `evidence/encrypted-handoff-staging-local.json`, `evidence/backup-retention-local.json`: real local restic encryption/restore and retention; not physically independent storage. |
-| Current regression batch | `evidence/process-group-cleanup.json`: library build and 374 Haskell examples, including surviving-child cleanup; not installed Linux acceptance. |
-| Published canonical trading routes | `evidence/published-jupiter-routes.json`: actual Jupiter Swap V2 quotes in both directions through the exact published Orca pool; no wallet identity, signing or executed swap. |
+| Connection-free conversions, 1% new fees, preserved historical terms | `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/postgres-fresh-product-live.json`, `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/installed-paying-product.json`: real API/worker transfers on L2L Signet and Solana Devnet; dedicated clients supplied deposits. |
+| Verified-owner refund, canceled unsigned preparation | `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/postgres-product-flows.json`: real finalized refund; does not prove every ambiguous/late receipt case. |
+| Customer saved-order recovery | `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/customer-manual-recovery-link.json`: actual browser recovery/reload and selectable private-link text; external wallet signing and clipboard bytes remain unverified. |
+| Severity DSL, separate read identity and one critical dispatcher | `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/dsl-public-boundary-audit.json`, `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/observer-separated-reader-authority.json`: compiler consumer probes and actual restricted PostgreSQL/API checks. New source must still receive consolidated Linux acceptance. |
+| Native replacement and confirmation recovery | `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/postgres-native-family-live.json`: actual replacement/confirmation and same-member loss/reconfirmation; not a public winner-changing reorg. |
+| Native signed-unsent host recovery | `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/installed-native-inflight-restore.json`: actual retired-source archive and new-host saved-byte recovery. |
+| Solana signed-unsent host recovery | `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/installed-solana-inflight-restore.json`: 38 tables restored, retained bytes, actual two-provider expiry, explicit retry, one finalized replacement and restart. Off-host durability/key revocation excluded. |
+| PostgreSQL source loss/restoration | `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/postgres-source-local-disconnect.json`: actual local Signet block invalidation/reconnection, unchanged postings/attempts. No permanent loss or double spend. |
+| Encrypted escrow and retention tools | `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/encrypted-handoff-staging-local.json`, `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/backup-retention-local.json`: real local restic encryption/restore and retention; not physically independent storage. |
+| Current regression batch | `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/process-group-cleanup.json`: library build and 374 Haskell examples, including surviving-child cleanup; not installed Linux acceptance. |
+| Published canonical trading routes | `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/published-jupiter-routes.json`: actual Jupiter Swap V2 quotes in both directions through the exact published Orca pool; no wallet identity, signing or executed swap. |
 
 ## Review boundaries
 
@@ -75,7 +75,7 @@ is unresolved. Bincode is pinned and unmaintained; no migration or waiver is imp
    supported ledger/signing workflow and acceptance; no general fee-withdrawal
    command is implemented or certified by the current evidence.
    Its internal reservation/cancellation stage now has a compiled PostgreSQL
-   contract (`evidence/fee-withdrawal-funding-contract.json`); operator API,
+   contract (`https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/fee-withdrawal-funding-contract.json`); operator API,
    payment-engine integration and real-chain acceptance remain outstanding.
 6. After substantive fixes, build source once for ARM64/x86, perform affected
    install/upgrade/reboot/restoration checks, and authenticate a new private review

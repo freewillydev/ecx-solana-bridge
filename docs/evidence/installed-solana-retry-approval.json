@@ -1,9 +1,0 @@
-{
-  "privateOperatorDslApproval": {
-    "approvedRetryOf": "2nNCfmQFHSj7gWBrZ35t1YUiTazniqrz5L96h3xZ7ZcTuJUSwntqScC6jiuTShrRg1U5KBjaGZuBTYZav6ukFe8c",
-    "signedOrSent": false
-  },
-  "approvalReplayStable": true,
-  "pausedAfterApproval": true,
-  "replacementSignedOrSent": false
-}

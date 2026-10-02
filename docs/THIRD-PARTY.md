@@ -64,8 +64,8 @@ library checksums/package versions and retains original installed Ubuntu copyrig
 texts. It accesses no ledger, wallet or network. The actual x86-64 inventory found
 29 loaded libraries, with 22 Ubuntu package notices retained and hash-checked;
 the bundled SQLite library is identified separately. ARM64 reports the same
-counts against its actual installed package versions. See [x86 inventory](evidence/installed-libraries-x86.json)
-and [ARM inventory](evidence/installed-libraries-arm.json). Original notice files
+counts against its actual installed package versions. See [x86 inventory](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/installed-libraries-x86.json)
+and [ARM inventory](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/installed-libraries-arm.json). Original notice files
 remain in the external review cache. Full obligation/applicability review remains; loader enumeration does not identify every statically embedded
 component or establish that a license obligation is satisfied.
 
@@ -87,7 +87,7 @@ SDK decoding APIs exist and this review does not prove whole-program compiled
 reachability. The output transaction limit is 1232 bytes, checked after encoding;
 bounded request fields and fixed instructions also constrain the allocation.
 
-See `evidence/bincode-maintenance-disposition.json` for source hashes, limits and
+See `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/bincode-maintenance-disposition.json` for source hashes, limits and
 the scoped conclusion. Revisit this dependency with a reviewed SDK migration and
 byte-compatibility acceptance. Independent review, the separate base/readFloat
 finding, and other dependency/license obligations remain open. No runtime or
@@ -98,4 +98,4 @@ The retained ARM64 installed executable was also inspected with LLVM nm. Its
 closures and code entries. Their presence prevents treating the source-only
 inventory as proof that the affected code is absent. This inspection does not
 establish an attacker-controlled call path; that and independent review remain
-open. See `evidence/readfloat-installed-symbols.json` for the actual ELF hash.
+open. See `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/readfloat-installed-symbols.json` for the actual ELF hash.

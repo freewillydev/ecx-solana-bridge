@@ -5,11 +5,11 @@ fixed Solana helper, a private PostgreSQL 16 ledger, browser assets, systemd uni
 optional dedicated **real L2L public Signet** node. No simulated chain is offered.
 The revised PostgreSQL package passed ARM64 installation, repeat installation,
 reboot, private-role and same-host backup restoration checks in an Ubuntu VM on
-the development Mac. See [the recorded checks](evidence/postgres-installer-arm64.json).
+the development Mac. See [the recorded checks](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/postgres-installer-arm64.json).
 This run used observation mode and a fresh ledger; it did not authorize payments.
 The native x86-64 package also passed fresh bridge installation, repeat installation,
 cold restart, configuration/financial-record preservation and isolated same-host
-restoration; see [x86 evidence](evidence/postgres-installer-x86.json).
+restoration; see [x86 evidence](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/postgres-installer-x86.json).
 That package predates the latest mandatory backup runtime and covered-source
 changes, which require consolidated package acceptance. Neither architecture's
 observation-only installation proves signer or independent-host recovery.
@@ -104,7 +104,7 @@ real Signet/Devnet identities, a custom port and support link, followed by repea
 installation and reboot with port/link settings preserved. No signer was supplied and payment intake stayed paused.
 Cross-release PostgreSQL upgrades now use the explicit `--upgrade` procedure below.
 Locally modified service definitions are refused until reconciled.
-See [setup evidence](evidence/postgres-setup-interface.json).
+See [setup evidence](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/postgres-setup-interface.json).
 
 ## Configuration supplied once
 
@@ -255,7 +255,7 @@ preserved configuration files, 32 unchanged durable tables, a nonempty audit
 marker, two verified private backups, same-host restoration and reboot. The
 fixture was observation-only without signing material or payments; valuable-fund
 upgrade, key restoration, x86 and remote recovery remain separate gates. See
-[upgrade evidence](evidence/postgres-upgrade-arm64.json).
+[upgrade evidence](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/postgres-upgrade-arm64.json).
 
 ## Native x86 build
 

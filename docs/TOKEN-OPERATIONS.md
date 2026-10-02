@@ -85,7 +85,7 @@ canonical backing acceptance remain open release gates.
 An October 2 read-only upstream refresh found the same reviewed commit
 `b980b4372c4844d3d42ff1926fd0da848631cebc`. The server conversion contract still
 uses native per-order addresses and Solana Pay references, with no bridge
-mint/burn authority. See `evidence/upstream-replacement-refresh.json`.
+mint/burn authority. See `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/upstream-replacement-refresh.json`.
 
 ## Published pool readback
 
@@ -103,7 +103,7 @@ These balances are a snapshot, not the initial funding or all circulating backin
 The account's tick spacing is 32896, above Orca's upstream full-range-only
 threshold of 32768; its fee-rate field is 10000 hundredths of a basis point
 (1%). Layout/discriminator/owner and source hashes are recorded in
-`evidence/published-orca-pool-readback.json`. This single-provider read does not
+`https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/published-orca-pool-readback.json`. This single-provider read does not
 prove issuer approval, reserve backing, LP ownership/lock, auto-compounding or
 Jupiter routing. It does not change the bridge's configured dedicated Devnet
 mint or authorize mainnet operations.
@@ -125,7 +125,7 @@ response hashes and timestamps, and never calls `/execute`. The real endpoint
 accepted these requests without credentials, although the
 [current API documentation](https://developers.jup.ag/docs/swap) specifies an
 API key; future authentication refusal must be investigated rather than treated
-as absent liquidity. See `evidence/published-jupiter-routes.json`.
+as absent liquidity. See `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/published-jupiter-routes.json`.
 
 Both quoted routes are verified. An assembled transaction and executed swap are
 not verified. Canonical configuration, issuer approval and backing gates remain

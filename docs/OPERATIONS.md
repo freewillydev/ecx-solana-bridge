@@ -81,7 +81,7 @@ interpreter as the worker. Rejections require investigation rather than direct
 ledger editing. PostgreSQL contracts and an actual Signet replacement-family draft/sign/send/
 confirmation pass, including signing replay and completed-payment restart. Real
 winner-changing reorg/source-loss, broader crash/backup and canonical-chain
-acceptance remain release requirements. See [live evidence](evidence/postgres-native-family-live.json).
+acceptance remain release requirements. See [live evidence](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/postgres-native-family-live.json).
 
 The CLI `scan`, `reconcile`, `recover`, `approve-source-recovery`,
 `cover-source-loss` and native replacement commands still target the legacy SQLite
@@ -249,7 +249,7 @@ block critical uploads. See the [official restic retention documentation](https:
 
 Real local restic acceptance preserved an older-timestamp highest-sequence
 snapshot and another deployment, applied the selected removals, and passed a
-repository check. See `evidence/backup-retention-local.json`. Actual remote
+repository check. See `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/backup-retention-local.json`. Actual remote
 retention, recovery receipts and physical host-loss restoration remain unproved.
 
 ## Read-only token adoption acceptance
@@ -271,7 +271,7 @@ rate-limited reads are retried; it never signs, mutates authority, initializes
 storage or enables payments. Output omits RPC URLs and credentials.
 
 Devnet acceptance passes for the dedicated test mint; see
-`evidence/token-policy-devnet.json`. This is not canonical-token acceptance or
+`https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/token-policy-devnet.json`. This is not canonical-token acceptance or
 proof of global reserve backing. Issuer approval, native reserve locations,
 outstanding redemption obligations and issuance reconciliation must be reviewed
 separately; the report explicitly leaves those claims unverified.
@@ -303,7 +303,7 @@ these custody archives. Review escrow retention separately.
 
 The actual retired dedicated test-host bundle passed a real encrypted local
 restic round trip, including the signing-material archive; see
-`evidence/encrypted-handoff-local.json`. The temporary restored material was
+`https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/encrypted-handoff-local.json`. The temporary restored material was
 removed after hash comparison. Actual independent-host storage, password recovery,
 host-loss restoration and old-key revocation remain release requirements. Do not
 use an old ledger merely because its keys can still sign.
@@ -330,7 +330,7 @@ verification, matching the reviewed application release and reconciling chains,
 obligations, signer identities and custody before any paying resume. Local real
 restic acceptance matched all original bytes, verified private modes, refused an
 existing destination and rejected a tampered receipt before staging. See
-`evidence/encrypted-handoff-staging-local.json`. Remote storage and actual host
+`https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/encrypted-handoff-staging-local.json`. Remote storage and actual host
 loss remain distinct unverified gates.
 
 ### Recheck the dedicated recovered Solana acceptance

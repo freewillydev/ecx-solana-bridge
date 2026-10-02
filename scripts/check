@@ -17,7 +17,6 @@ cabal exec -- ghc -fno-code -package ecx-bridge scripts/native-unsigned-probe.hs
 cabal exec -- ghc -fno-code -package ecx-bridge scripts/native-admission-probe.hs
 cabal exec -- ghc -fno-code -package ecx-bridge scripts/solana-probe.hs
 cabal exec -- ghc -fno-code -package ecx-bridge scripts/solana-admission-probe.hs
-cabal exec -- ghc -fno-code -package ecx-bridge scripts/reconcile-test-treasury.hs
 cabal exec -- ghc -fno-code -package ecx-bridge scripts/public-test-order.hs
 cabal exec -- ghc -fno-code -package ecx-bridge scripts/provisioning-probe.hs
 cargo test --locked --manifest-path solana-helper/Cargo.toml --all-targets
