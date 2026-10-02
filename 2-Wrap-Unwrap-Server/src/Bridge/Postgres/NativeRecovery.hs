@@ -237,8 +237,6 @@ eventRows c txid = O.runSelect c $ do
   evidence <- O.selectTable observationevidenceTable
   O.where_(chaineventsChain event O..== text "Native" O..&& chaineventsEventId event O..== text txid O..&& chaineventsKind event O..== text "outgoing" O..&& chaineventsNeedsReview event O..== num 0 O..&& chaineventsEvidenceHash event O..== observationevidenceHash evidence)
   pure(event,evidence)
-asAttempt :: Attempts -> Text -> Attempt
-asAttempt a chain = Attempt (attemptsTxid a) (attemptsIntentId a) chain (attemptsSignedBytes a) (attemptsPolicyJson a) (attemptsFeeLimit a) (attemptsState a) (attemptsCriticalSequence a)
 stored :: FromJSON a => Text -> IO a
 stored = either (const $ reject "invalid_native_settlement") pure . eitherDecodeStrict' . TE.encodeUtf8
 json :: ToJSON a => a -> Text

@@ -45,7 +45,7 @@ context c txid = do
 candidates :: Ledger -> Text -> IO [Attempt]
 candidates ledger txid = ledgerAction ledger $ \c->do
   (a,i,_,_) <- context c txid
-  pure[Attempt (attemptsTxid a) (attemptsIntentId a) (intentsChain i) (attemptsSignedBytes a) (attemptsPolicyJson a) (attemptsFeeLimit a) (attemptsState a) (attemptsCriticalSequence a)]
+  pure[asAttempt a (intentsChain i)]
 
 recordApproval :: Ledger -> Text -> Text -> Text -> IO ()
 recordApproval ledger txid reason proof = ledgerAction ledger $ \c->do

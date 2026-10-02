@@ -24,18 +24,18 @@ No independent reviewer has signed off, and canonical intake remains disabled.
 ## Review boundaries
 
 Start with `src/Bridge/Operation.hs` and `Operation/Internal.hs`, then
-`Postgres/Server.hs` and `Postgres/Runtime.hs`. Handlers resolve into closed plans;
+`API.hs` and `Postgres/Runtime.hs`. Handlers resolve into closed plans;
 only the central dispatcher evaluates critical work. SafeContext uses separate
 read credentials. Examine exports and Cabal component boundaries as well as
 individual functions: a safe type is insufficient if it can import worker authority.
 
 Review `Postgres/Ledger.hs`, `Schema.hs`, `Maintenance.hs` and PostgreSQL migrations
 for transaction ownership, immutable records, numeric bounds, constraints and
-worker sequencing. Runtime queries use Opaleye; named maintenance/locking/DDL
-primitives and the explicit historical importer are separate boundaries. The
-`legacy` library is regression compatibility, not the production database layer.
+worker sequencing. Application row access uses Opaleye; connection/transaction
+control and schema-migration DDL are separate infrastructure. The SQLite backend
+and legacy test library are retired; historical migration tooling remains in Git history.
 
-Follow `Payment.hs`, `Settlement.hs` and `Postgres/PaymentStore.hs` through native
+Follow `Payment.hs`, `Settlement.hs` and `Postgres/Settlement.hs` through native
 and Solana validators, source checks, preparation, signed-byte journal, backup,
 recorded-send authorization, observation and settlement. Review interrupted
 commits, changed chain evidence, expired generations, native replacement winners,

@@ -1,12 +1,14 @@
-module Bridge.Postgres.Settlement (recordSettlement,recordFailedSolana,markBroadcastIntent,authorizeRecordedSend,recordSolanaExpiry,checkExpiryOrigins) where
+module Bridge.Postgres.Settlement (recordSettlement,recordFailedSolana,markBroadcastIntent,authorizeRecordedSend,recordSolanaExpiry,checkExpiryOrigins, pendingAttempts, readObligation, sourceContext, winner, ready, busy) where
 
 import Bridge.Config
 import Bridge.Types
-import Bridge.Ledger.Model (Attempt(..),PaymentCosts(..))
+import Bridge.Ledger.Model (Attempt(..),Obligation(..),Deposit(..),PaymentCosts(..))
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
 import qualified Bridge.Postgres.Source as Source
-import Control.Monad (forM_,when)
+import Control.Monad (forM,forM_,when)
+import Data.List (sortOn,nub)
+import qualified Bridge.Postgres.NativeFamily as NativeFamily
 import Data.Aeson (FromJSON,ToJSON,object,(.=),encode,eitherDecodeStrict')
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
@@ -133,7 +135,7 @@ authorizeRecordedSend ledger remote txid = ledgerAction ledger $ \c->do
   require (sourceAllowed && obligationsStatus ob=="paying") "source_not_eligible"
   require (map deploymentPaused deployment==[0]) "payouts_paused"
   nativeSendChoice c a i
-  pure(Attempt (attemptsTxid a) (attemptsIntentId a) (intentsChain i) (attemptsSignedBytes a) (attemptsPolicyJson a) (attemptsFeeLimit a) (attemptsState a) (attemptsCriticalSequence a))
+  pure(asAttempt a (intentsChain i))
 
 parseAsset :: Text -> IO Asset
 parseAsset "Native"=pure Native
@@ -163,7 +165,7 @@ recordSolanaExpiry ledger expected proof = ledgerAction ledger $ \c->do
     [row]->require (solanaexpiriesProofJson row==proof) "expiry_evidence_conflict"
     []->do
       (a,i,ob,_,q) <- paymentContext c (attemptId expected)
-      require (intentsResolved i==0 && Attempt (attemptsTxid a) (attemptsIntentId a) (intentsChain i) (attemptsSignedBytes a) (attemptsPolicyJson a) (attemptsFeeLimit a) (attemptsState a) (attemptsCriticalSequence a)==expected) "expiry_attempt_changed"
+      require (intentsResolved i==0 && asAttempt a (intentsChain i)==expected) "expiry_attempt_changed"
       family <- O.runSelect c $ whereRows (\r->attemptsIntentId r O..== text(intentsId i)) (O.selectTable attemptsTable) :: IO [Attempts]
       expiries <- O.runSelect c (O.selectTable solanaexpiriesTable) :: IO [SolanaExpiries]
       require ([attemptsTxid r | r<-family,not(any ((==attemptsTxid r).solanaexpiriesTxid) expiries)]==[attemptId expected]) "expiry_attempt_changed"
@@ -180,3 +182,73 @@ recordSolanaExpiry ledger expected proof = ledgerAction ledger $ \c->do
       _ <- O.runInsert c O.Insert {O.iTable=auditTable,O.iRows=[Audit Nothing (text "solana_expiry_verified") (text $ attemptId expected)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
       pure ()
     _->reject "duplicate_expiry"
+
+readObligation :: Ledger -> Text -> IO Obligation
+readObligation ledger oid = ledgerAction ledger $ \connection->do
+  rows <- O.runSelect connection $ do
+    row <- O.selectTable obligationsTable
+    O.where_ (obligationsId row O..== O.sqlStrictText oid)
+    pure row
+    :: IO [Obligations]
+  case rows of [row]->pure (asObligation row); _->reject "obligation_not_found"
+sourceContext :: Ledger -> Obligation -> IO (Deposit,OrderRequest,PolicySnapshot,Text)
+sourceContext ledger expected = ledgerAction ledger $ \connection->do
+  rows <- O.runSelect connection $ do
+    ob <- O.selectTable obligationsTable
+    order <- O.selectTable ordersTable
+    deposit <- O.selectTable depositsTable
+    O.where_ (obligationsId ob O..== O.sqlStrictText (obligationId expected) O..&&
+      obligationsOrderId ob O..== ordersId order O..&& obligationsDepositId ob O..== depositsId deposit)
+    pure (ob,order,deposit)
+    :: IO [(Obligations,Orders,Deposits)]
+  (ob,order,deposit) <- case rows of [row]->pure row; _->reject "source_deposit_missing"
+  require (asObligation ob==expected) "obligation_mismatch"
+  request <- stored (ordersRequestJson order)
+  policy <- stored (ordersPolicyJson order)
+  instruction <- maybe (reject "source_instruction_missing") pure (ordersInstruction order)
+  let asset=sourceAsset (direction request)
+  require (depositsOrderId deposit==Just (obligationOrder expected) && depositsAsset deposit==T.pack(show asset)) "source_binding_mismatch"
+  quantity <- either reject pure (amount $ toInteger $ depositsAmount deposit)
+  require (depositsConfirmations deposit>=0 && toInteger (depositsConfirmations deposit)<=toInteger(maxBound::Int)) "source_depth_overflow"
+  pure (Deposit (depositsId deposit) (depositsOrderId deposit) asset quantity (depositsAnchor deposit)
+    (fromIntegral $ depositsConfirmations deposit) (depositsEligible deposit==1) (depositsFirstSeen deposit),request,policy,instruction)
+
+pendingAttempts :: Ledger -> IO [Attempt]
+pendingAttempts ledger = ledgerAction ledger $ \connection->do
+  rows <- O.runSelect connection $ do
+    a <- O.selectTable attemptsTable
+    i <- O.selectTable intentsTable
+    O.where_ (attemptsIntentId a O..== intentsId i O..&& intentsResolved i O..== O.sqlInt8 0)
+    pure (a,intentsChain i)
+    :: IO [(Attempts,Text)]
+  expired <- O.runSelect connection (O.selectTable solanaexpiriesTable) :: IO [SolanaExpiries]
+  native <- fmap concat $ forM (nub [attemptsIntentId a | (a,chain)<-rows,chain=="Native"]) (NativeFamily.familyC connection)
+  -- A newly signed replacement has no broadcast sequence yet. Sorting on that
+  -- nullable field puts it before its parent; lineage readers require fee order.
+  -- Use the same verified family order as signing, settlement and recovery.
+  pure $ native <> [asAttempt a chain | (a,chain)<-sortOn (\(a,_)->(attemptsPreparationGeneration a,attemptsCriticalSequence a,attemptsTxid a)) rows,chain/="Native",not(any ((==attemptsTxid a).solanaexpiriesTxid) expired)]
+
+winner :: Ledger -> Text -> IO Text
+winner ledger intent = ledgerAction ledger $ \connection->do
+  rows <- O.runSelect connection $ do
+    row <- O.selectTable attemptsTable
+    O.where_(attemptsIntentId row O..== O.sqlStrictText intent O..&& attemptsState row O..== O.sqlStrictText "settled")
+    pure(attemptsTxid row)
+    :: IO [Text]
+  case rows of [txid]->pure txid; _->reject "settled_payment_missing"
+ready :: Ledger -> IO [Obligation]
+ready ledger = ledgerAction ledger $ \c->do
+  rows <- O.runSelect c $ O.limit 100 $ do
+    row <- O.selectTable obligationsTable
+    O.where_ (obligationsStatus row O..== O.sqlStrictText "ready")
+    pure row
+    :: IO [Obligations]
+  pure(map asObligation rows)
+busy :: Ledger -> Text -> IO Bool
+busy ledger chain = ledgerAction ledger $ \c->do
+  rows <- O.runSelect c $ do
+    row <- O.selectTable intentsTable
+    O.where_ (intentsChain row O..== O.sqlStrictText chain O..&& intentsResolved row O..== O.sqlInt8 0)
+    pure(intentsId row)
+    :: IO [Text]
+  pure(not $ null rows)

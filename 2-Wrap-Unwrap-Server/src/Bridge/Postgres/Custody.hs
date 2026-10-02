@@ -1,6 +1,7 @@
-module Bridge.Postgres.Custody (Snapshot(..), readSnapshot, recordCheck, eventProof, freshC) where
+module Bridge.Postgres.Custody (readSnapshot, readRevision, hasEvent, recordCheck, eventProof, freshC) where
 
 import qualified Database.PostgreSQL.Simple as PG
+import Bridge.Ledger.Model (View(..))
 import Bridge.Config
 import Bridge.Types
 import Bridge.Postgres.Ledger (Ledger,ledgerAction)
@@ -19,10 +20,7 @@ import qualified Opaleye as O
 import Text.Read (readMaybe)
 
 -- A revision-bound snapshot grants no payment permission by itself.
-data Snapshot = Snapshot
-  { revision :: Int64, totals :: M.Map Text Integer, heads :: [(Text,Text)], slot :: Int64 }
-
-readSnapshot :: Config -> Ledger -> Int64 -> Bool -> IO Snapshot
+readSnapshot :: Config -> Ledger -> Int64 -> Bool -> IO View
 readSnapshot cfg ledger now inspectLosses = ledgerAction ledger $ \connection->do
   checks <- O.runSelect connection (O.selectTable custodycheckTable) :: IO [CustodyCheck]
   current <- case checks of [row]->pure (custodycheckRevision row); _->reject "custody_check_missing"
@@ -100,7 +98,7 @@ readSnapshot cfg ledger now inspectLosses = ledgerAction ledger $ \connection->d
     event <- findEvent chain signature
     maybe (reject "custody_history_anchor_missing") pure (readMaybe (T.unpack (chaineventsAnchor event)))) (filter (\(chain,_,_,_)->chain/="Native") ordered)
   require (length numbers==2 && all (>=0) numbers) "custody_history_anchor_missing"
-  pure (Snapshot current (M.fromList [(asset,maybe 0 fst (M.lookup asset summed)) | asset<-["Native","Wrapped","Sol"]]) [(chain,anchor) | (chain,_,_,anchor)<-ordered] (maximum numbers))
+  pure (View current (M.fromList [(asset,maybe 0 fst (M.lookup asset summed)) | asset<-["Native","Wrapped","Sol"]]) [(chain,anchor) | (chain,_,_,anchor)<-ordered] (maximum numbers))
 
 recordCheck :: Ledger -> Int64 -> Int64 -> Maybe Text -> Maybe Value -> IO ()
 recordCheck ledger expected now failure report = ledgerAction ledger $ \connection->do
@@ -146,3 +144,17 @@ freshC c now = do
   require (case checks of
     [r]->custodycheckCheckedRevision r==Just(custodycheckRevision r) && custodycheckLastError r==Nothing && maybe False (\at->at>=0 && at<=now && toInteger now-toInteger at<=60) (custodycheckCheckedAt r)
     _->False) "custody_not_reconciled"
+
+readRevision :: Ledger -> IO Int64
+readRevision ledger = ledgerAction ledger $ \connection->do
+  rows <- O.runSelect connection (fmap custodycheckRevision $ O.selectTable custodycheckTable) :: IO [Int64]
+  case rows of [revision]->pure revision; _->reject "custody_check_missing"
+hasEvent :: Ledger -> Text -> Text -> IO Bool
+hasEvent ledger txid chain = ledgerAction ledger $ \connection->do
+  rows <- O.runSelect connection $ do
+    row <- O.selectTable chaineventsTable
+    O.where_ (chaineventsEventId row O..== O.sqlStrictText txid O..&&
+      (chaineventsChain row O..== O.sqlStrictText chain O..|| chaineventsChain row O..== O.sqlStrictText (if chain=="Solana" then "SolanaOperating" else "Native")))
+    pure (chaineventsEventId row)
+    :: IO [Text]
+  pure (not $ null rows)

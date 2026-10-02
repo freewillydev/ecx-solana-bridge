@@ -33,10 +33,9 @@ import qualified Data.Text.Encoding as TE
 import Data.Int (Int64)
 import qualified Bridge.Postgres.Order as Order
 import qualified Bridge.Observer as Observer
-import qualified Bridge.Postgres.Server as Server
 import qualified Bridge.Postgres.Refund as Refund
 import qualified Bridge.Ledger.Model as Domain
-import Bridge.Postgres.PaymentStore (paymentNativeFamily)
+import qualified Bridge.Postgres.NativeFamily as NativeFamily
 import qualified Bridge.Reconciliation as CustodyWorkflow
 import Bridge.Settlement (realPaymentTransport,settleAttemptWith,paymentPass,reconcilePaymentsWith,PaymentTransport(..),approveSolanaRetryWith,readSavedPayment,readSavedNativeFamily,recheckSourceWith)
 import qualified Bridge.Postgres.Startup as Startup
@@ -341,7 +340,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
         _->reject "native_rebroadcast_payment_not_in_review"
       paymentIdentity transport
       (ob,_) <- readSavedPayment transport cfg ledger attempt
-      family <- paymentNativeFamily ledger (Domain.attemptIntent attempt)
+      family <- NativeFamily.readFamily ledger (Domain.attemptIntent attempt)
       view <- missing family
       recheckSourceWith transport cfg ledger ob
       block <- paymentNative transport False "getblockchaininfo" [] >>= fieldValue "bestblockhash" :: IO Text
@@ -447,7 +446,7 @@ runRuntime paying remote settings cfg = do
     let bootstrap=checked $ do
           _ <- evaluate runtime (worker ScanAndReconcile)
           when paying (evaluate runtime (worker StartPayments))
-    let customerAPIApp=serve customerAPI (hoistServer customerAPI (interpret runtime) Server.customerServer)
+    let customerAPIApp=serve customerAPI (hoistServer customerAPI (interpret runtime) API.customerServer)
     customerApp <- securityBoundary customerAPIApp
     -- Local clients retain their existing socket; public HTTP invokes the same
     -- typed server directly. Operator routes remain private to their own socket.

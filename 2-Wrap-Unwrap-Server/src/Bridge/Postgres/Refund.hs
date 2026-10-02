@@ -91,4 +91,3 @@ createRefund ledger did = ledgerAction ledger $ \c->do
  where
   text=O.sqlStrictText
   stored raw=either (const $ reject "corrupt_ledger_json") pure(eitherDecodeStrict' $ TE.encodeUtf8 raw)
-  asObligation row=Obligation (obligationsId row) (obligationsOrderId row) (obligationsDepositId row) (obligationsKind row) (obligationsAsset row) (obligationsAmount row) (obligationsRecipient row)

@@ -4,6 +4,7 @@ module Bridge.Reorg (reconcileNativeSettlementsWith,reconcileNativeSourcesWith,i
 import qualified Bridge.Postgres.Ledger as PgLedger
 import qualified Bridge.Postgres.NativeRecovery as PgNativeRecovery
 import qualified Bridge.Postgres.Source as PgSource
+import qualified Bridge.Postgres.NativeFamily as NativeFamily
 import Bridge.Config
 import Bridge.Ledger.Model
 import Bridge.Native (nativeAmount)
@@ -12,7 +13,6 @@ import Bridge.RPC
 import Bridge.Settlement
 import Bridge.Types
 import Bridge.Postgres.Ledger (Ledger)
-import Bridge.Postgres.PaymentStore
 import Control.Exception (IOException,catch,try)
 import Control.Monad (when,filterM)
 import Data.Aeson
@@ -168,7 +168,7 @@ reconcileNativeSettlementsWith transport c ledger=do
     require (name==nativeWallet c && descriptors && scanning==Bool False) "native_wallet_not_ready"
     (_,saved) <- readSavedPayment transport c ledger attempt
     payment <- case saved of NativePayment value->pure value; _->reject "wrong_destination_chain"
-    family <- paymentNativeFamily ledger (attemptIntent attempt)
+    family <- NativeFamily.readFamily ledger (attemptIntent attempt)
     if length family==1 then observeNativePayment (paymentNative transport) payment >>= sameWinner else do
       (members,view) <- readSavedNativeFamily transport c ledger family
       active <- activeFamilyPayment members view

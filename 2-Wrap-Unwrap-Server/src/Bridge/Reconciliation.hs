@@ -3,7 +3,7 @@ module Bridge.Reconciliation (View(..), reconcileCustodyWith, inspectCustodyWith
 
 import qualified Bridge.Postgres.Custody as PgCustody
 import qualified Bridge.Postgres.Observation as PgObservation
-import qualified Bridge.Postgres.PaymentStore as PgPaymentStore
+import qualified Bridge.Postgres.Settlement as PgSettlement
 import Bridge.Config
 import Bridge.Ledger.Model
 import Bridge.Native
@@ -15,9 +15,7 @@ import Bridge.Solana
 import Bridge.SolanaPayment
 import Bridge.Types
 import Bridge.Postgres.Ledger (Ledger)
-import Bridge.Postgres.PaymentStore
 import Control.Exception (IOException,catch,try)
-import qualified Bridge.Postgres.Custody as C
 import Control.Monad (forM_,when)
 import Data.Aeson hiding (decode)
 import Data.Int (Int64)
@@ -43,10 +41,10 @@ inspectSourceLossCustodyWith clock transport c ledger=do
 inspectCustodyWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> Bool -> IO (Int64,Int64,Bool,Value)
 inspectCustodyWith clock transport c ledger inspectLosses=do
   at <- clock
-  view <- custodyView c ledger at inspectLosses
+  view <- PgCustody.readSnapshot c ledger at inspectLosses
   paymentIdentity transport
   before <- nativeBalance native
-  attempts <- PgPaymentStore.pendingAttempts ledger
+  attempts <- PgSettlement.pendingAttempts ledger
   groups <- either (const $ reject "custody_attempt_bounds") pure (paymentAttemptGroups attempts)
   effects <- concat <$> mapM (pendingFamilyEffect transport c ledger) groups
   (slot,wrapped,sol) <- solanaBalances (paymentSolana transport) c ledger view
@@ -71,7 +69,7 @@ inspectCustodyWith clock transport c ledger inspectLosses=do
         ,"assets" .= [object ["asset" .= asset,"booked" .= T.pack(show booked),"inFlight" .= T.pack(show delta)
           ,"expected" .= T.pack(show $ booked+delta),"observed" .= T.pack(show actual),"difference" .= T.pack(show $ actual-booked-delta)] | (asset,booked,delta,actual)<-rows]
         ,"inFlightEffects" .= [object ["transaction" .= txid,"asset" .= asset,"units" .= T.pack(show n)] | (txid,asset,n)<-effects]]
-  current <- custodyRevision ledger
+  current <- PgCustody.readRevision ledger
   require (current==viewRevision view) "custody_ledger_changed"
   pure (viewRevision view,at,matches,report)
  where native=paymentNative transport
@@ -159,7 +157,7 @@ pendingEffect transport c ledger attempt=do
       recorded=require (attemptState attempt=="broadcast_intent") "unrecorded_broadcast_observed"
       native=paymentNative transport
       requireUnseen=do
-        seen <- custodyHasEvent ledger txid (attemptChain attempt)
+        seen <- PgCustody.hasEvent ledger txid (attemptChain attempt)
         require (not seen) "custody_payment_evidence_unavailable"
         pure []
   case payment of
@@ -194,13 +192,13 @@ pendingEffect transport c ledger attempt=do
 -- recovery and replacement. Callers cannot inject a different recording action.
 reconcileCustodyWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> IO Value
 reconcileCustodyWith clock transport cfg ledger = do
-  expected <- custodyRevision ledger
+  expected <- PgCustody.readRevision ledger
   result <- try (inspectCustodyWith clock transport cfg ledger False `catch` (\(_::IOException)->reject "custody_rpc_unavailable")) :: IO (Either BridgeError (Int64,Int64,Bool,Value))
   case result of
     Right (revision,at,matches,report)->do
-      C.recordCheck ledger revision at (if matches then Nothing else Just "custody_balance_mismatch") (Just report)
+      PgCustody.recordCheck ledger revision at (if matches then Nothing else Just "custody_balance_mismatch") (Just report)
       pure(object["matches" .= matches,"revision" .= revision,"report" .= report])
     Left (BridgeError code)->do
       at <- clock
-      C.recordCheck ledger expected at (Just code) Nothing
+      PgCustody.recordCheck ledger expected at (Just code) Nothing
       pure(object["matches" .= False,"error" .= code])

@@ -93,8 +93,8 @@ identifies current code boundaries and records the remaining gates.
 | `Native.hs`, `Solana.hs`, `Observer.hs` | Real-chain RPC adapters, identity checks, bounded history scans and evidence |
 | `NativePayment.hs`, `SolanaPayment.hs`, `Payment.hs`, `Settlement.hs` | Transaction validation, preparation/signing, saved-byte send and verified settlement |
 | `Reconciliation.hs`, `Recovery.hs`, `Reorg.hs`, `NativeReplacement.hs`, `Backup.hs` | Custody checks, pause/recovery, source/finality loss, replacement families and backup barriers |
-| `Operation.hs`, `Operation/Internal.hs`, `Postgres/Server.hs`, `Postgres/Runtime.hs`, `API.hs`, `Web.hs`, `scripts/server.hs` | Severity-indexed handler plans, safe/critical dispatcher, Servant contract, direct customer server and runtime entry points |
-| `solana-helper/` | Fixed official-SDK helper and separate real-Devnet setup/test clients |
+| `Operation.hs`, `Operation/Internal.hs`, `Postgres/Runtime.hs`, `API.hs`, `Web.hs`, `scripts/server.hs` | Severity-indexed handler plans, safe/critical dispatcher, Servant contract, direct customer server and runtime entry points |
+| `solana-helper/` | Pinned official Solana SDK library called through Haskell FFI |
 | `web/` | Haskell/HTML/CSS interface and Solana Pay QR/payment links |
 | `deploy/`, `scripts/install`, `scripts/build-release` | Pinned Linux build, packaged runtime, installer, systemd services and helper sandbox |
 | `test/` | Regression contracts; historical acceptance reports are linked from the release review |

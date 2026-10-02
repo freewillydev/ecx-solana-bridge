@@ -4,6 +4,7 @@
 module Bridge.Postgres.Schema where
 
 import Data.Int (Int64)
+import qualified Bridge.Ledger.Model as Domain
 import Data.Text (Text)
 import Data.Profunctor.Product.TH (makeAdaptorAndInstance)
 import qualified Opaleye as O
@@ -798,3 +799,15 @@ nativewinnerchangesTable = O.table "native_winner_changes" $ pNativeWinnerChange
   , nativewinnerchangesEvidenceHash = O.requiredTableField "evidence_hash"
   , nativewinnerchangesFeeDelta = O.requiredTableField "fee_delta"
   }
+
+-- Exact projections from persisted rows into the shared economic records.
+-- These grant no database or payment capability.
+asObligation :: Obligations -> Domain.Obligation
+asObligation row = Domain.Obligation (obligationsId row) (obligationsOrderId row)
+  (obligationsDepositId row) (obligationsKind row) (obligationsAsset row)
+  (obligationsAmount row) (obligationsRecipient row)
+
+asAttempt :: Attempts -> Text -> Domain.Attempt
+asAttempt row chain = Domain.Attempt (attemptsTxid row) (attemptsIntentId row) chain
+  (attemptsSignedBytes row) (attemptsPolicyJson row) (attemptsFeeLimit row)
+  (attemptsState row) (attemptsCriticalSequence row)

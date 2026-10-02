@@ -8,10 +8,11 @@ module Bridge.Recovery
 import qualified Bridge.Postgres.Cancellation as PgCancellation
 import qualified Bridge.Postgres.Ledger as PgLedger
 import qualified Bridge.Postgres.LossCover as PgLossCover
-import qualified Bridge.Postgres.PaymentStore as PgPaymentStore
+import qualified Bridge.Postgres.Settlement as PgSettlement
 import qualified Bridge.Postgres.Preparation as PgPreparation
 import qualified Bridge.Postgres.Replacement as PgReplacement
 import qualified Bridge.Postgres.Source as PgSource
+import qualified Bridge.Postgres.NativeFamily as NativeFamily
 import Bridge.Config
 import Bridge.Ledger.Model
 import Bridge.Native (nativeAmount)
@@ -25,7 +26,6 @@ import Bridge.Settlement
 import Bridge.SolanaPayment
 import Bridge.Types
 import Bridge.Postgres.Ledger (Ledger)
-import Bridge.Postgres.PaymentStore
 import Control.Exception (IOException,catch,try)
 import Control.Monad (when)
 import Data.Aeson
@@ -77,7 +77,7 @@ prepareNativeReplacementUsing clock transport drafter c ledger parent fee reason
       paymentIdentity transport
       (ob,payment) <- readSavedPayment transport c ledger expected
       signed <- case payment of NativePayment s->pure s; _->reject "wrong_destination_chain"
-      attempts <- paymentNativeFamily ledger (attemptIntent expected)
+      attempts <- NativeFamily.readFamily ledger (attemptIntent expected)
       family <- if attempts==[expected] then pure [signed] else do
         (members,_) <- readSavedNativeFamily transport c ledger attempts
         pure (map snd members)
@@ -174,7 +174,7 @@ reconcileNativeLocksWith transport c ledger=do
     scanning <- fieldValue "scanning" wallet :: IO Value
     require (name==nativeWallet c && descriptors && scanning==Bool False) "native_wallet_not_ready"
     preparations <- filter ((=="Native").preparationChain) <$> PgPreparation.pending ledger
-    attempts <- filter ((=="Native").attemptChain) <$> PgPaymentStore.pendingAttempts ledger
+    attempts <- filter ((=="Native").attemptChain) <$> PgSettlement.pendingAttempts ledger
     case (preparations,attempts) of
       ([],[])->verifyOnly "idle" []
       ([p],[])->do
@@ -208,7 +208,7 @@ reconcileNativeLocksWith transport c ledger=do
     current <- readNativePrevouts call (planDepth plan) (nativeInputs tx)
     require (sameNativePrevouts current previous) "native_previous_output_changed"
     restored <- restoreNativeInputLocks call (map nativeOutpoint $ nativeInputs tx)
-    when (restored>0) $ nativeLockAudit ledger subject
+    when (restored>0) $ PgPreparation.nativeLockAudit ledger subject
     pure $ report "locked" (length $ nativeInputs tx) restored
   recordedNativeSpend attempt signed=do
     found <- readNativePayment call signed

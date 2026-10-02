@@ -1,4 +1,5 @@
-module Bridge.Postgres.NativeFamily (familyC) where
+module Bridge.Postgres.NativeFamily (readFamily,familyC) where
+import Bridge.Postgres.Ledger (Ledger,ledgerAction)
 import Bridge.Types
 import Bridge.Ledger.Model (Attempt(..))
 import Bridge.NativePayment
@@ -13,6 +14,9 @@ import qualified Data.Text.Encoding as TE
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Opaleye as O
 
+readFamily :: Ledger -> Text -> IO [Attempt]
+readFamily ledger intent = ledgerAction ledger (\c->familyC c intent)
+
 -- Shared validator runs inside the caller's existing financial transaction.
 familyC :: PG.Connection -> Text -> IO [Attempt]
 familyC connection intent = do
@@ -26,7 +30,7 @@ familyC connection intent = do
   -- without depending on SQLite's implicit rowid.
   signedRows <- mapM (\(a,i)->do s <- stored (attemptsPolicyJson a); pure (a,i,s)) rows
   let ordered=sortOn (units . signedNativeFee . third) signedRows
-      family=[attempt a (intentsChain i) | (a,i,_)<-ordered]
+      family=[asAttempt a (intentsChain i) | (a,i,_)<-ordered]
       signed=map third ordered
   require (not(null family) && length family<=8) "native_replacement_family_bounds"
   changes <- O.runSelect connection (O.selectTable nativewinnerchangesTable) :: IO [NativeWinnerChanges]
@@ -64,8 +68,6 @@ familyC connection intent = do
       _->reject "native_replacement_family_bounds"
   pure family
 
-attempt :: Attempts -> Text -> Attempt
-attempt row chain = Attempt (attemptsTxid row) (attemptsIntentId row) chain (attemptsSignedBytes row) (attemptsPolicyJson row) (attemptsFeeLimit row) (attemptsState row) (attemptsCriticalSequence row)
 third :: (a,b,c) -> c
 third (_,_,c)=c
 stored :: FromJSON a => Text -> IO a

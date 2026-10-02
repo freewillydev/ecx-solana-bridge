@@ -251,6 +251,12 @@ The sequence below remains the broader refactor checklist, subject to that prior
    Custody inspection/recording now lives together in Reconciliation, rather than
    creating a cycle through a backend adapter. Ledger queries and transaction
    boundaries are unchanged by this consolidation.
+   The remaining PaymentStore module is now removed: settlement queries live with
+   settlement mutations, custody queries live with custody checks, and native
+   families use their existing validator directly. One domain View replaces the
+   duplicate Snapshot; schema-to-obligation/attempt projections have one definition.
+   Customer handlers now sit beside their four Servant routes in API.hs; the
+   operation algebra depends on pure model types rather than the HTTP API module.
    Remove redundant wrappers immediately after their replacement works.
    Core PostgreSQL budgeting is now part of Ledger, so allowance and journal
    arithmetic share one implementation. Retain remaining unique SQLite assertions
@@ -282,7 +288,7 @@ The sequence below remains the broader refactor checklist, subject to that prior
    through one workflow. Represent customer-deposit funding and operator-earned
    funding explicitly; never create fake customer orders or deposits. Finish the
    withdrawal path here, reusing/replacing its recent reservation stage as needed.
-   Consolidate Payment/Settlement/Preparation/PaymentStore and PostgreSQL wrappers
+   Consolidate payment, settlement and preparation workflows and PostgreSQL operations
    by responsibility. Keep effects and commit boundaries visible, with no transaction
    held across RPC, signing or backup.
 

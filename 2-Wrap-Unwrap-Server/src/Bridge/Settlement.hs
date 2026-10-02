@@ -9,9 +9,10 @@ module Bridge.Settlement
 
 import qualified Bridge.Postgres.Ledger as PgLedger
 import qualified Bridge.Postgres.Observation as PgObservation
-import qualified Bridge.Postgres.PaymentStore as PgPaymentStore
-import qualified Bridge.Postgres.Retry as PgRetry
 import qualified Bridge.Postgres.Settlement as PgSettlement
+import qualified Bridge.Postgres.Retry as PgRetry
+import qualified Bridge.Postgres.NativeFamily as NativeFamily
+import qualified Bridge.Postgres.Source as PgSource
 import Bridge.Config
 import Bridge.Ledger.Model
 import Bridge.Native
@@ -27,7 +28,6 @@ import Bridge.SolanaHelper
 import Bridge.SolanaPayment
 import Bridge.Types
 import Bridge.Postgres.Ledger (Ledger)
-import Bridge.Postgres.PaymentStore
 import Control.Exception (IOException,catch,onException,try)
 import Control.Monad (forM,forM_,when,unless)
 import Data.Aeson
@@ -183,7 +183,7 @@ solanaExpiryEvidence transport c signed = do
 -- a backup wait. A focused read never changes a scanner's global checkpoint.
 recheckSourceWith :: PaymentTransport -> Config -> Ledger -> Obligation -> IO ()
 recheckSourceWith transport c ledger ob = do
-  (deposit,request,policy,instruction) <- paymentSourceContext ledger ob
+  (deposit,request,policy,instruction) <- PgSettlement.sourceContext ledger ob
   require (deploymentFingerprint policy==fingerprint c && solanaCommitment policy=="finalized") "payment_profile_mismatch"
   (refreshed,provedMissing) <- case depositAsset deposit of
     Native -> do
@@ -228,7 +228,7 @@ recheckSourceWith transport c ledger ob = do
     Sol -> reject "unsupported_source_asset"
   PgObservation.refreshDeposit ledger refreshed
   covered <- if not(depositEligible refreshed) && provedMissing
-    then settlementCoveredSource ledger ob else pure False
+    then PgSource.coveredAuthorized ledger (obligationId ob) else pure False
   require (depositEligible refreshed || covered) "source_not_eligible"
   when covered $ do
     -- A saved cover cannot turn a merely pending or ambiguously missing input
@@ -247,8 +247,8 @@ recheckSourceWith transport c ledger ob = do
 data SavedPayment = NativePayment NativeSigned | SolanaPayment SolanaSigned
 readSavedPayment :: PaymentTransport -> Config -> Ledger -> Attempt -> IO (Obligation,SavedPayment)
 readSavedPayment transport c ledger attempt = do
-  ob <- paymentObligation ledger (attemptIntent attempt)
-  (_,_,policy,_) <- paymentSourceContext ledger ob
+  ob <- PgSettlement.readObligation ledger (attemptIntent attempt)
+  (_,_,policy,_) <- PgSettlement.sourceContext ledger ob
   require (deploymentFingerprint policy==fingerprint c) "payment_profile_mismatch"
   payment <- case attemptChain attempt of
     "Native" -> do
@@ -292,7 +292,7 @@ paymentAttemptGroups attempts=do
 readSavedNativeFamily :: PaymentTransport -> Config -> Ledger -> [Attempt] -> IO ([(Attempt,NativeSigned)],NativeFamilyView)
 readSavedNativeFamily transport c ledger expected=do
   first <- case expected of a:_->pure a; _->reject "native_replacement_family_bounds"
-  family <- paymentNativeFamily ledger (attemptIntent first)
+  family <- NativeFamily.readFamily ledger (attemptIntent first)
   require (family==expected) "native_replacement_family_changed"
   signed <- forM family $ \attempt->do
     (_,payment) <- readSavedPayment transport c ledger attempt
@@ -314,7 +314,7 @@ activeFamilyPayment family view=case familyActive view of
 -- backup or send, even if the deployment happens to be available.
 reconcilePaymentsWith :: PaymentTransport -> Config -> Ledger -> IO Value
 reconcilePaymentsWith transport c ledger = do
-  attempts <- PgPaymentStore.pendingAttempts ledger
+  attempts <- PgSettlement.pendingAttempts ledger
   groups <- case paymentAttemptGroups attempts of
     Left code->PgLedger.pause ledger code >> reject code
     Right groups->pure groups
@@ -327,7 +327,7 @@ reconcilePaymentsWith transport c ledger = do
     case outcome of
       Right result -> do
         txid <- case result of
-          Left "settled"->settlementWinner ledger (attemptIntent attempt)
+          Left "settled"->PgSettlement.winner ledger (attemptIntent attempt)
           _->pure $ attemptId attempt
         pure $ report txid attempt (either id (const "unseen") result) Nothing
       Left (BridgeError code) -> do
@@ -344,7 +344,7 @@ reconcileRecordedAttempt :: PaymentTransport -> Config -> Ledger -> Attempt -> I
 reconcileRecordedAttempt transport c ledger attempt = do
   paymentIdentity transport
   (ob,payment) <- readSavedPayment transport c ledger attempt
-  family <- if attemptChain attempt=="Native" then paymentNativeFamily ledger (attemptIntent attempt) else pure [attempt]
+  family <- if attemptChain attempt=="Native" then NativeFamily.readFamily ledger (attemptIntent attempt) else pure [attempt]
   if length family>1 then do
     require (attempt `elem` family) "native_replacement_family_changed"
     (members,view) <- readSavedNativeFamily transport c ledger family
@@ -437,18 +437,18 @@ paymentPass :: PaymentTransport -> Config -> Ledger -> (Obligation -> IO Text) -
 paymentPass transport c ledger prepare = work `onException` PgLedger.pause ledger "payment_requires_reconciliation"
  where
   work=do
-    attempts <- PgPaymentStore.pendingAttempts ledger
+    attempts <- PgSettlement.pendingAttempts ledger
     groups <- either reject pure (paymentAttemptGroups attempts)
     forM_ groups $ \family -> settleAttemptWith transport c ledger (last family) >> pure ()
-    ready <- settlementReady ledger
+    ready <- PgSettlement.ready ledger
     forM_ ready $ \ob -> do
       health <- PgLedger.readiness ledger
-      busy <- settlementBusy ledger (if obligationAsset ob=="Native" then "Native" else "Solana")
+      busy <- PgSettlement.busy ledger (if obligationAsset ob=="Native" then "Native" else "Solana")
       when (available health && not busy) $ do
         paymentIdentity transport
         recheckSourceWith transport c ledger ob
         txid <- prepare ob
-        fresh <- filter ((==txid) . attemptId) <$> PgPaymentStore.pendingAttempts ledger
+        fresh <- filter ((==txid) . attemptId) <$> PgSettlement.pendingAttempts ledger
         case fresh of
           [attempt] -> settleAttemptWith transport c ledger attempt >> pure ()
           _ -> reject "prepared_attempt_missing"

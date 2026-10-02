@@ -7,7 +7,7 @@ import qualified Bridge.Postgres.Custody as Custody
 import qualified Bridge.Postgres.Order as Order
 import Control.Monad (forM_)
 import Bridge.Settlement (PaymentTransport,reconcilePaymentsWith,readSavedPayment,recheckSourceWith)
-import Bridge.Postgres.PaymentStore (pendingAttempts)
+import Bridge.Postgres.Settlement (pendingAttempts)
 import qualified Bridge.Reconciliation as Payments
 import qualified Bridge.Ledger.Model as Domain
 import Bridge.RPC (fieldValue)
@@ -49,7 +49,7 @@ resumeChecked cfg ledger now reviewed = do
   ledgerAction ledger $ \c->do
     checks <- O.runSelect c (O.selectTable custodycheckTable) :: IO [CustodyCheck]
     require (case checks of
-      [row]->custodycheckRevision row==Custody.revision snapshot && custodycheckCheckedRevision row==Just(custodycheckRevision row) && custodycheckLastError row==Nothing && maybe False (\at->at>=0 && at<=now && now-at<=60) (custodycheckCheckedAt row)
+      [row]->custodycheckRevision row==Domain.viewRevision snapshot && custodycheckCheckedRevision row==Just(custodycheckRevision row) && custodycheckLastError row==Nothing && maybe False (\at->at>=0 && at<=now && now-at<=60) (custodycheckCheckedAt row)
       _->False) "custody_not_reconciled"
     intents <- O.runSelect c (O.selectTable intentsTable) :: IO [Intents]
     case reviewed of

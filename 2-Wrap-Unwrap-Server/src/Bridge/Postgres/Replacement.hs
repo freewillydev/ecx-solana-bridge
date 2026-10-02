@@ -206,8 +206,6 @@ auditC :: PG.Connection -> Text -> Text -> IO ()
 auditC c action detail=do
   count <- O.runInsert c O.Insert {O.iTable=auditTable,O.iRows=[Audit Nothing (text action) (text detail)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   require (count==1) "audit_insert_failed"
-asAttempt :: Attempts -> Text -> Attempt
-asAttempt a chain=Attempt (attemptsTxid a) (attemptsIntentId a) chain (attemptsSignedBytes a) (attemptsPolicyJson a) (attemptsFeeLimit a) (attemptsState a) (attemptsCriticalSequence a)
 stored :: FromJSON a => Text -> IO a
 stored=either (const $ reject "invalid_saved_payment") pure . eitherDecodeStrict' . TE.encodeUtf8
 json :: ToJSON a => a -> Text

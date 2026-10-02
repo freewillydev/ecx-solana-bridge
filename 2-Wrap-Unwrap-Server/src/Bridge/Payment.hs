@@ -1,7 +1,7 @@
 module Bridge.Payment (prepareNativeWithSigner, prepareSolanaWithSigner, payoutReference) where
 
 import qualified Bridge.Postgres.Ledger as PgLedger
-import qualified Bridge.Postgres.PaymentStore as PgPaymentStore
+import qualified Bridge.Postgres.Settlement as PgSettlement
 import qualified Bridge.Postgres.Preparation as PgPreparation
 import Bridge.Config
 import Bridge.Ledger.Model
@@ -33,7 +33,7 @@ prepareNativeWithSigner call signer c ledger obligation = prepare `onException` 
     quantity <- either reject pure (amount $ toInteger $ obligationAmount obligation)
     policy <- PgPreparation.orderPolicy ledger (obligationOrder obligation)
     require (deploymentFingerprint policy==fingerprint c) "payment_profile_mismatch"
-    attempts <- filter ((==obligationId obligation) . attemptIntent) <$> PgPaymentStore.pendingAttempts ledger
+    attempts <- filter ((==obligationId obligation) . attemptIntent) <$> PgSettlement.pendingAttempts ledger
     case attempts of
       [attempt] -> do
         signed <- stored (attemptPolicy attempt)
@@ -100,7 +100,7 @@ prepareSolanaWithSigner call signer c ledger obligation = prepare `onException` 
     quantity <- either reject pure (amount $ toInteger $ obligationAmount obligation)
     policy <- PgPreparation.orderPolicy ledger (obligationOrder obligation)
     require (deploymentFingerprint policy==fingerprint c && solanaCommitment policy=="finalized") "payment_profile_mismatch"
-    attempts <- filter ((==obligationId obligation) . attemptIntent) <$> PgPaymentStore.pendingAttempts ledger
+    attempts <- filter ((==obligationId obligation) . attemptIntent) <$> PgSettlement.pendingAttempts ledger
     case attempts of
       [attempt] -> do
         signed <- stored (attemptPolicy attempt)

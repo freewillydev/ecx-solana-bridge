@@ -187,7 +187,7 @@ recoveryContextC c covered intent restoration = do
     pure(preparationcancellationsGeneration row)
     :: IO [Int64]
   require (null cancellations) "preparation_cancellation_pending"
-  pure(Obligation (obligationsId ob) (obligationsOrderId ob) (obligationsDepositId ob) (obligationsKind ob) (obligationsAsset ob) (obligationsAmount ob) (obligationsRecipient ob),previous,loss,actual,cover)
+  pure(asObligation ob,previous,loss,actual,cover)
 
 recoveryObligation :: Ledger -> Text -> Int64 -> IO Obligation
 recoveryObligation ledger intent restoration = ledgerAction ledger $ \c->do

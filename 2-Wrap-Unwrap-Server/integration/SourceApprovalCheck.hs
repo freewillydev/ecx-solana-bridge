@@ -4,7 +4,7 @@ module Main (main) where
 import Bridge.Types hiding (deploymentFingerprint)
 import Bridge.Config (Config,fingerprint)
 import qualified Bridge.Postgres.Replacement as Replacement
-import qualified Bridge.Postgres.PaymentStore as PaymentStore
+import qualified Bridge.Postgres.Settlement as Settlement
 import Bridge.NativePayment
 import Bridge.RPC (fieldValue)
 import qualified Bridge.Postgres.NativeFamily as Family
@@ -13,7 +13,6 @@ import qualified Bridge.Postgres.Ledger as L
 import qualified Bridge.Postgres.Source as Source
 import qualified Bridge.Postgres.NativeRecovery as NativeRecovery
 import qualified Bridge.Postgres.LossCover as LossCover
-import qualified Bridge.Postgres.Settlement as Settlement
 import System.Environment (lookupEnv)
 import Data.Maybe (fromMaybe)
 import Bridge.Ledger.Model (LossCapital(..),SourceCheck(..),Deposit(..),Attempt(..),PaymentCosts(..),NativeSettlementCheck(..))
@@ -240,7 +239,7 @@ winnerContract ledger = do
   signedMember <- Replacement.recordMember ledger cfg draftSequence expectedFamily newer 100
   beforeSignedReplay <- snapshot ledger
   Replacement.recordMember ledger cfg draftSequence expectedFamily newer 100 >>= \a->require (a==signedMember) "contract_replacement_signed_replay_changed"
-  pendingFamily <- PaymentStore.pendingAttempts ledger
+  pendingFamily <- Settlement.pendingAttempts ledger
   canonicalFamily <- L.ledgerAction ledger (\c->Family.familyC c $ attemptIntent signedMember)
   require (filter ((==attemptIntent signedMember).attemptIntent) pendingFamily==canonicalFamily) "contract_pending_family_lineage_order"
   expectError "native_replacement_already_signed" $ Replacement.cancel ledger draftSequence "cannot cancel signature"

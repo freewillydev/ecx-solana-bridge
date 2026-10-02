@@ -1,5 +1,5 @@
 module Bridge.Postgres.Preparation
-  ( orderPolicy, costLimits, begin, active, activeC, storeDraft, storeAttempt, pending, pendingC, signingDecisionC ) where
+  ( orderPolicy, costLimits, begin, active, activeC, storeDraft, storeAttempt, pending, pendingC, signingDecisionC, nativeLockAudit ) where
 
 import Bridge.Config
 import Bridge.Types
@@ -166,8 +166,6 @@ orderStatus :: PG.Connection -> Text -> Text -> IO ()
 orderStatus c oid status = do
   _ <- O.runUpdate c O.Update {O.uTable=ordersTable,O.uUpdateWith= \r->r {ordersStatus=text status},O.uWhere= \r->ordersId r O..== text oid O..&& ordersStatus r O../= text "Paid",O.uReturning=O.rCount}
   pure ()
-asObligation :: Obligations -> Obligation
-asObligation r = Obligation (obligationsId r) (obligationsOrderId r) (obligationsDepositId r) (obligationsKind r) (obligationsAsset r) (obligationsAmount r) (obligationsRecipient r)
 generationInt :: Int64 -> IO Int
 generationInt g = require (g>=0 && g<=7) "preparation_generation_overflow" >> pure(fromIntegral g)
 whereRows :: (a -> O.Field O.SqlBool) -> O.Select a -> O.Select a
@@ -201,3 +199,9 @@ signingDecisionC c cfg intent generation = do
   policy <- case policies of [value]->stored value; _->reject "order_not_found"
   require (deploymentFingerprint policy==fingerprint cfg) "payment_profile_mismatch"
   pure (prepared,policy)
+
+nativeLockAudit :: Ledger -> Text -> IO ()
+nativeLockAudit ledger subject = ledgerAction ledger $ \connection->do
+  _ <- O.runInsert connection O.Insert
+    {O.iTable=auditTable,O.iRows=[Audit Nothing (O.sqlStrictText "native_locks_restored") (O.sqlStrictText subject)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  pure ()
