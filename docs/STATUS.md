@@ -790,3 +790,27 @@ later application/package steps fail; older frozen caches can supply unchanged
 packages while the locked resolver rebuilds changed dependencies. Run 36942617231
 was canceled before pursuing an outdated TLS artifact. A corrected patched-stack
 build is the next acceptance; no x86 installer is claimed complete yet.
+
+## PostgreSQL remote backup barrier implementation
+
+`Bridge.Postgres.Backup.backupCallback` now connects an exact PostgreSQL snapshot
+upload receipt to the owning worker's typed ledger capability. Snapshot/upload IO
+runs outside financial transactions; acknowledgement is a short Opaleye mutation
+that binds the deployment identity and the snapshot's sequence. It refuses future
+or regressing coverage and invalid receipts; replay does not append duplicate
+receipts or increment the financial sequence. The child tools use the specified
+read-only PostgreSQL endpoint rather than ambient database defaults.
+
+`deploy/postgres-remote-backup.py` uploads archive plus manifest through encrypted
+restic to a configured HTTPS REST repository, then reads back authenticated remote
+snapshot metadata to verify paths and deployment/sequence tags. Local repositories,
+literal loopback endpoints and exposed credential files are refused. Physical
+host independence must still be verified during deployment acceptance.
+
+The isolated real-PostgreSQL journal/coverage contract and the existing 371-example
+application suite pass. See `evidence/postgres-backup-acknowledgment.json` and
+`evidence/postgres-remote-backup-refusals.json`. This component is not yet wired to
+an enabled production payment command: the current public test worker remains
+backup-free, and canonical activation remains blocked. Actual off-host upload,
+restore/key recovery, worker fencing and runtime/installer configuration remain
+required before R3 is complete. No remote durability acceptance is claimed.

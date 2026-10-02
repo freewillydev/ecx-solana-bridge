@@ -1,6 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.Postgres.Ledger
-  ( Ledger, withLedger, ledgerAction, readiness, pause, criticalSequence, balances, posting ) where
+  ( Ledger, withLedger, ledgerAction, readiness, pause, criticalSequence, acknowledgeBackup, balances, posting ) where
 
 import Bridge.Postgres.Schema
 import Bridge.Types (Availability(..), Asset, require, reject)
@@ -75,6 +75,32 @@ criticalSequence connection = do
     , O.uWhere= \row->deploymentSingleton row O..== O.sqlInt8 1
     , O.uReturning=O.rReturning deploymentCriticalSequence }
   case sequenceNos of [sequenceNo]->pure sequenceNo; _->reject "corrupt_sequence"
+
+-- Internal worker capability, never an HTTP operation. The uploader must first
+-- obtain a durable remote receipt for the exact snapshot and its manifest.
+-- A receipt covers only that snapshot's sequence, never the current sequence
+-- observed after upload: financial writes can continue during the backup.
+acknowledgeBackup :: Ledger -> Text -> Int64 -> Text -> IO ()
+acknowledgeBackup ledger identity sequenceNo snapshot = ledgerAction ledger $ \connection->do
+  require (T.length snapshot==64 && T.all (`elem` ("0123456789abcdef"::String)) snapshot) "invalid_backup_receipt"
+  metadata <- O.runSelect connection (O.selectTable deploymentTable) :: IO [Deployment]
+  case metadata of
+    [row]->do
+      require (deploymentFingerprint row==identity) "snapshot_profile_mismatch"
+      require (sequenceNo>=deploymentBackupSequence row && sequenceNo<=deploymentCriticalSequence row) "invalid_backup_coverage"
+      if sequenceNo==deploymentBackupSequence row then pure () else do
+        count <- O.runUpdate connection O.Update
+          { O.uTable=deploymentTable
+          , O.uUpdateWith= \d->d {deploymentBackupSequence=O.sqlInt8 sequenceNo}
+          , O.uWhere= \d->deploymentSingleton d O..== O.sqlInt8 1
+          , O.uReturning=O.rCount }
+        require (count==1) "corrupt_sequence"
+        inserted <- O.runInsert connection O.Insert
+          { O.iTable=auditTable
+          , O.iRows=[Audit Nothing (O.sqlStrictText "backup") (O.sqlStrictText $ T.pack(show sequenceNo)<>":"<>snapshot)]
+          , O.iReturning=O.rCount, O.iOnConflict=Nothing }
+        require (inserted==1) "backup_receipt_insert_failed"
+    _->reject "corrupt_sequence"
 
 balances :: PG.Connection -> IO (M.Map (Text,Text) Integer)
 balances connection = do

@@ -1,0 +1,14 @@
+{
+  "database": "isolated disposable PostgreSQL 16",
+  "result": "PostgreSQL journal and backup acknowledgment: balanced writes, ownership, exact coverage, identity/receipt/stale refusal, idempotence and durable reopen passed",
+  "wrongIdentityRejected": true,
+  "futureCoverageRejected": true,
+  "invalidReceiptRejected": true,
+  "staleCoverageRejected": true,
+  "concurrentNewerSequenceNotCovered": true,
+  "receiptReplayIdempotent": true,
+  "acknowledgmentSurvivesReopen": true,
+  "sourceLedgerModified": false,
+  "remoteUploadTested": false,
+  "workerActivated": false
+}

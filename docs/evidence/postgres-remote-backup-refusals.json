@@ -1,0 +1,21 @@
+{
+  "tests": [
+    {
+      "case": "local-path",
+      "refusedBeforeDatabaseOrUpload": true,
+      "receiptEmitted": false
+    },
+    {
+      "case": "loopback",
+      "refusedBeforeDatabaseOrUpload": true,
+      "receiptEmitted": false
+    },
+    {
+      "case": "public-credentials",
+      "refusedBeforeDatabaseOrUpload": true,
+      "receiptEmitted": false
+    }
+  ],
+  "realRemoteUploadTested": false,
+  "signerKeysCopied": false
+}

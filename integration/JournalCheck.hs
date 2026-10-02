@@ -7,13 +7,17 @@ import Data.Int (Int64)
 import qualified Data.Map.Strict as M
 import qualified Database.PostgreSQL.Simple as PG
 import System.Posix.User (getEffectiveUserName)
+import qualified Data.Text as T
+import System.Environment (lookupEnv)
+import Data.Maybe (fromMaybe)
 
 -- Dedicated fresh schema contract, never the funded bridge's database.
 main :: IO ()
 main = do
   user <- getEffectiveUserName
+  database <- fromMaybe "ecx_financial_schema" <$> lookupEnv "ECX_JOURNAL_CONTRACT_DATABASE"
   let settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,
-        PG.connectDatabase="ecx_financial_schema",PG.connectUser=user}
+        PG.connectDatabase=database,PG.connectUser=user}
   bracket (PG.connect settings) PG.close $ \connection->do
     existing <- PG.query_ connection "SELECT count(*) FROM deployment" :: IO [PG.Only Int64]
     require (existing==[PG.Only 0]) "fresh_contract_database_required"
@@ -32,7 +36,27 @@ main = do
     require (M.lookup ("Native","float") bs==Just 100 && M.lookup ("Native","external") bs==Just (-100)) "journal_balance_failed"
     competing <- try (L.withLedger settings "journal-contract" (const $ pure ())) :: IO (Either BridgeError ())
     require (case competing of Left _->True; _->False) "worker_lock_failed"
+    let receipt=T.replicate 64 "a"
+        refused action=do
+          result <- try action :: IO(Either BridgeError ())
+          require (case result of Left _->True; _->False) "invalid_backup_accepted"
+        coverage=L.ledgerAction ledger $ \connection->PG.query_ connection
+          "SELECT critical_sequence,backup_sequence,(SELECT count(*) FROM audit WHERE action='backup') FROM deployment"
+          :: IO [(Int64,Int64,Int64)]
+    refused $ L.acknowledgeBackup ledger "wrong-deployment" 1 receipt
+    refused $ L.acknowledgeBackup ledger "journal-contract" 2 receipt
+    refused $ L.acknowledgeBackup ledger "journal-contract" 1 "not-a-remote-receipt"
+    coverage >>= \rows->require (rows==[(1,0,0)]) "rejected_backup_mutated_state"
+    -- A concurrent financial commit after the snapshot must remain uncovered.
+    L.ledgerAction ledger L.criticalSequence >>= \n->require (n==2) "backup_contract_sequence_failed"
+    L.acknowledgeBackup ledger "journal-contract" 1 receipt
+    L.acknowledgeBackup ledger "journal-contract" 1 receipt
+    coverage >>= \rows->require (rows==[(2,1,1)]) "backup_covered_newer_work_or_replay_mutated_state"
+    refused $ L.acknowledgeBackup ledger "journal-contract" 0 receipt
+    coverage >>= \rows->require (rows==[(2,1,1)]) "backup_coverage_regressed"
   L.withLedger settings "journal-contract" $ \ledger->do
     bs <- L.ledgerAction ledger L.balances
     require (M.lookup ("Native","float") bs==Just 100) "reopen_balance_failed"
-  putStrLn "PostgreSQL journal: balanced write, rejected unbalanced write, sequence, exclusive ownership and reopen passed"
+    coverage <- L.ledgerAction ledger $ \connection->PG.query_ connection "SELECT critical_sequence,backup_sequence FROM deployment" :: IO [(Int64,Int64)]
+    require (coverage==[(2,1)]) "backup_acknowledgment_not_durable"
+  putStrLn "PostgreSQL journal and backup acknowledgment: balanced writes, ownership, exact coverage, identity/receipt/stale refusal, idempotence and durable reopen passed"
