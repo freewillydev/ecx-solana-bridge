@@ -92,3 +92,10 @@ the scoped conclusion. Revisit this dependency with a reviewed SDK migration and
 byte-compatibility acceptance. Independent review, the separate base/readFloat
 finding, and other dependency/license obligations remain open. No runtime or
 transaction encoding was changed for this review.
+
+The retained ARM64 installed executable was also inspected with LLVM nm. Its
+250,587 symbols include the generic Numeric.readFloat and numberToRational
+closures and code entries. Their presence prevents treating the source-only
+inventory as proof that the affected code is absent. This inspection does not
+establish an attacker-controlled call path; that and independent review remain
+open. See `evidence/readfloat-installed-symbols.json` for the actual ELF hash.
