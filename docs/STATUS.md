@@ -1745,3 +1745,21 @@ it does not prove in-flight Solana restoration or off-host durability. A fresh
 dedicated signed-but-unsent acceptance run is now being prepared on this active
 destination; retired source guests remain prohibited. Final packaging is deferred
 under the revised execution sequence.
+
+### Next in-flight Solana handoff: current prerequisite
+
+The new `solana-inflight-restore-20261002` run stopped in its real-provider
+preflight, before creating an order or journaling a deposit. A separate guest
+probe gave a 25-second primary RPC connection failure while the independent
+verifier returned the actual Devnet genesis. No fake endpoint or proxy was used.
+The test guest was shut down after inspection. The handoff tool now accepts an
+explicit signed-Solana staging report and validates its single generation-zero
+signed attempt, saved-byte hash, paused/stopped worker, live reservations and
+balanced postings before retirement. Its live handoff acceptance remains open.
+The existing completed-ledger paying-resume evidence remains valid.
+
+Customer clipboard acceptance also remains inconclusive: the actual browser copy
+action displays success, while the browser automation clipboard API reads empty.
+This does not prove either clipboard contents or a recovery-link round trip.
+External wallet signing and off-host repository acceptance remain separate gates;
+packaging remains deferred while these substantive workflows are completed.
