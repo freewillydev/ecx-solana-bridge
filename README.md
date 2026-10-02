@@ -81,7 +81,7 @@ identifies current code boundaries and records the remaining gates.
 | --- | --- |
 | `src/Bridge/Types.hs`, `Config.hs`, `Budget.hs` | Amounts, deployment identity, immutable limits and operating budgets |
 | `src/Bridge/Postgres/`, PostgreSQL migrations | Opaleye ledger, orders, reservations, attempts, recovery decisions and schema preservation; `legacy-src/` holds historical regression compatibility |
-| `Order.hs`, `Admission.hs`, `Deposit.hs` | Quote checks, recoverable deposit provisioning and customer deposit validation |
+| `Order.hs`, `Admission.hs`, `SolanaPay.hs` | Quote checks, recoverable deposit provisioning and connection-free payment requests |
 | `Native.hs`, `Solana.hs`, `Observer.hs` | Real-chain RPC adapters, identity checks, bounded history scans and evidence |
 | `NativePayment.hs`, `SolanaPayment.hs`, `Payment.hs`, `Settlement.hs` | Transaction validation, preparation/signing, saved-byte send and verified settlement |
 | `Reconciliation.hs`, `Recovery.hs`, `Reorg.hs`, `NativeReplacement.hs`, `Backup.hs` | Custody checks, pause/recovery, source/finality loss, replacement families and backup barriers |

@@ -42,7 +42,7 @@ library
 library legacy
   import: settings
   hs-source-dirs: legacy-src
-  exposed-modules: Bridge.Legacy.Order, Bridge.Legacy.Reconciliation, Bridge.Legacy.Recovery, Bridge.Legacy.PaymentLifecycle, Bridge.Budget, Bridge.Ledger
+  exposed-modules: Bridge.Legacy.Reconciliation, Bridge.Legacy.Recovery, Bridge.Legacy.PaymentLifecycle, Bridge.Budget, Bridge.Ledger
   build-depends:
     ecx-bridge,
     base >=4.20 && <4.23, aeson >=2.2 && <2.4, async >=2.2 && <2.3,

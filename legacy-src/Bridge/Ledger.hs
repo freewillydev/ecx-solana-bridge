@@ -5,8 +5,8 @@
 module Bridge.Ledger
   ( Ledger, withLedger, ledgerAction, schemaVersion, sqliteIdentity, readiness, pause, resumeAfterChecks
   , createOrder, readOrder, bindInstruction, criticalSequence, acknowledgeBackup
-  , findOrder, checkIntakeReady, claimNativeAllocation, recordNativeInstruction, issueInstruction, instructionBackup
-  , exposeOrder, freeInventory, allocateTreasuryReceipt, allocateSolOperatingReceipt, recordTreasurySpend, expireQuotes
+  , checkIntakeReady
+  , freeInventory, allocateTreasuryReceipt, allocateSolOperatingReceipt, recordTreasurySpend, expireQuotes
   , Deposit(..), observeDeposit, refreshDeposit, recordScan, readCheckpoint, promoteDeposit, checkpoint
   , economicOutflow, ChainEvent(..), ScanBatch(..), commitScan, recordScanFailure, scannerHealth, custodyHealth
   , lookupInstruction, maximumNativeDepth, pendingVerification
@@ -348,13 +348,6 @@ createOrder l cfg now capability req = do
         readOrderC c cap oid
 requestHash :: Config -> OrderRequest -> Text
 requestHash cfg req = digest . TE.encodeUtf8 $ fingerprint cfg <> jsonText req
--- Check idempotency before network IO. Existing requests keep their saved
--- deadline/policy even when admission settings change or intake is paused.
-findOrder :: Ledger -> Config -> Text -> OrderRequest -> IO (Maybe OrderView)
-findOrder l cfg capability req = do
-  cap <- either reject pure (capabilityHash capability)
-  require (validIdentifier (idempotencyKey req)) "invalid_idempotency_key"
-  ledgerAction l $ \c -> findOrderC c cfg cap req
 findOrderC :: Connection -> Config -> Text -> OrderRequest -> IO (Maybe OrderView)
 findOrderC c cfg cap req = do
   previous <- query c "SELECT id,request_hash FROM orders WHERE capability_hash=? AND idempotency_key=?" (cap,idempotencyKey req) :: IO [(Text,Text)]
@@ -383,17 +376,6 @@ bindInstruction l oid instruction = ledgerAction l $ \c -> do
     [(Just old,_)] -> require (old==instruction) "instruction_is_immutable"
     [(Nothing,_)] -> reject "order_no_longer_provisioning"
     _ -> reject "order_not_found"
-exposeOrder :: Ledger -> Bool -> Text -> Text -> IO OrderView
-exposeOrder l remote capability oid = do
-  cap <- either reject pure (capabilityHash capability)
-  ledgerAction l $ \c -> do
-    view <- readOrderC c cap oid
-    ns <- query c "SELECT instruction_sequence,instruction_issued FROM orders WHERE id=?" (Only oid) :: IO [(Maybe Int64,Bool)]
-    case ns of
-      [(Just n,True)] -> requireBackup c remote n >> pure view
-      [(_,False)] -> pure view{depositInstruction=Nothing}
-      _ -> reject "invalid_instruction_state"
-
 checkIntakeReady :: Ledger -> Int64 -> IO ()
 checkIntakeReady l now = ledgerAction l $ \c -> checkIntakeReadyC c now
 checkIntakeReadyC :: Connection -> Int64 -> IO ()
@@ -415,77 +397,6 @@ checkCustodyFreshC c now = do
     [(revision,Just checked,Just at,Nothing)] -> revision==checked && at>=0 && at<=now && toInteger now-toInteger at<=60
     _ -> False) "custody_not_reconciled"
 
--- Exactly one caller receives permission to allocate. Every later caller may
--- only recover the durable label; even a lost reply never grants another try.
-claimNativeAllocation :: Ledger -> Config -> Int64 -> Text -> Text -> IO (Bool,Text)
-claimNativeAllocation l cfg now capability oid = do
-  cap <- either reject pure (capabilityHash capability)
-  ledgerAction l $ \c -> do
-    order <- readOrderC c cap oid
-    require (direction (request order)==NativeToWrapped && deploymentFingerprint (policy order)==fingerprint cfg
-      && depositInstruction order==Nothing) "invalid_native_provisioning_order"
-    let label="ecx-bridge:v1:"<>deploymentId cfg<>":order:"<>oid
-    saved <- query c "SELECT label FROM native_allocations WHERE order_id=?" (Only oid) :: IO [Only Text]
-    case saved of
-      [Only old] -> require (old==label) "allocation_label_mismatch" >> pure (False,label)
-      [] -> do
-        checkIntakeReadyC c now
-        require (status order=="Provisioning" && now<=deadline order) "deposit_window_closed"
-        n <- criticalSequence c
-        execute c "INSERT INTO native_allocations(order_id,label,critical_sequence) VALUES(?,?,?)" (oid,label,n)
-        pure (True,label)
-      _ -> reject "duplicate_native_allocation"
-
--- Record a recovered address even if the quote expired or the operator paused
--- during RPC. It remains hidden, and expiry cannot reopen the quote/its holds.
-recordNativeInstruction :: Ledger -> Text -> Text -> Text -> Text -> IO ()
-recordNativeInstruction l capability oid label address = do
-  cap <- either reject pure (capabilityHash capability)
-  ledgerAction l $ \c -> do
-    order <- readOrderC c cap oid
-    saved <- query c "SELECT label FROM native_allocations WHERE order_id=?" (Only oid) :: IO [Only Text]
-    require (saved==[Only label] && direction (request order)==NativeToWrapped
-      && not (T.null address) && T.length address<=128) "invalid_native_allocation_result"
-    case depositInstruction order of
-      Just old -> require (old==address) "instruction_is_immutable"
-      Nothing -> do
-        require (status order `elem` ["Provisioning","ExpiredUnfunded"]) "order_no_longer_provisioning"
-        n <- criticalSequence c
-        execute c "UPDATE orders SET instruction=?,instruction_sequence=?,status=CASE WHEN status='Provisioning' THEN 'AwaitingDeposit' ELSE status END WHERE id=?" (address,n,oid)
-
-instructionBackup :: Ledger -> Bool -> Text -> Text -> IO (Maybe Int64)
-instructionBackup l remote capability oid = do
-  cap <- either reject pure (capabilityHash capability)
-  ledgerAction l $ \c -> do
-    _ <- readOrderC c cap oid
-    rows <- query c "SELECT o.instruction_sequence,d.backup_sequence FROM orders o CROSS JOIN deployment d WHERE o.id=?" (Only oid) :: IO [(Maybe Int64,Int64)]
-    case rows of
-      [(Just n,covered)] -> pure (if remote && covered<n then Just n else Nothing)
-      _ -> reject "instruction_not_recorded"
-
-issueInstruction :: Ledger -> Config -> Int64 -> Text -> Text -> IO OrderView
-issueInstruction l cfg now capability oid = do
-  cap <- either reject pure (capabilityHash capability)
-  ledgerAction l $ \c -> do
-    order <- readOrderC c cap oid
-    require (deploymentFingerprint (policy order)==fingerprint cfg) "order_profile_mismatch"
-    rows <- query c "SELECT instruction_sequence,instruction_issued FROM orders WHERE id=?" (Only oid) :: IO [(Maybe Int64,Bool)]
-    case rows of
-      [(Just n,issued)] -> do
-        requireBackup c (backupRequired cfg) n
-        when (not issued) $ do
-          checkIntakeReadyC c now
-          require (status order=="AwaitingDeposit" && now<=deadline order) "deposit_window_closed"
-          held <- query c "SELECT phase FROM reservations WHERE order_id=?" (Only oid) :: IO [Only Text]
-          costs <- query c "SELECT phase FROM operating_reservations WHERE order_id=?" (Only oid) :: IO [Only Text]
-          require (held==[Only "quote"] && costs==[Only "quote",Only "quote"]) "quote_reservations_unavailable"
-          -- The critical address/quote was already backed up. Losing this
-          -- visibility marker in an older snapshot only hides the instruction;
-          -- it cannot erase its source binding or authorize another allocation.
-          execute c "UPDATE orders SET instruction_issued=1 WHERE id=?" (Only oid)
-          execute c "INSERT INTO audit(action,detail) VALUES('instruction_issued',?)" (Only oid)
-        pure order
-      _ -> reject "instruction_not_recorded"
 expireQuotes :: Ledger -> Int64 -> IO ()
 expireQuotes l now = ledgerAction l $ \c -> do
   execute c "UPDATE reservations SET phase='released' WHERE phase='quote' AND order_id IN (SELECT id FROM orders WHERE grace_deadline<?)" (Only now)

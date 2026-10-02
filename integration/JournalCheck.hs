@@ -9,8 +9,12 @@ import qualified Bridge.Order as Workflow
 import qualified Bridge.SolanaPay as Pay
 import qualified Bridge.Postgres.Observation as Observation
 import qualified Data.ByteString as BS
-import Data.Aeson (eitherDecodeStrict')
-import Control.Monad (void)
+import Data.Aeson (eitherDecodeStrict', Value(..), object, (.=))
+import qualified Data.Aeson.Key as Key
+import qualified Data.Aeson.KeyMap as KM
+import Data.IORef
+import Bridge.Order (OrderTransport(..))
+import Control.Monad (void, forM_, when)
 import qualified Bridge.Postgres.Ledger as L
 import Bridge.Postgres.Schema
 import qualified Opaleye as O
@@ -81,8 +85,9 @@ main = do
     coverage <- L.ledgerAction ledger (\connection->fixture connection ReadCoverage)
     require (coverage==[(2,1,1)]) "backup_acknowledgment_not_durable"
   orderContracts settings
+  provisioningContracts settings
   rollbackContract settings
-  putStrLn "PostgreSQL journal and backup acknowledgment: balanced writes, row locking, ownership, exact coverage, identity/receipt/stale refusal, idempotence, durable reopen, order contracts and SQL-error rollback/fencing passed"
+  putStrLn "PostgreSQL journal and backup acknowledgment: balanced writes, row locking, ownership, exact coverage, identity/receipt/stale refusal, idempotence, durable reopen, order/provisioning contracts and SQL-error rollback/fencing passed"
 
 
 -- Closed test operations: no arbitrary SQL/query callback in fixture access.
@@ -91,6 +96,10 @@ data Fixture a where
   LockDeployment :: Fixture ()
   ReadCoverage :: Fixture [(Int64,Int64,Int64)]
   FundOrderTests :: Fixture ()
+  ReadyAt :: Int64 -> Fixture ()
+  InvalidateCustody :: Fixture ()
+  OrderHoldCounts :: T.Text -> Fixture (Int,Int)
+  ReplaceInstruction :: T.Text -> Fixture ()
   FreeWrapped :: Fixture Integer
   ReceiptCounts :: Fixture (Int,Int)
   FailTransaction :: Fixture ()
@@ -147,14 +156,41 @@ fixture connection = \case
       , O.iRows=[ScanHealth (O.sqlStrictText chain) (O.toNullable (O.sqlInt8 100)) O.null (O.sqlInt8 100)
                 | chain<-["Native","Solana","SolanaOperating"]]
       , O.iReturning=O.rCount,O.iOnConflict=Nothing }
+    fixture connection (ReadyAt 100)
+  ReadyAt now -> do
+    void $ O.runUpdate connection O.Update
+      { O.uTable=scanhealthTable
+      , O.uUpdateWith= \row->row {scanhealthLastSuccess=O.toNullable(O.sqlInt8 now),
+          scanhealthLastError=O.null,scanhealthCheckedAt=O.sqlInt8 now}
+      , O.uWhere=const (O.sqlBool True),O.uReturning=O.rCount }
     void $ O.runUpdate connection O.Update
       { O.uTable=custodycheckTable
       , O.uUpdateWith= \row->row {custodycheckCheckedRevision=O.toNullable(custodycheckRevision row),
-          custodycheckCheckedAt=O.toNullable(O.sqlInt8 100),custodycheckLastError=O.null}
+          custodycheckCheckedAt=O.toNullable(O.sqlInt8 now),custodycheckLastError=O.null}
       , O.uWhere=const (O.sqlBool True),O.uReturning=O.rCount }
     void $ O.runUpdate connection O.Update
       { O.uTable=deploymentTable,O.uUpdateWith= \row->row {deploymentPaused=O.sqlInt8 0}
       , O.uWhere=const (O.sqlBool True),O.uReturning=O.rCount }
+  InvalidateCustody -> void $ O.runUpdate connection O.Update
+    { O.uTable=custodycheckTable
+    , O.uUpdateWith= \row->row {custodycheckCheckedRevision=O.null}
+    , O.uWhere=const (O.sqlBool True),O.uReturning=O.rCount }
+  OrderHoldCounts oid -> do
+    orders <- O.runSelect connection $ do
+      row <- O.selectTable ordersTable
+      O.where_ (ordersId row O..== O.sqlStrictText oid)
+      pure (ordersId row)
+      :: IO [T.Text]
+    holds <- O.runSelect connection $ do
+      row <- O.selectTable reservationsTable
+      O.where_ (reservationsOrderId row O..== O.sqlStrictText oid)
+      pure (reservationsOrderId row)
+      :: IO [T.Text]
+    pure (length orders,length holds)
+  ReplaceInstruction oid -> void $ O.runUpdate connection O.Update
+    { O.uTable=ordersTable
+    , O.uUpdateWith= \row->row {ordersInstruction=O.toNullable(O.sqlStrictText "replacement")}
+    , O.uWhere= \row->ordersId row O..== O.sqlStrictText oid,O.uReturning=O.rCount }
   FreeWrapped -> do
     balances <- L.balances connection
     held <- O.runSelect connection $ do
@@ -285,3 +321,173 @@ rollbackContract settings = do
   L.withLedger settings "journal-contract" $ \ledger->do
     after <- L.ledgerAction ledger (\connection->fixture connection JournalState)
     require (before==after) "failed_transaction_changed_journal"
+
+
+-- Offline RPC contracts against the production PostgreSQL order workflow.
+-- The in-memory node below models uncertain replies, not a real network.
+provisioningContracts :: PG.ConnectInfo -> IO ()
+provisioningContracts settings = do
+  base <- BS.readFile "config/l2l-devnet.example.json" >>= either fail pure . eitherDecodeStrict'
+  let quantity n=either (error . T.unpack) id (amount n)
+      cfg=base {maxQueued=100,maxSolAccountRent=quantity 0,
+                maxNativeDailyCost=quantity 1000000,maxSolDailyCost=quantity 1000000}
+      cap=T.replicate 64 "c"
+      request name=OrderRequest NativeToWrapped (quantity 10000) "destination" "refund" Nothing name
+      ready ledger now=L.ledgerAction ledger (\connection->fixture connection (ReadyAt now))
+      saved ledger name=Order.findSavedOrder ledger cfg cap (request name) >>= maybe (reject "missing_provisioning_order") pure
+      hidden ledger row=do
+        view <- Order.exposeOrder ledger False cap (ordersId row)
+        require (depositInstruction view==Nothing) "unissued_instruction_exposed"
+      countIs count n=readIORef count >>= \actual->require (actual==n) "allocation_count_wrong"
+      lost transport wallet method params=do
+        result <- orderNative transport wallet method params
+        if method=="getnewaddress" then reject "rpc_transport_unknown_outcome" else pure result
+      run name action=do
+        putStrLn ("Provisioning contract: "<>T.unpack name)
+        L.withLedger settings "journal-contract" $ \ledger->do
+          Order.expireQuotes ledger 100000
+          ready ledger 100
+          (transport,count) <- provisioningTransport cfg name
+          action ledger transport count (request name)
+      create transport ledger req=Workflow.createCustomerOrderWith transport cfg ledger cap req
+  run "issued-replay" $ \ledger transport count req->do
+    first <- create transport ledger req
+    require (depositInstruction first==Just ("fixture-receive-"<>idempotencyKey req<>"-1")) "address_not_issued"
+    L.pause ledger "contract-paused"
+    let noChecks=transport {orderAdmission=const $ reject "unexpected_admission",orderIdentity=reject "unexpected_identity"}
+    replay <- Workflow.createCustomerOrderWith noChecks cfg{maxInput=quantity 2,maxSolFee=quantity 1} ledger cap req
+    require (replay==first) "issued_replay_changed"
+    expectError "idempotency_conflict" (create noChecks ledger req{recipient="changed"})
+    countIs count 1
+    -- Verify the database trigger itself, not just bindInstruction's guard.
+    changed <- try (L.ledgerAction ledger (\connection->fixture connection (ReplaceInstruction $ orderId first))) :: IO (Either PG.SqlError ())
+    require (case changed of Left err->PG.sqlState err=="23514"; _->False) "instruction_mutation_accepted"
+  run "admission-failure" $ \ledger transport count req->do
+    expectError "fixture_admission_failed" (create transport{orderAdmission=const $ reject "fixture_admission_failed"} ledger req)
+    missing <- Order.findSavedOrder ledger cfg cap req
+    require (missing==Nothing) "failed_admission_stored_order"
+    countIs count 0
+  run "stale-admission" $ \ledger transport count req->do
+    expectError "scanners_not_fresh" (create transport{orderClock=pure 161} ledger req)
+    expectError "intake_paused" (create transport{orderAdmission=const $ Observation.recordScanFailure ledger "Solana" 100 "contract-outage"} ledger req)
+    missing <- Order.findSavedOrder ledger cfg cap req
+    require (missing==Nothing) "stale_admission_stored_order"
+    countIs count 0
+  run "lost-reply" $ \ledger transport count req->do
+    expectError "rpc_transport_unknown_outcome" (create transport{orderNative=lost transport} ledger req)
+    prior <- saved ledger (idempotencyKey req)
+    require (ordersStatus prior=="Provisioning") "lost_reply_not_durable"
+    hidden ledger prior
+    recovered <- create transport ledger req
+    require (orderId recovered==ordersId prior && deadline recovered==ordersDeadline prior &&
+      depositInstruction recovered==Just ("fixture-receive-"<>idempotencyKey req<>"-1")) "lost_reply_recovery_changed_order"
+    countIs count 1
+  run "unresolved-allocation" $ \ledger transport count req->do
+    let absent wallet method params=if method=="getnewaddress" then reject "rpc_transport_unknown_outcome" else orderNative transport wallet method params
+    expectError "rpc_transport_unknown_outcome" (create transport{orderNative=absent} ledger req)
+    expectError "native_allocation_unresolved" (create transport ledger req)
+    countIs count 0
+  run "ambiguous-label" $ \ledger transport count req->do
+    let values=[Null,object [],object ["one" .= object ["purpose" .= ("receive"::T.Text)],"two" .= object ["purpose" .= ("receive"::T.Text)]]]
+    forM_ (zip [1::Int ..] values) $ \(i,value)->do
+      let bad wallet method params=if method=="getaddressesbylabel" then pure value else orderNative transport wallet method params
+      expectError "native_allocation_ambiguous" (create transport{orderNative=bad} ledger req{idempotencyKey="ambiguous-"<>T.pack(show i)})
+    countIs count 0
+  run "address-policy" $ \ledger transport count req->do
+    let bad wallet method params=do
+          value <- orderNative transport wallet method params
+          pure $ case (method,value) of
+            ("getaddressinfo",Object fields)->Object(KM.insert "ismine" (Bool False) fields)
+            _->value
+    expectError "native_allocation_policy_mismatch" (create transport{orderNative=bad} ledger req)
+    saved ledger (idempotencyKey req) >>= hidden ledger
+    void $ create transport ledger req
+    countIs count 1
+  run "concurrent-retry" $ \ledger transport count req->do
+    results <- mapConcurrently (const (try (create transport ledger req) :: IO (Either BridgeError OrderView))) [1..20::Int]
+    let succeeded=[view | Right view<-results]
+    require (case succeeded of first:rest->all (==first) rest; []->False) "concurrent_retry_changed_order"
+    countIs count 1
+    row <- saved ledger (idempotencyKey req)
+    counts <- L.ledgerAction ledger (\connection->fixture connection (OrderHoldCounts $ ordersId row))
+    require (counts==(1,1)) "concurrent_retry_duplicated_reservation"
+  run "pause-during-allocation" $ \ledger transport count req->do
+    let stopping wallet method params=do
+          value <- orderNative transport wallet method params
+          when (method=="getnewaddress") (L.pause ledger "contract-paused")
+          pure value
+    expectError "intake_paused" (create transport{orderNative=stopping} ledger req)
+    row <- saved ledger (idempotencyKey req)
+    require (ordersInstruction row==Just ("fixture-receive-"<>idempotencyKey req<>"-1")) "paused_allocation_not_recorded"
+    hidden ledger row
+    countIs count 1
+  run "backup-deadline" $ \ledger transport count req->do
+    let backed=cfg{backupRequired=True}
+    expectError "backup_pending" (Workflow.createCustomerOrderWith transport backed ledger cap req)
+    prior <- saved ledger (idempotencyKey req)
+    hidden ledger prior
+    now <- newIORef 100
+    let delayed=transport {orderClock=readIORef now,orderBackup= \n->do
+          L.acknowledgeBackup ledger "journal-contract" n (T.replicate 64 "d")
+          writeIORef now (ordersDeadline prior+1)
+          ready ledger (ordersDeadline prior+1)}
+    expectError "deposit_window_closed" (Workflow.createCustomerOrderWith delayed backed ledger cap req)
+    hidden ledger prior
+    countIs count 1
+  run "late-recovery" $ \ledger transport count req->do
+    free <- L.ledgerAction ledger (\connection->fixture connection FreeWrapped)
+    expectError "rpc_transport_unknown_outcome" (create transport{orderNative=lost transport} ledger req)
+    ready ledger 100000
+    expectError "deposit_window_closed" (create transport{orderClock=pure 100000} ledger req)
+    row <- saved ledger (idempotencyKey req)
+    require (ordersStatus row=="ExpiredUnfunded" && ordersInstruction row==Just ("fixture-receive-"<>idempotencyKey req<>"-1")) "late_recovery_reopened_order"
+    hidden ledger row
+    after <- L.ledgerAction ledger (\connection->fixture connection FreeWrapped)
+    require (after==free) "late_recovery_retained_quote_hold"
+    countIs count 1
+  (transport,count) <- provisioningTransport cfg "restart"
+  let req=request "restart-recovery"
+  prior <- L.withLedger settings "journal-contract" $ \ledger->do
+    ready ledger 100
+    expectError "rpc_transport_unknown_outcome" (create transport{orderNative=lost transport} ledger req)
+    saved ledger (idempotencyKey req)
+  L.withLedger settings "journal-contract" $ \ledger->do
+    expectError "intake_paused" (create transport ledger req)
+    hidden ledger prior
+    ready ledger 100
+    L.ledgerAction ledger (\connection->fixture connection InvalidateCustody)
+    expectError "custody_not_reconciled" (create transport ledger req)
+    ready ledger 100
+    restored <- create transport ledger req
+    require (orderId restored==ordersId prior && deadline restored==ordersDeadline prior) "restart_lost_allocation_claim"
+    countIs count 1
+
+expectError :: T.Text -> IO a -> IO ()
+expectError code action=do
+  result <- try (void action) :: IO (Either BridgeError ())
+  require (case result of Left(BridgeError actual)->actual==code; _->False) ("expected:"<>code<>", got:"<>T.pack(show result))
+
+provisioningTransport :: Config -> T.Text -> IO (OrderTransport,IORef Int)
+provisioningTransport cfg name=do
+  count <- newIORef 0
+  addresses <- newIORef ([]::[(T.Text,T.Text)])
+  let native wallet method params=do
+        require wallet "provisioning_requires_wallet"
+        case (method,params) of
+          ("getwalletinfo",[]) -> pure $ object ["walletname" .= nativeWallet cfg,"descriptors" .= True,
+            "private_keys_enabled" .= True,"external_signer" .= False,"scanning" .= False]
+          ("getaddressesbylabel",[String label]) -> do
+            found <- map snd . filter ((==label).fst) <$> readIORef addresses
+            if null found then reject "rpc_error_-11" else pure $ object
+              [Key.fromText address .= object ["purpose" .= ("receive"::T.Text)] | address<-found]
+          ("getnewaddress",[String label,String "bech32"]) -> do
+            n <- atomicModifyIORef' count (\old->(old+1,old+1))
+            let address="fixture-receive-"<>name<>"-"<>T.pack(show n)
+            atomicModifyIORef' addresses (\old->((label,address):old,()))
+            pure (String address)
+          ("getaddressinfo",[String address]) -> do
+            labels <- map fst . filter ((==address).snd) <$> readIORef addresses
+            pure $ object ["address" .= address,"labels" .= labels,"ismine" .= True,"solvable" .= True,
+              "ischange" .= False,"scriptPubKey" .= ("0014"<>T.replicate 40 "1")]
+          _ -> reject ("unexpected_provisioning_rpc:"<>method)
+  pure (OrderTransport (pure 100) (const $ pure ()) (pure ()) native (const $ pure ()),count)
