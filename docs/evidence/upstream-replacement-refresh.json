@@ -1,0 +1,23 @@
+{
+  "repository": "https://github.com/ecash-com/wrapped-ecx",
+  "commit": "b980b4372c4844d3d42ff1926fd0da848631cebc",
+  "matchesPreviouslyReviewedSnapshot": true,
+  "readOnly": true,
+  "fileHashes": {
+    "2-wrap-unwrap-bridge/README.md": "9ab0d3e30628d6705c445a6383921596eb256c9beaddfd9f205db2cf73208862",
+    "2-wrap-unwrap-bridge/backend/README.md": "65ba9f32d8cb52732ee855067c5956eed89bdaa535aed876dd91f48009112e23",
+    "2-wrap-unwrap-bridge/backend/.env.example": "83e035853005f4f912cce20e4fc31d4a04cbf060d1dd484de834eca41d631776",
+    "3-create-amm-pool/README.md": "1c888f6d22e6131911039e4c16e37d6e61d614dab41715781341258653299557"
+  },
+  "bridgeContract": [
+    "Per-order native deposit address",
+    "Solana Pay reference redemption",
+    "Existing SPL treasury; no mint/burn authority"
+  ],
+  "marketContract": [
+    "Separate pool setup through hosted tooling",
+    "Full-range constant-product pool requested",
+    "LP lock proof is separate operator evidence"
+  ],
+  "scope": "No new upstream commit or funded market acceptance; documentation alignment only"
+}

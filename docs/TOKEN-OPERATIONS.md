@@ -64,7 +64,13 @@ That requires the complete issuance, reserve and redemption records.
 
 Use a separate liquidity wallet and the actual token pair. Follow Orca's
 [pool creation procedure](https://docs.orca.so/create/pools/clmm); keep pool,
-position, initial funding, authority and subsequent fee records. External pool
+position, initial funding, authority and subsequent fee records. The reviewed
+upstream vision calls for a full-range constant-product pool: select Orca
+full-range/Splash rather than a finite concentrated price range. Verify the
+actual created pool parameters; the linked CLMM documentation alone does not
+prove that choice. Retain separately verifiable LP ownership/lock evidence if
+publishing a liquidity-lock claim. A bridge ledger does not establish an LP lock.
+External pool
 or vault management handles any fee reinvestment. The bridge does not place
 liquidity, auto-compound yields or manage positions with customer custody keys.
 Do not manually move server inventory into a pool without a supported ledger
@@ -75,3 +81,8 @@ canonical mint, pool identity, token pair and an actual route/quote. The current
 configuration deliberately excludes trading links on Devnet. A visible link
 is not evidence of liquidity or executable routing. Market availability and
 canonical backing acceptance remain open release gates.
+
+An October 2 read-only upstream refresh found the same reviewed commit
+`b980b4372c4844d3d42ff1926fd0da848631cebc`. The server conversion contract still
+uses native per-order addresses and Solana Pay references, with no bridge
+mint/burn authority. See `evidence/upstream-replacement-refresh.json`.
