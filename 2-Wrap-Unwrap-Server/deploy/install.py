@@ -197,7 +197,7 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
         source = args.config_dir.resolve(strict=True)
         worker = json.loads((source / "worker.json").read_text())
         helper = json.loads((source / "helper.json").read_text())
-        required = {"dbPath": "/var/lib/ecx-bridge/private/ledger.sqlite", "customerSocket": "/run/ecx-bridge/customer/api.sock", "adminSocket": "/run/ecx-bridge/admin/api.sock", "signerPort": 8081, "signerAuthFile": "/etc/ecx-bridge/signing.auth", "solanaSdkLibrary": "/opt/ecx-bridge/current/lib/libecx_solana_sdk.so"}
+        required = {"customerSocket": "/run/ecx-bridge/customer/api.sock", "adminSocket": "/run/ecx-bridge/admin/api.sock", "signerPort": 8081, "signerAuthFile": "/etc/ecx-bridge/signing.auth", "solanaSdkLibrary": "/opt/ecx-bridge/current/lib/libecx_solana_sdk.so"}
         if any(worker.get(k) != v for k, v in required.items()):
             raise ValueError("Configuration must use the documented managed paths")
         if any(helper.get(k) != worker.get(v) for k, v in (("deployment_id", "deploymentId"), ("mint", "mint"), ("custody_owner", "custodyOwner"))):

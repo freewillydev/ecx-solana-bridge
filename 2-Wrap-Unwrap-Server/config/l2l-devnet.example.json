@@ -11,7 +11,6 @@
   "mint": "REQUIRED_REAL_DEVNET_MINT",
   "custodyOwner": "REQUIRED_DEVNET_CUSTODY_OWNER",
   "custodyAta": "REQUIRED_DEVNET_CUSTODY_ATA",
-  "dbPath": "/var/lib/ecx-bridge/private/ledger.sqlite",
   "customerSocket": "/run/ecx-bridge/customer/api.sock",
   "adminSocket": "/run/ecx-bridge/admin/api.sock",
   "signerPort": 8081,

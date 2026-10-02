@@ -154,11 +154,11 @@ Required managed paths in `worker.json`:
 
 | Field | Value |
 | --- | --- |
-| `dbPath` | `/var/lib/ecx-bridge/private/ledger.sqlite` |
 | `customerSocket` | `/run/ecx-bridge/customer/api.sock` |
 | `adminSocket` | `/run/ecx-bridge/admin/api.sock` |
-| `helperPath` | `/opt/ecx-bridge/current/deploy/helper-sandbox.sh` |
-| `helperConfig` | `/etc/ecx-bridge/helper.json` |
+| `signerPort` | `8081` |
+| `signerAuthFile` | `/etc/ecx-bridge/signing.auth` |
+| `solanaSdkLibrary` | `/opt/ecx-bridge/current/lib/libecx_solana_sdk.so` |
 
 With `--with-signet`, also use `nativeRpc: http://127.0.0.1:29432` and
 `nativeCookie: /run/ecx-node/rpc.cookie`. The installer creates or loads
@@ -166,8 +166,12 @@ the configured descriptor wallet in this dedicated node. It does not replace an
 existing wallet. Synchronization proceeds against the real public network;
 checkpoint validation remains the application's responsibility.
 
-`dbPath` remains a legacy configuration field for compatibility; the PostgreSQL
-worker does not open it. Database settings live in the private `postgres.env`,
+Remove the retired `dbPath` field from existing worker configurations before
+using this build. It never selected the PostgreSQL database and is now rejected
+as an unknown field. This does not change the deployment fingerprint or saved
+orders. Keep historical SQLite files preserved for any separately reviewed
+migration; the installer still refuses to replace an existing legacy ledger.
+Database settings live in the private `postgres.env`,
 using `/run/ecx-postgres`, port 29436 and database `ecx_bridge`. PostgreSQL listens
 only on its private Unix socket. Peer mapping gives the worker a restricted
 `ecx_worker` role and safe evaluation a SELECT-only `ecx_read` role. The dedicated

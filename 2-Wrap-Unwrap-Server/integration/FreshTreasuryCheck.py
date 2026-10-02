@@ -96,7 +96,7 @@ else:raise RuntimeError('Real funding awaiting finality; saved transfers must be
 helper={'deployment_id':'fresh-treasury-acceptance','mint':source['mint'],'custody_owner':funding['custodyOwner'],'signer_path':str(state/'custody.keypair.json')}
 save('helper.json',helper)
 sockets=Path('/tmp/ecx-fresh-treasury');sockets.mkdir(mode=0o700,exist_ok=True);sockets.chmod(0o700)
-config=dict(source,deploymentId=helper['deployment_id'],nativeWallet=wallet,nativeCheckpointHeight=origin['checkpointHeight'],nativeCheckpointHash=origin['checkpointHash'],custodyOwner=funding['custodyOwner'],custodyAta=funding['custodyAta'],solanaHistoryStart=sig,solanaOperatingHistoryStart=sig,helperConfig=str(state/'helper.json'),dbPath=str(state/'unused.sqlite'),customerSocket=str(sockets/'customer.sock'),adminSocket=str(sockets/'admin.sock'))
+config=dict(source,deploymentId=helper['deployment_id'],nativeWallet=wallet,nativeCheckpointHeight=origin['checkpointHeight'],nativeCheckpointHash=origin['checkpointHash'],custodyOwner=funding['custodyOwner'],custodyAta=funding['custodyAta'],solanaHistoryStart=sig,solanaOperatingHistoryStart=sig,helperConfig=str(state/'helper.json'),customerSocket=str(sockets/'customer.sock'),adminSocket=str(sockets/'admin.sock'))
 save('config.json',config)
 existing=command('psql','-XqAt','-d','postgres','-c',"SELECT 1 FROM pg_database WHERE datname='ecx_fresh_treasury_acceptance'").strip()
 if not existing:

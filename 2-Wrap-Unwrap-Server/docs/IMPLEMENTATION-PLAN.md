@@ -252,6 +252,9 @@ The sequence below remains the broader refactor checklist, subject to that prior
    Custody inspection/recording now lives together in Reconciliation, rather than
    creating a cycle through a backend adapter. Ledger queries and transaction
    boundaries are unchanged by this consolidation.
+   The unused SQLite dbPath setting and its validation are removed. Existing
+   configs must omit it; the financial identity hash and old-ledger refusal remain
+   unchanged.
    The remaining PaymentStore module is now removed: settlement queries live with
    settlement mutations, custody queries live with custody checks, and native
    families use their existing validator directly. One domain View replaces the

@@ -151,7 +151,7 @@ releaseAuthentication fault seed arch = withDir $ \dir->do
 amt :: Integer -> Amount
 amt n = either (error . T.unpack) id (amount n)
 cfg :: FilePath -> Config
-cfg dir = Config L2LSignetDevnet "unit-fixture" "http://127.0.0.1:29432" (dir</>"cookie") "fixture-wallet" 16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47" "https://api.devnet.solana.com" Nothing "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM" "RWjpjjkpABkEGomLbZYyN53pA3FVdPXp9izJ25wErGX" "11111111111111111111111111111111" (dir</>"private/ledger") (dir</>"customer/api.sock") (dir</>"admin/api.sock") 8081 (dir</>"signing.auth") (dir</>"sdk-library") (amt 2) (amt 1000000000000) 100 300 600 1 (amt 1000) (amt 10000) False Nothing (amt 0) Nothing (amt 100000) (amt 100000000)
+cfg dir = Config L2LSignetDevnet "unit-fixture" "http://127.0.0.1:29432" (dir</>"cookie") "fixture-wallet" 16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47" "https://api.devnet.solana.com" Nothing "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM" "RWjpjjkpABkEGomLbZYyN53pA3FVdPXp9izJ25wErGX" "11111111111111111111111111111111" (dir</>"customer/api.sock") (dir</>"admin/api.sock") 8081 (dir</>"signing.auth") (dir</>"sdk-library") (amt 2) (amt 1000000000000) 100 300 600 1 (amt 1000) (amt 10000) False Nothing (amt 0) Nothing (amt 100000) (amt 100000000)
 req :: OrderRequest
 req=OrderRequest NativeToWrapped (amt 100000) "fixture-solana-recipient" "fixture-native-refund" Nothing "retry-key"
 withDir :: (FilePath -> IO a) -> IO a
@@ -530,6 +530,14 @@ main=hspec $ do
         rpc manager ("http://127.0.0.1:"<>show port) Nothing "walletprocesspsbt" []
           `shouldThrow` isError "rpc_method_forbidden"
   describe "operator configuration boundaries" $ do
+    it "preserves deployment identity after removing the unused SQLite setting" $ do
+      let c=cfg "/tmp/config-policy"
+      eitherDecode (encode c) `shouldBe` Right c
+      fingerprint c `shouldBe` "e000426dd3543bf975bbe89250ec03c146ce5280167ea2fa7818865db6cb9b93"
+    it "rejects retired storage and helper settings instead of silently ignoring them" $ property $
+      forAll (elements ["dbPath","helperPath","helperConfig"]) $ \name->
+        let obsolete=setPath [name] (String "/unused/legacy") (toJSON $ cfg "/tmp/config-policy")
+        in case eitherDecode (encode obsolete) :: Either String Config of Left _->True; Right _->False
     it "rejects aliases of the primary RPC as an independent provider" $ do
       forM_ ["https://api.devnet.solana.com/other", "https://api.devnet.solana.com?key=other",
              "https://api.devnet.solana.com:443", "https://API.DEVNET.SOLANA.COM",
