@@ -1840,3 +1840,18 @@ See `evidence/solana-inflight-funding-prerequisite.json`. After funding, inspect
 and resolve the unsigned preparation journal and quote deadline explicitly before
 continuing; do not blindly reset it or treat the created order as funded. The
 guarded in-flight handoff and actual clean-host recovery still require acceptance.
+
+## Official faucet funding obtained
+
+The official Drivechain Signet faucet reported healthy available funds. Its
+deployed frontend uses `/api/faucet.v1.FaucetService/DispenseCoins`; a single
+request for 0.0001 coins to the dedicated restored tester address returned
+`e4fec8eebd1b24cbbc42a44b2a01326ae495e51bd5aad088ecc034278fe9b89d`.
+The actual local L2L Signet node, with the required challenge, independently saw
+the transaction and its exact 10000-base-unit funding output. It was unconfirmed
+at the recorded check. No second faucet request was made.
+
+See `evidence/l2l-faucet-funding.json`. After confirmation, inspect the retained
+unsigned preparation journal and quote deadline before continuing acceptance.
+This funds the tester rather than bridge custody and does not itself prove
+in-flight Solana recovery.
