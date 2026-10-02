@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Retire and archive the dedicated two-paid-order Signet/Devnet fixture.
+"""Retire and archive the dedicated reviewed Signet/Devnet fixture.
 
 Root-only test handoff. Retains original data; disables source services. No chain
 send or key deletion. A retired host cannot be reactivated by fence initialization.
 """
+import argparse
 import hashlib
 import json
 import os
@@ -11,6 +12,10 @@ from pathlib import Path
 import subprocess
 import sys
 
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--signed-native-fixture', action='store_true',
+                    help='Retire the exact reviewed five-order signed-native checkpoint')
+args = parser.parse_args()
 assert os.geteuid() == 0
 sys.dont_write_bytecode = True
 current = Path('/opt/ecx-bridge/current').resolve(strict=True)
@@ -36,9 +41,27 @@ def sql(query):
     return run('runuser', '-u', 'postgres', '--', 'psql', '-XqAt', '-v',
                'ON_ERROR_STOP=1', '-c', query)
 
-assert sql('SELECT count(*) FROM orders;') == '2'
-assert sql("SELECT count(*) FROM orders WHERE status <> 'Paid';") == '0'
-assert sql("SELECT count(*) FROM attempts WHERE state <> 'settled';") == '0'
+if args.signed_native_fixture:
+    order = '6632ca65986747e3cd135735ca23d1d0e6420f6b7fed43161a851543e188c49a'
+    txid = 'f4aa18204d8c5d4dad583f0638887a5e7d0b3c84169226dccd4148539d6c8013'
+    assert sql("SELECT count(*) FROM orders;") == '5'
+    assert sql("SELECT count(*) FROM orders WHERE status='Paid';") == '2'
+    assert sql("SELECT count(*) FROM orders WHERE status='ExpiredUnfunded';") == '2'
+    assert sql("SELECT count(*) FROM orders WHERE id='" + order + "' AND status='Paying';") == '1'
+    assert sql("SELECT count(*) FROM attempts;") == '3'
+    assert sql("SELECT count(*) FROM attempts WHERE state='settled';") == '2'
+    assert sql("SELECT count(*) FROM attempts WHERE txid='" + txid + "' AND intent_id='convert:" + order + "' AND state='signed' AND critical_sequence IS NULL;") == '1'
+    # Hash locally without emitting custody transaction bytes.
+    saved = sql("SELECT signed_bytes FROM attempts WHERE txid='" + txid + "';")
+    assert hashlib.sha256(saved.encode()).hexdigest() == '51ac16fd2efb5eb5ccbfbee548c8e62f19af6bff2b9e7a17691da8f1c4eb71d1'
+    del saved
+    assert sql("SELECT count(*) FROM fee_reservations WHERE intent_id='convert:" + order + "' AND released=0;") == '1'
+    assert sql("SELECT count(*) FROM reservations WHERE order_id='" + order + "' AND phase='payment';") == '1'
+    assert sql('SELECT critical_sequence FROM deployment;') == '12'
+else:
+    assert sql('SELECT count(*) FROM orders;') == '2'
+    assert sql("SELECT count(*) FROM orders WHERE status <> 'Paid';") == '0'
+    assert sql("SELECT count(*) FROM attempts WHERE state <> 'settled';") == '0'
 units = ['ecx-bridge-worker.service', 'ecx-bridge-web.service',
          'ecx-bridge-backup.timer', 'ecx-bridge-node.service']
 run('systemctl', 'disable', '--now', *units)

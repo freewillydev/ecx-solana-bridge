@@ -269,9 +269,11 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
     postgres.install(target, config, mkdir, keep, args.legacy_snapshot)
     for name in ("ecx-bridge-backup.service", "ecx-bridge-backup.timer"):
         keep(Path("/etc/systemd/system") / name, (target / "deploy" / name).read_bytes(), 0o644)
+    payment_mode_added = False
     if args.test_worker or args.backed_test_worker:
         mkdir("/etc/systemd/system/ecx-bridge-worker.service.d", 0o755)
         command = "postgres-backed-test-worker /etc/ecx-bridge/worker.json /etc/ecx-bridge/backup.json" if args.backed_test_worker else "postgres-test-worker /etc/ecx-bridge/worker.json"
+        payment_mode_added = not Path("/etc/systemd/system/ecx-bridge-worker.service.d/test.conf").exists()
         keep("/etc/systemd/system/ecx-bridge-worker.service.d/test.conf", ("[Service]\nExecStart=\nExecStart=/opt/ecx-bridge/current/bin/ecx-bridge " + command + "\n").encode(), 0o644)
     # Switch only after configuration, schema and unit setup have succeeded.
     from upgrade import atomic_link
@@ -300,6 +302,10 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
     if config.exists():
         run("systemctl", "enable", "--now", "ecx-bridge-backup.timer")
         run("systemctl", "enable", "--now", "ecx-bridge-worker.service", "ecx-bridge-web.service")
+        if payment_mode_added:
+            # daemon-reload changes future starts, not an active observer process.
+            # Existing paying repeat installs retain their running process.
+            run("systemctl", "restart", "ecx-bridge-worker.service")
         for _ in range(30):
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=2) as response:

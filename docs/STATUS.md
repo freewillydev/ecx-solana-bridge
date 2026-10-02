@@ -1271,3 +1271,30 @@ Source journals, the accepted normalized Linux binary and private snapshot are
 retained. The source is paused/stopped with its observation-only override retained;
 all task VMs are stopped. Actual key/ledger handoff to another clean guest and
 resumption to one settlement are the next steps, not claimed complete here.
+
+## Interrupted native payment restored on a clean Ubuntu guest
+
+The exact five-order checkpoint was archived with the source services disabled
+and its fence permanently retired. The existing settled-fixture handoff guard
+remains; a separate explicit mode accepts only the reviewed signed transaction,
+its byte hash, the five expected order states, fee hold and payment reservation.
+
+A new Ubuntu guest installed the same compiled release without a build, restored
+all 38 ledger tables and three native wallet databases, and initialized a new
+fence at sequence 12 in observation-only mode. Cached preparation replay preserved
+the exact signed bytes and financial state without invoking RPC or signing. The
+real Signet node synchronized; all three observers passed. Explicit reviewed
+resume then broadcast the original transaction, advancing sequence to 13 with
+exactly one saved attempt. A guarded restart preserved eight financial groups.
+Native confirmation and final settlement are still pending, not assumed complete.
+See `evidence/installed-native-inflight-restore.json`.
+
+The installed mode transition exposed an installer gap: daemon-reload did not
+replace an active observer process. Source tooling now restarts the worker when
+payment mode is first added, while ordinary paying repeat installs remain running.
+The 21 installer contracts pass. Deployment-only ARM64 release
+`7fcc24ca70e84e579da93f22` passed stopped upgrade and observer-to-paying mode
+transition on the same guest; the active process was verified through `/proc`,
+and reviewed resume succeeded. Its installer was retained and checksum-verified
+on the host. The corresponding x86 package acceptance remains. No compiled
+application or dependencies changed.
