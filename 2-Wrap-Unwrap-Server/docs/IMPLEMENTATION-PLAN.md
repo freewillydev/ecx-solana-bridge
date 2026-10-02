@@ -148,12 +148,28 @@ replacement/cancellation and loss-cover acceptance must be reverified against th
 current PostgreSQL DSL and dedicated signer. Removing the obsolete backend does
 not establish parity of every former SQLite fixture or complete release acceptance.
 
+Unused adapter convenience functions and four run-specific native/Solana probes
+are removed. Production flows use the checked workflow primitives; captured
+protocol fixtures and current acceptance runners remain. The obsolete probes
+are recoverable from Git history, and `file-embed` is no longer a direct dependency.
+
 Cabal project and dependency lock are at the repository root. Its tracked build
 hook generates the native SDK artifact before compiling Haskell and tracks Rust
-source/lock/toolchain inputs. `cabal test` also runs the SDK's own contracts. Finish
-the GHC JavaScript frontend and integrate its separate compiler into this same
-Cabal entry point, then remove npm/TypeScript and obsolete build wrappers. Do not
-claim the whole-project Cabal-only conversion until that is done.
+source/lock/toolchain inputs. `cabal test` also runs the SDK's own contracts. The GHC JavaScript frontend now builds through the same Cabal entry point,
+with a separate frozen pure dependency graph and shared domain types. Its real
+observation-only API browser checks cover configuration, rounded fees, precision,
+direction switching, recovery-fragment stripping, saved reload and missing-order
+errors without console errors. TypeScript/npm application files and build commands
+are removed. Full funded browser/Solana Pay flows remain acceptance work. Linux
+cross-compiler/bootstrap and its runtime notices remain release packaging gates;
+the local Cabal build does not prove a clean Linux release.
+
+The private signing Servant boundary now lives in `Bridge.Operator`: only
+sign-preparation, draft-replacement and sign-replacement. Handlers package critical
+existential requests; the hoist resolves `SigningDSL` and serializes evaluation.
+`Bridge.Signer` retains independent ledger checks and signing credentials. The
+existing private control protocol is preserved separately in `Bridge.Control`;
+this change does not remove pause/refund/recovery functionality or add public routes.
 
 ## Reinstall and recovery contract
 

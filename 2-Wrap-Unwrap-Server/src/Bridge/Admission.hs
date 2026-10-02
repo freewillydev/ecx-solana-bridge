@@ -1,4 +1,4 @@
-module Bridge.Admission (checkSolanaQuoteFor, SolanaQuoteCheck(..), checkSolanaQuote, checkSolanaQuoteWith) where
+module Bridge.Admission (checkSolanaQuoteFor, SolanaQuoteCheck(..), checkSolanaQuoteWith) where
 
 import Bridge.Config
 import Bridge.RPC
@@ -21,11 +21,6 @@ data SolanaQuoteCheck = SolanaQuoteCheck
   , checkedSolanaFee :: !Amount, checkedSolanaRent :: !Amount
   , checkedSolanaDepositFee :: !(Maybe Amount)
   } deriving (Eq,Show,Generic,ToJSON)
-
-checkSolanaQuote :: Manager -> Config -> OrderRequest -> IO SolanaQuoteCheck
-checkSolanaQuote manager c request = do
-  _ <- solanaIdentity manager c
-  checkSolanaQuoteWith (solanaCall manager c) (invokeUnsignedHelper c) c request
 
 checkSolanaQuoteFor :: Manager -> Config -> Quote -> OrderRequest -> IO SolanaQuoteCheck
 checkSolanaQuoteFor manager c quote request = do

@@ -8,7 +8,7 @@ category: Finance
 license: MIT
 license-file: LICENSE
 build-type: Hooks
-extra-source-files: migrations/postgresql/*.sql, config/*.json, web/*.html, web/*.css, docs/*.md,
+extra-source-files: migrations/postgresql/*.sql, config/*.json, web/*.html, web/*.css, web/*.hs, web/*.cabal, web/cabal.project*, docs/*.md,
                     test/fixtures/*.json, solana-helper/Cargo.toml, solana-helper/Cargo.lock,
                     solana-helper/src/lib.rs, rust-toolchain.toml
 
@@ -24,16 +24,16 @@ common settings
 library
   import: settings
   hs-source-dirs: src
-  autogen-modules: Bridge.SDKBuild
+  autogen-modules: Bridge.SDKBuild, Bridge.BrowserBuild
   other-modules: Bridge.Operation.Internal, Bridge.Postgres.Catalog
-  exposed-modules: Bridge.SDKBuild, Bridge.Operator, Bridge.Signer, Bridge.Postgres.FeeWithdrawal, Bridge.Ledger.Model, Bridge.Postgres.Treasury, Bridge.Postgres.Fence, Bridge.Postgres.Backup, Bridge.Postgres.LossCover, Bridge.Postgres.Replacement, Bridge.Postgres.NativeRecovery, Bridge.Postgres.NativeFamily, Bridge.Postgres.Cancellation, Bridge.Postgres.Retry, Bridge.Postgres.Maintenance, Bridge.Postgres.Startup, Bridge.Postgres.Refund, Bridge.SolanaPay, Bridge.Operation, Bridge.Postgres.Server, Bridge.Postgres.Runtime, Bridge.Postgres.Settlement, Bridge.Postgres.Preparation, Bridge.Postgres.PaymentStore, Bridge.Postgres.Custody, Bridge.Postgres.Source, Bridge.Postgres.Observation, Bridge.Postgres.Order, Bridge.Postgres.Ledger, Bridge.Postgres.Schema, Bridge.Types, Bridge.Config, Bridge.Reconciliation, Bridge.Recovery, Bridge.Reorg, Bridge.RPC, Bridge.Native, Bridge.NativePayment, Bridge.NativeReplacement, Bridge.Payment, Bridge.Settlement, Bridge.Order, Bridge.Admission, Bridge.Solana, Bridge.SolanaHelper, Bridge.SolanaPayment, Bridge.SolanaMessage, Bridge.SolanaDeposit, Bridge.Observer, Bridge.Process, Bridge.API, Bridge.Web
+  exposed-modules: Bridge.BrowserBuild, Bridge.Model, Bridge.SDKBuild, Bridge.Control, Bridge.Operator, Bridge.Signer, Bridge.Postgres.FeeWithdrawal, Bridge.Ledger.Model, Bridge.Postgres.Treasury, Bridge.Postgres.Fence, Bridge.Postgres.Backup, Bridge.Postgres.LossCover, Bridge.Postgres.Replacement, Bridge.Postgres.NativeRecovery, Bridge.Postgres.NativeFamily, Bridge.Postgres.Cancellation, Bridge.Postgres.Retry, Bridge.Postgres.Maintenance, Bridge.Postgres.Startup, Bridge.Postgres.Refund, Bridge.SolanaPay, Bridge.Operation, Bridge.Postgres.Server, Bridge.Postgres.Runtime, Bridge.Postgres.Settlement, Bridge.Postgres.Preparation, Bridge.Postgres.PaymentStore, Bridge.Postgres.Custody, Bridge.Postgres.Source, Bridge.Postgres.Observation, Bridge.Postgres.Order, Bridge.Postgres.Ledger, Bridge.Postgres.Schema, Bridge.Types, Bridge.Config, Bridge.Reconciliation, Bridge.Recovery, Bridge.Reorg, Bridge.RPC, Bridge.Native, Bridge.NativePayment, Bridge.NativeReplacement, Bridge.Payment, Bridge.Settlement, Bridge.Order, Bridge.Admission, Bridge.Solana, Bridge.SolanaHelper, Bridge.SolanaPayment, Bridge.SolanaMessage, Bridge.SolanaDeposit, Bridge.Observer, Bridge.Process, Bridge.API, Bridge.Web
   build-depends:
     base >=4.20 && <4.23, aeson >=2.2 && <2.4, async >=2.2 && <2.3,
     base16-bytestring >=1 && <1.1, base58-bytestring >=0.1 && <0.2,
     base64-bytestring >=1.2 && <1.3, binary >=0.8 && <0.9,
     bytestring >=0.11 && <0.13, containers >=0.6 && <0.9,
     crypton >=1 && <1.2, directory >=1.3 && <1.4, filepath >=1.4 && <1.6,
-    file-embed >=0.0.16 && <0.1, filelock >=0.1 && <0.2, http-client >=0.7 && <0.8,
+    filelock >=0.1 && <0.2, http-client >=0.7 && <0.8,
     http-client-tls >=0.4 && <0.5, http-types >=0.12 && <0.13,
     ram >=0.22 && <0.23, network >=3.1 && <3.3,
     process >=1.6 && <1.7, scientific >=0.3 && <0.4,

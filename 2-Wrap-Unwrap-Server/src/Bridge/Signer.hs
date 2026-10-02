@@ -22,28 +22,23 @@ import qualified Bridge.Postgres.Order as Order
 import Bridge.Postgres.Custody (freshC)
 import Bridge.RPC (newRpcManager)
 import Bridge.Observer (epochSeconds)
-import Bridge.Web (asHandler,runUnix,securityBoundary)
+import Bridge.Operator (runSigningServer)
 import Control.Exception (bracket)
-import Control.Concurrent.MVar (newMVar,withMVar)
 import Control.Monad (when)
 import Data.Aeson
 import qualified Data.ByteString as BS
 import qualified Data.Text.Encoding as TE
 import qualified Data.Text as T
 import Data.Text (Text)
-import Data.Int (Int64)
 import GHC.Generics (Generic)
 import System.IO (withBinaryFile,IOMode(ReadMode))
-import System.FilePath (isAbsolute,takeDirectory)
-import System.Directory (createDirectoryIfMissing)
-import System.FileLock (withFileLock,SharedExclusive(Exclusive))
+import System.FilePath (isAbsolute)
 import System.Posix.Files (getFileStatus,fileMode)
 import Data.Bits ((.&.))
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Database.PostgreSQL.Simple.Transaction as Tx
 import qualified Opaleye as O
 import Network.HTTP.Client (Manager,closeManager)
-import Servant
 
 -- Only the signer receives this private file. It holds no broadcast endpoint.
 data SignerConfig = SignerConfig
@@ -51,16 +46,6 @@ data SignerConfig = SignerConfig
   deriving (Generic)
 instance FromJSON SignerConfig where
   parseJSON=genericParseJSON defaultOptions{rejectUnknownFields=True}
-
-type SigningAPI = "sign-preparation" :> ReqBody '[JSON] (Text,Text,Int) :> Post '[JSON] Value
-  :<|> "draft-replacement" :> ReqBody '[JSON] (Text,Text,Amount) :> Post '[JSON] Value
-  :<|> "sign-replacement" :> ReqBody '[JSON] (Text,Int64) :> Post '[JSON] Value
-signingAPI :: Proxy SigningAPI
-signingAPI=Proxy
-server :: ServerT SigningAPI Plan
-server=(\(identity,intent,generation)->signing(SignPrepared identity intent generation))
-  :<|> (\(identity,parent,fee)->signing(DraftReplacement identity parent fee))
-  :<|> (\(identity,sequenceNo)->signing(SignReplacement identity sequenceNo))
 
 -- The socket accepts durable identifiers only, never a plan, key, raw bytes,
 -- arbitrary method or executable callback. The result type stays in the DSL.
@@ -81,16 +66,8 @@ runSigner settings cfg privateFile = do
   Maintenance.verifySigner cfg (solanaSigningKey private)
   bracket (PG.connect settings) PG.close $ \c->
     Tx.withTransactionMode (Tx.TransactionMode Tx.RepeatableRead Tx.ReadOnly) c (verifyReadRole c)
-  gate <- newMVar ()
-  bracket newRpcManager closeManager $ \manager->do
-    let interpret :: forall a. Plan a -> Handler a
-        interpret (SigningPlan request)=asHandler $ withMVar gate $ \_->case resolve request of
-          SigningDSL command->evaluateSigner settings manager cfg private command
-          _->reject "signer_command_required"
-        interpret _=asHandler(reject "signer_command_required")
-    app <- securityBoundary (serve signingAPI (hoistServer signingAPI interpret server))
-    createDirectoryIfMissing True (takeDirectory $ signerSocket cfg)
-    withFileLock (signerSocket cfg<>".lock") Exclusive $ \_->runUnix (signerSocket cfg) 0o660 app
+  bracket newRpcManager closeManager $ \manager ->
+    runSigningServer cfg (evaluateSigner settings manager cfg private)
 
 -- Each read transaction ends before RPC/FFI. Re-read the exact authorization
 -- before returning any signature; an intervening cancellation withholds it.

@@ -72,7 +72,6 @@ resolve :: Request s a -> DSL s a
 resolve (Request operation) = command operation
 
 data Plan a where
-  SigningPlan :: Request 'Critical a -> Plan a
   SafePlan :: Request 'Safe a -> Plan a
   CustomerPlan :: Request 'Critical a -> Plan a
   OperatorPlan :: Request 'Critical a -> Plan a
@@ -86,6 +85,3 @@ operator :: OperatorOperation a -> Plan a
 operator operation = OperatorPlan (Request operation)
 worker :: WorkerOperation a -> Plan a
 worker operation = WorkerPlan (Request operation)
-
-signing :: SigningOperation a -> Plan a
-signing operation = SigningPlan (Request operation)

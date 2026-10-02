@@ -80,6 +80,3 @@ solanaHistory manager c = solanaAddressHistory manager c (custodyAta c)
 solanaAddressHistory :: Manager -> Config -> Text -> Maybe Text -> Maybe Text -> IO Value
 solanaAddressHistory manager c address before untilSig = solanaCall manager c "getSignaturesForAddress"
   [toJSON address,object $ ["commitment" .= ("finalized"::Text),"limit" .= (100::Int)] <> maybe [] (\t->["before" .= t]) before <> maybe [] (\t->["until" .= t]) untilSig]
-broadcastSolana :: Manager -> Config -> Text -> IO Text
-broadcastSolana manager c bytes = solanaCall manager c "sendTransaction"
-  [toJSON bytes,object ["encoding" .= ("base64"::Text),"skipPreflight" .= False,"preflightCommitment" .= ("confirmed"::Text),"maxRetries" .= (0::Int)]] >>= parseValue parseJSON

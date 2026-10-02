@@ -1,6 +1,6 @@
 module Main where
 import Bridge.Config
-import Bridge.Operator (callControl)
+import Bridge.Control (callControl)
 import qualified Bridge.Signer as Signer
 import qualified Bridge.Postgres.Runtime as Postgres
 import qualified Bridge.Postgres.Backup as Backup
@@ -76,7 +76,7 @@ main = go `catch` (\(BridgeError code) -> LBS.putStrLn (encode $ object ["error"
       cfg <- loadConfig path
       settings <- postgresSettings
       Postgres.runTestWorker settings cfg
-    _ -> die "Usage: ecx-bridge signer CONFIG PRIVATE_SIGNER_CONFIG (SELECT-only PG role) | version | check-config CONFIG | check-interface CONFIG INTERFACE | check-signer CONFIG KEYFILE | doctor CONFIG | postgres-init CONFIG | postgres-init-worker-fence CONFIG (stopped worker, ECX_WORKER_FENCE_DIR) | postgres-retire-worker CONFIG (stopped worker) | postgres-test-worker CONFIG (PG* settings, real Devnet profiles) | check-backup BACKUP_CONFIG | postgres-backed-test-worker CONFIG BACKUP_CONFIG | postgres-api CONFIG | worker CONFIG (PostgreSQL observer alias) | test-worker CONFIG (PostgreSQL paying alias) (ECX_PORT defaults to 8080; ECX_ASSETS defaults to web). Financial operator actions: operator CONFIG < command.json (private local socket; no HTTP)."
+    _ -> die "Usage: ecx-bridge signer CONFIG PRIVATE_SIGNER_CONFIG (SELECT-only PG role) | version | check-config CONFIG | check-interface CONFIG INTERFACE | check-signer CONFIG KEYFILE | doctor CONFIG | postgres-init CONFIG | postgres-init-worker-fence CONFIG (stopped worker, ECX_WORKER_FENCE_DIR) | postgres-retire-worker CONFIG (stopped worker) | postgres-test-worker CONFIG (PG* settings, real Devnet profiles) | check-backup BACKUP_CONFIG | postgres-backed-test-worker CONFIG BACKUP_CONFIG | postgres-api CONFIG | worker CONFIG (PostgreSQL observer alias) | test-worker CONFIG (PostgreSQL paying alias) (ECX_PORT defaults to 8080; ECX_ASSETS defaults to Cabal-generated browser assets). Financial operator actions: operator CONFIG < command.json (private local socket; no HTTP)."
 
 
 postgresSettings :: IO PG.ConnectInfo

@@ -1,7 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.NativeReplacement
   ( replacementOutputs, validateNativeFamily, validateNativeReplacementDraft
-  , draftNativeReplacement, draftNativeReplacementWith
+  , draftNativeReplacementWith
   , NativeFamilyView(..), readNativeFamilyWith, signNativeReplacementDraftWith ) where
 
 import Bridge.Config
@@ -19,7 +19,6 @@ import Data.List (nub)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Time.Clock.POSIX (getPOSIXTime)
-import Network.HTTP.Client (Manager)
 
 unsignedPsbtInput :: Value -> Bool
 unsignedPsbtInput (Object fields)=all (\key->not $ KM.member key fields)
@@ -201,9 +200,6 @@ validateNativeReplacementDraft family fee draft = do
     && sameNativePrevouts (draftPrevouts draft) (signedNativePrevouts previous)
     && nativeOutputs tx==expected && nativeTxid tx `notElem` map (nativeTxid.signedNativeTransaction) family)
     (Left "native_replacement_draft_changed")
-
-draftNativeReplacement :: Manager -> Config -> [NativeSigned] -> Amount -> IO NativeDraft
-draftNativeReplacement manager c=draftNativeReplacementWith (nativeCall manager c) c
 
 -- This is an unsigned adapter primitive, not operator authorization. It does
 -- not lock, reserve, sign, send or allocate keys. Durable family intent, backup,

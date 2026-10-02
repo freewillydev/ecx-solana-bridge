@@ -149,3 +149,5 @@ select:focus {
 [hidden] {
   display: none;
 }
+
+#qr { max-width: 100%; height: auto; image-rendering: pixelated; }

@@ -43,8 +43,6 @@ nativeIdentityWith call c = do
   peers <- call False "getconnectioncount" [] >>= parseValue parseJSON :: IO Int
   require (peers>0) "native_no_peers"
   pure info
-validateNativeRecipient :: Manager -> Config -> Text -> IO Text
-validateNativeRecipient manager c = validateNativeRecipientWith (nativeCall manager c)
 validateNativeRecipientWith :: (Bool -> Text -> [Value] -> IO Value) -> Text -> IO Text
 validateNativeRecipientWith call address = do
   require (not (T.null address) && T.length address<=128) "invalid_native_address"
@@ -121,5 +119,3 @@ nativeAmount n
  where e=base10Exponent n+8
 nativeNumber :: Amount -> Value
 nativeNumber a = Number (fromIntegral (units a) / 100000000)
-broadcastNative :: Manager -> Config -> Text -> IO Text
-broadcastNative manager c signed = nativeCall manager c True "sendrawtransaction" [toJSON signed] >>= parseValue parseJSON

@@ -71,6 +71,7 @@ for name in ("ghc-source", "rust-source"):
         notice_module.retain(expanded, tools / "notices" / name)
 node = fetch("node")
 os.environ["PATH"] = f"{tools}/bin:{node}/bin:" + os.environ["PATH"]
+os.environ["ECX_BROWSER_BUILD_DIR"] = str(cache / "browser")
 os.environ["CARGO_HOME"] = str(cache / "cargo")
 os.environ["CARGO_TARGET_DIR"] = str(cache / "cargo-target")
 os.environ["CABAL_DIR"] = str(cache / "cabal")
@@ -103,11 +104,6 @@ run("cabal", "build", "all", *build_args)
 run("cabal", "test", "all", "--test-show-details=direct", *build_args)
 validator = subprocess.check_output(["cabal", "list-bin", "exe:ecx-tls-constraints-check", f"--builddir={cache}/dist"], cwd=root, text=True).strip()
 run("python3", "integration/check-tls-constraints.py", "--validator", validator)
-# npm's content-addressed download cache avoids repeated fetches; retain a clean
-# locked installation so a stale or edited node_modules cannot enter a release.
-run("npm", "ci", "--prefix", "web", "--ignore-scripts", "--prefer-offline", "--no-audit", "--no-fund")
-run("npm", "run", "check", "--prefix", "web")
-run("npm", "run", "build", "--prefix", "web")
 run("python3", "test/installer_test.py")
 binary = subprocess.check_output(["cabal", "list-bin", "exe:ecx-bridge", f"--builddir={cache}/dist"], cwd=root, text=True).strip()
 bundle = cache / "bundle"
@@ -119,10 +115,9 @@ shutil.copy2(binary, bundle / "bin/ecx-bridge")
 shutil.copy2(Path(binary).parent.parent / "autogen/libecx_solana_sdk.so", bundle / "lib/libecx_solana_sdk.so")
 for name in ("bitcoind", "bitcoin-cli"):
     shutil.copy2(fetch("bitcoin") / "bin" / name, bundle / "bin" / name)
-for path in (root / "web").iterdir():
-    if path.suffix in (".html", ".css"):
-        shutil.copy2(path, bundle / "web" / path.name)
-shutil.copytree(root / "web/dist", bundle / "web/dist", dirs_exist_ok=True)
+# Cabal generated both artifacts from their tracked sources.
+autogen = Path(binary).parent.parent / "autogen"
+shutil.copytree(autogen / "web", bundle / "web", dirs_exist_ok=True)
 shutil.copytree(root / "deploy", bundle / "deploy", ignore=shutil.ignore_patterns("__pycache__"), dirs_exist_ok=True)
 shutil.copy2(root / "config/l2l-devnet.example.json", bundle / "config/l2l-devnet.example.json")
 shutil.copy2(root / "config/interface.example.json", bundle / "config/interface.example.json")

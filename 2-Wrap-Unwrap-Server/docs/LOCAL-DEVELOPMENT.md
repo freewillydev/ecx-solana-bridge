@@ -17,8 +17,19 @@ cabal test bridge-test -j1 --offline --test-show-details=failures
 
 Offline builds assume cached dependencies. Cabal builds the pinned Rust SDK FFI
 through its tracked hooks; Rust/Cargo remain prerequisites. SQLite and the legacy
-library are retired. Preserve shared caches and private state. The GHC JavaScript
-browser conversion and its Cabal integration are still pending.
+library are retired. Preserve shared caches and private state. Cabal also builds
+the browser with GHC JavaScript **9.12.2**, Emscripten **3.1.74** and its frozen
+`web/cabal.project.freeze` graph. Only thin browser API bindings use JavaScript FFI;
+application decisions and QR generation are Haskell. No npm step is required.
+
+The hook finds `javascript-unknown-ghcjs-ghc` on PATH, or defaults to
+`~/.local/share/ecx-ghc-js-9.12.2/bin/javascript-unknown-ghcjs-ghc`.
+Set `ECX_GHC_JS` to another compiler path. If `emcc` is not on PATH, the hook uses
+`ECX_EMSDK` (default `~/.local/share/ecx-emsdk`). Set `ECX_BROWSER_BUILD_DIR` to reuse
+an external browser cache. The JavaScript backend uses asm.js for C inputs;
+it is not the GHC WebAssembly backend. Native and browser builds both use one job.
+Generated assets live under Cabal's library autogen directory; Runtime defaults
+to that directory. A deployed bundle overrides it with `ECX_ASSETS`.
 
 The PostgreSQL journal runner covers postings, ownership/row locks, backup receipts,
 idempotent orders and saved policy, concurrent inventory reservations, duplicate/
@@ -42,7 +53,7 @@ Current release gaps are in [RELEASE-REVIEW.md](RELEASE-REVIEW.md).
 
 Use private configuration for real L2L Signet or ECX betanet with Solana Devnet.
 Keep keys, cookies, credentials, ledgers, signed bytes and backups outside Git.
-Build the frontend with `npm ci --prefix web` and `npm run build --prefix web`.
+The root `cabal build all -j1` builds both server and frontend.
 With the configured native node running and private PostgreSQL environment loaded:
 
 ```sh
@@ -54,8 +65,7 @@ Verify executable/arguments before stopping a recorded PID. Run only one paying
 worker per custody identity. Respect persisted fences and retired sources; do not
 enable an old clone or remove an observation-only recovery override to progress an order.
 
-`PGREADUSER` must differ from `PGUSER`. Grant only schema usage, table SELECT and
-sequence SELECT. Startup rejects elevated roles, public-schema creation, table/
+`PGREADUSER` must differ from `PGUSER`. Grant only schema usage, table SELECT. Startup rejects elevated roles, public-schema creation, table/
 column writes and sequence use, including inherited grants. Readers use
 `PGREADPASSWORD` only when supplied; safe operations use read-only transactions.
 Do not weaken these checks to start a misconfigured instance.

@@ -1,7 +1,7 @@
 -- Solana Pay v1 transfer requests and validation of finalized RPC effects.
 module Bridge.SolanaPay
-  ( PayBinding(..), payInstruction, payReference, payURI, payURIFor, transactionKeys, verifyPay ) where
-import Bridge.Config (Config(..),tokenProgram)
+  ( PayBinding(..), payInstruction, payReference, payURIFor, transactionKeys, verifyPay ) where
+import Bridge.Config (tokenProgram)
 import Bridge.Types
 import Bridge.SolanaDeposit (SolanaDeposit(..))
 import Bridge.SolanaMessage (publicKey)
@@ -29,8 +29,6 @@ payReference oid = do
   if BS.length raw/=32 then Left "invalid_order_reference" else Right(TE.decodeUtf8 $ B58.encodeBase58 B58.bitcoinAlphabet raw)
 payInstruction :: Text -> Either Text Text
 payInstruction oid = ("solana-pay:"<>) <$> payReference oid
-payURI :: Config -> Text -> Amount -> Either Text Text
-payURI cfg = payURIFor (custodyOwner cfg) (mint cfg)
 payURIFor :: Text -> Text -> Text -> Amount -> Either Text Text
 payURIFor owner mintId instruction quantity = do
   reference <- maybe (Left "invalid_pay_reference") Right(T.stripPrefix "solana-pay:" instruction)

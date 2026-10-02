@@ -1,0 +1,20 @@
+cabal-version: 3.0
+name: ecx-browser
+version: 0.1.0.0
+synopsis: Connection-free ECX bridge browser, compiled by GHC JavaScript
+license: MIT
+license-file: ../LICENSE
+build-type: Simple
+
+executable ecx-browser
+  main-is: Main.hs
+  hs-source-dirs: ., ../src
+  other-modules: Browser, Bridge.Model
+  default-language: GHC2021
+  default-extensions: OverloadedStrings, DeriveGeneric, DeriveAnyClass, DerivingStrategies
+  ghc-options: -Wall -Wcompat -optl-sWASM=0
+  build-depends: base >=4.21 && <4.22, aeson ==2.2.3.0,
+                bytestring >=0.12 && <0.13, containers >=0.7 && <0.8,
+                text >=2.1 && <2.2, qrcode-core ==0.9.11
+  if !arch(javascript)
+    buildable: False

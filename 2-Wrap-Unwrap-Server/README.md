@@ -41,9 +41,11 @@ remain real RPC and Opaleye implementations.
 The signer implementation compiles and local contracts pass. Separate OS users,
 restricted native RPC credentials and full two-process real-chain acceptance are
 still required. Existing installed services have not been upgraded to this design.
-The browser is currently TypeScript; conversion to Haskell using GHC's JavaScript
-backend (no WebAssembly) is pending. Previous package and live evidence refer to
-the earlier architecture and do not prove these new release boundaries.
+The browser is Haskell compiled with GHC's JavaScript backend through the same
+Cabal build. Thin JavaScript FFI bindings provide DOM, fetch, storage and clipboard
+APIs; amount/quote/recovery/payment behavior and QR generation remain Haskell.
+TypeScript/npm application files are retired. Previous package and live evidence
+refer to the earlier architecture and do not prove these new release boundaries.
 
 From the repository root:
 
@@ -91,15 +93,15 @@ identifies current code boundaries and records the remaining gates.
 | `Reconciliation.hs`, `Recovery.hs`, `Reorg.hs`, `NativeReplacement.hs`, `Backup.hs` | Custody checks, pause/recovery, source/finality loss, replacement families and backup barriers |
 | `Operation.hs`, `Operation/Internal.hs`, `Postgres/Server.hs`, `Postgres/Runtime.hs`, `API.hs`, `Web.hs`, `scripts/server.hs` | Severity-indexed handler plans, safe/critical dispatcher, Servant contract, direct customer server and runtime entry points |
 | `solana-helper/` | Fixed official-SDK helper and separate real-Devnet setup/test clients |
-| `web/` | HTML/CSS/TypeScript interface and Solana Pay QR/payment links |
+| `web/` | Haskell/HTML/CSS interface and Solana Pay QR/payment links |
 | `deploy/`, `scripts/install`, `scripts/build-release` | Pinned Linux build, packaged runtime, installer, systemd services and helper sandbox |
 | `test/` | Regression contracts; historical acceptance reports are linked from the release review |
 
 ## Build and installation
 
-The tested dependency boundary is GHC **9.14.1**, Cabal **3.16.1.0**, Rust **1.97.1**, Node **25.4.0** and Bitcoin Core **30.2**. Cabal, Cargo and npm dependency graphs are locked. Linux upstream toolchain URLs/checksums are in [`deploy/toolchains.json`](deploy/toolchains.json). SQLite is retired from source and dependencies; the application uses libpq/PostgreSQL 16. The retired SQLite importer and schema translators remain in Git history at revision 6d293a3. `doctor` checks the actual configured PostgreSQL ledger in a read-only transaction.
+The tested dependency boundary is GHC **9.14.1**, Cabal **3.16.1.0**, Rust **1.97.1**, Node **25.4.0** and Bitcoin Core **30.2**. Native Cabal, browser Cabal and Cargo dependency graphs are locked. GHC JavaScript **9.12.2** and Emscripten **3.1.74** are browser compiler prerequisites; see [local development](docs/LOCAL-DEVELOPMENT.md). Linux upstream toolchain URLs/checksums are in [`deploy/toolchains.json`](deploy/toolchains.json). SQLite is retired from source and dependencies; the application uses libpq/PostgreSQL 16. The retired SQLite importer and schema translators remain in Git history at revision 6d293a3. `doctor` checks the actual configured PostgreSQL ledger in a read-only transaction.
 
-On Ubuntu 24.04, from `2-Wrap-Unwrap-Server` in a reviewed checkout, run as a normal sudo-enabled user:
+The following Ubuntu installation path exists, but its clean-host toolchain bootstrap, dedicated-signer setup and release notices still need updating for this refactor. It is not yet current release acceptance. From `2-Wrap-Unwrap-Server`:
 
 ```sh
 ./scripts/install --with-signet --config-dir /absolute/private/setup
@@ -139,7 +141,7 @@ The local launcher serves `http://127.0.0.1:61734` and accepts only the public-t
 | --- | --- |
 | Financial/state contracts | 373 Haskell examples, including generated arithmetic cases; [`current ARM package evidence`](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/sqlite-free-arm-build.json). These tests do not substitute for real-chain acceptance. |
 | Helper and installer contracts | Seven Rust tests and 21 installer tests pass in the revised ARM64 build. The new installer regression checks that helper imports preserve the package inventory. |
-| Browser source | Strict TypeScript checking and asset build pass. A connection-free quote, invalid-amount rejection, QR instructions and saved-order reload were verified in the browser. Actual supported-wallet Solana Pay signing remains pending. [`Evidence`](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/postgres-product-flows.json). |
+| Browser source | The Haskell browser builds through Cabal and runs under the actual CSP against the observation-only real-chain API. A connection-free quote, invalid-amount rejection, QR instructions and saved-order reload were verified in the browser. Actual supported-wallet Solana Pay signing remains pending. [`Evidence`](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/postgres-product-flows.json). |
 | Operator setup | Interactive private configuration, hidden-input TTY check, actual custody-key identity validation and real Devnet identity configuration pass locally. Compiled Ubuntu ARM64 wizard, custom port, private configuration and same-release repeat installation pass. Cross-release upgrades and x86-64 acceptance remain. |
 | PostgreSQL product | Both new 1% conversions paid; verified-owner full refund, explicit expired retry, unsigned cancellation and clean restart passed on real Signet/Devnet. [`Evidence`](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/postgres-product-flows.json). |
 | Automatic real-chain round trips | Both customer-API orders paid by the running test worker; custody matched. Deposits used dedicated native/official-SDK tester clients, not browser extensions. [`Transfer/restart evidence`](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/local-product-transfers.json). |

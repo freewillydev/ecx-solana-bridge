@@ -113,20 +113,26 @@ def add(ecosystem, name, version, source, texts, **extra):
     records.append(record)
 
 
-plan = json.loads((build / "dist/cache/plan.json").read_text())
+plan_paths = [build / "dist/cache/plan.json", build / "browser/cache/plan.json"]
+plans = [json.loads(path.read_text()) for path in plan_paths]
+# Both actual compiler graphs are required; an old native report cannot cover
+# the generated browser or its runtime.
+plan = {"install-plan": [dict(package, browser=(index==1))
+        for index, graph in enumerate(plans) for package in graph["install-plan"]]}
 ghc_notices = build / "tools/notices/ghc-source"
 if not ghc_notices.is_dir():
     ghc_notices = build / "ghc-source"
 seen = set()
 for package in plan["install-plan"]:
     name, version = package["pkg-name"], package["pkg-version"]
-    if name == "ecx-bridge" or (name, version) in seen:
+    if name in ("ecx-bridge", "ecx-browser") or (name, version) in seen:
         continue
     seen.add((name, version))
     if package["type"] == "pre-existing":
-        candidates = list(ghc_notices.glob(f"*/share/doc/*/{name}-{version}/**/*"))
-        texts = licenses([(str(p.relative_to(ghc_notices)), p.read_bytes()) for p in candidates if p.is_file() and name_pattern.match(p.name)])
-        provenance = "Pinned GHC 9.14.1 bindist"
+        compiler_notices = build / "tools/notices/ghc-js-source" if package["browser"] else ghc_notices
+        candidates = list(compiler_notices.glob(f"*/share/doc/*/{name}-{version}/**/*"))
+        texts = licenses([(str(p.relative_to(compiler_notices)), p.read_bytes()) for p in candidates if p.is_file() and name_pattern.match(p.name)])
+        provenance = "GHC JavaScript 9.12.2 bindist" if package["browser"] else "Pinned GHC 9.14.1 bindist"
         extra = {}
         if name == "rts" and version == "1.0.3" and not texts:
             url, checksum = json.loads((root / "deploy/toolchains.json").read_text())["ghc-source"]
@@ -176,33 +182,8 @@ for package in lock["package"]:
         texts = upstream_crate_notices(sources[0], name, version)
     add("Rust", name, version, f"https://crates.io/crates/{name}/{version}", texts, sourceSha256=package["checksum"], noticeLocation="repository root at crate-recorded commit; review applicability" if from_upstream else "crate archive")
 
-npm_lock = json.loads((root / "web/package-lock.json").read_text())
-omitted = []
-for relative, package in npm_lock["packages"].items():
-    if not relative:
-        continue
-    source = root / "web" / relative
-    if not source.is_dir():
-        if not package.get("optional"):
-            raise ValueError("Missing npm package: " + relative)
-        omitted.append(relative)
-        continue
-    metadata = json.loads((source / "package.json").read_text())
-    if metadata["version"] != package["version"]:
-        raise ValueError("npm version mismatch: " + relative)
-    texts = licenses([(str(p.relative_to(source)), p.read_bytes()) for p in source.rglob("*") if p.is_file() and is_notice(p.name)])
-    location = "installed package"
-    if not texts and metadata["name"].startswith("@esbuild/"):
-        parent = root / "web/node_modules/esbuild"
-        parent_metadata = json.loads((parent / "package.json").read_text())
-        if parent_metadata["version"] != metadata["version"]:
-            raise ValueError("esbuild binary/parent version mismatch")
-        texts = [("esbuild/LICENSE.md", (parent / "LICENSE.md").read_bytes())]
-        location = "same-version parent esbuild package; review applicability"
-    add("npm (installed build graph)", metadata["name"], metadata["version"], package["resolved"], texts, integrity=package["integrity"], noticeLocation=location)
-
 # Rust's standard library and GHC's RTS may include licenses beyond package metadata.
-for name, directory in (("Rust 1.97.1 distribution", build / "rust-source"), ("GHC 9.14.1 distribution", build / "ghc-source")):
+for name, directory in (("Rust 1.97.1 distribution", build / "rust-source"), ("GHC 9.14.1 distribution", build / "ghc-source"), ("GHC JavaScript 9.12.2 distribution", build / "ghc-js-source")):
     retained = build / "tools/notices" / directory.name
     if retained.is_dir():
         directory = retained
@@ -216,10 +197,10 @@ for name, directory in (("Rust 1.97.1 distribution", build / "rust-source"), ("G
     add("Toolchain", name, "", "Checksum-pinned upstream bindist", texts)
 
 missing = [f"{r['ecosystem']}: {r['name']} {r['version']}" for r in records if r["status"] == "missing"]
-coverage = dict(scope="Actual Linux build plan, complete Cargo lock graph, installed npm graph, bundled toolchain notices. Includes build/test dependencies conservatively; not a legal opinion or completed distribution audit.",
-                buildPlanSha256=hashlib.sha256((build / "dist/cache/plan.json").read_bytes()).hexdigest(),
-                lockfileSha256={str(p): hashlib.sha256(((root.parent if p.name == "cabal.project.freeze" else root) / p).read_bytes()).hexdigest() for p in (Path("cabal.project.freeze"), Path("solana-helper/Cargo.lock"), Path("web/package-lock.json"))},
-                records=records, absentOptionalNpmPackages=omitted, missing=missing, upstreamFetchErrors=upstream_errors,
+coverage = dict(scope="Actual native and browser Cabal build plans, complete Cargo lock graph, bundled toolchain notices. Includes build/test dependencies conservatively; not a legal opinion or completed distribution audit.",
+                buildPlanSha256={str(path.relative_to(build)): hashlib.sha256(path.read_bytes()).hexdigest() for path in plan_paths},
+                lockfileSha256={str(p): hashlib.sha256(((root.parent if p == Path("cabal.project.freeze") else root) / p).read_bytes()).hexdigest() for p in (Path("cabal.project.freeze"), Path("solana-helper/Cargo.lock"), Path("web/cabal.project.freeze"))},
+                records=records, missing=missing, upstreamFetchErrors=upstream_errors,
                 remainingReview=["Bitcoin Core and its bundled third-party notices", "System libraries supplied by Ubuntu", "License obligations beyond presence of a license text"])
 (args.output / "coverage.json").write_text(json.dumps(coverage, indent=2) + "\n")
 (args.output / "THIRD_PARTY_NOTICES.txt").write_text("Original upstream license texts for ECX Bridge build dependencies.\nSee coverage.json for source hashes, scope and remaining review.\n" + "".join(sections))

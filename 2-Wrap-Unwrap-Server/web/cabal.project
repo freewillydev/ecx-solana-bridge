@@ -1,0 +1,10 @@
+packages: .
+index-state: 2026-09-17T20:21:20Z
+optimization: 1
+jobs: 1
+
+-- GHC's archive reader expects unpadded object members on Darwin too.
+program-locations
+  ghc-pkg-location: javascript-unknown-ghcjs-ghc-pkg
+program-options
+  ar-options: --format=gnu

@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module Bridge.Process (runBounded,runBoundedWithEnvironment) where
+module Bridge.Process (runBoundedWithEnvironment) where
 
 import Bridge.Types
 import Control.Concurrent.Async (concurrently)
@@ -12,17 +12,10 @@ import System.Process
 import System.Timeout (timeout)
 import System.Posix.Signals (signalProcessGroup,sigKILL,sigTERM)
 
--- Fixed program paths and argument vectors only. Never invoke a shell.
-runBounded :: Int -> Int -> FilePath -> [String] -> BS.ByteString -> IO BS.ByteString
-runBounded = runProcessBounded Nothing
-
 -- Explicit child environment for database tools: no global environment
 -- mutation or shell, and credentials are never included in argument vectors.
 runBoundedWithEnvironment :: [(String,String)] -> Int -> Int -> FilePath -> [String] -> BS.ByteString -> IO BS.ByteString
-runBoundedWithEnvironment environment = runProcessBounded (Just environment)
-
-runProcessBounded :: Maybe [(String,String)] -> Int -> Int -> FilePath -> [String] -> BS.ByteString -> IO BS.ByteString
-runProcessBounded environment seconds limit program args input = do
+runBoundedWithEnvironment environment seconds limit program args input = do
   result <- timeout (seconds*1000000) $ bracket acquire cleanup $ \(hin,hout,herr,ph,_) ->
     case (hin,hout,herr) of
       (Just i,Just o,Just e) -> do
@@ -35,7 +28,7 @@ runProcessBounded environment seconds limit program args input = do
   maybe (reject "subprocess_timeout") pure result
  where
   acquire = do
-    (i,o,e,ph) <- createProcess (proc program args) { std_in=CreatePipe,std_out=CreatePipe,std_err=CreatePipe,close_fds=True,create_group=True,env=environment }
+    (i,o,e,ph) <- createProcess (proc program args) { std_in=CreatePipe,std_out=CreatePipe,std_err=CreatePipe,close_fds=True,create_group=True,env=Just environment }
     group <- getPid ph
     pure (i,o,e,ph,group)
   cleanup (i,o,e,ph,group) = do

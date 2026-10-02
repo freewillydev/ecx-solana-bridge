@@ -5,6 +5,8 @@ It is not independent application review or a claim that unknown vulnerabilities
 are absent. [Machine evidence](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/dependency-advisory-review.json) records
 lockfile hashes, database revisions and the remaining review items.
 
+The npm application graph was retired with the GHC JavaScript browser replacement.
+The following npm result is historical and does not cover the new browser graph.
 On October 1, npm audit reported zero advisories across the locked web graph.
 Cargo-audit 0.22.2 reported zero known vulnerabilities across 150 Rust dependencies,
 using RustSec revision `6de4455103aced2cba86e3b86e5c090b22827cf1`.

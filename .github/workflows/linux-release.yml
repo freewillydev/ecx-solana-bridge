@@ -34,7 +34,6 @@ jobs:
             .release-build/tools
             .release-build/*-linux-*.tar.xz
             .release-build/node-source
-            .release-build/sqlite
           key: ubuntu24-x86-tools-notices-v2-${{ hashFiles('2-Wrap-Unwrap-Server/deploy/toolchains.json') }}
       - name: Restore frozen dependencies
         id: dependencies
@@ -44,8 +43,7 @@ jobs:
             .release-build/cabal
             .release-build/cargo
             .release-build/cargo-target
-            ~/.npm
-          key: ubuntu24-x86-dependencies-${{ hashFiles('cabal.project.freeze', '2-Wrap-Unwrap-Server/solana-helper/Cargo.lock', '2-Wrap-Unwrap-Server/web/package-lock.json') }}
+          key: ubuntu24-x86-dependencies-${{ hashFiles('cabal.project.freeze', '2-Wrap-Unwrap-Server/solana-helper/Cargo.lock', '2-Wrap-Unwrap-Server/web/cabal.project.freeze') }}
           restore-keys: ubuntu24-x86-dependencies-
       - name: Install build dependencies
         run: |
@@ -61,7 +59,6 @@ jobs:
             .release-build/tools
             .release-build/*-linux-*.tar.xz
             .release-build/node-source
-            .release-build/sqlite
           key: ${{ steps.tools.outputs.cache-primary-key }}
       - name: Build, test and package
         id: build
@@ -74,7 +71,6 @@ jobs:
             .release-build/cabal
             .release-build/cargo
             .release-build/cargo-target
-            ~/.npm
           key: ${{ steps.dependencies.outputs.cache-primary-key }}
       - name: Verify installer checksum
         working-directory: .release-build

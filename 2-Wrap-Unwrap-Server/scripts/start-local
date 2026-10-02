@@ -23,9 +23,6 @@ if config.get("profile") not in {"L2LSignetDevnet", "ECXBetanetDevnet"} or confi
     parser.error("This launcher accepts real Signet-or-betanet / Solana Devnet profiles without required backups")
 if not 1024 <= args.port <= 65535:
     parser.error("Use a port from 1024 through 65535")
-assets = Path(__file__).resolve().parents[1] / "web"
-if not (assets / "dist/wallet.js").is_file():
-    parser.error("Build the browser bundle first: cd web && npm ci && npm run build")
 if args.postgres and not os.environ.get("PGDATABASE"):
     parser.error("--postgres requires PGDATABASE; set private PostgreSQL PG* connection settings")
 if args.postgres:
@@ -34,7 +31,9 @@ if args.postgres:
     fence = Path(os.environ.setdefault("ECX_WORKER_FENCE_DIR", str(Path.home() / ".local/state/ecx-bridge/worker-fence")))
     if not (fence / "sequence.json").exists():
         subprocess.run([binary, "postgres-init-worker-fence", str(config_path)], check=True)
-os.environ.update(ECX_PORT=str(args.port), ECX_ASSETS=str(assets))
+os.environ["ECX_PORT"] = str(args.port)
+# The Cabal-built executable defaults to its generated browser assets.
+# ECX_ASSETS may explicitly select a deployed bundle.
 
 
 def stop(_signal=None, _frame=None):

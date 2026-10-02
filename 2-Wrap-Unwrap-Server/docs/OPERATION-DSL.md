@@ -190,7 +190,14 @@ Safe operations and HTTP handlers cannot obtain or call them. The signer accepts
 only named, durable signing decisions, checks them independently, and never sends
 transactions. Native RPC credentials must also be split so the HTTP process cannot
 bypass this service using walletprocesspsbt or another signing/key-export method.
-Solana SDK Rust remains only through Haskell FFI inside the signer. The closed critical-only client and signer decision checks are implemented;
+Solana SDK Rust remains only through Haskell FFI inside the signer. `Bridge.Operator` now defines only the three private signing Servant routes.
+Its handlers return `Request 'Critical a`, the constrained existential dictionary,
+and the hoist resolves each request into `SigningDSL` before calling the dedicated
+signer evaluator under one serialization gate. The transport remains a mode-0660
+Unix socket, never a public TCP listener. `Bridge.Signer` owns keys and independent
+saved-decision checks. Existing pause/refund/recovery commands remain in
+`Bridge.Control` with their unchanged private CLI protocol and main critical dispatcher.
+The closed critical-only client and signer decision checks are implemented;
 deployment isolation and end-to-end acceptance remain current work.
 
 Unsigned Solana construction now calls the pinned SDK shared library through

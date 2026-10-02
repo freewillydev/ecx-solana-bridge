@@ -22,14 +22,15 @@ import Bridge.Admission
 import Bridge.RPC
 import Bridge.API (CustomerAPI, customerAPI)
 import qualified Bridge.API as API
-import Bridge.Operator (runControl, callControl)
+import Bridge.Control (runControl, callControl)
+import Bridge.Operator (signingApplication)
 import qualified Bridge.Postgres.Runtime as Runtime
 import Bridge.Web (runUnix,publicApplication,securityBoundary)
 import qualified Database.PostgreSQL.Simple as PG
 import Servant (serve,throwError,err409,Handler,Server)
-import Network.Wai (defaultRequest,responseLBS)
+import Network.Wai (defaultRequest,responseLBS,requestMethod,requestHeaders)
 import Network.Wai.Handler.Warp (testWithApplication)
-import Network.HTTP.Types (status200,status404,status403)
+import Network.HTTP.Types (status200,status404,status403,status409,status400,status413)
 import qualified Network.Wai.Test as W
 import Bridge.Observer
 import Control.Concurrent (threadDelay)
@@ -1001,6 +1002,24 @@ main=hspec $ do
       W.simpleStatus configuration `shouldBe` status200
       forM_ ["/health","/healthz","/readyz","/scanners","/audit","/pause","/api/v1/orders/id/observations"] $ \path->get path >>= \response->
         W.simpleStatus response `shouldBe` status404
+  describe "private signing Servant boundary" $ do
+    it "dispatches only the three closed signing routes and rejects malformed or oversized requests before evaluation" $ do
+      calls <- newIORef (0 :: Int)
+      app <- signingApplication (\_ -> modifyIORef' calls (+1) >> reject "signing_fixture")
+      let post path body = W.runSession (W.srequest $ W.SRequest
+            ((W.setPath defaultRequest path){requestMethod="POST",requestHeaders=[("Content-Type","application/json")]}) body) app
+      forM_ [("/sign-preparation",encode ("identity" :: Text,"intent" :: Text,0 :: Int)),
+             ("/draft-replacement",encode ("identity" :: Text,"parent" :: Text,amt 1)),
+             ("/sign-replacement",encode ("identity" :: Text,1 :: Int64))] $ \(path,body) -> do
+        response <- post path body
+        W.simpleStatus response `shouldBe` status409
+        W.simpleBody response `shouldBe` encode (object ["error" .= ("signing_fixture" :: Text)])
+      readIORef calls `shouldReturn` 3
+      forM_ ["/pause","/refund","/broadcast","/sign","/audit"] $ \path ->
+        post path "[]" >>= \response -> W.simpleStatus response `shouldBe` status404
+      post "/sign-preparation" "{}" >>= \response -> W.simpleStatus response `shouldBe` status400
+      post "/sign-preparation" (LBS.replicate 16385 32) >>= \response -> W.simpleStatus response `shouldBe` status413
+      readIORef calls `shouldReturn` 3
   describe "public/private Unix socket boundary" $ do
     it "refuses canonical and backup-dependent deployments in the local test command" $ withDir $ \dir->do
       publicTestProfile (cfg dir) `shouldBe` True

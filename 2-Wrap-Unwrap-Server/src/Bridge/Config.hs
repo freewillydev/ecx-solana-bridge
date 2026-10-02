@@ -1,4 +1,8 @@
-module Bridge.Config where
+module Bridge.Config
+  ( Config(..), Profile(..), InterfaceConfig(..), defaultInterface, loadInterface
+  , validateInterface, publicTestProfile, tokenProgram, signetChallenge, solanaGenesis, fingerprint, loadConfig, validateConfig ) where
+
+import Bridge.Model (Profile(..), InterfaceConfig(..))
 
 import Bridge.Types
 import Bridge.SolanaMessage (publicKey,signatureBytes)
@@ -14,7 +18,6 @@ import GHC.Generics (Generic)
 import Network.HTTP.Client (parseRequest,Request,host,secure,path,requestHeaders)
 import System.FilePath (isAbsolute)
 
-data Profile = L2LSignetDevnet | ECXBetanetDevnet | CanonicalBeta deriving (Eq, Show, Generic, ToJSON, FromJSON)
 data Config = Config
   { profile :: !Profile, deploymentId :: !Text, nativeRpc :: !String
   , nativeCookie :: !FilePath, nativeWallet :: !Text
@@ -34,14 +37,6 @@ data Config = Config
 instance FromJSON Config where parseJSON = genericParseJSON defaultOptions { rejectUnknownFields = True }
 
 -- Public presentation settings are separate from financial identity and orders.
-data InterfaceConfig = InterfaceConfig
-  { supportUrl :: !(Maybe Text), jupiterUrl :: !(Maybe Text)
-  , orcaUrl :: !(Maybe Text), nativeExplorerBase :: !(Maybe Text)
-  , publicOrigin :: !(Maybe Text)
-  } deriving (Eq,Show,Generic,ToJSON)
-instance FromJSON InterfaceConfig where
-  parseJSON = genericParseJSON defaultOptions { rejectUnknownFields = True }
-
 defaultInterface :: Profile -> InterfaceConfig
 defaultInterface p = InterfaceConfig Nothing Nothing Nothing
   (if p==L2LSignetDevnet then Just "https://explorer.signet.drivechain.info/tx/" else Nothing) Nothing

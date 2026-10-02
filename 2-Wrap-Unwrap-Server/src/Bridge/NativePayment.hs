@@ -180,9 +180,6 @@ readNativePrevoutsWith includeMempool call depth inputs = forM inputs $ \input -
   require (script==owned) "native_input_script_mismatch"
   pure (NativePrevout point quantity script confirmations coinbase)
 
-fundNativeDraft :: NativeRPC -> NativePlan -> IO NativeDraft
-fundNativeDraft = fundNativeDraftWith True
-
 fundNativeDraftWith :: Bool -> NativeRPC -> NativePlan -> IO NativeDraft
 fundNativeDraftWith lockInputs call plan@NativePlan{..} = do
   -- Unknown locks may be the result of an interrupted earlier RPC. Do not

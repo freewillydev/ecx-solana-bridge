@@ -2,8 +2,9 @@
 module Bridge.Postgres.Runtime (runAPI,runTestWorker,runBackedTestWorker,doctor,checkDatabase) where
 
 import Bridge.API (customerAPI)
+import Bridge.BrowserBuild (browserAssetsDirectory)
 import qualified Bridge.API as API
-import Bridge.Operator (runControl)
+import Bridge.Control (runControl)
 import Bridge.Config
 import Bridge.Types
 import Bridge.Operation.Internal
@@ -340,7 +341,6 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
 -- This remains the sole production invocation of critical evaluation.
 evaluate :: Runtime -> Plan a -> IO a
 evaluate (Runtime safeContext criticalContext gate) plan = case plan of
-  SigningPlan _->reject "dedicated_signer_required"
   SafePlan request->evalSafe safeContext (resolve request)
   CustomerPlan request->critical (resolve request)
   OperatorPlan request->critical (resolve request)
@@ -380,7 +380,7 @@ runRuntime paying remote settings cfg = do
   portText <- fromMaybe "8080" <$> lookupEnv "ECX_PORT"
   port <- maybe (reject "invalid_http_port") pure (readMaybe portText :: Maybe Int)
   require (port>=1024 && port<=65535) "invalid_http_port"
-  assets <- fromMaybe "web" <$> lookupEnv "ECX_ASSETS"
+  assets <- fromMaybe browserAssetsDirectory <$> lookupEnv "ECX_ASSETS"
   links <- lookupEnv "ECX_INTERFACE_CONFIG" >>= loadInterface cfg
   readUser <- lookupEnv "PGREADUSER" >>= maybe (reject "read_database_user_required") pure
   require (not(T.null $ T.strip $ T.pack readUser) && readUser/=PG.connectUser settings) "distinct_read_database_user_required"
