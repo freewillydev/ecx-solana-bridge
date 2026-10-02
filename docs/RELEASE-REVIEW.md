@@ -74,6 +74,9 @@ is unresolved. Bincode is pinned and unmaintained; no migration or waiver is imp
    The plan's bounded fee-sweeping requirement still needs a
    supported ledger/signing workflow and acceptance; no general fee-withdrawal
    command is implemented or certified by the current evidence.
+   Its internal reservation/cancellation stage now has a compiled PostgreSQL
+   contract (`evidence/fee-withdrawal-funding-contract.json`); operator API,
+   payment-engine integration and real-chain acceptance remain outstanding.
 6. After substantive fixes, build source once for ARM64/x86, perform affected
    install/upgrade/reboot/restoration checks, and authenticate a new private review
    candidate. Public publication and valuable-fund activation require their own

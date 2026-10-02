@@ -1,0 +1,30 @@
+{
+  "observedAt": "2026-10-02T15:51:03.776721+00:00",
+  "scope": "isolated PostgreSQL funding contract; not chain acceptance",
+  "contractPassed": true,
+  "immutableUpdateDeleteGuardsPassed": true,
+  "libraryCompiled": true,
+  "chainCalls": false,
+  "signedOrSent": false,
+  "withdrawalApiImplemented": false,
+  "paymentIntegrationComplete": false,
+  "sources": {
+    "src/Bridge/Postgres/FeeWithdrawal.hs": "a9804d771f84f10b270633099a7b3d08e9bf5622a31035d5d6b91ed3fd5e744c",
+    "migrations/postgresql/005.sql": "f088cc3fbef982503a15b0743e361b15d2d2d54f7561c1ab754692674ab0d90f",
+    "integration/FeeWithdrawalCheck.hs": "3186470ee946f181076c97c10dbe23abb7843530276d3d7f5c12e0f8eaf061cf"
+  },
+  "checks": [
+    "deployment identity",
+    "paused admission",
+    "fresh custody",
+    "positive bounded amount",
+    "supported asset",
+    "available earned capital",
+    "immutable saved terms",
+    "duplicate reservation replay",
+    "second reservation cannot reuse funds",
+    "unsigned cancellation",
+    "cancellation replay/conflict",
+    "immutable database records"
+  ]
+}

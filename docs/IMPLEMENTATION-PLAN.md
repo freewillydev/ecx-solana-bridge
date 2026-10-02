@@ -63,6 +63,17 @@ The next task remains item 1. Packaging does not become the default fallback whe
 external acceptance prerequisite is unavailable: continue another substantive
 item and record the prerequisite without repeating completed installer checks.
 
+Fee withdrawal construction: `Postgres/FeeWithdrawal.hs` and PostgreSQL migration
+005 implement the internal funding reservation and unsigned cancellation stage.
+Reserved amounts move from `earned` to `fee_pending` in the ordinary balanced
+journal, so loss-capital allocation cannot spend them. The isolated PostgreSQL
+contract covers pause/freshness/profile/bounds, replay/conflict and immutability.
+This is not a working withdrawal command yet. Next generalize the customer-bound
+payment context to a typed customer/operator funding choice, integrate the closed
+operator DSL and API, then preparation/budgets, saved-byte backup/send, observation,
+settlement and recovery. Add no fake order/deposit or independent signing path.
+Real-chain withdrawal acceptance and consolidated installation remain outstanding.
+
 ## Product contract
 
 One small Haskell Servant application, two real chain adapters, PostgreSQL with
