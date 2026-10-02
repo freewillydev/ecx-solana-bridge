@@ -1941,3 +1941,12 @@ financial tables. See the updated in-flight restore evidence. This closes the
 signed-unsent Solana local clean-host recovery/resume checkpoint, including the
 expired-signature path; off-host durability, key revocation, broader recovery
 gates and the consolidated source release remain open.
+
+The completed recovery now has a reusable read-only acceptance command,
+`integration/VerifyRecoveredSolana.py`. It passed against the actual restored
+ledger and both actual providers, rechecking the original hash, single settled
+replacement, 100-unit fee, reservations and finalized 9900-unit effects without
+changing financial state or signing/sending. See
+`evidence/solana-recovery-verifier.json`. Staging also explicitly refuses the newly
+retired `solrestore` guest and checks the persistent retirement marker before
+provider or wallet actions.

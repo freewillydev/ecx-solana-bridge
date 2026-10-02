@@ -1,0 +1,24 @@
+{
+  "orderId": "9752da9c4b027546940ade25945433e1a22fc82e051ec0e3631677c40e9cca98",
+  "recoveredPaymentPaid": true,
+  "originalSignedBytesPreserved": true,
+  "oneSettledReplacement": true,
+  "feeBaseUnits": 100,
+  "providers": {
+    "primary": {
+      "finalizedSlot": 506677368,
+      "networkFeeLamports": 5000,
+      "custodyDelta": -9900,
+      "customerDelta": 9900
+    },
+    "independent": {
+      "finalizedSlot": 506677368,
+      "networkFeeLamports": 5000,
+      "custodyDelta": -9900,
+      "customerDelta": 9900
+    }
+  },
+  "criticalSequence": 26,
+  "financialStateUnchanged": true,
+  "signedOrSent": false
+}

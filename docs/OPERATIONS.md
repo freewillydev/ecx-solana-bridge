@@ -332,3 +332,23 @@ restic acceptance matched all original bytes, verified private modes, refused an
 existing destination and rejected a tampered receipt before staging. See
 `evidence/encrypted-handoff-staging-local.json`. Remote storage and actual host
 loss remain distinct unverified gates.
+
+### Recheck the dedicated recovered Solana acceptance
+
+`integration/VerifyRecoveredSolana.py` verifies the retained Signet/Devnet test
+recovery from its private staging journal against the installed customer API,
+actual PostgreSQL ledger and two independent finalized providers. It requires
+the completed expired-original/replacement fixture; it creates no order, retry
+approval, signature or broadcast and does not start/resume services. Run against
+the active restored destination with its observation API available:
+
+```sh
+python3 integration/VerifyRecoveredSolana.py PRIVATE_STATE \
+  --vm RESTORED_TEST_GUEST --run-id RETAINED_RUN_ID --report PRIVATE_REPORT
+```
+
+The command checks the saved original hash, one settled replacement, exact 1%
+fee, released holds, balanced postings and actual 9900-unit finalized effects,
+then compares financial state before/after its reads. RPC read retries reuse the
+existing bounded 429 policy. It does not repeat the separate restart test or
+prove off-host durability. Never use the retired source guest for new staging.

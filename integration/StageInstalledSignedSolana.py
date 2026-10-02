@@ -23,7 +23,7 @@ parser.add_argument('--devnet-dir', type=Path, required=True)
 parser.add_argument('--report', type=Path, required=True)
 args = parser.parse_args()
 assert re.fullmatch(r'[a-z][a-z0-9-]{0,62}', args.vm)
-assert args.vm not in ('inflight', 'restore', 'pg-install'), 'Retired source guest refused'
+assert args.vm not in ('inflight', 'restore', 'pg-install', 'solrestore'), 'Retired source guest refused'
 assert re.fullmatch(r'[a-z][a-z0-9-]{0,62}', args.run_id)
 os.umask(0o077)
 state = args.state.resolve(strict=True)
@@ -71,6 +71,7 @@ try:
     connectivity = guest('sudo', 'python3', '-c', r"""
 import json,urllib.request
 from pathlib import Path
+assert not Path('/var/lib/ecx-bridge/source-retired').exists(), 'Retired source refused'
 cfg=json.loads(Path('/etc/ecx-bridge/worker.json').read_text())
 assert cfg['profile']=='L2LSignetDevnet'
 assert cfg['solanaVerifierRpc']=='https://solana-devnet.api.onfinality.io/public'
