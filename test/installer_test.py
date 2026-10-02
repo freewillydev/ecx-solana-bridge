@@ -107,7 +107,7 @@ class SignerPermissions(unittest.TestCase):
             for mode, owner, group in [(0o600, 0, 4321), (0o600, 1234, 4321), (0o640, 0, 4321)]:
                 key.chmod(mode)
                 values = list(key.stat()); values[4] = owner; values[5] = group
-                with patch.object(installer.os, "lstat", return_value=os.stat_result(values)), patch.object(installer.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=1234)), patch.object(installer.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=4321)), patch.object(installer.os, "chown") as ownership:
+                with patch.object(Path, "lstat", return_value=os.stat_result(values)), patch.object(installer.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=1234)), patch.object(installer.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=4321)), patch.object(installer.os, "chown") as ownership:
                     installer.secure_signer(key)
                     ownership.assert_called_once_with(key, 1234, 4321)
                 self.assertEqual(key.stat().st_mode & 0o777, 0o600)
