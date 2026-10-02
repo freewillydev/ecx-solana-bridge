@@ -1780,3 +1780,19 @@ other deployment preserved, selected removals applied, repository check passed.
 See `evidence/backup-retention-local.json` and the operations instructions.
 Off-host durability, remote retention and clean-host restore acceptance remain
 open. No VM, installer build or external repository was used for this batch.
+
+## Clipboard-independent customer instructions
+
+The customer copy action now always exposes selectable payment instructions or
+the private recovery link as well as attempting clipboard copy. Close/new-order
+actions still clear that field. Customers therefore have a manual recovery path
+even when a browser reports successful clipboard writing but its integration
+cannot paste the result. Strict TypeScript checking and frontend bundling pass;
+interactive acceptance of the revised view and a full recovery-link reload remain
+open. No wallet connection or new payment API was added.
+
+The fresh in-flight Solana fixture was retried after a guest restart. Its actual
+primary provider passed Devnet identity, but the verifier was unavailable; no
+order or deposit was created. Preflight now uses the transport's normal 25-second
+network budget and reports only provider role/readiness, never URLs or credentials.
+Both independent real providers remain required. The guest is stopped.

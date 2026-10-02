@@ -106,20 +106,19 @@ const customerErrors: Record<string, string> = {
 const customerError = (code: string) => customerErrors[code] || code;
 async function copyText(value: string, confirmation: string): Promise<void> {
   if (!value) return;
-  el("manual-copy").hidden = true;
-  el<HTMLTextAreaElement>("copy-text").value = "";
+  const field = el<HTMLTextAreaElement>("copy-text");
+  field.value = value;
+  el("manual-copy").hidden = false;
+  field.focus();
+  field.select();
   try {
     await navigator.clipboard.writeText(value);
-    text("message", confirmation);
+    text("message", confirmation + " Selected text is also available below.");
   } catch {
-    const field = el<HTMLTextAreaElement>("copy-text");
-    field.value = value;
-    el("manual-copy").hidden = false;
-    field.focus();
-    field.select();
     text("message", "Clipboard access is unavailable. Copy the selected text below.");
   }
 }
+
 async function api(path: string, method = "GET", body?: unknown): Promise<any> {
   const response = await fetch(path, {
     method,

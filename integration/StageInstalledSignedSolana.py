@@ -74,13 +74,20 @@ from pathlib import Path
 cfg=json.loads(Path('/etc/ecx-bridge/worker.json').read_text())
 assert cfg['profile']=='L2LSignetDevnet'
 assert cfg['solanaVerifierRpc']=='https://solana-devnet.api.onfinality.io/public'
-for endpoint in [cfg['solanaRpc'],cfg['solanaVerifierRpc']]:
-    req=urllib.request.Request(endpoint,json.dumps({'jsonrpc':'2.0','id':1,'method':'getGenesisHash','params':[]}).encode(),{'Content-Type':'application/json'})
-    result=json.load(urllib.request.urlopen(req,timeout=5))
-    assert result.get('id')==1 and result.get('result')=='EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG'
-print('guest-providers-ready')
+checks = {}
+for label, endpoint in [('primary',cfg['solanaRpc']),('verifier',cfg['solanaVerifierRpc'])]:
+    try:
+        req=urllib.request.Request(endpoint,json.dumps({'jsonrpc':'2.0','id':1,'method':'getGenesisHash','params':[]}).encode(),{'Content-Type':'application/json'})
+        result=json.load(urllib.request.urlopen(req,timeout=25))
+        checks[label] = 'ready' if result.get('id')==1 and result.get('result')=='EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG' else 'identity_mismatch'
+    except (OSError,ValueError):
+        checks[label] = 'unavailable'
+print(json.dumps(checks))
 """)
-    assert connectivity == 'guest-providers-ready'
+    checks = json.loads(connectivity)
+    assert set(checks) == {'primary', 'verifier'}
+    if any(value != 'ready' for value in checks.values()):
+        raise RuntimeError('Real Solana provider preflight refused: ' + ', '.join(key + '=' + value for key, value in checks.items()))
     guest('sudo', 'systemctl', 'start', 'ecx-bridge-node')
     if (private / 'order.json').exists():
         if (private / 'deposit.json').exists():
