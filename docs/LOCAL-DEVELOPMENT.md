@@ -378,3 +378,35 @@ eight configuration files, and installed full-row backup restoration passes all
 38 tables. See `docs/evidence/installed-backup-tools-x86.json`.
 The x86 guest remains observation-only with no signer;
 its prior release's cold-boot evidence is not a new cold-boot test of this package.
+
+### Native signed-but-unsent recovery boundary
+
+The existing `ecx-postgres-native-lock-check` acceptance executable now supports
+`stage-signed` and `verify-signed` alongside its original unsigned modes. It is
+excluded from installer packages. The signed modes require the configured host
+fence and exclusive ledger ownership, and are restricted to the known private
+macOS test database or the exact dedicated installed Signet/Devnet fixture.
+
+`stage-signed CONFIG OBLIGATION_ID` requires an existing eligible native payout,
+checks real chain identity/source/custody, records and signs the normal preparation,
+then finishes paused without calling the broadcast path. It does not create an
+order, fabricate a deposit or fund a customer. Explicit RPC guards refuse sending.
+Preserve the signed attempt and reservations; do not cancel/delete them to reset
+the test. Only run against the dedicated test custody with its worker stopped.
+
+After backup/restore, `verify-signed CONFIG OBLIGATION_ID` replays the preparation
+while all its RPC calls are forbidden. It validates the stored transaction and
+compares attempts, preparations, intents, obligations, orders, destination/operating
+and fee reservations, postings and the critical sequence. It outputs a bytes hash,
+not the signed bytes. It never broadcasts or resumes the worker. Installed usage
+requires `PGHOST=/run/ecx-postgres`, `PGPORT=29436`, `PGDATABASE=ecx_bridge`,
+`PGUSER=ecx_worker`, `ECX_WORKER_FENCE_DIR=/var/lib/ecx-bridge/fence` and execution
+as `ecx-worker`. The native Linux acceptance executable still needs to be compiled
+from this integration source before the installed live scenario can run.
+
+Current evidence covers compilation against the exact frozen macOS package IDs,
+two wrong-database refusals before ownership/chain calls, and planning the replay
+comparison query against the real PostgreSQL schema. See
+`docs/evidence/native-signed-boundary-driver.json`. No eligible payment was staged
+in that check; real signed-boundary and interrupted-host restore acceptance remain
+pending. The cached macOS driver is retained externally as `signed-native-driver`.

@@ -1,6 +1,6 @@
-{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE ScopedTypeVariables,OverloadedStrings #-}
 -- Real Signet/PostgreSQL acceptance driver. Excluded from installed release.
--- Stage a real eligible obligation and interrupt before signing. Never sends.
+-- Stage a real eligible obligation at an unsigned or signed boundary. Never sends.
 module Main (main) where
 import Bridge.Config
 import Bridge.Types
@@ -10,6 +10,7 @@ import Bridge.Recovery
 import Bridge.Settlement
 import qualified Bridge.Ledger as D
 import Bridge.Postgres.Ledger
+import qualified Bridge.Postgres.Fence as Fence
 import Bridge.Postgres.PaymentStore (Store(..))
 import Bridge.RPC
 import Control.Exception (try,finally)
@@ -20,10 +21,12 @@ import Bridge.Observer (epochSeconds)
 import Data.Aeson (encode,object,(.=))
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import qualified Data.Text as T
-import System.Environment (getArgs,getEnv)
+import System.Environment (getArgs,getEnv,lookupEnv)
 import System.Exit (die)
 import System.Posix.User (getEffectiveUserName)
 import qualified Database.PostgreSQL.Simple as PG
+import qualified Data.Text.Encoding as TE
+import Data.Maybe (fromMaybe)
 import Text.Read (readMaybe)
 
 main :: IO ()
@@ -32,30 +35,41 @@ main = do
   (mode,path,intent) <- case args of
     ["stage",cfg,oid]->pure("stage"::String,cfg,T.pack oid)
     ["verify",cfg,oid]->pure("verify"::String,cfg,T.pack oid)
-    _->die "Usage: ecx-postgres-native-lock-check stage|verify PRIVATE_CONFIG OBLIGATION_ID (PG*; exclusive stopped worker)"
+    ["stage-signed",cfg,oid]->pure("stage-signed"::String,cfg,T.pack oid)
+    ["verify-signed",cfg,oid]->pure("verify-signed"::String,cfg,T.pack oid)
+    _->die "Usage: ecx-postgres-native-lock-check stage|verify|stage-signed|verify-signed PRIVATE_CONFIG OBLIGATION_ID (PG*; exclusive stopped worker)"
   cfg <- loadConfig path
   require (profile cfg==L2LSignetDevnet && not(backupRequired cfg)) "public_test_profile_required"
   database <- getEnv "PGDATABASE"
-  require (database=="ecx_bridge_runtime") "actual_test_runtime_database_required"
   host <- getEnv "PGHOST"
-  require (host=="/tmp/ecx-pg-seam") "private_test_socket_required"
   port <- getEnv "PGPORT" >>= maybe (reject "invalid_postgres_port") pure . readMaybe
   require (port==29436) "private_test_port_required"
   user <- getEffectiveUserName
+  pgUser <- fromMaybe user <$> lookupEnv "PGUSER"
+  let local = database=="ecx_bridge_runtime" && host=="/tmp/ecx-pg-seam" && pgUser==user
+      installed = database=="ecx_bridge" && host=="/run/ecx-postgres" && user=="ecx-worker" && pgUser=="ecx_worker"
+        && deploymentId cfg=="fresh-treasury-acceptance" && custodyOwner cfg=="6vKbKHaYS393gQdjKysZFuyvn6cZ5p4vSwK2kMsQFuZY"
+  require (local || installed) "dedicated_test_runtime_required"
   manager <- newRpcManager
-  let settings=PG.defaultConnectInfo {PG.connectHost=host,PG.connectPort=port,PG.connectDatabase=database,PG.connectUser=user}
+  let settings=PG.defaultConnectInfo {PG.connectHost=host,PG.connectPort=port,PG.connectDatabase=database,PG.connectUser=pgUser}
       fullTransport=realPaymentTransport manager cfg (const $ reject "unexpected_acceptance_backup")
       transport=fullTransport {paymentIdentity=nativeIdentity manager cfg >> pure ()}
       -- Fault injection is confined to the pre-sign boundary. Every permitted
       -- identity, planning, funding, decoding and prevout call is a real RPC.
       unsignedCall wallet method params
-        | method=="walletprocesspsbt" = reject "acceptance_stopped_before_signing"
+        | method=="walletprocesspsbt" && mode=="stage" = reject "acceptance_stopped_before_signing"
         | method `elem` ["sendrawtransaction","signrawtransactionwithwallet","signrawtransactionwithkey"] = reject "acceptance_signing_or_send_forbidden"
         | otherwise = paymentNative transport wallet method params
-  withLedger settings (fingerprint cfg) $ \ledger->do
+  let owns action
+        | installed || mode `elem` ["stage-signed","verify-signed"] = do
+            directory <- Fence.fenceDirectory
+            Fence.withFence directory (fingerprint cfg) $ \guard->
+              withGuardedLedger settings (fingerprint cfg) (Just guard) action
+        | otherwise = withLedger settings (fingerprint cfg) action
+  owns $ \ledger->do
     let store=Store ledger
     case mode of
-      "stage"->(do
+      staging | staging `elem` ["stage","stage-signed"]->(do
         paymentIdentity fullTransport
         _ <- Observer.observeOnce manager cfg ledger
         ob <- paymentObligation store intent
@@ -70,17 +84,42 @@ main = do
         Startup.resumeAfterChecks cfg ledger now
         recheckSourceWith fullTransport cfg store ob
         result <- try (prepareNativeWith unsignedCall cfg store ob) :: IO(Either BridgeError T.Text)
-        case result of
-          Left(BridgeError "acceptance_stopped_before_signing")->pure ()
-          Left(BridgeError code)->reject code
-          Right _->reject "acceptance_unexpected_signed_attempt"
+        case (mode,result) of
+          ("stage",Left(BridgeError "acceptance_stopped_before_signing"))->pure ()
+          ("stage-signed",Right _)->pure ()
+          (_,Left(BridgeError code))->reject code
+          _->reject "acceptance_unexpected_signed_attempt"
         saved <- preparationPending store
-        require (case saved of [p]->D.obligationId(D.preparationObligation p)==intent && D.preparationChain p=="Native" && D.preparationDraft p/=Nothing; _->False) "acceptance_draft_not_preserved"
         after <- preparationAttempts store
-        require (null [a | a<-after,D.attemptIntent a==intent]) "acceptance_unexpected_attempt"
+        if mode=="stage" then do
+          require (case saved of [p]->D.obligationId(D.preparationObligation p)==intent && D.preparationChain p=="Native" && D.preparationDraft p/=Nothing; _->False) "acceptance_draft_not_preserved"
+          require (null [a | a<-after,D.attemptIntent a==intent]) "acceptance_unexpected_attempt"
+        else do
+          require (null saved) "acceptance_signed_draft_still_pending"
+          require (case (result,filter ((==intent) . D.attemptIntent) after) of
+            (Right txid,[a])->D.attemptId a==txid && D.attemptChain a=="Native" && D.attemptState a=="signed" && D.attemptSequence a==Nothing
+            _->False) "acceptance_signed_attempt_not_preserved"
+          pause ledger "acceptance_signed_native_review"
         state <- readiness ledger
         require (not(available state)) "acceptance_not_paused"
-        LBS.putStrLn(encode(object["obligation" .= intent,"unsignedDraftSaved" .= True,"paused" .= True,"signedOrSent" .= False]))) `finally` pause ledger "acceptance_native_draft_review"
+        LBS.putStrLn(encode(object["obligation" .= intent,"unsignedDraftSaved" .= (mode=="stage"),"signedAttemptSaved" .= (mode=="stage-signed"),"paused" .= True,"broadcast" .= False]))) `finally` pause ledger "acceptance_native_draft_review"
+      "verify-signed"->do
+        state <- readiness ledger
+        require (not(available state)) "pause_before_acceptance"
+        before <- preparationAttempts store
+        ob <- paymentObligation store intent
+        attempt <- case filter ((==intent) . D.attemptIntent) before of
+          [a] | D.attemptChain a=="Native" && D.attemptState a=="signed" && D.attemptSequence a==Nothing->pure a
+          _->reject "acceptance_signed_attempt_required"
+        let snapshot=ledgerAction ledger $ \connection->do
+              [PG.Only value] <- PG.query_ connection "SELECT jsonb_build_object('sequence',(SELECT critical_sequence FROM deployment),'attempts',(SELECT jsonb_agg(to_jsonb(a) ORDER BY txid) FROM attempts a),'preparations',(SELECT jsonb_agg(to_jsonb(p) ORDER BY intent_id,generation) FROM preparations p),'intents',(SELECT jsonb_agg(to_jsonb(i) ORDER BY id) FROM intents i),'obligations',(SELECT jsonb_agg(to_jsonb(o) ORDER BY id) FROM obligations o),'orders',(SELECT jsonb_agg(to_jsonb(o) ORDER BY id) FROM orders o),'reservations',(SELECT jsonb_agg(to_jsonb(r) ORDER BY order_id,asset) FROM reservations r),'operating',(SELECT jsonb_agg(to_jsonb(r) ORDER BY order_id,kind) FROM operating_reservations r),'fees',(SELECT jsonb_agg(to_jsonb(f) ORDER BY intent_id) FROM fee_reservations f),'postings',(SELECT jsonb_agg(to_jsonb(p) ORDER BY event_id,account) FROM postings p))::text"
+              pure (value::T.Text)
+        prior <- snapshot
+        txid <- prepareNativeWith (\_ _ _->reject "acceptance_replay_rpc_forbidden") cfg store ob
+        after <- preparationAttempts store
+        final <- snapshot
+        require (txid==D.attemptId attempt && before==after && prior==final) "acceptance_signed_replay_changed_state"
+        LBS.putStrLn(encode(object["transaction" .= txid,"savedBytesSha256" .= digest(TE.encodeUtf8 $ D.attemptBytes attempt),"signedBytesAndFinancialStateUnchanged" .= True,"signerOrRpcCalled" .= False,"broadcast" .= False,"paused" .= True]))
       _->do
         pending <- preparationPending store
         require (case pending of [p]->D.obligationId(D.preparationObligation p)==intent && D.preparationChain p=="Native" && D.preparationDraft p/=Nothing; _->False) "acceptance_draft_not_preserved"

@@ -1219,3 +1219,22 @@ Frozen Aeson/text-iso8601 versions are also checked against the separate officia
 negative-exponent JSON advisory's fixed versions. No application dependencies,
 binaries, chain state or financial records changed. All VMs remain stopped; the
 verified source archives are cached externally for repeat review without downloads.
+
+## Controlled native signed-boundary acceptance driver
+
+The existing native lock-recovery driver now stages a real eligible payment at
+the signed-but-unsent boundary, preserving the normal production preparation and
+signing algorithms. A separate replay mode forbids all preparation RPCs/signing,
+validates the saved attempt and compares its bytes plus financial/reservation
+state. Both new modes require the host fence; installed execution is restricted
+to the exact dedicated test deployment, worker user and private PostgreSQL endpoint.
+Production commands, DSL evaluators and installer payloads are unchanged.
+
+The acceptance executable compiles using the exact frozen package IDs and cached
+library, avoiding a whole-product rebuild. Both signed-mode wrong-database guards
+refuse before ownership/chain calls; the financial comparison query plans against
+the actual PostgreSQL schema. See `evidence/native-signed-boundary-driver.json`.
+This is preparation for the live interrupted-host scenario, not a claim that it
+has passed. Native Linux driver compilation, a real eligible test payment, private
+key/ledger handoff and resumed single settlement remain required. No funds were
+sent, no ledger rows modified and no task VM started during this driver check.
