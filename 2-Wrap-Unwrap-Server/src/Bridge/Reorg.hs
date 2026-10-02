@@ -7,7 +7,7 @@ import qualified Bridge.Postgres.Source as PgSource
 import qualified Bridge.Postgres.Replacement as Replacement
 import Bridge.Config
 import Bridge.Ledger.Model
-import Bridge.Native (nativeAmount)
+import Bridge.Native (nativeAmount,nativeWalletInfoWith)
 import Bridge.NativePayment (ownedScript,transactionId,signedNativePlan,planDepth,signedNativeFee)
 import Bridge.RPC
 import Bridge.Settlement
@@ -53,11 +53,7 @@ reconcileNativeSourcesWith transport c ledger=do
 inspectNativeSourceWith :: PaymentTransport -> Config -> Ledger -> Deposit -> IO SourceCheck
 inspectNativeSourceWith transport c ledger source=do
   paymentIdentity transport
-  wallet <- call True "getwalletinfo" []
-  name <- fieldValue "walletname" wallet
-  descriptors <- fieldValue "descriptors" wallet
-  scanning <- fieldValue "scanning" wallet :: IO Value
-  require (name==nativeWallet c && descriptors && scanning==Bool False) "native_wallet_not_ready"
+  wallet <- nativeWalletInfoWith call c
   position <- fieldValue "lastprocessedblock" wallet
   nodeAnchor <- fieldValue "hash" position
   nodeHeight <- fieldValue "height" position :: IO Int64
@@ -161,11 +157,7 @@ reconcileNativeSettlementsWith transport c ledger=do
           ,"state" .= ("winner_changed"::Text),"error" .= (Nothing::Maybe Text)],True)
   inspect attempt=do
     paymentIdentity transport
-    wallet <- paymentNative transport True "getwalletinfo" []
-    name <- fieldValue "walletname" wallet
-    descriptors <- fieldValue "descriptors" wallet
-    scanning <- fieldValue "scanning" wallet :: IO Value
-    require (name==nativeWallet c && descriptors && scanning==Bool False) "native_wallet_not_ready"
+    _ <- nativeWalletInfoWith (paymentNative transport) c
     (_,saved) <- readSavedPayment transport c ledger attempt
     payment <- case saved of NativePayment value->pure value; _->reject "wrong_destination_chain"
     family <- Replacement.readFamily ledger (attemptIntent attempt)

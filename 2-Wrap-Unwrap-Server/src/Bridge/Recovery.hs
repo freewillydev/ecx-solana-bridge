@@ -14,7 +14,7 @@ import qualified Bridge.Postgres.Replacement as PgReplacement
 import qualified Bridge.Postgres.Source as PgSource
 import Bridge.Config
 import Bridge.Ledger.Model
-import Bridge.Native (nativeAmount)
+import Bridge.Native (nativeAmount,nativeWalletInfoWith)
 import Bridge.NativePayment
 import Bridge.NativeReplacement
 import Bridge.Payment (payoutReference)
@@ -167,11 +167,7 @@ reconcileNativeLocksWith transport c ledger=do
   call=paymentNative transport
   work=do
     paymentIdentity transport
-    wallet <- call True "getwalletinfo" []
-    name <- fieldValue "walletname" wallet
-    descriptors <- fieldValue "descriptors" wallet
-    scanning <- fieldValue "scanning" wallet :: IO Value
-    require (name==nativeWallet c && descriptors && scanning==Bool False) "native_wallet_not_ready"
+    _ <- nativeWalletInfoWith call c
     preparations <- filter ((=="Native").preparationChain) <$> PgPreparation.pending ledger
     attempts <- filter ((=="Native").attemptChain) <$> PgSettlement.pendingAttempts ledger
     case (preparations,attempts) of

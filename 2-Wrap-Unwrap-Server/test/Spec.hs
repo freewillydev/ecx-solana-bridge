@@ -15,7 +15,7 @@ import Bridge.SolanaHelper
 import Bridge.SolanaPayment
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Aeson.Key as Key
-import Bridge.Native (nativeAmount,nativeNumber,validateNativeRecipientWith)
+import Bridge.Native (nativeAmount,nativeNumber,validateNativeRecipientWith,nativeWalletInfoWith,nativeWalletReadyWith)
 import Bridge.NativePayment
 import Bridge.NativeReplacement
 import Bridge.Settlement
@@ -49,7 +49,7 @@ import qualified Network.Wai.Test as W
 import Bridge.Observer
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync,concurrently_,link)
-import Control.Exception (bracket,SomeException)
+import Control.Exception (bracket,SomeException,try)
 import Control.Monad (forM_,when,void)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
@@ -529,6 +529,34 @@ main=hspec $ do
         manager <- newRpcManager
         rpc manager ("http://127.0.0.1:"<>show port) Nothing "walletprocesspsbt" []
           `shouldThrow` isError "rpc_method_forbidden"
+  describe "native wallet authority (offline RPC contracts)" $ do
+    it "checks observation readiness without requiring signing credentials" $ property $
+      \(sameName :: Bool) (descriptors :: Bool) (scanning :: Bool)->ioProperty $ do
+        let c=cfg "/unused-wallet-contract"
+            wallet=object ["walletname" .= (if sameName then nativeWallet c else "another-wallet")
+              ,"descriptors" .= descriptors,"scanning" .= scanning]
+            call scoped method params=do
+              (scoped,method,params) `shouldBe` (True,"getwalletinfo",[])
+              pure wallet
+            expected=sameName && descriptors && not scanning
+        result <- try (nativeWalletInfoWith call c) :: IO (Either BridgeError Value)
+        pure $ case result of
+          Right value->expected && value==wallet
+          Left (BridgeError code)->not expected && code=="native_wallet_not_ready"
+    it "requires local private keys and an unexpired unlock for signing readiness" $ property $
+      \(keys :: Bool) (external :: Bool)->forAll (elements [Nothing,Just 0,Just 99,Just 100,Just 101]) $ \unlocked->ioProperty $ do
+        let c=cfg "/unused-wallet-contract"
+            wallet=object (["walletname" .= nativeWallet c,"descriptors" .= True,"scanning" .= False
+              ,"private_keys_enabled" .= keys,"external_signer" .= external]
+              <>maybe [] (\n->["unlocked_until" .= (n::Int64)]) unlocked)
+            call scoped method params=do
+              (scoped,method,params) `shouldBe` (True,"getwalletinfo",[])
+              pure wallet
+            expected=keys && not external && maybe True (>100) unlocked
+        result <- try (nativeWalletReadyWith call c 100) :: IO (Either BridgeError ())
+        pure $ case result of
+          Right ()->expected
+          Left (BridgeError code)->not expected && code=="native_wallet_not_ready"
   describe "operator configuration boundaries" $ do
     it "preserves deployment identity after removing the unused SQLite setting" $ do
       let c=cfg "/tmp/config-policy"

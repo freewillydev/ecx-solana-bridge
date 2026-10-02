@@ -40,11 +40,7 @@ isHash value = T.length value==64 && T.all (`elem` ("0123456789abcdef"::String))
 observeNative :: Manager -> Config -> Ledger -> IO ()
 observeNative manager c ledger = do
   info <- nativeIdentity manager c
-  wallet <- nativeCall manager c True "getwalletinfo" []
-  name <- fieldValue "walletname" wallet
-  descriptor <- fieldValue "descriptors" wallet :: IO Bool
-  scanning <- fieldValue "scanning" wallet :: IO Value
-  require (name==nativeWallet c && descriptor && scanning==Bool False) "native_wallet_not_ready"
+  wallet <- nativeWalletInfoWith (nativeCall manager c) c
   tip <- fieldValue "blocks" info :: IO Int64
   processed <- fieldValue "lastprocessedblock" wallet
   height <- fieldValue "height" processed :: IO Int64

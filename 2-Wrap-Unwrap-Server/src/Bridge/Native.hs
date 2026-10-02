@@ -57,17 +57,24 @@ validateNativeRecipientWith call address = do
   kind <- fieldValue "type" decoded :: IO Text
   require (kind `elem` ["pubkeyhash","scripthash","witness_v0_keyhash","witness_v0_scripthash","witness_v1_taproot"]) "unsupported_native_destination"
   pure script
-nativeWalletReadyWith :: (Bool -> Text -> [Value] -> IO Value) -> Config -> Int64 -> IO ()
-nativeWalletReadyWith call c now = do
+-- Observation and recovery require the named descriptor wallet to be idle,
+-- without requiring private keys. Callers check its chain position separately.
+nativeWalletInfoWith :: (Bool -> Text -> [Value] -> IO Value) -> Config -> IO Value
+nativeWalletInfoWith call c = do
   wallet <- call True "getwalletinfo" []
   name <- fieldValue "walletname" wallet
   descriptors <- fieldValue "descriptors" wallet
+  scanning <- fieldValue "scanning" wallet :: IO Value
+  require (name==nativeWallet c && descriptors && scanning==Bool False) "native_wallet_not_ready"
+  pure wallet
+
+nativeWalletReadyWith :: (Bool -> Text -> [Value] -> IO Value) -> Config -> Int64 -> IO ()
+nativeWalletReadyWith call c now = do
+  wallet <- nativeWalletInfoWith call c
   keys <- fieldValue "private_keys_enabled" wallet
   external <- fieldValue "external_signer" wallet
-  scanning <- fieldValue "scanning" wallet :: IO Value
   unlocked <- parseValue (withObject "wallet" (.:? "unlocked_until")) wallet :: IO (Maybe Int64)
-  require (name==nativeWallet c && descriptors && keys && not external && scanning==Bool False
-    && maybe True (>now) unlocked) "native_wallet_not_ready"
+  require (keys && not external && maybe True (>now) unlocked) "native_wallet_not_ready"
 
 -- A durable ledger claim supplies fresh=True exactly once. Recovery only reads
 -- the saved label; absent/ambiguous evidence never permits a second allocation.
