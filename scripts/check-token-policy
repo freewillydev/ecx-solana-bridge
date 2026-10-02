@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Read finalized token policy from two real providers; never sign or activate."""
+import argparse
+import json
+from pathlib import Path
+import re
+import sys
+import time
+import urllib.error
+import urllib.request
+from urllib.parse import urlsplit
+
+TOKEN_PROGRAM = 'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
+DEVNET = 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG'
+MAINNET = '5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d'
+KEY = r'[1-9A-HJ-NP-Za-km-z]{32,44}'
+
+
+def call(endpoint, method, params):
+    request = urllib.request.Request(endpoint, json.dumps(dict(jsonrpc='2.0', id=1, method=method, params=params)).encode(), {'Content-Type': 'application/json'})
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(request, timeout=25) as response:
+                data = response.read(4 * 1024 * 1024 + 1)
+                if len(data) > 4 * 1024 * 1024:
+                    raise ValueError('RPC response exceeds limit')
+            break
+        except urllib.error.HTTPError as error:
+            delay = error.headers.get('Retry-After')
+            seconds = 4 * (attempt + 1) if delay is None else int(delay) if re.fullmatch('[0-9]{1,2}', delay) else 16
+            if error.code != 429 or attempt == 2 or seconds > 15:
+                raise
+            time.sleep(max(1, seconds))
+    result = json.loads(data)
+    if result.get('id') != 1 or result.get('error') or 'result' not in result:
+        raise ValueError('RPC refused read')
+    return result['result']
+
+
+def inspect(endpoint, config, genesis, authority):
+    if call(endpoint, 'getGenesisHash', []) != genesis:
+        raise ValueError('Wrong network')
+    result = call(endpoint, 'getMultipleAccounts', [[config['mint'], config['custodyAta']], {'encoding': 'jsonParsed', 'commitment': 'finalized'}])
+    mint, custody = result['value']
+    for account in (mint, custody):
+        if account is None or account['owner'] != TOKEN_PROGRAM or account['executable']:
+            raise ValueError('Unsupported token program')
+    parsed = mint['data']['parsed']
+    info = parsed['info']
+    if parsed['type'] != 'mint' or info['decimals'] != 8 or info['isInitialized'] is not True or info['freezeAuthority'] is not None or info['mintAuthority'] != authority:
+        raise ValueError('Mint authority or format mismatch')
+    supply = info['supply']
+    parsed = custody['data']['parsed']
+    account = parsed['info']
+    amount = account['tokenAmount']['amount']
+    if parsed['type'] != 'account' or custody['data']['space'] != 165 or account['mint'] != config['mint'] or account['owner'] != config['custodyOwner'] or account['state'] != 'initialized' or account['isNative'] is not False or account.get('delegate') is not None or account.get('closeAuthority') is not None or account['tokenAmount']['decimals'] != 8:
+        raise ValueError('Custody account policy mismatch')
+    for value in (supply, amount):
+        if not isinstance(value, str) or not re.fullmatch('0|[1-9][0-9]{0,19}', value) or int(value) > 2**64-1:
+            raise ValueError('Invalid token amount')
+    return dict(finalizedSlot=result['context']['slot'], mintAuthority=authority, freezeAuthority=None, supplyBaseUnits=supply, custodyBaseUnits=amount)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('config', type=Path)
+    parser.add_argument('--expected-mint-authority', required=True, help='Issuer-approved public key, or revoked')
+    parser.add_argument('--report', type=Path, required=True)
+    args = parser.parse_args()
+    config = json.loads(args.config.read_text())
+    if config['profile'] not in ('L2LSignetDevnet', 'ECXBetanetDevnet', 'CanonicalBeta'):
+        raise ValueError('Unsupported profile')
+    authority = None if args.expected_mint_authority == 'revoked' else args.expected_mint_authority
+    if authority is not None and not re.fullmatch(KEY, authority):
+        raise ValueError('Invalid authority')
+    for field in ('mint', 'custodyOwner', 'custodyAta'):
+        if not re.fullmatch(KEY, config[field]):
+            raise ValueError('Invalid token identity')
+    primary, verifier = config['solanaRpc'], config['solanaVerifierRpc']
+    hosts = [urlsplit(endpoint).hostname for endpoint in (primary, verifier)]
+    if not all(hosts) or hosts[0].lower() == hosts[1].lower() or any(urlsplit(endpoint).scheme != 'https' for endpoint in (primary, verifier)):
+        raise ValueError('Independent HTTPS providers required')
+    genesis = MAINNET if config['profile'] == 'CanonicalBeta' else DEVNET
+    readings = [inspect(endpoint, config, genesis, authority) for endpoint in (primary, verifier)]
+    if {k:v for k,v in readings[0].items() if k != 'finalizedSlot'} != {k:v for k,v in readings[1].items() if k != 'finalizedSlot'}:
+        raise ValueError('Provider observations differ; repeat only after investigating')
+    report = dict(profile=config['profile'], mint=config['mint'], custodyOwner=config['custodyOwner'], custodyAta=config['custodyAta'], genesis=genesis, tokenProgram=TOKEN_PROGRAM, decimals=8, independentProviderPolicyAndInventoryMatch=True, readings=readings, reserveBackingVerified=False, issuerApprovalVerified=False, canonicalActivationAuthorized=False, chainMutation=False)
+    args.report.write_text(json.dumps(report, indent=2)+'\n')
+    print(json.dumps(report))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (ValueError, KeyError, TypeError, OSError):
+        sys.exit('Token policy acceptance refused; configuration, provider identity or finalized account policy did not match')

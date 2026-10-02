@@ -1812,3 +1812,16 @@ The automation virtual clipboard remains unavailable; external wallet signing
 is still unverified. The ledger remained six orders, five attempts and sequence
 19. Temporary web/observer overrides and the local forwarding were removed; no
 new transfer occurred. See `evidence/customer-manual-recovery-link.json`.
+
+## Actual two-provider token policy and inventory acceptance
+
+`scripts/check-token-policy` now performs read-only adoption acceptance from the
+existing configuration plus an explicitly expected issuer authority. Actual
+Devnet primary/verifier finalized observations matched: classic eight-decimal
+mint, expected test authority, absent freeze authority, supply 200000000000 base
+units, and custody inventory 1000200 base units with the configured account
+policy. Initial verifier HTTP 429 cleared under the bounded read retry budget.
+See `evidence/token-policy-devnet.json`. No transaction, authority change, VM
+or package build was involved. The same command can inspect an issuer-approved
+canonical configuration; no such canonical acceptance is claimed here. Global
+backing, issuer authorization and funded canonical/betanet round trips remain open.

@@ -251,3 +251,27 @@ Real local restic acceptance preserved an older-timestamp highest-sequence
 snapshot and another deployment, applied the selected removals, and passed a
 repository check. See `evidence/backup-retention-local.json`. Actual remote
 retention, recovery receipts and physical host-loss restoration remain unproved.
+
+## Read-only token adoption acceptance
+
+Before an issuer-approved deployment, compare the finalized mint and custody
+accounts through both configured HTTPS RPC providers:
+
+```sh
+./scripts/check-token-policy /absolute/private/worker.json --expected-mint-authority ISSUER_APPROVED_PUBLIC_KEY --report /absolute/private/token-policy.json
+```
+
+Use `revoked` instead of a public key only when the approved policy explicitly
+requires absent mint authority. The command checks actual cluster genesis, classic
+SPL program, eight decimals, initialization, absent freeze authority, the expected
+mint authority, and the configured custody account's owner/mint/state/delegation
+policy. It compares supply and custody inventory across both finalized responses,
+records their slots, and refuses mismatches or unavailable providers. Only bounded
+rate-limited reads are retried; it never signs, mutates authority, initializes
+storage or enables payments. Output omits RPC URLs and credentials.
+
+Devnet acceptance passes for the dedicated test mint; see
+`evidence/token-policy-devnet.json`. This is not canonical-token acceptance or
+proof of global reserve backing. Issuer approval, native reserve locations,
+outstanding redemption obligations and issuance reconciliation must be reviewed
+separately; the report explicitly leaves those claims unverified.
