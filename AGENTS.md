@@ -1,11 +1,11 @@
 # Bridge development
 
-Read docs/IMPLEMENTATION-PLAN.md before architecture work. The current priority is
+Read 2-Wrap-Unwrap-Server/docs/IMPLEMENTATION-PLAN.md before architecture work. The current priority is
 human-auditable simplification: remove duplication, obsolete artifacts and unnecessary
 abstractions while preserving required behavior and financial invariants.
 
-Before operation, handler or interpreter changes, read docs/reference/Main.hs in full
-and docs/OPERATION-DSL.md. Main.hs is the user's exact architectural reference from
+Before operation, handler or interpreter changes, read 2-Wrap-Unwrap-Server/docs/reference/Main.hs in full
+and 2-Wrap-Unwrap-Server/docs/OPERATION-DSL.md. Main.hs is the user's exact architectural reference from
 “Add interactive environment prompts”, supplied 2026-10-02. Keep it unmodified and
 outside production builds. Preserve the typeclass/constrained-existential/GADT
 severity design; correct the sketch's incomplete or permissive types as explained
@@ -24,3 +24,6 @@ connections/transaction control and schema-migration DDL are separate infrastruc
 Opaleye queries belong only to implementations of specific closed DSL operations.
 Do not expose connection/query callbacks or generic RunQuery/RunSQL operations to
 handlers. Keep connection capabilities private to the relevant interpreter.
+
+Run bridge commands from 2-Wrap-Unwrap-Server. Keep token administration in
+1-Make-Wrapped-ECX and liquidity operations in 3-Create-CPMM-Pool, separate from custody.

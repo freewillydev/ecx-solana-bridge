@@ -63,8 +63,8 @@ library legacy
 
 executable ecx-bridge
   import: settings
-  hs-source-dirs: app
-  main-is: Main.hs
+  hs-source-dirs: scripts
+  main-is: server.hs
   ghc-options: -threaded -rtsopts -with-rtsopts=-N2
   build-depends: base, ecx-bridge, postgresql-simple, unix, aeson, bytestring, text
 
@@ -77,7 +77,7 @@ test-suite bridge-test
   build-depends: base, ecx-bridge, ecx-bridge:legacy, aeson, bytestring, directory, filepath,
     hspec >=2.11 && <2.12, QuickCheck >=2.15 && <2.19, sqlite-simple,
     text, time, async, network, http-client, servant-client, servant, servant-server, postgresql-simple, unix, scientific, base64-bytestring,
-    crypton, ram, wai, wai-extra, http-types
+    crypton, ram, wai, wai-extra, http-types, process
 
 executable ecx-postgres-journal-check
   import: settings

@@ -11,3 +11,9 @@ run/
 .DS_Store
 .release-build/
 __pycache__/
+
+# Bridge source now lives under its numbered project directory.
+2-Wrap-Unwrap-Server/solana-helper/target/
+2-Wrap-Unwrap-Server/web/node_modules/
+2-Wrap-Unwrap-Server/web/dist/
+2-Wrap-Unwrap-Server/config/local.json

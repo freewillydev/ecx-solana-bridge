@@ -14,7 +14,7 @@ The user supplied the complete 118-line Main.hs on 2026-10-02 from
 [`reference/Main.hs`](reference/Main.hs), SHA-256 `f1d0777a8d2fddd62881aa5d85f518884c9d4efb451480f1520a677ab2319ea2`.
 It comes from “Add interactive environment prompts”, thread
 `01a0f3e8-cade-75d3-aef2-58257f30cc21`; the previously recorded remote path was
-`/home/jack/haskell/secureServer/app/Main.hs`. The supplied file is now the
+`/home/jack/haskell/secureServer/scripts/server.hs`. The supplied file is now the
 architectural reference. It is not a production module or a claim of compilation.
 
 Preserve its intent: severity-indexed operations, typeclass-constrained GADT input,

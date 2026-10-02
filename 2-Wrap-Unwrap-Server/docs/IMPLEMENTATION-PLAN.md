@@ -128,6 +128,12 @@ Immediate priority, per the latest instructions: finish the direct HTTP server,
 dedicated signer with critical-only communication, Solana SDK Haskell FFI and
 Haskell frontend using GHC's JavaScript backend (no WebAssembly). Complete and
 verify those replacements together before the next repository-wide deletion pass.
+Use Marcus's `marcusmmmz/wecx-mint` compact root (README, package files and
+scripts) as the layout reference. Cabal files replace npm application files;
+`scripts/server.hs` is the named server entry point. Keep source, interface,
+configuration and tests only where this service requires them, consolidate
+operational scripts, and avoid separate top-level folders for each acceptance
+runner, backend, language or historical phase.
 Then remove every obsolete or irrelevant tracked file/folder, including retired
 frontend/helper/proxy code and unused deployment/test tools. Preserve essential
 invariant checks, dependency locks and licenses; do not hide clutter elsewhere.
@@ -236,3 +242,11 @@ Completion requires both a genuinely smaller reasoning surface and every retaine
 function working with appropriate evidence. A short codebase is not automatically
 trustworthy; the objective is a concise, legible implementation whose authority,
 accounting and external effects a human can actually verify.
+
+## Repository layout
+
+The root has three project folders: `1-Make-Wrapped-ECX` for token administration,
+`2-Wrap-Unwrap-Server` for the bridge and its build/test sources, and
+`3-Create-CPMM-Pool` for separate liquidity operations. Administration and pool
+programs remain pending; their folders point to the existing operational guide.
+Shared Git metadata, CI, license and contributor instructions remain at the root.

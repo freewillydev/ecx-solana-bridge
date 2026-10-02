@@ -10,11 +10,15 @@ jobs:
   x86-release:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    defaults:
+      run:
+        working-directory: 2-Wrap-Unwrap-Server
     env:
       ECX_BUILD_DIR: ${{ github.workspace }}/.release-build
       ECX_BUILD_JOBS: '2'
     steps:
       - name: Reserve capacity on the disposable runner
+        working-directory: .
         run: |
           # These image SDKs are unrelated to the pinned bridge toolchains.
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet /usr/share/swift /opt/ghc /opt/hostedtoolcache
@@ -31,7 +35,7 @@ jobs:
             .release-build/*-linux-*.tar.xz
             .release-build/node-source
             .release-build/sqlite
-          key: ubuntu24-x86-tools-notices-v2-${{ hashFiles('deploy/toolchains.json') }}
+          key: ubuntu24-x86-tools-notices-v2-${{ hashFiles('2-Wrap-Unwrap-Server/deploy/toolchains.json') }}
       - name: Restore frozen dependencies
         id: dependencies
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -41,7 +45,7 @@ jobs:
             .release-build/cargo
             .release-build/cargo-target
             ~/.npm
-          key: ubuntu24-x86-dependencies-${{ hashFiles('cabal.project.freeze', 'solana-helper/Cargo.lock', 'web/package-lock.json') }}
+          key: ubuntu24-x86-dependencies-${{ hashFiles('2-Wrap-Unwrap-Server/cabal.project.freeze', '2-Wrap-Unwrap-Server/solana-helper/Cargo.lock', '2-Wrap-Unwrap-Server/web/package-lock.json') }}
           restore-keys: ubuntu24-x86-dependencies-
       - name: Install build dependencies
         run: |
