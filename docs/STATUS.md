@@ -1855,3 +1855,19 @@ See `evidence/l2l-faucet-funding.json`. After confirmation, inspect the retained
 unsigned preparation journal and quote deadline before continuing acceptance.
 This funds the tester rather than bridge custody and does not itself prove
 in-flight Solana recovery.
+
+## Bincode source review and funding wait
+
+The bincode maintenance advisory now has an explicit scoped disposition: retain
+the pinned SDK-compatible codec while tracking its maintenance risk. Cargo.lock
+archive hashes and 49 corresponding bincode/message/transaction source files
+were verified; production helper calls construct bounded messages and serialize
+them, while its direct bincode decoding is test-only. This does not waive
+independent review or claim compiled whole-program reachability. See the
+third-party notes and `evidence/bincode-maintenance-disposition.json`.
+
+The faucet transfer remained unconfirmed at the subsequent real-node check.
+The unfunded order `9b3fbf73edf358d5e66b314758422a54e67998584fe8b618222d4e7537d4fcab`
+has expired, and its preparation journal contains no signed bytes. Preserve it
+for review; after funding confirms, a fresh quoted test order is needed rather
+than broadcasting against that expired quote. No task VM was started here.

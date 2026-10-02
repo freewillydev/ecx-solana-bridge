@@ -1,0 +1,41 @@
+{
+  "date": "2026-10-02",
+  "advisory": "RUSTSEC-2025-0141",
+  "advisoryType": "informational unmaintained",
+  "source": "https://rustsec.org/advisories/RUSTSEC-2025-0141.html",
+  "helperSourceSha256": "55456bb4ea9eff4c102759f72724878a24dda38e0025b34c5811bbba7e379be9",
+  "cargoLockSha256": "3ff96fe01dfc96435aa8d3a7601da3d78dfd09053fc855ab11d0e6eb98e9c7a9",
+  "verifiedPinnedSources": {
+    "bincode": {
+      "version": "1.3.3",
+      "archiveSha256": "b1f45e9417d87227c7a56d22e471c6206462cba514c7590c09aff4cf6d1ddcad",
+      "verifiedSourceFiles": 23
+    },
+    "solana-message": {
+      "version": "3.0.1",
+      "archiveSha256": "85666605c9fd727f865ed381665db0a8fc29f984a030ecc1e40f43bfb2541623",
+      "verifiedSourceFiles": 17
+    },
+    "solana-transaction": {
+      "version": "3.0.0",
+      "archiveSha256": "2db6ac3984042d9248fd9b06761ece438ed9ba412c001240052ce6216fee3141",
+      "verifiedSourceFiles": 9
+    }
+  },
+  "productionDirectSerializationCalls": 2,
+  "productionDirectBincodeDeserializationCalls": 0,
+  "inputFormat": "bounded JSON; locally constructed fixed-instruction Solana messages",
+  "requestByteLimit": 8192,
+  "identifierByteLimit": 64,
+  "transactionByteLimit": 1232,
+  "reviewedSdkPaths": [
+    "Message::new_with_blockhash",
+    "Message::serialize",
+    "Transaction::new_unsigned",
+    "Transaction::try_sign",
+    "Transaction::verify"
+  ],
+  "disposition": "retain pinned interoperable codec; track maintenance advisory and revisit with SDK migration",
+  "compiledWholeProgramReachabilityProven": false,
+  "independentSecurityReviewComplete": false
+}

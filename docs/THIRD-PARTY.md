@@ -68,3 +68,27 @@ counts against its actual installed package versions. See [x86 inventory](eviden
 and [ARM inventory](evidence/installed-libraries-arm.json). Original notice files
 remain in the external review cache. Full obligation/applicability review remains; loader enumeration does not identify every statically embedded
 component or establish that a license obligation is satisfied.
+
+## Bincode maintenance disposition
+
+[RUSTSEC-2025-0141](https://rustsec.org/advisories/RUSTSEC-2025-0141.html)
+classifies bincode as unmaintained, with no patched version. The bridge retains
+1.3.3 for the pinned Solana SDK wire encoding instead of introducing an unverified
+replacement codec during release construction. This remains a maintenance risk.
+
+The helper, pinned message SDK and transaction SDK source paths were reviewed.
+Their crate archives match Cargo.lock, and all 49 extracted source/archive files
+match byte for byte. Production helper input is bounded JSON (8192 bytes), and
+only fixed transfer/ATA/memo instructions are constructed. Both direct production
+bincode calls serialize these locally constructed messages/transactions. The
+helper's direct bincode deserialization calls are confined to its test module.
+The reviewed SDK signing/verification paths serialize the constructed message;
+SDK decoding APIs exist and this review does not prove whole-program compiled
+reachability. The output transaction limit is 1232 bytes, checked after encoding;
+bounded request fields and fixed instructions also constrain the allocation.
+
+See `evidence/bincode-maintenance-disposition.json` for source hashes, limits and
+the scoped conclusion. Revisit this dependency with a reviewed SDK migration and
+byte-compatibility acceptance. Independent review, the separate base/readFloat
+finding, and other dependency/license obligations remain open. No runtime or
+transaction encoding was changed for this review.
