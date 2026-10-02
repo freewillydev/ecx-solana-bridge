@@ -9,13 +9,26 @@ remaining operator/recovery workflows still require completion and audit.
 
 ## Source reviewed
 
-“Add interactive environment prompts”, thread
-`01a0f3e8-cade-75d3-aef2-58257f30cc21`, contains `/home/jack/haskell/secureServer/app/Main.hs`
-on the other computer. Reviewed the complete file captured in the thread and the
-subsequent successful build/edit output for its `DoThing`, `Input`, `Severity`,
-`CriticalOperation`, `SafeOperation` and `DSL` definitions. There is no direct
-remote filesystem tool in this session, so this is the recorded version, not a
-claim to have fetched any newer unrecorded edits.
+The user supplied the complete 118-line Main.hs on 2026-10-02 from
+`/Users/lukekensik/Downloads/Main.hs`. Its exact, unmodified reference copy is
+[`reference/Main.hs`](reference/Main.hs), SHA-256 `f1d0777a8d2fddd62881aa5d85f518884c9d4efb451480f1520a677ab2319ea2`.
+It comes from “Add interactive environment prompts”, thread
+`01a0f3e8-cade-75d3-aef2-58257f30cc21`; the previously recorded remote path was
+`/home/jack/haskell/secureServer/app/Main.hs`. The supplied file is now the
+architectural reference. It is not a production module or a claim of compilation.
+
+Preserve its intent: severity-indexed operations, typeclass-constrained GADT input,
+explicit command construction, separate interpreters and small visible operation
+vocabularies. Review its exact definitions when changing the bridge DSL. Adapt the
+sketch rather than copying its unfinished signatures: the safe evaluator currently
+accepts critical input and maps WrapEcx to SafeWrap; RequiredOperation is polymorphic
+in severity; runSafe has no instance implementation. Those shapes must not become
+a production route around the authority boundary.
+
+Comments about a weekly 10% supply limit and multisig coordination are design notes
+to reconcile with agreed scope, not implemented guarantees or automatic authority
+to expand the project. Its restore goal requires the durable ledger and signed
+attempt journal as well as the original key/configuration material.
 
 Retain the constrained existential/GADT idea and severity indexing. Replace the
 identity update methods with operation-to-command elaboration. Remove the

@@ -1,273 +1,188 @@
-# Integrated implementation plan
+# Simplification plan
 
-Revised 2026-10-02. The execution sequence below takes precedence over the older numbered stages retained as a requirement inventory.
-Build the complete test-network product first, then audit its completed pieces.
-Implementation, integration, verification and audit are distinct checkpoints.
+Revised 2026-10-02. This replaces the previous execution sequence. Simplify the
+complete product for human review before adding more machinery or rebuilding
+packages. This is an implementation plan, not a claim that the refactor is done.
+The previous plan and evidence remain in Git history at commit `6d293a3`.
 
-## Remaining execution sequence — functionality before packaging
+## Product and audit contract
 
-Installer upgrades, repeated architecture acceptance, signed-candidate refreshes
-and release uploads are deferred until the substantive work below is consolidated.
-Existing packages remain development baselines; source changes need only scoped
-compilation and checks during this phase. Completed build artifacts are retained.
+Keep the useful behavior of Marcus's published conversion service: quote, create
+order, identify deposit, confirm it, transfer existing treasury inventory, report
+status, and refund when appropriate. His mint tooling is JavaScript; the published
+conversion backend is Rust. Its reviewed reference is ecash-com/wrapped-ecx at
+`b980b4372c4844d3d42ff1926fd0da848631cebc`.
 
-1. **Finish payment and recovery workflows.** Complete the outstanding Solana
-   signed-but-unsent clean-host recovery and paying reconciliation, then address
-   remaining concrete replacement/reorg/loss and interrupted-operation gaps.
-   Reuse existing real Signet/Devnet fixtures, ledger and adapters; do not create
-   a parallel payment implementation. Verify each complete workflow once.
-   Implement the outstanding bounded earned-fee withdrawal as an operator payment
-   before calling the product complete. Preserve its distinction from customer
-   conversions: do not create fictitious deposit receipts or customer orders to
-   reuse the engine. Generalize saved payment context only where necessary, with
-   typed operator funding, immutable destination/amount/fee ceilings, atomic
-   reservation of unencumbered earned funds, central critical dispatch, saved
-   bytes/backup/send barriers and ordinary independently verified settlement.
-   Concurrent source-loss capital allocation must exclude those reservations.
-   Recovery, cancellation and retries must preserve the same single-payment and
-   custody invariants. Exercise the complete withdrawal on dedicated real test
-   funds before packaging; no manual wallet-send bypass.
-2. **Finish customer acceptance.** Exercise the connection-free browser journey,
-   clipboard/private recovery links and an actual supported Solana Pay wallet.
-   Keep external wallet signing pending until it can be performed with the
-   dedicated test identity; do not introduce wallet connection to solve testing.
-3. **Finish operational recovery.** Complete remote backup/retention, receipt
-   barriers, stopped-source fencing, key recovery and clean-host resume. Prepare
-   all code and procedures locally; an actual off-host repository and restoration
-   require real repository access. Local backups do not prove this requirement.
-4. **Finish real deployment/market integration.** Verify canonical network/token
-   configuration, authority, supply/backing and usable market integration. Run
-   funded betanet/canonical acceptance only with allocated test funding and the
-   required operator authorization. Keep unavailable external prerequisites
-   explicit while completing independent implementation.
-5. **Audit the consolidated product.** Review financial invariants, authorization,
-   chain validation, dependency/license findings and the collected recovery
-   evidence in bounded batches. Obtain independent security review; self-review
-   cannot satisfy that gate. Fix related findings together.
-6. **Package once at the end.** Build the consolidated source for ARM64/x86,
-   verify install/upgrade/repeat/reboot and restoration where affected, then
-   authenticate a fresh private review candidate. Public activation remains a
-   separate authorized decision.
+Retain Haskell/Servant, PostgreSQL/Opaleye, connection-free customers, 1% new fees
+both ways, historical saved terms, native deposit addresses, Solana Pay references,
+QR/payment links, saved-order recovery, refunds, explorer/trading links and support.
+Keep bounded operator treasury/earned-fee operations, reconciliation and recovery.
+Use real L2L Signet/Solana Devnet for development; canonical deployment is a separate
+acceptance gate. Mint/metadata administration, liquidity placement, LP locking and
+compounding remain external tools with separate keys. Use existing market providers
+for price discovery/charts rather than building an exchange or pricing engine.
 
-The signed-but-unsent Solana local clean-host restore, explicit expired retry,
-normal-worker settlement and restart checkpoint passed on the real chains; see
-[evidence](evidence/installed-solana-inflight-restore.json). Item 1 still includes
-the remaining concrete replacement/reorg/loss acceptance gaps.
+A reviewer must be able to trace a request through its typed operation, authority
+check, durable decision, chain effect and balanced settlement. Every retained file
+must serve a current product function, invariant, protocol boundary, deployment need
+or license obligation. Readability wins over code golf and arbitrary line quotas.
 
-The published canonical pool and both Jupiter quote directions have now been
-read from actual mainnet services; see `evidence/published-orca-pool-readback.json`
-and `evidence/published-jupiter-routes.json`. Quote availability does not establish
-executed-trade acceptance, issuer approval or global reserve backing.
+## Baseline and desired shape
 
-The next task remains item 1. Packaging does not become the default fallback when an
-external acceptance prerequisite is unavailable: continue another substantive
-item and record the prerequisite without repeating completed installer checks.
+At this review: 431 tracked files; 58 production Haskell modules / 9,331 lines;
+9 legacy modules / 2,298 lines; 31 integration files; 27 scripts; 26 deployment
+files; 13 test files / 6,504 lines; 218 documentation files including 186 evidence
+artifacts. Local dependencies and build caches are not tracked source bloat.
+Required license notices are not development clutter.
 
-Fee withdrawal construction: `Postgres/FeeWithdrawal.hs` and PostgreSQL migration
-005 implement the internal funding reservation and unsigned cancellation stage.
-Reserved amounts move from `earned` to `fee_pending` in the ordinary balanced
-journal, so loss-capital allocation cannot spend them. The isolated PostgreSQL
-contract covers pause/freshness/profile/bounds, replay/conflict and immutability.
-This is not a working withdrawal command yet. Next generalize the customer-bound
-payment context to a typed customer/operator funding choice, integrate the closed
-operator DSL and API, then preparation/budgets, saved-byte backup/send, observation,
-settlement and recovery. Add no fake order/deposit or independent signing path.
-Real-chain withdrawal acceptance and consolidated installation remain outstanding.
+Aim for roughly 15–20 production Haskell modules, one small Rust signing helper,
+one thin frontend, one test suite with one acceptance runner, and three maintained
+guides. Seek roughly 50–75 first-party tracked files, excluding required notices
+and lockfiles. These are provisional review targets, not reasons to hide logic or
+remove protection. Measure actual reductions in concepts, dependencies, entry points
+and review steps as well as files and lines.
 
-## Product contract
+## Main.hs and the operation boundary
 
-One small Haskell Servant application, two real chain adapters, PostgreSQL with
-Opaleye throughout runtime database access, and a thin connection-free interface.
-Use actual L2L Signet and Solana Devnet during development. Actual ECX betanet and
-the canonical wrapped token are separate release acceptance requirements.
+The supplied original is preserved verbatim at `docs/reference/Main.hs`, received
+2026-10-02 from `/Users/lukekensik/Downloads/Main.hs`. Its SHA-256 and design mapping
+are in OPERATION-DSL.md. Read this 118-line reference before changing operation
+types, handlers or interpreter boundaries. Preserve its constrained typeclasses,
+GADTs and severity intent while correcting unfinished or permissive sketch types.
+It is a design reference, excluded from production builds.
 
-New orders charge 1% in both directions, using integer base units and existing
-rounding rules. Historical orders retain their saved terms. Wrapping accepts a
-Solana destination and provides native deposit instructions. Unwrapping accepts
-a native destination and provides a standard Solana Pay request. Customers pay
-in their wallets without connecting them to the website.
+Keep the valid typeclass/constrained-existential/GADT design:
 
-Supersede the published service's conversions, quotes, payment instructions/QR,
-saved orders, status, refunds, explorers, trading links, token administration
-documentation and restricted operator diagnostics. Mint authority and liquidity
-keys remain separate from the online bridge. Use existing official tooling and
-checked payment algorithms; no new token program, AMM or workflow framework.
+    class Operation s op | op -> s where
+      command :: op a -> DSL s a
+    data Request s a where
+      Request :: Operation s op => op a -> Request s a
+    resolve (Request op) = command op
 
-## Architecture fixed before further expansion
+Servant handlers construct typed plans. Separate evalSafe and evalCritical
+interpreters execute them through one authorized dispatcher, with one production
+critical-evaluation call site. Keep result type and severity visible while hiding
+the operation type. Safe context has only read authority, no signing keys or writable
+ledger. Caller permissions are separate from severity: an order request can be
+critical without giving its customer access to operator commands.
+Use closed constructors and enforced module/component exports. No arbitrary IO/SQL
+command, severity cast, incoherent instance, undefined placeholder or unnecessary
+free-monad/effect framework. Retain the operation typeclasses; remove storage
+typeclasses whose only remaining purpose is supporting the retired SQLite backend.
 
-    Servant handler -> typed operation -> result/severity-indexed DSL
-                    -> central dispatcher -> safe or critical evaluator
-                    -> Opaleye / existing real-chain workflows -> response
+## Intended architecture
 
-Handlers construct DSL values; evaluation performs effects. The constrained
-existential hides operation type while retaining severity and result type. The
-operation typeclass determines severity; it does not grant caller authorization.
-Keep closed customer, operator and worker command sets and one production
-critical-evaluation invocation. Safe evaluation has no signer, financial write
-capability, wallet mutation transport or full private configuration. No arbitrary
-LiftIO, SQL/RPC command or severity cast. See [the DSL specification](OPERATION-DSL.md)
-for the Main.hs-derived design and provenance.
+    Servant handlers -> request / closed DSL -> authorized dispatcher
+      safe interpreter     -> read-only Opaleye queries
+      critical interpreter -> payment workflow -> durable Opaleye transaction
+                                              -> native / Solana adapters
 
-Fix shared domain, storage, adapter and API contracts once. Implement both ends
-of any necessary contract change in the same batch. Reuse existing workflows
-while replacing storage; do not redesign accounting simultaneously.
+- Domain: amounts, IDs, explicit states, payment purpose, accounting and pure decisions.
+- Operations/API: small operation vocabulary, severity/caller permissions, pure handlers.
+- Runtime: startup capabilities and the two interpreters.
+- Workflow: prepare, journal, sign, save bytes, authorize/send, observe, settle.
+- Recovery: cancellation, expiry, replacement and loss decisions using that same workflow.
+- Store: typed schema and explicit transactions/queries; PostgreSQL only.
+- Native/Solana: concrete adapters; separate codec/validation modules only where useful.
+- Small configuration, RPC/process, backup and frontend boundaries.
 
-## 1. Finish the whole runtime and both customer flows
+Use one application/executable with public/worker modes where needed for OS privilege
+separation. Do not place custody authority in the public web process just to reduce
+process count. Keep one active paying worker. PostgreSQL, the native node, Solana RPC
+and existing backup tooling are explicit dependencies rather than custom frameworks.
 
-Continue from the existing PostgreSQL schema, historical import comparison,
-real scanner/custody checks, payment port, Servant DSL and Solana Pay/interface
-work. Do not repeat these investigations or treat each module as a new project.
-Both new 1% conversions, a verified-owner full refund, explicit expired retry,
-unsigned cancellation, browser quote/reload and clean restart now have integrated
-Signet/Devnet evidence. Preserve this working baseline while completing the thin
-interface, configuration and installation work below.
+## Ordered execution
 
-1. Finish and compile the actual PostgreSQL startup, scan/reconcile and paying
-   worker loop with the existing API, DSL, observer, preparation and settlement.
-   Bring across the recovery operations needed for normal restart. Unimplemented
-   recovery situations must remain paused and visible rather than spend blindly.
-2. Complete one continuous customer path in each direction: quote, create order,
-   copy/QR/payment link, real deposit, observation, payout, status and saved-order
-   reload. Keep old outstanding order instructions usable or resolve their
-   obligations explicitly; a new interface cannot abandon historical orders.
-3. Finish the normal refund path with verified ownership. Bind Solana receipts to
-   the actual mint, custody, amount and reference; prevent deposit reuse. Reuse
-   the existing payout engine rather than adding a second implementation.
-4. Perform controlled local cutover: inventory processes, stop the old paying
-   worker, take a final consistent snapshot, import into a fresh PostgreSQL
-   ledger, compare state and reconcile custody before enabling payment. Preserve
-   the old snapshot privately. Never run two paying workers against one custody.
-5. Demonstrate both conversions through the real customer API/interface on
-   Signet/Devnet, including one normal refund and one restart. Verify recorded
-   payout amounts, 1% fees, historical terms and custody. Resolve failures that
-   block these flows; put unrelated findings in the audit backlog.
+1. **Freeze behavior and classify the tree.** Preserve the baseline commit and a
+   consistent private ledger backup. Map every file to keep, merge/rewrite, remove,
+   or historical artifact. Make one small matrix linking required behavior to its
+   implementation and essential check. Identify any proposed behavior removal
+   explicitly; do not silently shrink the accepted product. Preserve wallet state.
 
-**Checkpoint: both conversions, refund and reload/restart work as one product.**
-This is a development milestone, not approval for valuable-fund operation.
+2. **Remove noise without changing behavior.** Remove historical evidence dumps,
+   screenshots, progress diaries and obsolete plans from the current checkout once
+   preserved in history/private release artifacts. Replace overlapping status
+   documents with one current checklist. Keep a compact current acceptance summary
+   tied to source/artifact identity. Remove unused probes and run-specific VM tools.
+   Do not move the clutter into another directory in the same checkout. Preserve
+   required licenses, provenance and dependency locks.
 
-## 2. Finish the usable, one-command product
+3. **Remove SQLite and duplicate storage abstractions.** Move unique useful assertions
+   from legacy tests into pure/PostgreSQL tests, then delete legacy-src, its Cabal
+   component, sqlite-simple, obsolete SQLite migrations and active import tooling.
+   Historical migration tools remain available at the baseline revision. Replace
+   PreparationStore, SettlementStore and similar backend-compatibility classes with
+   concrete PostgreSQL functions where abstraction no longer pays for itself.
+   Remove redundant wrappers immediately after their replacement works.
 
-6. Complete only the remaining thin interface features: exact fees/net amount,
-   deadlines, clear errors, explorer links, support contact and configured
-   Jupiter/Orca links. Verify actual liquidity before claiming trading works.
-   A trading link does not itself replace bridge deposit/redemption instructions.
-7. Finish interactive configuration and protected noninteractive config input:
-   endpoints/networks, domain/port, mint/custody, key files, minima and limits.
-   Hidden secret prompts must restore terminal echo. Validate integer ranges and
-   identities. Reuse existing configuration rather than adding a framework.
-8. Update the existing one-command installer for PostgreSQL, private access,
-   restricted roles, migrations, node/helper/application services, health and
-   backups. Preserve ledger and keys during repeat installation and upgrades.
-   Keep raw SQL confined to named DDL/transaction/locking primitives and the
-   legacy importer. Remove SQLite runtime dependencies after successful cutover.
-9. Prove clean installation, health and restart on one local Ubuntu 24.04
-   architecture. Rebuild the other architecture after the first complete package
-   works; do not rebuild both for every unrelated source change.
-10. Supply concise customer/operator instructions, redacted diagnostics and
-    separate mint/metadata, inventory and pool setup documentation. Distinguish
-    bridge fee revenue from pool auto-compounding. Validate an actual supported
-    wallet's Solana Pay payment and browser reload. If browser automation is
-    unavailable, continue independent implementation and record that acceptance
-    as pending; do not call an untested wallet flow verified.
+4. **Make the domain and DSL the entry point for auditing.** Consolidate duplicate
+   Plan/Request/DSL layers only when they add no distinct guarantee. Use explicit
+   business ADTs/records instead of scattered state strings and Value blobs.
+   Confine raw chain JSON to adapters. Put the operation vocabulary and permission
+   table in one place. Preserve separate safe/critical evaluators and compile-time
+   authority checks. Check the final design directly against the supplied Main.hs and document intentional corrections.
 
-**Checkpoint: the complete test-network product is usable and installable with
-one command.** No unfinished essential path is relabeled as an audit item.
-At this point, stop feature expansion and begin the systematic audit.
+5. **Unify complete payment flows.** Trace wrap, unwrap, refund and fee withdrawal
+   through one workflow. Represent customer-deposit funding and operator-earned
+   funding explicitly; never create fake customer orders or deposits. Finish the
+   withdrawal path here, reusing/replacing its recent reservation stage as needed.
+   Consolidate Payment/Settlement/Preparation/PaymentStore and PostgreSQL wrappers
+   by responsibility. Keep effects and commit boundaries visible, with no transaction
+   held across RPC, signing or backup.
 
-Current installation evidence: the PostgreSQL ARM64 package passes fresh-ledger
-installation, repeat installation, reboot, restricted-role checks and same-host
-backup restoration. Finish the remaining interface/configuration features and
-actual wallet payment acceptance, then verify the x86-64 package.
+6. **Simplify ledger and recovery together.** Give each financial fact one authoritative
+   representation. Retain append-only postings, immutable signed attempts and necessary
+   decisions; remove duplicated derived state only after proving reconstruction.
+   Consolidate cancellation/retry/replacement/rebroadcast/source-recovery mechanics
+   into a small typed recovery vocabulary. Keep actual chain-specific rules.
+   Consolidate schema definitions and fresh-install schema while providing a verified
+   forward migration for existing ledgers, including saved bytes and sequence fences.
+   Redesigning the schema requires migration acceptance, not just compilation.
 
-## 3. Audit the completed product in bounded passes
+7. **Reduce the customer and operator surface.** One connection-free page, shared
+   typed responses and minimal browser code. Keep QR generation through a pinned
+   dependency; do not invent a codec to remove a build tool. One private operator
+   command family can expose typed decisions instead of endpoints for every internal
+   step. Keep pause/resume, funding, refunds, withdrawals and actionable redacted
+   diagnostics. Existing mint/pool tooling stays outside the custody application.
 
-Audit against the same integrated build. Each finding records its component,
-consequence, corrective action and affected acceptance check. Fix related
-findings together, then rerun affected checks. Broaden regression testing only
-when a change affects shared financial behavior.
+8. **Replace the test collection with a compact specification.** Keep pure accounting
+   and state-transition properties; PostgreSQL atomicity, locking and replay checks;
+   DSL authority compile checks; protocol vectors; and one real-chain runner.
+   Cover duplicate receipts, fees/reservations, wrong network/mint/recipient, refunds,
+   ambiguous sends, expiry/replacement/reorg, restart and restore. Remove duplicate,
+   obsolete and implementation-mirroring tests and bespoke executables. Port unique
+   important assertions before removing their old harness. Tests should explain
+   promises, not reproduce every helper. Local tests do not replace real-chain checks.
 
-11. **Execution and authorization:** typeclass/DSL resolution, existential result
-    types, exports/component boundaries, safe capabilities, caller restrictions,
-    single critical call site and any remaining bypasses.
-12. **Ledger and recovery:** typed mappings/checked integers, constraints and
-    balanced append-only postings; reservations, exclusive ownership, isolation,
-    concurrent requests, revision fences and uncertain commits; exact migration
-    comparisons and historical fee preservation.
-13. **Payments and chains:** actual instruction/effect validation, reference and
-    receipt uniqueness, finality, deadlines, partial/extra/late/ambiguous deposits,
-    refund ownership, exact-byte retries, interrupted signing/sending, replacement
-    families, reorgs and loss recovery. Implement missing recovery functionality
-    found here before release; fail-closed handling alone is not final completion.
-14. **Operations and installation:** secrets and redaction, least-privilege roles,
-    bounded fee sweeping, health/support procedures, clean/repeat install,
-    corrupted-package refusal, upgrade and reboot on ARM64 and x86-64, remote
-    backup and paused clean-host restore with identity/history/custody checks.
-15. **Release:** dependency/license notices and artifact integrity, actual betanet
-    and canonical-token identity/authority/inventory acceptance, bounded operator
-    pilot and independent security review. Public publication is a separate
-    decision from the existing private repository.
+9. **Consolidate operations last.** One Ubuntu installation path, configuration format,
+   backup/restore path and doctor command, using existing systemd/PostgreSQL/restic.
+   Merge overlapping shell/Python wrappers. Keep backup coverage, key separation and
+   source fencing while reducing their implementation. Reduce maintained prose to
+   README (purpose/use/limits), ARCHITECTURE (audit path/DSL/invariants/reference),
+   OPERATIONS (install/fund/pause/recover/upgrade), plus required legal/security
+   disclosures. Build ARM64/x86 only after the runtime refactor is coherent.
 
-**Checkpoint: audit findings resolved and release evidence recorded.** Do not
-promise perfect security or zero debugging. A hot wallet retains material risk.
+10. **Review the reduced whole.** Trace every retained user/operator flow and interruption
+    at each irreversible boundary. Run the consolidated suite and real Signet/Devnet
+    acceptance. Close outstanding wallet-signing, off-host restore, native loss/winner
+    change, canonical authority/backing/funded-flow and independent-review gates.
+    Reuse old evidence only where its behavior and artifact scope still apply.
+    Produce a private review candidate; public activation remains a separate decision.
 
-## Construction rules: what runs now and what waits
+## Rules and completion
 
-Run at most one test VM at a time, with one build job by default. Shut it down
-when its acceptance/build is finished; do not keep idle architecture VMs running.
+Replace one coherent path, verify it, delete its predecessor. Avoid a second full
+application growing beside the first. Validate necessary invariants during changes,
+then test the integrated workflow; defer exhaustive edge matrices and packaging.
+No new bespoke report or executable per helper. Use small targeted reads, one build
+job and at most one 3-GiB task VM when necessary; stop it immediately after use.
 
-During construction, check that the whole application compiles, real interfaces
-fit, the next customer flow works, and its necessary financial protections hold.
-Run existing relevant regressions at integration milestones. Do not create a
-bespoke executable, report or extensive test matrix for every small module.
+Keep integer accounting, immutable quoted terms, unique receipts, atomic reservations,
+single economic settlement, exact signed bytes, required backup-before-send barriers,
+exclusive worker ownership and independent settlement validation throughout.
 
-Defer exhaustive negative/failure-injection matrices, rare-case exploration,
-export-by-export reviews, cosmetic refactors, documentation polish, notice
-refreshes and repeated platform builds to the completed-product audit. Record
-those items briefly instead of stopping the main flow to solve each one.
-
-Keep these protections in the initial implementation: private secrets and
-customer capabilities, integer accounting, immutable saved terms, unique
-receipts, one economic settlement, reservations, durable exact signed bytes,
-backup barriers where required, single worker ownership and fail-closed handling
-of uncertain external effects. Do not hold database transactions across RPC,
-signing or backups. Preserve preparation -> journal -> backup -> sign -> saved
-bytes -> backup -> send -> independent observation -> settlement.
-
-A passed check is repeated only after a relevant change invalidates its evidence.
-A task must advance the runtime, a customer flow, installation, or resolve a
-shown integration failure. Stop improving a component when the next complete
-flow can use it. Avoid alternative implementations and speculative abstractions.
-
-Restoration requires the current journal as well as keys. After new external
-effects, an old SQLite snapshot is not a safe rollback state. Configuration and
-seeds alone do not reconstruct order obligations or payment history.
-
-Report progress using the three checkpoints above and concrete working flows.
-Do not use arbitrary completion percentages, confuse compilation with actual
-wallet acceptance, or claim that an unfinished core path is merely an edge case.
-
-## Execution batching — 2026-10-01
-
-Complete each remaining workflow across storage, shared chain logic, closed DSL,
-private/public API as applicable, interface and installer before opening a new
-checkpoint. Use incremental one-job compilation and scoped contracts during
-implementation, then run the shared suite once for the complete batch. Record
-which requirement each acceptance proves and reuse that evidence until a relevant
-change or concrete failure invalidates it. Avoid repeating toolchain downloads,
-VM installation, package builds, full suites or real transfers for internal helper
-changes. Group Linux packaging/install checks after runtime workflows stabilize;
-keep one 3-GiB task VM at most and stop disposable resources after acceptance.
-
-Prioritize the usable integrated product. Preserve all financial/signing guards
-while building it; then perform the outstanding deep recovery, clean-host restore,
-canonical network, supported-wallet and independent release reviews together.
-Database fixture acceptance does not substitute for actual chain/host acceptance.
-
-Current construction evidence now includes explicit ARM64 PostgreSQL cross-release
-upgrade/backup/repeat/reboot acceptance and a real PostgreSQL native replacement
-family through draft/sign/replay/paused-send/resume/mempool replacement/confirmation,
-completed restart and same-member confirmation-loss/reconfirmation. Native x86
-CI compilation replaces slow local emulation; retain the local VM only for
-installation/reboot acceptance. Do not repeat these workflows for unrelated edits.
-Remaining work follows the existing recovery/restore, wallet, canonical-network
-and independent-review gates; these results do not declare them complete.
+Completion requires both a genuinely smaller reasoning surface and every retained
+function working with appropriate evidence. A short codebase is not automatically
+trustworthy; the objective is a concise, legible implementation whose authority,
+accounting and external effects a human can actually verify.
