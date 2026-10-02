@@ -15,3 +15,8 @@ dispatch site. Re-read the reference after context loss when doing architecture 
 Use targeted reads, one build job, and no idle task VMs. Consolidate tests and
 documentation instead of creating a new report or executable for each small change.
 Keep required licenses and dependency locks.
+
+Database access: use Opaleye for all application reads/writes, diagnostics, role
+checks and database test fixtures/assertions. No raw SQL query/execute escape path
+for those operations and no alternative database backend. Underlying libpq
+connections/transaction control and schema-migration DDL are separate infrastructure.
