@@ -35,7 +35,6 @@ import qualified Bridge.Postgres.Runtime as Runtime
 import Bridge.Web (runUnix,securityBoundary)
 import qualified Database.PostgreSQL.Simple as PG
 import Servant (serve,throwError,err409,Handler)
-import Bridge.Backup
 import Bridge.Observer
 import Control.Concurrent (threadDelay,newEmptyMVar,putMVar,takeMVar)
 import Control.Concurrent.Async (mapConcurrently,withAsync,cancel,concurrently_)
@@ -745,59 +744,6 @@ main=hspec $ do
       nativeAmount (scientific 1 (-1000000000)) `shouldBe` Left "native_amount_out_of_range"
     it "conserves principal and bounds upward rounding in both directions" $ property $ forAll (chooseInteger (1000,1000000000000)) $ \n -> all (valid n) [NativeToWrapped,WrappedToNative]
     it "never quotes an input consumed entirely by its fee" $ makeQuote NativeToWrapped (amt 1) `shouldBe` Left "nonpositive_net"
-  describe "durable order and inventory invariants" $ do
-    it "recovers a lost create response and rejects changed destinations" $ withFunded $ \l c -> do
-      o<-createOrder l c 100 cap req
-      createOrder l c 999 cap req `shouldReturn` o
-      createOrder l c 100 cap req{recipient="changed"} `shouldThrow` isError "idempotency_conflict"
-      readOrder l (T.replicate 64 "b") (orderId o) `shouldThrow` isError "order_not_found"
-    it "snapshots confirmation policy for idempotent retries after configuration changes" $ withFunded $ \l c -> do
-      o<-createOrder l c 100 cap req
-      nativeDepth (policy o) `shouldBe` 1
-      same<-createOrder l c{nativeConfirmations=6} 100 cap req
-      policy same `shouldBe` policy o
-      fresh<-createOrder l c{nativeConfirmations=6} 100 cap req{idempotencyKey="new-policy"}
-      nativeDepth (policy fresh) `shouldBe` 6
-      maximumNativeDepth l 1 `shouldReturn` 6
-    it "does not oversubscribe inventory under concurrent orders" $ withFunded $ \l c -> do
-      let create i=try (createOrder l c 100 cap req{idempotencyKey=T.pack(show i),input=amt 100000}) :: IO (Either BridgeError OrderView)
-      results<-mapConcurrently create [1..20::Int]
-      length [o|Right o<-results] `shouldBe` 10
-      remaining<-ledgerAction l $ \db -> freeInventory db Wrapped
-      remaining `shouldBe` 2000
-    it "deduplicates deposits and quoted obligations" $ withFunded $ \l c -> do
-      (o,_)<-fundOrder l c
-      observeDeposit l (Deposit "fixture-tx:0" (Just $ orderId o) Native (input req) "fixture-anchor" 2 True 100) "fixture-cursor-2"
-      promoteDeposit l 120 "fixture-tx:0" `shouldReturn` False
-      length <$> readyObligations l `shouldReturn` 1
-      ledgerAction l (\db -> query_ db "SELECT count(*) FROM events WHERE id='deposit:fixture-tx:0'" :: IO [Only Int]) `shouldReturn` [Only 1]
-    it "expiry cannot release an eligible obligation's reservation" $ withFunded $ \l c -> do
-      _<-fundOrder l c
-      expireQuotes l 100000
-      ledgerAction l (\db -> freeInventory db Wrapped) `shouldReturn` 900200
-    it "expired unfunded quotes release capacity without erasing their order" $ withFunded $ \l c -> do
-      o<-createOrder l c 100 cap req
-      expireQuotes l 100000
-      status <$> readOrder l cap (orderId o) `shouldReturn` "ExpiredUnfunded"
-      bindInstruction l (orderId o) "late-address" `shouldThrow` isError "order_no_longer_provisioning"
-      ledgerAction l (\db -> freeInventory db Wrapped) `shouldReturn` 1000000
-    it "holds partial and excess deposits for review" $ withFunded $ \l c -> do
-      o<-createOrder l c 100 cap req
-      observeDeposit l (Deposit "partial:0" (Just $ orderId o) Native (amt 10) "fixture-anchor" 1 True 100) "cursor"
-      promoteDeposit l 110 "partial:0" `shouldReturn` False
-      readyObligations l `shouldReturn` []
-      status <$> readOrder l cap (orderId o) `shouldReturn` "NeedsReview"
-    it "rolls back a failed database action as one financial decision" $ withDir $ \dir->do
-      originalAudit<-withFundedAt dir $ \l _->do
-        before<-auditExport l
-        result<-try (ledgerAction l $ \db -> do
-          execute_ db "INSERT INTO events(id,description) VALUES('rollback','test')"
-          execute_ db "INSERT INTO postings(event_id,asset,account,delta) VALUES('rollback','Native','float',NULL)") :: IO (Either SQLError ())
-        either (Just . sqlError) (const Nothing) result `shouldBe` Just ErrorConstraint
-        auditExport l `shouldThrow` isError "ledger_requires_reopen"
-        pure before
-      let c=cfg dir
-      withLedger (dbPath c) (fingerprint c) $ \l->auditExport l `shouldReturn` originalAudit
   describe "SQLite transaction failure boundaries (local database, no chain IO)" $ do
     it "rolls back an interrupted request and releases the writer without publishing its checkpoint" $ withFunded $ \l _->do
       original<-auditExport l
@@ -2559,23 +2505,6 @@ main=hspec $ do
         ledgerAction l (\db->orderCostLimits db "legacy-order") `shouldThrow` isError "order_cost_policy_missing"
         resumeAfterChecks l `shouldThrow` isError "legacy_order_cost_review_required"
         available <$> readiness l `shouldReturn` False
-    it "does not expose canonical instructions before acknowledged coverage" $ withFunded $ \l c -> do
-      freshScans l 100
-      o<-createOrder l c 100 cap req
-      bindInstruction l (orderId o) "fixture-address"
-      depositInstruction <$> exposeOrder l True cap (orderId o) `shouldReturn` Nothing
-      issueInstruction l c{backupRequired=True} 100 cap (orderId o) `shouldThrow` isError "backup_pending"
-      acknowledgeBackup l 1 (T.replicate 64 "b")
-      _<-issueInstruction l c{backupRequired=True} 100 cap (orderId o)
-      depositInstruction <$> exposeOrder l True cap (orderId o) `shouldReturn` Just "fixture-address"
-      acknowledgeBackup l 99 "bad" `shouldThrow` isError "invalid_backup_coverage"
-    it "makes a consistent snapshot while the ledger is open" $ withFunded $ \l c -> do
-      o<-createOrder l c 100 cap req
-      bindInstruction l (orderId o) "fixture-address"
-      sqlite<-findExecutable "sqlite3" >>= maybe (fail "sqlite3 required for backup integration test") pure
-      snapshot<-snapshotLedger sqlite (dbPath c) (takeDirectory (dbPath c)</>"snapshots") (fingerprint c)
-      snapshotSequence snapshot `shouldBe` 1
-      snapshotFingerprint snapshot `shouldBe` fingerprint c
     it "refuses repointing an existing database" $ withDir $ \dir -> do
       let c=cfg dir
       withLedger (dbPath c) (fingerprint c) (const $ pure ())

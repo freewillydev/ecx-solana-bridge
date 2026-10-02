@@ -42,7 +42,7 @@ library
 library legacy
   import: settings
   hs-source-dirs: legacy-src
-  exposed-modules: Bridge.Legacy.Order, Bridge.Legacy.Reconciliation, Bridge.Legacy.Recovery, Bridge.Legacy.PaymentLifecycle, Bridge.Legacy.ObservationPreparation, Bridge.Budget, Bridge.Ledger, Bridge.Backup
+  exposed-modules: Bridge.Legacy.Order, Bridge.Legacy.Reconciliation, Bridge.Legacy.Recovery, Bridge.Legacy.PaymentLifecycle, Bridge.Legacy.ObservationPreparation, Bridge.Budget, Bridge.Ledger
   build-depends:
     ecx-bridge,
     base >=4.20 && <4.23, aeson >=2.2 && <2.4, async >=2.2 && <2.3,
@@ -84,7 +84,7 @@ executable ecx-postgres-journal-check
   import: settings
   hs-source-dirs: integration
   main-is: JournalCheck.hs
-  build-depends: base, ecx-bridge, containers, postgresql-simple, opaleye, async, unix, text
+  build-depends: base, ecx-bridge, containers, postgresql-simple, opaleye, async, unix, text, bytestring, aeson
 
 executable ecx-postgres-scan-check
   import: settings
