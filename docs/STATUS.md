@@ -1763,3 +1763,20 @@ action displays success, while the browser automation clipboard API reads empty.
 This does not prove either clipboard contents or a recovery-link round trip.
 External wallet signing and off-host repository acceptance remain separate gates;
 packaging remains deferred while these substantive workflows are completed.
+
+## Deployment-scoped critical backup retention
+
+The source now includes `deploy/postgres-retention.py`, a preview-first operator
+maintenance command over the existing encrypted restic repository. Its fixed
+policy retains last-two/daily-seven/weekly-four/monthly-twelve snapshots and
+explicitly protects the highest critical sequence irrespective of timestamp.
+Deletion is confined to exact reviewed IDs for one deployment; concurrent new
+uploads are not reevaluated under the deletion policy. It refuses malformed
+sequence metadata and does not acknowledge coverage or prune storage.
+
+`integration/BackupRetentionCheck.py` passed against actual restic in disposable
+local storage: no preview deletion, highest-sequence older snapshot retained,
+other deployment preserved, selected removals applied, repository check passed.
+See `evidence/backup-retention-local.json` and the operations instructions.
+Off-host durability, remote retention and clean-host restore acceptance remain
+open. No VM, installer build or external repository was used for this batch.

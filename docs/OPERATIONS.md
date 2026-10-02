@@ -222,3 +222,32 @@ position; any auto-compounding service has its own permissions and costs. Do not
 feed its keys into the bridge or count its yield as bridge reserves without an
 explicit reconciled transfer. Historical pricing and the intended eCash-site
 integration remain later market deliverables after real routing is proven.
+
+## Critical snapshot retention
+
+`deploy/postgres-retention.py` previews a fixed policy for one deployment: the
+last two snapshots, seven daily, four weekly and twelve monthly snapshots, plus
+every snapshot at the highest recorded critical sequence. The sequence rule
+preserves the most advanced financial journal independently of clock ordering.
+Only snapshots tagged both `ecx-bridge-critical` and the exact deployment
+fingerprint are considered. Malformed sequence metadata is refused.
+
+From a source checkout (the next consolidated package will include this tool):
+
+```sh
+sudo python3 deploy/postgres-retention.py --fingerprint DEPLOYMENT_FINGERPRINT --repository-file /etc/ecx-bridge/backup.repository --password-file /etc/ecx-bridge/backup.password
+```
+
+Review the preview first. During scheduled maintenance with payment workers
+paused, add `--apply` to remove only the exact snapshot IDs selected by that
+preview; newly arriving snapshots are never fed into a second deletion policy.
+Use protected operator credentials with delete permission, separate from the
+worker's append-only upload credentials. This command does not prune repository
+data or acknowledge a worker backup barrier. Schedule restic pruning and its
+subsequent repository check separately: pruning locks the repository and can
+block critical uploads. See the [official restic retention documentation](https://restic.readthedocs.io/en/stable/060_forget.html).
+
+Real local restic acceptance preserved an older-timestamp highest-sequence
+snapshot and another deployment, applied the selected removals, and passed a
+repository check. See `evidence/backup-retention-local.json`. Actual remote
+retention, recovery receipts and physical host-loss restoration remain unproved.
