@@ -35,7 +35,9 @@ site. Operator recovery uses a private mode-0600 local CLI socket, not HTTP.
 Only the critical evaluator can call the dedicated Haskell signer. The signer
 independently reloads the durable decision, validates effects and saved limits,
 and signs through restricted native RPC or the official Solana SDK Haskell FFI.
-It never broadcasts. Both chain adapters and all application database access
+It never broadcasts. The worker uses Servant ClientM over authenticated HTTPS
+on 127.0.0.1, with a shared token in a protected file and a separately protected
+signer TLS key. Only the configured signer certificate is trusted. Both chain adapters and all application database access
 remain real RPC and Opaleye implementations.
 
 The signer implementation compiles and local contracts pass. Separate OS users,

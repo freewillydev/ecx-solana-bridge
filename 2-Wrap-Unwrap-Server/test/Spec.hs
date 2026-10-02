@@ -23,18 +23,27 @@ import Bridge.RPC
 import Bridge.API (CustomerAPI, customerAPI)
 import qualified Bridge.API as API
 import Bridge.Control (runControl, callControl)
-import Bridge.Operator (signingApplication)
+import Bridge.Operator (signingApplication,signingAPI,signerCredentials,signerCertificate)
 import qualified Bridge.Postgres.Runtime as Runtime
 import Bridge.Web (runUnix,publicApplication,securityBoundary)
 import qualified Database.PostgreSQL.Simple as PG
-import Servant (serve,throwError,err409,Handler,Server)
+import Servant (BasicAuthData(..),serve,throwError,err409,Handler,Server)
 import Network.Wai (defaultRequest,responseLBS,requestMethod,requestHeaders)
-import Network.Wai.Handler.Warp (testWithApplication)
-import Network.HTTP.Types (status200,status404,status403,status409,status400,status413)
+import Network.Wai.Handler.Warp (testWithApplication,openFreePort,setBeforeMainLoop,defaultSettings)
+import Network.Wai.Handler.WarpTLS (runTLSSocket,tlsSettings)
+import qualified Network.Socket as NS
+import Network.HTTP.Client (closeManager,newManager)
+import Network.HTTP.Client.TLS (mkManagerSettings)
+import qualified Network.Connection as NC
+import qualified Network.TLS as TLS
+import Network.TLS.Extra.Cipher (ciphersuite_default)
+import Data.X509.CertificateStore (makeCertificateStore)
+import Control.Concurrent.MVar (newEmptyMVar,putMVar,takeMVar)
+import Network.HTTP.Types (status200,status404,status403,status409,status400,status413,status401)
 import qualified Network.Wai.Test as W
 import Bridge.Observer
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (withAsync,concurrently_)
+import Control.Concurrent.Async (withAsync,concurrently_,link)
 import Control.Exception (bracket,SomeException)
 import Control.Monad (forM_,when)
 import Data.Aeson
@@ -137,7 +146,7 @@ releaseAuthentication fault seed arch = withDir $ \dir->do
 amt :: Integer -> Amount
 amt n = either (error . T.unpack) id (amount n)
 cfg :: FilePath -> Config
-cfg dir = Config L2LSignetDevnet "unit-fixture" "http://127.0.0.1:29432" (dir</>"cookie") "fixture-wallet" 16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47" "https://api.devnet.solana.com" Nothing "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM" "RWjpjjkpABkEGomLbZYyN53pA3FVdPXp9izJ25wErGX" "11111111111111111111111111111111" (dir</>"private/ledger") (dir</>"customer/api.sock") (dir</>"admin/api.sock") (dir</>"signer.sock") (dir</>"sdk-library") (amt 2) (amt 1000000000000) 100 300 600 1 (amt 1000) (amt 10000) False Nothing (amt 0) Nothing (amt 100000) (amt 100000000)
+cfg dir = Config L2LSignetDevnet "unit-fixture" "http://127.0.0.1:29432" (dir</>"cookie") "fixture-wallet" 16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47" "https://api.devnet.solana.com" Nothing "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM" "RWjpjjkpABkEGomLbZYyN53pA3FVdPXp9izJ25wErGX" "11111111111111111111111111111111" (dir</>"private/ledger") (dir</>"customer/api.sock") (dir</>"admin/api.sock") 8081 (dir</>"signing.auth") (dir</>"sdk-library") (amt 2) (amt 1000000000000) 100 300 600 1 (amt 1000) (amt 10000) False Nothing (amt 0) Nothing (amt 100000) (amt 100000000)
 req :: OrderRequest
 req=OrderRequest NativeToWrapped (amt 100000) "fixture-solana-recipient" "fixture-native-refund" Nothing "retry-key"
 withDir :: (FilePath -> IO a) -> IO a
@@ -1005,9 +1014,11 @@ main=hspec $ do
   describe "private signing Servant boundary" $ do
     it "dispatches only the three closed signing routes and rejects malformed or oversized requests before evaluation" $ do
       calls <- newIORef (0 :: Int)
-      app <- signingApplication (\_ -> modifyIORef' calls (+1) >> reject "signing_fixture")
+      let credentials=BasicAuthData "worker" (BS.replicate 64 97)
+          authorization="Basic "<>B64.encode ("worker:"<>BS.replicate 64 97)
+      app <- signingApplication credentials (\_ -> modifyIORef' calls (+1) >> reject "signing_fixture")
       let post path body = W.runSession (W.srequest $ W.SRequest
-            ((W.setPath defaultRequest path){requestMethod="POST",requestHeaders=[("Content-Type","application/json")]}) body) app
+            ((W.setPath defaultRequest path){requestMethod="POST",requestHeaders=[("Content-Type","application/json"),("Authorization",authorization)]}) body) app
       forM_ [("/sign-preparation",encode ("identity" :: Text,"intent" :: Text,0 :: Int)),
              ("/draft-replacement",encode ("identity" :: Text,"parent" :: Text,amt 1)),
              ("/sign-replacement",encode ("identity" :: Text,1 :: Int64))] $ \(path,body) -> do
@@ -1019,7 +1030,65 @@ main=hspec $ do
         post path "[]" >>= \response -> W.simpleStatus response `shouldBe` status404
       post "/sign-preparation" "{}" >>= \response -> W.simpleStatus response `shouldBe` status400
       post "/sign-preparation" (LBS.replicate 16385 32) >>= \response -> W.simpleStatus response `shouldBe` status413
+      forM_ [(Nothing,status401),(Just "Basic d29ya2VyOndyb25n",status403)] $ \(authentication,expected)->do
+        denied <- W.runSession (W.srequest $ W.SRequest
+          ((W.setPath defaultRequest "/sign-preparation"){requestMethod="POST"
+            ,requestHeaders=[("Content-Type","application/json")]<>maybe [] (\value->[("Authorization",value)]) authentication})
+          (encode ("identity"::Text,"intent"::Text,0::Int))) app
+        W.simpleStatus denied `shouldBe` expected
       readIORef calls `shouldReturn` 3
+    it "loads only a bounded private credential file and rejects public permissions" $ withDir $ \dir->do
+      let c=cfg dir
+      BS.writeFile (signerAuthFile c) (BS.replicate 64 97<>"\n")
+      setFileMode (signerAuthFile c) 0o600
+      credentials <- signerCredentials c
+      basicAuthUsername credentials `shouldBe` "worker"
+      basicAuthPassword credentials `shouldBe` BS.replicate 64 97
+      setFileMode (signerAuthFile c) 0o644
+      signerCredentials c `shouldThrow` isError "unsafe_signer_auth_permissions"
+      setFileMode (signerAuthFile c) 0o600
+      BS.writeFile (signerAuthFile c) (BS.replicate 100 97)
+      signerCredentials c `shouldThrow` isError "invalid_signer_auth_token"
+    it "uses authenticated ClientM over TLS and rejects a different certificate" $ withDir $ \dir->do
+      let c=cfg dir
+          wrong=c{signerAuthFile=dir</>"wrong.auth"}
+          generate configuration=do
+            (code,_,_) <- readProcessWithExitCode "openssl"
+              ["req","-x509","-newkey","rsa:2048","-nodes","-days","1","-subj","/CN=127.0.0.1"
+              ,"-addext","subjectAltName=IP:127.0.0.1,DNS:127.0.0.1"
+              ,"-keyout",signerAuthFile configuration<>".key","-out",signerAuthFile configuration<>".pem"] ""
+            code `shouldBe` ExitSuccess
+          credentials=BasicAuthData "worker" (BS.replicate 64 97)
+      generate c
+      generate wrong
+      certificate <- signerCertificate c
+      other <- signerCertificate wrong
+      calls <- newIORef (0::Int)
+      app <- signingApplication credentials (\_ -> modifyIORef' calls (+1) >> reject "signing_fixture")
+      ready <- newEmptyMVar
+      bracket openFreePort (NS.close . snd) $ \(port,socket)->
+        withAsync (runTLSSocket (tlsSettings (signerAuthFile c<>".pem") (signerAuthFile c<>".key"))
+          (setBeforeMainLoop (putMVar ready ()) defaultSettings) socket app) $ \running->do
+          link running
+          takeMVar ready
+          let managerFor trusted=do
+                let base=TLS.defaultParamsClient "127.0.0.1" BS.empty
+                    params=base{TLS.clientShared=(TLS.clientShared base){TLS.sharedCAStore=makeCertificateStore [trusted]}
+                      ,TLS.clientSupported=(TLS.clientSupported base){TLS.supportedCiphers=ciphersuite_default}}
+                newManager (mkManagerSettings (NC.TLSSettings params) Nothing)
+              environment manager=mkClientEnv manager (BaseUrl Https "127.0.0.1" port "")
+              preparation :<|> draft :<|> replacement=client signingAPI credentials
+              evaluated result=case result of
+                Left (FailureResponse _ response)->responseStatusCode response==status409
+                _->False
+          bracket (managerFor certificate) closeManager $ \manager->do
+            forM_ [preparation ("identity","intent",0),draft ("identity","parent",amt 1),replacement ("identity",1)] $ \action->
+              runClientM action (environment manager) >>= (`shouldSatisfy` evaluated)
+          readIORef calls `shouldReturn` 3
+          bracket (managerFor other) closeManager $ \manager->do
+            result <- runClientM (preparation ("identity","intent",0)) (environment manager)
+            result `shouldSatisfy` \case Left (ConnectionError _)->True; _->False
+          readIORef calls `shouldReturn` 3
   describe "public/private Unix socket boundary" $ do
     it "refuses canonical and backup-dependent deployments in the local test command" $ withDir $ \dir->do
       publicTestProfile (cfg dir) `shouldBe` True

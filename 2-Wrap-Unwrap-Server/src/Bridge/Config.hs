@@ -25,7 +25,7 @@ data Config = Config
   , solanaRpc :: !String, solanaVerifierRpc :: !(Maybe String), mint :: !Text
   , custodyOwner :: !Text, custodyAta :: !Text
   , dbPath :: !FilePath, customerSocket :: !FilePath, adminSocket :: !FilePath
-  , signerSocket :: !FilePath, solanaSdkLibrary :: !FilePath
+  , signerPort :: !Int, signerAuthFile :: !FilePath, solanaSdkLibrary :: !FilePath
   , minInput :: !Amount, maxInput :: !Amount, maxQueued :: !Int
   , quoteSeconds :: !Int64, confirmationGraceSeconds :: !Int64
   , nativeConfirmations :: !Int, maxNativeFee :: !Amount, maxSolFee :: !Amount
@@ -103,8 +103,9 @@ loadConfig path = do
 validateConfig :: Config -> IO ()
 validateConfig c = do
   require (validIdentifier (deploymentId c) && validIdentifier (nativeWallet c)) "invalid_deployment_identifier"
-  require (all isAbsolute [nativeCookie c,dbPath c,customerSocket c,adminSocket c,signerSocket c,solanaSdkLibrary c]) "absolute_paths_required"
+  require (all isAbsolute [nativeCookie c,dbPath c,customerSocket c,adminSocket c,signerAuthFile c,solanaSdkLibrary c]) "absolute_paths_required"
   require (customerSocket c /= adminSocket c && length (customerSocket c) < 100 && length (adminSocket c) < 100) "invalid_socket_paths"
+  require (signerPort c>0 && signerPort c<=65535 && signerAuthFile c `notElem` [nativeCookie c,dbPath c,customerSocket c,adminSocket c]) "invalid_signer_endpoint"
   require (units (minInput c) > 0 && minInput c <= maxInput c && units (maxInput c) <= 1000000000000000) "invalid_limits"
   require (maxQueued c > 0 && maxQueued c <= 1000 && quoteSeconds c > 0 && quoteSeconds c <= 3600 && confirmationGraceSeconds c >= 0 && confirmationGraceSeconds c <= 86400 && nativeConfirmations c > 0) "invalid_policy"
   require (units (maxNativeFee c) > 0 && units (maxSolFee c) > 0) "invalid_fee_budget"

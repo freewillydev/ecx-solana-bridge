@@ -7,6 +7,16 @@ import Bridge.API (customerAPI)
 import Bridge.BrowserBuild (browserAssetsDirectory)
 import qualified Bridge.API as API
 import Bridge.Control (runControl)
+import Bridge.Operator (signingAPI,signerCredentials,signerCertificate)
+import qualified Servant.Client as SC
+import qualified Network.Connection as NC
+import qualified Network.TLS as TLS
+import Network.TLS.Extra.Cipher (ciphersuite_default)
+import Network.HTTP.Client.TLS (mkManagerSettings)
+import Data.X509.CertificateStore (makeCertificateStore)
+import Data.IORef (newIORef,atomicModifyIORef')
+import qualified Data.ByteString as BS
+import qualified Data.ByteString.Lazy as LBS
 import Bridge.Config
 import Bridge.Types
 import Bridge.Operation.Internal
@@ -43,11 +53,11 @@ import qualified Bridge.SolanaPay as Pay
 import Bridge.RPC (fieldValue,parseValue)
 import qualified Bridge.Order as OrderWorkflow
 import Bridge.Observer (epochSeconds)
-import Bridge.RPC (newRpcManager,unixManager,boundedBody)
+import Bridge.RPC (newRpcManager,boundedBody)
 import Bridge.Web (asHandler,runUnix,runPublic,securityBoundary)
 import Control.Concurrent.Async (concurrently_)
 import Control.Exception (bracket,try)
-import Data.Aeson (FromJSON,Value(..),object,(.=),toJSON,encode,parseJSON,eitherDecodeStrict')
+import Data.Aeson (FromJSON,Value(..),object,(.=),toJSON,parseJSON,eitherDecodeStrict')
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Map.Strict as M
 import System.Environment (lookupEnv)
@@ -55,7 +65,9 @@ import Data.Maybe (fromMaybe)
 import Text.Read (readMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Network.HTTP.Client (Manager,closeManager,parseRequest,withResponse,method,redirectCount,requestHeaders,requestBody,RequestBody(..),responseBody,responseTimeout,responseTimeoutMicro,checkResponse,HttpException)
+import Network.HTTP.Client (Manager,closeManager,newManager,managerSetProxy,noProxy,
+  managerRetryableException,managerIdleConnectionCount,managerResponseTimeout,managerModifyRequest,managerModifyResponse,
+  redirectCount,responseBody,responseTimeoutMicro)
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Database.PostgreSQL.Simple.Transaction as Tx
 import qualified Opaleye as O
@@ -165,10 +177,10 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
     RebroadcastNative txid recovery reason->rebroadcastNative txid recovery reason
     PrepareNativeReplacement parent fee reason->
       prepareNativeReplacementUsing epochSeconds transport
-        (\parent' _ fee'->signerRequest "draft-replacement" (toJSON(fingerprint cfg,parent',fee'))) cfg ledger parent fee reason
+        (\parent' _ fee'->signerRequest (DraftReplacement (fingerprint cfg) parent' fee')) cfg ledger parent fee reason
     SignNativeReplacement sequenceNo->do
       a <- signNativeReplacementUsing epochSeconds transport
-        (\sequenceNo' _ _->signerRequest "sign-replacement" (toJSON(fingerprint cfg,sequenceNo'))) cfg ledger sequenceNo
+        (\sequenceNo' _ _->signerRequest (SignReplacement (fingerprint cfg) sequenceNo')) cfg ledger sequenceNo
       pure(object["transaction" .= Domain.attemptId a,"draftSequence" .= sequenceNo,"signed" .= True,"sent" .= False])
     CancelNativeReplacement sequenceNo reason->do
       PgReplacement.cancel ledger sequenceNo reason
@@ -234,31 +246,50 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
 
   prepare ob = if Domain.obligationAsset ob=="Native"
     then prepareNativeWithSigner (paymentNative transport)
-      (\intent generation _ _->signerRequest "sign-preparation" (toJSON(fingerprint cfg,intent,generation))) cfg ledger ob
+      (\intent generation _ _->signerRequest (SignPrepared (fingerprint cfg) intent generation)) cfg ledger ob
     else prepareSolanaWithSigner (paymentSolana transport)
-      (\intent generation _->signerRequest "sign-preparation" (toJSON(fingerprint cfg,intent,generation))) cfg ledger ob
+      (\intent generation _->signerRequest (SignPrepared (fingerprint cfg) intent generation)) cfg ledger ob
 
-  -- The sole signer client lives inside this critical evaluator. Safe contexts,
-  -- handlers and exported modules receive neither it nor its socket manager.
-  signerRequest :: FromJSON reply => String -> Value -> IO reply
-  signerRequest endpoint payload = (do
+  -- The only ClientM capability lives inside this critical evaluator. Calls
+  -- use the server's shared contract, never a caller-supplied URL or command.
+  signerRequest :: FromJSON reply => SigningOperation Value -> IO reply
+  signerRequest operation = do
+    credentials <- signerCredentials cfg
+    certificate <- signerCertificate cfg
     when (backupRequired cfg) $ do
       sequenceNo <- ledgerAction ledger $ \c->do
         rows <- O.runSelect c $ fmap deploymentCriticalSequence (O.selectTable deploymentTable) :: IO [Int64]
         case rows of [n]->pure n; _->reject "corrupt_sequence"
       backup sequenceNo
-    bracket (unixManager $ signerSocket cfg) closeManager $ \local->do
-      base <- parseRequest ("http://signer/"<>endpoint)
-      let request=base{method="POST",redirectCount=0,requestHeaders=[("Content-Type","application/json")]
-            ,requestBody=RequestBodyLBS(encode payload),responseTimeout=responseTimeoutMicro 60000000
-            ,checkResponse= \_ _->pure ()}
-      withResponse request local $ \response->do
-        bytes <- boundedBody 524288 (responseBody response)
-        value <- either (const $ reject "invalid_signer_reply") pure (eitherDecodeStrict' bytes)
-        case value of
-          Object fields | Just code<-KM.lookup "error" fields->parseValue parseJSON code >>= reject
-          _->parseValue parseJSON value)
-    `catch` (\(_::HttpException)->reject "signer_outcome_unknown")
+    let base=TLS.defaultParamsClient "127.0.0.1" BS.empty
+        tls=base{TLS.clientShared=(TLS.clientShared base){TLS.sharedCAStore=makeCertificateStore [certificate]}
+          ,TLS.clientSupported=(TLS.clientSupported base){TLS.supportedCiphers=ciphersuite_default}}
+        settings=managerSetProxy noProxy (mkManagerSettings (NC.TLSSettings tls) Nothing)
+          {managerRetryableException=const False,managerIdleConnectionCount=0
+          ,managerResponseTimeout=responseTimeoutMicro 60000000
+          ,managerModifyRequest= \request->pure request{redirectCount=0}
+          ,managerModifyResponse= \response->do
+            bytes <- boundedBody 524288 (responseBody response)
+            body <- newIORef bytes
+            pure response{responseBody=atomicModifyIORef' body (\chunk->(BS.empty,chunk))}}
+    bracket (newManager settings) closeManager $ \local->do
+      let prepareCall :<|> draftCall :<|> replacementCall=SC.client signingAPI credentials
+          action=case operation of
+            SignPrepared identity intent generation->prepareCall (identity,intent,generation)
+            DraftReplacement identity parent fee->draftCall (identity,parent,fee)
+            SignReplacement identity sequenceNo->replacementCall (identity,sequenceNo)
+          environment=SC.mkClientEnv local (SC.BaseUrl SC.Https "127.0.0.1" (signerPort cfg) "")
+      result <- SC.runClientM action environment
+      value <- case result of
+        Right value->pure value
+        Left (SC.FailureResponse _ response)->do
+          failure <- either (const $ reject "signer_outcome_unknown") pure
+            (eitherDecodeStrict' $ LBS.toStrict $ SC.responseBody response)
+          case failure of
+            Object fields | Just code<-KM.lookup "error" fields->parseValue parseJSON code >>= reject
+            _->reject "signer_request_rejected"
+        Left _->reject "signer_outcome_unknown"
+      parseValue parseJSON value
 
   -- Explicit operator approval revives the original suspended obligation only.
   -- It never resumes intake, signs, broadcasts, marks a deposit eligible or books

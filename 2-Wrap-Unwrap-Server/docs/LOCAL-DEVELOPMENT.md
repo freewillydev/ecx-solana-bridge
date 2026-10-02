@@ -48,6 +48,12 @@ OS user. Set `ECX_JOURNAL_CONTRACT_DATABASE` to a fresh `ecx_journal_contract_â€
 database, run the binary from `cabal list-bin exe:ecx-postgres-journal-check`, then
 drop that specific database. Never target an existing custody ledger.
 
+The source-approval runner also uses only closed Opaleye fixture operations and
+whole typed record comparisons. Set `ECX_SOURCE_CONTRACT_DATABASE` to a fresh
+`ecx_source_approval_contract_â€¦` database with the same migrations. It preserves
+restoration, native finality/replacement, source-loss capital and exact-byte
+rebroadcast/coverage contracts without signing or contacting either chain.
+
 Other `integration/` runners cover recovery, snapshot/restore and real chains.
 Read their restrictions before running them; some sign or transfer test funds.
 Historical acceptance applies only to its recorded source/configuration/network.
@@ -73,6 +79,21 @@ enable an old clone or remove an observation-only recovery override to progress 
 column writes and sequence use, including inherited grants. Readers use
 `PGREADPASSWORD` only when supplied; safe operations use read-only transactions.
 Do not weaken these checks to start a misconfigured instance.
+
+The dedicated signer uses `signerPort` (8081 in examples) on 127.0.0.1.
+`signerAuthFile` names a 64-character hexadecimal token generated from 32 random
+bytes, stored outside Git. Both services may read that file (0600, or root-owned
+0640 with a dedicated worker/signer group); nobody else may read or write it.
+Its containing directory must reject group/world writes. The adjacent `.pem`
+certificate is the worker's sole TLS trust anchor; the adjacent `.key` belongs
+only to the signer, mode 0600. Generate the certificate with an IP subjectAltName
+for 127.0.0.1 and maintain its expiry. Do not reuse a key or token from a fixture.
+Start `ecx-bridge signer CONFIG PRIVATE_SIGNER_CONFIG` under its separate
+SELECT-only PostgreSQL role before enabling the paying worker. The worker uses
+Servant ClientM, certificate validation and BasicAuth only from its critical DSL
+evaluator; it disables redirects, proxies and retries. Rotate token/certificate
+with the worker paused and restart the signer; preserve its custody keys and ledger.
+Existing installed services still require the dedicated-signer deployment update.
 
 New orders charge 1% both ways; saved quotes keep their terms. Check inventory,
 fee budgets, deadlines and exact network/token identities before real tests.

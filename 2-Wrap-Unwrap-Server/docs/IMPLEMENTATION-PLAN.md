@@ -101,7 +101,7 @@ there is no public-to-worker HTTP proxy. Keep the local operator control socket 
 local customer sockets may remain as alternate transport for acceptance clients,
 not a separate application or intermediary. Keep one active paying workflow.
 
-Only the critical DSL evaluator may communicate with the signer. Keep its socket
+Only the critical DSL evaluator may communicate with the signer. Keep its generated Servant ClientM
 client and connection capability private to that evaluator; handlers and the safe
 context receive neither. Use closed signing requests tied to durable preparation
 or replacement decisions, never arbitrary bytes, RPC methods or caller callbacks.
@@ -167,7 +167,12 @@ the local Cabal build does not prove a clean Linux release.
 The private signing Servant boundary now lives in `Bridge.Operator`: only
 sign-preparation, draft-replacement and sign-replacement. Handlers package critical
 existential requests; the hoist resolves `SigningDSL` and serializes evaluation.
-`Bridge.Signer` retains independent ledger checks and signing credentials. The
+`Bridge.Signer` retains independent ledger checks and signing credentials.
+Signer transport is now authenticated HTTPS on 127.0.0.1, with a protected shared
+token and a dedicated pinned trust certificate. Runtime uses the shared Servant
+ClientM contract only inside critical evaluation. No signer Unix listener remains.
+Credential/certificate ownership, renewal and separate service users still require
+installation acceptance. The
 existing private control protocol is preserved separately in `Bridge.Control`;
 this change does not remove pause/refund/recovery functionality or add public routes.
 
@@ -256,8 +261,11 @@ The sequence below remains the broader refactor checklist, subject to that prior
    The standalone raw-SQL FeeWithdrawalCheck is retired: its unique funding,
    pause/freshness, immutable replay and cancellation assertions now run as
    QuickCheck cases for both Native and Wrapped in the existing journal runner,
-   using closed Opaleye fixture operations. SourceApprovalCheck's handwritten
-   SQL fixtures remain conversion work; do not delete its unique recovery assertions.
+   using closed Opaleye fixture operations. SourceApprovalCheck now also uses closed Opaleye fixture operations and typed
+   whole-row snapshots. Its restoration, native finality, replacement winner,
+   loss-cover/return and covered-source send-fence assertions are preserved and
+   pass against a fresh disposable PostgreSQL database; no signer or chain call
+   occurs in that contract.
    Receipt/page atomicity and delayed verification also use the PostgreSQL contract;
    legacy resume-policy checks remain until their whole workflow is migrated.
    Chain scanning no longer executes Opaleye directly: reference lookup, promotion

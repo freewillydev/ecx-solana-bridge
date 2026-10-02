@@ -185,7 +185,7 @@ single critical dispatcher. It cannot serialize arbitrary DSL or SQL.
 
 The revised custody boundary is a dedicated Haskell signer process. All signer
 communication must originate inside the critical evaluator's closed workflows;
-the client implementation and socket capability must be private to that evaluator.
+the generated Servant ClientM implementation and connection capability must be private to that evaluator.
 Safe operations and HTTP handlers cannot obtain or call them. The signer accepts
 only named, durable signing decisions, checks them independently, and never sends
 transactions. Native RPC credentials must also be split so the HTTP process cannot
@@ -193,8 +193,15 @@ bypass this service using walletprocesspsbt or another signing/key-export method
 Solana SDK Rust remains only through Haskell FFI inside the signer. `Bridge.Operator` now defines only the three private signing Servant routes.
 Its handlers return `Request 'Critical a`, the constrained existential dictionary,
 and the hoist resolves each request into `SigningDSL` before calling the dedicated
-signer evaluator under one serialization gate. The transport remains a mode-0660
-Unix socket, never a public TCP listener. `Bridge.Signer` owns keys and independent
+signer evaluator under one serialization gate. It binds HTTPS only on
+127.0.0.1 at signerPort. A 256-bit shared token authenticates the worker using
+Servant BasicAuth; signerAuthFile is a root/service-owned regular file, mode 0600
+or 0640 for a dedicated worker/signer group. Its directory rejects group/world
+writes. The worker trusts only signerAuthFile.pem, with normal certificate and
+hostname validation; signerAuthFile.key is signer-only, mode 0600. TLS prevents a
+fake local listener from collecting the authentication token. No proxy, redirect,
+automatic retry or unbounded response is permitted. All three generated ClientM
+calls are private to Runtime's critical evaluator, sharing the exact server API. `Bridge.Signer` owns keys and independent
 saved-decision checks. Existing pause/refund/recovery commands remain in
 `Bridge.Control` with their unchanged private CLI protocol and main critical dispatcher.
 The closed critical-only client and signer decision checks are implemented;
@@ -231,7 +238,7 @@ Hoist this server once to `Handler`:
 
 Preserve synchronous create-order responses; routing internally to the worker
 must not silently change the public API into a new asynchronous order protocol.
-Use the dedicated signer process/socket boundary. Do not add a second public
+Use the dedicated signer process and authenticated loopback boundary. Do not add a second public
 service, message broker or general-purpose remotely executable command endpoint.
 An in-process worker can use the same dispatcher without inventing another
 network protocol.

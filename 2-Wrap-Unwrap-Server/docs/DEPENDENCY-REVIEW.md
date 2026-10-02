@@ -5,6 +5,13 @@ It is not independent application review or a claim that unknown vulnerabilities
 are absent. [Machine evidence](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/dependency-advisory-review.json) records
 lockfile hashes, database revisions and the remaining review items.
 
+The authenticated loopback signer now adds warp-tls 3.4.14, tls-session-manager
+0.1.0, crypto-token 0.2.0 and clock 0.8.4 to the frozen native graph. Its ClientM
+uses the existing patched TLS/X.509 packages with a dedicated certificate store.
+The earlier advisory inventory does not cover these added inputs; refresh source,
+advisory and license coverage before producing a release artifact. Local TLS/auth
+contracts pass but do not substitute for that release review.
+
 The npm application graph was retired with the GHC JavaScript browser replacement.
 The following npm result is historical and does not cover the new browser graph.
 On October 1, npm audit reported zero advisories across the locked web graph.

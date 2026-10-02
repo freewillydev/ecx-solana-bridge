@@ -1,6 +1,7 @@
+{-# LANGUAGE GADTs, LambdaCase #-}
 -- Database-only recovery contract. No chain transport, signer or broadcast.
 module Main (main) where
-import Bridge.Types
+import Bridge.Types hiding (deploymentFingerprint)
 import Bridge.Config (Config,fingerprint)
 import qualified Bridge.Postgres.Replacement as Replacement
 import qualified Bridge.Postgres.PaymentStore as PaymentStore
@@ -18,7 +19,11 @@ import Data.Maybe (fromMaybe)
 import Bridge.Ledger.Model (LossCapital(..),SourceCheck(..),Deposit(..),Attempt(..),PaymentCosts(..),NativeSettlementCheck(..))
 import qualified Data.Text as T
 import Control.Exception (bracket,try)
-import Control.Monad (forM_)
+import Control.Monad (forM_,void)
+import Data.List (sortOn)
+import qualified Data.Map.Strict as M
+import Bridge.Postgres.Schema
+import qualified Opaleye as O
 import Data.Aeson (object,(.=),encode,ToJSON,eitherDecodeStrict')
 import qualified Data.ByteString.Lazy as LBS
 import qualified Data.Text.Encoding as TE
@@ -37,47 +42,41 @@ expectError expected action = do
   result <- try action :: IO(Either BridgeError ())
   require (case result of Left(BridgeError code)->code==expected; _->False) ("contract_expected:"<>expected)
 
--- Fixtures model ledger state only; they are never chain evidence. Raw INSERTs
--- are maintenance/test setup, not a runtime database implementation.
+-- Fixtures model ledger state only; they never provide chain evidence.
+-- Every row access uses the closed Opaleye fixture interpreter below.
 fixture :: L.Ledger -> Text -> Text -> IO Int64
 fixture ledger oid prior = L.ledgerAction ledger $ \c->do
-  _ <- PG.execute c "INSERT INTO orders(id,capability_hash,idempotency_key,request_hash,request_json,quote_json,policy_json,status,deadline,grace_deadline) VALUES(?,?,?,'contract','{}','{}','{}','NeedsReview',100,200)" (oid,oid,oid)
-  _ <- PG.execute c "INSERT INTO deposits(id,order_id,asset,amount,anchor,first_seen,confirmations,eligible,allocated) VALUES(?,?,'Native',10000,'database-contract-anchor',100,1,1,1)" (oid,oid)
-  _ <- PG.execute c "INSERT INTO obligations(id,order_id,deposit_id,kind,asset,amount,recipient,status) VALUES(?,?,?,'conversion','Wrapped',9900,'database-contract-recipient',?)" (oid,oid,oid,prior)
+  fixtureOperation c (ContractOrder oid "NeedsReview" "{}" Nothing)
+  fixtureOperation c (ContractDeposit $ Deposits oid (Just oid) "Native" 10000 "database-contract-anchor" 100 1 1 1 "observed")
+  fixtureOperation c (ContractObligation $ Obligations oid oid oid "conversion" "Wrapped" 9900 "database-contract-recipient" prior)
   work <- Source.sourceWorkHashC c oid
-  _ <- PG.execute c "UPDATE deposits SET eligible=0 WHERE id=?" (PG.Only oid)
+  fixtureOperation c (DepositEligibility oid 0)
   Source.recordSourceCheckC c oid $ SourceUnavailable $ object
     ["reason" .= ("source_eligibility_lost"::Text),"reviewedObligations" .= [object["intent" .= oid,"previousStatus" .= prior,"workHash" .= work]]]
-  _ <- PG.execute c "UPDATE obligations SET status='review' WHERE id=?" (PG.Only oid)
-  _ <- PG.execute c "UPDATE deposits SET eligible=1 WHERE id=?" (PG.Only oid)
+  fixtureOperation c (ObligationStatus oid "review")
+  fixtureOperation c (DepositEligibility oid 1)
   Source.recordSourceCheckC c oid $ SourceRestored $ object["anchor" .= ("database-contract-restoration"::Text)]
-  rows <- PG.query c "SELECT critical_sequence FROM source_recoveries WHERE deposit_id=? ORDER BY id DESC LIMIT 1" (PG.Only oid) :: IO[PG.Only Int64]
-  case rows of [PG.Only n]->pure n; _->reject "contract_restoration_missing"
+  fixtureOperation c (SourceSequence oid)
 
 fresh :: L.Ledger -> IO ()
 fresh ledger = L.ledgerAction ledger $ \c->do
-  _ <- PG.execute_ c "UPDATE custody_check SET checked_revision=revision,checked_at=100,last_error=NULL,report_json='{}'"
+  fixtureOperation c FreshCustody
   pure ()
 
-snapshot :: L.Ledger -> IO (Int64,Int64,Text)
-snapshot ledger = L.ledgerAction ledger $ \c->do
-  [PG.Only sequenceNo] <- PG.query_ c "SELECT critical_sequence FROM deployment"
-  [PG.Only count] <- PG.query_ c "SELECT count(*) FROM source_recovery_approvals"
-  [PG.Only states] <- PG.query_ c "SELECT jsonb_build_object('obligations',(SELECT jsonb_agg(to_jsonb(o) ORDER BY id) FROM obligations o),'attempts',(SELECT jsonb_agg(to_jsonb(a) ORDER BY txid) FROM attempts a),'nativeRecoveries',(SELECT jsonb_agg(to_jsonb(r) ORDER BY id) FROM native_payment_recoveries r),'postings',(SELECT jsonb_agg(to_jsonb(p) ORDER BY event_id,account) FROM postings p))::text"
-  pure(sequenceNo,count,states)
+snapshot :: L.Ledger -> IO RecoverySnapshot
+snapshot ledger = L.ledgerAction ledger (\c->fixtureOperation c RecoveryState)
 
 main :: IO ()
 main = do
   user <- getEffectiveUserName
   database <- fromMaybe "ecx_source_approval_contract" <$> lookupEnv "ECX_SOURCE_CONTRACT_DATABASE"
+  require ("ecx_source_approval_contract" `T.isPrefixOf` T.pack database) "disposable_contract_database_required"
   let connectionSettings=(settings user) {PG.connectDatabase=database}
   bracket (PG.connect connectionSettings) PG.close $ \c->do
-    [PG.Only count] <- PG.query_ c "SELECT count(*) FROM deployment" :: IO[PG.Only Int64]
-    require (count==0) "fresh_contract_database_required"
+    rows <- fixtureOperation c DeploymentRows
+    require (null rows) "fresh_contract_database_required"
     PG.withTransaction c $ do
-      _ <- PG.execute c "INSERT INTO deployment(singleton,schema_version,fingerprint) VALUES(1,18,?)" (PG.Only identity)
-      _ <- PG.execute_ c "INSERT INTO custody_check(singleton) VALUES(1)"
-      pure ()
+      fixtureOperation c Initialize
   L.withLedger connectionSettings identity $ \ledger->do
     forM_ ["ready","paying"] $ \prior->do
       let oid="restore-"<>prior
@@ -86,8 +85,8 @@ main = do
       fresh ledger
       Source.recoveryRecord ledger oid restoration 100 "verified contract restoration"
       L.ledgerAction ledger $ \c->do
-        state <- PG.query c "SELECT status FROM obligations WHERE id=?" (PG.Only oid) :: IO[PG.Only Text]
-        require (state==[PG.Only prior]) "contract_wrong_restored_state"
+        state <- fixtureOperation c (ReadObligationStatus oid)
+        require (state==[prior]) "contract_wrong_restored_state"
       before <- snapshot ledger
       Source.recoveryRecord ledger oid restoration 100 "verified contract restoration"
       expectError "source_approval_conflict" $ Source.recoveryRecord ledger oid restoration 100 "changed reason"
@@ -95,7 +94,7 @@ main = do
       require (before==after) "contract_replay_mutated_state"
     changed <- fixture ledger "changed-work" "ready"
     L.ledgerAction ledger $ \c->do
-      _ <- PG.execute_ c "INSERT INTO intents(id,obligation_id,chain) VALUES('changed-work','changed-work','Solana')"
+      fixtureOperation c (ContractIntent $ Intents "changed-work" "changed-work" "Solana" Nothing 0)
       pure ()
     fresh ledger
     beforeChanged <- snapshot ledger
@@ -114,9 +113,9 @@ main = do
     let sourceTxid=T.replicate 64 "a"
         did="native:"<>sourceTxid<>":0"
     L.ledgerAction ledger $ \c->do
-      _ <- PG.execute c "INSERT INTO deposits(id,asset,amount,anchor,first_seen,confirmations,eligible) VALUES(?,'Native',10000,'unconfirmed',100,0,0)" (PG.Only did)
-      _ <- PG.execute c "INSERT INTO observation_evidence(hash,chain,event_id,evidence_json) VALUES('contract-hash','Native',?,'{}')" (PG.Only sourceTxid)
-      _ <- PG.execute c "INSERT INTO chain_events(chain,event_id,kind,anchor,evidence_hash,first_seen,last_seen,needs_review) VALUES('Native',?,'incoming','unconfirmed','contract-hash',100,100,0)" (PG.Only sourceTxid)
+      fixtureOperation c (ContractDeposit $ Deposits did Nothing "Native" 10000 "unconfirmed" 100 0 0 0 "observed")
+      fixtureOperation c (NativeEvidence "contract-hash" sourceTxid "{}")
+      fixtureOperation c (NativeEvent sourceTxid "incoming" "unconfirmed" "contract-hash")
       pure ()
     pendingSources <- Source.candidates ledger
     source <- case filter ((==did).depositId) pendingSources of [row]->pure row; _->reject "contract_native_source_missing"
@@ -127,8 +126,8 @@ main = do
     afterFence <- snapshot ledger
     require (beforeFence==afterFence) "contract_source_fence_mutated_financial_state"
     L.ledgerAction ledger $ \c->do
-      history <- PG.query c "SELECT count(*) FROM source_recoveries WHERE deposit_id=?" (PG.Only did) :: IO[PG.Only Int64]
-      require (history==[PG.Only 0]) "contract_ordinary_pending_journaled"
+      history <- fixtureOperation c (SourceHistory did)
+      require (null history) "contract_ordinary_pending_journaled"
 
     -- Finality-only records use synthetic database fixtures, never signed bytes
     -- or transport responses. No principal is posted by these recovery records.
@@ -141,15 +140,15 @@ main = do
         old=jsonText $ object["costs" .= costs,"proof" .= proof "block-a" 1]
         expected=Attempt txid oid "Native" "database-fixture-not-signed" "{}" 1000 "settled" (Just 1)
     L.ledgerAction ledger $ \c->do
-      _ <- PG.execute c "INSERT INTO orders(id,capability_hash,idempotency_key,request_hash,request_json,quote_json,policy_json,status,deadline,grace_deadline) VALUES(?,?,?,'contract','{}','{}','{}','Paid',100,200)" (oid,oid,oid)
-      _ <- PG.execute c "INSERT INTO deposits(id,order_id,asset,amount,anchor,first_seen,confirmations,eligible,allocated) VALUES(?,?,'Wrapped',10000,'database-contract',100,1,1,1)" (oid,oid)
-      _ <- PG.execute c "INSERT INTO obligations(id,order_id,deposit_id,kind,asset,amount,recipient,status) VALUES(?,?,?,'conversion','Native',9900,'contract-recipient','paid')" (oid,oid,oid)
-      _ <- PG.execute c "INSERT INTO intents(id,obligation_id,chain,resolved) VALUES(?,?,'Native',0)" (oid,oid)
-      _ <- PG.execute c "INSERT INTO preparations(intent_id,generation,policy_json) VALUES(?,0,'{}')" (PG.Only oid)
-      _ <- PG.execute c "INSERT INTO attempts(txid,intent_id,signed_bytes,policy_json,fee_limit,state,critical_sequence,observation_json) VALUES(?,?,'database-fixture-not-signed','{}',1000,'settled',1,?)" (txid,oid,old)
-      _ <- PG.execute c "UPDATE intents SET resolved=1 WHERE id=?" (PG.Only oid)
-      _ <- PG.execute c "INSERT INTO observation_evidence(hash,chain,event_id,evidence_json) VALUES('finality-contract-hash','Native',?,?)" (txid,jsonText $ object["proof" .= object["confirmations" .= (2::Int)]])
-      _ <- PG.execute c "INSERT INTO chain_events(chain,event_id,kind,anchor,evidence_hash,first_seen,last_seen,needs_review) VALUES('Native',?,'outgoing','block-a','finality-contract-hash',100,100,0)" (PG.Only txid)
+      fixtureOperation c (ContractOrder oid "Paid" "{}" Nothing)
+      fixtureOperation c (ContractDeposit $ Deposits oid (Just oid) "Wrapped" 10000 "database-contract" 100 1 1 1 "observed")
+      fixtureOperation c (ContractObligation $ Obligations oid oid oid "conversion" "Native" 9900 "contract-recipient" "paid")
+      fixtureOperation c (ContractIntent $ Intents oid oid "Native" Nothing 0)
+      fixtureOperation c (ContractPreparation oid "{}")
+      fixtureOperation c (ContractAttempt $ Attempts txid oid "database-fixture-not-signed" "{}" 1000 "settled" (Just 1) (Just old) 0)
+      fixtureOperation c (ResolveIntent oid)
+      fixtureOperation c (NativeEvidence "finality-contract-hash" txid (jsonText $ object["proof" .= object["confirmations" .= (2::Int)]]))
+      fixtureOperation c (NativeEvent txid "outgoing" "block-a" "finality-contract-hash")
       pure ()
     NativeRecovery.candidates ledger >>= \rows->require (null rows) "contract_healthy_finality_candidate"
     NativeRecovery.recordCheck ledger expected old NativeSettlementConfirming
@@ -161,7 +160,7 @@ main = do
     NativeRecovery.recordCheck ledger expected old (NativeSettlementUnavailable "contract RPC unavailable")
     NativeRecovery.observation ledger txid >>= \saved->require (saved==old) "contract_uncertainty_changed_payment"
     L.ledgerAction ledger $ \c->do
-      _ <- PG.execute c "UPDATE chain_events SET anchor='block-b' WHERE chain='Native' AND event_id=?" (PG.Only txid)
+      fixtureOperation c (NativeAnchor txid "block-b")
       pure ()
     NativeRecovery.recordCheck ledger expected old (NativeSettlementReconfirmed costs $ proof "block-b" 1)
     updated <- NativeRecovery.observation ledger txid
@@ -173,14 +172,14 @@ main = do
     require (beforeConfirmedReplay==afterConfirmedReplay) "contract_finality_refusal_mutated_state"
     NativeRecovery.candidates ledger >>= \rows->require (null rows) "contract_reconfirmed_candidate_not_closed"
     L.ledgerAction ledger $ \c->do
-      [PG.Only count] <- PG.query_ c "SELECT count(*) FROM postings WHERE event_id LIKE 'native-winner-fee:%'" :: IO[PG.Only Int64]
-      require (count==0) "contract_unapproved_winner_money_posted"
+      posts <- fixtureOperation c WinnerPosts
+      require (null posts) "contract_unapproved_winner_money_posted"
     winnerContract ledger
     lossCoverContract ledger
     coveredObligationContract ledger
   L.withLedger connectionSettings identity $ \ledger->do
     L.ledgerAction ledger $ \c->do
-      rows <- PG.query_ c "SELECT id,status FROM obligations ORDER BY id" :: IO[(Text,Text)]
+      rows <- fixtureOperation c ObligationStates
       require (lookup "restore-ready" rows==Just "ready" && lookup "restore-paying" rows==Just "paying" && lookup "changed-work" rows==Just "review" && lookup "stale-restoration" rows==Just "review") "contract_restart_changed_state"
   putStrLn "PostgreSQL source approval: ready/paying restoration, freshness, replay, conflict, changed-work/stale refusal, candidate view, source/evidence fences and reopen plus native finality and replacement draft/sign/cancel, older/newer winner fees, loss cover/return, covered ready/paying approvals, exact backup coverage and fences passed; database-only contract"
 
@@ -214,14 +213,14 @@ winnerContract ledger = do
       newCosts=PaymentCosts (draftFee draft) zero
       previous=jsonText $ object["costs" .= oldCosts,"proof" .= proof oldId]
   L.ledgerAction ledger $ \c->do
-    _ <- PG.execute c "INSERT INTO orders(id,capability_hash,idempotency_key,request_hash,request_json,quote_json,policy_json,status,deadline,grace_deadline,payout_tx) VALUES(?,?,?,'contract','{}','{}',?,'Paid',100,200,?)" (oid,oid,oid,jsonText policy,oldId)
-    _ <- PG.execute c "INSERT INTO deposits(id,order_id,asset,amount,anchor,first_seen,confirmations,eligible,allocated) VALUES(?,?,'Wrapped',101010,'database-contract',100,1,1,1)" (oid,oid)
-    _ <- PG.execute c "INSERT INTO obligations(id,order_id,deposit_id,kind,asset,amount,recipient,status) VALUES(?,?,?,'conversion','Native',?,?,'paying')" (oid,oid,oid,units $ planAmount plan,planRecipient plan)
-    _ <- PG.execute c "INSERT INTO intents(id,obligation_id,chain,common_input) VALUES(?,?,'Native',?)" (oid,oid,common)
-    _ <- PG.execute c "INSERT INTO preparations(intent_id,generation,policy_json) VALUES(?,0,?)" (oid,jsonText plan)
-    _ <- PG.execute c "INSERT INTO fee_reservations(intent_id,asset,amount,released) VALUES(?,'Native',?,0)" (oid,units $ planFeeLimit plan)
+    fixtureOperation c (ContractOrder oid "Paid" (jsonText policy) (Just oldId))
+    fixtureOperation c (ContractDeposit $ Deposits oid (Just oid) "Wrapped" 101010 "database-contract" 100 1 1 1 "observed")
+    fixtureOperation c (ContractObligation $ Obligations oid oid oid "conversion" "Native" (units $ planAmount plan) (planRecipient plan) "paying")
+    fixtureOperation c (ContractIntent $ Intents oid oid "Native" (Just common) 0)
+    fixtureOperation c (ContractPreparation oid $ jsonText plan)
+    fixtureOperation c (ContractFeeReservation $ FeeReservations oid "Native" (units $ planFeeLimit plan) 0)
     oldSequence <- L.criticalSequence c
-    _ <- PG.execute c "INSERT INTO attempts(txid,intent_id,signed_bytes,policy_json,fee_limit,state,critical_sequence) VALUES(?,?,?,?,?,'broadcast_intent',?)" (oldId,oid,raw,jsonText original,units $ planFeeLimit plan,oldSequence)
+    fixtureOperation c (ContractAttempt $ Attempts oldId oid raw (jsonText original) (units $ planFeeLimit plan) "broadcast_intent" (Just oldSequence) Nothing 0)
     pure ()
   expected <- Replacement.parent ledger cfg oldId
   fresh ledger
@@ -249,14 +248,14 @@ winnerContract ledger = do
   Replacement.member ledger draftSequence >>= \a->require (a==Just signedMember) "contract_replacement_member_missing"
   L.ledgerAction ledger $ \c->do
     broadcastSequence <- L.criticalSequence c
-    _ <- PG.execute c "UPDATE attempts SET critical_sequence=? WHERE txid=?" (broadcastSequence,newId)
-    _ <- PG.execute c "UPDATE attempts SET state='broadcast_intent' WHERE txid=?" (PG.Only newId)
-    _ <- PG.execute c "UPDATE attempts SET state='settled',observation_json=? WHERE txid=?" (previous,oldId)
-    _ <- PG.execute c "UPDATE intents SET resolved=1 WHERE id=?" (PG.Only oid)
-    _ <- PG.execute c "UPDATE obligations SET status='paid' WHERE id=?" (PG.Only oid)
-    _ <- PG.execute c "UPDATE fee_reservations SET released=1 WHERE intent_id=?" (PG.Only oid)
-    _ <- PG.execute c "INSERT INTO observation_evidence(hash,chain,event_id,evidence_json) VALUES('winner-contract-evidence','Native',?,?)" (newId,jsonText $ object["proof" .= object["confirmations" .= (2::Int),"walletNetUnits" .= ("-100000"::Text),"feeUnits" .= draftFee draft]])
-    _ <- PG.execute c "INSERT INTO chain_events(chain,event_id,kind,anchor,evidence_hash,first_seen,last_seen,needs_review) VALUES('Native',?,'outgoing','winner-contract-anchor','winner-contract-evidence',100,100,0)" (PG.Only newId)
+    fixtureOperation c (AttemptSequence newId broadcastSequence)
+    fixtureOperation c (AttemptState newId "broadcast_intent" Nothing)
+    fixtureOperation c (AttemptState oldId "settled" (Just previous))
+    fixtureOperation c (ResolveIntent oid)
+    fixtureOperation c (ObligationStatus oid "paid")
+    fixtureOperation c (ReleaseFee oid)
+    fixtureOperation c (NativeEvidence "winner-contract-evidence" newId (jsonText $ object["proof" .= object["confirmations" .= (2::Int),"walletNetUnits" .= ("-100000"::Text),"feeUnits" .= draftFee draft]]))
+    fixtureOperation c (NativeEvent newId "outgoing" "winner-contract-anchor" "winner-contract-evidence")
     pure ()
   family <- L.ledgerAction ledger $ \c->Family.familyC c oid
   old <- case filter ((==oldId).attemptId) family of [a]->pure a; _->reject "contract_old_winner_missing"
@@ -271,13 +270,13 @@ winnerContract ledger = do
   expectError "native_settlement_changed" $ NativeRecovery.recordCheck ledger old previous (NativeSettlementReplaced family newId newCosts $ proof newId)
   snapshot ledger >>= \replayed->require (after==replayed) "contract_winner_replay_mutated_state"
   L.ledgerAction ledger $ \c->do
-    states <- PG.query c "SELECT txid,state FROM attempts WHERE intent_id=? ORDER BY txid" (PG.Only oid) :: IO [(Text,Text)]
+    states <- fixtureOperation c (AttemptStates oid)
     require (lookup oldId states==Just "review" && lookup newId states==Just "settled") "contract_winner_not_moved"
-    [PG.Only link] <- PG.query c "SELECT payout_tx FROM orders WHERE id=?" (PG.Only oid) :: IO [PG.Only Text]
+    [Just link] <- fixtureOperation c (ReadPrimaryLink oid)
     require (link==newId) "contract_winner_link_not_moved"
-    [PG.Only delta] <- PG.query_ c "SELECT fee_delta FROM native_winner_changes" :: IO [PG.Only Int64]
+    [delta] <- fixtureOperation c WinnerDeltas
     require (delta==units(draftFee draft)-units oldFee) "contract_winner_delta_wrong"
-    posts <- PG.query_ c "SELECT account,delta FROM postings WHERE event_id LIKE 'native-winner-fee:%' ORDER BY account" :: IO [(Text,Int64)]
+    posts <- fixtureOperation c WinnerPosts
     require (posts==[("external",delta),("operating",negate delta)]) "contract_winner_principal_changed"
     pure ()
   -- Re-read through the same validator after the prior winner becomes reviewed.
@@ -285,22 +284,22 @@ winnerContract ledger = do
   -- A later reorg can restore the older winner. Charge/refund the delta once
   -- while preserving an unrelated primary conversion link (e.g. extra refund).
   L.ledgerAction ledger $ \c->do
-    _ <- PG.execute c "UPDATE orders SET payout_tx='other-primary-link' WHERE id=?" (PG.Only oid)
-    _ <- PG.execute c "INSERT INTO observation_evidence(hash,chain,event_id,evidence_json) VALUES('older-winner-contract-evidence','Native',?,?)" (oldId,jsonText $ object["proof" .= object["confirmations" .= (2::Int),"walletNetUnits" .= ("-100000"::Text),"feeUnits" .= oldFee]])
-    _ <- PG.execute c "INSERT INTO chain_events(chain,event_id,kind,anchor,evidence_hash,first_seen,last_seen,needs_review) VALUES('Native',?,'outgoing','winner-contract-anchor','older-winner-contract-evidence',100,100,0)" (PG.Only oldId)
+    fixtureOperation c (PrimaryLink oid "other-primary-link")
+    fixtureOperation c (NativeEvidence "older-winner-contract-evidence" oldId (jsonText $ object["proof" .= object["confirmations" .= (2::Int),"walletNetUnits" .= ("-100000"::Text),"feeUnits" .= oldFee]]))
+    fixtureOperation c (NativeEvent oldId "outgoing" "winner-contract-anchor" "older-winner-contract-evidence")
     pure ()
   current <- L.ledgerAction ledger $ \c->Family.familyC c oid
   new <- case filter ((==newId).attemptId) current of [a]->pure a; _->reject "contract_new_winner_missing"
   saved <- NativeRecovery.observation ledger newId
   NativeRecovery.recordCheck ledger new saved (NativeSettlementReplaced current oldId oldCosts $ proof oldId)
   L.ledgerAction ledger $ \c->do
-    [PG.Only link] <- PG.query c "SELECT payout_tx FROM orders WHERE id=?" (PG.Only oid) :: IO [PG.Only Text]
+    [Just link] <- fixtureOperation c (ReadPrimaryLink oid)
     require (link=="other-primary-link") "contract_additional_refund_replaced_primary"
-    [PG.Only count] <- PG.query_ c "SELECT count(*) FROM native_winner_changes" :: IO [PG.Only Int64]
-    require (count==2) "contract_older_winner_missing"
-    [PG.Only total] <- PG.query_ c "SELECT sum(delta)::bigint FROM postings WHERE event_id LIKE 'native-winner-fee:%' AND account='operating'" :: IO [PG.Only Int64]
+    changes <- fixtureOperation c WinnerDeltas
+    require (length changes==2) "contract_older_winner_missing"
+    total <- sum . map (toInteger . snd) . filter ((=="operating").fst) <$> fixtureOperation c WinnerPosts
     require (total==0) "contract_older_winner_fee_not_returned"
-    states <- PG.query c "SELECT txid,state FROM attempts WHERE intent_id=?" (PG.Only oid) :: IO [(Text,Text)]
+    states <- fixtureOperation c (AttemptStates oid)
     require (lookup oldId states==Just "settled" && lookup newId states==Just "review") "contract_older_winner_not_canonical"
     pure ()
   rebroadcastContract ledger oid oldId
@@ -313,13 +312,10 @@ rebroadcastContract ledger oid txid = do
   old <- NativeRecovery.observation ledger txid
   NativeRecovery.recordCheck ledger saved old NativeSettlementConfirming
   anchor <- L.ledgerAction ledger $ \c->do
-    [PG.Only sequenceNo] <- PG.query c "SELECT critical_sequence FROM native_payment_recoveries WHERE txid=? ORDER BY id DESC LIMIT 1" (PG.Only txid)
-    pure sequenceNo
+    fixtureOperation c (NativeSequence txid)
   let proof=object["transaction" .= txid,"bytesHash" .= digest(TE.encodeUtf8 $ attemptBytes saved),"fixtureOnly" .= True]
       reason="database-only exact-byte repair contract"
-      economicSnapshot=L.ledgerAction ledger $ \c->do
-        [PG.Only value] <- PG.query_ c "SELECT jsonb_build_object('orders',(SELECT jsonb_agg(to_jsonb(o) ORDER BY id) FROM orders o),'intents',(SELECT jsonb_agg(to_jsonb(i) ORDER BY id) FROM intents i),'obligations',(SELECT jsonb_agg(to_jsonb(o) ORDER BY id) FROM obligations o),'attempts',(SELECT jsonb_agg(to_jsonb(a) ORDER BY txid) FROM attempts a),'postings',(SELECT jsonb_agg(to_jsonb(p) ORDER BY event_id,account) FROM postings p),'reservations',(SELECT jsonb_agg(to_jsonb(r) ORDER BY intent_id) FROM fee_reservations r))::text"
-        pure(value::Text)
+      economicSnapshot=L.ledgerAction ledger (\c->fixtureOperation c EconomicState)
   economicBefore <- economicSnapshot
   before <- snapshot ledger
   expectError "native_rebroadcast_review_changed" $ NativeRecovery.recordRebroadcast ledger saved family (anchor+1) reason proof >> pure ()
@@ -337,16 +333,16 @@ rebroadcastContract ledger oid txid = do
   L.acknowledgeBackup ledger identity approved (T.replicate 64 "d")
   NativeRecovery.authorizeRebroadcast ledger True saved family approved
   expectError "native_rebroadcast_payment_changed" $ NativeRecovery.authorizeRebroadcast ledger True saved{attemptBytes="changed"} family approved
-  L.ledgerAction ledger $ \c->PG.execute_ c "UPDATE deployment SET paused=0" >> pure ()
+  L.ledgerAction ledger $ \c->fixtureOperation c Unpause
   expectError "pause_before_operator_action" $ NativeRecovery.authorizeRebroadcast ledger True saved family approved
   L.pause ledger "database-only repair stays paused"
   NativeRecovery.recordCheck ledger saved old (NativeSettlementUnavailable "contract uncertain RPC")
   expectError "native_rebroadcast_not_missing" $ NativeRecovery.authorizeRebroadcast ledger True saved family approved
   economicSnapshot >>= \after->require (economicBefore==after) "contract_rebroadcast_changed_economic_records"
   L.ledgerAction ledger $ \c->do
-    rows <- PG.query c "SELECT i.resolved,o.status FROM intents i JOIN obligations o ON o.id=i.obligation_id WHERE i.id=?" (PG.Only oid) :: IO [(Int64,Text)]
+    rows <- fixtureOperation c (PrincipalState oid)
     require (rows==[(1,"paid")]) "contract_rebroadcast_reopened_principal"
-    [PG.Only total] <- PG.query_ c "SELECT sum(delta)::bigint FROM postings WHERE event_id LIKE 'native-winner-fee:%' AND account='operating'" :: IO [PG.Only Int64]
+    total <- sum . map (toInteger . snd) . filter ((=="operating").fst) <$> fixtureOperation c WinnerPosts
     require (total==0) "contract_rebroadcast_reposted_money"
 
 lossCoverContract :: L.Ledger -> IO ()
@@ -356,7 +352,7 @@ lossCoverContract ledger = do
       sourceProof=object["transaction" .= txid,"output" .= (0::Int),"observationHash" .= ("contract-hash"::Text),"confirmations" .= (-1::Int),"nodeBlock" .= ("loss-contract-block"::Text),"nodeHeight" .= (100::Int)]
   (source,recovery) <- L.ledgerAction ledger $ \c->do
     Source.recordSourceCheckC c did (SourceMissing sourceProof)
-    [PG.Only sequenceNo] <- PG.query c "SELECT critical_sequence FROM source_recoveries WHERE deposit_id=? ORDER BY id DESC LIMIT 1" (PG.Only did) :: IO [PG.Only Int64]
+    sequenceNo <- fixtureOperation c (SourceSequence did)
     quantity <- either reject pure(amount 10000)
     L.posting c "contract-loss-capital" "synthetic database fixture only" [(Native,"float",5000),(Native,"earned",4000),(Native,"external",-9000)]
     pure(Deposit did Nothing Native quantity "unconfirmed" 0 False 100,sequenceNo)
@@ -366,8 +362,7 @@ lossCoverContract ledger = do
       reason="contract capital coverage"
       custody revision=object["revision" .= revision,"checkedAt" .= (100::Int),"report" .= object["matches" .= True,"nativeBlock" .= ("loss-contract-block"::Text),"nativeHeight" .= (100::Int)]]
   revision <- L.ledgerAction ledger $ \c->do
-    [PG.Only current] <- PG.query_ c "SELECT revision FROM custody_check" :: IO [PG.Only Int64]
-    pure current
+    fixtureOperation c CustodyRevision
   before <- snapshot ledger
   expectError "insufficient_loss_capital" $ LossCover.record ledger source recovery 100 capital reason sourceProof (custody revision)
   expectError "source_loss_custody_not_current" $ LossCover.record ledger source recovery 100 capital reason sourceProof (custody $ revision+1)
@@ -375,8 +370,7 @@ lossCoverContract ledger = do
   snapshot ledger >>= \after->require (before==after) "contract_loss_refusal_mutated"
   L.ledgerAction ledger $ \c->L.posting c "contract-extra-loss-capital" "synthetic database fixture only" [(Native,"float",1000),(Native,"external",-1000)]
   coverRevision <- L.ledgerAction ledger $ \c->do
-    [PG.Only current] <- PG.query_ c "SELECT revision FROM custody_check" :: IO [PG.Only Int64]
-    pure current
+    fixtureOperation c CustodyRevision
   LossCover.record ledger source recovery 100 capital reason sourceProof (custody coverRevision)
   LossCover.decision ledger did recovery >>= \saved->require (saved==Just(capital,reason)) "contract_loss_decision_missing"
   beforeReplay <- snapshot ledger
@@ -384,13 +378,13 @@ lossCoverContract ledger = do
   expectError "source_loss_cover_conflict" $ LossCover.record ledger source recovery 100 capital "changed allocation reason" sourceProof (custody coverRevision)
   snapshot ledger >>= \after->require (beforeReplay==after) "contract_loss_cover_repeated"
   L.ledgerAction ledger $ \c->do
-    [PG.Only deficit] <- PG.query_ c "SELECT sum(delta)::bigint FROM postings WHERE asset='Native' AND account='source_deficit'" :: IO [PG.Only Int64]
+    deficit <- M.findWithDefault 0 "source_deficit" <$> fixtureOperation c NativeCapital
     require (deficit==0) "contract_loss_deficit_not_covered"
-    _ <- PG.execute c "UPDATE deposits SET eligible=1 WHERE id=?" (PG.Only did)
+    fixtureOperation c (DepositEligibility did 1)
     Source.recordSourceCheckC c did (SourceRestored $ object["contractRestored" .= True])
-    [PG.Only count] <- PG.query_ c "SELECT count(*) FROM source_loss_returns" :: IO [PG.Only Int64]
-    require (count==1) "contract_loss_capital_not_returned"
-    posts <- PG.query_ c "SELECT account,sum(delta)::bigint FROM postings WHERE asset='Native' AND account IN('float','earned','source_deficit') GROUP BY account ORDER BY account" :: IO [(Text,Int64)]
+    returns <- fixtureOperation c LossReturns
+    require (length returns==1) "contract_loss_capital_not_returned"
+    posts <- M.toAscList <$> fixtureOperation c NativeCapital
     require (posts==[("earned",4000),("float",6000),("source_deficit",0)]) "contract_loss_return_changed_capital"
     pure ()
 
@@ -407,41 +401,40 @@ coveredObligationContract ledger = forM_ ["ready","paying"] $ \prior->do
       report=object["matches" .= True,"nativeBlock" .= ("covered-contract-block"::Text),"nativeHeight" .= (100::Int)]
       savedTx=oid<>"-non-sendable-payment"
   (recovery,source,oldSendSequence) <- L.ledgerAction ledger $ \c->do
-    _ <- PG.execute c "INSERT INTO orders(id,capability_hash,idempotency_key,request_hash,request_json,quote_json,policy_json,status,deadline,grace_deadline) VALUES(?,?,?,'contract','{}','{}','{}','NeedsReview',100,200)" (oid,oid,oid)
-    _ <- PG.execute c "INSERT INTO deposits(id,order_id,asset,amount,anchor,first_seen,confirmations,eligible,allocated) VALUES(?,?,'Native',10000,'unconfirmed',100,0,0,1)" (did,oid)
-    _ <- PG.execute c "INSERT INTO obligations(id,order_id,deposit_id,kind,asset,amount,recipient,status) VALUES(?,?,?,'conversion','Wrapped',9900,'database-contract-recipient',?)" (oid,oid,did,prior)
+    fixtureOperation c (ContractOrder oid "NeedsReview" "{}" Nothing)
+    fixtureOperation c (ContractDeposit $ Deposits did (Just oid) "Native" 10000 "unconfirmed" 100 0 0 1 "observed")
+    fixtureOperation c (ContractObligation $ Obligations oid oid did "conversion" "Wrapped" 9900 "database-contract-recipient" prior)
     oldSequence <- L.criticalSequence c
     if prior=="paying" then do
       -- Earlier changed-work fixture has no attempts or signed bytes. Retire
       -- that isolated fixture's slot before testing a different Solana intent.
-      _ <- PG.execute_ c "UPDATE intents SET resolved=1 WHERE id='changed-work'"
-      _ <- PG.execute c "INSERT INTO intents(id,obligation_id,chain) VALUES(?,?,'Solana')" (oid,oid)
-      _ <- PG.execute c "INSERT INTO preparations(intent_id,generation,policy_json) VALUES(?,0,'{}')" (PG.Only oid)
-      _ <- PG.execute c "INSERT INTO fee_reservations(intent_id,asset,amount,released) VALUES(?,'Sol',5000,0)" (PG.Only oid)
-      _ <- PG.execute c "INSERT INTO attempts(txid,intent_id,signed_bytes,policy_json,fee_limit,state,critical_sequence) VALUES(?,?,'database-fixture-not-signed','{}',5000,'broadcast_intent',?)" (savedTx,oid,oldSequence)
+      fixtureOperation c (ResolveIntent "changed-work")
+      fixtureOperation c (ContractIntent $ Intents oid oid "Solana" Nothing 0)
+      fixtureOperation c (ContractPreparation oid "{}")
+      fixtureOperation c (ContractFeeReservation $ FeeReservations oid "Sol" 5000 0)
+      fixtureOperation c (ContractAttempt $ Attempts savedTx oid "database-fixture-not-signed" "{}" 5000 "broadcast_intent" (Just oldSequence) Nothing 0)
       pure ()
     else pure ()
     work <- Source.sourceWorkHashC c oid
     Source.recordSourceCheckC c did $ SourceUnavailable $ object["reason" .= ("source_eligibility_lost"::Text),"reviewedObligations" .= [object["intent" .= oid,"previousStatus" .= prior,"workHash" .= work]]]
-    _ <- PG.execute c "UPDATE obligations SET status='review' WHERE id=?" (PG.Only oid)
-    _ <- PG.execute c "INSERT INTO observation_evidence(hash,chain,event_id,evidence_json) VALUES(?,'Native',?,'{}')" (eventHash,txid)
-    _ <- PG.execute c "INSERT INTO chain_events(chain,event_id,kind,anchor,evidence_hash,first_seen,last_seen,needs_review) VALUES('Native',?,'incoming','unconfirmed',?,100,100,0)" (txid,eventHash)
+    fixtureOperation c (ObligationStatus oid "review")
+    fixtureOperation c (NativeEvidence eventHash txid "{}")
+    fixtureOperation c (NativeEvent txid "incoming" "unconfirmed" eventHash)
     L.posting c (oid<>"-original-deposit") "isolated database fixture only" [(Native,"float",10000),(Native,"external",-10000)]
     Source.recordSourceCheckC c did (SourceMissing proof)
-    [PG.Only loss] <- PG.query c "SELECT critical_sequence FROM source_recoveries WHERE deposit_id=? ORDER BY id DESC LIMIT 1" (PG.Only did) :: IO [PG.Only Int64]
+    loss <- fixtureOperation c (SourceSequence did)
     quantity <- either reject pure(amount 10000)
     pure(loss,Deposit did (Just oid) Native quantity "unconfirmed" 0 False 100,oldSequence)
   Source.coveredAuthorized ledger oid >>= \yes->require (not yes) "uncovered_source_authorized"
   expectError "source_loss_not_covered" $ Source.coveredObligation ledger oid recovery >> pure ()
   capital <- LossCapital <$> either reject pure(amount 10000) <*> either reject pure(amount 0)
   revision <- L.ledgerAction ledger $ \c->do
-    [PG.Only r] <- PG.query_ c "SELECT revision FROM custody_check" :: IO [PG.Only Int64]
-    pure r
+    fixtureOperation c CustodyRevision
   LossCover.record ledger source recovery 100 capital "isolated cover contract" proof (object["revision" .= revision,"checkedAt" .= (100::Int),"report" .= report])
   Source.coveredAuthorized ledger oid >>= \yes->require (not yes) "capital_cover_implicitly_authorized_payment"
   expectError "custody_not_reconciled" $ Source.coveredRecord ledger oid recovery 100 "explicit covered contract" proof
   fresh ledger
-  L.ledgerAction ledger $ \c->PG.execute c "UPDATE custody_check SET report_json=?" (PG.Only $ jsonText report) >> pure ()
+  L.ledgerAction ledger $ \c->fixtureOperation c (CustodyReport $ jsonText report)
   Source.coveredRecord ledger oid recovery 100 "explicit covered contract" proof
   before <- snapshot ledger
   Source.coveredRecord ledger oid recovery 100 "explicit covered contract" proof
@@ -449,14 +442,14 @@ coveredObligationContract ledger = forM_ ["ready","paying"] $ \prior->do
   after <- snapshot ledger
   require (before==after) "covered_approval_replay_mutated_state"
   Source.coveredAuthorized ledger oid >>= \yes->require yes "approved_covered_source_not_authorized"
-  L.ledgerAction ledger $ \c->PG.execute c "UPDATE chain_events SET needs_review=1 WHERE chain='Native' AND event_id=?" (PG.Only txid) >> pure ()
+  L.ledgerAction ledger $ \c->fixtureOperation c (NativeReview txid 1)
   Source.coveredAuthorized ledger oid >>= \yes->require (not yes) "ambiguous_covered_source_authorized"
-  L.ledgerAction ledger $ \c->PG.execute c "UPDATE chain_events SET needs_review=0 WHERE chain='Native' AND event_id=?" (PG.Only txid) >> pure ()
+  L.ledgerAction ledger $ \c->fixtureOperation c (NativeReview txid 0)
   L.ledgerAction ledger $ \c->do
-    states <- PG.query c "SELECT o.status,d.eligible FROM obligations o JOIN deposits d ON d.id=o.deposit_id WHERE o.id=?" (PG.Only oid) :: IO [(Text,Int64)]
+    states <- fixtureOperation c (CoveredState oid)
     require (states==[(prior,0)]) "covered_approval_changed_physical_eligibility_or_prior_state"
   if prior=="paying" then do
-    L.ledgerAction ledger $ \c->PG.execute_ c "UPDATE deployment SET paused=0" >> pure ()
+    L.ledgerAction ledger $ \c->fixtureOperation c Unpause
     L.acknowledgeBackup ledger identity oldSendSequence (T.replicate 64 "e")
     needed <- Settlement.markBroadcastIntent ledger savedTx
     require (needed>oldSendSequence) "covered_approval_not_included_in_send_coverage"
@@ -469,8 +462,203 @@ coveredObligationContract ledger = forM_ ["ready","paying"] $ \prior->do
   -- Returning the source retires the cover. If it is lost again, its previous
   -- capital allocation/approval cannot authorize another uncovered loss.
   L.ledgerAction ledger $ \c->do
-    _ <- PG.execute c "UPDATE deposits SET eligible=1 WHERE id=?" (PG.Only did)
+    fixtureOperation c (DepositEligibility did 1)
     Source.recordSourceCheckC c did (SourceRestored $ object["contractRestored" .= True])
-    _ <- PG.execute c "UPDATE deposits SET eligible=0 WHERE id=?" (PG.Only did)
+    fixtureOperation c (DepositEligibility did 0)
     Source.recordSourceCheckC c did (SourceMissing proof)
   Source.coveredAuthorized ledger oid >>= \yes->require (not yes) "returned_cover_authorized_later_loss"
+
+-- Closed database-only vocabulary. Callers cannot supply SQL, tables, query
+-- callbacks or arbitrary IO; these fixtures never sign or contact either chain.
+data Fixture a where
+  Initialize :: Fixture ()
+  DeploymentRows :: Fixture [Deployment]
+  ContractOrder :: Text -> Text -> Text -> Maybe Text -> Fixture ()
+  ContractDeposit :: Deposits -> Fixture ()
+  ContractObligation :: Obligations -> Fixture ()
+  ContractIntent :: Intents -> Fixture ()
+  ContractPreparation :: Text -> Text -> Fixture ()
+  ContractAttempt :: Attempts -> Fixture ()
+  ContractFeeReservation :: FeeReservations -> Fixture ()
+  NativeEvidence :: Text -> Text -> Text -> Fixture ()
+  NativeEvent :: Text -> Text -> Text -> Text -> Fixture ()
+  DepositEligibility :: Text -> Int64 -> Fixture ()
+  ObligationStatus :: Text -> Text -> Fixture ()
+  ResolveIntent :: Text -> Fixture ()
+  NativeAnchor :: Text -> Text -> Fixture ()
+  NativeReview :: Text -> Int64 -> Fixture ()
+  AttemptSequence :: Text -> Int64 -> Fixture ()
+  AttemptState :: Text -> Text -> Maybe Text -> Fixture ()
+  ReleaseFee :: Text -> Fixture ()
+  PrimaryLink :: Text -> Text -> Fixture ()
+  Unpause :: Fixture ()
+  FreshCustody :: Fixture ()
+  CustodyReport :: Text -> Fixture ()
+  RecoveryState :: Fixture RecoverySnapshot
+  EconomicState :: Fixture EconomicSnapshot
+  SourceHistory :: Text -> Fixture [SourceRecoveries]
+  SourceSequence :: Text -> Fixture Int64
+  NativeSequence :: Text -> Fixture Int64
+  ReadObligationStatus :: Text -> Fixture [Text]
+  ObligationStates :: Fixture [(Text,Text)]
+  AttemptStates :: Text -> Fixture [(Text,Text)]
+  ReadPrimaryLink :: Text -> Fixture [Maybe Text]
+  WinnerDeltas :: Fixture [Int64]
+  WinnerPosts :: Fixture [(Text,Int64)]
+  PrincipalState :: Text -> Fixture [(Int64,Text)]
+  CoveredState :: Text -> Fixture [(Text,Int64)]
+  CustodyRevision :: Fixture Int64
+  NativeCapital :: Fixture (M.Map Text Integer)
+  LossReturns :: Fixture [SourceLossReturns]
+
+-- Whole typed rows retain all columns formerly compared through jsonb_agg.
+-- Explicit sorting makes equality independent of PostgreSQL's scan order.
+data RecoverySnapshot = RecoverySnapshot [Deployment] [SourceRecoveryApprovals]
+  [Obligations] [Attempts] [NativePaymentRecoveries] [Postings] deriving (Eq,Show)
+data EconomicSnapshot = EconomicSnapshot [Orders] [Intents] [Obligations]
+  [Attempts] [Postings] [FeeReservations] deriving (Eq,Show)
+
+fixtureOperation :: PG.Connection -> Fixture a -> IO a
+fixtureOperation c = \case
+  Initialize -> do
+    void $ O.runInsert c O.Insert
+      {O.iTable=deploymentTable,O.iRows=[O.toFields (Deployment 1 18 identity 0 0 1 "initialization" :: Deployment)]
+      ,O.iReturning=O.rCount,O.iOnConflict=Nothing}
+    void $ O.runInsert c O.Insert
+      {O.iTable=custodycheckTable,O.iRows=[O.toFields (CustodyCheck 1 0 Nothing Nothing Nothing Nothing :: CustodyCheck)]
+      ,O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  DeploymentRows -> O.runSelect c (O.selectTable deploymentTable)
+  ContractOrder oid status policy link -> void $ O.runInsert c O.Insert
+    {O.iTable=ordersTable,O.iRows=[O.toFields (Orders oid oid oid "contract" "{}" "{}" policy status 100 200 Nothing Nothing link 0 :: Orders)]
+    ,O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  ContractDeposit row -> void $ O.runInsert c O.Insert
+    {O.iTable=depositsTable,O.iRows=[O.toFields row],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  ContractObligation row -> void $ O.runInsert c O.Insert
+    {O.iTable=obligationsTable,O.iRows=[O.toFields row],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  ContractIntent row -> void $ O.runInsert c O.Insert
+    {O.iTable=intentsTable,O.iRows=[O.toFields row],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  ContractPreparation oid policy -> void $ O.runInsert c O.Insert
+    {O.iTable=preparationsTable,O.iRows=[O.toFields (Preparations oid 0 policy Nothing Nothing 0 :: Preparations)]
+    ,O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  ContractAttempt row -> void $ O.runInsert c O.Insert
+    {O.iTable=attemptsTable,O.iRows=[O.toFields row],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  ContractFeeReservation row -> void $ O.runInsert c O.Insert
+    {O.iTable=feereservationsTable,O.iRows=[O.toFields row],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  NativeEvidence hash txid evidence -> void $ O.runInsert c O.Insert
+    {O.iTable=observationevidenceTable,O.iRows=[O.toFields (ObservationEvidence hash "Native" txid evidence :: ObservationEvidence)]
+    ,O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  NativeEvent txid kind anchor hash -> void $ O.runInsert c O.Insert
+    {O.iTable=chaineventsTable,O.iRows=[O.toFields (ChainEvents "Native" txid kind anchor hash 100 100 0 :: ChainEvents)]
+    ,O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  DepositEligibility did value -> void $ O.runUpdate c O.Update
+    {O.uTable=depositsTable,O.uUpdateWith= \row->row{depositsEligible=O.sqlInt8 value}
+    ,O.uWhere= \row->depositsId row O..== O.sqlStrictText did,O.uReturning=O.rCount}
+  ObligationStatus oid status -> void $ O.runUpdate c O.Update
+    {O.uTable=obligationsTable,O.uUpdateWith= \row->row{obligationsStatus=O.sqlStrictText status}
+    ,O.uWhere= \row->obligationsId row O..== O.sqlStrictText oid,O.uReturning=O.rCount}
+  ResolveIntent oid -> void $ O.runUpdate c O.Update
+    {O.uTable=intentsTable,O.uUpdateWith= \row->row{intentsResolved=O.sqlInt8 1}
+    ,O.uWhere= \row->intentsId row O..== O.sqlStrictText oid,O.uReturning=O.rCount}
+  NativeAnchor txid anchor -> void $ O.runUpdate c O.Update
+    {O.uTable=chaineventsTable,O.uUpdateWith= \row->row{chaineventsAnchor=O.sqlStrictText anchor}
+    ,O.uWhere= \row->chaineventsChain row O..== O.sqlStrictText "Native" O..&& chaineventsEventId row O..== O.sqlStrictText txid
+    ,O.uReturning=O.rCount}
+  NativeReview txid value -> void $ O.runUpdate c O.Update
+    {O.uTable=chaineventsTable,O.uUpdateWith= \row->row{chaineventsNeedsReview=O.sqlInt8 value}
+    ,O.uWhere= \row->chaineventsChain row O..== O.sqlStrictText "Native" O..&& chaineventsEventId row O..== O.sqlStrictText txid
+    ,O.uReturning=O.rCount}
+  AttemptSequence txid n -> void $ O.runUpdate c O.Update
+    {O.uTable=attemptsTable,O.uUpdateWith= \row->row{attemptsCriticalSequence=O.toNullable $ O.sqlInt8 n}
+    ,O.uWhere= \row->attemptsTxid row O..== O.sqlStrictText txid,O.uReturning=O.rCount}
+  AttemptState txid state observation -> void $ O.runUpdate c O.Update
+    {O.uTable=attemptsTable,O.uUpdateWith= \row->row{attemptsState=O.sqlStrictText state
+      ,attemptsObservationJson=maybe (attemptsObservationJson row) (O.toNullable . O.sqlStrictText) observation}
+    ,O.uWhere= \row->attemptsTxid row O..== O.sqlStrictText txid,O.uReturning=O.rCount}
+  ReleaseFee oid -> void $ O.runUpdate c O.Update
+    {O.uTable=feereservationsTable,O.uUpdateWith= \row->row{feereservationsReleased=O.sqlInt8 1}
+    ,O.uWhere= \row->feereservationsIntentId row O..== O.sqlStrictText oid,O.uReturning=O.rCount}
+  PrimaryLink oid link -> void $ O.runUpdate c O.Update
+    {O.uTable=ordersTable,O.uUpdateWith= \row->row{ordersPayoutTx=O.toNullable $ O.sqlStrictText link}
+    ,O.uWhere= \row->ordersId row O..== O.sqlStrictText oid,O.uReturning=O.rCount}
+  Unpause -> void $ O.runUpdate c O.Update
+    {O.uTable=deploymentTable,O.uUpdateWith= \row->row{deploymentPaused=O.sqlInt8 0}
+    ,O.uWhere=const(O.sqlBool True),O.uReturning=O.rCount}
+  FreshCustody -> void $ O.runUpdate c O.Update
+    {O.uTable=custodycheckTable,O.uUpdateWith= \row->row
+      {custodycheckCheckedRevision=O.toNullable $ custodycheckRevision row
+      ,custodycheckCheckedAt=O.toNullable $ O.sqlInt8 100,custodycheckLastError=O.null
+      ,custodycheckReportJson=O.toNullable $ O.sqlStrictText "{}"}
+    ,O.uWhere=const(O.sqlBool True),O.uReturning=O.rCount}
+  CustodyReport report -> void $ O.runUpdate c O.Update
+    {O.uTable=custodycheckTable,O.uUpdateWith= \row->row{custodycheckReportJson=O.toNullable $ O.sqlStrictText report}
+    ,O.uWhere=const(O.sqlBool True),O.uReturning=O.rCount}
+  RecoveryState -> RecoverySnapshot
+    <$> (sortOn deploymentSingleton <$> O.runSelect c (O.selectTable deploymentTable))
+    <*> (sortOn (\row->(sourcerecoveryapprovalsObligationId row,sourcerecoveryapprovalsRestorationSequence row,sourcerecoveryapprovalsLossSequence row)) <$> O.runSelect c (O.selectTable sourcerecoveryapprovalsTable))
+    <*> (sortOn obligationsId <$> O.runSelect c (O.selectTable obligationsTable))
+    <*> (sortOn attemptsTxid <$> O.runSelect c (O.selectTable attemptsTable))
+    <*> (sortOn nativepaymentrecoveriesId <$> O.runSelect c (O.selectTable nativepaymentrecoveriesTable))
+    <*> (sortOn postingsId <$> O.runSelect c (O.selectTable postingsTable))
+  EconomicState -> EconomicSnapshot
+    <$> (sortOn ordersId <$> O.runSelect c (O.selectTable ordersTable))
+    <*> (sortOn intentsId <$> O.runSelect c (O.selectTable intentsTable))
+    <*> (sortOn obligationsId <$> O.runSelect c (O.selectTable obligationsTable))
+    <*> (sortOn attemptsTxid <$> O.runSelect c (O.selectTable attemptsTable))
+    <*> (sortOn postingsId <$> O.runSelect c (O.selectTable postingsTable))
+    <*> (sortOn feereservationsIntentId <$> O.runSelect c (O.selectTable feereservationsTable))
+  SourceHistory did -> O.runSelect c $ do
+    row <- O.selectTable sourcerecoveriesTable
+    O.where_ (sourcerecoveriesDepositId row O..== O.sqlStrictText did)
+    pure row
+  SourceSequence did -> do
+    rows <- fixtureOperation c (SourceHistory did)
+    case reverse (sortOn sourcerecoveriesId rows) of
+      row:_ -> pure (sourcerecoveriesCriticalSequence row)
+      _ -> reject "contract_restoration_missing"
+  NativeSequence txid -> do
+    rows <- (O.runSelect c $ O.limit 1 $ O.orderBy (O.desc fst) $ do
+      row <- O.selectTable nativepaymentrecoveriesTable
+      O.where_ (nativepaymentrecoveriesTxid row O..== O.sqlStrictText txid)
+      pure (nativepaymentrecoveriesId row,nativepaymentrecoveriesCriticalSequence row)) :: IO [(Int64,Int64)]
+    case rows of [(_,n)] -> pure n; _ -> reject "contract_native_recovery_missing"
+  ReadObligationStatus oid -> O.runSelect c $ do
+    row <- O.selectTable obligationsTable
+    O.where_ (obligationsId row O..== O.sqlStrictText oid)
+    pure (obligationsStatus row)
+  ObligationStates -> O.runSelect c $ O.orderBy (O.asc fst) $ do
+    row <- O.selectTable obligationsTable
+    pure (obligationsId row,obligationsStatus row)
+  AttemptStates oid -> O.runSelect c $ do
+    row <- O.selectTable attemptsTable
+    O.where_ (attemptsIntentId row O..== O.sqlStrictText oid)
+    pure (attemptsTxid row,attemptsState row)
+  ReadPrimaryLink oid -> O.runSelect c $ do
+    row <- O.selectTable ordersTable
+    O.where_ (ordersId row O..== O.sqlStrictText oid)
+    pure (ordersPayoutTx row)
+  WinnerDeltas -> O.runSelect c $ nativewinnerchangesFeeDelta <$> O.selectTable nativewinnerchangesTable
+  WinnerPosts -> O.runSelect c $ O.orderBy (O.asc fst) $ do
+    row <- O.selectTable postingsTable
+    O.where_ (postingsEventId row `O.like` O.sqlStrictText "native-winner-fee:%")
+    pure (postingsAccount row,postingsDelta row)
+  PrincipalState oid -> O.runSelect c $ do
+    intent <- O.selectTable intentsTable
+    obligation <- O.selectTable obligationsTable
+    O.where_ (intentsId intent O..== O.sqlStrictText oid O..&& obligationsId obligation O..== intentsObligationId intent)
+    pure (intentsResolved intent,obligationsStatus obligation)
+  CoveredState oid -> O.runSelect c $ do
+    obligation <- O.selectTable obligationsTable
+    deposit <- O.selectTable depositsTable
+    O.where_ (obligationsId obligation O..== O.sqlStrictText oid O..&& depositsId deposit O..== obligationsDepositId obligation)
+    pure (obligationsStatus obligation,depositsEligible deposit)
+  CustodyRevision -> do
+    rows <- O.runSelect c $ custodycheckRevision <$> O.selectTable custodycheckTable
+    case rows of [n] -> pure n; _ -> reject "contract_custody_missing"
+  NativeCapital -> do
+    posts <- (O.runSelect c $ do
+      row <- O.selectTable postingsTable
+      O.where_ (postingsAsset row O..== O.sqlStrictText "Native"
+        O..&& O.in_ (map O.sqlStrictText ["float","earned","source_deficit"]) (postingsAccount row))
+      pure (postingsAccount row,postingsDelta row)) :: IO [(Text,Int64)]
+    pure $ M.fromListWith (+) [(account,toInteger value) | (account,value) <- posts]
+  LossReturns -> O.runSelect c (O.selectTable sourcelossreturnsTable)

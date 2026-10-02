@@ -62,7 +62,7 @@ runSigner settings cfg privateFile = do
   private <- either (const $ reject "invalid_signer_config") pure (eitherDecodeStrict' bytes)
   require (all isAbsolute [nativeSigningCookie private,solanaSigningKey private]
     && nativeSigningCookie private/=nativeCookie cfg
-    && signerSocket cfg `notElem` [customerSocket cfg,adminSocket cfg]) "separate_signer_authority_required"
+    && signerAuthFile cfg `notElem` [nativeSigningCookie private,solanaSigningKey private,privateFile]) "separate_signer_authority_required"
   Maintenance.verifySigner cfg (solanaSigningKey private)
   bracket (PG.connect settings) PG.close $ \c->
     Tx.withTransactionMode (Tx.TransactionMode Tx.RepeatableRead Tx.ReadOnly) c (verifyReadRole c)
