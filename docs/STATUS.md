@@ -1678,3 +1678,9 @@ with the existing development Ed25519 release key, in the separate retained
 `signed-sqlite-free-review-candidate` directory. This is a private review pair,
 not approval of the development key for production publishing. The task x86 guest
 was shut down after acceptance.
+
+The PostgreSQL-only review pair is now uploaded as private draft/prerelease
+`review-2026-10-02-postgresql`, with eight assets. Downloading the uploaded assets
+and verifying both archives using the independently retained development public
+key succeeded. The repository remains private and all task VMs are stopped.
+See `evidence/postgresql-review-release.json`; remaining release gates are unchanged.

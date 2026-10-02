@@ -6,6 +6,8 @@ An inventory-backed bridge between native ECX-family networks and a wrapped Sola
 
 The project follows the later requirements in the original ECX discussion: an operator-run wrapping/redemption service, **1% to wrap and 1% to redeem for new orders**, and separate Solana liquidity that can eventually be traded through Jupiter. The bridge is the conversion service; a DEX pool supplies market trading and price discovery. There is no custom blockchain, Solana token program or AMM implementation here.
 
+The current [private review candidate](https://github.com/ekulkisnek/ecx-solana-bridge/releases/tag/untagged-bb954b02332325c69cc4) contains authenticated PostgreSQL-only ARM64 and x86 installers. Both passed installed upgrade/repeat preservation checks; downloaded GitHub assets also passed signature and checksum verification. This is a testing draft, with the remaining release gates listed below.
+
 ## Current integrated revision
 
 The [integrated implementation plan](docs/IMPLEMENTATION-PLAN.md) targets a connection-free interface, 1% fees in both directions, PostgreSQL/Opaleye throughout the database layer, and Servant handlers that produce a severity-indexed DSL for separate safe and critical evaluation. The local PostgreSQL paying runtime and both new 1% customer flows are working. Historical orders keep their original terms. The revised installer and private PostgreSQL replacement/loss-cover workflows are integrated locally; remaining live recovery, restore and release acceptance follows the integrated product.

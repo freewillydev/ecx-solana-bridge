@@ -1,0 +1,24 @@
+{
+  "url": "https://github.com/ekulkisnek/ecx-solana-bridge/releases/tag/untagged-bb954b02332325c69cc4",
+  "tag": "review-2026-10-02-postgresql",
+  "repositoryPrivate": true,
+  "draft": true,
+  "prerelease": true,
+  "assets": 8,
+  "readbackSignatureAndArchiveChecksumsVerified": true,
+  "publicKeySha256": "55f602053badd0f370a70e9b45d9e6519a0e41a474062fc4c166113b45900456",
+  "runtimeSourceCommit": "f24ed3766a78ee540ba39e482a762834f6d99bc6",
+  "architectures": {
+    "aarch64": {
+      "bytes": 26582323,
+      "filename": "ecx-bridge-ubuntu-24.04-aarch64.run",
+      "sha256": "43415f34c050a6f800cd89da2ed35a1bd99978181a03a6f26b1208d5b006771d"
+    },
+    "x86_64": {
+      "bytes": 19877629,
+      "filename": "ecx-bridge-ubuntu-24.04-x86_64.run",
+      "sha256": "f387d44088ee640cd0e0a56c406c76b0f6ef5b155c51386567b957b055f63252"
+    }
+  },
+  "publicRelease": false
+}
