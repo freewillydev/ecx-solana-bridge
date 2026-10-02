@@ -17,7 +17,36 @@
   "quoteGrossUnits": 10000,
   "topupUnits": 2000,
   "topupTransaction": "9bb783d7cb639fc89d97383af496e45003489fde335f052ff2cc04b3ed3f72b9",
-  "topupConfirmedAtRecordedCheck": false,
-  "customerDepositSent": false,
-  "bridgePayoutSent": false
+  "topupConfirmedAtRecordedCheck": true,
+  "customerDepositSent": true,
+  "bridgePayoutSent": false,
+  "topupAllocated": true,
+  "topupAllocationSequence": 14,
+  "latestCustomerOrderCreated": true,
+  "guestRpcTcpTimeouts": [
+    "api.devnet.solana.com",
+    "solana-devnet.api.onfinality.io"
+  ],
+  "hostDirectVerifierGenesisVerified": true,
+  "guestRpcConnectivityRestoredAfterReboot": true,
+  "orderId": "de8263b85175e9c2db4796c9ba8335e4814cbb8b16f2d6875e384a3693377bce",
+  "quote": {
+    "gross": "10000",
+    "fee": "100",
+    "net": "9900"
+  },
+  "customerDepositTransaction": "61a6ad8d7eb1afca14b8f3e10decb01ab56e005e25dca6d6207bdb0bcc17e2f5",
+  "customerDepositConfirmed": true,
+  "orderState": "Ready",
+  "criticalSequence": 16,
+  "paused": true,
+  "newOrderPreparations": 0,
+  "newOrderAttempts": 0,
+  "guestRpcConnectivityIntermittent": true,
+  "finalStageError": "rpc_transport_unknown_outcome",
+  "installedBackupCreated": true,
+  "privateHostArchiveCopyHashMatched": true,
+  "backupTables": 38,
+  "backupSha256": "89899d3f51abd87122fb0d0eb73155362890304dd425d1fb2ef37c67b26a423f",
+  "bothGuestProviderGenesisVerifiedAtEarlierProbe": true
 }

@@ -7,12 +7,11 @@ capability. A failed run leaves the worker stopped; never deletes or resets work
 import argparse
 import json
 import os
+import re
 from pathlib import Path
 import secrets
 import subprocess
 import time
-import urllib.request
-import urllib.error
 
 from InstalledTestTransport import InstalledTestTransport
 
@@ -55,35 +54,28 @@ def guest(*command, input=None):
     result = subprocess.run(['limactl', 'shell', 'inflight', *command], input=input,
                             capture_output=True, text=True, timeout=120)
     if result.returncode:
-        raise RuntimeError('Dedicated guest action refused')
+        codes = re.findall(r'BridgeError "([a-z0-9_-]{1,100})"', result.stderr)
+        raise RuntimeError('Dedicated guest action refused' + (': ' + codes[-1] if codes else ''))
     return result.stdout.strip()
 
 
-def rpc(method, params):
-    request = urllib.request.Request(cfg['solanaRpc'],
-        json.dumps({'jsonrpc': '2.0', 'id': 1, 'method': method, 'params': params}).encode(),
-        {'Content-Type': 'application/json'})
-    for attempt in range(4):
-        try:
-            response = json.load(urllib.request.urlopen(request, timeout=25))
-            break
-        except urllib.error.HTTPError as error:
-            if error.code not in [429, 503] or method not in [
-                'getGenesisHash', 'getLatestBlockhash', 'getBlockHeight', 'getSignatureStatuses'
-            ] or attempt == 3:
-                raise
-            delay = error.headers.get('Retry-After')
-            seconds = 2 ** (attempt + 1) if delay is None else int(delay)
-            if seconds < 1 or seconds > 15:
-                raise RuntimeError('Unusable read-only RPC retry delay') from None
-            time.sleep(seconds)
-    if response.get('error'):
-        raise RuntimeError('Devnet RPC refused')
-    return response['result']
-
 
 try:
-    assert rpc('getGenesisHash', []) == 'EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG'
+    # Qualify the actual guest's egress before any order or wallet mutation.
+    # Host-only preflight does not prove this installed server can reach RPC.
+    connectivity = guest('sudo', 'python3', '-c', r"""
+import json,urllib.request
+from pathlib import Path
+cfg=json.loads(Path('/etc/ecx-bridge/worker.json').read_text())
+assert cfg['profile']=='L2LSignetDevnet'
+assert cfg['solanaVerifierRpc']=='https://solana-devnet.api.onfinality.io/public'
+for endpoint in [cfg['solanaRpc'],cfg['solanaVerifierRpc']]:
+    req=urllib.request.Request(endpoint,json.dumps({'jsonrpc':'2.0','id':1,'method':'getGenesisHash','params':[]}).encode(),{'Content-Type':'application/json'})
+    result=json.load(urllib.request.urlopen(req,timeout=5))
+    assert result.get('id')==1 and result.get('result')=='EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG'
+print('guest-providers-ready')
+""")
+    assert connectivity == 'guest-providers-ready'
     guest('sudo', 'systemctl', 'start', 'ecx-bridge-node')
     if (private / 'order.json').exists():
         if (private / 'deposit.json').exists():

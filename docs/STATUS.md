@@ -1410,3 +1410,32 @@ with an explicit close-and-clear action. New orders and saved-order switching
 clear that temporary text. Strict TypeScript checking and browser bundling pass.
 These frontend changes are not yet in the accepted private installer draft;
 actual clipboard/recovery-link and customer wallet browser acceptance remain open.
+
+## Installed Solana recovery: confirmed source retained, staging pending
+
+The actual 2,000-unit native top-up confirmed and was allocated as treasury float
+through the private DSL at sequence 14, with stable allocation replay. The new
+wrapping order `de8263b85175e9c2db4796c9ba8335e4814cbb8b16f2d6875e384a3693377bce`
+was created with gross 10,000, fee 100, net 9,900. Its actual native deposit
+`61a6ad8d7eb1afca14b8f3e10decb01ab56e005e25dca6d6207bdb0bcc17e2f5`
+confirmed; the installed observer made the order Ready while observation-only
+mode prevented any payout.
+
+The dedicated guest developed intermittent outbound RPC connection timeouts.
+A reboot temporarily restored direct correct-genesis responses from both
+providers, but signed staging subsequently stopped with
+`rpc_transport_unknown_outcome`. The final authoritative ledger check is paused
+at sequence 16, with zero preparations or attempts for this order and no Solana
+payout. Existing historical preparations remain. The orchestrator now checks
+both real providers from the guest before intake and reports only bounded
+BridgeError codes from driver failures. It never replaces or resends a customer
+deposit on retry.
+
+The installed backup service completed a consistent 38-table snapshot. Its
+archive was copied privately to the host and matched its recorded SHA-256.
+This is another same-physical-host private copy, not remote durability or a new
+restore acceptance. All test processes terminated and the guest was shut down.
+Resume this saved Ready order once guest RPC access is stable; do not create
+another customer order or funding transfer to bypass the wait. Solana signed
+replay, expiry/retry and interruption acceptance remain unfinished. See
+[evidence](evidence/installed-solana-recovery-driver.json).
