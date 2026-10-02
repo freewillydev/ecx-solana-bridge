@@ -1950,3 +1950,15 @@ changing financial state or signing/sending. See
 `evidence/solana-recovery-verifier.json`. Staging also explicitly refuses the newly
 retired `solrestore` guest and checks the persistent retirement marker before
 provider or wallet actions.
+
+## Actual PostgreSQL source confirmation-loss/restoration
+
+The restored dedicated Signet node locally invalidated the actual confirmed
+customer deposit block while the bridge ran observation-only. The normal
+observer/source recovery path exposed NeedsReview and retained all postings and
+saved payment attempts. Reconsidering the same block returned the actual order
+to Paid; before/after full-row comparison of postings and attempts matched. The
+journal records unavailable and restored decisions. No new signature, payout,
+public consensus reorg, double spend or permanent loss was produced. See
+`evidence/postgres-source-local-disconnect.json`. External backup/wallet/reviewer
+prerequisites remain deferred at the user's request; continue local work.

@@ -1,0 +1,15 @@
+{
+  "actualLocalSignetBlockDisconnected": true,
+  "publicConsensusReorg": false,
+  "observerOnly": true,
+  "lossProducedNeedsReview": true,
+  "restorationReturnedPaid": true,
+  "postingsUnchanged": true,
+  "signedAttemptsUnchanged": true,
+  "sourceRecoveryStates": [
+    "unavailable",
+    "unavailable",
+    "restored"
+  ],
+  "newSignatureOrBroadcast": false
+}
