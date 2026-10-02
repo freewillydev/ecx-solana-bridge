@@ -3,6 +3,7 @@ module Main (main) where
 
 import Bridge.Types hiding (deploymentFingerprint)
 import Bridge.Ledger.Model (Deposit(..),Obligation(..),Preparation(..),CostLimits(..),ScanBatch(..),ChainEvent(..))
+import qualified Bridge.Postgres.FeeWithdrawal as Withdrawal
 import qualified Bridge.Postgres.Refund as Refund
 import qualified Bridge.Postgres.Treasury as Treasury
 import qualified Bridge.Postgres.Preparation as Preparation
@@ -114,8 +115,68 @@ main = do
   observerContracts settings
   quoteProperties settings
   journalProperties settings
-  putStrLn "PostgreSQL journal and backup acknowledgment: balanced writes, row locking, ownership, exact coverage, identity/receipt/stale refusal, idempotence, durable reopen, order/provisioning contracts, interruption, commit/capacity failure, send-authority rollback/fencing, treasury classification and observer page contracts passed"
+  feeWithdrawalProperties settings
+  putStrLn "PostgreSQL journal and backup acknowledgment: balanced writes, row locking, ownership, exact coverage, identity/receipt/stale refusal, idempotence, durable reopen, order/provisioning contracts, interruption, commit/capacity failure, send-authority rollback/fencing, treasury classification, fee funding and observer page contracts passed"
 
+
+-- Retains the retired fee-funding harness's checks, generated for both assets.
+-- Only funding/cancellation: no chain model, signer or payout claim.
+feeWithdrawalProperties :: PG.ConnectInfo -> IO ()
+feeWithdrawalProperties settings = do
+  base <- BS.readFile "config/l2l-devnet.example.json" >>= either fail pure . eitherDecodeStrict'
+  let quantity n=either (error . T.unpack) id (amount n)
+      cfg=base {maxInput=quantity (toInteger(maxBound::Int64))}
+  bracket (PG.connect settings) PG.close $ \c->PG.withTransaction c
+    (fixture c $ BeginFeeContract $ fingerprint cfg)
+  result <- L.withLedger settings (fingerprint cfg) $ \ledger->
+    quickCheckWithResult stdArgs {maxSuccess=20} $
+      forAll (chooseInt (1000,100000)) $ \funded->forAll (elements [Native,Wrapped]) $ \currency->ioProperty $ do
+        key <- randomId
+        other <- randomId
+        let holdings=(toInteger funded*3) `div` 5
+            reason="dedicated accounting contract"
+            balance account rows=M.findWithDefault 0 (T.pack(show currency),account) rows
+            readBalances=L.ledgerAction ledger L.balances
+            fresh=L.ledgerAction ledger (\c->fixture c FreshFeeContract)
+            reserve identifier asset n recipient=void(Withdrawal.reserve ledger cfg 100 identifier asset (quantity n) recipient reason)
+            cancelFunding why=void(Withdrawal.cancel ledger key why)
+        before <- readBalances
+        L.ledgerAction ledger $ \c->do
+          fixture c (BeginFeeContract $ fingerprint cfg)
+          L.posting c ("fee-fixture:"<>key) "database-only earned fee fixture"
+            [(currency,"earned",toInteger funded),(currency,"external",negate $ toInteger funded)]
+        expectError "custody_not_reconciled" (reserve key currency holdings "recipient")
+        fresh
+        expectError "fee_withdrawal_profile_mismatch" $ void(Withdrawal.reserve ledger
+          cfg{deploymentId="another-deployment"} 100 key currency (quantity holdings) "recipient" reason)
+        expectError "invalid_fee_withdrawal" (reserve key Sol holdings "recipient")
+        expectError "invalid_fee_withdrawal" (reserve key currency 0 "recipient")
+        expectError "invalid_fee_withdrawal" $ void(Withdrawal.reserve ledger
+          cfg{maxInput=quantity (holdings-1)} 100 key currency (quantity holdings) "recipient" reason)
+        expectError "insufficient_earned_fees" (reserve key currency (balance "earned" before+toInteger funded+1) "recipient")
+        reserve key currency holdings "recipient"
+        held <- readBalances
+        require (balance "earned" held==balance "earned" before+toInteger funded-holdings
+          && balance "fee_pending" held==balance "fee_pending" before+holdings) "fee_reservation_balance_mismatch"
+        reserve key currency holdings "recipient"
+        expectError "fee_withdrawal_conflict" (reserve key currency holdings "changed-recipient")
+        replay <- readBalances
+        require (replay==held) "fee_reservation_replay_changed_balances"
+        expectError "custody_not_reconciled" (reserve other currency holdings "recipient")
+        fresh
+        expectError "insufficient_earned_fees" (reserve other currency (balance "earned" held+1) "recipient")
+        cancelFunding "unsigned cancellation"
+        released <- readBalances
+        require (balance "earned" released==balance "earned" before+toInteger funded
+          && balance "fee_pending" released==balance "fee_pending" before) "fee_cancellation_balance_mismatch"
+        cancelFunding "unsigned cancellation"
+        expectError "fee_withdrawal_cancellation_conflict" (cancelFunding "changed reason")
+        replayCancel <- readBalances
+        require (replayCancel==released) "fee_cancellation_replay_changed_balances"
+        L.ledgerAction ledger (\c->fixture c (ReadyAt 100))
+        expectError "fee_withdrawal_requires_pause" (reserve other currency 1 "recipient")
+        pure True
+  require (isSuccess result) "postgres_fee_withdrawal_properties_failed"
 
 -- Replacement for the SQLite accounting fixtures: generated values run against
 -- the actual PostgreSQL transaction and Opaleye implementation, not a model DB.
@@ -184,6 +245,8 @@ quoteProperties settings = do
 -- Closed test operations: no arbitrary SQL/query callback in fixture access.
 data Fixture a where
   InitializeFixture :: Fixture ()
+  BeginFeeContract :: T.Text -> Fixture ()
+  FreshFeeContract :: Fixture ()
   LockDeployment :: Fixture ()
   DeploymentState :: Fixture [Deployment]
   ReadCoverage :: Fixture [(Int64,Int64,Int64)]
@@ -214,6 +277,17 @@ data JournalSnapshot = JournalSnapshot [Events] [Postings] [(Int64,Int64,Int64)]
 
 fixture :: PG.Connection -> Fixture a -> IO a
 fixture connection = \case
+  BeginFeeContract identity -> do
+    void $ O.runUpdate connection O.Update
+      {O.uTable=deploymentTable,O.uUpdateWith= \row->row
+        {deploymentFingerprint=O.sqlStrictText identity,deploymentPaused=O.sqlInt8 1}
+      ,O.uWhere=const(O.sqlBool True),O.uReturning=O.rCount}
+    fixture connection InvalidateCustody
+  FreshFeeContract -> void $ O.runUpdate connection O.Update
+    {O.uTable=custodycheckTable,O.uUpdateWith= \row->row
+      {custodycheckCheckedRevision=O.toNullable(custodycheckRevision row)
+      ,custodycheckCheckedAt=O.toNullable(O.sqlInt8 100),custodycheckLastError=O.null}
+    ,O.uWhere=const(O.sqlBool True),O.uReturning=O.rCount}
   DeploymentState -> O.runSelect connection (O.selectTable deploymentTable)
   LockDeployment -> do
     rows <- O.runSelect connection $ Locking.forUpdate $ do

@@ -37,6 +37,10 @@ partial deposits, expiry, instruction backup gates, and SQL-error rollback/fenci
 Fixtures and assertions use closed Opaleye operations. These are database contracts,
 not live-chain acceptance. Generated QuickCheck properties exercise balanced
 postings, failed-write atomicity, exact sequences, immutable quotes and ownership.
+The same runner generates earned-fee funding/cancellation contracts for Native
+and Wrapped assets: immutable terms, rejected replay conflicts, balanced holds,
+exact cancellation, asset/amount bounds and pause/freshness gates. These are
+funding-stage contracts; they do not prove fee signing or sending.
 
 Use a fresh disposable database with all `migrations/postgresql/*.sql` applied in
 filename order. This host uses socket `/tmp/ecx-pg-seam`, port 29436 and the current

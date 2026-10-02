@@ -253,6 +253,11 @@ The sequence below remains the broader refactor checklist, subject to that prior
    the PostgreSQL operator DSL; duplicate SQLite treasury allocation/spend mutations
    and the separate treasury runner are retired. Funding guarantees are checked by
    the consolidated PostgreSQL journal contract, including immutable replay across restart.
+   The standalone raw-SQL FeeWithdrawalCheck is retired: its unique funding,
+   pause/freshness, immutable replay and cancellation assertions now run as
+   QuickCheck cases for both Native and Wrapped in the existing journal runner,
+   using closed Opaleye fixture operations. SourceApprovalCheck's handwritten
+   SQL fixtures remain conversion work; do not delete its unique recovery assertions.
    Receipt/page atomicity and delayed verification also use the PostgreSQL contract;
    legacy resume-policy checks remain until their whole workflow is migrated.
    Chain scanning no longer executes Opaleye directly: reference lookup, promotion
