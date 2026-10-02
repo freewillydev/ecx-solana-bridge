@@ -12,6 +12,8 @@ import Bridge.Operation
 import qualified Data.Text as T
 import Servant
 
+-- Pure endpoint results retain the existential Operation dictionary. Runtime
+-- calls its command method to obtain the DSL, then selects the evaluator.
 customerServer :: ServerT CustomerAPI Plan
 customerServer = safe PublicConfig
   :<|> (\header request->customer(CreateOrder header request))

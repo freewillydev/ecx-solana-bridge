@@ -63,16 +63,16 @@ resolve :: Request s a -> DSL s a
 resolve (Request operation) = command operation
 
 data Plan a where
-  SafePlan :: DSL 'Safe a -> Plan a
-  CustomerPlan :: DSL 'Critical a -> Plan a
-  OperatorPlan :: DSL 'Critical a -> Plan a
-  WorkerPlan :: DSL 'Critical a -> Plan a
+  SafePlan :: Request 'Safe a -> Plan a
+  CustomerPlan :: Request 'Critical a -> Plan a
+  OperatorPlan :: Request 'Critical a -> Plan a
+  WorkerPlan :: Request 'Critical a -> Plan a
 
 safe :: SafeOperation a -> Plan a
-safe operation = SafePlan(resolve(Request operation))
+safe operation = SafePlan (Request operation)
 customer :: CustomerOperation a -> Plan a
-customer operation = CustomerPlan(resolve(Request operation))
+customer operation = CustomerPlan (Request operation)
 operator :: OperatorOperation a -> Plan a
-operator operation = OperatorPlan(resolve(Request operation))
+operator operation = OperatorPlan (Request operation)
 worker :: WorkerOperation a -> Plan a
-worker operation = WorkerPlan(resolve(Request operation))
+worker operation = WorkerPlan (Request operation)

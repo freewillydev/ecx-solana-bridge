@@ -91,11 +91,11 @@ evalSafe (SafeContext status) Status = pure status
 evalCritical :: CriticalContext -> DSL 'Critical a -> IO a
 evalCritical (CriticalContext ()) Payment = pure ()
 
-statusHandler :: DSL 'Safe Bool
-statusHandler = resolve (Request ReadStatus)
+statusHandler :: Request 'Safe Bool
+statusHandler = Request ReadStatus
 
-paymentPlan :: DSL 'Critical ()
-paymentPlan = resolve (Request AdvancePayment)
+paymentPlan :: Request 'Critical ()
+paymentPlan = Request AdvancePayment
 ```
 
 Use a single-step algebra initially. Do not introduce a free monad, generic
@@ -148,21 +148,25 @@ private; they are created only after the existing checks.
 
 ## Servant boundary
 
-Each Servant route resolves its operation to a **DSL value**, and only the
-central interpreter evaluates that value. The existential `Request s a` carries
-the typeclass dictionary during planning; `resolve` elaborates it into `DSL s a`
-before evaluation. The endpoint response type `a` remains visible throughout.
-The interpreter does not receive arbitrary operations or invoke handler IO.
+Each Servant route returns a **packaged existential operation**, not an evaluated
+result or an already elaborated DSL. `Request s a` hides the operation type and
+retains its `Operation s op` dictionary. The endpoint response type `a` and request
+severity `s` remain visible. At the runtime boundary, `resolve (Request op)` calls
+the class method `command op` to produce `DSL s a`; the matching evaluator then
+executes it. This is the production counterpart of Main.hs's DoThing class.
 
-Use `ServerT CustomerAPI CustomerDSL` as the unevaluated server and hoist once
-into `Handler`. `CustomerDSL` is the closed, result-indexed customer language:
-safe commands plus the explicitly permitted create-order command. It cannot
-wrap an arbitrary critical command. Resolve typed operation packages to this
-language in the route, then lower its commands to the severity-indexed safe or
-critical DSL only at the interpreter boundary. The admin language is separate.
+The actual servers use `ServerT CustomerAPI Plan` and `ServerT OperatorAPI Plan`,
+hoisted into `Handler`. The abstract `Plan a` contains a severity-indexed Request
+inside a safe/customer/operator/worker envelope. Public smart constructors accept
+only their concrete operation vocabulary; they package the operation without
+calling `resolve`. The class, instances, Request and Plan constructors remain in
+the hidden internal module. HTTP code cannot define a new executable operation or
+insert an arbitrary critical DSL through these constructors. Customer and operator
+routes currently share the public planning module; component-level separation of
+their imports remains part of the authority audit.
 
 Servant's `ServerT` requires a type constructor of kind `Type -> Type`; hoisting
-requires a natural transformation `forall a. CustomerDSL a -> Handler a`. Add
+requires a natural transformation `forall a. Plan a -> Handler a`. Add
 only the pure/applicative/monadic structure actually required by the installed
 Servant API and handler composition. Do not gain convenience by implementing
 `MonadIO`. Validation/authentication may be typed DSL steps; malformed inputs

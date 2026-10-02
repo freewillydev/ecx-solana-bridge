@@ -224,14 +224,15 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
         Left (BridgeError "custody_not_reconciled")->pure ()
         Left (BridgeError reason)->reject reason
 
--- The sole production invocation of critical evaluation. Routes have already
--- resolved their existential operation to a typed DSL, without performing IO.
+-- Routes return existential operations, without performing IO. Unpack their
+-- class dictionaries here and elaborate to the DSL before either evaluator.
+-- This remains the sole production invocation of critical evaluation.
 evaluate :: Runtime -> Plan a -> IO a
 evaluate (Runtime safeContext criticalContext gate) plan = case plan of
-  SafePlan dsl->evalSafe safeContext dsl
-  CustomerPlan dsl->critical dsl
-  OperatorPlan dsl->critical dsl
-  WorkerPlan dsl->critical dsl
+  SafePlan request->evalSafe safeContext (resolve request)
+  CustomerPlan request->critical (resolve request)
+  OperatorPlan request->critical (resolve request)
+  WorkerPlan request->critical (resolve request)
  -- A critical workflow can include RPC calls between ledger transactions.
  -- Keep scanning, admission and payment workflows from interleaving; otherwise
  -- a request's sampled time can precede a newer custody certificate after it
@@ -246,7 +247,9 @@ interpret :: Runtime -> Plan a -> Handler a
 interpret runtime plan = do
   result <- asHandler(evaluate runtime plan)
   case plan of
-    SafePlan (SafeDSL ReadyEndpoint) | not(available result)->throwError err503 {errBody=encode result}
+    SafePlan request -> case resolve request of
+      SafeDSL ReadyEndpoint | not(available result)->throwError err503 {errBody=encode result}
+      _->pure result
     _->pure result
 
 -- This command exposes the actual API against a paused test deployment. It

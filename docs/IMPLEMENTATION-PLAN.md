@@ -59,7 +59,9 @@ Keep the valid typeclass/constrained-existential/GADT design:
       Request :: Operation s op => op a -> Request s a
     resolve (Request op) = command op
 
-Servant handlers construct typed plans. Separate evalSafe and evalCritical
+Servant handlers construct typed plans containing existential Request values and
+their Operation dictionaries. Only the runtime boundary calls resolve/command to
+convert the packaged operation into a DSL value. Separate evalSafe and evalCritical
 interpreters execute them through one authorized dispatcher, with one production
 critical-evaluation call site. Keep result type and severity visible while hiding
 the operation type. Safe context has only read authority, no signing keys or writable
