@@ -57,6 +57,7 @@ rpc manager url auth methodName params = retryRateLimitedRead threadDelay method
       bytes <- boundedBody (4*1024*1024) (responseBody response)
       -- An unsupported Retry-After form is a stop, never permission to retry
       -- sooner. Neither transport errors nor mutating calls are retried here.
+      require (statusCode (responseStatus response)/=403) "rpc_method_forbidden"
       let delay=case lookup "Retry-After" (responseHeaders response) of
             Nothing -> Nothing
             Just h -> Just $ maybe (maxBound::Int) id (readMaybe $ BSC.unpack h)

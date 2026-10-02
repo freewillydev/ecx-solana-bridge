@@ -242,21 +242,6 @@ auditTable = O.table "audit" $ pAudit Audit
   , auditDetail = O.requiredTableField "detail"
   }
 
-data HintsF a0 a1 = Hints
-  { hintsOrderId :: a0
-  , hintsSignature :: a1
-  } deriving (Eq,Show)
-$(makeAdaptorAndInstance "pHints" ''HintsF)
-
-type Hints = HintsF Text Text
-type HintsRead = HintsF (O.Field O.SqlText) (O.Field O.SqlText)
-type HintsWrite = HintsF (O.Field O.SqlText) (O.Field O.SqlText)
-hintsTable :: O.Table HintsWrite HintsRead
-hintsTable = O.table "hints" $ pHints Hints
-  { hintsOrderId = O.requiredTableField "order_id"
-  , hintsSignature = O.requiredTableField "signature"
-  }
-
 data FeeReservationsF a0 a1 a2 a3 = FeeReservations
   { feereservationsIntentId :: a0
   , feereservationsAsset :: a1

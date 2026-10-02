@@ -81,7 +81,7 @@ createOrder :: Ledger -> Config -> Int64 -> Text -> OrderRequest -> IO Orders
 createOrder ledger cfg now capability req = do
   cap <- either reject pure (capabilityHash capability)
   require (validIdentifier (idempotencyKey req)) "invalid_idempotency_key"
-  fee <- either reject pure (feeFor 100 (input req))
+  fee <- either reject pure (feeFor (feeBps $ direction req) (input req))
   netAmount <- either reject pure (amount (toInteger (units (input req))-toInteger (units fee)))
   require (units netAmount>0) "nonpositive_net"
   oid <- randomId

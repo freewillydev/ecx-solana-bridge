@@ -25,5 +25,10 @@ Opaleye queries belong only to implementations of specific closed DSL operations
 Do not expose connection/query callbacks or generic RunQuery/RunSQL operations to
 handlers. Keep connection capabilities private to the relevant interpreter.
 
-Run bridge commands from 2-Wrap-Unwrap-Server. Keep token administration in
+Run Cabal build/test commands from the root (one build job). Use Cabal hooks for
+non-Haskell compiler inputs; do not require separate application build commands.
+Keep customer HTTP limited to configuration/order/payment instructions. Local
+operator control must use the closed DSL dispatcher, not operator HTTP routes.
+SQLite and its legacy test library are retired; use QuickCheck and actual
+PostgreSQL contracts. Run other bridge operations from 2-Wrap-Unwrap-Server. Keep token administration in
 1-Make-Wrapped-ECX and liquidity operations in 3-Create-CPMM-Pool, separate from custody.

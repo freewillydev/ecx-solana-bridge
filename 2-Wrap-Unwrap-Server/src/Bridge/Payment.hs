@@ -1,10 +1,8 @@
-module Bridge.Payment (PreparationStore(..), prepareNativePayment, prepareNativeWith, prepareSolanaPayment, prepareSolanaWith, payoutReference) where
+module Bridge.Payment (PreparationStore(..), prepareNativeWithSigner, prepareSolanaWithSigner, payoutReference) where
 
 import Bridge.Config
 import Bridge.Ledger.Model
-import Bridge.Native
 import Bridge.NativePayment
-import Bridge.Solana (solanaIdentity, solanaCall)
 import Bridge.SolanaHelper
 import Bridge.SolanaPayment
 import Bridge.Types
@@ -15,7 +13,6 @@ import Data.Text (Text)
 import Data.Int (Int64)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Network.HTTP.Client (Manager)
 
 class PreparationStore ledger where
   preparationPause :: ledger -> Text -> IO ()
@@ -36,14 +33,9 @@ stored = either (const $ reject "invalid_saved_payment") pure . eitherDecodeStri
 
 -- No broadcast occurs here. The separate first-send decision must still
 -- recheck source/freshness, journal BroadcastIntent and satisfy backup coverage.
-prepareNativePayment :: PreparationStore ledger => Manager -> Config -> ledger -> Obligation -> IO Text
-prepareNativePayment manager c ledger obligation = (do
-  _ <- nativeIdentity manager c
-  prepareNativeWith (nativeCall manager c) c ledger obligation)
-  `onException` preparationPause ledger "native_preparation_requires_review"
-
-prepareNativeWith :: PreparationStore ledger => NativeRPC -> Config -> ledger -> Obligation -> IO Text
-prepareNativeWith call c ledger obligation = prepare `onException` preparationPause ledger "native_preparation_requires_review"
+prepareNativeWithSigner :: PreparationStore ledger => NativeRPC
+  -> (Text -> Int -> NativePlan -> NativeDraft -> IO NativeSigned) -> Config -> ledger -> Obligation -> IO Text
+prepareNativeWithSigner call signer c ledger obligation = prepare `onException` preparationPause ledger "native_preparation_requires_review"
  where
   prepare = do
     require (obligationAsset obligation=="Native") "wrong_destination_chain"
@@ -86,7 +78,10 @@ prepareNativeWith call c ledger obligation = prepare `onException` preparationPa
             value <- fundNativeDraftWith False call plan
             preparationStoreDraft ledger (obligationId obligation) (json value) generation
             pure value
-        signed <- signNativeDraft call plan draft
+        signed <- signer (obligationId obligation) generation plan draft
+        require (signedNativePlan signed==plan && sameNativeTemplate (draftTransaction draft) (signedNativeTransaction signed)
+          && signedNativeFee signed==draftFee draft && sameNativePrevouts (signedNativePrevouts signed) (draftPrevouts draft)) "native_signed_template_changed"
+        either reject pure (validateNativeTx plan (signedNativePrevouts signed) (signedNativeFee signed) (signedNativeTransaction signed))
         let txid=nativeTxid (signedNativeTransaction signed)
             points=map nativeOutpoint (nativeInputs $ signedNativeTransaction signed)
         first <- case points of point:_ -> pure point; [] -> reject "native_input_mismatch"
@@ -105,14 +100,9 @@ payoutReference :: Config -> Obligation -> Text
 payoutReference c obligation = digest $ TE.encodeUtf8
   ("ecx-payout-v1:"<>fingerprint c<>":"<>obligationId obligation)
 
-prepareSolanaPayment :: PreparationStore ledger => Manager -> Config -> ledger -> Obligation -> IO Text
-prepareSolanaPayment manager c ledger obligation = (do
-  _ <- solanaIdentity manager c
-  prepareSolanaWith (solanaCall manager c) (invokeHelper c) c ledger obligation)
-  `onException` preparationPause ledger "solana_preparation_requires_review"
-
-prepareSolanaWith :: PreparationStore ledger => SolanaRPC -> (HelperRequest -> IO HelperReply) -> Config -> ledger -> Obligation -> IO Text
-prepareSolanaWith call helper c ledger obligation = prepare `onException` preparationPause ledger "solana_preparation_requires_review"
+prepareSolanaWithSigner :: PreparationStore ledger => SolanaRPC
+  -> (Text -> Int -> SolanaPlan -> IO SolanaSigned) -> Config -> ledger -> Obligation -> IO Text
+prepareSolanaWithSigner call signer c ledger obligation = prepare `onException` preparationPause ledger "solana_preparation_requires_review"
  where
   prepare = do
     require (obligationAsset obligation=="Wrapped") "wrong_destination_chain"
@@ -163,7 +153,10 @@ prepareSolanaWith call helper c ledger obligation = prepare `onException` prepar
           Just value -> stored value >>= \old -> require (old==request) "saved_solana_request_mismatch"
         -- The immutable order/preparation supplies these ceilings. Current
         -- aggregate daily caps were checked by beginPreparation above.
-        signed <- prepareSolanaSigned call helper c{maxSolFee=solPlanFeeLimit plan,maxSolAccountRent=solPlanRentLimit plan} plan
+        signed <- signer (obligationId obligation) generation plan
+        require (signedSolanaPlan signed==plan && units(signedSolanaFeeEstimate signed)>0
+          && signedSolanaFeeEstimate signed<=solPlanFeeLimit plan && signedSolanaRentEstimate signed<=solPlanRentLimit plan) "invalid_saved_payment"
+        _ <- either reject pure (validateHelperReply c request $ signedSolanaReply signed)
         let reply=signedSolanaReply signed
         signature <- maybe (reject "helper_signature_missing") pure (replySignature reply)
         limit <- either reject pure (solanaOperatingLimit plan)

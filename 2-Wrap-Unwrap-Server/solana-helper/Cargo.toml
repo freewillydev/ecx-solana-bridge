@@ -2,6 +2,7 @@
 name = "ecx-solana-helper"
 version = "0.1.0"
 edition = "2021"
+autobins = false
 license = "MIT"
 rust-version = "1.97"
 

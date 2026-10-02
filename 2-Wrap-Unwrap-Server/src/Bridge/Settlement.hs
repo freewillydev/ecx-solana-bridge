@@ -457,10 +457,9 @@ approveSolanaRetryWith transport c ledger txid reason=do
 
 -- One bounded pass; the database owns the queue across restarts. Reconciliation
 -- runs even while paused, but only an available deployment may prepare/send.
-paymentPass :: SettlementStore ledger => Manager -> Config -> ledger -> (Int64 -> IO ()) -> IO ()
-paymentPass manager c ledger backup = work `onException` preparationPause ledger "payment_requires_reconciliation"
+paymentPass :: SettlementStore ledger => PaymentTransport -> Config -> ledger -> (Obligation -> IO Text) -> IO ()
+paymentPass transport c ledger prepare = work `onException` preparationPause ledger "payment_requires_reconciliation"
  where
-  transport=realPaymentTransport manager c backup
   work=do
     attempts <- preparationAttempts ledger
     groups <- either reject pure (paymentAttemptGroups attempts)
@@ -472,7 +471,7 @@ paymentPass manager c ledger backup = work `onException` preparationPause ledger
       when (available health && not busy) $ do
         paymentIdentity transport
         recheckSourceWith transport c ledger ob
-        txid <- if obligationAsset ob=="Native" then prepareNativePayment manager c ledger ob else prepareSolanaPayment manager c ledger ob
+        txid <- prepare ob
         fresh <- filter ((==txid) . attemptId) <$> preparationAttempts ledger
         case fresh of
           [attempt] -> settleAttemptWith transport c ledger attempt >> pure ()

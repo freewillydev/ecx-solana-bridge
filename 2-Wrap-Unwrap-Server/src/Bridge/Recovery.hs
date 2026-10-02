@@ -2,8 +2,8 @@
 module Bridge.Recovery
   ( NativeLockStore(..), reconcileNativeLocksWith
   , CancellationStore(..), cancelPreparationWith, SourceRecoveryStore(..), approveSourceRecoveryWith
-  , LossCoverStore(..), coverSourceLossWith, prepareNativeReplacementWith
-  , NativeReplacementStore(..), signNativeReplacementWith ) where
+  , LossCoverStore(..), coverSourceLossWith, prepareNativeReplacementUsing
+  , NativeReplacementStore(..), signNativeReplacementUsing ) where
 
 import Bridge.Config
 import Bridge.Ledger.Model
@@ -69,8 +69,9 @@ class (SettlementStore ledger,CustodyStore ledger) => NativeReplacementStore led
   replacementCustody :: IO Int64 -> PaymentTransport -> Config -> ledger -> IO Value
   replacementFresh :: ledger -> Int64 -> IO ()
   replacementCancel :: ledger -> Int64 -> Text -> IO ()
-prepareNativeReplacementWith :: NativeReplacementStore ledger => IO Int64 -> PaymentTransport -> Config -> ledger -> Text -> Amount -> Text -> IO Value
-prepareNativeReplacementWith clock transport c ledger parent fee reason=do
+prepareNativeReplacementUsing :: NativeReplacementStore ledger => IO Int64 -> PaymentTransport
+  -> (Text -> [NativeSigned] -> Amount -> IO NativeDraft) -> Config -> ledger -> Text -> Amount -> Text -> IO Value
+prepareNativeReplacementUsing clock transport drafter c ledger parent fee reason=do
   require (units fee>0 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_native_replacement_draft"
   health <- preparationReadiness ledger
   require (not $ available health) "pause_before_operator_action"
@@ -87,7 +88,8 @@ prepareNativeReplacementWith clock transport c ledger parent fee reason=do
         (members,_) <- readSavedNativeFamily transport c ledger attempts
         pure (map snd members)
       recheckSourceWith transport c ledger ob
-      draft <- draftNativeReplacementWith (paymentNative transport) c family fee
+      draft <- drafter parent family fee
+      either reject pure (validateNativeReplacementDraft family fee draft)
       -- The original can confirm during drafting. Reconcile it and reject a
       -- stale parent before committing an operator decision for new work.
       payments <- reconcilePaymentsWith transport c ledger
@@ -104,8 +106,9 @@ prepareNativeReplacementWith clock transport c ledger parent fee reason=do
 
 -- Signing is an explicit paused operator call, never a worker task. Saved
 -- members advance only through the ordinary durable send/observation engine.
-signNativeReplacementWith :: NativeReplacementStore ledger => IO Int64 -> PaymentTransport -> Config -> ledger -> Int64 -> IO Attempt
-signNativeReplacementWith clock transport c ledger sequenceNo=do
+signNativeReplacementUsing :: NativeReplacementStore ledger => IO Int64 -> PaymentTransport
+  -> (Int64 -> [NativeSigned] -> NativeDraft -> IO NativeSigned) -> Config -> ledger -> Int64 -> IO Attempt
+signNativeReplacementUsing clock transport signer c ledger sequenceNo=do
   previous <- replacementMember ledger sequenceNo
   case previous of
     Just member->pure member
@@ -117,7 +120,7 @@ signNativeReplacementWith clock transport c ledger sequenceNo=do
       recheckSourceWith transport c ledger ob
       reconcile
       _ <- replacementSigningContext ledger c sequenceNo
-      signed <- signNativeReplacementDraftWith (paymentNative transport) c (map snd members) draft
+      signed <- signer sequenceNo (map snd members) draft
       recheckSourceWith transport c ledger ob
       reconcile
       now <- clock

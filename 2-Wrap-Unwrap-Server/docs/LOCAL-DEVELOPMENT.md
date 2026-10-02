@@ -8,22 +8,24 @@ they are not current operating instructions.
 
 ## Build and tests
 
-Use the pinned dependencies and one build job:
+From the repository root, use the pinned dependencies and one build job:
 
 ```sh
-cabal build exe:ecx-bridge exe:ecx-postgres-journal-check -j1 --offline
+cabal build all -j1 --offline
 cabal test bridge-test -j1 --offline --test-show-details=failures
 ```
 
-Offline builds assume cached dependencies. Remaining legacy tests still need the
-pinned SQLite library selected by the local Cabal configuration; production uses
-PostgreSQL. Keep host-specific paths ignored. Preserve shared caches and private state.
+Offline builds assume cached dependencies. Cabal builds the pinned Rust SDK FFI
+through its tracked hooks; Rust/Cargo remain prerequisites. SQLite and the legacy
+library are retired. Preserve shared caches and private state. The GHC JavaScript
+browser conversion and its Cabal integration are still pending.
 
 The PostgreSQL journal runner covers postings, ownership/row locks, backup receipts,
 idempotent orders and saved policy, concurrent inventory reservations, duplicate/
 partial deposits, expiry, instruction backup gates, and SQL-error rollback/fencing.
 Fixtures and assertions use closed Opaleye operations. These are database contracts,
-not live-chain acceptance.
+not live-chain acceptance. Generated QuickCheck properties exercise balanced
+postings, failed-write atomicity, exact sequences, immutable quotes and ownership.
 
 Use a fresh disposable database with all `migrations/postgresql/*.sql` applied in
 filename order. This host uses socket `/tmp/ecx-pg-seam`, port 29436 and the current

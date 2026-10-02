@@ -218,9 +218,9 @@ for name, directory in (("Rust 1.97.1 distribution", build / "rust-source"), ("G
 missing = [f"{r['ecosystem']}: {r['name']} {r['version']}" for r in records if r["status"] == "missing"]
 coverage = dict(scope="Actual Linux build plan, complete Cargo lock graph, installed npm graph, bundled toolchain notices. Includes build/test dependencies conservatively; not a legal opinion or completed distribution audit.",
                 buildPlanSha256=hashlib.sha256((build / "dist/cache/plan.json").read_bytes()).hexdigest(),
-                lockfileSha256={str(p): hashlib.sha256((root / p).read_bytes()).hexdigest() for p in (Path("cabal.project.freeze"), Path("solana-helper/Cargo.lock"), Path("web/package-lock.json"))},
+                lockfileSha256={str(p): hashlib.sha256(((root.parent if p.name == "cabal.project.freeze" else root) / p).read_bytes()).hexdigest() for p in (Path("cabal.project.freeze"), Path("solana-helper/Cargo.lock"), Path("web/package-lock.json"))},
                 records=records, absentOptionalNpmPackages=omitted, missing=missing, upstreamFetchErrors=upstream_errors,
-                remainingReview=["Bitcoin Core and its bundled third-party notices", "SQLite amalgamation notices", "System libraries supplied by Ubuntu", "License obligations beyond presence of a license text"])
+                remainingReview=["Bitcoin Core and its bundled third-party notices", "System libraries supplied by Ubuntu", "License obligations beyond presence of a license text"])
 (args.output / "coverage.json").write_text(json.dumps(coverage, indent=2) + "\n")
 (args.output / "THIRD_PARTY_NOTICES.txt").write_text("Original upstream license texts for ECX Bridge build dependencies.\nSee coverage.json for source hashes, scope and remaining review.\n" + "".join(sections))
 print(json.dumps(dict(packages=len(records), collected=len(records)-len(missing), missing=missing)))

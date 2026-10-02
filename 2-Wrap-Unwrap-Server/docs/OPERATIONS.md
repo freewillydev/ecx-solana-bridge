@@ -23,89 +23,46 @@ quote. Use the order status and support contact instead of sending another depos
 when an outcome is unclear. Refunds use verified ownership and return principal
 without a bridge fee; their network costs come from operator operating funds.
 
-## Restricted diagnostics
+## Restricted diagnostics and local control
 
-On an installed server, the customer HTTP listener is loopback-only. The operator
-socket is worker-owned mode 0600 and must never be published by the reverse proxy.
-The following reads do not invoke signing:
+The customer HTTP listener is loopback-only. Operator HTTP endpoints are removed.
+Use `ecx-bridge operator CONFIG < command.json` as the service owner. This sends
+one bounded named operation over the private mode-0600 socket and evaluates its
+existential Plan through the existing safe/critical dispatcher. Never expose this
+socket or the signer socket through a reverse proxy. Current installed releases
+still use the old control protocol until their deployment is explicitly upgraded.
 
-```sh
-sudo -u ecx-worker curl --unix-socket /run/ecx-bridge/admin/api.sock http://localhost/health
-sudo -u ecx-worker curl --unix-socket /run/ecx-bridge/admin/api.sock http://localhost/scanners
-sudo -u ecx-worker curl --unix-socket /run/ecx-bridge/admin/api.sock http://localhost/audit
+Examples of command file contents:
+
+```json
+{"operation":"audit"}
 ```
 
-Pause new intake with an explicit reason:
-
-```sh
-sudo -u ecx-worker curl --unix-socket /run/ecx-bridge/admin/api.sock \
-  -H 'Content-Type: application/json' -d '{"pauseReason":"operator maintenance"}' \
-  http://localhost/pause
+```json
+{"operation":"pause","arguments":"operator maintenance"}
 ```
 
-Pausing intake does not stop completion/recovery of already authorized obligations.
-For an offline maintenance snapshot stop the worker service and confirm it is
-inactive. `/resume` is a private POST that reconciles and revalidates any pending exact
-saved payment, its source and current custody before fencing that work in the
-resume transaction. Automatic startup still refuses unresolved intents. Neither
-path bypasses custody/history errors. Private POST operations also include `/refund`
-(`depositId`), `/retry-solana` (`transaction`, `reason`) and `/cancel-preparation`
-(`intent`, `generation`, `cancellationReason`). `/approve-source-recovery`
-accepts `obligation`, `restorationSequence`, `approvalReason` and restores only the
-exact reviewed work after the saved source restoration is reverified.
+`health` and `scanners` are read operations; `resume` performs the same reconciliation
+and saved-authority checks as the old private route. Arguments are a single value
+for unary operations or a positional array for multiple arguments:
 
-The PostgreSQL private socket also supports this replacement workflow:
+| Operation | Arguments |
+| --- | --- |
+| refund | deposit ID |
+| retry-solana | [transaction, reason] |
+| cancel-preparation | [intent, generation, reason] |
+| approve-source-recovery / approve-covered-source | [obligation, sequence, reason] |
+| rebroadcast-native | [transaction, recovery sequence, reason] |
+| prepare-native-replacement | [parent transaction, fee base-unit string, reason] |
+| sign-native-replacement / send-native-replacement | draft sequence |
+| cancel-native-replacement | [draft sequence, reason] |
+| cover-source-loss | [deposit, recovery sequence, capital object, reason] |
+| allocate-treasury | [receipt, [[allocation, amount string]], ownership attestation] |
+| classify-treasury-spend | [observation stream, transaction, ownership attestation] |
 
-1. Pause; call `/prepare-native-replacement` with `parentTransaction`,
-   `replacementFee` (integer base units as a JSON string), `replacementReason`.
-   It saves an unsigned template and returns `draftSequence`.
-2. While paused, call `/sign-native-replacement` with `draftSequence`. It rechecks
-   the source, custody and exact template, then persists the signature and lineage.
-   A repeated call returns the same saved member; it does not make a new signature.
-3. Call `/resume` after reviewing the saved work. The normal worker can send the
-   latest authorized member; `/send-native-replacement` with `draftSequence` also
-   advances that exact member through the existing send/backup/observation engine.
-   A paused deployment returns a paused outcome without broadcasting.
-
-An unsigned draft can be cancelled through `/cancel-native-replacement` using
-`cancelledDraftSequence`, `replacementCancellationReason`. Cancellation cannot
-remove a signature or release the original payment. `/cover-source-loss` takes
-`lossDeposit`, `lossRecoverySequence`, `lossCapital` (`lossFloat`, `lossEarned`,
-base-unit strings), `lossReason`. It independently verifies the missing source
-and current custody view before allocating existing free capital. It does not
-resume, sign or send, and cannot treat an RPC failure as a proved loss. Restored
-sources return the covered capital through the recovery journal.
-
-These commands use closed critical DSL operations and the same serialized
-interpreter as the worker. Rejections require investigation rather than direct
-ledger editing. PostgreSQL contracts and an actual Signet replacement-family draft/sign/send/
-confirmation pass, including signing replay and completed-payment restart. Real
-winner-changing reorg/source-loss, broader crash/backup and canonical-chain
-acceptance remain release requirements. See [live evidence](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/postgres-native-family-live.json).
-
-The CLI `scan`, `reconcile`, `recover`, `approve-source-recovery`,
-`cover-source-loss` and native replacement commands still target the legacy SQLite
-implementation. **Do not run those against the PostgreSQL deployment.** Use the
-private PostgreSQL routes above. Native advisory-input
-lock recovery now runs in the PostgreSQL worker and has actual unsigned-draft
-node-restart acceptance; it is not an operator command. `postgres-init` is offline maintenance;
-`postgres-test-worker` is the explicit public-test payment runtime. Do not run a
-second worker against the same custody accounts under another database.
-
-Health 200 only proves process liveness. Readiness 503 is expected in observation
-mode or while inventory, chain history, synchronization or custody checks fail.
-Inspect service status and the private diagnostics before changing configuration:
-
-```sh
-sudo systemctl status ecx-bridge-worker ecx-bridge-web ecx-bridge-postgres ecx-bridge-node
-sudo journalctl -u ecx-bridge-worker -u ecx-bridge-web --since '30 minutes ago'
-```
-
-Logs and audit responses are operator data. Share a reviewed excerpt containing
-error codes, timestamps, order IDs and public transaction IDs. Do not grant broad
-SSH/sudo access to obtain logs. Never attach configuration, environment files,
-keypair JSON, cookies, database dumps or customer recovery credentials to support
-reports. The web user deliberately cannot access worker secrets or the ledger.
+Pause before replacement/recovery review. A lost response is an uncertain outcome;
+inspect the journal before acting again. The CLI never automatically retries.
+Restart and resume retain saved bytes and economic settlement protections.
 
 ## Backup and release maintenance
 

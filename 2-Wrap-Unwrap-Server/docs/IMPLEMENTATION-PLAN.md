@@ -97,7 +97,7 @@ typeclasses whose only remaining purpose is supporting the retired SQLite backen
 
 Use one Haskell HTTP/API process and one dedicated Haskell signer process.
 The HTTP process serves HTML/CSS and invokes its Servant Plan interpreter directly;
-there is no public-to-worker HTTP proxy. Keep the operator socket private. Existing
+there is no public-to-worker HTTP proxy. Keep the local operator control socket private. Existing
 local customer sockets may remain as alternate transport for acceptance clients,
 not a separate application or intermediary. Keep one active paying workflow.
 
@@ -119,8 +119,73 @@ protocol after migration. Browser DOM bindings and the generated JavaScript runt
 but no TypeScript application or npm frontend build should remain. Preserve QR,
 integer amounts, payment instructions, saved-order reload and error behavior.
 PostgreSQL, the native node, Solana RPC and backup tooling remain dependencies.
-This revised process/FFI/JavaScript-backend architecture is not yet complete or accepted
+The signer/FFI source is implemented; the JavaScript-backend frontend is still pending.
+The integrated architecture is not yet complete or accepted
 on real chains; previous package evidence describes the earlier process design.
+
+## Current refactor checkpoint
+
+The customer HTTP API now has four routes: configuration, create order, read order,
+and read payment instructions. Servant handlers return `Plan a` with a constrained
+existential `Request`; Runtime resolves its dictionary into the severity-indexed
+DSL. Wire results use concrete records, not arbitrary JSON `Value`. Operator
+recovery is a local CLI over a mode-0600 framed Unix socket, using the same runtime
+dispatcher; its old HTTP routes and handlers, health/readiness routes and optional
+deposit-hint operation are removed. The signer retains a separate private protocol.
+
+The dedicated Haskell signer and critical-only client are implemented in source;
+real two-process acceptance, OS isolation and restricted native RPC credentials
+still need deployment verification. The signer uses a SELECT-only database role,
+checks the durable decision before and after signing, and never broadcasts.
+Old deployment/acceptance helpers still need conversion to this architecture;
+previous installer evidence cannot establish this new boundary.
+
+The legacy SQLite component and migrations are retired. QuickCheck checks integer
+accounting and the SDK boundary; generated journal and immutable-quote properties
+run against real PostgreSQL in the consolidated contract runner. Captured native
+and Solana protocol checks remain. Recovery interruption, native winner changes,
+replacement/cancellation and loss-cover acceptance must be reverified against the
+current PostgreSQL DSL and dedicated signer. Removing the obsolete backend does
+not establish parity of every former SQLite fixture or complete release acceptance.
+
+Cabal project and dependency lock are at the repository root. Its tracked build
+hook generates the native SDK artifact before compiling Haskell and tracks Rust
+source/lock/toolchain inputs. `cabal test` also runs the SDK's own contracts. Finish
+the GHC JavaScript frontend and integrate its separate compiler into this same
+Cabal entry point, then remove npm/TypeScript and obsolete build wrappers. Do not
+claim the whole-project Cabal-only conversion until that is done.
+
+## Reinstall and recovery contract
+
+The desired upgrade is a clean reinstall using the same recovery parameters.
+Those parameters identify the deployment/network/mint/custody identities and an
+off-host encrypted recovery repository, with its unlock material retained outside
+the server. They are not merely RPC URLs or public addresses. Do not pass secrets
+on command lines or automatically initialize an empty ledger for an existing identity.
+
+A coherent recovery snapshot must include the native wallet/descriptors/key state,
+Solana custody key, private signer configuration, PostgreSQL financial ledger,
+exact signed attempts, sequence/backup manifests and supported schema version.
+Independent key or seed backup is useful but cannot replace order history, receipt
+binding or send decisions. Do not introduce a new key-derivation scheme to pretend
+both existing wallets are reproducible from one parameter.
+
+The reinstall sequence is: pause and quiesce the old worker; fence/retire it and
+revoke old signing authority; make and verify the final off-host snapshot; install
+from a pinned release; restore the verified snapshot into staging; restore keys
+with separate permissions and validate both identities; adopt the sequence fence
+without lowering it; migrate forward; rescan/reconcile both real chains and pending
+signed attempts; resume only after matching balances/authorizations and readiness.
+A crashed host requires recovery from the newest complete snapshot and review of
+any uncertain later effects, not automatic replay or a guessed empty ledger.
+
+Coins remain on their chains. A reinstall restores control and correct accounting;
+it cannot recreate spent/lost funds, missing keys, or unavailable unbacked decisions.
+No wipe command is implemented or authorized by this goal. Never erase the only
+copy of wallet state or journal. Acceptance requires clean-host restoration with
+nonempty balances on both chains and in-flight work, no duplicate economic payout,
+refusal of stale/wrong-identity snapshots, and exclusion of the old worker.
+This off-host recovery path is still a release gate, not a current one-command promise.
 
 ## Ordered execution
 

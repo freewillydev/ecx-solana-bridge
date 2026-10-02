@@ -2,7 +2,7 @@
 module Main (main) where
 
 import Bridge.Types hiding (deploymentFingerprint)
-import Bridge.Ledger.Model (Deposit(..),Obligation(..),CostLimits(..),ScanBatch(..),ChainEvent(..))
+import Bridge.Ledger.Model (Deposit(..),Obligation(..),Preparation(..),CostLimits(..),ScanBatch(..),ChainEvent(..))
 import qualified Bridge.Postgres.Refund as Refund
 import qualified Bridge.Postgres.Treasury as Treasury
 import qualified Bridge.Postgres.Preparation as Preparation
@@ -39,6 +39,7 @@ import qualified Database.PostgreSQL.Simple as PG
 import System.Posix.User (getEffectiveUserName)
 import qualified Data.Text as T
 import System.Environment (lookupEnv)
+import Test.QuickCheck (quickCheckWithResult, stdArgs, maxSuccess, forAll, chooseInt, elements, ioProperty, isSuccess, conjoin, counterexample)
 
 -- Dedicated fresh schema contract, never the funded bridge's database.
 main :: IO ()
@@ -111,8 +112,74 @@ main = do
   rollbackContract settings
   treasuryContracts settings
   observerContracts settings
+  quoteProperties settings
+  journalProperties settings
   putStrLn "PostgreSQL journal and backup acknowledgment: balanced writes, row locking, ownership, exact coverage, identity/receipt/stale refusal, idempotence, durable reopen, order/provisioning contracts, interruption, commit/capacity failure, send-authority rollback/fencing, treasury classification and observer page contracts passed"
 
+
+-- Replacement for the SQLite accounting fixtures: generated values run against
+-- the actual PostgreSQL transaction and Opaleye implementation, not a model DB.
+journalProperties :: PG.ConnectInfo -> IO ()
+journalProperties settings = L.withLedger settings "journal-contract" $ \ledger -> do
+  result <- quickCheckWithResult stdArgs {maxSuccess=40} $
+    forAll (chooseInt (1,1000000)) $ \n -> forAll (elements [Native,Wrapped,Sol]) $ \asset -> ioProperty $ do
+      event <- ("property:"<>) <$> randomId
+      before <- L.ledgerAction ledger L.balances
+      sequenceBefore <- readSequence ledger
+      let delta=toInteger n
+          key=(T.pack $ show asset,"property")
+      rejected <- try (L.ledgerAction ledger $ \connection ->
+        L.posting connection event "generated unbalanced refusal" [(asset,"property",delta)])
+          :: IO (Either BridgeError ())
+      unchanged <- L.ledgerAction ledger L.balances
+      sequenceUnchanged <- readSequence ledger
+      _ <- L.ledgerAction ledger $ \connection -> do
+        L.posting connection event "generated conservation" [(asset,"property",delta),(asset,"external",-delta)]
+        L.criticalSequence connection
+      after <- L.ledgerAction ledger L.balances
+      sequenceAfter <- readSequence ledger
+      let totals balances = M.fromListWith (+) [(chain,value) | ((chain,_),value)<-M.toList balances]
+      pure $ conjoin
+        [ counterexample "unbalanced posting was not refused" (rejected==Left (BridgeError "unbalanced_journal"))
+        , counterexample "failed write changed balances or sequence" (unchanged==before && sequenceUnchanged==sequenceBefore)
+        , counterexample "successful commit did not advance once" (sequenceAfter==sequenceBefore+1)
+        , counterexample "posting lost its exact delta" (M.findWithDefault 0 key after==M.findWithDefault 0 key before+delta)
+        , counterexample "per-asset conservation failed" (totals after==totals before) ]
+  require (isSuccess result) "postgres_journal_properties_failed"
+ where
+  readSequence ledger = do
+    rows <- L.ledgerAction ledger (\connection -> fixture connection ReadCoverage)
+    case rows of
+      [(sequenceNo,_,_)] -> pure sequenceNo
+      _ -> reject "corrupt_sequence"
+
+
+-- Saved quote, replay and ownership properties replace backend-specific fixtures.
+quoteProperties :: PG.ConnectInfo -> IO ()
+quoteProperties settings = do
+  base <- BS.readFile "config/l2l-devnet.example.json" >>= either fail pure . eitherDecodeStrict'
+  let cfg=base {maxQueued=100, minInput=either (error . T.unpack) id (amount 101),
+                maxNativeDailyCost=either (error . T.unpack) id (amount 1000000),
+                maxSolDailyCost=either (error . T.unpack) id (amount 1000000),
+                maxSolAccountRent=either (error . T.unpack) id (amount 0)}
+      capability=T.replicate 64 "a"
+  L.withLedger settings "journal-contract" $ \ledger -> do
+    result <- quickCheckWithResult stdArgs {maxSuccess=20} $
+      forAll (chooseInt (101,10000)) $ \gross -> ioProperty $ do
+        ident <- randomId
+        let quantity=either (error . T.unpack) id (amount $ toInteger gross)
+            request=OrderRequest NativeToWrapped quantity "destination" "refund" Nothing ident
+        L.ledgerAction ledger (\connection -> fixture connection $ ReadyAt 100)
+        first <- Order.createOrder ledger cfg 100 capability request
+        replay <- Order.createOrder ledger cfg{nativeConfirmations=6,maxNativeFee=either (error . T.unpack) id (amount 1)} 999 capability request
+        conflict <- try (Order.createOrder ledger cfg 100 capability request{recipient="other"}) :: IO (Either BridgeError Orders)
+        wrongOwner <- try (Order.exposeOrder ledger False (T.replicate 64 "b") (ordersId first)) :: IO (Either BridgeError OrderView)
+        view <- Order.exposeOrder ledger False capability (ordersId first)
+        pure (first==replay && conflict==Left (BridgeError "idempotency_conflict")
+          && wrongOwner==Left (BridgeError "order_not_found")
+          && units(fee $ quote view)==fromIntegral ((gross+99) `div` 100)
+          && units(net $ quote view)+units(fee $ quote view)==fromIntegral gross)
+    require (isSuccess result) "postgres_quote_properties_failed"
 
 -- Closed test operations: no arbitrary SQL/query callback in fixture access.
 data Fixture a where
@@ -492,7 +559,17 @@ broadcastWriteContract settings = do
     ob <- state ledger FundedObligation
     Preparation.begin ledger cfg ob "Solana" 10000 "{\"contract\":true}"
     generation <- Preparation.active ledger (obligationId ob)
+    expectError "payment_not_prepared" $ L.ledgerAction ledger $ \c->
+      Preparation.signingDecisionC c cfg (obligationId ob) generation
+    Preparation.storeDraft ledger (obligationId ob) "{}" generation
+    (prepared,_) <- L.ledgerAction ledger $ \c->Preparation.signingDecisionC c cfg (obligationId ob) generation
+    require (preparationObligation prepared==ob && preparationDraft prepared==Just "{}"
+      && preparationGeneration prepared==generation) "signing_decision_not_bound"
+    expectError "preparation_generation_changed" $ L.ledgerAction ledger $ \c->
+      Preparation.signingDecisionC c cfg (obligationId ob) (generation+1)
     Preparation.storeAttempt ledger ob "Solana" txid "original-contract-bytes" "{}" 10000 Nothing generation
+    expectError "preparation_not_unsigned" $ L.ledgerAction ledger $ \c->
+      Preparation.signingDecisionC c cfg (obligationId ob) generation
     original <- state ledger JournalState
     signed <- state ledger SendState
     -- A genuine server constraint refuses the authority-granting state write.

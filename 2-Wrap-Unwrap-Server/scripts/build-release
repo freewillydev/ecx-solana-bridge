@@ -29,13 +29,13 @@ def run(*args, cwd=root, **kw):
 
 
 def fetch(name):
-    url, expected = pins["sqlite"] if name == "sqlite" else pins[arch][name]
+    url, expected = pins[arch][name]
     archive = cache / url.rsplit("/", 1)[1]
     if not archive.exists():
         temp = archive.with_suffix(".download")
         run("curl", "--fail", "--location", "--proto", "=https", "--retry", "3", "--output", str(temp), url)
         temp.rename(archive)
-    digest = hashlib.sha3_256 if name == "sqlite" else hashlib.sha256
+    digest = hashlib.sha256
     with archive.open("rb") as f:
         if hashlib.file_digest(f, digest).hexdigest() != expected:
             raise ValueError(f"Checksum mismatch: {name}")
@@ -82,17 +82,6 @@ os.environ["CARGO_BUILD_JOBS"] = build_jobs
 # time in the Solana dependency graph. Release artifacts keep their own profile.
 os.environ["CARGO_PROFILE_DEV_DEBUG"] = "0"
 os.environ["CARGO_PROFILE_TEST_DEBUG"] = "0"
-sqlite = cache / "sqlite"
-if not (sqlite / "bin/sqlite3").exists():
-    source = fetch("sqlite")
-    run("./configure", f"--prefix={sqlite}", "--disable-readline", cwd=source)
-    run("make", "-j2", cwd=source)
-    run("make", "install", cwd=source)
-os.environ["PATH"] = f"{sqlite}/bin:" + os.environ["PATH"]
-os.environ["LD_LIBRARY_PATH"] = str(sqlite / "lib")
-os.environ["PKG_CONFIG_PATH"] = str(sqlite / "lib/pkgconfig")
-os.environ["LIBRARY_PATH"] = str(sqlite / "lib")
-os.environ["C_INCLUDE_PATH"] = str(sqlite / "include")
 # CI saves the expensive verified toolchains before any application build.
 if os.environ.get("ECX_BOOTSTRAP_ONLY") == "1":
     raise SystemExit(0)
@@ -109,10 +98,7 @@ if not index.exists() or os.environ.get("ECX_REFRESH_INDEX") == "1":
     configuration = configuration.replace("url: http://hackage.haskell.org/", "url: https://hackage-content.haskell.org/")
     cabal_config.write_text(configuration)
     run("cabal", "update")
-build_args = [f"--builddir={cache}/dist", f"--extra-lib-dirs={sqlite}/lib", f"--extra-include-dirs={sqlite}/include", "-j" + build_jobs]
-run("cargo", "test", "--locked", "--manifest-path", "solana-helper/Cargo.toml", "--all-targets")
-run("cargo", "build", "--locked", "--release", "--manifest-path", "solana-helper/Cargo.toml")
-os.environ["ECX_SOLANA_SDK_LIBRARY"] = str(cache / "cargo-target/release/libecx_solana_sdk.so")
+build_args = [f"--builddir={cache}/dist", "--enable-optimization=2", "-j" + build_jobs]
 run("cabal", "build", "all", *build_args)
 run("cabal", "test", "all", "--test-show-details=direct", *build_args)
 validator = subprocess.check_output(["cabal", "list-bin", "exe:ecx-tls-constraints-check", f"--builddir={cache}/dist"], cwd=root, text=True).strip()
@@ -130,8 +116,7 @@ if bundle.exists():
 for directory in ("bin", "lib", "web/dist", "deploy", "config", "migrations/postgresql", "scripts"):
     (bundle / directory).mkdir(parents=True, exist_ok=True)
 shutil.copy2(binary, bundle / "bin/ecx-bridge")
-shutil.copy2(cache / "cargo-target/release/ecx-solana-helper", bundle / "bin/ecx-solana-helper")
-shutil.copy2(cache / "cargo-target/release/libecx_solana_sdk.so", bundle / "lib/libecx_solana_sdk.so")
+shutil.copy2(Path(binary).parent.parent / "autogen/libecx_solana_sdk.so", bundle / "lib/libecx_solana_sdk.so")
 for name in ("bitcoind", "bitcoin-cli"):
     shutil.copy2(fetch("bitcoin") / "bin" / name, bundle / "bin" / name)
 for path in (root / "web").iterdir():
@@ -157,8 +142,7 @@ for component in ("bitcoin-core",):
         if hashlib.sha256((notices / entry["path"]).read_bytes()).hexdigest() != entry["sha256"]:
             raise ValueError(component + " notice differs from its recorded source")
     shutil.copytree(notices, bundle / "notices" / component)
-# SQLite is needed only in the build cache for legacy regression tests.
-# Explicit old-ledger import uses Python's standard-library read-only adapter.
+# Guard against accidentally reintroducing the retired database dependency.
 needed = subprocess.check_output(["patchelf", "--print-needed", str(bundle / "bin/ecx-bridge")], text=True)
 if "sqlite" in needed.lower():
     raise ValueError("Production runtime links legacy SQLite")

@@ -1,5 +1,5 @@
 module Bridge.Postgres.Replacement
-  ( parent,decision,recordDraft,member,signingContext,recordMember,cancel ) where
+  ( parent,contextC,decision,recordDraft,member,signingContext,signingContextC,recordMember,cancel ) where
 import Bridge.Types
 import Bridge.Config (Config(..),fingerprint)
 import Bridge.Ledger.Model (Attempt(..))

@@ -55,8 +55,7 @@ sourceAsset WrappedToNative = Wrapped
 destinationAsset NativeToWrapped = Wrapped
 destinationAsset WrappedToNative = Native
 feeBps :: Direction -> Integer
-feeBps NativeToWrapped = 20
-feeBps WrappedToNative = 100
+feeBps _ = 100
 
 data OrderRequest = OrderRequest
   { direction :: !Direction, input :: !Amount, recipient :: !Text

@@ -135,7 +135,6 @@ mean every ordinary write belongs in the safe interpreter.
 | --- | --- |
 | Public configuration, health, quote calculation | Safe; customer |
 | Authorized order view and payment instructions | Safe; customer, ownership checked |
-| Bounded deposit hint | Safe only through a narrow append-only inbox; a hint never becomes chain evidence |
 | Create/bind an authoritative order or deposit reference | Critical; customer-origin request restricted to this command |
 | Provision native deposit addresses / reserve identities | Critical; native wallet mutation, even without spending |
 | Accept chain evidence, allocate funds, reserve fees, settle, compensate a reorg | Critical; worker |
@@ -167,8 +166,8 @@ severity `s` remain visible. At the runtime boundary, `resolve (Request op)` cal
 the class method `command op` to produce `DSL s a`; the matching evaluator then
 executes it. This is the production counterpart of Main.hs's DoThing class.
 
-The actual servers use `ServerT CustomerAPI Plan` and `ServerT OperatorAPI Plan`,
-hoisted into `Handler`. The abstract `Plan a` contains a severity-indexed Request
+The customer server uses `ServerT CustomerAPI Plan`, hoisted into `Handler`.
+Local operator commands package the same existential plans without an HTTP server. The abstract `Plan a` contains a severity-indexed Request
 inside a safe/customer/operator/worker envelope. Public smart constructors accept
 only their concrete operation vocabulary; they package the operation without
 calling `resolve`. The class, instances, Request and Plan constructors remain in
@@ -180,7 +179,9 @@ their imports remains part of the authority audit.
 The HTTP/API process serves the DSL-backed CustomerAPI directly, alongside
 HTML/CSS and the Haskell interface compiled with GHC’s JavaScript backend. `Web.runPublic` receives that WAI
 application; it no longer generates a Servant client or forwards HTTP requests.
-The operator API retains its private Unix socket.
+Operator HTTP routes are removed. A local CLI sends a bounded named command over
+a mode-0600 Unix socket; it packages the same existential Plan and uses Runtime’s
+single critical dispatcher. It cannot serialize arbitrary DSL or SQL.
 
 The revised custody boundary is a dedicated Haskell signer process. All signer
 communication must originate inside the critical evaluator's closed workflows;
@@ -189,8 +190,8 @@ Safe operations and HTTP handlers cannot obtain or call them. The signer accepts
 only named, durable signing decisions, checks them independently, and never sends
 transactions. Native RPC credentials must also be split so the HTTP process cannot
 bypass this service using walletprocesspsbt or another signing/key-export method.
-Solana SDK Rust remains only through Haskell FFI inside the signer. Completing this
-boundary is current work, not an implemented guarantee of the existing runtime.
+Solana SDK Rust remains only through Haskell FFI inside the signer. The closed critical-only client and signer decision checks are implemented;
+deployment isolation and end-to-end acceptance remain current work.
 
 Unsigned Solana construction now calls the pinned SDK shared library through
 Haskell FFI. Its private, versioned `ecx_solana_prepare_v1` C ABI accepts at most
@@ -199,9 +200,9 @@ bytes into caller-owned buffers. No pointer or allocator crosses ownership
 boundaries; ordinary failures return fixed codes, and Rust panics are caught
 before returning across the ABI. Haskell independently validates the resulting
 transaction. The unsigned adapter supplies only public identity fields and a
-null signing path, never the private helper configuration. Signed payouts retain
-the existing subprocess sandbox until the Haskell signer replaces it; neither
-native signing isolation nor the complete critical-only signer boundary is done.
+null signing path, never the private helper configuration. Signed payouts now use the SDK FFI inside the dedicated Haskell signer. The
+standalone Rust signing binary is retired. Native RPC credential restrictions,
+OS separation and real-chain acceptance of both processes remain pending.
 See the [Rust FFI contract](https://doc.rust-lang.org/nomicon/ffi.html) and
 [GHC FFI documentation](https://ghc.gitlab.haskell.org/ghc/doc/users_guide/exts/ffi.html).
 
@@ -249,11 +250,9 @@ the existing runtime into more modules is not required to deliver the product.
 packages. It has no imports of ledger IO, signer modules, chain transports or
 Opaleye execution functions.
 
-`Bridge.Evaluate.Safe` owns read-only query execution and the tightly restricted
-hint inbox. Its context contains no private keys, writable ledger connection,
+`Bridge.Evaluate.Safe` owns read-only query execution ; the optional hint inbox has been retired. Its context contains no private keys, writable ledger connection,
 wallet-mutation RPC, critical dispatcher or signing capability. Use a PostgreSQL
-read-only role/transaction for views, with a separately restricted hint-inbox
-writer if hints are retained. Safe evaluation cannot receive the worker's broad
+read-only role/transaction for views. Safe evaluation cannot receive the worker's broad
 `Config`, `Ledger`, `Manager` or an arbitrary RPC callback.
 
 `Bridge.Evaluate.Critical` owns the write transaction and delegates to the

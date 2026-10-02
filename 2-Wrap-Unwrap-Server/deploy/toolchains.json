@@ -1,18 +1,50 @@
 {
   "aarch64": {
-    "ghc": ["https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-aarch64-deb12-linux.tar.xz", "6aa27a377451851c851eefdd869e8f5a9217b02ce66c6ca9b418b72efee28427"],
-    "cabal": ["https://downloads.haskell.org/cabal/cabal-install-3.16.1.0/cabal-install-3.16.1.0-aarch64-linux-deb12.tar.xz", "41d8fc43de1c652c00d85799d0273f8b6600bc71603126bc651ca4e3917a1b84"],
-    "rust": ["https://static.rust-lang.org/dist/rust-1.97.1-aarch64-unknown-linux-gnu.tar.xz", "9a7a2c336b4787f1b72f6bab7c35d5b7af2fd03cbd39b4fc721466a70d402a7d"],
-    "node": ["https://nodejs.org/dist/v25.4.0/node-v25.4.0-linux-arm64.tar.xz", "1e8c471a0c4693cb8b592bcde86be0bf4b7bf8efb28b196e52fc6fa4b486f2e9"],
-    "bitcoin": ["https://bitcoincore.org/bin/bitcoin-core-30.2/bitcoin-30.2-aarch64-linux-gnu.tar.gz", "73e76c14edc79808a0511c744d102ffbb494807ee90cbcba176568243254b532"]
+    "ghc": [
+      "https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-aarch64-deb12-linux.tar.xz",
+      "6aa27a377451851c851eefdd869e8f5a9217b02ce66c6ca9b418b72efee28427"
+    ],
+    "cabal": [
+      "https://downloads.haskell.org/cabal/cabal-install-3.16.1.0/cabal-install-3.16.1.0-aarch64-linux-deb12.tar.xz",
+      "41d8fc43de1c652c00d85799d0273f8b6600bc71603126bc651ca4e3917a1b84"
+    ],
+    "rust": [
+      "https://static.rust-lang.org/dist/rust-1.97.1-aarch64-unknown-linux-gnu.tar.xz",
+      "9a7a2c336b4787f1b72f6bab7c35d5b7af2fd03cbd39b4fc721466a70d402a7d"
+    ],
+    "node": [
+      "https://nodejs.org/dist/v25.4.0/node-v25.4.0-linux-arm64.tar.xz",
+      "1e8c471a0c4693cb8b592bcde86be0bf4b7bf8efb28b196e52fc6fa4b486f2e9"
+    ],
+    "bitcoin": [
+      "https://bitcoincore.org/bin/bitcoin-core-30.2/bitcoin-30.2-aarch64-linux-gnu.tar.gz",
+      "73e76c14edc79808a0511c744d102ffbb494807ee90cbcba176568243254b532"
+    ]
   },
   "x86_64": {
-    "ghc": ["https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-x86_64-ubuntu24_04-linux.tar.xz", "530f0861d1d7b45476c158a9e68aa89987687aaf9939df7a15995c45726e2344"],
-    "cabal": ["https://downloads.haskell.org/cabal/cabal-install-3.16.1.0/cabal-install-3.16.1.0-x86_64-linux-ubuntu24_04.tar.xz", "f7284888f523ff0bb3d8bfc9e7b8c89ab3b95fe87792aefc06019801b9f6ef74"],
-    "rust": ["https://static.rust-lang.org/dist/rust-1.97.1-x86_64-unknown-linux-gnu.tar.xz", "88f28fa9af20594179f85d6df67078dfd6fa93e2f6da5e1e9b0ac4997988ca4f"],
-    "node": ["https://nodejs.org/dist/v25.4.0/node-v25.4.0-linux-x64.tar.xz", "f3bde66a96c232f34cdd9f4fea6b551f915f8f3ac0952793eef903b3e35df037"],
-    "bitcoin": ["https://bitcoincore.org/bin/bitcoin-core-30.2/bitcoin-30.2-x86_64-linux-gnu.tar.gz", "6aa7bb4feb699c4c6262dd23e4004191f6df7f373b5d5978b5bcdd4bb72f75d8"]
+    "ghc": [
+      "https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-x86_64-ubuntu24_04-linux.tar.xz",
+      "530f0861d1d7b45476c158a9e68aa89987687aaf9939df7a15995c45726e2344"
+    ],
+    "cabal": [
+      "https://downloads.haskell.org/cabal/cabal-install-3.16.1.0/cabal-install-3.16.1.0-x86_64-linux-ubuntu24_04.tar.xz",
+      "f7284888f523ff0bb3d8bfc9e7b8c89ab3b95fe87792aefc06019801b9f6ef74"
+    ],
+    "rust": [
+      "https://static.rust-lang.org/dist/rust-1.97.1-x86_64-unknown-linux-gnu.tar.xz",
+      "88f28fa9af20594179f85d6df67078dfd6fa93e2f6da5e1e9b0ac4997988ca4f"
+    ],
+    "node": [
+      "https://nodejs.org/dist/v25.4.0/node-v25.4.0-linux-x64.tar.xz",
+      "f3bde66a96c232f34cdd9f4fea6b551f915f8f3ac0952793eef903b3e35df037"
+    ],
+    "bitcoin": [
+      "https://bitcoincore.org/bin/bitcoin-core-30.2/bitcoin-30.2-x86_64-linux-gnu.tar.gz",
+      "6aa7bb4feb699c4c6262dd23e4004191f6df7f373b5d5978b5bcdd4bb72f75d8"
+    ]
   },
-  "sqlite": ["https://www.sqlite.org/2026/sqlite-autoconf-3530400.tar.gz", "454e45f61c6bd75b7420e7190732dea03ce6639c63ada47bbc592f67fc340338"],
-  "ghc-source": ["https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz", "2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77"]
+  "ghc-source": [
+    "https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz",
+    "2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77"
+  ]
 }

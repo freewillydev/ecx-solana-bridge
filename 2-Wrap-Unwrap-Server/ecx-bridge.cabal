@@ -1,4 +1,4 @@
-cabal-version: 3.0
+cabal-version: 3.14
 name: ecx-bridge
 version: 0.1.0.0
 synopsis: Inventory bridge for real L2L Signet and ECX networks
@@ -7,9 +7,14 @@ description: Development implementation of an inventory bridge with a durable
 category: Finance
 license: MIT
 license-file: LICENSE
-build-type: Simple
-extra-source-files: migrations/*.sql, migrations/postgresql/*.sql, config/*.json, web/*.html, web/*.css, docs/*.md,
-                    test/fixtures/*.json
+build-type: Hooks
+extra-source-files: migrations/postgresql/*.sql, config/*.json, web/*.html, web/*.css, docs/*.md,
+                    test/fixtures/*.json, solana-helper/Cargo.toml, solana-helper/Cargo.lock,
+                    solana-helper/src/lib.rs, rust-toolchain.toml
+
+custom-setup
+  setup-depends: base >=4.20 && <4.23, Cabal >=3.16 && <3.17, Cabal-hooks ==3.16,
+                directory, filepath, process
 
 common settings
   default-language: GHC2021
@@ -19,8 +24,9 @@ common settings
 library
   import: settings
   hs-source-dirs: src
+  autogen-modules: Bridge.SDKBuild
   other-modules: Bridge.Operation.Internal, Bridge.Postgres.Catalog
-  exposed-modules: Bridge.Postgres.FeeWithdrawal, Bridge.Ledger.Model, Bridge.Postgres.Treasury, Bridge.Postgres.Fence, Bridge.Postgres.Backup, Bridge.Postgres.LossCover, Bridge.Postgres.Replacement, Bridge.Postgres.NativeRecovery, Bridge.Postgres.NativeFamily, Bridge.Postgres.Cancellation, Bridge.Postgres.Retry, Bridge.Postgres.Maintenance, Bridge.Postgres.Startup, Bridge.Postgres.Refund, Bridge.SolanaPay, Bridge.Operation, Bridge.Postgres.Server, Bridge.Postgres.Runtime, Bridge.Postgres.Settlement, Bridge.Postgres.Preparation, Bridge.Postgres.PaymentStore, Bridge.Postgres.Custody, Bridge.Postgres.Source, Bridge.Postgres.Observation, Bridge.Postgres.Order, Bridge.Postgres.Ledger, Bridge.Postgres.Schema, Bridge.Types, Bridge.Config, Bridge.Reconciliation, Bridge.Recovery, Bridge.Reorg, Bridge.RPC, Bridge.Native, Bridge.NativePayment, Bridge.NativeReplacement, Bridge.Payment, Bridge.Settlement, Bridge.Order, Bridge.Admission, Bridge.Solana, Bridge.SolanaHelper, Bridge.SolanaPayment, Bridge.SolanaMessage, Bridge.SolanaDeposit, Bridge.Observer, Bridge.Process, Bridge.API, Bridge.Web
+  exposed-modules: Bridge.SDKBuild, Bridge.Operator, Bridge.Signer, Bridge.Postgres.FeeWithdrawal, Bridge.Ledger.Model, Bridge.Postgres.Treasury, Bridge.Postgres.Fence, Bridge.Postgres.Backup, Bridge.Postgres.LossCover, Bridge.Postgres.Replacement, Bridge.Postgres.NativeRecovery, Bridge.Postgres.NativeFamily, Bridge.Postgres.Cancellation, Bridge.Postgres.Retry, Bridge.Postgres.Maintenance, Bridge.Postgres.Startup, Bridge.Postgres.Refund, Bridge.SolanaPay, Bridge.Operation, Bridge.Postgres.Server, Bridge.Postgres.Runtime, Bridge.Postgres.Settlement, Bridge.Postgres.Preparation, Bridge.Postgres.PaymentStore, Bridge.Postgres.Custody, Bridge.Postgres.Source, Bridge.Postgres.Observation, Bridge.Postgres.Order, Bridge.Postgres.Ledger, Bridge.Postgres.Schema, Bridge.Types, Bridge.Config, Bridge.Reconciliation, Bridge.Recovery, Bridge.Reorg, Bridge.RPC, Bridge.Native, Bridge.NativePayment, Bridge.NativeReplacement, Bridge.Payment, Bridge.Settlement, Bridge.Order, Bridge.Admission, Bridge.Solana, Bridge.SolanaHelper, Bridge.SolanaPayment, Bridge.SolanaMessage, Bridge.SolanaDeposit, Bridge.Observer, Bridge.Process, Bridge.API, Bridge.Web
   build-depends:
     base >=4.20 && <4.23, aeson >=2.2 && <2.4, async >=2.2 && <2.3,
     base16-bytestring >=1 && <1.1, base58-bytestring >=0.1 && <0.2,
@@ -34,29 +40,6 @@ library
     servant >=0.20 && <0.21, servant-server >=0.20 && <0.21,
     product-profunctors >=0.11 && <0.12,
     opaleye ==0.10.8.0, postgresql-simple >=0.7 && <0.8,
-    transformers >=0.6 && <0.7, stm >=2.5 && <2.6, text >=2.1 && <2.2, time >=1.12 && <1.16,
-    unix >=2.8 && <2.9, wai >=3.2 && <3.3, wai-extra >=3.1 && <3.2,
-    warp >=3.3 && <3.5
-
-library legacy
-  import: settings
-  hs-source-dirs: legacy-src
-  exposed-modules: Bridge.Legacy.Reconciliation, Bridge.Legacy.Recovery, Bridge.Legacy.PaymentLifecycle, Bridge.Budget, Bridge.Ledger
-  build-depends:
-    ecx-bridge,
-    base >=4.20 && <4.23, aeson >=2.2 && <2.4, async >=2.2 && <2.3,
-    base16-bytestring >=1 && <1.1, base58-bytestring >=0.1 && <0.2,
-    base64-bytestring >=1.2 && <1.3, binary >=0.8 && <0.9,
-    bytestring >=0.11 && <0.13, containers >=0.6 && <0.9,
-    crypton >=1 && <1.2, directory >=1.3 && <1.4, filepath >=1.4 && <1.6,
-    file-embed >=0.0.16 && <0.1, filelock >=0.1 && <0.2, http-client >=0.7 && <0.8,
-    http-client-tls >=0.4 && <0.5, http-types >=0.12 && <0.13,
-    ram >=0.22 && <0.23, network >=3.1 && <3.3,
-    process >=1.6 && <1.7, scientific >=0.3 && <0.4,
-    servant >=0.20 && <0.21, servant-server >=0.20 && <0.21,
-    product-profunctors >=0.11 && <0.12,
-    opaleye ==0.10.8.0, postgresql-simple >=0.7 && <0.8,
-    sqlite-simple >=0.4.19 && <0.5,
     transformers >=0.6 && <0.7, stm >=2.5 && <2.6, text >=2.1 && <2.2, time >=1.12 && <1.16,
     unix >=2.8 && <2.9, wai >=3.2 && <3.3, wai-extra >=3.1 && <3.2,
     warp >=3.3 && <3.5
@@ -74,16 +57,16 @@ test-suite bridge-test
   hs-source-dirs: test
   main-is: Spec.hs
   ghc-options: -threaded
-  build-depends: base, ecx-bridge, ecx-bridge:legacy, aeson, bytestring, directory, filepath,
-    hspec >=2.11 && <2.12, QuickCheck >=2.15 && <2.19, sqlite-simple,
+  build-depends: base, ecx-bridge, aeson, bytestring, containers, directory, filepath,
+    hspec >=2.11 && <2.12, QuickCheck >=2.15 && <2.19,
     text, time, async, network, http-client, servant-client, servant, servant-server, postgresql-simple, unix, scientific, base64-bytestring,
-    crypton, ram, wai, wai-extra, http-types, process
+    crypton, ram, wai, wai-extra, warp, http-types, process
 
 executable ecx-postgres-journal-check
   import: settings
   hs-source-dirs: integration
   main-is: JournalCheck.hs
-  build-depends: base, ecx-bridge, containers, postgresql-simple, opaleye, async, unix, text, bytestring, aeson
+  build-depends: base, ecx-bridge, containers, postgresql-simple, opaleye, async, unix, text, bytestring, aeson, QuickCheck
 
 -- Host/ledger anti-rollback contract; disposable databases, no chain adapters.
 executable ecx-postgres-fence-check
@@ -92,13 +75,6 @@ executable ecx-postgres-fence-check
   main-is: FenceCheck.hs
   build-depends: base, ecx-bridge, bytestring, directory, filepath,
     postgresql-simple, process, unix, text
-
--- Fault-injected real-network acceptance; never bundled in the server release.
-executable ecx-postgres-native-lock-check
-  import: settings
-  hs-source-dirs: integration
-  main-is: NativeLockCheck.hs
-  build-depends: base, ecx-bridge, aeson, bytestring, postgresql-simple, unix, text
 
 executable ecx-postgres-source-approval-check
   import: settings

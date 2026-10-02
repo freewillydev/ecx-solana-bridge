@@ -1,10 +1,7 @@
-packages: .
+packages: 2-Wrap-Unwrap-Server
 index-state: 2026-09-17T20:21:20Z
 optimization: 1
 tests: True
-
-package direct-sqlite
-  flags: +systemlib
 
 -- GHC 9.14/base 4.22 and containers 0.8 exceed these packages' declared
 -- bounds. Keep exceptions package-specific and verify compilation/regressions;

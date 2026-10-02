@@ -1,11 +1,10 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 module Bridge.SolanaHelper
   ( HelperRequest(..), HelperReply(..), helperMemo, validateHelperRequest
-  , validateHelperReply, validateUnsignedHelperReply, invokeHelper, invokeUnsignedHelper
+  , validateHelperReply, validateUnsignedHelperReply, signSolanaSdk, invokeUnsignedHelper
   , unsignedSimulation ) where
 
 import Bridge.Config
-import Bridge.Process
 import Bridge.SolanaMessage
 import Bridge.Types
 import Control.Monad (unless)
@@ -92,11 +91,15 @@ validateHelperReplyWithSignature signed c request@HelperRequest{..} HelperReply{
   unless (replySignature==expectedSignature) (Left "helper_signature_mismatch")
   pure tx
 
-invokeHelper :: Config -> HelperRequest -> IO HelperReply
-invokeHelper c request = do
+-- Called only in the dedicated signer, with its private key path. The SDK and
+-- independent Haskell decoder both enforce the exact custody/effect binding.
+signSolanaSdk :: Config -> FilePath -> HelperRequest -> IO HelperReply
+signSolanaSdk c key request = do
   require (helperPayout request) "signed_helper_requires_payout"
   either reject pure (validateHelperRequest c request)
-  output <- runBounded 10 8192 (helperPath c) ["--config",helperConfig c]
+  let privateConfig=object ["deployment_id" .= deploymentId c,"mint" .= mint c
+        ,"custody_owner" .= custodyOwner c,"signer_path" .= key]
+  output <- invokeSdk (solanaSdkLibrary c) (LBS.toStrict $ encode privateConfig)
     (LBS.toStrict $ encode request)
   reply <- either (const $ reject "invalid_helper_reply") pure (eitherDecodeStrict' output)
   _ <- either reject pure (validateHelperReply c request reply)

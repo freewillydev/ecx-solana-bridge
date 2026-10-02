@@ -1,5 +1,13 @@
 # Ubuntu installer
 
+**Current source checkpoint:** the dedicated Haskell signer and non-HTTP local
+operator protocol replace the older packaged custody/control design. Installer
+units, credentials and restore tooling have not yet been adapted and accepted for
+this revision. The commands and evidence below describe the previous deployment;
+do not treat them as acceptance of the current source. Packaging remains deferred
+until the runtime and GHC JavaScript browser changes are complete.
+
+
 This installer targets Ubuntu 24.04 on ARM64 or x86-64. It installs the bridge,
 fixed Solana helper, a private PostgreSQL 16 ledger, browser assets, systemd units and an
 optional dedicated **real L2L public Signet** node. No simulated chain is offered.

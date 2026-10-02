@@ -1,12 +1,12 @@
 module Bridge.Postgres.Preparation
-  ( orderPolicy, costLimits, begin, active, activeC, storeDraft, storeAttempt, pending, pendingC ) where
+  ( orderPolicy, costLimits, begin, active, activeC, storeDraft, storeAttempt, pending, pendingC, signingDecisionC ) where
 
 import Bridge.Config
 import Bridge.Types
 import Bridge.Ledger.Model (CostLimits(..))
 import Bridge.Ledger.Model (Obligation(..),Preparation(..))
 import Bridge.Postgres.Ledger
-import Bridge.Postgres.Schema
+import Bridge.Postgres.Schema hiding (deploymentFingerprint)
 import qualified Bridge.Postgres.Source as Source
 import Data.Aeson (FromJSON,eitherDecodeStrict')
 import Data.Int (Int64)
@@ -122,6 +122,7 @@ storeDraft ledger intent draft generation = ledgerAction ledger $ \c->do
   rows <- O.runSelect c $ whereRows (\r->preparationsIntentId r O..== text intent O..&& preparationsGeneration r O..== num actual) (O.selectTable preparationsTable) :: IO [Preparations]
   case rows of
     [row] | preparationsDraftJson row==Nothing->do
+      _ <- criticalSequence c
       _ <- O.runUpdate c O.Update {O.uTable=preparationsTable,O.uUpdateWith= \r->r {preparationsDraftJson=O.toNullable(text draft)},O.uWhere= \r->preparationsIntentId r O..== text intent O..&& preparationsGeneration r O..== num actual,O.uReturning=O.rCount}
       pure ()
     [row]->require (preparationsDraftJson row==Just draft) "preparation_draft_conflict"
@@ -177,3 +178,26 @@ num :: Int64 -> O.Field O.SqlInt8
 num = O.sqlInt8
 stored :: FromJSON a => Text -> IO a
 stored = either (const $ reject "invalid_saved_payment") pure . eitherDecodeStrict' . TE.encodeUtf8
+
+-- Specific read-only signer operation. It accepts durable identity, never a
+-- caller-supplied plan or transaction. No connection escapes the signer.
+signingDecisionC :: PG.Connection -> Config -> Text -> Int -> IO (Preparation,PolicySnapshot)
+signingDecisionC c cfg intent generation = do
+  actual <- activeC c intent
+  require (actual==fromIntegral generation) "preparation_generation_changed"
+  rows <- pendingC c
+  prepared <- case filter ((==intent).obligationId.preparationObligation) rows of
+    [row]->pure row
+    _->reject "preparation_not_unsigned"
+  let ob=preparationObligation prepared
+  sourceAllowed <- Source.authorizedC c intent
+  require sourceAllowed "source_not_eligible"
+  statuses <- O.runSelect c $ fmap obligationsStatus $ whereRows (\r->obligationsId r O..== text intent) (O.selectTable obligationsTable) :: IO [Text]
+  require (statuses==["paying"] && preparationGeneration prepared==generation
+    && preparationDraft prepared/=Nothing) "payment_not_prepared"
+  fees <- O.runSelect c $ whereRows (\r->feereservationsIntentId r O..== text intent) (O.selectTable feereservationsTable) :: IO [FeeReservations]
+  require ([(feereservationsAmount r,feereservationsReleased r) | r<-fees]==[(preparationFeeLimit prepared,0)]) "payment_not_prepared"
+  policies <- O.runSelect c $ fmap ordersPolicyJson $ whereRows (\r->ordersId r O..== text(obligationOrder ob)) (O.selectTable ordersTable) :: IO [Text]
+  policy <- case policies of [value]->stored value; _->reject "order_not_found"
+  require (deploymentFingerprint policy==fingerprint cfg) "payment_profile_mismatch"
+  pure (prepared,policy)

@@ -27,37 +27,41 @@ The bridge needs funded inventory and operating budgets on both sides. Low inven
 
 ## Architecture
 
-One Haskell application provides the financial engine and typed Servant API, with two real-chain adapters, one PostgreSQL ledger accessed with Opaleye and a thin browser interface. The HTTP server serves the interface and typed API directly, with payment workflows in the same process and a private operator socket. Unsigned Solana deposit/preview construction now uses the official SDK through a bounded Haskell FFI, with public identity data only. A dedicated Haskell signer and Haskell frontend compiled with GHC’s JavaScript backend remain the accepted next changes; signed payouts retain the sandboxed subprocess and the frontend remains TypeScript until those replacements pass.
+One Haskell HTTP process serves four customer routes and the interface. Handlers
+return a `Plan a` containing a typeclass-constrained existential operation;
+Runtime resolves its method into the severity-indexed DSL. Safe evaluation has a
+read-only PostgreSQL role; all critical workflows share one guarded evaluation
+site. Operator recovery uses a private mode-0600 local CLI socket, not HTTP.
+Only the critical evaluator can call the dedicated Haskell signer. The signer
+independently reloads the durable decision, validates effects and saved limits,
+and signs through restricted native RPC or the official Solana SDK Haskell FFI.
+It never broadcasts. Both chain adapters and all application database access
+remain real RPC and Opaleye implementations.
 
-```mermaid
-flowchart LR
-    Browser[Connection-free browser UI / Solana Pay] --> Worker[Haskell HTTP server / Servant API]
-    Client[Customer HTTP client] --> Worker
-    Operator[Private operator commands] --> Worker
-    Worker --> Dispatcher[Severity-indexed DSL dispatcher]
-    Dispatcher --> Ledger[(Private PostgreSQL ledger)]
-    Worker --> Native[Native adapter / dedicated daemon wallet]
-    Worker --> Solana[Solana RPC adapter]
-    Worker --> SDK[Solana SDK FFI / unsigned construction]
-    Worker --> Helper[Sandboxed signing helper / transitional]
-    Native --> NativeChain[Real L2L Signet or ECX betanet]
-    Solana --> SolanaChain[Real Solana Devnet]
+The signer implementation compiles and local contracts pass. Separate OS users,
+restricted native RPC credentials and full two-process real-chain acceptance are
+still required. Existing installed services have not been upgraded to this design.
+The browser is currently TypeScript; conversion to Haskell using GHC's JavaScript
+backend (no WebAssembly) is pending. Previous package and live evidence refer to
+the earlier architecture and do not prove these new release boundaries.
+
+From the repository root:
+
+```sh
+cabal build all -j1
+cabal test all -j1
 ```
 
-### Process and key boundaries
-
-Paying workers now use a shared host lock and durable critical-sequence watermark across database clones. The installer manages their protected fence; local startup uses PostgreSQL by default. Explicit stopped-worker retirement supports a handoff, while independent-host/key restoration remains unproved. Fresh PostgreSQL funding and private treasury allocation now pass on real Signet/Devnet without a legacy import. Both 1% customer directions then completed from that fresh ledger, and a guarded restart preserved orders and financial rows. The consolidated x86-64 Ubuntu package passed upgrade, repeat installation and cold restart. See [fresh product evidence](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/postgres-fresh-product-live.json) and [installed package evidence](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/postgres-installer-consolidated-x86.json). The native ARM64 installer also completed both real 1% customer directions from a fresh ledger through its installed systemd worker and sandboxed signer, with restart preservation. See [installed paying evidence](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/installed-paying-product.json). A clean Ubuntu guest now restores the keys and all ledger rows, reconciles the existing real orders, and passes paying restart; both restored signers reproduce the original settled bytes without broadcast. See [clean-guest handoff](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/installed-clean-host-handoff.json). A signed-but-unsent native payment also survived a second clean-guest key/ledger handoff, exact-byte replay, reviewed broadcast, real Signet confirmation, single settlement and confirmed restart. A final snapshot restored all 38 table contents. See [interrupted-payment restore](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/installed-native-inflight-restore.json). GUI wallet signing, off-host recovery, the remaining interruption matrix and independent review remain open. The latest deployment-only packages preserve the paying ARM64 fixture and the x86 observation fixture; see [ARM upgrade](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/installed-wallet-archive-upgrade-arm.json) and [x86 upgrade](https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/postgres-installer-final-deployment-x86.json).
-
-| Component | Responsibility and access |
-| --- | --- |
-| `ecx-bridge postgres-api` | Exclusively owns the ledger; scans and reconciles while intake is paused. Serves separate customer and administrator Unix sockets. |
-| `ecx-bridge postgres-test-worker` | Uses the same engine and explicitly enables automatic intake/payouts for real L2L Signet or ECX betanet paired with a noncanonical Solana Devnet mint, with backups not required. It is not a canonical deployment mode. |
-| `ecx-bridge serve` | Serves static assets and proxies only the typed customer API. Binds to loopback and receives no signer or database path. Administrator routes are excluded. |
-| Native daemon wallet | Generates deposit addresses, funds/signs PSBTs and provides native chain/wallet evidence. RPC stays private and uses a cookie. |
-| `ecx-solana-helper` | Constructs or signs only supported transactions under fixed mint/custody configuration. It has no RPC client. Unsigned previews do not read the signer. |
-| Browser | Displays quotes/deposits/status and opens standard payment requests in the customer wallet. No frontend framework or Node server runs in production. |
-
-Ubuntu services separate the worker, web and native-node users. Private file permissions protect the ledger, configuration, keys and RPC cookie. The helper runs through a restricted filesystem/network namespace with a scoped AppArmor policy. These boundaries have ARM64 installation evidence; they do not make a hot wallet immune to host compromise. The bridge runtime must not hold the mint-authority key or LP/backing keys.
+Cabal's tracked hooks build the pinned Solana SDK library through Cargo internally
+and provide its path to the Haskell tests. No separate Cargo build is required.
+GHC, Cabal, Rust/Cargo and libpq remain prerequisites. The PostgreSQL contract
+runner additionally requires a disposable PostgreSQL database. SDK artifacts live
+under Cabal's build tree; deployment uses an explicit SDK library path. Whole-project
+Cabal-only builds remain incomplete until the browser conversion is integrated.
+The SQLite library, migrations and regression component have been removed;
+QuickCheck properties and actual PostgreSQL contracts replace backend-specific
+fixtures. Native recovery and interruption acceptance must be reverified against
+the current DSL/signer architecture before release.
 
 ### Durable financial workflow
 
@@ -80,7 +84,7 @@ identifies current code boundaries and records the remaining gates.
 | Location | What to review |
 | --- | --- |
 | `src/Bridge/Types.hs`, `Config.hs`, `Budget.hs` | Amounts, deployment identity, immutable limits and operating budgets |
-| `src/Bridge/Postgres/`, PostgreSQL migrations | Opaleye ledger, orders, reservations, attempts, recovery decisions and schema preservation; `legacy-src/` holds historical regression compatibility |
+| `src/Bridge/Postgres/`, PostgreSQL migrations | Opaleye ledger, orders, reservations, attempts, recovery decisions and schema preservation |
 | `Order.hs`, `Admission.hs`, `SolanaPay.hs` | Quote checks, recoverable deposit provisioning and connection-free payment requests |
 | `Native.hs`, `Solana.hs`, `Observer.hs` | Real-chain RPC adapters, identity checks, bounded history scans and evidence |
 | `NativePayment.hs`, `SolanaPayment.hs`, `Payment.hs`, `Settlement.hs` | Transaction validation, preparation/signing, saved-byte send and verified settlement |
@@ -93,7 +97,7 @@ identifies current code boundaries and records the remaining gates.
 
 ## Build and installation
 
-The tested dependency boundary is GHC **9.14.1**, Cabal **3.16.1.0**, Rust **1.97.1**, SQLite **3.53.4**, Node **25.4.0** and Bitcoin Core **30.2**. Cabal, Cargo and npm dependency graphs are locked. Linux upstream toolchain URLs/checksums are in [`deploy/toolchains.json`](deploy/toolchains.json). The Haskell SQLite dependency is confined to the separate `legacy` Cabal component and build-cache regression tests; the production application uses libpq/PostgreSQL 16 and no longer links or bundles a SQLite CLI/shared library. The retired SQLite importer and schema translators remain in Git history at revision 6d293a3. `doctor` checks the actual configured PostgreSQL ledger in a read-only transaction.
+The tested dependency boundary is GHC **9.14.1**, Cabal **3.16.1.0**, Rust **1.97.1**, Node **25.4.0** and Bitcoin Core **30.2**. Cabal, Cargo and npm dependency graphs are locked. Linux upstream toolchain URLs/checksums are in [`deploy/toolchains.json`](deploy/toolchains.json). SQLite is retired from source and dependencies; the application uses libpq/PostgreSQL 16. The retired SQLite importer and schema translators remain in Git history at revision 6d293a3. `doctor` checks the actual configured PostgreSQL ledger in a read-only transaction.
 
 On Ubuntu 24.04, from `2-Wrap-Unwrap-Server` in a reviewed checkout, run as a normal sudo-enabled user:
 

@@ -37,8 +37,8 @@ def digest(path):
 
 binaries = {}
 libraries = {}
-for name in ('ecx-bridge', 'ecx-solana-helper', 'bitcoind', 'bitcoin-cli'):
-    binary = release / 'bin' / name
+for name in ('bin/ecx-bridge', 'lib/libecx_solana_sdk.so', 'bin/bitcoind', 'bin/bitcoin-cli'):
+    binary = release / name
     loaded = []
     listing = run('ldd', str(binary))
     assert 'not found' not in listing, 'Unresolved installed library'

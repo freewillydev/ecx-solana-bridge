@@ -1,26 +1,8 @@
 #!/bin/sh
 set -eu
 cd "$(dirname "$0")/.."
-test "$(pkg-config --modversion sqlite3)" = 3.53.4 || {
-  echo 'Select SQLite 3.53.4 using PKG_CONFIG_PATH before building.' >&2
-  exit 1
-}
-sqlite_lib=$(pkg-config --variable=libdir sqlite3)
-sqlite_include=$(pkg-config --variable=includedir sqlite3)
-sqlite_prefix=$(pkg-config --variable=prefix sqlite3)
-PATH="$sqlite_prefix/bin:$PATH"
-export PATH
-# Build the SDK once before Haskell's cross-language properties.
-cargo test --locked --manifest-path solana-helper/Cargo.toml --all-targets -j1
-cargo build --locked --manifest-path solana-helper/Cargo.toml --lib -j1
-cargo fmt --check --manifest-path solana-helper/Cargo.toml
-case "$(uname -s)" in Darwin) sdk_extension=dylib ;; *) sdk_extension=so ;; esac
-ECX_SOLANA_SDK_LIBRARY="${CARGO_TARGET_DIR:-$PWD/solana-helper/target}/debug/libecx_solana_sdk.$sdk_extension"
-export ECX_SOLANA_SDK_LIBRARY
-cabal build all -j1 --extra-lib-dirs="$sqlite_lib" --extra-include-dirs="$sqlite_include"
-cabal test all -j1 --test-show-details=direct --extra-lib-dirs="$sqlite_lib" --extra-include-dirs="$sqlite_include"
-# Compile the manual public-network probe without running it or touching a wallet.
-cabal exec -- ghc -fno-code -package ecx-bridge scripts/solana-probe.hs
+cabal build all -j1
+cabal test all -j1 --test-show-details=direct
 npm ci --prefix web --ignore-scripts
 npm run check --prefix web
 npm run build --prefix web

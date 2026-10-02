@@ -1,7 +1,9 @@
 {-# LANGUAGE DataKinds,GADTs #-}
 module Bridge.Postgres.Runtime (runAPI,runTestWorker,runBackedTestWorker,doctor,checkDatabase) where
 
-import Bridge.API
+import Bridge.API (customerAPI)
+import qualified Bridge.API as API
+import Bridge.Operator (runControl)
 import Bridge.Config
 import Bridge.Types
 import Bridge.Operation.Internal
@@ -25,23 +27,24 @@ import qualified Bridge.Ledger.Model as Domain
 import Bridge.Postgres.PaymentStore (Store(..))
 import Bridge.Settlement (realPaymentTransport,settleAttemptWith,paymentPass,reconcilePaymentsWith,PaymentTransport(..),approveSolanaRetryWith,readSavedPayment,readSavedNativeFamily,recheckSourceWith,paymentNativeFamily)
 import qualified Bridge.Postgres.Startup as Startup
-import Bridge.Recovery (cancelPreparationWith,reconcileNativeLocksWith,approveSourceRecoveryWith,prepareNativeReplacementWith,signNativeReplacementWith,NativeReplacementStore(..),coverSourceLossWith)
+import Bridge.Recovery (cancelPreparationWith,reconcileNativeLocksWith,approveSourceRecoveryWith,prepareNativeReplacementUsing,signNativeReplacementUsing,NativeReplacementStore(..),coverSourceLossWith)
 import Bridge.Native (nativeIdentity)
+import Bridge.Payment (prepareNativeWithSigner,prepareSolanaWithSigner)
 import Bridge.Solana (solanaIdentity)
 import Bridge.Reorg (reconcileNativeSourcesWith,reconcileNativeSettlementsWith,sourceCandidates,inspectNativeSourceWith)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar,newMVar,withMVar)
-import Control.Monad (forever,when)
+import Control.Monad (forever,when,forM_)
 import Control.Exception (IOException,catch,onException)
 import qualified Bridge.SolanaPay as Pay
 import Bridge.RPC (fieldValue,parseValue)
 import qualified Bridge.Order as OrderWorkflow
 import Bridge.Observer (epochSeconds)
-import Bridge.RPC (newRpcManager)
+import Bridge.RPC (newRpcManager,unixManager,boundedBody)
 import Bridge.Web (asHandler,runUnix,runPublic,securityBoundary)
 import Control.Concurrent.Async (concurrently_)
 import Control.Exception (bracket,try)
-import Data.Aeson (Value(..),object,(.=),toJSON,encode,parseJSON)
+import Data.Aeson (FromJSON,Value(..),object,(.=),toJSON,encode,parseJSON,eitherDecodeStrict')
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Map.Strict as M
 import System.Environment (lookupEnv)
@@ -49,14 +52,14 @@ import Data.Maybe (fromMaybe)
 import Text.Read (readMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Network.HTTP.Client (Manager)
+import Network.HTTP.Client (Manager,closeManager,parseRequest,withResponse,method,redirectCount,requestHeaders,requestBody,RequestBody(..),responseBody,responseTimeout,responseTimeoutMicro,checkResponse,HttpException)
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Database.PostgreSQL.Simple.Transaction as Tx
 import qualified Opaleye as O
 import Servant
 
 -- No signer, mutating chain transport, writable ledger or private Config.
-data SafeContext = SafeContext PG.ConnectInfo Value Bool Bool
+data SafeContext = SafeContext PG.ConnectInfo (Maybe API.PublicConfiguration) Bool Bool
 data CriticalContext = CriticalContext Manager Config Ledger Bool (Int64 -> IO ())
 
 data Runtime = Runtime SafeContext CriticalContext (MVar ())
@@ -70,7 +73,6 @@ bearer header = do
 -- The only input to read evaluation is a closed safe DSL command. No caller
 -- can supply a query, callback or receive a database connection.
 evalSafe :: SafeContext -> DSL 'Safe a -> IO a
-evalSafe _ (SafeDSL Health) = pure(Availability True "process_running")
 evalSafe (SafeContext settings public remote paying) (SafeDSL operation) =
   bracket (PG.connect settings) PG.close $ \connection->
     Tx.withTransactionMode (Tx.TransactionMode Tx.RepeatableRead Tx.ReadOnly)
@@ -97,9 +99,8 @@ evalSafe (SafeContext settings public remote paying) (SafeDSL operation) =
     DatabaseIdentity expected->inspectDatabase connection expected
     PublicConfig->do
       state <- publicAvailability connection
-      case public of
-        Object fields->pure(Object(KM.insert "availability" (toJSON state) fields))
-        _->reject "invalid_public_configuration"
+      configuration <- maybe (reject "public_configuration_unavailable") pure public
+      pure configuration {API.pubAvailability=state}
     OrderStatus header oid->do
       token <- bearer header
       cap <- either reject pure(capabilityHash token)
@@ -112,13 +113,12 @@ evalSafe (SafeContext settings public remote paying) (SafeDSL operation) =
       state <- publicAvailability connection
       require (available state && status order=="AwaitingDeposit" && now<=deadline order && direction(request order)==WrappedToNative) "deposit_window_closed"
       instruction <- maybe (reject "instruction_not_recorded") pure(depositInstruction order)
-      owner <- fieldValue "custodyOwner" public
-      mintId <- fieldValue "mint" public
+      configuration <- maybe (reject "public_configuration_unavailable") pure public
+      let owner=API.pubCustodyOwner configuration
+          mintId=API.pubMint configuration
       uri <- either reject pure(Pay.payURIFor owner mintId instruction (gross $ quote order))
-      pure(object["uri" .= uri,"reference" .= T.drop 11 instruction,"mint" .= mintId,"amount" .= gross(quote order),"refundPolicy" .= ("verified_source_owner"::Text)])
-    Health->pure(Availability True "process_running")
+      pure(API.PaymentInstruction uri (T.drop 11 instruction) mintId (gross $ quote order) "verified_source_owner")
     Readiness->publicAvailability connection
-    ReadyEndpoint->publicAvailability connection
     Scanners->do
       rows <- O.runSelect connection (O.selectTable scanhealthTable) :: IO [ScanHealth]
       pure(object["scanners" .= [object["chain" .= scanhealthChain row,"lastSuccess" .= scanhealthLastSuccess row,"lastError" .= scanhealthLastError row] | row<-rows]])
@@ -135,38 +135,23 @@ evalSafe (SafeContext settings public remote paying) (SafeDSL operation) =
       pure(object["treasuryReceipts" .= [object["receipt" .= depositsId row,"asset" .= depositsAsset row,"units" .= T.pack(show $ depositsAmount row),"ownershipRequiresAttestation" .= True] | row<-take 1000 treasuryReceipts],"treasuryBacklog" .= (length treasuryReceipts>1000),"balances" .= [object["asset" .= asset,"allocation" .= account,"units" .= T.pack(show n)] | ((asset,account),n)<-M.toList totals],"unresolved" .= [object["id" .= obligationsId row,"status" .= obligationsStatus row] | row<-obligations,obligationsStatus row/="paid"],"nativeRecoveryReviews" .= [object["transaction" .= txid,"state" .= state,"recoverySequence" .= sequenceNo] | (txid,state,sequenceNo)<-take 1000 nativeReviews],"nativeRecoveryBacklog" .= (length nativeReviews>1000)])
 
 evalCritical :: CriticalContext -> DSL 'Critical a -> IO a
--- Observer mode can retain payment hints, pause and reconcile recorded effects.
+-- Observer mode can pause and reconcile recorded effects.
 -- It has no order-creation, resume, new signature or broadcast authority.
 observationOperation :: DSL 'Critical a -> Bool
 observationOperation = \case
-  CustomerDSL (DepositHint _ _ _)->True
   OperatorDSL (Pause _)->True
   WorkerDSL ScanAndReconcile->True
   _->False
 
 evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
+  SigningDSL _->reject "dedicated_signer_required"
   CustomerDSL operation->case operation of
     CreateOrder header request->bearer header >>= \token->OrderWorkflow.createCustomerOrder manager cfg ledger backup token request
-    DepositHint header oid signature->do
-      token <- bearer header
-      cap <- either reject pure(capabilityHash token)
-      require (T.length signature>=64 && T.length signature<=88) "invalid_signature_hint"
-      ledgerAction ledger $ \connection->do
-        _ <- Order.readSavedOrder connection cap oid
-        previous <- O.runSelect connection $ do
-          row <- O.selectTable hintsTable
-          O.where_(hintsOrderId row O..== O.sqlStrictText oid)
-          pure(hintsSignature row)
-          :: IO [Text]
-        require (length previous<8) "hint_limit"
-        if signature `elem` previous then pure () else do
-          _ <- O.runInsert connection O.Insert {O.iTable=hintsTable,O.iRows=[Hints (O.sqlStrictText oid) (O.sqlStrictText signature)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-          pure ()
-      pure(object["accepted" .= True,"authorization" .= ("independent_chain_evidence_required"::Text)])
   OperatorDSL operation->case operation of
     Pause reason->pause ledger reason >> readiness ledger
     CancelPreparation intent generation reason->cancelPreparationWith epochSeconds transport cfg store intent generation reason
     Resume->do
+      verifyNativeBoundary
       Startup.resumeAfterReview epochSeconds transport cfg ledger
       readiness ledger
     ApproveSolanaRetry txid reason->do
@@ -176,9 +161,11 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
     ApproveCoveredSource intent loss reason->approveCoveredSource intent loss reason
     RebroadcastNative txid recovery reason->rebroadcastNative txid recovery reason
     PrepareNativeReplacement parent fee reason->
-      prepareNativeReplacementWith epochSeconds transport cfg store parent fee reason
+      prepareNativeReplacementUsing epochSeconds transport
+        (\parent' _ fee'->signerRequest "draft-replacement" (toJSON(fingerprint cfg,parent',fee'))) cfg store parent fee reason
     SignNativeReplacement sequenceNo->do
-      a <- signNativeReplacementWith epochSeconds transport cfg store sequenceNo
+      a <- signNativeReplacementUsing epochSeconds transport
+        (\sequenceNo' _ _->signerRequest "sign-replacement" (toJSON(fingerprint cfg,sequenceNo'))) cfg store sequenceNo
       pure(object["transaction" .= Domain.attemptId a,"draftSequence" .= sequenceNo,"signed" .= True,"sent" .= False])
     CancelNativeReplacement sequenceNo reason->do
       replacementCancel store sequenceNo reason
@@ -215,6 +202,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
     _ <- reconcilePaymentsWith transport cfg store
     Payments.reconcileCustodyWith epochSeconds transport cfg ledger
   WorkerDSL StartPayments->do
+    verifyNativeBoundary
     lockResult <- reconcileNativeLocksWith transport {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg store
     lockError <- fieldValue "error" lockResult :: IO (Maybe Text)
     maybe (pure ()) reject lockError
@@ -226,12 +214,49 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
       now <- epochSeconds
       fresh <- try (Order.checkIntakeReady ledger now) :: IO (Either BridgeError ())
       case fresh of
-        Right ()->paymentPass manager cfg store backup
+        Right ()->paymentPass transport cfg store prepare
         Left (BridgeError "custody_not_reconciled")->pure ()
         Left (BridgeError reason)->reject reason
  where
   transport=realPaymentTransport manager cfg backup
   store=Store ledger
+
+  verifyNativeBoundary :: IO ()
+  verifyNativeBoundary = do
+      forM_ ["walletprocesspsbt","signrawtransactionwithwallet","signmessage","dumpprivkey"
+        ,"dumpwallet","gethdkeys","listdescriptors","walletpassphrase","walletpassphrasechange"
+        ,"encryptwallet","importprivkey","importwallet","backupwallet"] $ \methodName->do
+          denied <- try (paymentNative transport True methodName []) :: IO (Either BridgeError Value)
+          require (case denied of Left(BridgeError "rpc_method_forbidden")->True; _->False)
+            "native_signing_authority_not_separated"
+
+  prepare ob = if Domain.obligationAsset ob=="Native"
+    then prepareNativeWithSigner (paymentNative transport)
+      (\intent generation _ _->signerRequest "sign-preparation" (toJSON(fingerprint cfg,intent,generation))) cfg store ob
+    else prepareSolanaWithSigner (paymentSolana transport)
+      (\intent generation _->signerRequest "sign-preparation" (toJSON(fingerprint cfg,intent,generation))) cfg store ob
+
+  -- The sole signer client lives inside this critical evaluator. Safe contexts,
+  -- handlers and exported modules receive neither it nor its socket manager.
+  signerRequest :: FromJSON reply => String -> Value -> IO reply
+  signerRequest endpoint payload = (do
+    when (backupRequired cfg) $ do
+      sequenceNo <- ledgerAction ledger $ \c->do
+        rows <- O.runSelect c $ fmap deploymentCriticalSequence (O.selectTable deploymentTable) :: IO [Int64]
+        case rows of [n]->pure n; _->reject "corrupt_sequence"
+      backup sequenceNo
+    bracket (unixManager $ signerSocket cfg) closeManager $ \local->do
+      base <- parseRequest ("http://signer/"<>endpoint)
+      let request=base{method="POST",redirectCount=0,requestHeaders=[("Content-Type","application/json")]
+            ,requestBody=RequestBodyLBS(encode payload),responseTimeout=responseTimeoutMicro 60000000
+            ,checkResponse= \_ _->pure ()}
+      withResponse request local $ \response->do
+        bytes <- boundedBody 524288 (responseBody response)
+        value <- either (const $ reject "invalid_signer_reply") pure (eitherDecodeStrict' bytes)
+        case value of
+          Object fields | Just code<-KM.lookup "error" fields->parseValue parseJSON code >>= reject
+          _->parseValue parseJSON value)
+    `catch` (\(_::HttpException)->reject "signer_outcome_unknown")
 
   -- Explicit operator approval revives the original suspended obligation only.
   -- It never resumes intake, signs, broadcasts, marks a deposit eligible or books
@@ -315,6 +340,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
 -- This remains the sole production invocation of critical evaluation.
 evaluate :: Runtime -> Plan a -> IO a
 evaluate (Runtime safeContext criticalContext gate) plan = case plan of
+  SigningPlan _->reject "dedicated_signer_required"
   SafePlan request->evalSafe safeContext (resolve request)
   CustomerPlan request->critical (resolve request)
   OperatorPlan request->critical (resolve request)
@@ -330,13 +356,7 @@ evaluate (Runtime safeContext criticalContext gate) plan = case plan of
            withMVar gate (\_->evalCritical criticalContext dsl)
 
 interpret :: Runtime -> Plan a -> Handler a
-interpret runtime plan = do
-  result <- asHandler(evaluate runtime plan)
-  case plan of
-    SafePlan request -> case resolve request of
-      SafeDSL ReadyEndpoint | not(available result)->throwError err503 {errBody=encode result}
-      _->pure result
-    _->pure result
+interpret runtime plan = asHandler (evaluate runtime plan)
 
 -- This command exposes the actual API against a paused test deployment. It
 -- continuously scans/reconciles; it never resumes or advances payments.
@@ -366,8 +386,12 @@ runRuntime paying remote settings cfg = do
   require (not(T.null $ T.strip $ T.pack readUser) && readUser/=PG.connectUser settings) "distinct_read_database_user_required"
   readPassword <- fromMaybe "" <$> lookupEnv "PGREADPASSWORD"
   let readSettings=settings {PG.connectUser=readUser,PG.connectPassword=readPassword}
-  let public=object["profile" .= profile cfg,"solanaCluster" .= (if profile cfg==CanonicalBeta then "mainnet-beta" else "devnet"::Text),"links" .= links,"deployment" .= deploymentId cfg,"mint" .= mint cfg,"custodyOwner" .= custodyOwner cfg,"decimals" .= (8::Int),"minInput" .= minInput cfg,"maxInput" .= maxInput cfg,"feesBps" .= object["NativeToWrapped" .= (100::Int),"WrappedToNative" .= (100::Int)],"intakeEnabled" .= paying,"implementationReady" .= False]
-      safeContext=SafeContext readSettings public (backupRequired cfg) paying
+  let public=API.PublicConfiguration (profile cfg)
+        (if profile cfg==CanonicalBeta then "mainnet-beta" else "devnet") links
+        (deploymentId cfg) (mint cfg) (custodyOwner cfg) 8 (minInput cfg) (maxInput cfg)
+        (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]) paying False
+        (Availability False "starting")
+      safeContext=SafeContext readSettings (Just public) (backupRequired cfg) paying
   -- Validate the separately authenticated reader through a closed safe operation.
   evalSafe safeContext (resolve (Request VerifyReadRole))
     `catch` (\(_::PG.SqlError)->reject "read_database_identity_unavailable")
@@ -393,11 +417,10 @@ runRuntime paying remote settings cfg = do
           when paying (evaluate runtime (worker StartPayments))
     let customerAPIApp=serve customerAPI (hoistServer customerAPI (interpret runtime) Server.customerServer)
     customerApp <- securityBoundary customerAPIApp
-    adminApp <- securityBoundary (serve Server.operatorAPI (hoistServer Server.operatorAPI (interpret runtime) Server.adminServer))
     -- Local clients retain their existing socket; public HTTP invokes the same
     -- typed server directly. Operator routes remain private to their own socket.
     let api=concurrently_ (runPublic port assets customerAPIApp)
-          (concurrently_ (runUnix (customerSocket cfg) 0o660 customerApp) (runUnix (adminSocket cfg) 0o600 adminApp))
+          (concurrently_ (runUnix (customerSocket cfg) 0o660 customerApp) (runControl cfg (evaluate runtime)))
         loop=forever $ do
           result <- try ((do
             _ <- evaluate runtime (worker ScanAndReconcile)
@@ -415,7 +438,7 @@ runRuntime paying remote settings cfg = do
 -- not initialize a ledger, acquire worker ownership or construct a signer.
 checkDatabase :: PG.ConnectInfo -> Text -> IO Value
 checkDatabase settings identity =
-  evalSafe (SafeContext settings Null False False) (resolve $ Request $ DatabaseIdentity identity)
+  evalSafe (SafeContext settings Nothing False False) (resolve $ Request $ DatabaseIdentity identity)
     `catch` (\(_::PG.SqlError)->reject "postgres_diagnostic_unavailable")
     `catch` (\(_::IOException)->reject "postgres_diagnostic_unavailable")
 

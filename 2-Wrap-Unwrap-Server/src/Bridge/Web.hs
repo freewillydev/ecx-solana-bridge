@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module Bridge.Web (runUnix, runPublic, publicApplication, securityBoundary, asHandler) where
+module Bridge.Web (runUnix, withUnixListener, runPublic, publicApplication, securityBoundary, asHandler) where
 
 import Control.Monad.IO.Class (liftIO)
 import Bridge.Types
@@ -26,7 +26,11 @@ asHandler action = do
     Right result -> pure result
     Left code -> throwError err409 {errBody=encode (object ["error" .= code]),errHeaders=[("Content-Type","application/json")]}
 runUnix :: FilePath -> Integer -> Application -> IO ()
-runUnix path mode app = do
+runUnix path mode app = withUnixListener path mode $ \sock ->
+  runSettingsSocket (setTimeout 20 defaultSettings) sock app
+
+withUnixListener :: FilePath -> Integer -> (NS.Socket -> IO a) -> IO a
+withUnixListener path mode action = do
   createDirectoryIfMissing True (takeDirectory path)
   setFileMode (takeDirectory path) 0o750
   -- Caller holds the worker lock. Only its stale socket may be removed.
@@ -36,7 +40,7 @@ runUnix path mode app = do
     NS.bind sock (NS.SockAddrUnix path)
     setFileMode path (fromInteger mode)
     NS.listen sock 64
-    runSettingsSocket (setTimeout 20 defaultSettings) sock app
+    action sock
 securityBoundary :: Application -> IO Application
 securityBoundary app = do
   active <- newTVarIO (0::Int)
