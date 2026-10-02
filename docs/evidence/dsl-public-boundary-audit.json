@@ -1,0 +1,14 @@
+{
+  "compiler": "GHC 9.14.1",
+  "scope": "External consumer of current compiled public library",
+  "checks": {
+    "public_safe_plan": "accepted",
+    "worker_constructor_hidden": "rejected",
+    "internal_module_hidden": "rejected",
+    "critical_evaluator_hidden": "rejected",
+    "customer_cannot_be_safe": "rejected",
+    "no_arbitrary_io_node": "rejected"
+  },
+  "completeSecurityAudit": false,
+  "linuxArtifactsUpdated": false
+}

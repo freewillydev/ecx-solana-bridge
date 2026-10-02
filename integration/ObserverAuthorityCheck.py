@@ -2,7 +2,8 @@
 """Observer DSL authority over the actual Unix API; no wallets/signers invoked.
 
 Provide a real Signet/Devnet or betanet/Devnet config and a compiled binary.
-PG* must identify a private maintenance database role with CREATEDB permission.
+PG* must identify a private maintenance role with CREATEDB/CREATEROLE permission.
+Reader login must be supported by this acceptance cluster (e.g. local trust).
 The source ledger/config stay unchanged; only a disposable database is used.
 """
 import os,json,subprocess,tempfile,time,secrets,argparse,uuid
@@ -20,8 +21,15 @@ def run(*command,**kw):
     except (subprocess.SubprocessError,OSError):raise SystemExit('Observer contract subprocess failed: '+Path(command[0]).name)
 run('createdb',env['PGDATABASE'])
 process=None
+reader='ecx_observer_read_'+uuid.uuid4().hex
+reader_created=False
 try:
     run('psql','-Xq','-v','ON_ERROR_STOP=1','-f',str(root/'migrations/postgresql/001.sql'))
+    run('psql','-Xq','-v','ON_ERROR_STOP=1','-c','CREATE ROLE '+reader+' LOGIN')
+    reader_created=True
+    run('psql','-Xq','-v','ON_ERROR_STOP=1','-c','GRANT USAGE ON SCHEMA public TO '+reader+'; GRANT SELECT ON ALL TABLES IN SCHEMA public TO '+reader+'; GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO '+reader)
+    env['PGREADUSER']=reader
+    env.pop('PGREADPASSWORD',None)
     with tempfile.TemporaryDirectory(prefix='ecx-observer-') as folder:
         directory=Path(folder)
         c=json.loads(Path(args.config).read_text())
@@ -59,7 +67,7 @@ try:
             assert all(v=={'error':'payment_worker_required'} for v in refused.values()),refused
             result=json.loads(run('psql','-XqAt','-c',"SELECT json_build_object('orders',(SELECT count(*) FROM orders),'attempts',(SELECT count(*) FROM attempts),'criticalSequence',(SELECT critical_sequence FROM deployment));").stdout)
             assert result=={'orders':0,'attempts':0,'criticalSequence':0}
-            report={'actualProfile':c['profile'],'canonicalOperationEnabled':False,'observationOnlyAvailabilityPassed':True,'orderCreationRefused':True,'resumeRefused':True,'signatureRefused':True,'broadcastRefused':True,'refundRefused':True,'coveredSourceApprovalRefused':True,'nativeRebroadcastRefused':True,'treasuryAllocationRefused':True,'orders':0,'attempts':0,'criticalSequence':0,'walletsModified':False,'roundTripVerified':False}
+            report={'actualProfile':c['profile'],'canonicalOperationEnabled':False,'observationOnlyAvailabilityPassed':True,'orderCreationRefused':True,'resumeRefused':True,'signatureRefused':True,'broadcastRefused':True,'refundRefused':True,'coveredSourceApprovalRefused':True,'nativeRebroadcastRefused':True,'treasuryAllocationRefused':True,'orders':0,'attempts':0,'criticalSequence':0,'restrictedReaderIdentityValidated':True,'walletsModified':False,'roundTripVerified':False}
             print(json.dumps(report))
             if args.report:Path(args.report).write_text(json.dumps(report,indent=2)+'\n')
 finally:
@@ -68,3 +76,4 @@ finally:
         try:process.wait(timeout=5)
         except subprocess.TimeoutExpired:process.kill();process.wait()
     run('dropdb',env['PGDATABASE'])
+    if reader_created:run('psql','-d','postgres','-Xq','-v','ON_ERROR_STOP=1','-c','DROP ROLE '+reader)

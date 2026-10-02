@@ -1705,3 +1705,28 @@ The existing signed private Linux review pair predates this fix; rebuild it once
 the related authorization audit is complete, rather than repeating both builds
 for each audit finding. This is a bounded finding/repair, not a complete security
 audit or external review.
+
+### Bounded DSL/public API authorization acceptance
+
+The current compiled public library accepts a normal safe plan, while actual GHC
+consumer probes reject importing worker constructors, importing the hidden DSL
+module, importing the critical evaluator, treating customer operations as safe,
+and lifting arbitrary IO into a plan. Current Servant handlers construct closed
+plans; the runtime retains one critical evaluator invocation behind its gate.
+These probes cover the public module/type boundary, not hostile code already
+running inside the bridge process or a complete security review.
+
+The existing observer-authority acceptance now provisions a separate temporary
+restricted reader for its disposable PostgreSQL database. Against the compiled
+runtime and actual Signet/Devnet configuration, customer reads passed and creation,
+resume, signature/broadcast, refund, covered-source approval, native rebroadcast
+and treasury allocation were refused in observation mode. Orders, attempts and
+critical sequence stayed zero. The test process, database and reader role were
+cleaned up. A cleanup connection initially targeted the already dropped database;
+the harness now explicitly uses the maintenance database, and the test reran to
+successful completion after removing that retained temporary role.
+
+See `evidence/dsl-public-boundary-audit.json` and
+`evidence/observer-separated-reader-authority.json`. The authorization source
+batch is verified locally; the signed Linux review pair still predates it and
+needs one consolidated rebuild/installed acceptance after related audit changes.
