@@ -1,0 +1,774 @@
+{
+  "allConfiguredSourcesScanned": true,
+  "bootPackagesNotScanned": {
+    "array": "0.5.8.0",
+    "base": "4.22.0.0",
+    "binary": "0.8.9.3",
+    "bytestring": "0.12.2.0",
+    "containers": "0.8",
+    "deepseq": "1.5.1.0",
+    "directory": "1.3.10.0",
+    "exceptions": "0.10.11",
+    "file-io": "0.1.5",
+    "filepath": "1.5.4.0",
+    "ghc-bignum": "1.4",
+    "ghc-boot-th": "9.14.1",
+    "ghc-internal": "9.1401.0",
+    "ghc-prim": "0.13.1",
+    "integer-gmp": "1.1",
+    "mtl": "2.3.1",
+    "os-string": "2.0.8",
+    "parsec": "3.1.18.0",
+    "pretty": "1.1.3.6",
+    "process": "1.6.26.1",
+    "rts": "1.0.3",
+    "stm": "2.5.3.1",
+    "template-haskell": "2.24.0.0",
+    "text": "2.1.3",
+    "time": "1.15",
+    "transformers": "0.6.1.2",
+    "unix": "2.8.8.0"
+  },
+  "buildPlanSha256": "030b8305a65c9a58ad61eb7e53d3b3274e273f1852e72509ce20279990693a61",
+  "buildPlanVersionsMatchFreeze": true,
+  "configuredPackages": 164,
+  "freezeSha256": "b7e2883e2d33a828225610ea369d0a6a2bf62f0af653fe7e534cc645b1e1acaa",
+  "ghcSourceInventory": {
+    "compiledBootUnitReachabilityProven": false,
+    "references": [
+      {
+        "file": "ghc-9.14.1/libraries/ghc-internal/src/GHC/Internal/Numeric.hs",
+        "line": 55
+      },
+      {
+        "file": "ghc-9.14.1/libraries/ghc-internal/src/GHC/Internal/Numeric.hs",
+        "line": 128
+      },
+      {
+        "file": "ghc-9.14.1/libraries/ghc-internal/src/GHC/Internal/Numeric.hs",
+        "line": 129
+      },
+      {
+        "file": "ghc-9.14.1/libraries/ghc-internal/src/GHC/Internal/Numeric.hs",
+        "line": 135
+      },
+      {
+        "file": "ghc-9.14.1/libraries/ghc-internal/src/GHC/Internal/Text/Read/Lex.hs",
+        "line": 22
+      },
+      {
+        "file": "ghc-9.14.1/libraries/ghc-internal/src/GHC/Internal/Text/Read/Lex.hs",
+        "line": 145
+      },
+      {
+        "file": "ghc-9.14.1/libraries/ghc-internal/src/GHC/Internal/Text/Read/Lex.hs",
+        "line": 146
+      },
+      {
+        "file": "ghc-9.14.1/libraries/ghc-internal/src/GHC/Internal/Text/Read/Lex.hs",
+        "line": 149
+      },
+      {
+        "file": "ghc-9.14.1/libraries/ghc-internal/src/GHC/Internal/Text/Read/Lex.hs",
+        "line": 150
+      },
+      {
+        "file": "ghc-9.14.1/libraries/ghc-internal/src/GHC/Internal/Text/Read/Lex.hs",
+        "line": 151
+      },
+      {
+        "file": "ghc-9.14.1/libraries/base/tests/read-float-double.hs",
+        "line": 10
+      },
+      {
+        "file": "ghc-9.14.1/libraries/base/tests/read-float-double.hs",
+        "line": 17
+      },
+      {
+        "file": "ghc-9.14.1/libraries/base/tests/read-float-double.hs",
+        "line": 18
+      },
+      {
+        "file": "ghc-9.14.1/libraries/base/tests/read-float-double.hs",
+        "line": 19
+      },
+      {
+        "file": "ghc-9.14.1/libraries/base/tests/read-float-double.hs",
+        "line": 20
+      },
+      {
+        "file": "ghc-9.14.1/libraries/base/src/Numeric.hs",
+        "line": 43
+      },
+      {
+        "file": "ghc-9.14.1/libraries/base/src/Text/Read/Lex.hs",
+        "line": 21
+      }
+    ],
+    "sha256": "2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77",
+    "sourceFiles": 3862,
+    "url": "https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz"
+  },
+  "missingPackages": [],
+  "reachabilityProven": false,
+  "references": [],
+  "verifiedPackages": {
+    "HUnit-1.6.2.0": {
+      "sha256": "b0b7538871ffc058486fc00740886d2f3172f8fa6869936bfe83a5e10bd744ab",
+      "sourceFiles": 11
+    },
+    "OneTuple-0.4.3": {
+      "sha256": "643d1f48e63480ac6d03a8f0ab5976d66527c9b42b1fca81d1bf373d10099c6b",
+      "sourceFiles": 6
+    },
+    "Only-0.1": {
+      "sha256": "ab7aa193e8c257d3bda6b0b3c1cbcf74cdaa85ab08cb20c2dd62ba248c1ab265",
+      "sourceFiles": 2
+    },
+    "QuickCheck-2.18.0.0": {
+      "sha256": "fd8462ad3b1c3bb90465ec581356cf5214673c1015d73f28f2e7a3df179bbc55",
+      "sourceFiles": 39
+    },
+    "StateVar-1.2.2": {
+      "sha256": "5e4b39da395656a59827b0280508aafdc70335798b50e5d6fd52596026251825",
+      "sourceFiles": 2
+    },
+    "adjunctions-4.4.4": {
+      "sha256": "21408d9bd3c74331b557ce86281e592f56466e19d2a7e3f37e4065203a663145",
+      "sourceFiles": 15
+    },
+    "aeson-2.3.2.0": {
+      "sha256": "c30d187d60fb81b0f93f72442ee6b1abd2709fc3b5e3befcf4173f6b30983458",
+      "sourceFiles": 76
+    },
+    "ansi-terminal-1.1.5": {
+      "sha256": "9cf083cef2e2ba88a425f132c8a82bfa931eb4b0c38232b2017f8fcea2e23073",
+      "sourceFiles": 11
+    },
+    "ansi-terminal-types-1.1.3": {
+      "sha256": "9fc9ce2157f1889bd99a4d22c9f1c64589590be0f797c3efe71c8fa17a11a689",
+      "sourceFiles": 2
+    },
+    "appar-0.1.8": {
+      "sha256": "c4ceeddc26525b58d82c41b6d3e32141371a200a6794aae185b6266ccc81631f",
+      "sourceFiles": 6
+    },
+    "assoc-1.1.1": {
+      "sha256": "231149b7fef09f5dd95af51228615e3b296dbd0faadeca053e0644a4b13b0ff6",
+      "sourceFiles": 2
+    },
+    "async-2.2.6": {
+      "sha256": "148571bc188003101241da6c49131d07324e63a88ed283a84def2e9694599619",
+      "sourceFiles": 9
+    },
+    "attoparsec-0.14.4": {
+      "sha256": "3f337fe58624565de12426f607c23e60c7b09c86b4e3adfc827ca188c9979e6c",
+      "sourceFiles": 52
+    },
+    "auto-update-0.2.7": {
+      "sha256": "bdc1cec3400e87801d2d9c961a857fbea1932d1f74cc3358dbae3cc9faf1f0fe",
+      "sourceFiles": 14
+    },
+    "base-compat-0.15.0": {
+      "sha256": "59aa49d7779a20a808924690583653c2bdfb0e54b5162df80df5a81632824531",
+      "sourceFiles": 131
+    },
+    "base-orphans-0.9.4": {
+      "sha256": "08cc283a31350f7bd28b2a5d31af693ee337f2593d3e7222999b72dd4954c72b",
+      "sourceFiles": 15
+    },
+    "base16-1.0": {
+      "sha256": "86366364910b78609677817cf3f987bf1690e1f75bba04bc91a5ed993d619cde",
+      "sourceFiles": 16
+    },
+    "base16-bytestring-1.0.2.0": {
+      "sha256": "1d5a91143ef0e22157536093ec8e59d226a68220ec89378d5dcaeea86472c784",
+      "sourceFiles": 6
+    },
+    "base58-bytestring-0.1.0": {
+      "sha256": "c2dbf598f3415053e12cca84b90fa7c0c1b02f3b784cce0157264baebf2d40d3",
+      "sourceFiles": 5
+    },
+    "base64-1.0": {
+      "sha256": "7942239f1804945fd6d319a953f26c53b64518076cd294141fda983f2ff1b2b6",
+      "sourceFiles": 26
+    },
+    "base64-bytestring-1.2.1.0": {
+      "sha256": "fbf8ed30edde271eb605352021431d8f1b055f95a56af31fe2eacf6bdfdc49c9",
+      "sourceFiles": 9
+    },
+    "bifunctors-5.6.3": {
+      "sha256": "ad7a357f022f4c780c505040d73f1c06a4fd697b4a0bab6123bbd73b55d8115c",
+      "sourceFiles": 19
+    },
+    "blaze-builder-0.4.4.1": {
+      "sha256": "971d360428ac97af9a4e55e4f2c23649f6cedc0ce5d6e94d520e663f33ea5113",
+      "sourceFiles": 38
+    },
+    "blaze-html-0.9.2.0": {
+      "sha256": "65542ef39f7644a3d76afcadeb976d3e334c6947516b7313fcb59165cea1608f",
+      "sourceFiles": 28
+    },
+    "blaze-markup-0.8.3.0": {
+      "sha256": "8606ac8b4a1f7f8f1bbc0770b2752e9b6f88ccc9fbdcbb33aa20577d0e5930e8",
+      "sourceFiles": 10
+    },
+    "blaze-textual-0.2.3.1": {
+      "sha256": "dd2acac978433e4001302190e530829707203febbc664966c3d347ecac5717b2",
+      "sourceFiles": 6
+    },
+    "boring-0.2.2.1": {
+      "sha256": "a96edc1d8a782ca888068a9bc971452dc7fbed03b90e5e0d71bd733c5684e62d",
+      "sourceFiles": 1
+    },
+    "bsb-http-chunked-0.0.0.4": {
+      "sha256": "148309e23eb8b261c1de374712372d62d8c8dc8ee504c392809c7ec33c0a0e7c",
+      "sourceFiles": 5
+    },
+    "byteorder-1.0.4": {
+      "sha256": "bd20bbb586947f99c38a4c93d9d0266f49f6fc581767b51ba568f6d5d52d2919",
+      "sourceFiles": 2
+    },
+    "call-stack-0.4.0": {
+      "sha256": "430bcf8a3404f7e55319573c0b807b1356946f0c8f289bb3d9afb279c636b87b",
+      "sourceFiles": 7
+    },
+    "case-insensitive-1.2.1.0": {
+      "sha256": "296dc17e0c5f3dfb3d82ced83e4c9c44c338ecde749b278b6eae512f1d04e406",
+      "sourceFiles": 7
+    },
+    "cborg-0.2.10.0": {
+      "sha256": "17fe070c38fc498cab49bcb9d6215b7747d53bedf96502e9bcce9cad73b9c797",
+      "sourceFiles": 32
+    },
+    "cereal-0.5.8.3": {
+      "sha256": "99905220661b26e5bd91130bd9772554938608a5b1d717240a6eb331121e0f6a",
+      "sourceFiles": 8
+    },
+    "character-ps-0.1": {
+      "sha256": "22de71fde38b236d3e9168a832b5e1e75d1fb4f4028667bdf747b3b4c8c1529c",
+      "sourceFiles": 4
+    },
+    "colour-2.3.7": {
+      "sha256": "1f3b1055675abe4e3362800cc9bf7ab9b92dfdf21a1f6c82b252611270be9680",
+      "sourceFiles": 17
+    },
+    "comonad-5.0.10": {
+      "sha256": "e9739df2bf5944958062a4ea73bde3bf35c0879cee0944edf7f05bebf993f9c1",
+      "sourceFiles": 17
+    },
+    "constraints-0.14.4": {
+      "sha256": "808021e217c39eb4aaa76cf85abf43f4e5bf4396143d86bb2275068dd8bb6d39",
+      "sourceFiles": 12
+    },
+    "contravariant-1.5.6": {
+      "sha256": "65f3260354ee5fd1f2c7ffc54cff99d22b794c254f053734979ad37820e6efe3",
+      "sourceFiles": 5
+    },
+    "cookie-0.5.1": {
+      "sha256": "1adde62726e3a3bbe147c02514fe0c4f5f2c5a2ff63842deac10c451a2a6f7a0",
+      "sourceFiles": 2
+    },
+    "cryptohash-md5-0.11.101.0": {
+      "sha256": "3b08db0ae39df2b44e83053ad30d7546a4c6200a852c22a240a7e03ae1080f05",
+      "sourceFiles": 7
+    },
+    "crypton-1.1.5": {
+      "sha256": "bcff846a537429eaa3d64c1ea888c2dfb24805cb3ad9ce6c57b1ae0f39462394",
+      "sourceFiles": 294
+    },
+    "crypton-asn1-encoding-0.10.0": {
+      "sha256": "49813a0ee253f628cb8102dd6857905609b52e490c73c554d7cdf0cbce2926d2",
+      "sourceFiles": 12
+    },
+    "crypton-asn1-parse-0.10.0": {
+      "sha256": "35c0f278d8fcb720b4ad89c2a7f256f7fb098b9f71a0aeb493a4c3c0fe7728d9",
+      "sourceFiles": 2
+    },
+    "crypton-asn1-types-0.4.1": {
+      "sha256": "61efc63877a0d3ddb992a793839d9427c1597e095a6e1f63c04e05fd3e4e302d",
+      "sourceFiles": 8
+    },
+    "crypton-connection-0.4.6": {
+      "sha256": "d686b7855817ea8c4bc8def79b78bc24aef725973e82a8afd109d528c9c54034",
+      "sourceFiles": 4
+    },
+    "crypton-pem-0.3.0": {
+      "sha256": "1fadab8cba74c6acd74873f06415b4a2a7c84b16b43425217a7beb0ec5830540",
+      "sourceFiles": 6
+    },
+    "crypton-socks-0.6.2": {
+      "sha256": "a836087e5c277413c79e6d94a7bf346bfb61eaffb2f55555875c76dfeca69f3b",
+      "sourceFiles": 9
+    },
+    "crypton-x509-1.9.1": {
+      "sha256": "55260290338272562b7b1452002e1ad0d9b6b92fb31dc25f6115f5d2da3cbc0e",
+      "sourceFiles": 16
+    },
+    "crypton-x509-store-1.9.0": {
+      "sha256": "de9193403c11d1fb090083382646be6f6cf68ed984f475d1a0e142f77efb8766",
+      "sourceFiles": 5
+    },
+    "crypton-x509-system-1.9.0": {
+      "sha256": "89ee819b78963a5c925fdaad80e2e64be6c0fedf4f24fc2b95eddb649b86cefe",
+      "sourceFiles": 6
+    },
+    "crypton-x509-validation-1.9.1": {
+      "sha256": "8fcb83401114c7f694d84c543e8f7f96cea60c543a30a770903741d336eece3d",
+      "sourceFiles": 8
+    },
+    "data-default-0.8.0.2": {
+      "sha256": "fa7d5de70ccef7381a7f17cd64948de1c24b620de13e1cd55c36c26949870799",
+      "sourceFiles": 4
+    },
+    "data-default-class-0.2.0.0": {
+      "sha256": "0ae530c4fb0bd6c8a8ba399429ccd9c75f9c7696049117178f4ceeb2bd08d5b4",
+      "sourceFiles": 2
+    },
+    "data-fix-0.3.4": {
+      "sha256": "8df052d18c047ab9e9200536a8799b5af3997ebecbbb091a7384b6be8416ab37",
+      "sourceFiles": 2
+    },
+    "dec-0.0.6": {
+      "sha256": "fb153694d1c7f8b271b20c4394b05f6d66d0211df78c3649dced878567b27f2d",
+      "sourceFiles": 1
+    },
+    "direct-sqlite-2.3.29": {
+      "sha256": "5f2ace38a7a926363fe72b1ad882764d68333bba88709c0f8f036d26c9b4d0af",
+      "sourceFiles": 9
+    },
+    "distributive-0.6.3": {
+      "sha256": "aeeb028a23db9f9b073e24a6bd766b79b9d58c2b407b06bf33296c27e9264baa",
+      "sourceFiles": 5
+    },
+    "dlist-1.0": {
+      "sha256": "173d637328bb173fcc365f30d29ff4a94292a1e0e5558aeb3dfc11de81510115",
+      "sourceFiles": 12
+    },
+    "easy-file-0.2.5": {
+      "sha256": "ee0fa0914b3bb3662838a689d7cd23a2785ccbc29def366664f994bc524ff2bb",
+      "sourceFiles": 6
+    },
+    "ech-config-0.0.1": {
+      "sha256": "b236b6d7ea1385c280b76051edc7d8f6db31c9cb7b35df5c06f5a0bd75b4feba",
+      "sourceFiles": 2
+    },
+    "fast-logger-3.2.7": {
+      "sha256": "2a344d9a783c90919a71c6c089f98800904e651fdef6e2c3b57af830f2af6bf2",
+      "sourceFiles": 16
+    },
+    "file-embed-0.0.16.0": {
+      "sha256": "5f18672eff936355557cdd163905451205d7ee22742edac313dd27cf42a3f415",
+      "sourceFiles": 3
+    },
+    "filelock-0.1.1.9": {
+      "sha256": "243248730399e383a10c276c476db8c735591716e0f6f34ca6120cb3a255eae7",
+      "sourceFiles": 6
+    },
+    "free-5.2": {
+      "sha256": "72867f7c89173263765736e8d395e94291f1aaea626ecb1d673d72ce90b94f89",
+      "sourceFiles": 27
+    },
+    "generics-sop-0.5.1.4": {
+      "sha256": "616a1c2176097469f9514e76d979fffdbc12d569f44fd01deb14377c7888797e",
+      "sourceFiles": 21
+    },
+    "half-0.3.3": {
+      "sha256": "f476049628d6ff79722fb073c01e85f2a11b2ef3835fdc3fc21a61f05d17ab02",
+      "sourceFiles": 3
+    },
+    "hashable-1.5.1.0": {
+      "sha256": "ed0b7c10ce92c9ffe45420dadc38c6d39db486ff3633ff13567cc9f75f79b112",
+      "sourceFiles": 20
+    },
+    "haskell-lexer-1.2.1": {
+      "sha256": "9d76e1528106b1b32e6e465264e39381ca4b450b72a4b5331e7e5127640a1a41",
+      "sourceFiles": 7
+    },
+    "hpke-0.1.0": {
+      "sha256": "1a00e05c344b17f7d2b28ae19576c2aec348d71c995583f8588264a59dc87fa2",
+      "sourceFiles": 20
+    },
+    "hsc2hs-0.68.10": {
+      "sha256": "6f4e34d788fe2ca7091ee0a10307ee8a7c060a1ba890f2bffad16a7d4d5cef76",
+      "sourceFiles": 15
+    },
+    "hspec-2.11.17": {
+      "sha256": "39e4c8c3bb2be08a4c61747ddff0365c6a07efc6185b3a80a7b88fbb6bec9756",
+      "sourceFiles": 6
+    },
+    "hspec-core-2.11.17": {
+      "sha256": "84b5176a525cb0df98070440201220814517b5d51e6fd15a52c0bc79da3b8a85",
+      "sourceFiles": 86
+    },
+    "hspec-discover-2.11.17": {
+      "sha256": "356c9d8df78df3033348be617ddf408914a41dd87c12b5ed787b0480face4652",
+      "sourceFiles": 10
+    },
+    "hspec-expectations-0.8.4": {
+      "sha256": "7b8dde7e230ecfda90c95fd80478b244a45e68602fb3dd4a76f4710619be21ff",
+      "sourceFiles": 9
+    },
+    "http-api-data-0.7": {
+      "sha256": "09460678340e65cc9fe27d3018395a0ee14c64ea65486322b8f5dd2d995b818e",
+      "sourceFiles": 9
+    },
+    "http-client-0.7.19": {
+      "sha256": "a02c1be082e8f48c959ac7150a48a405f8d4383e0942639481e84b220f29ad61",
+      "sourceFiles": 31
+    },
+    "http-client-tls-0.4.0": {
+      "sha256": "611cf14cf046657bb1788a4dac09710b4b104c037d42b189148c02e6dd84ae3c",
+      "sourceFiles": 4
+    },
+    "http-date-0.0.11": {
+      "sha256": "32f923ac1ad9bdfeadce7c52a03c9ba6225ba60dc14137cb1cdf32ea84ccf4d3",
+      "sourceFiles": 10
+    },
+    "http-media-0.8.1.1": {
+      "sha256": "1920adf31b15d167f60374fbfd0a53a1fbe7820fd7fd459beacf6eb00d03f183",
+      "sourceFiles": 26
+    },
+    "http-semantics-0.4.1": {
+      "sha256": "a02df11df8d5eabad028ce4c2d1efa889ae68e556dba94b0d13a7501797453db",
+      "sourceFiles": 14
+    },
+    "http-types-0.12.6": {
+      "sha256": "b688042acb4e53f1f5efed26056cf1fdc3ae5dc6b85cfbe321edffc3079c106c",
+      "sourceFiles": 15
+    },
+    "http2-5.4.4": {
+      "sha256": "72a7c5294538002e324bc34c535e4dbc684db6d67fd42265258ffa165b791dde",
+      "sourceFiles": 81
+    },
+    "indexed-traversable-0.1.5": {
+      "sha256": "6423597d3528ac66c54beaab9f5408429c0a29b8cb98c45a1645f255aef7fef0",
+      "sourceFiles": 7
+    },
+    "indexed-traversable-instances-0.1.2.1": {
+      "sha256": "e69d41f23a95463c2e03aee03374a4f489c72f7bf235be251499c4cca9411fec",
+      "sourceFiles": 3
+    },
+    "integer-conversion-0.1.1": {
+      "sha256": "c18164a048073310f6353ebc64c9037b52a4b8299963ce05e027bcf60e22155a",
+      "sourceFiles": 5
+    },
+    "integer-logarithms-1.0.5": {
+      "sha256": "66dff6f1f778fe1ec689139fe125cd4e6a95643734c651c891eafa2c50669459",
+      "sourceFiles": 9
+    },
+    "invariant-0.6.5": {
+      "sha256": "626bdec7c925fb0f15896dcc776992cb00a5fcf99211528c13e7535e72396e3a",
+      "sourceFiles": 7
+    },
+    "iproute-1.7.15": {
+      "sha256": "18a331a7e0e6f9dc89a2da95577b0d76bd2690b8f832b72b46d6cc9b667b4ba5",
+      "sourceFiles": 14
+    },
+    "kan-extensions-5.2.8": {
+      "sha256": "f76daa44a80d423c849d5fb552e2a20b1e2f47b638c889a34cb1a5bd1ab08d21",
+      "sourceFiles": 14
+    },
+    "mime-types-0.1.2.2": {
+      "sha256": "e56e474778d72c387039d3514b52a9af3485f4abe31e62096f381485af494940",
+      "sourceFiles": 2
+    },
+    "mlkem-0.2.3.0": {
+      "sha256": "bb6b24fcf337d0480a64c8b5152d97ecf2820872824d792ab46a9fb45acb0829",
+      "sourceFiles": 28
+    },
+    "mmorph-1.2.2": {
+      "sha256": "dd6f2d2b3b6776544fc6fefe914c9ba4016ca911755383ec639d6ede417b9faf",
+      "sourceFiles": 3
+    },
+    "monad-control-1.0.3.1": {
+      "sha256": "ae0baea04d99375ef788140367179994a7178d400a8ce0d9026846546772713c",
+      "sourceFiles": 1
+    },
+    "network-3.2.9.0": {
+      "sha256": "a3e1d8bdd58c67fe4bf21f2feb41b5041b8926f3d5779f80614944b7c3075bb5",
+      "sourceFiles": 48
+    },
+    "network-byte-order-0.1.8": {
+      "sha256": "529766816e9e3fdb82fe1b147f8499ef482c30d15330d72088d8216ef640e741",
+      "sourceFiles": 2
+    },
+    "network-control-0.1.7": {
+      "sha256": "05d40d381e5c72beefb209b7e82877b457fbca2880e60ed849bad480b6795b10",
+      "sourceFiles": 7
+    },
+    "network-uri-2.6.4.2": {
+      "sha256": "9c188973126e893250b881f20e8811dca06c223c23402b06f7a1f2e995797228",
+      "sourceFiles": 6
+    },
+    "old-locale-1.0.0.7": {
+      "sha256": "dbaf8bf6b888fb98845705079296a23c3f40ee2f449df7312f7f7f1de18d7b50",
+      "sourceFiles": 2
+    },
+    "opaleye-0.10.8.0": {
+      "sha256": "f9be887c7c10c35b25faf3e8f5144b574b071f507f40b3696b700aa1e16ea7fb",
+      "sourceFiles": 81
+    },
+    "optparse-applicative-0.19.0.0": {
+      "sha256": "cf16aeefd821730c7738447fa7c6b7ada7ca1c9cc25400d64ef283294d345871",
+      "sourceFiles": 31
+    },
+    "postgresql-libpq-0.11.0.0": {
+      "sha256": "034ab1208fe6bb33009b3c7c75a06dfea5b306e289a013fff2e2e450d63ed2a3",
+      "sourceFiles": 11
+    },
+    "postgresql-libpq-configure-0.11": {
+      "sha256": "8d4fe34b5475dd0c8339b5c05506111a10214ea18a10cd366e5440eaac95b2d8",
+      "sourceFiles": 1
+    },
+    "postgresql-simple-0.7.0.1": {
+      "sha256": "597cf320650318d6033ee538b19eb28e43f02b88590baae7272bc21275f3ab99",
+      "sourceFiles": 44
+    },
+    "prettyprinter-1.7.2": {
+      "sha256": "f04eb6fd865512ad8672da1e8bfcea1c384509fc2f662c41b7ac39d7898706ee",
+      "sourceFiles": 42
+    },
+    "prettyprinter-ansi-terminal-1.1.4": {
+      "sha256": "912cd340d5c2583111e2eaeb9aa03b87551ca2e3dd78bbfd346756b9f1e6c9fe",
+      "sourceFiles": 12
+    },
+    "primitive-0.9.1.0": {
+      "sha256": "44b4de41813c7bc5db8a57f87c3612a069b65086946268ba165097252ebd3d76",
+      "sourceFiles": 23
+    },
+    "product-profunctors-0.11.1.1": {
+      "sha256": "3fbe8621294d0431a0a1ab72e358ddd563bc228580b4831104e347f2a5bb1cda",
+      "sourceFiles": 19
+    },
+    "profunctors-5.6.3": {
+      "sha256": "b9c6f427368d2e811e4c48b59005218672458fd2f00a02cbefb8be9c751c0ef3",
+      "sourceFiles": 17
+    },
+    "psqueues-0.2.8.3": {
+      "sha256": "10bcbe9aeb3ca00d72e86d940cf91b021b83f908885375120d4d51d0240ad076",
+      "sourceFiles": 22
+    },
+    "quickcheck-io-0.2.0": {
+      "sha256": "fb779119d79fe08ff4d502fb6869a70c9a8d5fd8ae0959f605c3c937efd96422",
+      "sourceFiles": 2
+    },
+    "ram-0.22.1": {
+      "sha256": "72474962349dd101b970cc46bcc06c799f7311d228e7b59f1a44f81427159f70",
+      "sourceFiles": 32
+    },
+    "random-1.3.1": {
+      "sha256": "d840ac83f265b0cfa2a678f8ec78627eb50cf9be2f067c52c8a4239c29b71a35",
+      "sourceFiles": 23
+    },
+    "recv-0.1.2": {
+      "sha256": "4a1d9923646619911d7f5e162ef01be88de981c122e31e4d733df56f319e9aa5",
+      "sourceFiles": 6
+    },
+    "resourcet-1.3.0": {
+      "sha256": "ec601785ee42a201f32adb205b8685c983f18757b1bd33d2e806d571e0f9996b",
+      "sourceFiles": 7
+    },
+    "safe-0.3.21": {
+      "sha256": "2c81fea42bbe79ec488774043c1ec54f30efba059df9a4f3681ce83d85007f01",
+      "sourceFiles": 7
+    },
+    "scientific-0.3.8.1": {
+      "sha256": "ad3781be149dfc7936e62eb9c3ad78ded0e9985b4dae16d2f62d9ba957ccdcfe",
+      "sourceFiles": 8
+    },
+    "semialign-1.4": {
+      "sha256": "0f51389e57af646042dcec2511960617bee2857231ac291228cf4ef6621a9464",
+      "sourceFiles": 6
+    },
+    "semigroupoids-6.0.2": {
+      "sha256": "e48258e49542245ef6c58d7f419a83d1d1ab91b013d92c3b5c8c7c048daaa12e",
+      "sourceFiles": 28
+    },
+    "semigroups-0.20.1": {
+      "sha256": "bf4c71224397c3777e6a79145f5c9c31d5a13f27548345e55138461d87348ffe",
+      "sourceFiles": 2
+    },
+    "serialise-0.2.6.1": {
+      "sha256": "63949799ffd10675ef70ea701c1eb63e618629b3b2f7b25f07c5a966e24e77f4",
+      "sourceFiles": 57
+    },
+    "servant-0.20.3.0": {
+      "sha256": "f273e65c8f6cc6ddfa204c8d1d0bc5b7e258cec288ca5b2a2e57fadb31bf6602",
+      "sourceFiles": 47
+    },
+    "servant-client-0.20.3.0": {
+      "sha256": "9667bc4a1aa3ca672d6322721288cbc924429582d9fd3197c8b1dab25f8fb54f",
+      "sourceFiles": 19
+    },
+    "servant-client-core-0.20.3.0": {
+      "sha256": "d653580e988407386cf6042da6a617fd2c7d5dff6149b33730d3434086eb66ef",
+      "sourceFiles": 20
+    },
+    "servant-server-0.20.3.0": {
+      "sha256": "30560af5d2597ae361711de8302617de3bfb3e01f10180ff48a331bbe8e49915",
+      "sourceFiles": 33
+    },
+    "simple-sendfile-0.2.32": {
+      "sha256": "9f28d0a67ac3d956d2dd78eb19ea922c0a9192bbbeeeead20d39f561636828a3",
+      "sourceFiles": 10
+    },
+    "singleton-bool-0.1.8": {
+      "sha256": "261bf3d2b93b519a7901266af43d7d454b65aac4ac8fb4e113c68de4db131473",
+      "sourceFiles": 2
+    },
+    "some-1.1": {
+      "sha256": "2304aa059ba4b6f3fd074a4bb69fd35af142df902ad4aa05f79e34bbd8a951bb",
+      "sourceFiles": 11
+    },
+    "sop-core-0.5.0.2": {
+      "sha256": "87bffd2254b98ded822d449fcd1c33dbd74d2ce96bf35e7a6714abc5a2297265",
+      "sourceFiles": 8
+    },
+    "splitmix-0.1.3.2": {
+      "sha256": "a61d4e8b30f5a16526d7d31171b674ae7924d2207f378060d13363bd8794de8c",
+      "sourceFiles": 6
+    },
+    "sqlite-simple-0.4.19.0": {
+      "sha256": "38727d16060909a2b65c15914ba58a68d88fe9919c547078e701e50635e9323a",
+      "sourceFiles": 27
+    },
+    "streaming-commons-0.2.3.1": {
+      "sha256": "33d16c0c6080795800d9f0e490203ea3e50bd5034e5d077a0ddc04d33ea4dc6e",
+      "sourceFiles": 25
+    },
+    "strict-0.5.1": {
+      "sha256": "77719280c2a86312e748227bfa732eeaae0e7df48d57acc3c2e5b7b07afe2f8b",
+      "sourceFiles": 8
+    },
+    "tagged-0.8.10": {
+      "sha256": "17ef791eb4caf314a3b4b158827a0f1f4b695c2a24af0875f09e3d8c10f56c5d",
+      "sourceFiles": 3
+    },
+    "tasty-1.5.4": {
+      "sha256": "c76120141bd61c4418b3ed5efc5fe3094186d47cfe12d7be552320139f52c6c7",
+      "sourceFiles": 26
+    },
+    "text-iso8601-0.1.1.2": {
+      "sha256": "ddbb13aec70a2fd54c7a25bf85e38a467d0d5599980d21f4925b3c706f8f7398",
+      "sourceFiles": 4
+    },
+    "text-short-0.1.6.1": {
+      "sha256": "83669f402354274fbcdc75126443af733267b955e451f72c0c6d86ae8da87416",
+      "sourceFiles": 6
+    },
+    "th-abstraction-0.7.2.0": {
+      "sha256": "946654bcd8ea2dff7d0058061861a8c898be9addf20c92d3cfa53b679e737622",
+      "sourceFiles": 7
+    },
+    "th-compat-0.1.7": {
+      "sha256": "9e26f12230d38ae56dcf94f8c139799dc3b7376f3434d35ce74847a0a24fd5ff",
+      "sourceFiles": 5
+    },
+    "these-1.2.1": {
+      "sha256": "17d6d933365edabf801a16842c1403bdd37cc5300faa2fcca980decdab22e4de",
+      "sourceFiles": 3
+    },
+    "time-compat-1.9.9": {
+      "sha256": "90fadded53cf9c15855eebf809e9536af8f85d00e32b82f7c8b506d2fadf7c25",
+      "sourceFiles": 59
+    },
+    "time-hourglass-0.3.0": {
+      "sha256": "9c7c7c74dda5033160328606cb3e8724201abadf9a140271c73c89a2612b9d22",
+      "sourceFiles": 22
+    },
+    "time-locale-compat-0.1.1.5": {
+      "sha256": "07ff1566de7d851423a843b2de385442319348c621d4f779b3d365ce91ac502c",
+      "sourceFiles": 2
+    },
+    "time-manager-0.3.2": {
+      "sha256": "776dec1e000a9c306b1747495776c2400591a6b51b2cd58b835cd7a429ed3619",
+      "sourceFiles": 4
+    },
+    "tls-2.4.4": {
+      "sha256": "f2d2ba9aeca038447fb49b5fe0d7a05ef31ef97bca8d9e13825b96e91361b6fc",
+      "sourceFiles": 104
+    },
+    "transformers-base-0.4.6.1": {
+      "sha256": "b43de3b3b9d658d504e8a0309356602ddc53c8dad3fdbbc3359abcb5439b41d8",
+      "sourceFiles": 2
+    },
+    "transformers-compat-0.7.2": {
+      "sha256": "b62c7304c9f3cbc9463d0739aa85cb9489f217ea092b9d625d417514fbcc9d6a",
+      "sourceFiles": 16
+    },
+    "unix-compat-0.7.4.1": {
+      "sha256": "3f9611624a100c75e672d900e63fe7a0e595615a34e6605662edaff151e44054",
+      "sourceFiles": 15
+    },
+    "unix-time-0.5.0": {
+      "sha256": "1563609b662309f8939fc9c61a672c5566ae53386999e50f9d85e705138fa85f",
+      "sourceFiles": 9
+    },
+    "unliftio-core-0.2.1.0": {
+      "sha256": "99384cba8d56d9d61b85e38a313a93ebcdb78be6566367f0930ef580597fe3e3",
+      "sourceFiles": 2
+    },
+    "unordered-containers-0.2.21": {
+      "sha256": "3b2ad1522b546e61960153257d1e5d239eeec5e83da847d5cb4d896a5bb7f9c0",
+      "sourceFiles": 25
+    },
+    "utf8-string-1.0.2": {
+      "sha256": "ee48deada7600370728c4156cb002441de770d0121ae33a68139a9ed9c19b09a",
+      "sourceFiles": 7
+    },
+    "uuid-types-1.0.6.1": {
+      "sha256": "9f00f278b9711104b6acc1404d9f0d45c1183b4987cf9c07403bebc05c0c3024",
+      "sourceFiles": 5
+    },
+    "vault-0.3.2.0": {
+      "sha256": "8ee4c8e71feb26841e667ee23e41d7a380f64c14703da93b3a4ea9164da79023",
+      "sourceFiles": 18
+    },
+    "vector-0.13.2.0": {
+      "sha256": "28f203c786cbf8ac6dc3fea3378ec36f34173d505fb4a1dd60fc8418ad91c423",
+      "sourceFiles": 58
+    },
+    "vector-stream-0.1.0.1": {
+      "sha256": "d0f507334bdea5431a2f07f525a97f29e76522c32210f5de6d5a2b4f1d42bf7c",
+      "sourceFiles": 2
+    },
+    "void-0.7.4": {
+      "sha256": "61ff790961edb34fd653e62f9f37020792f416f329b12e87549169e7f624fdf9",
+      "sourceFiles": 2
+    },
+    "wai-3.2.5": {
+      "sha256": "7add19f5371a1850f8d785db2401edb144dfb2755a7b1ac4d2337ebc771ed46a",
+      "sourceFiles": 5
+    },
+    "wai-app-static-3.2.1": {
+      "sha256": "27fb26a86b0b3849a59c4046bfdd446a28afee12b8e846c38c51f2ec67040474",
+      "sourceFiles": 15
+    },
+    "wai-extra-3.1.18": {
+      "sha256": "ee63740b8dd478b01196f8968603b1bc0ee00aa5502d17edae579abfd0f150f7",
+      "sourceFiles": 58
+    },
+    "wai-logger-2.5.0": {
+      "sha256": "5cfbd3076b1f94aca3bd2def06b136b36a22d37974f31c7732b8526ebec3e184",
+      "sourceFiles": 5
+    },
+    "warp-3.4.15": {
+      "sha256": "83540b8fc5028f321fc2bb18d34e8f94665c779189988187957015a47e9c2d41",
+      "sourceFiles": 56
+    },
+    "witherable-0.5": {
+      "sha256": "48434cc1e465b13cbc0133a90c3ec0d827c93b77ce95807fe0a38b65f4918cd1",
+      "sourceFiles": 3
+    },
+    "word8-0.1.3": {
+      "sha256": "2630934c75728bfbf390c1f0206b225507b354f68d4047b06c018a36823b5d8a",
+      "sourceFiles": 7
+    },
+    "zlib-0.7.1.1": {
+      "sha256": "bf95ab01ed924be800addea195fba5ca97ec69f378368f6ff466bdc29666c1c1",
+      "sourceFiles": 13
+    }
+  },
+  "vulnerabilityFindingWaived": false
+}

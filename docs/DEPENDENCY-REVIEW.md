@@ -40,8 +40,35 @@ The export still matches
 [HSEC-2023-0007](https://github.com/haskell/security-advisories/blob/main/advisories/published/2023/HSEC-2023-0007.md)
 against base's generic `Numeric.readFloat`; the record lists no fixed version.
 The application has no direct call to that function. Amounts use bounded integer
-units and checked decimal strings. Full transitive input-path applicability review
-remains; the package-level finding is preserved in the evidence.
+units and checked decimal strings. The October 2 source inventory verifies the
+build plan against the freeze file and scans 164 configured Hackage packages from
+archives matching the build plan's SHA-256 values. None contains a `readFloat` or
+`numberToRational` reference in its Haskell/preprocessor source files. This is a
+source inventory, not a call-graph or generated-code reachability proof.
 
-Native system-library applicability, full license obligations, independent review
-and installation of the patched Linux artifacts remain release gates.
+The separately pinned GHC 9.14.1 source archive also matches its checksum. Its
+3,862 library source files locate the generic conversion in
+`GHC.Internal.Numeric`, the rational/exponent implementation in
+`GHC.Internal.Text.Read.Lex`, public reexports and a test-local name. Manual review
+of `GHC.Internal.Read` confirms integer `Read` uses the integer conversion and
+Float/Double use the ranged conversion. This agrees with the advisory's stated
+mitigation; the unsafe generic function remains available. The 27 compiler-supplied
+boot units have not received a compiled-unit reachability proof. Preserve the
+package-level finding for independent review.
+
+The frozen Aeson 2.3.2.0 and text-iso8601 0.1.1.2 are beyond/at the respective
+fixed versions in [HSEC-2026-0007](https://github.com/haskell/security-advisories/blob/main/advisories/published/2026/HSEC-2026-0007.md).
+That distinct negative-exponent JSON finding does not match these frozen versions.
+No deliberately memory-exhausting proof-of-concept was executed.
+
+See [pinned source inventory](evidence/readfloat-source-inventory.json). Reproduce
+with `scripts/check-readfloat-sources PLAN --cache SOURCE_CACHE --report REPORT`;
+`--download` fetches missing official Hackage archives and refuses checksum
+mismatches. Optional `--ghc-source ARCHIVE` inventories the separately pinned boot
+source. These tools do not extract archives, compile, start a worker or waive a
+vulnerability. Input PLAN must correspond to the actual frozen build.
+
+Native system-library applicability, full license obligations and independent
+review remain release gates. Installation of the patched compiled artifacts is
+now verified on ARM64 and x86-64; the newer deployment-only releases retain those
+same binaries.

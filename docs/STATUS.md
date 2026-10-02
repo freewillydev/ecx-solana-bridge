@@ -1200,3 +1200,22 @@ observation-only acceptance on x86. See `evidence/installed-backup-tools-x86.jso
 The x86 installer/checksum are retained privately under
 `releases/backup-tools-515dd6e-x86`; ARM artifacts remain alongside them under
 `releases/backup-tools-515dd6e-arm`. All task VMs are stopped afterward.
+
+## Pinned transitive parser source review
+
+`scripts/check-readfloat-sources` checks Cabal build-plan versions against the
+actual freeze file, verifies every configured source archive checksum and
+inventories the generic `readFloat`/`numberToRational` references. All 164 Hackage
+source packages were present and verified; none referenced those names. A second
+inventory of the pinned GHC source scanned 3,862 library files and located the
+generic conversion, its rational implementation, public reexports and a local
+test name. Manual review confirms compiler integer parsing uses integer conversion
+and Float/Double use the ranged conversion. No memory-exhausting input was run.
+
+See `evidence/readfloat-source-inventory.json` and `DEPENDENCY-REVIEW.md`. This
+narrows the base advisory's applicability investigation without waiving it: boot
+compiled-unit/generated-code reachability and independent review remain open.
+Frozen Aeson/text-iso8601 versions are also checked against the separate official
+negative-exponent JSON advisory's fixed versions. No application dependencies,
+binaries, chain state or financial records changed. All VMs remain stopped; the
+verified source archives are cached externally for repeat review without downloads.

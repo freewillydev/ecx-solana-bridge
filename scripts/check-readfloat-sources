@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""Inventory readFloat references in hash-verified sources from a Cabal build plan.
+
+This is source-review evidence, not a proof of reachability or vulnerability absence.
+Boot libraries, generated code and binary/system dependencies need separate review.
+"""
+import argparse
+import hashlib
+import json
+from pathlib import Path
+import re
+import tarfile
+import urllib.request
+
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('plan', type=Path)
+parser.add_argument('--freeze', type=Path, default=Path(__file__).resolve().parents[1] / 'cabal.project.freeze')
+parser.add_argument('--cache', type=Path, required=True)
+parser.add_argument('--download', action='store_true', help='fetch missing pinned Hackage source archives')
+parser.add_argument('--report', type=Path, required=True)
+parser.add_argument('--ghc-source', type=Path, help='optional pinned GHC source archive for boot-library reference inventory')
+args = parser.parse_args()
+plan = json.loads(args.plan.read_text())
+packages = {}
+boot = {}
+frozen = dict(re.findall(r'any\.([A-Za-z0-9-]+)\s*==\s*([0-9.]+)', args.freeze.read_text()))
+for unit in plan['install-plan']:
+    name, version = unit['pkg-name'], unit['pkg-version']
+    if unit['type'] == 'pre-existing' or unit.get('pkg-src', {}).get('type') == 'repo-tar':
+        if frozen.get(name) != version:
+            raise ValueError('Build plan does not match frozen version: ' + name)
+    if unit['type'] == 'pre-existing':
+        boot[name] = version
+    elif unit.get('pkg-src', {}).get('type') == 'repo-tar':
+        assert re.fullmatch('[A-Za-z0-9-]+', name) and re.fullmatch('[0-9.]+', version)
+        digest = unit['pkg-src-sha256']
+        assert re.fullmatch('[0-9a-f]{64}', digest)
+        key = name + '-' + version
+        assert key not in packages or packages[key] == digest
+        packages[key] = digest
+args.cache.mkdir(parents=True, exist_ok=True)
+checked, missing, matches = {}, [], []
+for package, expected in sorted(packages.items()):
+    archive = args.cache / (package + '.tar.gz')
+    if not archive.exists() and args.download:
+        pending = archive.with_suffix('.pending')
+        try:
+            with urllib.request.urlopen('https://hackage-content.haskell.org/package/' + package + '.tar.gz', timeout=30) as source, pending.open('xb') as output:
+                size = 0
+                while chunk := source.read(65536):
+                    size += len(chunk)
+                    if size > 32*1024*1024:
+                        raise ValueError('Source archive exceeds limit')
+                    output.write(chunk)
+            with pending.open('rb') as source:
+                if hashlib.file_digest(source, 'sha256').hexdigest() != expected:
+                    raise ValueError('Source archive checksum mismatch: ' + package)
+            pending.rename(archive)
+        finally:
+            pending.unlink(missing_ok=True)
+    if not archive.exists():
+        missing.append(package)
+        continue
+    with archive.open('rb') as source:
+        if hashlib.file_digest(source, 'sha256').hexdigest() != expected:
+            raise ValueError('Source archive checksum mismatch: ' + package)
+    files = 0
+    with tarfile.open(archive) as source:
+        for member in source:
+            if not member.isfile() or not member.name.endswith(('.hs', '.lhs', '.hsc', '.chs', '.cpp', '.h')):
+                continue
+            if member.size > 16*1024*1024:
+                raise ValueError('Source member exceeds limit')
+            files += 1
+            for line, text in enumerate(source.extractfile(member).read().decode('utf-8', errors='replace').splitlines(), 1):
+                if re.search(r'\b(?:readFloat|numberToRational)\b', text):
+                    matches.append(dict(package=package, file=member.name, line=line))
+    checked[package] = dict(sha256=expected, sourceFiles=files)
+report = dict(buildPlanSha256=hashlib.sha256(args.plan.read_bytes()).hexdigest(),
+              freezeSha256=hashlib.sha256(args.freeze.read_bytes()).hexdigest(),
+              buildPlanVersionsMatchFreeze=True,
+              configuredPackages=len(packages), verifiedPackages=checked,
+              missingPackages=missing, bootPackagesNotScanned=boot, references=matches,
+              allConfiguredSourcesScanned=not missing, reachabilityProven=False,
+              vulnerabilityFindingWaived=False)
+if args.ghc_source:
+    pins = json.loads((Path(__file__).resolve().parents[1] / 'deploy/toolchains.json').read_text())
+    url, expected = pins['ghc-source']
+    if plan['compiler-id'] not in url:
+        raise ValueError('GHC source pin does not match compiler')
+    with args.ghc_source.open('rb') as source:
+        if hashlib.file_digest(source, 'sha256').hexdigest() != expected:
+            raise ValueError('GHC source checksum mismatch')
+    references, files = [], 0
+    with tarfile.open(args.ghc_source) as source:
+        for member in source:
+            if not member.isfile() or '/libraries/' not in member.name or not member.name.endswith(('.hs', '.lhs', '.hsc')):
+                continue
+            if member.size > 16*1024*1024:
+                raise ValueError('Boot source exceeds limit')
+            files += 1
+            for line, text in enumerate(source.extractfile(member).read().decode('utf-8', errors='replace').splitlines(), 1):
+                if re.search(r'\b(?:readFloat|numberToRational)\b', text):
+                    references.append(dict(file=member.name, line=line))
+    report['ghcSourceInventory'] = dict(url=url, sha256=expected, sourceFiles=files,
+                                      references=references, compiledBootUnitReachabilityProven=False)
+args.report.write_text(json.dumps(report, indent=2, sort_keys=True)+'\n')
+print(json.dumps(dict(verifiedPackages=len(checked), missingPackages=len(missing),
+                      references=matches, bootPackagesNotScanned=len(boot),
+                      reachabilityProven=False)))
+if missing:
+    raise SystemExit('Source review incomplete: missing pinned archives')
