@@ -1,12 +1,17 @@
-module Bridge.Order (OrderTransport(..), realOrderTransport) where
+module Bridge.Order (OrderTransport(..), createCustomerOrder, createCustomerOrderWith) where
 
-import Bridge.Admission
+import Bridge.Admission (checkSolanaQuoteFor)
 import Bridge.Config
 import Bridge.Native
 import Bridge.NativePayment
 import Bridge.Observer (epochSeconds)
 import Bridge.Solana
 import Bridge.Types
+import Bridge.SolanaPay (payInstruction)
+import Bridge.Postgres.Ledger (Ledger,ledgerAction)
+import Bridge.Postgres.Order
+import Bridge.Postgres.Schema (ordersId)
+import Control.Monad (when)
 import Data.Int (Int64)
 import Network.HTTP.Client (Manager)
 import Data.Text (Text)
@@ -29,8 +34,53 @@ realOrderTransport manager c backup = OrderTransport epochSeconds admission iden
     nativeWalletReadyWith (nativeCall manager c) c now
   admission request=do
     _ <- checkNativeQuote manager c request
-    _ <- checkSolanaQuote manager c request
-    pure ()
+    fee <- either reject pure (feeFor 100 $ input request)
+    netAmount <- either reject pure (amount $ toInteger(units $ input request)-toInteger(units fee))
+    _ <- solanaIdentity manager c
+    when (direction request==NativeToWrapped) $
+      checkSolanaQuoteFor manager c (Quote (input request) fee netAmount) request >> pure ()
 
 -- Every database action is short. Node calls and backup callbacks run only
 -- after their preceding durable mutation has committed and released the writer.
+
+createCustomerOrder :: Manager -> Config -> Ledger -> (Int64 -> IO ()) -> Text -> OrderRequest -> IO OrderView
+createCustomerOrder manager cfg ledger backup =
+  createCustomerOrderWith (realOrderTransport manager cfg backup) cfg ledger
+
+createCustomerOrderWith :: OrderTransport -> Config -> Ledger -> Text -> OrderRequest -> IO OrderView
+createCustomerOrderWith transport cfg ledger capability requested = do
+  previous <- findSavedOrder ledger cfg capability requested
+  now <- orderClock transport
+  expireQuotes ledger now
+  stored <- case previous of
+    Just old->pure old
+    Nothing->do
+      checkIntakeReady ledger now
+      orderAdmission transport requested
+      admitted <- orderClock transport
+      checkIntakeReady ledger admitted
+      createOrder ledger cfg admitted capability requested
+  cap <- either reject pure (capabilityHash capability)
+  let oid=ordersId stored
+  order <- ledgerAction ledger (\connection->readOrderC connection cap oid)
+  visible <- exposeOrder ledger (backupRequired cfg) capability oid
+  if depositInstruction visible/=Nothing then pure visible else do
+    orderIdentity transport
+    case depositInstruction order of
+      Just _->pure ()
+      Nothing->case direction requested of
+        NativeToWrapped->do
+          started <- orderClock transport
+          (fresh,label) <- claimNativeAllocation ledger cfg started capability oid
+          address <- recoverNativeAddressWith (orderNative transport) cfg started fresh label
+          recordNativeInstruction ledger capability oid label address
+        WrappedToNative->do
+          started <- orderClock transport
+          checkIntakeReady ledger started
+          require (started<=deadline order) "deposit_window_closed"
+          instruction <- either reject pure(payInstruction oid)
+          bindInstruction ledger oid instruction
+    coverage <- instructionBackup ledger (backupRequired cfg) capability oid
+    mapM_ (orderBackup transport) coverage
+    issued <- orderClock transport
+    issueInstruction ledger cfg issued capability oid

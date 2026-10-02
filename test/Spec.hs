@@ -24,9 +24,8 @@ import Bridge.NativePayment
 import Bridge.NativeReplacement
 import Bridge.Payment (prepareNativeWith,prepareSolanaWith,payoutReference)
 import Bridge.Settlement
-import Bridge.Deposit
 import Bridge.Admission
-import Bridge.Order
+import Bridge.Order (OrderTransport(..))
 import Bridge.Legacy.Order
 import Bridge.Process (runBounded)
 import Bridge.RPC
@@ -3588,59 +3587,6 @@ main=hspec $ do
       prepareSolanaWith (solanaContract c plan Null) helper c{maxSolDailyCost=amt 1} l ob `shouldThrow` isError "operating_daily_limit"
       pendingPreparations l `shouldReturn` []
       pendingAttempts l `shouldReturn` []
-  describe "unsigned customer deposits (SDK fixture and offline RPC contracts)" $ do
-    it "binds owner, amount and memo without a custody signature or payment intent" $ withDepositFixture $ \l c order recent reply call -> do
-      let helper r=do
-            helperPayout r `shouldBe` False
-            helperOwner r `shouldBe` refund (request order)
-            helperAmount r `shouldBe` input (request order)
-            unsignedDepositReply c r reply
-      prepared<-prepareSolanaDepositWith (pure 100) call helper c l cap (orderId order)
-      bytes<-fieldValue "transaction" prepared
-      Transaction signatures _ _<-either (fail . T.unpack) pure (decodeTransaction bytes)
-      signatures `shouldBe` [BS.replicate 64 0]
-      fieldValue "memo" prepared `shouldReturn` solanaDepositMemo c (orderId order)
-      fieldValue "lastValidBlockHeight" prepared `shouldReturn` recentLastValidHeight recent
-      pendingAttempts l `shouldReturn` []
-      readyObligations l `shouldReturn` []
-    it "refreshes a blockhash without changing the order or reserving more inventory" $ withDepositFixture $ \l c order _ reply call -> do
-      let helper = \r -> unsignedDepositReply c r reply
-          prepare rpcCall=prepareSolanaDepositWith (pure 100) rpcCall helper c l cap (orderId order)
-          nextHash=base58 $ BS.replicate 32 7
-          changed method params=if method=="getLatestBlockhash" then pure $ contextContract $ object ["blockhash" .= nextHash,"lastValidBlockHeight" .= (1000::Int)] else call method params
-      first<-prepare call
-      second<-prepare changed
-      fieldValue "transaction" first >>= \bytes -> fieldValue "transaction" second >>= \newBytes -> (bytes::Text) `shouldNotBe` newBytes
-      fieldValue "memo" first >>= \memo -> fieldValue "memo" second `shouldReturn` (memo::Text)
-      request <$> readOrder l cap (orderId order) `shouldReturn` request order
-      ledgerAction l (\db->query_ db "SELECT COUNT(*) FROM reservations" :: IO [Only Int]) `shouldReturn` [Only 1]
-    it "requires instruction backup coverage before invoking the helper" $ withDepositFixture $ \l c order _ reply call -> do
-      let noHelper _=expectationFailure "helper called before backup coverage" >> reject "unexpected"
-          prepare helper=prepareSolanaDepositWith (pure 100) call helper c{backupRequired=True} l cap (orderId order)
-      prepare noHelper `shouldThrow` isError "backup_pending"
-      sequenceRows<-ledgerAction l (\db->query_ db "SELECT critical_sequence FROM deployment" :: IO [Only Int64])
-      sequenceNumber<-case sequenceRows of [Only n]->pure n; _->fail "missing sequence"
-      acknowledgeBackup l sequenceNumber "fixture-covered-order"
-      _<-prepare (\r->unsignedDepositReply c r reply)
-      pure ()
-    it "rechecks deadline and pause state after RPC without losing the quote" $ withDepositFixture $ \l c order _ reply call -> do
-      ticks<-newIORef ([100,deadline order+1]::[Int64])
-      let clock=atomicModifyIORef' ticks (\xs->case xs of a:rest->(rest,a); _->([],deadline order+1))
-          helper = \r -> unsignedDepositReply c r reply
-      prepareSolanaDepositWith clock call helper c l cap (orderId order) `shouldThrow` isError "deposit_window_closed"
-      let stopped method params=do
-            when (method=="getFeeForMessage") $ pause l "fixture-pause-during-RPC"
-            call method params
-      prepareSolanaDepositWith (pure 100) stopped helper c l cap (orderId order) `shouldThrow` isError "deposits_paused"
-      status <$> readOrder l cap (orderId order) `shouldReturn` "AwaitingDeposit"
-    it "rejects unauthorized access and insufficient user fee funds without signing" $ withDepositFixture $ \l c order _ reply call -> do
-      let helper = \r -> unsignedDepositReply c r reply
-      prepareSolanaDepositWith (pure 100) call helper c l (T.replicate 64 "b") (orderId order) `shouldThrow` isError "order_not_found"
-      let poor method params=if method=="getMultipleAccounts" then pure $ contextContract $ toJSON
-            [tokenContract c (refund $ request order),tokenContract c (custodyOwner c),systemContract 1] else call method params
-      prepareSolanaDepositWith (pure 100) poor helper c l cap (orderId order) `shouldThrow` isError "insufficient_deposit_fee_sol"
-      available <$> readiness l `shouldReturn` True
-      pendingAttempts l `shouldReturn` []
   describe "recoverable order provisioning (offline RPC contracts)" $ do
     it "records and issues one address after admission, then reuses it while paused" $ withProvisioning $ \l c transport count -> do
       order<-createCustomerOrderWith transport c l cap req
@@ -4841,48 +4787,3 @@ codecSettlementProof c signed success=do
     ,"meta" .= object ["err" .= (if success then Null else String "offline-fixture-failure"),"fee" .= (5000::Int)
       ,"preBalances" .= balances,"postBalances" .= afterBalances
       ,"preTokenBalances" .= tokens 10 0,"postTokenBalances" .= (if success then tokens 7 3 else tokens 10 0)]]
-
-withDepositFixture :: (Ledger -> Config -> OrderView -> RecentBlockhash -> HelperReply -> SolanaRPC -> IO a) -> IO a
-withDepositFixture action=withDir $ \dir -> do
-  fixtureValue<-BS.readFile "test/fixtures/unsigned-three-units.json" >>= either fail pure . eitherDecodeStrict'
-  owner<-fieldValue "owner" fixtureValue
-  target<-fieldValue "recipient" fixtureValue
-  token<-fieldValue "mint" fixtureValue
-  hash<-fieldValue "blockhash" fixtureValue
-  reply<-fieldValue "reply" fixtureValue
-  let c=(cfg dir){deploymentId="codec-fixture",mint=token,custodyOwner=target,custodyAta=replyDestination reply}
-      recent=RecentBlockhash hash 1000 100
-      depositRequest=OrderRequest WrappedToNative (amt 3) "offline-native-recipient" owner (Just owner) "offline-deposit"
-  withLedger (dbPath c) (fingerprint c) $ \l -> do
-    fundAllocation l "fixture-native-float" Native "float" (amt 10000)
-    fundAllocation l "fixture-sol-fees" Sol "operating" (amt 3000000)
-    fundAllocation l "fixture-native-fees" Native "operating" (amt 10000)
-    resumeAfterChecks l
-    created<-createOrder l c 100 cap depositRequest
-    bindInstruction l (orderId created) (solanaDepositMemo c $ orderId created)
-    freshScans l 100
-    _<-issueInstruction l c 100 cap (orderId created)
-    order<-readOrder l cap (orderId created)
-    let call method _=case method of
-          "getLatestBlockhash"->pure $ contextContract $ object ["blockhash" .= hash,"lastValidBlockHeight" .= (1000::Int)]
-          "getBlockHeight"->pure (Number 900)
-          "getMultipleAccounts"->pure $ contextContract $ toJSON [tokenContract c owner,tokenContract c target,systemContract 1000000]
-          "getFeeForMessage"->pure $ contextContract $ Number 5000
-          _->expectationFailure ("unexpected deposit RPC: "<>T.unpack method) >> pure Null
-    action l c order recent reply call
-
-unsignedDepositReply :: Config -> HelperRequest -> HelperReply -> IO HelperReply
-unsignedDepositReply c requested old=do
-  body<-either fail pure (B64.decode $ TE.encodeUtf8 $ replyMessage old)
-  Transaction _ (Message _ _ _ keys _ _) _<-either (fail . T.unpack) pure (decodeTransaction $ replyTransaction old)
-  hash<-either (fail . T.unpack) pure (publicKey $ helperBlockhash requested)
-  let memo=helperMemo c requested
-      memoBytes=TE.encodeUtf8 memo
-      oldMemo=TE.encodeUtf8 (replyMemo old)
-      hashOffset=4+32*length keys
-      freshHash=BS.take hashOffset body<>hash<>BS.drop (hashOffset+32) body
-      message=BS.take (BS.length freshHash-BS.length oldMemo-1) freshHash<>BS.singleton (fromIntegral $ BS.length memoBytes)<>memoBytes
-  BS.length memoBytes `shouldSatisfy` (<128)
-  BS.drop (BS.length body-BS.length oldMemo) body `shouldBe` oldMemo
-  pure old{replyMemo=memo,replyMessage=TE.decodeUtf8 $ B64.encode message,replySignature=Nothing
-    ,replyTransaction=TE.decodeUtf8 $ B64.encode (BS.singleton 1<>BS.replicate 64 0<>message)}

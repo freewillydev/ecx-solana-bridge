@@ -33,7 +33,7 @@ import Control.Monad (forever,when)
 import Control.Exception (IOException,catch)
 import qualified Bridge.SolanaPay as Pay
 import Bridge.RPC (fieldValue)
-import qualified Bridge.Postgres.Provisioning as Provisioning
+import qualified Bridge.Order as OrderWorkflow
 import Bridge.Observer (epochSeconds)
 import Bridge.RPC (newRpcManager)
 import Bridge.Web (asHandler,runUnix,securityBoundary)
@@ -142,7 +142,7 @@ observationOperation = \case
 
 evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
   CustomerDSL operation->case operation of
-    CreateOrder header request->bearer header >>= \token->Provisioning.createCustomerOrder manager cfg ledger backup token request
+    CreateOrder header request->bearer header >>= \token->OrderWorkflow.createCustomerOrder manager cfg ledger backup token request
     DepositHint header oid signature->do
       token <- bearer header
       cap <- either reject pure(capabilityHash token)

@@ -5,6 +5,8 @@ import Bridge.Types hiding (deploymentFingerprint)
 import Bridge.Ledger.Model (Deposit(..))
 import Bridge.Config
 import qualified Bridge.Postgres.Order as Order
+import qualified Bridge.Order as Workflow
+import qualified Bridge.SolanaPay as Pay
 import qualified Bridge.Postgres.Observation as Observation
 import qualified Data.ByteString as BS
 import Data.Aeson (eitherDecodeStrict')
@@ -235,6 +237,21 @@ orderContracts settings = do
     require (remaining==10000) "reserved_inventory_or_fee_wrong"
 
     Order.expireQuotes ledger 100000
+    let redemption=OrderRequest WrappedToNative (quantity 100000) "native-destination" "" Nothing "connection-free"
+        transport=Workflow.OrderTransport (pure 100) (const $ pure ()) (pure ())
+          (\_ _ _->reject "unexpected_native_rpc") (\_->reject "unexpected_backup")
+    -- Exercise the production provisioning workflow without any chain IO.
+    provisioned <- Workflow.createCustomerOrderWith transport cfg ledger capability redemption
+    instruction <- either reject pure (Pay.payInstruction $ orderId provisioned)
+    require (depositInstruction provisioned==Just instruction &&
+      fee(quote provisioned)==quantity 1000 && net(quote provisioned)==quantity 99000)
+      "connection_free_redemption_binding_wrong"
+    let noEffects=transport {Workflow.orderAdmission=const $ reject "unexpected_readmission",
+                             Workflow.orderIdentity=reject "unexpected_identity_call"}
+    replay <- Workflow.createCustomerOrderWith noEffects cfg ledger capability redemption
+    require (replay==provisioned) "provisioning_replay_changed_order"
+    expect "idempotency_conflict" (Workflow.createCustomerOrderWith transport cfg ledger capability
+      redemption{recipient="changed"})
     funded <- Order.createOrder ledger cfg 100 capability request{idempotencyKey="funded"}
     partial <- Order.createOrder ledger cfg 100 capability request{idempotencyKey="partial"}
     Order.bindInstruction ledger (ordersId funded) "funded-instruction"

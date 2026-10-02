@@ -8,7 +8,6 @@ import Bridge.Config
 import Bridge.Types
 import Bridge.Settlement
 import Bridge.Reorg
-import Bridge.Deposit
 import Data.Aeson
 import Data.Int (Int64)
 import Data.Text (Text)
@@ -85,12 +84,6 @@ instance NativeSettlementStore Ledger where
     rows <- ledgerAction ledger $ \db->query db "SELECT observation_json FROM attempts WHERE txid=?" (Only txid)
     case rows of [Only saved]->pure saved; _->reject "native_settlement_missing"
   recoveryCheck = recordNativeSettlementCheck
-
-instance DepositStore Ledger where
-  depositRead = readOrder
-  depositExpose = exposeOrder
-  depositPause = pause
-  depositReadiness = readiness
 
 instance PreparationStore Ledger where
   preparationPause = pause

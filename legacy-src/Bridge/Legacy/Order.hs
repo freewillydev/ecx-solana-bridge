@@ -1,7 +1,6 @@
-module Bridge.Legacy.Order (createCustomerOrderWith) where
-import Bridge.Order
+module Bridge.Legacy.Order (createCustomerOrderWith,solanaDepositMemo) where
+import Bridge.Order (OrderTransport(..))
 import Bridge.Config
-import Bridge.Deposit (solanaDepositMemo)
 import Bridge.Ledger
 import Bridge.Native (recoverNativeAddressWith)
 import Bridge.Types
@@ -41,3 +40,7 @@ createCustomerOrderWith transport c ledger capability requested = do
     mapM_ (orderBackup transport) coverage
     issued <- orderClock transport
     issueInstruction ledger c issued capability oid
+
+-- Historical memo form used only by the remaining SQLite provisioning tests.
+solanaDepositMemo :: Config -> Text -> Text
+solanaDepositMemo c oid="ecx-bridge:v1:"<>deploymentId c<>":deposit:"<>oid
