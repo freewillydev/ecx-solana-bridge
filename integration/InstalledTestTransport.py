@@ -9,7 +9,7 @@ import subprocess
 
 
 GUEST = r'''
-import base64,http.client,json,os,socket,subprocess,sys,urllib.request,urllib.error
+import base64,http.client,json,os,re,socket,subprocess,sys,urllib.request,urllib.error
 from pathlib import Path
 request=json.load(sys.stdin)
 cfg=json.loads(Path('/etc/ecx-bridge/worker.json').read_text())
@@ -60,7 +60,10 @@ elif action=='api':
         data=request['data']
         conn.request('POST' if data is not None else 'GET',request['route'],None if data is None else json.dumps(data),headers)
         response=conn.getresponse();value=json.loads(response.read())
-        assert response.status<400,'Installed API refused '+request['route']
+        if response.status>=400:
+            code=value.get('error') if isinstance(value,dict) else None
+            code=code if isinstance(code,str) and re.fullmatch('[a-z0-9_-]{1,100}',code) else 'redacted'
+            value={'__installed_test_error':{'status':response.status,'code':code}}
     finally:conn.close()
 elif action=='financial':
     query=request['query'];assert query.startswith('SELECT json_build_object(') and query.count(';')==1
@@ -78,7 +81,7 @@ class InstalledTestTransport:
         assert re.fullmatch(r'[a-z][a-z0-9-]{0,62}', vm), 'Invalid dedicated VM name'
         self.vm = vm
         self.identity = {key: config[key] for key in (
-            'profile', 'deploymentId', 'nativeWallet', 'nativeCheckpointHeight',
+            'profile', 'deploymentId', 'nativeRpc', 'nativeCookie', 'solanaRpc', 'nativeWallet', 'nativeCheckpointHeight',
             'nativeCheckpointHash', 'mint', 'custodyOwner', 'custodyAta',
             'solanaHistoryStart', 'solanaOperatingHistoryStart')}
 
@@ -90,7 +93,11 @@ class InstalledTestTransport:
         if result.returncode:
             # Never print private capabilities, signed bytes, cookies or config.
             raise RuntimeError('Installed test action failed: ' + action)
-        return json.loads(result.stdout)
+        value = json.loads(result.stdout)
+        if isinstance(value, dict) and '__installed_test_error' in value:
+            error = value['__installed_test_error']
+            raise RuntimeError('Installed API refused: ' + str(error['status']) + ' ' + error['code'])
+        return value
 
     def preflight(self):
         return self.call('preflight')

@@ -283,9 +283,10 @@ installation. This option does not provision funds, import a ledger or authorize
 an existing signing deployment to be duplicated. On completion or timeout it
 stops the installed worker and retains the exact requests and deposits for
 reconciliation. GUI wallet signing and clean-host/key restoration remain separate
-checks. The installed paying test has not yet run; the modified local driver
-replayed the existing two real terminal orders and passed its restart comparison
-without new funding or deposits.
+checks. The installed paying test now passes both directions, actual finality and restart
+preservation on the fresh ARM64 deployment; see `evidence/installed-paying-product.json`.
+Read-only public Solana RPC calls retry bounded 429/503 failures; customer send
+operations are not retried by that transport.
 
 
 The `pg-install` fixture now retains two newly created empty native wallets and
@@ -296,3 +297,13 @@ It checks the real L2L Signet challenge, refuses unjournaled preexisting names,
 and sends no funding. The guest's existing observer installation remains intact;
 preparation is not a paying-mode activation. Preserve its original database,
 configuration and fence before switching to a distinct fresh acceptance deployment.
+
+The observer fixture was preserved before switching to a fresh funded paying
+fixture. `SwitchInstalledFixture.py`, `FundInstalledCustody.py` and
+`AllocateInstalledTreasury.py` are guarded dedicated-test orchestration, not
+general deployment or production funding commands. Their private journals retain
+exact transactions for replay. `InstalledPayingReinstallCheck.py` compares a
+paused, stopped two-terminal-order fixture across a same-release reinstall,
+including 31 durable tables, configuration hashes and the protected fence.
+The earlier local preview supervisor and its worker/web children were stopped
+after verifying its orders were terminal; recorded preview PIDs are historical.

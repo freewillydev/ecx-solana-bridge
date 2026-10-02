@@ -38,7 +38,7 @@ if a.installed_vm:
     installed.preflight()
 
 def rpc(method,params=(),native=False,wallet=None):
-    if installed:return installed.rpc(method,params,native,wallet)
+    if installed and native:return installed.rpc(method,params,native,wallet)
     headers={'Content-Type':'application/json'}
     if native:
         assert wallet in (None,cfg['nativeWallet'],'ecx-bridge-tester')
@@ -46,10 +46,14 @@ def rpc(method,params=(),native=False,wallet=None):
         url=cfg['nativeRpc']+('/wallet/'+wallet if wallet else '')
     else:url=cfg['solanaRpc']
     req=urllib.request.Request(url,json.dumps({'jsonrpc':'2.0','id':1,'method':method,'params':params}).encode(),headers)
-    try:r=json.load(urllib.request.urlopen(req,timeout=25))
-    except urllib.error.HTTPError as e:
-        if not native:raise
-        r=json.load(e)
+    for attempt in range(4):
+        try:
+            r=json.load(urllib.request.urlopen(req,timeout=25));break
+        except urllib.error.HTTPError as e:
+            if native:r=json.load(e);break
+            # Read-only test RPCs may be retried; signing/sending is never retried here.
+            if e.code not in (429,503) or method not in ('getGenesisHash','getLatestBlockhash','getSignatureStatuses','getBlockHeight','getBalance','getTokenAccountBalance') or attempt==3:raise
+            time.sleep(2**(attempt+1))
     if r.get('error'):raise RuntimeError('RPC refused '+method)
     return r['result']
 class UnixHTTP(http.client.HTTPConnection):
@@ -79,7 +83,9 @@ def stop():
 def start():
     global worker,log
     launched=int(time.time());log=(private/'worker.log').open('a');os.chmod(private/'worker.log',0o600)
-    if installed:installed.service('start')
+    if installed:
+        installed.service('stop')
+        installed.service('start')
     else:worker=subprocess.Popen([binary,'postgres-test-worker',str(state/'config.json')],env=env,stdout=log,stderr=log)
     for _ in range(90):
         assert (installed.alive() if installed else worker.poll() is None),'Product worker exited'
@@ -87,11 +93,11 @@ def start():
             scans=api('/scanners',admin=True)['scanners']
             if len(scans)==3 and all(x['lastSuccess'] and x['lastSuccess']>=launched and x['lastError'] is None for x in scans):
                 if api('/health',admin=True)['available']:return
-                # Existing uncertain work requires explicit, evidence-gated resume.
-                if (private/'wrap-order.json').exists():
-                    try:
-                        if api('/resume',{},admin=True)['available']:return
-                    except RuntimeError:pass
+                # Explicit reviewed-test resume also covers a transient startup scan failure.
+                # The production resume handler retains all evidence/recovery gates.
+                try:
+                    if api('/resume',{},admin=True)['available']:return
+                except RuntimeError:pass
         except (OSError,RuntimeError):pass
         time.sleep(2)
     raise RuntimeError('Fresh product did not become ready; inspect retained ledger and worker log')

@@ -1,0 +1,22 @@
+{
+  "compiledSource": "d8d74f1ddadb7a16fbd2db18084d2633dccaa7c9",
+  "releaseId": "d3329ec6899a48caa1ecee7f",
+  "platform": "native Ubuntu 24.04 aarch64",
+  "installerSha256": "9839444799eddfa5ce3a5890317f9dc0e5173f6cfe0c8e67e266ef602746d898",
+  "deploymentOnlyRepack": true,
+  "nonDeploymentArtifactsUnchanged": true,
+  "installerTests": 19,
+  "signerOwner": "ecx-worker",
+  "signerMode": "0600",
+  "signerPreflightPassed": true,
+  "legacyManaged0640SignerTightened": true,
+  "managedSignetFallbackSatPerVbyte": 2,
+  "fallbackOnlyWhenFeeEstimateUnavailable": true,
+  "applicationMaximumFeeChecksRetained": true,
+  "independentSecurityAudit": false,
+  "publicRelease": false,
+  "nodeConfigurationUpgradeUsesExistingManagedContentGuard": true,
+  "helperNetworkNamespace": true,
+  "helperProcfsAbsent": true,
+  "workerNetlinkForSandboxSetup": true
+}

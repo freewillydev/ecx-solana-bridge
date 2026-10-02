@@ -1,0 +1,18 @@
+{
+  "network": "actual L2L Signet / Solana Devnet",
+  "mint": "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM",
+  "custodyOwner": "6vKbKHaYS393gQdjKysZFuyvn6cZ5p4vSwK2kMsQFuZY",
+  "solanaFunding": "4TVHLnE7UEn5uPqPMebbWTPgc5EiHVSH2TJj3iiPY7nYSMokwWQJoDSSt14Lspc5x9b2dM5aafczb3VEbVmLw6Kg",
+  "solanaFundingFinalized": true,
+  "wrappedFundingUnits": 1000000,
+  "solFundingLamports": 50000000,
+  "nativeTreasuryFunding": "da144442d8b059473b730036c29383732b205ff80766679a5e8ba57f2399c46c",
+  "nativeTreasuryConfirmed": true,
+  "nativeTreasuryUnits": 20000,
+  "nativeTesterFunding": "b5eb11265926c893af72b9f9b3c82a40a34b8b8683b73cdd0fb7c11cdb9aab28",
+  "nativeTesterUnits": 12000,
+  "managedConfigSignerInterfaceValidated": true,
+  "installedPayingAcceptance": true,
+  "existingCustodyKeysCopied": false,
+  "nativeTesterConfirmed": true
+}

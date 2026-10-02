@@ -1,0 +1,76 @@
+{
+  "actualInstalledSystemdWorker": true,
+  "freshLedger": true,
+  "legacyImport": false,
+  "allocations": [
+    {
+      "asset": "Native",
+      "criticalSequence": 1,
+      "replayStable": true
+    },
+    {
+      "asset": "Wrapped",
+      "criticalSequence": 2,
+      "replayStable": true
+    },
+    {
+      "asset": "Sol",
+      "criticalSequence": 3,
+      "replayStable": true
+    }
+  ],
+  "balances": [
+    {
+      "allocation": "external",
+      "asset": "Native",
+      "units": "-20000"
+    },
+    {
+      "allocation": "float",
+      "asset": "Native",
+      "units": "15000"
+    },
+    {
+      "allocation": "operating",
+      "asset": "Native",
+      "units": "5000"
+    },
+    {
+      "allocation": "unallocated",
+      "asset": "Native",
+      "units": "0"
+    },
+    {
+      "allocation": "external",
+      "asset": "Sol",
+      "units": "-50000000"
+    },
+    {
+      "allocation": "operating",
+      "asset": "Sol",
+      "units": "50000000"
+    },
+    {
+      "allocation": "unallocated",
+      "asset": "Sol",
+      "units": "0"
+    },
+    {
+      "allocation": "external",
+      "asset": "Wrapped",
+      "units": "-1000000"
+    },
+    {
+      "allocation": "float",
+      "asset": "Wrapped",
+      "units": "1000000"
+    },
+    {
+      "allocation": "unallocated",
+      "asset": "Wrapped",
+      "units": "0"
+    }
+  ],
+  "paused": true,
+  "customerTransfersRun": false
+}

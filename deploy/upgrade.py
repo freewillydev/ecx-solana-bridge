@@ -29,6 +29,7 @@ def managed_files(release):
     result = {Path("/etc/systemd/system") / p.name: p for p in (release / "deploy").glob("ecx-bridge*.service")}
     result.update({Path("/etc/systemd/system") / p.name: p for p in (release / "deploy").glob("ecx-bridge*.timer")})
     result[Path("/etc/apparmor.d/ecx-bridge-bwrap")] = release / "deploy/ecx-bridge-bwrap.apparmor"
+    result[Path("/etc/ecx-node.conf")] = release / "deploy/signet.conf"
     return result
 
 

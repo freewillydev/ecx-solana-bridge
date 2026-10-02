@@ -1,0 +1,45 @@
+{
+  "networks": [
+    "actual L2L Signet",
+    "actual Solana Devnet"
+  ],
+  "freshPostgresLedger": true,
+  "legacyImport": false,
+  "feesBpsBothDirections": 100,
+  "orders": [
+    {
+      "direction": "NativeToWrapped",
+      "orderId": "e202b09eb3f4142f1be8108ad6f6ee794f16614f2067b34fa6596c4fbbd53e5b",
+      "status": "Paid",
+      "payout": "5ZpJYRN69BfhdKLVzNzMxVd9KYHFTnzr63Kzi3QxBCtQN8QJQk5KEARugaqo2MkwqwZRfm8qPU1zUnm1w2zLx45B",
+      "quote": {
+        "fee": "100",
+        "gross": "10000",
+        "net": "9900"
+      }
+    },
+    {
+      "direction": "WrappedToNative",
+      "orderId": "7866ee52e8cbedd2c9b0c290dca4f0c4c6d68a57997152de1b6d90b3b1a82a97",
+      "status": "Paid",
+      "payout": "a621a92014a75118576c2950382f0227a38d225dee120aa0bb29c702833b0b31",
+      "quote": {
+        "fee": "100",
+        "gross": "10000",
+        "net": "9900"
+      }
+    }
+  ],
+  "nativeDeposit": "008c2c165bdffea69d059ef953b71b6e8aa97f37431ae3130059d04be7cd45a6",
+  "solanaDeposit": "5QGiMxxNu3qHP8VHFPCFh3M484KvYb4YTJv3dNt9T72JcCr5ri8A2H4ZtQ3DGRtaXTCg1mYPXthWCsuMAhhNmog6",
+  "nativePayoutConfirmed": true,
+  "solanaPayoutFinalized": true,
+  "financialTablesCompared": 10,
+  "financialRowsAndSequenceUnchangedAfterRestart": true,
+  "savedOrderReloadStable": true,
+  "hostFenceEnabled": true,
+  "guiWalletVerified": false,
+  "workerStopped": true,
+  "finalPaused": true,
+  "installedSystemdWorker": true
+}

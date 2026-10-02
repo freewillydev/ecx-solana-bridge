@@ -16,8 +16,8 @@ code now provisions private PostgreSQL, read/write roles, typed initialization,
 explicit legacy import and private dump backups. ARM64 installation, repeat
 installation, reboot, role restrictions and same-host restoration of all 38
 tables passed. See [installer evidence](evidence/postgres-installer-arm64.json).
-Installed paying acceptance, full recovery/audit, actual supported-wallet
-signing and canonical deployment
+Installed ARM64 paying acceptance now passes on a fresh ledger (see below).
+Full recovery/audit, actual supported-wallet signing and canonical deployment
 remain open. Canonical `implementationReady` remains false.
 
 Earlier SQLite launch/transfer/restart evidence below is historical baseline
@@ -52,7 +52,7 @@ and retirement contracts passed on Ubuntu. See
 [consolidated installer evidence](evidence/postgres-installer-consolidated-x86.json)
 and [Linux fence evidence](evidence/postgres-worker-fence-linux.json). The
 observation-only installation had no signer and remained unavailable for
-payments. The consolidated native ARM64 build also passed 371 Haskell examples, seven Rust tests and the browser build. Its deployment-only repack requires both actual Solana history origins in the wizard; 17 installer tests pass. ARM64 upgrade/reinstall preserved 31 durable tables and existing configuration. After initial real-chain history ingestion settled, cold reboot preserved the exact baseline with all three scanners healthy and the protected fence verified. Installed ARM64 stale-ledger and retirement contracts passed. See [ARM build](evidence/native-arm-consolidated-build.json), [ARM installation](evidence/postgres-installer-consolidated-arm.json) and [ARM fence](evidence/postgres-worker-fence-linux-arm.json). The fixture remained observation-only, without a signer. Installed paying flows, off-host/key restoration and an x86 deployment-only repack of the wizard fix remain separate checks.
+payments. The consolidated native ARM64 build also passed 371 Haskell examples, seven Rust tests and the browser build. Its deployment-only repack requires both actual Solana history origins in the wizard; 17 installer tests pass. ARM64 upgrade/reinstall preserved 31 durable tables and existing configuration. After initial real-chain history ingestion settled, cold reboot preserved the exact baseline with all three scanners healthy and the protected fence verified. Installed ARM64 stale-ledger and retirement contracts passed. See [ARM build](evidence/native-arm-consolidated-build.json), [ARM installation](evidence/postgres-installer-consolidated-arm.json) and [ARM fence](evidence/postgres-worker-fence-linux-arm.json). The fixture remained observation-only, without a signer. Installed paying flows now pass below; off-host/key restoration and an x86 deployment-only repack of the latest deployment changes remain separate checks.
 
 The product acceptance driver now supports the installed systemd worker through
 private SSH/stdin transport, with the guest reading its own RPC cookie. Its local
@@ -61,8 +61,30 @@ without new funding/deposits; see [driver replay](evidence/postgres-product-driv
 Two new native wallets were created and durably journaled on the actual installed
 ARM64 Signet node, with replay checked and no funding or key export. See
 [installed native preparation](evidence/installed-paying-native-preparation.json).
-The installed paying mode itself is not yet verified: separate Solana custody,
-funding, fresh ledger/configuration and treasury allocation must precede that run.
+The installed ARM64 paying mode now passes on a distinct fresh PostgreSQL ledger,
+new native wallets and a new Solana custody key. The old observer database,
+configuration and fence are preserved separately. Genuine Signet/Devnet funding
+receipts were allocated through the private critical API, then both customer
+orders completed at 1%: native confirmed, Solana finalized. The original Solana
+signature settled after a lost send response without another payout. Restart
+preserved the terminal order views, ten financial tables and critical sequence.
+See [installed product evidence](evidence/installed-paying-product.json),
+[treasury evidence](evidence/installed-paying-treasury.json) and
+[funding evidence](evidence/installed-paying-funding.json).
+
+Actual installed acceptance found and fixed deployment integration defects:
+managed signer files must be worker-owned 0600; fresh public-test Signet nodes
+need an explicit fallback fee when no estimate exists; Bubblewrap needs netlink
+for namespace setup, while this SDK helper needs no procfs mount. All other
+service restrictions and application maximum-fee checks remain. Deployment-only
+repacks reused the compiled application/helper/frontend unchanged; 19 installer
+tests pass. See [package evidence](evidence/installed-paying-package.json) and
+[sandbox evidence](evidence/installed-helper-sandbox.json).
+
+The dedicated worker finishes paused and stopped. GUI wallet signing, real
+remote/key restoration, complete interruption/reorg recovery, the latest x86
+repack and independent security review remain open. This is a reviewable public-test
+product checkpoint, not canonical or valuable-fund release acceptance.
 
 ## Verified locally
 
@@ -990,3 +1012,16 @@ allocation workflow for float and operating budgets. The earlier actual round
 trips used a migrated, already allocated ledger. Porting that allocation through
 Opaleye and the critical operator DSL takes priority before further restore drills;
 it is part of completing U1/new-server operation, not an optional enhancement.
+
+Same-release reinstall then preserved all 31 durable tables, 12 configuration
+files and sequence 8, with private signer ownership and fence verified. The
+installed web health, root interface and public-config routes returned 200 while
+the worker was running; after inspection the worker was explicitly paused and
+stopped. See [reinstall evidence](evidence/installed-paying-reinstall.json).
+The task VM and old local preview were stopped to release memory.
+
+The next restore audit must verify the managed native wallet archive covers the
+actual Signet wallet directory (including the chain-specific `signet/wallets`
+layout). The current archive's legacy `wallets` path alone is not proof of key
+restorability. Preserve the funded guest disk and private journals until that
+clean-host key/ledger recovery check succeeds.

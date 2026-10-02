@@ -10,6 +10,7 @@ from pathlib import Path
 import platform
 import pwd
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -69,6 +70,22 @@ def keep_file(path, content, mode, group="root"):
         os.fsync(f.fileno())
     os.chown(path, 0, grp.getgrnam(group).gr_gid)
     path.chmod(mode)
+
+
+def secure_signer(path):
+    """Tighten only known managed key layouts; never admit a public/link key."""
+    path = Path(path)
+    info = path.lstat()
+    worker = pwd.getpwnam("ecx-worker")
+    group = grp.getgrnam("ecx-worker").gr_gid
+    mode = stat.S_IMODE(info.st_mode)
+    if not stat.S_ISREG(info.st_mode) or not (
+        (mode == 0o600 and info.st_uid in {0, worker.pw_uid}) or
+        (mode == 0o640 and info.st_uid == 0 and info.st_gid == group)
+    ):
+        raise ValueError("Unsafe managed signer ownership or permissions")
+    path.chmod(0o600)
+    os.chown(path, worker.pw_uid, group)
 
 
 def main():
@@ -209,10 +226,14 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
         for name, content in incoming:
             dest = Path("/etc/ecx-bridge") / name
             credential = name in {"backup.repository", "backup.password"}
-            keep(dest, content, 0o600 if credential else 0o640, "ecx-worker")
+            keep(dest, content, 0o600 if credential or name == "signer.json" else 0o640, "ecx-worker")
             if credential:
                 os.chown(dest, pwd.getpwnam("ecx-worker").pw_uid, grp.getgrnam("ecx-worker").gr_gid)
                 dest.chmod(0o600)
+    managed_signer = Path("/etc/ecx-bridge/signer.json")
+    if managed_signer.exists() or managed_signer.is_symlink():
+        secure_signer(managed_signer)
+        run(str(target / "bin/ecx-bridge"), "check-signer", str(config), str(managed_signer), stdout=subprocess.DEVNULL)
     if Path("/etc/ecx-bridge/interface.json").is_file():
         keep("/etc/ecx-bridge/interface.env", b"ECX_INTERFACE_CONFIG=/etc/ecx-bridge/interface.json\n", 0o640, "ecx-worker")
     port = 8080

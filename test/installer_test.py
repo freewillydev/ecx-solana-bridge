@@ -10,7 +10,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 spec = importlib.util.spec_from_file_location("installer", Path(__file__).resolve().parents[1] / "deploy/install.py")
 installer = importlib.util.module_from_spec(spec)
@@ -95,6 +95,35 @@ class ReleaseIntegrity(unittest.TestCase):
         with self.assertRaises(ValueError):
             installer.keep_file(config, b"replacement", 0o640)
         self.assertEqual(config.read_bytes(), b"original private configuration")
+
+
+class SignerPermissions(unittest.TestCase):
+    def test_managed_private_and_legacy_group_key_become_worker_only(self):
+        import os
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            key = Path(directory) / "signer.json"
+            key.write_bytes(b"private test fixture")
+            for mode, owner, group in [(0o600, 0, 4321), (0o600, 1234, 4321), (0o640, 0, 4321)]:
+                key.chmod(mode)
+                values = list(key.stat()); values[4] = owner; values[5] = group
+                with patch.object(installer.os, "lstat", return_value=os.stat_result(values)), patch.object(installer.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=1234)), patch.object(installer.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=4321)), patch.object(installer.os, "chown") as ownership:
+                    installer.secure_signer(key)
+                    ownership.assert_called_once_with(key, 1234, 4321)
+                self.assertEqual(key.stat().st_mode & 0o777, 0o600)
+
+    def test_public_and_symlink_keys_are_refused(self):
+        from types import SimpleNamespace
+        with tempfile.TemporaryDirectory() as directory:
+            key = Path(directory) / "signer.json"
+            key.write_bytes(b"private test fixture"); key.chmod(0o644)
+            link = Path(directory) / "link.json"; link.symlink_to(key)
+            with patch.object(installer.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=1234)), patch.object(installer.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=4321)), patch.object(installer.os, "chown") as ownership:
+                for path in [key, link]:
+                    with self.assertRaisesRegex(ValueError, "Unsafe managed signer"):
+                        installer.secure_signer(path)
+                ownership.assert_not_called()
+            self.assertEqual(key.stat().st_mode & 0o777, 0o644)
 
 
 class ConfigurationOrigins(unittest.TestCase):

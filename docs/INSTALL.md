@@ -120,6 +120,19 @@ only on its private Unix socket. Peer mapping gives the worker a restricted
 `ecx_worker` role and safe evaluation a SELECT-only `ecx_read` role. The dedicated
 cluster is separate from any system PostgreSQL cluster.
 
+The managed custody signer is owned by `ecx-worker` with mode 0600, so only the
+worker (and root) can read it. Installation and upgrade validate its public-key
+identity and reject public files or symlinks. An older managed root-owned 0640
+signer is tightened to this layout without changing its contents. The signing
+helper retains its own private-permission check.
+
+The managed L2L Signet node uses a 2-sat/vbyte fallback only when its estimator
+has no history. The bridge still refuses fees above its configured limits.
+Node configuration is a managed definition during upgrades: unchanged packaged
+configuration can be updated after the stopped-node backup; locally modified
+configuration is refused for explicit reconciliation. This fallback is public-test
+policy, not a canonical/betanet fee recommendation.
+
 Default mode starts the PostgreSQL observation-only worker and keeps intake paused. For an
 already configured and funded public Signet/Devnet deployment, pass
 `--test-worker` explicitly. That mode requires the custody signer and rejects

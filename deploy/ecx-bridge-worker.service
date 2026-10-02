@@ -23,7 +23,8 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/ecx-bridge/private /var/lib/ecx-bridge/fence /run/ecx-bridge
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Bubblewrap needs NETLINK_ROUTE while configuring its isolated network namespace.
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
