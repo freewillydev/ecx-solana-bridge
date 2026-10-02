@@ -126,7 +126,9 @@ and existing backup tooling are explicit dependencies rather than custom framewo
    Core PostgreSQL budgeting is now part of Ledger, so allowance and journal
    arithmetic share one implementation. Retain remaining unique SQLite assertions
    until their production equivalent exists. Treasury-spend classification now uses
-   the PostgreSQL operator DSL; its duplicate SQLite mutation and runner are retired.
+   the PostgreSQL operator DSL; duplicate SQLite treasury allocation/spend mutations
+   and the separate treasury runner are retired. Funding guarantees are checked by
+   the consolidated PostgreSQL journal contract, including immutable replay across restart.
 
 4. **Make the domain and DSL the entry point for auditing.** Consolidate duplicate
    Plan/Request/DSL layers only when they add no distinct guarantee. Use explicit

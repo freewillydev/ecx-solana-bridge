@@ -6,7 +6,7 @@ module Bridge.Ledger
   ( Ledger, withLedger, ledgerAction, readiness, pause, resumeAfterChecks
   , createOrder, readOrder, bindInstruction, criticalSequence, acknowledgeBackup
   , checkIntakeReady
-  , freeInventory, allocateTreasuryReceipt, allocateSolOperatingReceipt, expireQuotes
+  , freeInventory, expireQuotes
   , Deposit(..), observeDeposit, refreshDeposit, recordScan, readCheckpoint, promoteDeposit
   , economicOutflow, ChainEvent(..), ScanBatch(..), commitScan, recordScanFailure, custodyHealth
   , maximumNativeDepth, pendingVerification
@@ -28,7 +28,6 @@ import Bridge.Types
 import Bridge.Ledger.Model
 import Bridge.NativePayment
 import Bridge.NativeReplacement (validateNativeFamily,validateNativeReplacementDraft)
-import Bridge.SolanaMessage (signatureBytes)
 import Control.Concurrent.MVar
 import Control.Exception (bracket,mask,try,SomeException,fromException,throwIO)
 import Control.Monad (forM, forM_, when)
@@ -38,7 +37,6 @@ import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString.Lazy as LBS
 import Data.FileEmbed (embedFile)
 import Data.Int (Int64)
-import Data.List (nub,sortOn)
 import qualified Data.Map.Strict as M
 import Data.String (fromString)
 import Data.Text (Text)
@@ -224,60 +222,6 @@ freeInventory c asset = do
   bs <- balances c
   holds <- query c "SELECT amount FROM reservations WHERE asset=? AND phase<>'released'" (Only (T.pack (show asset))) :: IO [Only Int64]
   pure $ M.findWithDefault 0 (T.pack (show asset),"float") bs - sum [toInteger n | Only n <- holds]
--- The operator's verified funding workflow supplies the ownership evidence.
--- Move an existing observed receipt; never credit the same on-chain value twice.
-allocateTreasuryReceipt :: Ledger -> Text -> [(Text,Amount)] -> Value -> IO ()
-allocateTreasuryReceipt l did allocation evidence = ledgerAction l $ \c -> allocateTreasuryReceiptC c did allocation evidence
-
--- An explicit private operator decision may assign only an independently
--- observed, finalized SOL receipt to fees. It cannot reclassify customer coins.
-allocateSolOperatingReceipt :: Ledger -> Text -> Amount -> IO ()
-allocateSolOperatingReceipt l signature expected = do
-  _ <- either reject pure (signatureBytes signature)
-  require (units expected>0) "invalid_operating_funding_amount"
-  ledgerAction l $ \c->do
-    let did="sol-operating:"<>signature
-    verified <- query c "SELECT d.amount FROM deposits d JOIN chain_events e ON e.chain='SolanaOperating' AND e.event_id=? JOIN observation_evidence p ON p.hash=e.evidence_hash WHERE d.id=? AND d.order_id IS NULL AND d.asset='Sol' AND d.eligible=1 AND d.anchor=e.anchor AND e.kind='unmatched_incoming' AND e.needs_review=0 AND json_extract(p.evidence_json,'$.proof.delta')=? AND json_type(p.evidence_json,'$.proof.failed')='false'"
-      (signature,did,T.pack $ show $ units expected) :: IO [Only Int64]
-    require (verified==[Only $ units expected]) "verified_operating_receipt_required"
-    allocateTreasuryReceiptC c did [("operating",expected)] $ object
-      ["purpose" .= ("operator_network_fees"::Text),"signature" .= signature,"lamports" .= expected]
-
-allocateTreasuryReceiptC :: Connection -> Text -> [(Text,Amount)] -> Value -> IO ()
-allocateTreasuryReceiptC c did allocation evidence = do
-  let entries=sortOn fst allocation
-      names=map fst entries
-      allocationJSON=jsonText entries
-      proofJSON=jsonText evidence
-  require (not (null entries) && length entries<=4 && length (nub names)==length names
-    && all (`elem` ["float","backing","operating","lp"]) names && all ((>0) . units . snd) entries
-    && evidence/=Null && T.length proofJSON<=8192) "invalid_treasury_allocation"
-  old <- query c "SELECT allocation_json,proof_json FROM treasury_allocations WHERE deposit_id=?" (Only did) :: IO [(Text,Text)]
-  case old of
-    [(a,p)] -> require (a==allocationJSON && p==proofJSON) "treasury_allocation_conflict"
-    [] -> do
-      paused <- query_ c "SELECT paused FROM deployment" :: IO [Only Bool]
-      require (paused==[Only True]) "treasury_allocation_requires_pause"
-      rows <- query c "SELECT order_id,asset,amount,eligible,allocated FROM deposits WHERE id=?" (Only did) :: IO [(Maybe Text,Text,Int64,Bool,Bool)]
-      (asset,quantity) <- case rows of
-        [(Nothing,name,n,True,False)] -> case name of
-          "Native" -> pure (Native,n)
-          "Wrapped" -> pure (Wrapped,n)
-          "Sol" -> pure (Sol,n)
-          _ -> reject "invalid_treasury_asset"
-        _ -> reject "receipt_not_available_for_treasury"
-      require (sum (map (toInteger . units . snd) entries)==toInteger quantity) "treasury_allocation_amount_mismatch"
-      require (asset/=Sol || names==["operating"]) "sol_reserved_for_operating"
-      linked <- query c "SELECT id FROM obligations WHERE deposit_id=?" (Only did) :: IO [Only Text]
-      require (null linked) "receipt_has_customer_obligation"
-      sequenceNumber <- criticalSequence c
-      posting c ("treasury:"<>did) "operator allocation of verified treasury receipt"
-        ((asset,"unallocated",negate $ toInteger quantity):[(asset,account,toInteger $ units n) | (account,n)<-entries])
-      execute c "INSERT INTO treasury_allocations(deposit_id,allocation_json,proof_json,critical_sequence) VALUES(?,?,?,?)"
-        (did,allocationJSON,proofJSON,sequenceNumber)
-      execute c "UPDATE deposits SET allocated=1,state='treasury' WHERE id=?" (Only did)
-    _ -> reject "duplicate_treasury_allocation"
-
 scanAssets :: [(Text,Asset)]
 scanAssets=[("Native",Native),("Solana",Wrapped),("SolanaOperating",Sol)]
 

@@ -126,6 +126,7 @@ data Fixture a where
   FreeWrapped :: Fixture Integer
   Inventory :: Asset -> Fixture Integer
   TreasuryState :: Fixture ([TreasurySpends],[ChainEvents])
+  ReceiptState :: Fixture ([Deposits],[TreasuryAllocations])
   ReceiptCounts :: Fixture (Int,Int)
   FailTransaction :: Fixture ()
   FailCommit :: IORef Bool -> Fixture ()
@@ -233,6 +234,9 @@ fixture connection = \case
     <$> (sortOn (\r->(treasuryspendsChain r,treasuryspendsEventId r)) <$> O.runSelect connection (O.selectTable treasuryspendsTable))
     <*> (sortOn (\r->(chaineventsChain r,chaineventsEventId r)) <$> O.runSelect connection (O.selectTable chaineventsTable))
 
+  ReceiptState -> (,)
+    <$> (sortOn depositsId <$> O.runSelect connection (O.selectTable depositsTable))
+    <*> (sortOn treasuryallocationsDepositId <$> O.runSelect connection (O.selectTable treasuryallocationsTable))
   ReceiptCounts -> do
     obligations <- O.runSelect connection (O.selectTable obligationsTable) :: IO [Obligations]
     events <- O.runSelect connection $ do
@@ -504,6 +508,12 @@ treasuryContracts settings = do
       scan ledger chain deposits events=do
         previous <- Observation.readCheckpoint ledger chain
         Observation.commitScan ledger (ScanBatch chain "treasury-contract" previous "treasury-cursor" 100 deposits events)
+      review ledger=state ledger (ReadyAt 100) >> L.pause ledger "treasury contract"
+      refuse ledger code did split=do
+        before <- (,) <$> state ledger JournalState <*> state ledger ReceiptState
+        expectError code (Treasury.allocate ledger 100 did split "operator capital")
+        after <- (,) <$> state ledger JournalState <*> state ledger ReceiptState
+        require (before==after) "rejected_treasury_allocation_changed_records"
       reason="dedicated database contract: operator-owned outflow"
       spend ledger chain txid=Treasury.classifySpend ledger chain txid reason
       checkReview ledger chain txid expected=do
@@ -512,9 +522,15 @@ treasuryContracts settings = do
   L.withLedger settings "journal-contract" $ \ledger->do
     -- Replace the retired standalone treasury runner's raw-SQL fixture with
     -- the same closed scanner and allocation operations used by the worker.
+    tokenCursor <- Observation.readCheckpoint ledger "Solana"
     scan ledger "SolanaOperating"
       [Deposit "sol-operating:treasury-fund" Nothing Sol (quantity 10000) "slot" 1 True 100]
       [ChainEvent "treasury-fund" "unmatched_incoming" "slot" (object["delta" .= ("10000"::T.Text),"failed" .= False])]
+    tokenCursorAfter <- Observation.readCheckpoint ledger "Solana"
+    require (tokenCursor==tokenCursorAfter) "sol_operating_scan_moved_token_cursor"
+    let wrongAsset=Deposit "sol-operating:wrong-stream" Nothing Native (quantity 10000) "slot" 1 True 100
+    current <- Observation.readCheckpoint ledger "SolanaOperating"
+    expectError "scan_asset_mismatch" (Observation.commitScan ledger (ScanBatch "SolanaOperating" "treasury-contract" current "wrong" 100 [wrongAsset] []))
     L.pause ledger "treasury contract"
     let allocate split owner=Treasury.allocate ledger 100 "sol-operating:treasury-fund" split owner
     expectError "custody_not_reconciled" (allocate [("operating",quantity 10000)] "operator capital")
@@ -522,11 +538,51 @@ treasuryContracts settings = do
     L.pause ledger "treasury contract"
     expectError "sol_reserved_for_operating" (allocate [("float",quantity 10000)] "operator capital")
     allocated <- allocate [("operating",quantity 10000)] "operator capital"
-    before <- state ledger JournalState
+    allocatedJournal <- state ledger JournalState
     replay <- allocate [("operating",quantity 10000)] "operator capital"
-    after <- state ledger JournalState
-    require (allocated==replay && before==after) "treasury_allocation_replay_mutated_journal"
+    replayedJournal <- state ledger JournalState
+    require (allocated==replay && allocatedJournal==replayedJournal) "treasury_allocation_replay_mutated_journal"
     expectError "treasury_allocation_conflict" (allocate [("operating",quantity 10000)] "different owner")
+
+    review ledger
+    refuse ledger "receipt_not_available_for_treasury" "contract-deposit:0" [("float",quantity 100000)]
+    -- An eligible deposit is insufficient without accepted, matching scanner
+    -- evidence. Failed/reviewed/unconfirmed receipts cannot fund the operator.
+    forM_ [("no-proof","unmatched_incoming",True,False,False,"verified_treasury_receipt_required"),
+           ("failed","unmatched_incoming",True,True,True,"verified_treasury_receipt_required"),
+           ("review","unclassified",True,False,True,"verified_treasury_receipt_required"),
+           ("unconfirmed","awaiting_verifier",False,False,True,"receipt_not_available_for_treasury")] $
+      \(ident,kind,eligible,failed,observed,code)->do
+        let did="sol-operating:"<>ident
+            receipt=Deposit did Nothing Sol (quantity 10000) "slot" 1 eligible 100
+            event=ChainEvent ident kind "slot" (object["delta" .= ("10000"::T.Text),"failed" .= failed])
+        scan ledger "SolanaOperating" [receipt] (if observed then [event] else [])
+        review ledger
+        refuse ledger code did [("operating",quantity 10000)]
+    forM_ [(Native,"Native"),(Wrapped,"Solana")] $ \(asset,chain)->do
+      let ident="wrong-"<>T.pack(show asset); did="sol-operating:"<>ident
+      scan ledger chain [Deposit did Nothing asset (quantity 10000) "block" 1 True 100] []
+      review ledger
+      refuse ledger "invalid_treasury_receipt_id" did [("operating",quantity 10000)]
+
+    let nativeId="native:treasury-native:0"
+        nativeReceipt=Deposit nativeId Nothing Native (quantity 1000) "database-funding" 1 True 100
+        nativeProof=object["receipts" .= [object["id" .= nativeId,"amount" .= quantity 1000,
+          "order" .= (Nothing::Maybe T.Text),"eligible" .= True]]]
+    scan ledger "Native" [nativeReceipt] [ChainEvent "treasury-native" "incoming" "database-funding" nativeProof]
+    review ledger
+    refuse ledger "treasury_allocation_amount_mismatch" nativeId [("float",quantity 1001)]
+    capitalBefore <- L.ledgerAction ledger L.balances
+    let split=[("float",quantity 900),("operating",quantity 100)]
+    capital <- Treasury.allocate ledger 100 nativeId split "operator capital"
+    capitalAfter <- L.ledgerAction ledger L.balances
+    require (capitalAfter==M.adjust (+900) ("Native","float")
+      (M.adjust (+100) ("Native","operating") (M.adjust (subtract 1000) ("Native","unallocated") capitalBefore))) "treasury_allocation_credited_asset_twice"
+    savedCapital <- (,) <$> state ledger JournalState <*> state ledger ReceiptState
+    capitalRetry <- Treasury.allocate ledger 100 nativeId (reverse split) "operator capital"
+    repeatedCapital <- (,) <$> state ledger JournalState <*> state ledger ReceiptState
+    require (capital==capitalRetry && savedCapital==repeatedCapital) "treasury_split_reordering_changed_allocation"
+    refuse ledger "treasury_allocation_conflict" nativeId [("float",quantity 1000)]
 
     -- Separate customer attempts, provisional quote holds and transferred
     -- fee holds from operator funds, even while the worker is paused.
@@ -610,6 +666,11 @@ treasuryContracts settings = do
   -- Saved decisions, bytes and reservations survive reconnect. Conflicting
   -- observed anchors still refuse replay after restart.
   L.withLedger settings "journal-contract" $ \ledger->do
+    before <- (,) <$> state ledger JournalState <*> state ledger ReceiptState
+    _ <- Treasury.allocate ledger 100 "sol-operating:treasury-fund" [("operating",quantity 10000)] "operator capital"
+    _ <- Treasury.allocate ledger 100 "native:treasury-native:0" [("operating",quantity 100),("float",quantity 900)] "operator capital"
+    after <- (,) <$> state ledger JournalState <*> state ledger ReceiptState
+    require (before==after) "treasury_allocation_replay_changed_reopened_ledger"
     expectError "treasury_spend_conflict" (spend ledger "Native" "operator-payment")
     (spends,events) <- state ledger TreasuryState
     require (length spends==3) "treasury_decisions_lost_on_restart"
