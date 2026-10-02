@@ -1238,3 +1238,36 @@ This is preparation for the live interrupted-host scenario, not a claim that it
 has passed. Native Linux driver compilation, a real eligible test payment, private
 key/ledger handoff and resumed single settlement remain required. No funds were
 sent, no ledger rows modified and no task VM started during this driver check.
+
+## Real installed native signed-but-unsent checkpoint
+
+The native Linux acceptance component was compiled against its cached frozen
+library/package IDs without rebuilding the application or dependencies. The
+test binary uses the same SQLite soname normalization as the release builder and
+the installed pinned library; it lives outside the release inventory. An existing
+dedicated tester made one new real Devnet redemption for 10,000 wrapped units,
+with the saved 100-unit fee and 9,900-unit native payout.
+
+The customer instructions were recorded before pausing intake. A persistent
+observation-only service override was installed before the deposit, so a background
+paying loop could not race the recovery checkpoint. The first incoming test
+signature expired before submission during controller setup; its exact journal
+and block-height/history evidence remain private. A fresh tester transaction for
+the same valid order finalized, and the normal observer created the eligible
+native obligation. No fake chain evidence, clock or deposit was used.
+
+With the worker stopped, the normal native preparation/signing algorithms saved
+one signed attempt. The replay mode then returned that exact transaction while
+all preparation RPCs/signing were forbidden and the compared financial records/
+sequence remained identical. Independent native checks found the transaction
+absent from wallet and mempool, both original inputs unspent, destination phase
+payment and network-fee hold unreleased. Sequence is 12; the ledger has two Paid
+orders, two ExpiredUnfunded orders and the new Paying order. Earlier settlements
+remain and the native payout was not broadcast.
+
+The installed backup service captured this unfinished state; isolated restoration
+matched every row of all 38 tables. See `evidence/installed-native-signed-boundary.json`.
+Source journals, the accepted normalized Linux binary and private snapshot are
+retained. The source is paused/stopped with its observation-only override retained;
+all task VMs are stopped. Actual key/ledger handoff to another clean guest and
+resumption to one settlement are the next steps, not claimed complete here.

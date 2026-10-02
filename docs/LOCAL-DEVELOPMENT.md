@@ -368,8 +368,10 @@ report. The local round trip is recorded in
 
 The restored ARM test deployment currently uses release
 `c8786e4c208f2a226b7282c1`, including row-content backup verification. Its two
-unfunded browser orders have now expired normally; the ledger retains four orders
-and two paid attempts, at critical sequence 11. Upgrade and repeat installation
+unfunded browser orders have now expired normally. The subsequent signed recovery
+scenario adds a fifth order: two Paid, two ExpiredUnfunded and one Paying, with
+two settled attempts and one signed-but-unsent attempt at critical sequence 12.
+Upgrade and repeat installation
 evidence is in `docs/evidence/installed-backup-tools-arm.json`. Preserve the
 original private stopped upgrade archive and both state-comparison baselines.
 The x86 deployment-only update is accepted as release
@@ -401,12 +403,29 @@ and fee reservations, postings and the critical sequence. It outputs a bytes has
 not the signed bytes. It never broadcasts or resumes the worker. Installed usage
 requires `PGHOST=/run/ecx-postgres`, `PGPORT=29436`, `PGDATABASE=ecx_bridge`,
 `PGUSER=ecx_worker`, `ECX_WORKER_FENCE_DIR=/var/lib/ecx-bridge/fence` and execution
-as `ecx-worker`. The native Linux acceptance executable still needs to be compiled
-from this integration source before the installed live scenario can run.
+as `ecx-worker`. Native Linux compilation and actual installed signed staging now
+pass. The executable is installed separately at
+`/opt/ecx-bridge-acceptance/native-signed-driver`, outside the verified release.
+Apply the same SQLite soname normalization as `scripts/build-release` and point
+its runtime library search path at the installed pinned library.
 
 Current evidence covers compilation against the exact frozen macOS package IDs,
 two wrong-database refusals before ownership/chain calls, and planning the replay
 comparison query against the real PostgreSQL schema. See
 `docs/evidence/native-signed-boundary-driver.json`. No eligible payment was staged
-in that check; real signed-boundary and interrupted-host restore acceptance remain
-pending. The cached macOS driver is retained externally as `signed-native-driver`.
+in that initial check. The later real signed-boundary scenario passes; interrupted
+host restore and resumed settlement remain pending. The cached macOS driver is
+retained externally as `signed-native-driver`; the accepted Linux artifact is
+`signed-native-driver-linux-arm64-normalized`.
+
+`integration/StageInstalledSignedNative.py` reuses the installed test transport
+and existing dedicated Devnet payment client. Its private journals live under
+`installed-fresh-treasury-acceptance/signed-native-recovery`. Quote, capability,
+payment request, exact deposit bytes, expired incoming attempt and native replay
+results are retained. The restored guest has a persistent
+`zz-recovery-observer.conf` override: it must remain observation-only through
+the next handoff. Do not remove that override or enable paying mode on the source
+just to clear the pending order. The source worker finishes paused/stopped and
+the VM is stopped. The full-row staged backup and independent native unspent/
+wallet/mempool checks are recorded in
+`docs/evidence/installed-native-signed-boundary.json`.
