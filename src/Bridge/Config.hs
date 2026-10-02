@@ -118,12 +118,16 @@ validateConfig c = do
   require (T.length (nativeCheckpointHash c) == 64 && T.all (\x -> x `elem` ("0123456789abcdef"::String)) (nativeCheckpointHash c) && nativeCheckpointHeight c > 0) "checkpoint_required"
   nr <- parseRequest (nativeRpc c)
   require (host nr `elem` ["127.0.0.1","localhost","::1"]) "native_rpc_must_be_loopback"
-  mapM_ (\url -> parseRequest url >>= \r -> require (secure r) "solana_requires_https") (solanaRpc c : maybe [] pure (solanaVerifierRpc c))
+  primary <- parseRequest (solanaRpc c)
+  verifier <- traverse parseRequest (solanaVerifierRpc c)
+  mapM_ (\r -> require (secure r) "solana_requires_https") (primary : maybe [] pure verifier)
+  let normalizedHost r = BS.dropWhileEnd (==46) $ BS.map (\b -> if b>=65 && b<=90 then b+32 else b) (host r)
+  mapM_ (\r -> require (normalizedHost r/=normalizedHost primary) "independent_rpc_required") verifier
   unless (profile c == L2LSignetDevnet) $ require (nativeCheckpointHeight c == 967680 && nativeCheckpointHash c == ecxCheckpoint) "wrong_ecx_checkpoint"
   if profile c == CanonicalBeta
     then do
       require (mint c == canonicalMint && backupRequired c) "canonical_identity_or_backup_required"
-      require (maybe False (/= solanaRpc c) (solanaVerifierRpc c)) "independent_rpc_required"
+      require (maybe False (const True) verifier) "independent_rpc_required"
       require (maybe False (const True) (solanaHistoryStart c)) "solana_history_start_required"
       require (maybe False (const True) (solanaOperatingHistoryStart c)) "solana_operating_history_start_required"
     else require (mint c /= canonicalMint) "canonical_mint_forbidden_on_devnet"

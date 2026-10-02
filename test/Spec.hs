@@ -664,6 +664,14 @@ withNativeCancellationDraft saveDraft dir action=withFundedAt dir $ \l original 
 main :: IO ()
 main=hspec $ do
   describe "operator configuration boundaries" $ do
+    it "rejects aliases of the primary RPC as an independent provider" $ do
+      forM_ ["https://api.devnet.solana.com/other", "https://api.devnet.solana.com?key=other",
+             "https://api.devnet.solana.com:443", "https://API.DEVNET.SOLANA.COM",
+             "https://api.devnet.solana.com."] $ \endpoint ->
+        validateConfig (cfg "/tmp/config-policy"){solanaVerifierRpc=Just endpoint}
+          `shouldThrow` isError "independent_rpc_required"
+    it "accepts distinct actual Devnet provider hosts without network IO" $
+      validateConfig (cfg "/tmp/config-policy"){solanaVerifierRpc=Just "https://solana-devnet.api.onfinality.io/public"}
     it "refuses mainnet trading links on a Devnet deployment" $ withDir $ \dir->do
       let links=(defaultInterface L2LSignetDevnet){jupiterUrl=Just "https://jup.ag/swap/SOL-token"}
       validateInterface (cfg dir) links `shouldThrow` isError "trading_links_require_mainnet"

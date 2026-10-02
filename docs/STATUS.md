@@ -1355,3 +1355,32 @@ are recorded for review. This is not an approved production publisher identity,
 independent security approval or public distribution. Production key custody and
 policy, a trusted public release endpoint and the existing wallet/off-host/
 canonical/recovery/review gates remain.
+
+## Independent Devnet provider and Solana recovery driver
+
+Both the official Devnet RPC and OnFinality public Devnet RPC passed real,
+read-only genesis, finalized anchor, expired blockhash, immutable custody/owner
+history, transaction absence and historical signature absence checks against an
+actual expired customer deposit. Requests were paced three seconds apart; the
+public endpoint returned a rate limit during the earlier rapid probe. This
+qualifies the methods for the next acceptance run, not production reliability or
+an expired bridge-payout retry. See
+[evidence](evidence/solana-independent-provider-preflight.json).
+
+Configuration now rejects verifier URLs sharing the primary host, including
+path/query/port variants, case and trailing-dot aliases. A distinct hostname
+still requires operator review of provider independence. All 373 shared Haskell
+examples pass. The earlier failed invocation ran outside the repository and
+could not find fixtures; rerunning from the repository resolved it without
+changing application behavior.
+
+The existing fenced, dedicated public-test recovery driver now also supports
+`stage-solana-signed` and `verify-solana-signed`. Staging uses the production
+preparation algorithm, real RPC and helper, requires a configured verifier,
+retains the signed attempt without sending, and leaves the ledger paused. Replay
+rejects any RPC/helper invocation and compares the original signed attempt and
+financial state. The updated driver compiles locally; its new modes have not
+yet been exercised against a funded order or installed on Ubuntu. The private
+draft release remains the previously accepted binaries and does not contain
+this new configuration guard. No wallets, installed configurations, financial
+records or running services changed during this batch.
