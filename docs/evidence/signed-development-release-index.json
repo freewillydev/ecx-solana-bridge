@@ -1,0 +1,18 @@
+{
+  "algorithm": "Ed25519",
+  "artifacts": {
+    "aarch64": {
+      "bytes": 33199565,
+      "filename": "ecx-bridge-ubuntu-24.04-aarch64.run",
+      "sha256": "8d00957a1141f83bb0340b0cc74c945e0a1af3a56f5911833d98a0f5f374032f"
+    },
+    "x86_64": {
+      "bytes": 26415847,
+      "filename": "ecx-bridge-ubuntu-24.04-x86_64.run",
+      "sha256": "9601f52dc49eceb564d72febc8216d681dd5e8d4920380676fc26d874276f4ce"
+    }
+  },
+  "format": 1,
+  "os": "ubuntu-24.04",
+  "publicKeySha256": "55f602053badd0f370a70e9b45d9e6519a0e41a474062fc4c166113b45900456"
+}

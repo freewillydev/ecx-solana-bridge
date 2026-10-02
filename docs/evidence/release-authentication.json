@@ -1,0 +1,21 @@
+{
+  "algorithm": "Ed25519",
+  "publicKeySha256": "55f602053badd0f370a70e9b45d9e6519a0e41a474062fc4c166113b45900456",
+  "actualArmArchiveVerified": true,
+  "actualX86ArchiveVerified": true,
+  "signatureContractsPassed": 7,
+  "ubuntuArmAuthenticatedInstallPassed": true,
+  "financialGroupsPreserved": 8,
+  "criticalSequence": 13,
+  "signingKeyCopiedToServer": false,
+  "publicRelease": false,
+  "productionPublisherKeyApproved": false,
+  "x86AuthenticatedInstallVerified": true,
+  "ubuntuX86AuthenticatedInstallPassed": true,
+  "x86DurableTablesPreserved": 31,
+  "x86ConfigurationFilesPreserved": 8,
+  "x86CriticalSequence": 0,
+  "ubuntuArmOpenSSL": "3.0.13",
+  "ubuntuArmInvalidSignatureInstallRefused": true,
+  "invalidSignatureInstallerExecuted": false
+}

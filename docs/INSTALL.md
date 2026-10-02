@@ -31,11 +31,48 @@ produced in `.release-build/`, without installing compilers:
 sh ecx-bridge-ubuntu-24.04-aarch64.run --with-signet --config-dir /absolute/private/setup
 ```
 
-Use the matching architecture's package. Run `sha256sum -c PACKAGE.run.sha256`
-against a checksum obtained from a trusted source before execution. The embedded
-archive checksum also catches corruption. These locally built artifacts are not
-a signed public release, and there is no published download URL. Package checksums
-do not authenticate an unknown distributor.
+Use the matching architecture's package. Raw package checksums detect corruption;
+they do not authenticate an unknown distributor. The current local development
+candidate has a detached Ed25519 signature covering both architecture filenames,
+archive sizes and SHA-256 values. No public download URL has been published.
+
+From a trusted reviewed checkout, authenticate and install a candidate already
+copied to `/absolute/reviewed-release` with one command:
+
+```sh
+sudo python3 scripts/release-auth install docs/development-release-public.pem /absolute/reviewed-release "$(uname -m)" -- --with-signet --config-dir /absolute/private/setup
+```
+
+The directory contains `release-index.json`, `release-index.sig` and the selected
+architecture's `.run` file. This command verifies the index with the separately
+trusted public key, copies the installer into private temporary storage, verifies
+that exact copy, and executes it. The existing installer still validates its
+embedded release inventory and platform. `verify` replaces `install` for inspection
+without installation; omit installer arguments in verify mode. No compiler is
+required by the compiled package. Python 3 and OpenSSL 3 must already be available
+for authentication; the installer supplies its other Ubuntu runtime dependencies.
+
+The development public key's SHA-256 fingerprint over DER SubjectPublicKeyInfo is
+`55f602053badd0f370a70e9b45d9e6519a0e41a474062fc4c166113b45900456`.
+Approve the key through a separate reviewed channel; never trust a replacement
+key merely because it accompanies a downloaded installer. This is a local
+project development key, not an issuer endorsement or approved production
+publisher identity. Its private key remains outside the repository and is never
+copied to a bridge server.
+
+To prepare a subsequent candidate, place both accepted installers and their
+existing `.run.sha256` files in a fresh directory, then run:
+
+```sh
+python3 scripts/release-auth sign /absolute/private/publisher.pem /absolute/new-candidate
+```
+
+The signing key must be an Ed25519 PEM file privately owned by the caller. Existing
+indexes/signatures are never overwritten. Signing does not certify correctness,
+choose a release channel, authorize valuable-fund operation or publish anything.
+A valid signature can describe an older release: choose the intended reviewed
+index explicitly. Production key custody, revocation/rotation policy and authenticated public
+distribution remain release work. The command uses OpenSSL's [documented Ed25519 raw-input signature API](https://docs.openssl.org/3.0/man1/openssl-pkeyutl/).
 
 New builds also collect notices against the actual dependency graph and include
 them with recorded Bitcoin Core and SQLite notices in the package manifest.

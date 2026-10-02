@@ -1,0 +1,170 @@
+#!/usr/bin/env python3
+"""Sign a local release index, verify it, or install its exact verified snapshot.
+
+Trust the public key through a separate reviewed channel. Never obtain a new
+trust key from the candidate being verified. No downloads or automatic updates.
+"""
+import argparse
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import shutil
+import stat
+import subprocess
+import tempfile
+
+ARCHES = ('aarch64', 'x86_64')
+INDEX = 'release-index.json'
+SIGNATURE = 'release-index.sig'
+ED25519_SPKI = bytes.fromhex('302a300506032b6570032100')
+
+
+def require(condition, message):
+    if not condition:
+        raise ValueError(message)
+
+
+def regular(path, limit):
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_size <= limit,
+            'Expected bounded regular file')
+    return info
+
+
+def openssl(*arguments):
+    return subprocess.check_output(['openssl', *map(str, arguments)],
+        stderr=subprocess.DEVNULL, timeout=30)
+
+
+def public_der(key, private=False):
+    arguments = ['pkey', '-in', key, '-outform', 'DER']
+    arguments += ['-pubout'] if private else ['-pubin', '-pubout']
+    value = openssl(*arguments)
+    require(len(value) == 44 and value.startswith(ED25519_SPKI),
+            'Ed25519 release key required')
+    return value
+
+
+def digest(path):
+    with path.open('rb') as source:
+        return hashlib.file_digest(source, 'sha256').hexdigest()
+
+
+def filename(arch):
+    return 'ecx-bridge-ubuntu-24.04-' + arch + '.run'
+
+
+def sign(key, directory):
+    info = regular(key, 16384)
+    require(info.st_uid == os.geteuid() and info.st_mode & 0o077 == 0,
+            'Signing key must be privately owned with no group/other access')
+    require(not (directory / INDEX).exists() and not (directory / SIGNATURE).exists(),
+            'Existing signature/index retained; choose a new candidate directory')
+    artifacts = {}
+    for arch in ARCHES:
+        path = directory / filename(arch)
+        info = regular(path, 512*1024*1024)
+        checksum = digest(path)
+        saved = path.with_suffix('.run.sha256').read_text().split()
+        require(saved == [checksum, path.name], 'Candidate checksum differs')
+        artifacts[arch] = dict(filename=path.name, bytes=info.st_size, sha256=checksum)
+    index = dict(format=1, os='ubuntu-24.04', algorithm='Ed25519',
+        publicKeySha256=hashlib.sha256(public_der(key, True)).hexdigest(),
+        artifacts=artifacts)
+    with (directory / INDEX).open('xb') as output:
+        output.write((json.dumps(index, sort_keys=True, indent=2)+'\n').encode())
+        output.flush()
+        os.fsync(output.fileno())
+    signature = openssl('pkeyutl', '-sign', '-rawin', '-inkey', key,
+                        '-in', directory / INDEX)
+    require(len(signature) == 64, 'Unexpected Ed25519 signature')
+    with (directory / SIGNATURE).open('xb') as output:
+        output.write(signature)
+        output.flush()
+        os.fsync(output.fileno())
+    return index
+
+
+def authenticated_index(key, directory, snapshot):
+    regular(key, 16384)
+    regular(directory / INDEX, 16384)
+    regular(directory / SIGNATURE, 64)
+    # Authenticate the same private snapshot that is subsequently parsed.
+    index_path = snapshot / INDEX
+    signature_path = snapshot / SIGNATURE
+    index_path.write_bytes((directory / INDEX).read_bytes())
+    signature_path.write_bytes((directory / SIGNATURE).read_bytes())
+    openssl('pkeyutl', '-verify', '-rawin', '-pubin', '-inkey', key,
+            '-in', index_path, '-sigfile', signature_path)
+    index = json.loads(index_path.read_bytes())
+    require(index.get('format') == 1 and index.get('os') == 'ubuntu-24.04'
+        and index.get('algorithm') == 'Ed25519'
+        and index.get('publicKeySha256') == hashlib.sha256(public_der(key)).hexdigest()
+        and set(index.get('artifacts', {})) == set(ARCHES), 'Unsupported signed index')
+    return index
+
+
+def verify_or_install(key, directory, arch, install, arguments):
+    require(arch in ARCHES, 'Unsupported architecture')
+    if install:
+        require(os.geteuid() == 0 and platform.system() == 'Linux'
+            and platform.machine() == arch, 'Install as root on the matching Ubuntu host')
+        os_release = Path('/etc/os-release').read_text()
+        require('ID=ubuntu\n' in os_release and 'VERSION_ID="24.04"' in os_release,
+                'Ubuntu 24.04 required')
+    with tempfile.TemporaryDirectory(prefix='ecx-release-') as temporary:
+        snapshot = Path(temporary)
+        index = authenticated_index(key, directory, snapshot)
+        artifact = index['artifacts'][arch]
+        name = filename(arch)
+        require(artifact.get('filename') == name, 'Unexpected signed filename')
+        source = directory / name
+        regular(source, 512*1024*1024)
+        # Execute the root-private verified bytes, never the mutable source path.
+        target = snapshot / name
+        with source.open('rb') as input_file, target.open('xb') as output:
+            os.chmod(target, 0o600)
+            shutil.copyfileobj(input_file, output)
+        require(target.stat().st_size == artifact.get('bytes')
+            and digest(target) == artifact.get('sha256'), 'Installer checksum differs')
+        if install:
+            subprocess.run(['/bin/sh', str(target), *arguments], check=True)
+    return dict(signatureVerified=True, installerChecksumVerified=True,
+                arch=arch, installed=install)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    commands = parser.add_subparsers(dest='command', required=True)
+    signer = commands.add_parser('sign')
+    signer.add_argument('key', type=Path)
+    signer.add_argument('directory', type=Path)
+    for name in ('verify', 'install'):
+        command = commands.add_parser(name)
+        command.add_argument('key', type=Path)
+        command.add_argument('directory', type=Path)
+        command.add_argument('arch', choices=ARCHES)
+        command.add_argument('installer_arguments', nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    try:
+        if args.command == 'sign':
+            index = sign(args.key, args.directory)
+            report = dict(signed=True, architectures=list(index['artifacts']),
+                          publicKeySha256=index['publicKeySha256'])
+        else:
+            arguments = args.installer_arguments
+            if arguments[:1] == ['--']:
+                arguments = arguments[1:]
+            require(args.command == 'install' or not arguments,
+                    'Installer arguments require install mode')
+            report = verify_or_install(args.key, args.directory, args.arch,
+                                       args.command == 'install', arguments)
+        print(json.dumps(report))
+    except (ValueError, OSError, subprocess.SubprocessError):
+        raise SystemExit('Release authentication refused; no unverified installer executed')
+
+
+if __name__ == '__main__':
+    main()

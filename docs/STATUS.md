@@ -1327,3 +1327,31 @@ libraries and 22 Ubuntu package notices; bundled SQLite is separate. Notice file
 were retained externally and their hashes checked after copying. This makes the
 remaining system-license applicability review concrete; it does not assert legal
 obligation completion or identify every statically linked component.
+
+## Authenticated local release candidate
+
+A detached Ed25519 signature now authenticates a bounded index containing both
+accepted architecture installer filenames, exact sizes and SHA-256 values. The
+small `scripts/release-auth` command verifies the index against a separately
+trusted public key, snapshots the installer into private temporary storage,
+checks that copy and executes it only on matching Ubuntu 24.04. It introduces no
+runtime chain, ledger or DSL changes and no new Python/crypto library dependency;
+OpenSSL performs the signature operations.
+
+Both actual archives verify. Seven real-signature file-fixture contracts cover
+successful verification, modified installer/index/signature, a different trust
+key, public signing-key permissions and invalid verify-mode installer arguments.
+These are file/cryptographic tests, not substitute chain tests. Installed Ubuntu
+ARM64 authentication/reinstallation preserved eight financial groups and sequence
+13; invalid-signature root installation refused before accessing an installer.
+Installed x86 authentication/reinstallation preserved 31 durable tables, eight
+configuration files and sequence zero, with the observer/signer/role/fence checks
+passing. No application compilation was repeated. See
+`evidence/release-authentication.json` and the signed index/signature alongside it.
+
+The private development signing key is held outside the repository and never
+copied to either bridge server. The public development key and its fingerprint
+are recorded for review. This is not an approved production publisher identity,
+independent security approval or public distribution. Production key custody and
+policy, a trusted public release endpoint and the existing wallet/off-host/
+canonical/recovery/review gates remain.
