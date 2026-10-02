@@ -1,7 +1,7 @@
 module Bridge.Postgres.Source (recordSourceCheckC, paymentWorkHashC, sourceWorkHashC, recoveryApproval, recoveryObligation, recoveryRecord, coveredApproval, coveredObligation, coveredRecord, authorizedC, coveredAuthorized, candidates, recordCheck, orderBinding, eventEvidence) where
 
 import Bridge.Types
-import Bridge.Ledger.Model (SourceCheck(..),Obligation(..),Deposit(..))
+import Bridge.Ledger.Model (encodeRecord,decodeRecord,SourceCheck(..),Obligation(..),Deposit(..))
 import Bridge.Postgres.Ledger (Ledger,ledgerAction)
 import Bridge.Postgres.Custody (freshC)
 import qualified Bridge.Postgres.Order as Order
@@ -46,7 +46,7 @@ recordSourceCheckC connection did check = do
     SourceMissing proof->require (not eligible && asset==Native) "source_recovery_scan_not_current" >> pure ("missing",depositsAmount source,proof)
     SourceRestored proof->require eligible "source_recovery_scan_not_current" >> pure ("restored",0,proof)
     SourceUnavailable proof->pure ("unavailable",previousLoss,proof)
-  let evidence=TE.decodeUtf8 (LBS.toStrict (encode proof))
+  let evidence=encodeRecord proof
       ordinary=old==Nothing && depositsAllocated source==0 && state=="pending"
       unchanged=case old of Just row->sourcerecoveriesState row==state && sourcerecoveriesShortfall row==loss && (state/="unavailable" || sourcerecoveriesEvidenceJson row==evidence); _->False
   require (proof/=Null && T.length evidence<=16384) "invalid_source_recovery_evidence"
@@ -164,7 +164,7 @@ recoveryContextC c covered intent restoration = do
   let cutoff=maximum(0:approvals)
       eligible=[row | row<-reverse(sortOn sourcerecoveriesId history),sourcerecoveriesCriticalSequence row>cutoff,sourcerecoveriesCriticalSequence row<restoration]
   reviews <- mapM (\row->do
-    evidence <- either (const $ reject "invalid_source_recovery_evidence") pure (eitherDecodeStrict' $ TE.encodeUtf8 $ sourcerecoveriesEvidenceJson row)
+    evidence <- decodeRecord "invalid_source_recovery_evidence" (sourcerecoveriesEvidenceJson row)
     case evidence of
       Object fields | KM.lookup "reason" fields==Just(String "source_eligibility_lost")->do
         entries <- fieldValue "reviewedObligations" evidence :: IO [Value]
@@ -246,13 +246,13 @@ recordApproval covered sourceProof ledger intent restoration now reason = ledger
           :: IO [Text]
         require (hashes==[observedHash]) "source_recovery_scan_not_current"
         report <- case checks of
-          [r] | Just saved<-custodycheckReportJson r->either (const $ reject "custody_not_reconciled") pure (eitherDecodeStrict' $ TE.encodeUtf8 saved)
+          [r] | Just saved<-custodycheckReportJson r->decodeRecord "custody_not_reconciled" saved
           _->reject "custody_not_reconciled"
         matched <- fieldValue "matches" report :: IO Bool
         block <- fieldValue "nativeBlock" report :: IO Text
         height <- fieldValue "nativeHeight" report :: IO Int64
         require (matched && block==sourceBlock && height==sourceHeight) "source_loss_custody_view_changed"
-      let proof=TE.decodeUtf8 $ LBS.toStrict $ encode $ object $
+      let proof=encodeRecord $ object $
             ["custody" .= [(custodycheckRevision row,custodycheckCheckedAt row,custodycheckReportJson row) | row<-checks],"sourceRestoration" .= restoration] <> maybe [] (\n->["sourceCover" .= n,"source" .= sourceProof]) cover
       require (T.length proof<=32768) "source_approval_evidence_too_large"
       sequenceNo <- criticalSequence c

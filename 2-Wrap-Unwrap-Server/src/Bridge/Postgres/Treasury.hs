@@ -1,6 +1,6 @@
 module Bridge.Postgres.Treasury (allocate, classifySpend) where
 
-import Bridge.Ledger.Model (economicOutflow)
+import Bridge.Ledger.Model (economicOutflow,encodeRecord,decodeRecord)
 import Control.Monad (forM_)
 import Bridge.Types
 import Bridge.RPC (fieldValue)
@@ -8,12 +8,10 @@ import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
 import Bridge.Postgres.Custody (freshC)
 import Data.Aeson
-import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
 import Data.List (sortOn,nub)
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
 import qualified Opaleye as O
 
 -- Ownership is an explicit operator attestation; an unmatched receipt alone
@@ -21,7 +19,7 @@ import qualified Opaleye as O
 allocate :: Ledger -> Int64 -> Text -> [(Text,Amount)] -> Text -> IO Value
 allocate ledger now did split reason = ledgerAction ledger $ \c->do
   let entries=sortOn fst split; names=map fst entries
-      encoded=json entries
+      encoded=encodeRecord entries
   require (not(null entries) && length entries<=4 && length(nub names)==length names
     && all (`elem` ["float","backing","operating","lp"]) names
     && all ((>0).units.snd) entries && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_treasury_allocation"
@@ -31,7 +29,7 @@ allocate ledger now did split reason = ledgerAction ledger $ \c->do
     pure r
   sequenceNumber <- case (old :: [TreasuryAllocations]) of
     [r]->do
-      proof<-either (const $ reject "invalid_saved_treasury_proof") pure (eitherDecodeStrict' $ TE.encodeUtf8 $ treasuryallocationsProofJson r)
+      proof<-decodeRecord "invalid_saved_treasury_proof" (treasuryallocationsProofJson r)
       savedReason<-fieldValue "ownershipAttestation" proof
       require (treasuryallocationsAllocationJson r==encoded && savedReason==reason) "treasury_allocation_conflict"
       pure(treasuryallocationsCriticalSequence r)
@@ -73,7 +71,7 @@ allocate ledger now did split reason = ledgerAction ledger $ \c->do
         pure(chaineventsKind e,observationevidenceEvidenceJson p)
       envelope<-case (evidence :: [(Text,Text)]) of
         [(kind,raw)] | kind=="unmatched_incoming" || asset==Native && kind=="incoming" ->
-          either (const $ reject "invalid_treasury_observation") pure (eitherDecodeStrict' $ TE.encodeUtf8 raw)
+          decodeRecord "invalid_treasury_observation" raw
         _->reject "verified_treasury_receipt_required"
       proof<-fieldValue "proof" envelope :: IO Value
       case asset of
@@ -94,7 +92,7 @@ allocate ledger now did split reason = ledgerAction ledger $ \c->do
       seqNo<-criticalSequence c
       posting c ("treasury:"<>did) "operator allocation of verified treasury receipt"
         ((asset,"unallocated",negate $ toInteger quantity):[(asset,account,toInteger $ units n) | (account,n)<-entries])
-      let savedProof=json(object ["ownershipAttestation" .= reason,"observation" .= envelope])
+      let savedProof=encodeRecord(object ["ownershipAttestation" .= reason,"observation" .= envelope])
       require(T.length savedProof<=8192) "treasury_proof_too_large"
       _<-O.runInsert c O.Insert {O.iTable=treasuryallocationsTable,O.iRows=[TreasuryAllocations (text did) (text encoded) (text savedProof) (num seqNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
       _<-O.runUpdate c O.Update {O.uTable=depositsTable,O.uUpdateWith= \r->r {depositsAllocated=num 1,depositsState=text "treasury"},O.uWhere= \r->depositsId r O..== text did,O.uReturning=O.rCount}
@@ -104,8 +102,6 @@ allocate ledger now did split reason = ledgerAction ledger $ \c->do
  where
   text=O.sqlStrictText
   num=O.sqlInt8
-  json :: ToJSON a => a -> Text
-  json=TE.decodeUtf8.LBS.toStrict.encode
 
 -- Record an already-observed operator outflow; never sign or broadcast here.
 -- The scanner supplies economic facts, the operator supplies ownership only.
@@ -123,7 +119,7 @@ classifySpend ledger stream txid reason = ledgerAction ledger $ \c->do
     pure (chaineventsAnchor event,observationevidenceEvidenceJson proof)
     :: IO [(Text,Text)]
   (anchor,raw) <- case rows of [row]->pure row; _->reject "treasury_spend_not_observed"
-  observation <- either (const $ reject "invalid_observation_evidence") pure (eitherDecodeStrict' $ TE.encodeUtf8 raw)
+  observation <- decodeRecord "invalid_observation_evidence" raw
   proof <- fieldValue "proof" observation
   economic@(asset,outflow,fee) <- either reject pure (economicOutflow stream proof)
   attempts <- O.runSelect c $ do
@@ -139,9 +135,9 @@ classifySpend ledger stream txid reason = ledgerAction ledger $ \c->do
     :: IO [TreasurySpends]
   sequenceNo <- case old of
     [row]->do
-      saved <- either (const $ reject "invalid_saved_treasury_proof") pure (eitherDecodeStrict' $ TE.encodeUtf8 $ treasuryspendsProofJson row)
+      saved <- decodeRecord "invalid_saved_treasury_proof" (treasuryspendsProofJson row)
       savedReason <- fieldValue "ownershipAttestation" saved
-      require (treasuryspendsAnchor row==anchor && treasuryspendsEconomicJson row==json economic && savedReason==reason) "treasury_spend_conflict"
+      require (treasuryspendsAnchor row==anchor && treasuryspendsEconomicJson row==encodeRecord economic && savedReason==reason) "treasury_spend_conflict"
       pure (treasuryspendsCriticalSequence row)
     []->do
       let costs | asset==Native = [("float",toInteger(units outflow)-toInteger(units fee)),("operating",toInteger(units fee))]
@@ -153,9 +149,9 @@ classifySpend ledger stream txid reason = ledgerAction ledger $ \c->do
       n <- criticalSequence c
       posting c ("treasury-spend:"<>stream<>":"<>txid) "verified operator spend and network costs"
         ([(asset,account,negate cost) | (account,cost)<-costs]<>[(asset,"external",toInteger(units outflow))])
-      let evidence=json(object["ownershipAttestation" .= reason,"observation" .= observation])
+      let evidence=encodeRecord(object["ownershipAttestation" .= reason,"observation" .= observation])
       _ <- O.runInsert c O.Insert
-        { O.iTable=treasuryspendsTable,O.iRows=[TreasurySpends (text stream) (text txid) (text anchor) (text $ json economic) (text evidence) (O.sqlInt8 n)]
+        { O.iTable=treasuryspendsTable,O.iRows=[TreasurySpends (text stream) (text txid) (text anchor) (text $ encodeRecord economic) (text evidence) (O.sqlInt8 n)]
         , O.iReturning=O.rCount,O.iOnConflict=Nothing }
       pure n
     _->reject "duplicate_treasury_spend"
@@ -168,5 +164,3 @@ classifySpend ledger stream txid reason = ledgerAction ledger $ \c->do
   pure(object["transaction" .= txid,"criticalSequence" .= sequenceNo,"signedOrSent" .= False])
  where
   text=O.sqlStrictText
-  json :: ToJSON a => a -> Text
-  json=TE.decodeUtf8.LBS.toStrict.encode

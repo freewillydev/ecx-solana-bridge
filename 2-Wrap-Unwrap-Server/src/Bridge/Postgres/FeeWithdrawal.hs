@@ -2,18 +2,17 @@
 -- Internal funding stage only. No public handler, signing or send authority.
 module Bridge.Postgres.FeeWithdrawal (reserve,cancel) where
 
+import Bridge.Ledger.Model (encodeRecord)
 import Bridge.Config
 import Bridge.Types hiding (deploymentFingerprint)
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Custody (freshC)
 import Bridge.Postgres.Schema (deploymentTable,deploymentPaused,deploymentFingerprint,intentsTable,intentsId)
-import Data.Aeson (encode,object,(.=),Value)
-import qualified Data.ByteString.Lazy as B
+import Data.Aeson (object,(.=),Value)
 import Data.Int (Int64)
 import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
-import qualified Data.Text.Encoding as TE
 import Data.Profunctor.Product (p3)
 import Data.Profunctor.Product.TH (makeAdaptorAndInstance)
 import qualified Opaleye as O
@@ -43,7 +42,7 @@ reserve ledger cfg now key currency n destination explanation = ledgerAction led
    && not(T.null destination) && T.length destination<=128 && validReason explanation) "invalid_fee_withdrawal"
  deployment<-O.runSelect c $ fmap (\d->(deploymentPaused d,deploymentFingerprint d)) $ O.selectTable deploymentTable :: IO [(Int64,Text)]
  require(map snd deployment==[fingerprint cfg]) "fee_withdrawal_profile_mismatch"
- let saved=TE.decodeUtf8 $ B.toStrict $ encode $ object
+ let saved=encodeRecord $ object
        ["fingerprint" .= fingerprint cfg,"policy" .= PolicySnapshot (nativeConfirmations cfg) "finalized" (fingerprint cfg),
         "nativeFee" .= maxNativeFee cfg,"solanaFee" .= maxSolFee cfg,"solanaRent" .= maxSolAccountRent cfg]
      expected :: Withdrawal
