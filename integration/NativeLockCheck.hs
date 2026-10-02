@@ -16,7 +16,7 @@ import Bridge.Postgres.PaymentStore (Store(..))
 import Bridge.RPC
 import Control.Exception (try,finally)
 import qualified Bridge.Observer as Observer
-import qualified Bridge.Postgres.Reconciliation as Reconciliation
+import qualified Bridge.Postgres.PaymentStore as Payments
 import qualified Bridge.Postgres.Startup as Startup
 import Bridge.Observer (epochSeconds)
 import Data.Aeson (encode,object,(.=))
@@ -87,7 +87,7 @@ main = do
         pending <- preparationPending store
         require (null pending) "acceptance_other_preparation_exists"
         _ <- reconcilePaymentsWith fullTransport cfg store
-        _ <- Reconciliation.reconcileCustodyWith epochSeconds fullTransport cfg ledger
+        _ <- Payments.reconcileCustodyWith epochSeconds fullTransport cfg ledger
         now <- epochSeconds
         Startup.resumeAfterChecks cfg ledger now
         recheckSourceWith fullTransport cfg store ob

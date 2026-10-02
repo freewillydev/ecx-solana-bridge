@@ -1,8 +1,9 @@
-module Bridge.Postgres.PaymentStore (Store(..), pendingAttempts) where
+module Bridge.Postgres.PaymentStore (Store(..), pendingAttempts, reconcileCustodyWith) where
 
 import Bridge.Types
+import Bridge.Config (Config)
 import Bridge.Ledger.Model (Attempt(..),Obligation(..),Deposit(..))
-import Bridge.Settlement (PaymentStore(..),SettlementStore(..))
+import Bridge.Settlement (PaymentTransport,PaymentStore(..),SettlementStore(..))
 import Control.Exception (IOException,catch,try)
 import Data.Aeson (Value,object,(.=))
 import qualified Bridge.Postgres.Settlement as S
@@ -16,7 +17,7 @@ import qualified Bridge.Postgres.Replacement as Replacement
 import qualified Bridge.Postgres.LossCover as LossCover
 import Bridge.Payment (PreparationStore(..))
 import qualified Bridge.Postgres.Preparation as P
-import Bridge.Reconciliation (CustodyStore(..),View(..),inspectCustodyWith,reconcileCustodyRecordWith)
+import Bridge.Reconciliation (CustodyStore(..),View(..),inspectCustodyWith)
 import qualified Bridge.Postgres.Custody as C
 import qualified Bridge.Postgres.Observation as Observation
 import Data.Int (Int64)
@@ -152,17 +153,7 @@ instance SettlementStore Store where
   settlementAuthorize (Store ledger) = S.authorizeRecordedSend ledger
 
 instance CancellationStore Store where
-  cancellationReconcile clock transport cfg store@(Store ledger) = do
-    expected <- custodyRevision store
-    result <- try (inspectCustodyWith clock transport cfg store False `catch` (\(_::IOException)->reject "custody_rpc_unavailable")) :: IO (Either BridgeError (Int64,Int64,Bool,Value))
-    case result of
-      Right (revision,at,matches,report)->do
-        C.recordCheck ledger revision at (if matches then Nothing else Just "custody_balance_mismatch") (Just report)
-        pure(object["matches" .= matches])
-      Left(BridgeError code)->do
-        at <- clock
-        C.recordCheck ledger expected at (Just code) Nothing
-        pure(object["matches" .= False,"error" .= code])
+  cancellationReconcile clock transport cfg (Store ledger) = reconcileCustodyWith clock transport cfg ledger
   cancellationRead (Store ledger) = Cancellation.readCancellation ledger
   cancellationCheckFresh (Store ledger) = Cancellation.checkFresh ledger
   cancellationBegin (Store ledger) = Cancellation.begin ledger
@@ -200,7 +191,7 @@ instance NativeReplacementStore Store where
   replacementMember (Store ledger) = Replacement.member ledger
   replacementSigningContext (Store ledger) = Replacement.signingContext ledger
   replacementRecordMember (Store ledger) = Replacement.recordMember ledger
-  replacementCustody clock transport cfg store@(Store ledger) = reconcileCustodyRecordWith (C.recordCheck ledger) clock transport cfg store
+  replacementCustody = cancellationReconcile
   replacementFresh (Store ledger) = Cancellation.checkFresh ledger
   replacementCancel (Store ledger) = Replacement.cancel ledger
 
@@ -208,3 +199,19 @@ instance LossCoverStore Store where
   lossReadiness (Store ledger) = readiness ledger
   lossDecision (Store ledger) = LossCover.decision ledger
   lossRecord (Store ledger) = LossCover.record ledger
+
+-- One custody inspection/recording path for scanning, cancellation, source
+-- recovery and replacement. Callers cannot inject a different recording action.
+reconcileCustodyWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> IO Value
+reconcileCustodyWith clock transport cfg ledger = do
+  let store=Store ledger
+  expected <- custodyRevision store
+  result <- try (inspectCustodyWith clock transport cfg store False `catch` (\(_::IOException)->reject "custody_rpc_unavailable")) :: IO (Either BridgeError (Int64,Int64,Bool,Value))
+  case result of
+    Right (revision,at,matches,report)->do
+      C.recordCheck ledger revision at (if matches then Nothing else Just "custody_balance_mismatch") (Just report)
+      pure(object["matches" .= matches,"revision" .= revision,"report" .= report])
+    Left (BridgeError code)->do
+      at <- clock
+      C.recordCheck ledger expected at (Just code) Nothing
+      pure(object["matches" .= False,"error" .= code])

@@ -1,6 +1,4 @@
 """Managed private PostgreSQL installation; no wallet signing or chain sends."""
-import hashlib
-import json
 import os
 from pathlib import Path
 import pwd
@@ -24,17 +22,13 @@ def sql(query, database="ecx_bridge"):
     return run("runuser", "-u", "postgres", "--", "psql", "-X", "-q", "-t", "-A", "-v", "ON_ERROR_STOP=1", "-d", database, input=query.encode())
 
 
-def install(target, config, mkdir, keep_file, snapshot=None):
-    # A stopped legacy deployment must be migrated explicitly, never initialized
-    # over. The maintenance importer remains separate from repeat installation.
+def install(target, config, mkdir, keep_file):
+    # Historical migration tooling remains at Git revision 6d293a3. Never
+    # replace an existing SQLite ledger with an empty PostgreSQL deployment.
     legacy = Path("/var/lib/ecx-bridge/private/ledger.sqlite")
     data = Path("/var/lib/ecx-postgres/data")
-    if legacy.exists() and not (data / "PG_VERSION").exists() and snapshot is None:
-        raise ValueError("Existing SQLite ledger: stop its worker and perform the documented final snapshot/import before PostgreSQL installation")
-    if snapshot is not None:
-        if subprocess.run(["systemctl", "is-active", "--quiet", "ecx-bridge-worker.service"]).returncode == 0:
-            raise ValueError("Stop the old worker before importing its consistent final snapshot")
-        snapshot = snapshot.resolve(strict=True)
+    if legacy.exists() and not (data / "PG_VERSION").exists():
+        raise ValueError("Existing SQLite ledger: preserve it and migrate separately using the reviewed historical tools before installation")
     mkdir("/var/lib/ecx-postgres", 0o700, "postgres", "postgres")
     mkdir(data, 0o700, "postgres", "postgres")
     for name in ("postgresql.conf", "pg_hba.conf", "pg_ident.conf"):
@@ -93,24 +87,6 @@ def install(target, config, mkdir, keep_file, snapshot=None):
       GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO ecx_read;
       REVOKE ALL ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
       GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO ecx_worker;""")
-    if snapshot is not None:
-        report = Path("/var/lib/ecx-postgres/import-report.json")
-        source_hash = hashlib.sha256(snapshot.read_bytes()).hexdigest()
-        digest_file = report.with_suffix(".source-sha256")
-        if sql("SELECT count(*) FROM deployment;") == "0":
-            with tempfile.TemporaryDirectory(prefix="ecx-pg-import-", dir="/run") as tmp:
-                directory = Path(tmp)
-                uid = pwd.getpwnam("postgres").pw_uid
-                os.chown(directory, uid, -1)
-                copy = directory / "snapshot.sqlite"
-                shutil.copyfile(snapshot, copy)
-                os.chown(copy, uid, -1)
-                copy.chmod(0o600)
-                run("runuser", "-u", "postgres", "--", "python3", str(target / "scripts/import-legacy-ledger"), str(copy), "--report", str(report))
-            digest_file.write_text(source_hash + "\n")
-            digest_file.chmod(0o600)
-        elif not (report.is_file() and digest_file.is_file() and digest_file.read_text().strip() == source_hash and json.loads(report.read_text()).get("allRecordsMatch")):
-            raise ValueError("Nonempty destination does not match this recorded import; do not reimport")
     if config.is_file():
         # Config contains key-file paths, not inline signing material. Give only
         # the maintenance user a short-lived copy for typed initialization.

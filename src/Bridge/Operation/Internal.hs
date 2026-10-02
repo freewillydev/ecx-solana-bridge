@@ -14,6 +14,7 @@ class Operation (s :: Severity) (op :: Type -> Type) | op -> s where
 
 data SafeOperation a where
   VerifyReadRole :: SafeOperation ()
+  DatabaseIdentity :: Text -> SafeOperation Value
   PublicConfig :: SafeOperation Value
   PaymentInstructions :: Text -> Text -> SafeOperation Value
   OrderStatus :: Text -> Text -> SafeOperation OrderView

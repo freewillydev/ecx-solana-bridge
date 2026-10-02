@@ -66,3 +66,9 @@ delete an attempt or regenerate a capability to force a retry.
 Use at most one bounded task VM when needed and stop it afterwards. Packaging and
 cross-architecture installer builds follow runtime simplification. A Mac build is
 not Linux installation evidence.
+
+PostgreSQL migrations and the typed Opaleye records in `src/Bridge/Postgres/Schema.hs`
+are the maintained schema sources. The retired SQLite importer, translators and
+intermediate schema manifest remain at Git revision `6d293a3`. Do not regenerate
+the current schema from SQLite; change it with a reviewed forward migration and
+run the database contracts against the resulting schema.

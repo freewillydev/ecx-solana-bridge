@@ -1,7 +1,11 @@
--- Private implementation of the VerifyReadRole safe DSL operation.
-module Bridge.Postgres.Catalog (verifyReadRole) where
+-- Private fixed catalog operations for safe diagnostics and startup ownership.
+module Bridge.Postgres.Catalog (verifyReadRole,inspectDatabase,claimWorkerSession,claimInstallationTransaction) where
 
-import Bridge.Types (require)
+import Bridge.Types (require,reject)
+import Bridge.Postgres.Schema
+import Data.Aeson (Value,object,(.=))
+import Data.Int (Int64)
+import Data.Text (Text)
 import Data.Profunctor.Product (p2,p3,p6)
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Opaleye as O
@@ -59,3 +63,39 @@ tableWrite oid = Column (Expr.FunExpr "pg_catalog.has_table_privilege"
   [unColumn oid,unColumn (O.sqlStrictText "INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER")])
   O..|| Column (Expr.FunExpr "pg_catalog.has_any_column_privilege"
     [unColumn oid,unColumn (O.sqlStrictText "INSERT,UPDATE,REFERENCES")])
+
+-- These two startup locks intentionally share a namespace and key. Session
+-- ownership spans worker transactions; installation holds only its transaction.
+claimWorkerSession :: PG.Connection -> IO ()
+claimWorkerSession connection = do
+  claimed <- O.runSelect connection $ pure (Column (Expr.FunExpr "pg_catalog.pg_try_advisory_lock"
+    [unColumn (O.sqlInt4 1162041393),unColumn (O.sqlInt4 18)]) :: O.Field O.SqlBool)
+  require (claimed==[True]) "worker_already_running"
+
+claimInstallationTransaction :: PG.Connection -> IO ()
+claimInstallationTransaction connection = do
+  claimed <- O.runSelect connection $ pure (Column (Expr.FunExpr "pg_catalog.pg_try_advisory_xact_lock"
+    [unColumn (O.sqlInt4 1162041393),unColumn (O.sqlInt4 18)]) :: O.Field O.SqlBool)
+  require (claimed==[True]) "worker_already_running"
+
+-- Implementation of the closed DatabaseIdentity safe operation. Neither SQL
+-- nor arbitrary setting names/values can be supplied by its caller.
+inspectDatabase :: PG.Connection -> Text -> IO Value
+inspectDatabase connection expected = do
+  _ <- O.runSelect connection $ pure (Column (Expr.FunExpr "pg_catalog.set_config"
+    [unColumn (O.sqlStrictText "statement_timeout"),unColumn (O.sqlStrictText "10s"),
+     unColumn (O.sqlBool True)]) :: O.Field O.SqlText)
+    :: IO [Text]
+  rows <- O.runSelect connection (O.selectTable deploymentTable) :: IO [Deployment]
+  row <- case rows of
+    [d] | deploymentSingleton d==1 && deploymentSchemaVersion d==18
+        && deploymentFingerprint d==expected -> pure d
+    _ -> reject "ledger_profile_or_schema_mismatch"
+  versions <- O.runSelect connection $ pure (O.unsafeCast "bigint"
+    (Column (Expr.FunExpr "pg_catalog.current_setting" [unColumn (O.sqlStrictText "server_version_num")]) :: O.Field O.SqlText)
+    :: O.Field O.SqlInt8)
+  version <- case versions of [v]->pure (v::Int64); _->reject "postgres_identity_unavailable"
+  pure $ object ["engine" .= ("PostgreSQL"::Text),"serverVersionNumber" .= version,
+    "schemaVersion" .= deploymentSchemaVersion row,"fingerprint" .= deploymentFingerprint row,
+    "paused" .= (deploymentPaused row/=0),"criticalSequence" .= deploymentCriticalSequence row,
+    "readOnly" .= True]

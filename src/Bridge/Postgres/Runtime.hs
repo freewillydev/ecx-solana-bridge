@@ -1,5 +1,5 @@
 {-# LANGUAGE DataKinds,GADTs #-}
-module Bridge.Postgres.Runtime (runAPI,runTestWorker,runBackedTestWorker) where
+module Bridge.Postgres.Runtime (runAPI,runTestWorker,runBackedTestWorker,doctor,checkDatabase) where
 
 import Bridge.API
 import Bridge.Config
@@ -9,7 +9,7 @@ import Bridge.Postgres.Ledger (Ledger,withGuardedLedger,ledgerAction,pause,readi
 import qualified Bridge.Postgres.Treasury as Treasury
 import qualified Bridge.Postgres.Fence as Fence
 import Bridge.Postgres.Schema hiding (Audit)
-import Bridge.Postgres.Catalog (verifyReadRole)
+import Bridge.Postgres.Catalog (verifyReadRole,inspectDatabase)
 import qualified Bridge.Postgres.Backup as Backup
 import qualified Bridge.Postgres.NativeRecovery as NativeRecovery
 import qualified Bridge.Postgres.Source as Source
@@ -18,7 +18,7 @@ import qualified Data.Text.Encoding as TE
 import Data.Int (Int64)
 import qualified Bridge.Postgres.Order as Order
 import qualified Bridge.Observer as Observer
-import qualified Bridge.Postgres.Reconciliation as Reconciliation
+import qualified Bridge.Postgres.PaymentStore as Payments
 import qualified Bridge.Postgres.Server as Server
 import qualified Bridge.Postgres.Refund as Refund
 import qualified Bridge.Ledger.Model as Domain
@@ -27,6 +27,7 @@ import Bridge.Settlement (realPaymentTransport,settleAttemptWith,paymentPass,rec
 import qualified Bridge.Postgres.Startup as Startup
 import Bridge.Recovery (cancelPreparationWith,reconcileNativeLocksWith,approveSourceRecoveryWith,prepareNativeReplacementWith,signNativeReplacementWith,NativeReplacementStore(..),coverSourceLossWith)
 import Bridge.Native (nativeIdentity)
+import Bridge.Solana (solanaIdentity)
 import Bridge.Reorg (reconcileNativeSourcesWith,reconcileNativeSettlementsWith,sourceCandidates,inspectNativeSourceWith)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar (MVar,newMVar,withMVar)
@@ -92,6 +93,7 @@ evalSafe (SafeContext settings public remote paying) (SafeDSL operation) =
   readOperation :: PG.Connection -> SafeOperation result -> IO result
   readOperation connection = \case
     VerifyReadRole->verifyReadRole connection
+    DatabaseIdentity expected->inspectDatabase connection expected
     PublicConfig->do
       state <- publicAvailability connection
       case public of
@@ -188,7 +190,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
     CoverSourceLoss did recovery capital reason->
       coverSourceLossWith epochSeconds transport cfg store did recovery capital reason
     AllocateTreasury did split reason->do
-      _<-Reconciliation.reconcileCustodyWith epochSeconds transport cfg ledger
+      _<-Payments.reconcileCustodyWith epochSeconds transport cfg ledger
       now<-epochSeconds
       Treasury.allocate ledger now did split reason
     RefundDeposit did->do
@@ -209,7 +211,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
     now <- epochSeconds
     Order.expireQuotes ledger now
     _ <- reconcilePaymentsWith transport cfg store
-    Reconciliation.reconcileCustodyWith epochSeconds transport cfg ledger
+    Payments.reconcileCustodyWith epochSeconds transport cfg ledger
   WorkerDSL StartPayments->do
     lockResult <- reconcileNativeLocksWith transport {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg store
     lockError <- fieldValue "error" lockResult :: IO (Maybe Text)
@@ -246,7 +248,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
         attempts <- fieldValue "attempts" payments :: IO [Value]
         failures <- mapM (fieldValue "error") attempts :: IO [Maybe Text]
         require (all (==Nothing) failures) "source_approval_payment_requires_review"
-        _ <- Reconciliation.reconcileCustodyWith epochSeconds transport cfg ledger
+        _ <- Payments.reconcileCustodyWith epochSeconds transport cfg ledger
         candidates <- sourceCandidates store
         require (length candidates<=1000) "source_recovery_backlog"
         source <- case filter ((==Domain.obligationDeposit ob).Domain.depositId) candidates of
@@ -397,3 +399,27 @@ runRuntime paying remote settings cfg = do
     -- Liveness must not wait for initial chain synchronization. withLedger has
     -- already paused intake; bootstrap can only resume it after reconciliation.
     concurrently_ api (bootstrap >> loop)
+
+
+-- CLI diagnostics use the same closed safe interpreter as HTTP reads. They do
+-- not initialize a ledger, acquire worker ownership or construct a signer.
+checkDatabase :: PG.ConnectInfo -> Text -> IO Value
+checkDatabase settings identity =
+  evalSafe (SafeContext settings Null False False) (resolve $ Request $ DatabaseIdentity identity)
+    `catch` (\(_::PG.SqlError)->reject "postgres_diagnostic_unavailable")
+    `catch` (\(_::IOException)->reject "postgres_diagnostic_unavailable")
+
+doctor :: PG.ConnectInfo -> Config -> IO Value
+doctor settings cfg = do
+  manager <- newRpcManager
+  native <- inspect (nativeIdentity manager cfg)
+  solana <- inspect (solanaIdentity manager cfg)
+  database <- inspect (checkDatabase settings $ fingerprint cfg)
+  pure $ object ["profile" .= profile cfg,"fingerprint" .= fingerprint cfg,
+    "native" .= native,"solana" .= solana,"database" .= database,"implementationReady" .= False]
+ where
+  inspect action = do
+    result <- try (action `catch` (\(_::IOException)->reject "diagnostic_io_unavailable")) :: IO (Either BridgeError Value)
+    pure $ case result of
+      Right evidence->object ["ok" .= True,"evidence" .= evidence]
+      Left (BridgeError code)->object ["ok" .= False,"error" .= code]

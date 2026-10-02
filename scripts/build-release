@@ -140,7 +140,6 @@ shutil.copytree(root / "deploy", bundle / "deploy", ignore=shutil.ignore_pattern
 shutil.copy2(root / "config/l2l-devnet.example.json", bundle / "config/l2l-devnet.example.json")
 shutil.copy2(root / "config/interface.example.json", bundle / "config/interface.example.json")
 shutil.copytree(root / "migrations/postgresql", bundle / "migrations/postgresql", dirs_exist_ok=True)
-shutil.copy2(root / "scripts/import-legacy-ledger", bundle / "scripts/import-legacy-ledger")
 shutil.copy2(root / "LICENSE", bundle / "LICENSE")
 shutil.copy2(root / "docs/dependencies.json", bundle / "dependencies.json")
 # Collect against this architecture's actual build, rather than copying another

@@ -3,6 +3,7 @@ module Bridge.Postgres.Ledger
   ( Ledger, withLedger, withGuardedLedger, ledgerAction, readiness, pause, criticalSequence, acknowledgeBackup, balances, posting ) where
 
 import Bridge.Postgres.Schema
+import Bridge.Postgres.Catalog (claimWorkerSession)
 import Bridge.Types (Availability(..), Asset, require, reject)
 import Control.Concurrent.MVar
 import Control.Exception
@@ -24,8 +25,7 @@ withLedger settings identity = withGuardedLedger settings identity Nothing
 withGuardedLedger :: PG.ConnectInfo -> Text -> Maybe (Int64 -> IO ()) -> (Ledger -> IO a) -> IO a
 withGuardedLedger settings identity guard action = bracket (PG.connect settings) PG.close $ \connection -> do
   -- Session ownership survives individual commits and is released on close.
-  locked <- PG.query_ connection "SELECT pg_try_advisory_lock(1162041393,18)" :: IO [PG.Only Bool]
-  require (locked == [PG.Only True]) "worker_already_running"
+  claimWorkerSession connection
   metadata <- O.runSelect connection (O.selectTable deploymentTable)
     :: IO [Deployment]
   require (case metadata of [row]->deploymentSingleton row==1 && deploymentSchemaVersion row==18 && deploymentFingerprint row==identity; _->False) "ledger_profile_or_schema_mismatch"

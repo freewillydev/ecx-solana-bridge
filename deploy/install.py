@@ -95,7 +95,6 @@ def main():
     parser.add_argument("--upgrade", action="store_true", help="stop and privately back up an existing PostgreSQL deployment, then switch verified releases")
     parser.add_argument("--configure", action="store_true", help="interactively collect and validate private Signet/Devnet configuration")
     parser.add_argument("--port", type=int, help="loopback web port (default 8080, or existing configuration)")
-    parser.add_argument("--legacy-snapshot", type=Path, help="consistent final SQLite snapshot; old worker must be stopped")
     parser.add_argument("--with-signet", action="store_true", help="install/start a dedicated real L2L public Signet node")
     parser.add_argument("--test-worker", action="store_true", help="enable payments only for explicit Signet/Devnet or betanet/Devnet test profiles")
     parser.add_argument("--backed-test-worker", action="store_true", help="enable Devnet payments with mandatory encrypted off-host backup (requires backup.json and protected repository/password files)")
@@ -104,8 +103,8 @@ def main():
         parser.error("Choose either --test-worker or --backed-test-worker")
     if args.configure and args.backed_test_worker:
         parser.error("--backed-test-worker requires prepared private backup configuration; use --config-dir instead of --configure")
-    if args.upgrade and (args.configure or args.config_dir or args.legacy_snapshot or args.test_worker or args.backed_test_worker or args.port is not None):
-        parser.error("--upgrade preserves configuration/payment mode; do not combine it with configuration, import, port or payment-mode changes")
+    if args.upgrade and (args.configure or args.config_dir or args.test_worker or args.backed_test_worker or args.port is not None):
+        parser.error("--upgrade preserves configuration/payment mode; do not combine it with configuration, port or payment-mode changes")
     if args.configure and (args.config_dir or not sys.stdin.isatty()):
         parser.error("--configure requires a terminal and cannot be combined with --config-dir")
     if args.port is not None and not 1024 <= args.port <= 65535:
@@ -266,7 +265,7 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
     for name in ("ecx-bridge-worker.service", "ecx-bridge-web.service", "ecx-bridge-node.service"):
         dest = Path("/etc/systemd/system") / name
         keep(dest, (target / "deploy" / name).read_bytes(), 0o644)
-    postgres.install(target, config, mkdir, keep, args.legacy_snapshot)
+    postgres.install(target, config, mkdir, keep)
     for name in ("ecx-bridge-backup.service", "ecx-bridge-backup.timer"):
         keep(Path("/etc/systemd/system") / name, (target / "deploy" / name).read_bytes(), 0o644)
     payment_mode_added = False

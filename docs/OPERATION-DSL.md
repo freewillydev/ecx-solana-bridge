@@ -118,8 +118,12 @@ public API lacks these built-ins; no function name or SQL expression is accepted
 from callers. The check covers public-schema relations; read-only transactions
 remain an independent enforcement layer. PostgreSQL documents the current-user and
 inherited-privilege semantics in its [system information functions](https://www.postgresql.org/docs/16/functions-info.html).
-Remaining writable-store exports, maintenance paths and handwritten diagnostic/
-locking reads still need consolidation under this boundary.
+Database diagnostics now enter through the private DatabaseIdentity safe operation;
+its fixed Opaleye catalog queries run in the same read-only interpreter. Worker and
+installation ownership use fixed Opaleye advisory-lock expressions. Production
+Haskell no longer uses handwritten query/execute calls. Remaining writable-store
+exports and maintenance paths still need consolidation under this boundary;
+legacy tests and external maintenance scripts remain separate refactoring work.
 
 ## Classification and authority
 

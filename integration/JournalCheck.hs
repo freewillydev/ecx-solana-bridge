@@ -5,6 +5,8 @@ import Bridge.Types hiding (deploymentFingerprint)
 import Bridge.Ledger.Model (Deposit(..))
 import Bridge.Config
 import qualified Bridge.Postgres.Order as Order
+import qualified Bridge.Postgres.Runtime as Runtime
+import Bridge.RPC (fieldValue)
 import qualified Bridge.Order as Workflow
 import qualified Bridge.SolanaPay as Pay
 import qualified Bridge.Postgres.Observation as Observation
@@ -61,6 +63,18 @@ main = do
     require (case invalid of Left _->True; _->False) "unbalanced_posting_accepted"
     bs <- L.ledgerAction ledger L.balances
     require (M.lookup ("Native","float") bs==Just 100 && M.lookup ("Native","external") bs==Just (-100)) "journal_balance_failed"
+    -- Diagnostics remain usable during active worker ownership, without
+    -- pausing it, claiming its lock or changing any deployment metadata.
+    before <- L.ledgerAction ledger (\connection->fixture connection DeploymentState)
+    diagnostic <- Runtime.checkDatabase settings "journal-contract"
+    engine <- fieldValue "engine" diagnostic
+    version <- fieldValue "serverVersionNumber" diagnostic
+    readOnly <- fieldValue "readOnly" diagnostic
+    require (engine==("PostgreSQL"::T.Text) && (version::Int64)>=160000 && readOnly)
+      "database_diagnostic_wrong"
+    expectError "ledger_profile_or_schema_mismatch" (Runtime.checkDatabase settings "wrong-profile")
+    after <- L.ledgerAction ledger (\connection->fixture connection DeploymentState)
+    require (before==after) "diagnostic_changed_deployment"
     competing <- try (L.withLedger settings "journal-contract" (const $ pure ())) :: IO (Either BridgeError ())
     require (case competing of Left _->True; _->False) "worker_lock_failed"
     let receipt=T.replicate 64 "a"
@@ -94,6 +108,7 @@ main = do
 data Fixture a where
   InitializeFixture :: Fixture ()
   LockDeployment :: Fixture ()
+  DeploymentState :: Fixture [Deployment]
   ReadCoverage :: Fixture [(Int64,Int64,Int64)]
   FundOrderTests :: Fixture ()
   ReadyAt :: Int64 -> Fixture ()
@@ -107,6 +122,7 @@ data Fixture a where
 
 fixture :: PG.Connection -> Fixture a -> IO a
 fixture connection = \case
+  DeploymentState -> O.runSelect connection (O.selectTable deploymentTable)
   LockDeployment -> do
     rows <- O.runSelect connection $ Locking.forUpdate $ do
       row <- O.selectTable deploymentTable

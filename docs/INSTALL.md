@@ -210,13 +210,12 @@ signing/publication and independent security review are separate unfinished gate
 
 ## Existing ledger and backups
 
-An existing SQLite ledger is not automatically replaced. Stop its worker, take a
-consistent final snapshot, preserve it privately, then supply
-`--legacy-snapshot /absolute/private/final.sqlite` during reviewed installation.
-The importer requires an empty PostgreSQL destination and compares every record
-before committing. Repeat installation with the same import requires its recorded
-source digest and comparison report. After new external effects, the old snapshot
-is no longer a safe rollback state. Never run two paying workers for one custody.
+An existing SQLite ledger is refused rather than replaced with an empty database.
+The retired migration tools remain at Git revision 6d293a3; migrating an old ledger
+is a separate reviewed operation with the worker stopped, a consistent private
+snapshot and full record comparison. The current installer does not import SQLite.
+After new external effects, an old snapshot is no longer a safe rollback state.
+Never run two paying workers for one custody.
 
 The hourly `ecx-bridge-backup.timer` creates consistent custom-format PostgreSQL
 dumps under `/var/lib/ecx-bridge/private/backups`, validates the archive inventory

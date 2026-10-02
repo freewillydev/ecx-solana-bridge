@@ -8,12 +8,12 @@ module Bridge.Ledger
   , checkIntakeReady
   , freeInventory, allocateTreasuryReceipt, allocateSolOperatingReceipt, recordTreasurySpend, expireQuotes
   , Deposit(..), observeDeposit, refreshDeposit, recordScan, readCheckpoint, promoteDeposit, checkpoint
-  , economicOutflow, ChainEvent(..), ScanBatch(..), commitScan, recordScanFailure, scannerHealth, custodyHealth
-  , lookupInstruction, maximumNativeDepth, pendingVerification
+  , economicOutflow, ChainEvent(..), ScanBatch(..), commitScan, recordScanFailure, custodyHealth
+  , maximumNativeDepth, pendingVerification
   , Obligation(..), readyObligations, Attempt(..), storeAttempt, markBroadcastIntent, authorizeRecordedSend
   , Preparation(..), beginPreparation, storeDraft, pendingPreparations, activePreparationGeneration
   , preparationCancellation, beginPreparationCancellation, finishPreparationCancellation, checkCustodyFresh
-  , pendingAttempts, PaymentCosts(..), recordSettlement, createRefund, recordFailedSolana, recordSolanaExpiry, recordSolanaRetryApproval, requireBackup, addHint, auditExport, auditExportWithBudget
+  , pendingAttempts, PaymentCosts(..), recordSettlement, createRefund, recordFailedSolana, recordSolanaExpiry, recordSolanaRetryApproval, requireBackup, auditExport, auditExportWithBudget
   , NativeSettlementCheck(..), nativeSettlementCandidates, recordNativeSettlementCheck
   , SourceCheck(..), nativeSourceCandidates, recordSourceCheck
   , sourceRecoveryApproval, sourceRecoveryObligation, recordSourceRecoveryApproval
@@ -469,20 +469,6 @@ recordScanFailure l chain now code = ledgerAction l $ \c -> do
   when (previous/=[Only (Just code)]) $ execute c "INSERT INTO audit(action,detail) VALUES('scanner_failure',?)" (Only (chain<>":"<>code))
   execute c "INSERT INTO scan_health(chain,last_error,checked_at) VALUES(?,?,?) ON CONFLICT(chain) DO UPDATE SET last_error=excluded.last_error,checked_at=excluded.checked_at" (chain,code,now)
   execute c "UPDATE deployment SET paused=1,pause_reason=?" (Only ("scanner_unavailable:"<>chain))
-
-scannerHealth :: Ledger -> IO Value
-scannerHealth l = ledgerAction l $ \c -> do
-  rows <- query_ c "SELECT h.chain,h.last_success,h.last_error,h.checked_at,p.anchor FROM scan_health h LEFT JOIN checkpoints p ON p.chain=h.chain ORDER BY h.chain" :: IO [(Text,Maybe Int64,Maybe Text,Int64,Maybe Text)]
-  reviews <- query_ c "SELECT chain,event_id,kind FROM chain_events WHERE needs_review=1 ORDER BY first_seen LIMIT 100" :: IO [(Text,Text,Text)]
-  pure $ object ["scanners" .= [object ["chain" .= chain,"lastSuccess" .= ok,"lastError" .= err,"checkedAt" .= checked,"cursor" .= cursor] | (chain,ok,err,checked,cursor)<-rows],"review" .= reviews]
-
-lookupInstruction :: Ledger -> Text -> IO (Maybe (Text,OrderRequest,PolicySnapshot))
-lookupInstruction l instruction = ledgerAction l $ \c -> do
-  rows <- query c "SELECT id,request_json,policy_json FROM orders WHERE instruction=?" (Only instruction) :: IO [(Text,Text,Text)]
-  case rows of
-    [] -> pure Nothing
-    [(oid,r,p)] -> Just <$> ((,,) oid <$> fromText r <*> fromText p)
-    _ -> reject "duplicate_deposit_instruction"
 
 maximumNativeDepth :: Ledger -> Int -> IO Int
 maximumNativeDepth l minimumDepth = ledgerAction l $ \c -> do
@@ -1348,15 +1334,6 @@ recordSettlement l txid costs evidence = ledgerAction l $ \c -> do
   parseAsset "Native" = pure Native
   parseAsset "Wrapped" = pure Wrapped
   parseAsset _ = reject "invalid_payout_asset"
-addHint :: Ledger -> Text -> Text -> Text -> IO ()
-addHint l capability oid sig = do
-  cap <- either reject pure (capabilityHash capability)
-  require (T.length sig >= 64 && T.length sig <= 88) "invalid_signature_hint"
-  ledgerAction l $ \c -> do
-    _ <- readOrderC c cap oid
-    counts <- query c "SELECT count(*) FROM hints WHERE order_id=?" (Only oid) :: IO [Only Int]
-    require (case counts of [Only n] -> n<8; _ -> False) "hint_limit"
-    execute c "INSERT OR IGNORE INTO hints(order_id,signature) VALUES(?,?)" (oid,sig)
 auditExport :: Ledger -> IO Value
 auditExport l = ledgerAction l auditExportC
 auditExportWithBudget :: Ledger -> Config -> IO Value

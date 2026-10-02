@@ -17,6 +17,20 @@ installer = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(installer)
 
 
+class LegacyLedgerGuard(unittest.TestCase):
+    def test_unmigrated_ledger_refused_before_service_or_filesystem_changes(self):
+        spec = importlib.util.spec_from_file_location("postgres_install", Path(__file__).resolve().parents[1] / "deploy/postgres.py")
+        postgres = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(postgres)
+        mkdir, keep = Mock(), Mock()
+        with patch.object(Path, "exists", lambda path: str(path) == "/var/lib/ecx-bridge/private/ledger.sqlite"), patch.object(postgres, "run") as run:
+            with self.assertRaisesRegex(ValueError, "Existing SQLite ledger"):
+                postgres.install(Path("/unused"), Path("/unused/config"), mkdir, keep)
+        mkdir.assert_not_called()
+        keep.assert_not_called()
+        run.assert_not_called()
+
+
 class ReleaseIntegrity(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()

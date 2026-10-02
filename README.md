@@ -93,7 +93,7 @@ identifies current code boundaries and records the remaining gates.
 
 ## Build and installation
 
-The tested dependency boundary is GHC **9.14.1**, Cabal **3.16.1.0**, Rust **1.97.1**, SQLite **3.53.4**, Node **25.4.0** and Bitcoin Core **30.2**. Cabal, Cargo and npm dependency graphs are locked. Linux upstream toolchain URLs/checksums are in [`deploy/toolchains.json`](deploy/toolchains.json). The Haskell SQLite dependency is confined to the separate `legacy` Cabal component and build-cache regression tests; the production application uses libpq/PostgreSQL 16 and no longer links or bundles a SQLite CLI/shared library. The explicit legacy importer retains read-only compatibility through Python’s standard library. `doctor` checks the actual configured PostgreSQL ledger in a read-only transaction.
+The tested dependency boundary is GHC **9.14.1**, Cabal **3.16.1.0**, Rust **1.97.1**, SQLite **3.53.4**, Node **25.4.0** and Bitcoin Core **30.2**. Cabal, Cargo and npm dependency graphs are locked. Linux upstream toolchain URLs/checksums are in [`deploy/toolchains.json`](deploy/toolchains.json). The Haskell SQLite dependency is confined to the separate `legacy` Cabal component and build-cache regression tests; the production application uses libpq/PostgreSQL 16 and no longer links or bundles a SQLite CLI/shared library. The retired SQLite importer and schema translators remain in Git history at revision 6d293a3. `doctor` checks the actual configured PostgreSQL ledger in a read-only transaction.
 
 On Ubuntu 24.04, from a reviewed checkout, run as a normal sudo-enabled user:
 

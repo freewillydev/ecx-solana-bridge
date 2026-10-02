@@ -9,7 +9,7 @@ import qualified Bridge.Postgres.Order as Order
 import Control.Monad (forM_)
 import Bridge.Settlement (PaymentTransport,reconcilePaymentsWith,readSavedPayment,recheckSourceWith)
 import Bridge.Postgres.PaymentStore (Store(..),pendingAttempts)
-import qualified Bridge.Postgres.Reconciliation as Reconciliation
+import qualified Bridge.Postgres.PaymentStore as Payments
 import qualified Bridge.Ledger.Model as Domain
 import Bridge.RPC (fieldValue)
 import Data.Aeson (Value)
@@ -40,7 +40,7 @@ resumeAfterReview clock transport cfg ledger = do
     require (Domain.attemptState attempt `elem` ["signed","broadcast_intent"]) "resume_payment_requires_review"
     (obligation,_) <- readSavedPayment transport cfg (Store ledger) attempt
     recheckSourceWith transport cfg (Store ledger) obligation
-  _ <- Reconciliation.reconcileCustodyWith clock transport cfg ledger
+  _ <- Payments.reconcileCustodyWith clock transport cfg ledger
   now <- clock
   resumeChecked cfg ledger now (Just saved)
 
