@@ -1153,3 +1153,29 @@ databases and encrypted storage were removed; deliberately invalid contract
 archives remain privately isolated from normal recovery material. These deployment
 script changes are committed source; installed packages still use their prior
 verified releases pending the next consolidated deployment package update.
+
+## Installed full-row backup tooling: ARM upgrade and repeat installation
+
+Deployment-only release `c8786e4c208f2a226b7282c1` now includes the new backup and
+restore scripts in the actual Ubuntu ARM64 one-command installer. The repacker
+verified every non-deployment artifact was unchanged; no compiler was run. The
+restored dedicated test guest upgraded from `55b523e248e8687bc34f29f7` and repeated
+installation successfully. All 21 installer tests pass.
+
+The first upgrade comparison was deliberately not called exact: one browser
+order was still awaiting payment in the stopped baseline, then naturally expired
+when the installer restarted the paused worker. Comparing the upgrade archive
+with current state isolated the differences to its order status and native/wrapped
+reservation phases, with no attempt or critical-sequence change. Both unfunded
+orders are now expired; both previously paid orders remain paid. A new stopped
+baseline followed by repeat installation preserved all 31 durable tables, all
+11 configuration files and the worker fence exactly at sequence 11.
+
+The installed backup systemd service then created a new row-hashed manifest. The
+installed verifier restored it into an isolated database and verified archive,
+deployment, counts and complete contents of all 38 tables. No worker was started
+by verification and no remote coverage was acknowledged. See
+`evidence/installed-backup-tools-arm.json`. The installer/checksum are retained
+privately under `releases/backup-tools-515dd6e-arm`. The worker finishes paused and
+stopped; all task VMs are stopped. The x86 package still uses its previous verified
+release and needs this deployment-only update and installed acceptance next.

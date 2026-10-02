@@ -365,3 +365,12 @@ or starts a worker. Credentials and repository URLs are omitted from reports and
 failure diagnostics. An unavailable repository fails the command without a success
 report. The local round trip is recorded in
 `docs/evidence/postgres-encrypted-backup-command.json`.
+
+The restored ARM test deployment currently uses release
+`c8786e4c208f2a226b7282c1`, including row-content backup verification. Its two
+unfunded browser orders have now expired normally; the ledger retains four orders
+and two paid attempts, at critical sequence 11. Upgrade and repeat installation
+evidence is in `docs/evidence/installed-backup-tools-arm.json`. Preserve the
+original private stopped upgrade archive and both state-comparison baselines.
+The x86 deployment-only update remains pending; do not claim both architectures
+have accepted these latest script changes yet.
