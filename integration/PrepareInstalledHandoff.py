@@ -13,8 +13,11 @@ import subprocess
 import sys
 
 parser = argparse.ArgumentParser(description=__doc__)
-parser.add_argument('--signed-native-fixture', action='store_true',
+fixtures = parser.add_mutually_exclusive_group()
+fixtures.add_argument('--signed-native-fixture', action='store_true',
                     help='Retire the exact reviewed five-order signed-native checkpoint')
+fixtures.add_argument('--settled-solana-fixture', action='store_true',
+                    help='Retire the exact reviewed six-order settled Solana retry checkpoint')
 args = parser.parse_args()
 assert os.geteuid() == 0
 sys.dont_write_bytecode = True
@@ -41,7 +44,26 @@ def sql(query):
     return run('runuser', '-u', 'postgres', '--', 'psql', '-XqAt', '-v',
                'ON_ERROR_STOP=1', '-c', query)
 
-if args.signed_native_fixture:
+if args.settled_solana_fixture:
+    order = 'de8263b85175e9c2db4796c9ba8335e4814cbb8b16f2d6875e384a3693377bce'
+    original = '2nNCfmQFHSj7gWBrZ35t1YUiTazniqrz5L96h3xZ7ZcTuJUSwntqScC6jiuTShrRg1U5KBjaGZuBTYZav6ukFe8c'
+    replacement = '3Jha9ig3L1TSpiquyZiHdENm57ea4ssFxDkqr3joAEtJckXnCdhUTnEPVUTCWpt6LzqHbkpi5q6yLSGkT1Y36xqj'
+    assert sql('SELECT count(*) FROM orders;') == '6'
+    assert sql("SELECT count(*) FROM orders WHERE status='Paid';") == '4'
+    assert sql("SELECT count(*) FROM orders WHERE status='ExpiredUnfunded';") == '2'
+    assert sql("SELECT count(*) FROM orders WHERE id='" + order + "' AND status='Paid';") == '1'
+    assert sql('SELECT count(*) FROM attempts;') == '5'
+    assert sql("SELECT count(*) FROM attempts WHERE state='settled';") == '4'
+    assert sql("SELECT count(*) FROM attempts WHERE txid='" + original + "' AND intent_id='convert:" + order + "' AND state='review' AND critical_sequence IS NULL;") == '1'
+    saved = sql("SELECT signed_bytes FROM attempts WHERE txid='" + original + "';")
+    assert hashlib.sha256(saved.encode()).hexdigest() == 'ded0467e4a3d0e0c0247b39dec336bc882c9e5eeccdb8942f2d7f263f446a85b'
+    del saved
+    assert sql("SELECT count(*) FROM attempts WHERE txid='" + replacement + "' AND intent_id='convert:" + order + "' AND state='settled' AND critical_sequence=19;") == '1'
+    assert sql("SELECT count(*) FROM fee_reservations WHERE intent_id='convert:" + order + "' AND released=0;") == '0'
+    assert sql("SELECT count(*) FROM reservations WHERE order_id='" + order + "' AND phase<>'released';") == '0'
+    assert sql('SELECT critical_sequence FROM deployment;') == '19'
+    assert sql('SELECT count(*) FROM (SELECT event_id,asset FROM postings GROUP BY event_id,asset HAVING sum(delta)<>0) unbalanced;') == '0'
+elif args.signed_native_fixture:
     order = '6632ca65986747e3cd135735ca23d1d0e6420f6b7fed43161a851543e188c49a'
     txid = 'f4aa18204d8c5d4dad583f0638887a5e7d0b3c84169226dccd4148539d6c8013'
     assert sql("SELECT count(*) FROM orders;") == '5'

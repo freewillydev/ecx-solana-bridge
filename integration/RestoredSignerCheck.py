@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Reproduce only the two settled original signatures after the test handoff.
+"""Reproduce settled saved signatures after a reviewed dedicated test handoff.
 
 No broadcast, new transaction parameters, ledger write or customer intent. Output
 contains only comparison results. Run as root with the paying worker stopped.
 """
+import argparse
 import base64
 import json
 import os
@@ -11,6 +12,9 @@ from pathlib import Path
 import subprocess
 import urllib.request
 
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument('--settled-solana-fixture', action='store_true')
+args = parser.parse_args()
 assert os.geteuid() == 0
 assert subprocess.run(['systemctl','is-active','--quiet','ecx-bridge-worker']).returncode != 0
 cfg = json.loads(Path('/etc/ecx-bridge/worker.json').read_text())
@@ -25,9 +29,15 @@ def sql(query):
     return result.stdout.strip()
 
 assert sql('SELECT paused FROM deployment;') == '1'
-assert sql("SELECT count(*) FROM orders WHERE status <> 'Paid';") == '0'
+if args.settled_solana_fixture:
+    assert sql('SELECT count(*) FROM orders;') == '6'
+    assert sql("SELECT count(*) FROM orders WHERE status='Paid';") == '4'
+    assert sql("SELECT count(*) FROM orders WHERE status='ExpiredUnfunded';") == '2'
+    assert sql('SELECT critical_sequence FROM deployment;') == '19'
+else:
+    assert sql("SELECT count(*) FROM orders WHERE status <> 'Paid';") == '0'
 rows = sql("SELECT json_build_object('chain',i.chain,'draft',p.draft_json,'bytes',a.signed_bytes,'txid',a.txid)::text FROM preparations p JOIN intents i ON i.id=p.intent_id JOIN attempts a ON a.intent_id=i.id AND a.preparation_generation=p.generation WHERE a.state='settled';").splitlines()
-assert len(rows) == 2
+assert len(rows) == (4 if args.settled_solana_fixture else 2)
 sequence = sql('SELECT critical_sequence FROM deployment;')
 verified = []
 for encoded in rows:
@@ -52,11 +62,11 @@ for encoded in rows:
         reply = json.loads(result.stdout)
         assert reply['transaction'] == row['bytes'] and reply['signature'] == row['txid'], 'Restored Solana signature differs'
     verified.append(row['chain'])
-assert sorted(verified) == ['Native','Solana']
+assert sorted(verified) == (['Native','Native','Solana','Solana'] if args.settled_solana_fixture else ['Native','Solana'])
 assert sql('SELECT critical_sequence FROM deployment;') == sequence
 report = dict(restoredNativeSignerReproducesOriginalBytes=True,
     restoredSolanaSignerReproducesOriginalBytesAndSignature=True,
-    onlySettledSavedDraftsUsed=True, newEconomicIntent=False, broadcast=False,
+    onlySettledSavedDraftsUsed=True, reproducedSavedAttempts=len(verified), newEconomicIntent=False, broadcast=False,
     criticalSequenceUnchanged=True, workerStopped=True)
 Path('/home/lukekensik.guest/private-handoff/signer-evidence.json').write_text(json.dumps(report,indent=2)+'\n')
 print(json.dumps(report))

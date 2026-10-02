@@ -1502,3 +1502,28 @@ not a paid x86 chain round trip. Both consolidated archives were signed and
 individually verified using the development Ed25519 release key. The local
 `signed-latest-review-candidate` directory preserves the new pair separately
 from the earlier candidate. No public or valuable-fund release is authorized.
+
+### Clean-host restore of the completed Solana retry ledger
+
+The latest installed paying fixture was retired at sequence 19 after exact
+six-order/five-attempt guards verified the expired unsent signature, finalized
+replacement, released holds and balanced postings. Source services are disabled
+behind a persistent retirement condition and its fence rejects paying startup.
+Its private archive was copied to protected local storage; this is not off-host
+backup acceptance.
+
+A new 3 GiB Ubuntu ARM64 guest (`solrestore`) installed the same verified release
+without compilation and restored all 38 tables with matching complete row hashes
+before startup. Three existing dedicated native wallet databases and the Solana
+custody key were restored. Source retirement overrides and the retired fence were
+not copied; the destination initialized a fresh matching fence at sequence 19 in
+observation-only mode. With its worker stopped, restored native and Solana keys
+reproduced the exact bytes/signatures of all four settled saved transactions,
+without broadcast, new intent or sequence change.
+
+See `evidence/installed-solana-clean-host-restore.json`. This proves restoration
+of the completed expiry/retry ledger and signing material. It does not prove
+restoring an in-flight Solana transaction, post-restore paying reconciliation,
+off-host durability, lost-host key revocation or the broader fault/reorg matrix.
+`inflight` is now retired; `solrestore` is the retained destination. Both guests
+were shut down after acceptance; do not reactivate a retired source.
