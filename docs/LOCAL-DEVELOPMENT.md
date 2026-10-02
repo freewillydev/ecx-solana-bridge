@@ -372,5 +372,9 @@ unfunded browser orders have now expired normally; the ledger retains four order
 and two paid attempts, at critical sequence 11. Upgrade and repeat installation
 evidence is in `docs/evidence/installed-backup-tools-arm.json`. Preserve the
 original private stopped upgrade archive and both state-comparison baselines.
-The x86 deployment-only update remains pending; do not claim both architectures
-have accepted these latest script changes yet.
+The x86 deployment-only update is accepted as release
+`9449c9f71c336addc67f3f2b`: upgrade/reinstall preserve all 31 durable tables and
+eight configuration files, and installed full-row backup restoration passes all
+38 tables. See `docs/evidence/installed-backup-tools-x86.json`.
+The x86 guest remains observation-only with no signer;
+its prior release's cold-boot evidence is not a new cold-boot test of this package.

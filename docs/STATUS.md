@@ -1179,3 +1179,24 @@ by verification and no remote coverage was acknowledged. See
 privately under `releases/backup-tools-515dd6e-arm`. The worker finishes paused and
 stopped; all task VMs are stopped. The x86 package still uses its previous verified
 release and needs this deployment-only update and installed acceptance next.
+
+## Installed full-row backup tooling: x86 upgrade and repeat installation
+
+The matching deployment-only x86 release `9449c9f71c336addc67f3f2b` upgrades the
+observation-only Ubuntu guest from `5fc0d68eb70457516fe5122d`. Verified compiled
+artifacts are unchanged. Upgrade and repeat installation each preserved all 31
+durable tables, eight configuration files and sequence zero. Private PostgreSQL,
+restricted roles, the protected fingerprint/sequence fence and absent signer were
+checked. The interface returned health 200 and readiness 503 before shutdown.
+
+The installed backup service created a manifest with row hashes for all 38 tables;
+the installed verifier restored it and matched archive checksum, deployment,
+counts and every table's row contents. The disposable restore database was removed.
+No payment mode, signer, chain send or remote coverage was introduced. This run
+does not repeat cold-boot acceptance for the latest deployment-only release; the
+previous release has that separate evidence. Both architectures now have installed
+acceptance of the updated backup scripts, with paying-flow evidence on ARM and
+observation-only acceptance on x86. See `evidence/installed-backup-tools-x86.json`.
+The x86 installer/checksum are retained privately under
+`releases/backup-tools-515dd6e-x86`; ARM artifacts remain alongside them under
+`releases/backup-tools-515dd6e-arm`. All task VMs are stopped afterward.
