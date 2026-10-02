@@ -1,0 +1,21 @@
+{
+  "platform": "Ubuntu 24.04 aarch64",
+  "actualNativeWalletLayout": "signet/wallets",
+  "previousArchiveWalletDatabases": 0,
+  "archivedNativeWalletDatabases": 3,
+  "allArchivedWalletFilesMatchStoppedSource": true,
+  "isolatedWalletDatabaseIntegrityPassed": true,
+  "solanaSignerArchiveMatches": true,
+  "installerTests": 21,
+  "workerStarted": false,
+  "keysLoadedOrUsedForSigning": false,
+  "offHostDurabilityVerified": false,
+  "cleanHostRestorationVerified": false,
+  "privateArchiveMode": "0o600",
+  "archiveManifestDigestsVerified": true,
+  "isolatedLedgerRestored": true,
+  "allLedgerTableRowsMatch": true,
+  "ledgerTablesCompared": 38,
+  "criticalSequence": 8,
+  "workerAndNodeStopped": true
+}

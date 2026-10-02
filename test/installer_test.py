@@ -162,6 +162,23 @@ class UpgradeFiles(unittest.TestCase):
         self.upgrade.previous, self.upgrade.target, self.upgrade.current = self.previous, self.target, self.current
         self.upgrade.old_files = {}
 
+    def test_archive_discovers_chain_specific_and_legacy_wallet_storage(self):
+        node = self.root / "node"
+        for name in ("wallets/old", "signet/wallets/treasury"):
+            wallet = node / name
+            wallet.mkdir(parents=True)
+            (wallet / "wallet.dat").write_bytes(b"offline private wallet fixture")
+        self.assertEqual(list(self.module.private_state_paths(node)),
+                         [node / "wallets", node / "signet/wallets"])
+
+    def test_archive_refuses_redirected_wallet_storage(self):
+        node = self.root / "node"
+        wallet = node / "signet/wallets"
+        wallet.mkdir(parents=True)
+        (wallet / "redirected").symlink_to(self.previous, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            list(self.module.private_state_paths(node))
+
     def test_atomic_release_switch_retains_previous_package(self):
         self.module.atomic_link(self.current, self.target)
         self.assertEqual(self.current.resolve(), self.target)

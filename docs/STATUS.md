@@ -1020,8 +1020,20 @@ the worker was running; after inspection the worker was explicitly paused and
 stopped. See [reinstall evidence](evidence/installed-paying-reinstall.json).
 The task VM and old local preview were stopped to release memory.
 
-The next restore audit must verify the managed native wallet archive covers the
-actual Signet wallet directory (including the chain-specific `signet/wallets`
-layout). The current archive's legacy `wallets` path alone is not proof of key
-restorability. Preserve the funded guest disk and private journals until that
-clean-host key/ledger recovery check succeeds.
+The managed wallet archive audit found a real omission: the installed node used
+`signet/wallets`, while earlier upgrade archives covered only `wallets` and
+contained zero native wallet databases. The corrected archive includes both
+managed layouts and rejects redirected storage. With the actual installed worker
+and node stopped, all three archived native wallet databases matched the source;
+isolated copies passed database integrity checks and the archived Solana signer
+matched. The paired dump restored into a disposable, access-restricted database
+with every row in all 38 tables matching and critical sequence 8 retained. The
+verification database and temporary wallet copies were removed. See
+[wallet/ledger archive evidence](evidence/installed-wallet-archive.json).
+
+This verifies the corrected offline archive routine on the actual paying fixture;
+it does not prove off-host retention, clean-host key loading/signing, independent
+host fencing or safe resume. The deployment-only repack is prepared, with compiled
+application/helper/frontend unchanged and 21 installer tests passing. Installing
+that repack on ARM64 and updating the x86 package remain next deployment checks.
+Preserve the funded guest disk and private journals until full recovery passes.

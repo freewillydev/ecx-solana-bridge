@@ -199,6 +199,9 @@ This supports the managed PostgreSQL 16 / ledger schema 18 installation. It
 verifies the old release and its managed units, stops the worker, web, backup
 timer and dedicated node, and creates a private ledger dump plus configuration,
 key, native-wallet and unit archive under `/var/lib/ecx-bridge/upgrades/`. It
+includes both managed `wallets` and `signet/wallets` layouts and refuses redirected
+wallet storage rather than silently archiving a symlink. Wallets stored outside
+these managed defaults require a separate verified key backup. It
 checks archive readability and digests before replacing managed deployment files,
 applying supported schema corrections and switching the release. Configuration,
 keys, port and observation/test mode are preserved. New configurations cannot be

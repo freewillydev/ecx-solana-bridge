@@ -33,6 +33,20 @@ def managed_files(release):
     return result
 
 
+def private_state_paths(node_root=Path("/var/lib/ecx-node")):
+    """Managed default wallet layouts only; external wallet storage needs its own backup."""
+    roots = (node_root / "wallets", node_root / "signet/wallets")
+    for root in roots:
+        # Tar would retain a symlink rather than the keys it points to. Refuse
+        # unsupported redirected storage instead of claiming a complete archive.
+        if any(p.is_symlink() for p in (node_root, root.parent, root)):
+            raise ValueError("Managed wallet directory cannot be a symlink")
+        if root.exists():
+            if not root.is_dir() or any(p.is_symlink() for p in root.rglob("*")):
+                raise ValueError("Unsupported managed wallet storage layout")
+            yield root
+
+
 class Upgrade:
     def __init__(self, previous, target, current, verify, run):
         self.previous, self.target, self.current = previous, target, current
@@ -86,7 +100,7 @@ class Upgrade:
         # Node stopped before copying wallet databases. Preserve signing material
         # privately; archives never enter a release or the Git repository.
         with tarfile.open(self.backup / "private-state.tar.gz", "w:gz") as saved:
-            for path in (Path("/etc/ecx-bridge"), Path("/etc/ecx-node.conf"), Path("/var/lib/ecx-node/wallets")):
+            for path in (Path("/etc/ecx-bridge"), Path("/etc/ecx-node.conf"), *private_state_paths()):
                 if path.exists():
                     saved.add(path, arcname=str(path).lstrip("/"))
             for destination in self.old_files:
