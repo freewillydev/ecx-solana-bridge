@@ -1298,3 +1298,32 @@ transition on the same guest; the active process was verified through `/proc`,
 and reviewed resume succeeded. Its installer was retained and checksum-verified
 on the host. The corresponding x86 package acceptance remains. No compiled
 application or dependencies changed.
+
+## Clean-host signed native payment completed; installer batch closed
+
+The restored transaction `f4aa18204d8c5d4dad583f0638887a5e7d0b3c84169226dccd4148539d6c8013`
+confirmed on actual L2L Signet and settled as the original single attempt. The
+saved quote remained gross 10,000, fee 100, net 9,900. The destination and fee
+reservations released, custody reconciliation passed, and posting events balance.
+The ledger now contains three Paid orders and two ExpiredUnfunded orders, with
+three settled attempts at critical sequence 13. A confirmed restart preserved
+eight financial groups and reviewed resume passed. The installed backup of this
+settled sequence restored all 38 tables with matching complete row hashes in an
+isolated disposable database. This closes this particular signed-but-unsent
+clean-guest scenario; it does not close the wider interruption/reorg matrix or
+prove off-host durability. See `evidence/installed-native-inflight-restore.json`.
+
+Deployment-only x86 release `0cee5dfb9bd39d09f4df69bf` passed upgrade and repeat
+installation while preserving all 31 durable tables, eight configuration files
+and sequence zero. Private PostgreSQL, restricted roles, protected fence,
+observation-only mode and absent signer were checked. Its compiled binaries are
+unchanged; this release did not receive another cold-boot acceptance. See
+`evidence/installed-mode-fix-x86.json`. ARM64's active observer-to-paying transition
+was already accepted in `7fcc24ca70e84e579da93f22`.
+
+The fixed-binary loader inventory now records both architectures' actual installed
+library versions/hashes and original Ubuntu copyright notices. Each found 29
+libraries and 22 Ubuntu package notices; bundled SQLite is separate. Notice files
+were retained externally and their hashes checked after copying. This makes the
+remaining system-license applicability review concrete; it does not assert legal
+obligation completion or identify every statically linked component.

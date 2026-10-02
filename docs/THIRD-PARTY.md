@@ -51,9 +51,20 @@ Additional embedded-component applicability, Ubuntu system libraries, and
 obligations beyond the presence of license texts remain to be reviewed.
 Dual-license choices have not been made by the collector.
 
-The release builder now regenerates dependency notices against its actual build
+The release builder regenerates dependency notices against its actual build
 graph, refuses missing entries, verifies saved native-notice hashes and includes
-the notices in the hashed package inventory. This packaging change is awaiting
-the next completed Linux build. The previously delivered ARM64 installer is
-unchanged and does not contain this collection. Neither collection nor packaging
-certifies a release for public distribution.
+the notices in the hashed package inventory. The installed x86-64 release
+`0cee5dfb9bd39d09f4df69bf` contains 377 records with no missing entries, plus the
+Bitcoin Core and SQLite provenance directories. The original 333-entry source
+collection above describes the earlier graph, not this newer package.
+
+`scripts/inventory-installed-libraries RELEASE OUTPUT` verifies the installed
+release manifest, inspects the loader output for its four fixed binaries, records
+library checksums/package versions and retains original installed Ubuntu copyright
+texts. It accesses no ledger, wallet or network. The actual x86-64 inventory found
+29 loaded libraries, with 22 Ubuntu package notices retained and hash-checked;
+the bundled SQLite library is identified separately. ARM64 reports the same
+counts against its actual installed package versions. See [x86 inventory](evidence/installed-libraries-x86.json)
+and [ARM inventory](evidence/installed-libraries-arm.json). Original notice files
+remain in the external review cache. Full obligation/applicability review remains; loader enumeration does not identify every statically embedded
+component or establish that a license obligation is satisfied.
