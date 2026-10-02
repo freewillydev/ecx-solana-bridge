@@ -9,6 +9,7 @@ import Bridge.Postgres.Ledger (Ledger,withGuardedLedger,ledgerAction,pause,readi
 import qualified Bridge.Postgres.Treasury as Treasury
 import qualified Bridge.Postgres.Fence as Fence
 import Bridge.Postgres.Schema hiding (Audit)
+import Bridge.Postgres.Catalog (verifyReadRole)
 import qualified Bridge.Postgres.Backup as Backup
 import qualified Bridge.Postgres.CoveredSource as CoveredSource
 import qualified Bridge.Postgres.NativeRebroadcast as NativeRebroadcast
@@ -89,6 +90,7 @@ evalSafe (SafeContext settings public remote paying) (SafeDSL operation) =
 
   readOperation :: PG.Connection -> SafeOperation result -> IO result
   readOperation connection = \case
+    VerifyReadRole->verifyReadRole connection
     PublicConfig->do
       state <- publicAvailability connection
       case public of
@@ -276,13 +278,12 @@ runRuntime paying remote settings cfg = do
   require (not(T.null $ T.strip $ T.pack readUser) && readUser/=PG.connectUser settings) "distinct_read_database_user_required"
   readPassword <- fromMaybe "" <$> lookupEnv "PGREADPASSWORD"
   let readSettings=settings {PG.connectUser=readUser,PG.connectPassword=readPassword}
-  -- Safe evaluation gets a separately authenticated role, never worker credentials.
-  let validateReader = bracket (PG.connect readSettings) PG.close $ \connection->do
-        roles <- PG.query_ connection "SELECT NOT rolsuper AND NOT rolcreatedb AND NOT rolcreaterole AND NOT rolreplication AND NOT rolbypassrls AND NOT has_schema_privilege(current_user,'public','CREATE') FROM pg_roles WHERE rolname=current_user" :: IO [PG.Only Bool]
-        require (roles==[PG.Only True]) "unsafe_read_database_role"
-        writable <- PG.query_ connection "SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p','v','m','f','S') AND CASE WHEN c.relkind='S' THEN has_sequence_privilege(current_user,c.oid,'USAGE,UPDATE') ELSE has_table_privilege(current_user,c.oid,'INSERT,UPDATE,DELETE,TRUNCATE,REFERENCES,TRIGGER') END" :: IO [PG.Only Int64]
-        require (writable==[PG.Only 0]) "unsafe_read_database_role"
-  validateReader `catch` (\(_::PG.SqlError)->reject "read_database_identity_unavailable") `catch` (\(_::IOException)->reject "read_database_identity_unavailable")
+  let public=object["profile" .= profile cfg,"solanaCluster" .= (if profile cfg==CanonicalBeta then "mainnet-beta" else "devnet"::Text),"links" .= links,"deployment" .= deploymentId cfg,"mint" .= mint cfg,"custodyOwner" .= custodyOwner cfg,"decimals" .= (8::Int),"minInput" .= minInput cfg,"maxInput" .= maxInput cfg,"feesBps" .= object["NativeToWrapped" .= (100::Int),"WrappedToNative" .= (100::Int)],"intakeEnabled" .= paying,"implementationReady" .= False]
+      safeContext=SafeContext readSettings public (backupRequired cfg) paying
+  -- Validate the separately authenticated reader through a closed safe operation.
+  evalSafe safeContext (resolve (Request VerifyReadRole))
+    `catch` (\(_::PG.SqlError)->reject "read_database_identity_unavailable")
+    `catch` (\(_::IOException)->reject "read_database_identity_unavailable")
   let ownership action=if paying then do
         directory <- Fence.fenceDirectory
         Fence.withFence directory (fingerprint cfg) $ \guard->withGuardedLedger settings (fingerprint cfg) (Just guard) action
@@ -293,8 +294,7 @@ runRuntime paying remote settings cfg = do
     let backup=case remote of
           Nothing->const $ reject "unexpected_test_backup"
           Just policy->Backup.backupCallback readSettings ledger cfg policy
-        public=object["profile" .= profile cfg,"solanaCluster" .= (if profile cfg==CanonicalBeta then "mainnet-beta" else "devnet"::Text),"links" .= links,"deployment" .= deploymentId cfg,"mint" .= mint cfg,"custodyOwner" .= custodyOwner cfg,"decimals" .= (8::Int),"minInput" .= minInput cfg,"maxInput" .= maxInput cfg,"feesBps" .= object["NativeToWrapped" .= (100::Int),"WrappedToNative" .= (100::Int)],"intakeEnabled" .= paying,"implementationReady" .= False]
-        runtime=Runtime (SafeContext readSettings public (backupRequired cfg) paying) (CriticalContext manager cfg ledger paying backup) gate
+        runtime=Runtime safeContext (CriticalContext manager cfg ledger paying backup) gate
     let checked action = do
           outcome <- try (action `catch` (\(_::IOException)->reject "postgres_worker_io_unavailable")) :: IO (Either BridgeError ())
           case outcome of

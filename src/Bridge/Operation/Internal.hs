@@ -13,6 +13,7 @@ class Operation (s :: Severity) (op :: Type -> Type) | op -> s where
   command :: op a -> DSL s a
 
 data SafeOperation a where
+  VerifyReadRole :: SafeOperation ()
   PublicConfig :: SafeOperation Value
   PaymentInstructions :: Text -> Text -> SafeOperation Value
   OrderStatus :: Text -> Text -> SafeOperation OrderView

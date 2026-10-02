@@ -110,8 +110,16 @@ The safe evaluator opens its read-only transaction internally and interprets onl
 SafeOperation constructors; it accepts no query or connection callback. Handlers
 receive neither the connection nor an Opaleye Select/Insert/Update capability.
 The obsolete prototype status-server DSL has been removed; Runtime implements
-the operational interpreter. Remaining writable-store exports, maintenance paths
-and handwritten catalog/locking reads still need consolidation under this boundary.
+the operational interpreter. Startup reader validation is the private safe operation
+VerifyReadRole. Its Opaleye catalog implementation rejects elevated roles, schema
+creation, table/column writes and sequence use, including inherited grants. Fixed
+PostgreSQL privilege bindings use the pinned Opaleye expression AST because the
+public API lacks these built-ins; no function name or SQL expression is accepted
+from callers. The check covers public-schema relations; read-only transactions
+remain an independent enforcement layer. PostgreSQL documents the current-user and
+inherited-privilege semantics in its [system information functions](https://www.postgresql.org/docs/16/functions-info.html).
+Remaining writable-store exports, maintenance paths and handwritten diagnostic/
+locking reads still need consolidation under this boundary.
 
 ## Classification and authority
 
