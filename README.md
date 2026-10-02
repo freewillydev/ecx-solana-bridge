@@ -150,7 +150,7 @@ The following inventory retains the broader release scope. These are not equal-s
 
 | Order | Remaining work | Why it matters |
 | --- | --- | --- |
-| 1. Finish the usable test product | Actual supported-wallet signing, saved-order browser reload and interface acceptance. Browser automation currently cannot verify its administrator policy. | API round trips alone do not prove the customer wallet flow works. |
+| 1. Finish the usable test product | Actual external Solana Pay wallet signing and clipboard/private recovery-link verification. Installed browser forms, QR/payment instructions, saved-order reload and history switching now pass. | Browser acceptance now complements API round trips; external wallet approval/signing remains unverified. |
 | 2. Finish installer acceptance | Prepare authenticated release distribution; current ARM64/x86-64 upgrades and a clean-guest key/ledger handoff pass. | A source build or ARM64 result does not prove an Intel/AMD server installation. |
 | 3. Complete payment/reorg recovery | Integrated private native replacement send with a real Signet family; covered-source resolution, missing-destination treatment and finalized Solana history-loss handling. | Ambiguous or changed chain evidence must preserve customer claims and prevent duplicate payout. |
 | 4. Complete backup, restore and resume | Remote critical backups/retention, old-ledger/old-signer fencing, key restoration, exact-byte recovery, independent-provider expiry and clean-host acceptance. | Process restart is much narrower than losing a host and recovering a hot wallet. |

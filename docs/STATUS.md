@@ -1084,3 +1084,32 @@ in-flight/failure recovery and real off-host backup retention remain open.
 Retirement constrains cooperating bridge workers; it cannot cryptographically
 revoke copies of a private key held by root or other software. The VM is stopped
 after acceptance, and private archive/journal copies are retained outside Git.
+
+## Installed browser form, QR and saved-order acceptance
+
+The installed restored service was exercised through the actual in-app browser
+at its loopback interface. Both direction forms show the real Signet/Devnet
+identity and 1% quote. An invalid native destination is rejected visibly;
+`New order` clears the rejected request and restores editable fields. Two
+unfunded browser orders show the actual native address/QR and Solana Pay URI/QR.
+Each reload recovered the same order, destination and quote from device storage;
+history switching restored the earlier order. Instructions disappear during
+custody reconciliation and after the payment deadline. Token details link to
+the actual configured Devnet mint. No website wallet connection is involved.
+
+The copy-payment handler displayed success, but the automation clipboard reader
+returned empty; copied bytes and the private recovery-link round trip remain
+unverified. The captured browser error log contains zero entries. Actual external
+Solana Pay wallet signing remains separate. Invalid native-address errors still
+display the RPC code; more helpful wording is an identified usability cleanup.
+See [browser evidence](evidence/installed-browser-acceptance.json),
+[payment screenshot](evidence/browser-payment-instructions.jpg) and
+[saved-order screenshot](evidence/browser-saved-order.jpg). Screenshots are
+historical unfunded test orders, not current payment requests.
+
+The ledger now has four orders: two earlier paid orders and two new unfunded
+browser orders. Attempts/settlements remain exactly two and neither browser
+order has a deposit. The unfunded records and reservations are retained for
+normal deadline/grace expiry on the next worker run; no ledger rows were deleted
+or clock/network behavior approximated. The worker finishes paused/stopped and
+the VM is stopped after acceptance. Production binaries/frontend were unchanged.

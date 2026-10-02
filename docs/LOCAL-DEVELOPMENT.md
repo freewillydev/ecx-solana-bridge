@@ -323,3 +323,12 @@ rather than sending it. This verifies recovery of existing customer work without
 issuing new funding or transfers. The installed restored worker finishes paused
 and stopped. Both guests are on this physical computer; remote durability is
 still unverified. Preserve the retired guest and private recovery journals.
+
+The restored installed interface is forwarded from guest loopback port 8090 to
+`http://127.0.0.1:61737/` while the `restore` VM is running. Actual browser
+acceptance created two additional unfunded orders, so fixed two-paid-order
+handoff/signature fixtures are no longer the entire current order set. Do not
+rerun those guarded tools against this changed fixture. Retain the new records
+for ordinary deadline/grace expiry; no new signing attempt or deposit was made.
+Browser screenshots/evidence are in `docs/evidence/installed-browser-acceptance.json`.
+External wallet signing and clipboard/private recovery-link verification remain.

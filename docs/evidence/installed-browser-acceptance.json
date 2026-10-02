@@ -1,0 +1,42 @@
+{
+  "browser": "Codex in-app browser",
+  "installedServiceVM": "restore",
+  "releaseId": "55b523e248e8687bc34f29f7",
+  "networks": [
+    "actual L2L Signet",
+    "actual Solana Devnet"
+  ],
+  "noWebsiteWalletConnection": true,
+  "configuredTokenAndDevnetExplorerVerified": true,
+  "feePreviewBothDirections": {
+    "gross": "0.00010000",
+    "fee": "0.00000100",
+    "net": "0.00009900"
+  },
+  "invalidNativeAddressRejected": true,
+  "invalidAddressVisibleError": "rpc_error_-5",
+  "newOrderControlRecoversRejectedRequest": true,
+  "browserOrders": [
+    "088035c7c957116088f1f7d4c752790c06fded67f7fef3d24d7645ee627154c8",
+    "a009e84bfa922136a14af364bf649ddb36b7f64ece4ddd1d6b41907bb56b3d2c"
+  ],
+  "nativeAddressAndQRRendered": true,
+  "solanaPayURIAndQRRendered": true,
+  "paymentInstructionsHiddenDuringCustodyReconciliation": true,
+  "paymentInstructionsHiddenAfterDeadline": true,
+  "savedOrderReloadBothDirections": true,
+  "savedOrderHistorySwitching": true,
+  "copyPaymentSuccessMessage": true,
+  "clipboardBytesVerified": false,
+  "clipboardAutomationReadReturnedEmpty": true,
+  "privateRecoveryLinkRoundTripVerified": false,
+  "browserErrorLogEntries": 0,
+  "customerWalletSigningVerified": false,
+  "browserDeposits": 0,
+  "ordersAfterTest": 4,
+  "paidOrdersUnchanged": 2,
+  "attemptsUnchanged": 2,
+  "settledAttemptsUnchanged": 2,
+  "workerFinalPaused": true,
+  "workerStopped": true
+}
