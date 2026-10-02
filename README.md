@@ -72,17 +72,20 @@ The ledger uses balanced, append-only postings separately for native coins, wrap
 
 Exclusive worker ownership, immutable attempts, generation fencing, input-lock recovery, rolling cost caps and revision-bound custody checks reduce replay and concurrency risk. Some loss/replacement/restore workflows remain partial; the application pauses instead of treating uncertain evidence as success or erasing customer claims.
 
+The [release review handoff](docs/RELEASE-REVIEW.md) maps requirements to evidence,
+identifies current code boundaries and records the remaining gates.
+
 ## Source map
 
 | Location | What to review |
 | --- | --- |
 | `src/Bridge/Types.hs`, `Config.hs`, `Budget.hs` | Amounts, deployment identity, immutable limits and operating budgets |
-| `Ledger.hs`, `migrations/` | Financial journal, orders, reservations, attempts, recovery decisions and schema preservation |
+| `src/Bridge/Postgres/`, PostgreSQL migrations | Opaleye ledger, orders, reservations, attempts, recovery decisions and schema preservation; `legacy-src/` holds historical regression compatibility |
 | `Order.hs`, `Admission.hs`, `Deposit.hs` | Quote checks, recoverable deposit provisioning and customer deposit validation |
 | `Native.hs`, `Solana.hs`, `Observer.hs` | Real-chain RPC adapters, identity checks, bounded history scans and evidence |
 | `NativePayment.hs`, `SolanaPayment.hs`, `Payment.hs`, `Settlement.hs` | Transaction validation, preparation/signing, saved-byte send and verified settlement |
 | `Reconciliation.hs`, `Recovery.hs`, `Reorg.hs`, `NativeReplacement.hs`, `Backup.hs` | Custody checks, pause/recovery, source/finality loss, replacement families and backup barriers |
-| `API.hs`, `Web.hs`, `Worker.hs`, `app/Main.hs` | Shared Servant contract, customer proxy, worker and CLI entry points |
+| `Operation.hs`, `Operation/Internal.hs`, `Postgres/Server.hs`, `Postgres/Runtime.hs`, `API.hs`, `Web.hs`, `app/Main.hs` | Severity-indexed handler plans, safe/critical dispatcher, Servant contract, customer proxy and runtime entry points |
 | `solana-helper/` | Fixed official-SDK helper and separate real-Devnet setup/test clients |
 | `web/` | HTML/CSS/TypeScript interface and Solana Pay QR/payment links |
 | `deploy/`, `scripts/install`, `scripts/build-release` | Pinned Linux build, packaged runtime, installer, systemd services and helper sandbox |
