@@ -3,6 +3,7 @@ module Bridge.NativePayment
   ( NativeRPC, Outpoint(..), NativeInput(..), NativeOutput(..), NativeTx(..)
   , NativePrevout(..), NativePlan(..), NativeDraft(..), NativeSigned(..)
   , transactionId, ownedScript, decodeNativeTx, validateNativeTx, sameNativeTemplate, sameNativePrevouts
+  , NativeFamilyView(..), readNativeFamily, draftNativeReplacement, signNativeReplacement
   , replacementOutputs, validateNativeFamily, validateNativeReplacementDraft
   , previewNativePayment, newNativePlan, fundNativeDraft, checkNativeDraft, signNativeDraft
   , readNativePrevoutsWith, ownedNativeLocks, releaseNativeInputLocks, restoreNativeInputLocks, checkNativeAcceptance
@@ -13,6 +14,8 @@ import Bridge.Native
 import Bridge.RPC
 import Bridge.Domain (Amount, amount, units)
 import Bridge.Error
+import Control.Exception (try)
+import qualified Data.Aeson.KeyMap as KM
 import Control.Monad (forM, forM_, unless, when)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
@@ -341,3 +344,180 @@ validateNativeReplacementDraft family fee draft = do
     && sameNativePrevouts (draftPrevouts draft) (signedNativePrevouts previous)
     && nativeOutputs tx==expected && nativeTxid tx `notElem` map (nativeTxid.signedNativeTransaction) family)
     (Left "native_replacement_draft_changed")
+
+unsignedPsbtInput :: Value -> Bool
+unsignedPsbtInput (Object fields)=all (\key->not $ KM.member key fields)
+  ["partial_signatures","final_scriptSig","final_scriptwitness","taproot_key_path_sig","taproot_script_path_sigs"]
+unsignedPsbtInput _=False
+
+-- Sign only the already-journaled template. The caller must recheck durable
+-- authorization/source/custody and save the bytes before any send decision.
+signNativeReplacement :: NativeRPC -> NativeSettings -> [NativeSigned] -> NativeDraft -> IO NativeSigned
+signNativeReplacement call c family draft=do
+  either reject pure (validateNativeReplacementDraft family (draftFee draft) draft)
+  previous <- case reverse family of s:_->pure s; _->reject "native_replacement_family_bounds"
+  let plan=signedNativePlan previous
+      inputs=nativeInputs $ draftTransaction draft
+      points=map nativeOutpoint inputs
+  require (not (T.null $ draftPsbt draft) && T.length (draftPsbt draft)<=100000) "invalid_native_psbt"
+  decoded <- call False "decodepsbt" [toJSON $ draftPsbt draft]
+  tx <- fieldValue "tx" decoded >>= either reject pure . decodeNativeTx
+  fee <- fieldValue "fee" decoded >>= either reject pure . nativeAmount
+  psbtInputs <- fieldValue "inputs" decoded :: IO [Value]
+  require (tx==draftTransaction draft && fee==draftFee draft
+    && length psbtInputs==length inputs && all unsignedPsbtInput psbtInputs) "native_replacement_draft_changed"
+  before <- readNativeFamily call c family
+  require (maybe True (\(_,depth,_)->depth==0) $ familyActive before) "native_replacement_member_not_pending"
+  current <- readNativePrevoutsWith False call (planDepth plan) inputs
+  require (sameNativePrevouts current $ draftPrevouts draft) "native_previous_output_changed"
+  _ <- ownedNativeLocks call points
+  case familyActive before of
+    Nothing->restoreNativeInputLocks call points >> pure ()
+    Just _->pure () -- The mempool member already spends this shared set.
+  signed <- signNativeTemplate call plan draft current
+  either reject pure (validateNativeFamily $ family<>[signed])
+  after <- readNativeFamily call c family
+  require (after==before) "native_family_view_changed"
+  pure signed
+
+-- Wallet records persist after eviction/replacement. Only the one member in
+-- the active chain or spending ALL shared inputs in the mempool moves custody.
+data NativeFamilyView = NativeFamilyView
+  { familyPosition :: !Value
+  , familyWallet :: ![(Text,Maybe (Int,Value))]
+  , familyActive :: !(Maybe (Text,Int,Value))
+  } deriving (Eq,Show)
+
+readNativeFamily :: NativeRPC -> NativeSettings -> [NativeSigned] -> IO NativeFamilyView
+readNativeFamily call c family=do
+  either reject pure (validateNativeFamily family)
+  first <- case family of a:_->pure a; _->reject "native_replacement_family_bounds"
+  require (planProfile (signedNativePlan first)==profile c) "payment_profile_mismatch"
+  forM_ family $ \signed->do
+    actual <- call False "decoderawtransaction" [toJSON $ signedNativeBytes signed] >>= either reject pure . decodeNativeTx
+    require (actual==signedNativeTransaction signed) "native_signed_bytes_mismatch"
+  before <- inspect first
+  after <- inspect first
+  require (after==before) "native_family_view_changed"
+  pure (snd before)
+ where
+  identifiers=map (nativeTxid.signedNativeTransaction) family
+  inspect first=do
+    chain <- nativeIdentityWith call c
+    block <- fieldValue "bestblockhash" chain
+    height <- fieldValue "blocks" chain :: IO Int64
+    wallet <- call True "getwalletinfo" []
+    name <- fieldValue "walletname" wallet
+    descriptors <- fieldValue "descriptors" wallet
+    scanning <- fieldValue "scanning" wallet :: IO Value
+    position <- fieldValue "lastprocessedblock" wallet
+    active <- call False "getblockhash" [toJSON height] >>= parseValue parseJSON
+    require (name==nativeWallet c && descriptors && scanning==Bool False
+      && transactionId block && active==block && position==object ["hash" .= block,"height" .= height]) "native_family_wallet_behind"
+    observations <- forM family $ \signed->do
+      let txid=nativeTxid $ signedNativeTransaction signed
+      found <- try (call True "gettransaction" [toJSON txid,Bool False,Bool True]) :: IO (Either BridgeError Value)
+      value <- case found of
+        Left (BridgeError "rpc_error_-5")->pure Nothing
+        Left (BridgeError code)->reject code
+        Right value->do
+          actual <- fieldValue "decoded" value >>= either reject pure . decodeNativeTx
+          raw <- fieldValue "hex" value
+          actualId <- fieldValue "txid" value
+          fee <- fieldValue "fee" value >>= either reject pure . nativeAmount . negate
+          depth <- fieldValue "confirmations" value
+          processed <- fieldValue "lastprocessedblock" value
+          require (actualId==txid && raw==signedNativeBytes signed && actual==signedNativeTransaction signed
+            && fee==signedNativeFee signed && processed==position) "native_family_member_changed"
+          forM_ ["walletconflicts","mempoolconflicts"] $ \key->do
+            conflicts <- parseValue (withObject "conflicts" (\o->o .:? key .!= [])) value :: IO [Text]
+            require (length conflicts<=7 && length conflicts==length (nub conflicts)
+              && txid `notElem` conflicts && all (`elem` identifiers) conflicts) "native_family_unknown_conflict"
+          pure (Just (depth,value))
+      pure (txid,value)
+    let points=map nativeOutpoint $ nativeInputs $ signedNativeTransaction first
+    spending <- call False "gettxspendingprevout" [toJSON points] >>= parseValue parseJSON :: IO [Value]
+    bindings <- forM spending $ parseValue $ withObject "spender" $ \o->(,) <$> parseJSON (Object o) <*> o .:? "spendingtxid"
+    require (map fst bindings==points && length (nub $ map snd bindings)==1
+      && all (maybe True (`elem` identifiers).snd) bindings) "native_family_unknown_spender"
+    let mempool=case bindings of (_,Just txid):_->Just txid; _->Nothing
+        confirmed=[(txid,depth,value) | (txid,Just (depth,value))<-observations,depth>0]
+    selected <- case confirmed of
+      [winner@(txid,depth,value)]->do
+        require (mempool==Nothing) "native_family_conflicting_effects"
+        anchor <- fieldValue "blockhash" value
+        header <- call False "getblockheader" [toJSON (anchor::Text)]
+        actualHash <- fieldValue "hash" header
+        actualDepth <- fieldValue "confirmations" header :: IO Int
+        actualHeight <- fieldValue "height" header :: IO Int64
+        canonical <- call False "getblockhash" [toJSON actualHeight] >>= parseValue parseJSON
+        require (transactionId anchor && actualHash==anchor && canonical==anchor && actualDepth==depth
+          && toInteger actualHeight+toInteger depth-1==toInteger height) "native_family_winner_not_canonical"
+        forM_ observations $ \(_,seen)->case seen of
+          Just (n,other) | n<0->do
+            conflicts <- fieldValue "walletconflicts" other :: IO [Text]
+            require (txid `elem` conflicts && toInteger n==negate (toInteger depth)) "native_family_conflict_not_proven"
+          _->pure ()
+        pure (Just winner)
+      []->do
+        require (all (maybe True ((>=0).fst).snd) observations) "native_family_conflict_not_proven"
+        previous <- readNativePrevoutsWith False call (planDepth $ signedNativePlan first) (nativeInputs $ signedNativeTransaction first)
+        require (sameNativePrevouts previous (signedNativePrevouts first)) "native_previous_output_changed"
+        case mempool of
+          Nothing->pure Nothing
+          Just txid->do
+            value <- case lookup txid observations of Just (Just (0,v))->pure v; _->reject "native_family_spender_unavailable"
+            entry <- call False "getmempoolentry" [toJSON txid]
+            size <- fieldValue "vsize" entry :: IO Int
+            require (size>0) "native_mempool_evidence_invalid"
+            pure (Just (txid,0,value))
+      _->reject "native_family_multiple_winners"
+    -- Fence both the wallet's view and the node's active tip after all reads.
+    end <- call True "getwalletinfo" [] >>= fieldValue "lastprocessedblock"
+    tip <- call False "getblockchaininfo" [] >>= fieldValue "bestblockhash"
+    require (end==position && tip==block) "native_family_view_changed"
+    pure (position,NativeFamilyView position observations selected)
+
+-- Unsigned construction reuses the same family reader as signing/settlement.
+-- It allocates no keys, changes no locks and never supplies signing=true.
+draftNativeReplacement :: NativeRPC -> NativeSettings -> [NativeSigned] -> Amount -> IO NativeDraft
+draftNativeReplacement call c family fee = do
+  either reject pure (validateNativeFamily family)
+  require (length family<8) "native_replacement_family_bounds"
+  previous<-case reverse family of p:_->pure p; _->reject "native_replacement_family_bounds"
+  let plan=signedNativePlan previous; original=signedNativeTransaction previous
+      inputs=nativeInputs original; points=map nativeOutpoint inputs
+  outputs<-either reject pure (replacementOutputs previous fee)
+  script<-validateNativeRecipientWith call (planRecipient plan)
+  change<-ownedScript call (planChange plan)
+  require (script==planRecipientScript plan && change==planChangeScript plan) "native_replacement_script_changed"
+  let inspect=do
+        view<-readNativeFamily call c family
+        require (maybe True (\(_,depth,_)->depth==0) $ familyActive view) "native_replacement_member_not_pending"
+        prevouts<-readNativePrevoutsWith False call (planDepth plan) inputs
+        require (sameNativePrevouts prevouts $ signedNativePrevouts previous) "native_previous_output_changed"
+        locks<-ownedNativeLocks call points
+        pure (view,prevouts,locks)
+  before@(_,prevouts,_)<-inspect
+  let sources=[object ["txid" .= outpointTxid point,"vout" .= outpointVout point,"sequence" .= nativeSequence input]
+              | input<-inputs,let point=nativeOutpoint input]
+      destinations=[object [Key.fromText (if nativeOutputScript output==planRecipientScript plan then planRecipient plan else planChange plan)
+                     .= nativeNumber (nativeOutputAmount output)] | output<-outputs]
+  created<-call False "createpsbt" [toJSON sources,toJSON destinations,toJSON $ nativeLocktime original,Bool False] >>= parseValue parseJSON
+  bounded created
+  updated<-call True "walletprocesspsbt" [toJSON created,Bool False,String "ALL",Bool False,Bool False]
+  complete<-fieldValue "complete" updated
+  require (not complete) "native_replacement_not_unsigned"
+  psbt<-fieldValue "psbt" updated
+  bounded psbt
+  decoded<-call False "decodepsbt" [toJSON psbt]
+  unsigned<-fieldValue "inputs" decoded :: IO [Value]
+  require (length unsigned==length inputs && all unsignedPsbtInput unsigned) "native_replacement_not_unsigned"
+  actualFee<-fieldValue "fee" decoded >>= either reject pure . nativeAmount
+  tx<-fieldValue "tx" decoded >>= either reject pure . decodeNativeTx
+  let draft=NativeDraft psbt tx prevouts actualFee
+  either reject pure (validateNativeReplacementDraft family fee draft)
+  after<-inspect
+  require (after==before) "native_replacement_view_changed"
+  pure draft
+ where bounded psbt=require (not(T.null psbt) && T.length psbt<=100000) "invalid_native_psbt"

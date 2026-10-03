@@ -1146,3 +1146,29 @@ observation and winner recovery remain to be integrated before this feature is u
 Validation: Cabal executable/contract build, QuickCheck suite and the full disposable
 PostgreSQL contract passed. No existing custody state was migrated or chain transaction
 submitted by these tests. The baseline remains required until parity and live acceptance.
+
+## Native replacement adapter checkpoint
+
+The existing native adapter now supplies unsigned replacement construction, exact-draft
+signing and a shared family reader. The reader independently verifies saved bytes,
+wallet/node synchronization, canonical winners, mempool spenders, confirmed owned
+prevouts and two consistent chain views. Drafting refuses confirmed winners and only
+builds the validated higher-fee template; signing rechecks the draft and family before
+and after the existing template signer. Neither adapter broadcasts. The returned
+family view retains the tip position, so callers can detect a change across construction
+even when every member is absent from wallet history.
+
+The corresponding baseline adapter functions occupy **228 physical lines**; their
+rebuild versions occupy **176**, excluding imports/exports and the previously extracted
+pure rules on both sides. Shared inspection replaces the separate drafting inspector.
+Existing `NativePayment.hs` grows **343 → 523 lines** including imports/exports;
+**no new production file**. Existing test module **299 → 432**, with **one copied
+captured PSBT fixture**. The fixture's provenance explicitly records unsigned construction
+from an already-confirmed public Signet input; it is not a live replacement proof.
+
+Root Cabal build and QuickCheck pass. Offline contracts reproduce the captured PSBT,
+exercise absent/pending families, simulated signing response effects, refusal of a
+confirmed winner, foreign spenders and signature-bearing PSBTs, and discard construction
+when the tip changes. The simulated signing reply is not a newly verified real signature.
+Durable replacement decisions, signer routes, worker/family settlement and winner-change
+recovery remain integration work; funded replacement/reorg acceptance remains a gate.
