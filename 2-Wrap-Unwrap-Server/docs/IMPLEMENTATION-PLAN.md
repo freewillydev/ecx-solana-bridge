@@ -5,6 +5,21 @@ complete product for human review before adding more machinery or rebuilding
 packages. This is an implementation plan, not a claim that the refactor is done.
 The previous plan and evidence remain in Git history at commit `6d293a3`.
 
+## Active execution: controlled replacement
+
+The user chose a separate rebuild after the inventory review. Follow
+[rebuild/README.md](../rebuild/README.md) for the current construction order.
+The preserved baseline is `ba31b28`; build the replacement through root Cabal,
+extracting proven protocol and financial behavior, then remove the old application
+only after migration and real-chain acceptance. The baseline implementation steps
+below remain requirements/reference, not a competing instruction to keep polishing
+its installer or reorganizing its modules.
+
+Current replacement checkpoint: pure monetary/funding/accounting types, preserved
+customer wire records, caller/severity-indexed existential requests and four
+restricted Servant handlers. Storage, evaluators, chain adapters and execution are
+not implemented in the replacement yet. No existing custody state has been moved.
+
 ## Product and audit contract
 
 Keep the useful behavior of Marcus's published conversion service: quote, create
