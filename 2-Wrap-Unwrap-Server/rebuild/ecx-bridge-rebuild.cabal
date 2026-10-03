@@ -52,7 +52,7 @@ library workflow
   exposed-modules: Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.SigningTransport, Bridge.Critical, Bridge.Reconciliation, Bridge.Admission, Bridge.Order, Bridge.Web, Bridge.Config
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:customer-api, ecx-bridge-rebuild:store,
     ecx-bridge-rebuild:chain, aeson, bytestring, text, time, containers, http-client, servant, servant-server,
-    transformers, stm, ram, crypton-pem, crypton-x509, http-types, wai, warp, warp-tls, filepath, unix,
+    transformers, stm, ram, crypton, crypton-pem, crypton-x509, http-types, wai, warp, warp-tls, filepath, unix,
     servant-client, http-client-tls, crypton-connection, tls, crypton-x509-store
 
 test-suite rebuild-test

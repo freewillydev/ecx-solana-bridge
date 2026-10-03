@@ -1,7 +1,8 @@
 {-# LANGUAGE DataKinds, GADTs, RankNTypes #-}
 -- Actual WAI/Servant boundary; the closed evaluator returns public fixture data.
--- No signing keys, chain RPC, native listener or funds are used here.
+-- Only a public zero-seed key vector; no chain RPC or funds are used here.
 module SigningTransportCheck (checks) where
+import Bridge.Signer (verifySigningKey)
 import Bridge.SigningTransport
 import qualified Bridge.Fence as Fence
 import qualified Data.Text as T
@@ -16,6 +17,7 @@ import Bridge.Error
 import Bridge.Wire (SignedAttempt(..))
 import Control.Exception (bracket,try)
 import Data.Aeson (encode,eitherDecode)
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as B64
 import Data.IORef
@@ -140,6 +142,31 @@ checks=sequence
           accepted:_->eitherDecode (simpleBody accepted)==Right result
             && lookup "Cache-Control" (simpleHeaders accepted)==Just "no-store"
           _->False
+  , check "signer startup binds protected keypair seed and public half to the custody owner" $ once $ ioProperty $
+      bracket temporary removeDirectoryRecursive $ \directory->do
+        let file=directory</>"key.json"; owner="4zvwRjXUKGfvwnParsHAS3HuSVzV5cA4McphgmoCtajS"
+            key=replicate 32 (0::Int)<>[59, 106, 39, 188, 206, 182, 164, 45, 98, 163, 168, 208, 42, 111, 13, 115, 101, 50, 21, 119, 29, 226, 67, 166, 58, 192, 72, 161, 139, 89, 218, 41]
+        BL.writeFile file (encode key)
+        setFileMode file 0o600
+        verifySigningKey owner file
+        wrongOwner<-refuses (verifySigningKey (T.replicate 32 "1") file)
+        BL.writeFile file (encode (1:drop 1 key))
+        wrongSeed<-refuses (verifySigningKey owner file)
+        BL.writeFile file (encode (take 32 key<>replicate 32 (0::Int)))
+        wrongPublic<-refuses (verifySigningKey owner file)
+        BL.writeFile file (encode (replicate 64 (256::Int)))
+        outOfRange<-refuses (verifySigningKey owner file)
+        BL.writeFile file (encode (take 32 key))
+        short<-refuses (verifySigningKey owner file)
+        BS.writeFile file (BS.replicate 4097 32)
+        oversized<-refuses (verifySigningKey owner file)
+        BL.writeFile file (encode key)
+        setFileMode file 0o640
+        sharedKey<-refuses (verifySigningKey owner file)
+        setFileMode file 0o600
+        createSymbolicLink file (directory</>"key-link")
+        linkedKey<-refuses (verifySigningKey owner (directory</>"key-link"))
+        pure (wrongOwner && wrongSeed && wrongPublic && outOfRange && short && oversized && sharedKey && linkedKey)
   , check "signer credentials reject unsafe modes symlinks parents and token formats" $ once $ ioProperty $
       bracket temporary removeDirectoryRecursive $ \directory->do
         let path=directory</>"auth"; endpoint=SigningEndpoint 9443 path

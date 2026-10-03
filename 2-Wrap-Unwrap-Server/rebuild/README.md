@@ -427,6 +427,12 @@ Current evidence:
 - Actual WAI/Servant checks cover auth, typed replies, refusals, malformed/oversized
   bodies, cross-site requests, absent broadcast route and evaluator call counts.
   Credential tests cover modes, parent permissions, symlinks, token format and port.
+  Signer startup now requires a protected standard Solana keypair whose seed,
+  public half and configured custody owner agree. Key and transport credentials
+  share the permission validator. Offline checks use a public all-zero seed vector
+  and reject changed seeds/owners/public halves, invalid bytes, oversized files,
+  symlinks and group-readable private keys. PostgreSQL signer-refusal contracts
+  still pass after startup validation; no custody key or funds are used.
 - Disposable PostgreSQL contracts pass signing/broadcast gates, exact saved bytes,
   restart reads, replay and source refusal. Settlement checks verify a 7% historical
   conversion, earned withdrawal without customer debit, finalized-failure fee-only
@@ -510,12 +516,19 @@ Scoped physical-line comparisons (not whole-product reduction claims):
 | Custody chain workflow | 202 / 1 file | 188 / 1 file | Replacement-family and source-loss wrapper parity pending; not equivalent full-feature reduction |
 | Custody snapshot function | 79 / existing custody file | 71 / existing Store file | Reuses freshness/balance helpers; live acceptance pending |
 | Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
-| Signer module | 144 / 1 file | 73 / 1 file | Startup and replacement parity pending |
-| Signer transport | 103 / 1 file plus shared web boundary | 86 / 1 file + shared 53-line Web module | Shared module also serves customer API; initial signer route only |
+| Signer module | 144 / 1 file | 117 / 1 file | Now includes startup key validation and shared file permissions; replacement parity pending |
+| Signer transport | 103 / 1 file plus shared web boundary | 69 / 1 file + shared 53-line Web module | Shared module also serves customer API; initial signer route only |
 | Customer/worker runtime | Part of broader Runtime | 232 / 1 file (previous worker-only checkpoint 172) | Adds safe evaluation, shared gate, customer dispatch and mode/config checks |
 | Focused source validation | 63-line mixed validation/storage/recovery function | 67-line dedicated module | Covered-source recovery is still separate unfinished work |
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |
+
+The key verifier is 15 lines versus the baseline's 16-line verification function,
+excluding comments/imports and shared permission checks. It now runs inside
+`withSigner`, before handing out the evaluator, rather than relying on a separate
+maintenance command. Signer plus transport grew from the previous 159 to 186 lines
+across the same two files to add this startup check; moving permissions is not
+counted as a feature reduction.
 
 Custody storage adds five schema-projection lines and no production files. The
 snapshot comparison excludes shared helpers, grammar, evidence/revision reads and
@@ -524,8 +537,8 @@ reads avoid loading the complete evidence table; aggregate balances avoid loadin
 all journal rows. Terminal attempts are still checked individually, so long-history
 performance remains to be measured. Source eligibility checking is shared with signing.
 
-Still required: successful TLS worker/signer integration and private-key startup
-checks; executable/scheduler/browser integration;
+Still required: successful TLS worker/signer integration and deployed OS/native-RPC
+authority separation; executable/scheduler/browser integration;
 integrated positive submission/reconciliation acceptance; retry, cancellation,
 replacement/winner changes and covered-source approvals generalized to earned
 funding; complete custody acceptance and Haskell backup/restore integration; actual populated-ledger migration and funded

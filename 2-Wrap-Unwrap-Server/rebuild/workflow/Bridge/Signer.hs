@@ -2,9 +2,10 @@
 -- Dedicated signing evaluator: read-only ledger, private signing credentials,
 -- no writer or broadcast operation. TLS/auth transport is installed by runtime.
 module Bridge.Signer
-  ( SigningAPI, signingAPI, signingServer, SignerSettings(..), withSigner ) where
+  ( SigningAPI, signingAPI, signingServer, SignerSettings(..), withSigner, verifySigningKey, protectedSignerFile ) where
 import Bridge.Operation.Internal
 import Bridge.Wire (Profile(..),SignedAttempt)
+import Bridge.Identity (publicKey)
 import Bridge.Error
 import Bridge.Store (Reader,StoreRead(ReadSigningDecision),evalRead)
 import Bridge.Payment
@@ -13,6 +14,17 @@ import Bridge.NativePayment (signNativeDraft)
 import qualified Bridge.Solana as S
 import qualified Bridge.SolanaHelper as H
 import Bridge.SolanaPayment
+import Crypto.Error (CryptoFailable(..))
+import qualified Crypto.PubKey.Ed25519 as Ed
+import qualified Data.ByteArray as BA
+import qualified Data.ByteString as BS
+import Data.Aeson (eitherDecodeStrict')
+import Data.Bits ((.&.))
+import Data.Word (Word8)
+import System.FilePath (isAbsolute,takeDirectory)
+import System.IO (withBinaryFile,IOMode(ReadMode))
+import System.Posix.Files
+import System.Posix.User (getEffectiveUserID)
 import Control.Concurrent.MVar (newMVar,withMVar)
 import Data.Text (Text)
 import Data.Time.Clock.POSIX (getPOSIXTime)
@@ -43,6 +55,7 @@ withSigner manager reader settings action = do
     && S.custodyAta solana==H.custodyAta config) "signer_profile_mismatch"
   N.validateNativeSettings native
   S.validateSolanaSettings solana
+  verifySigningKey (S.custodyOwner solana) (signingKey settings)
   gate<-newMVar ()
   let interpret :: forall a. Request 'Signer 'Critical a -> IO a
       interpret request=withMVar gate $ \_ -> case resolve request of
@@ -71,3 +84,34 @@ withSigner manager reader settings action = do
           require (before==after) "signing_decision_changed"
           pure verified
   action interpret
+
+-- Secret files permit group read only for the shared auth token. Certificates
+-- may be public, but neither they nor their parent may be replaced by that group.
+protectedSignerFile :: FilePath -> Bool -> Bool -> IO ()
+protectedSignerFile path secret shared = do
+  require (isAbsolute path) "absolute_credential_path_required"
+  uid<-getEffectiveUserID
+  file<-getSymbolicLinkStatus path
+  parent<-getFileStatus (takeDirectory path)
+  let mode=fileMode file .&. 0o777
+  require (isRegularFile file && fileOwner file `elem` [0,uid]
+    && fileOwner parent `elem` [0,uid] && fileMode parent .&. 0o022==0
+    && if secret then mode==0o600 || shared && mode==0o640 else mode .&. 0o022==0) "unsafe_signer_file_permissions"
+
+-- Standard Solana CLI keypair: seed plus derived public key, never printed.
+-- Validate before accepting requests; the SDK checks again when it signs.
+verifySigningKey :: Text -> FilePath -> IO ()
+verifySigningKey owner filename = do
+  protectedSignerFile filename True False
+  bytes<-withBinaryFile filename ReadMode (`BS.hGet` 4097)
+  require (BS.length bytes<=4096) "signer_file_too_large"
+  values<-either (const $ reject "invalid_signer_json") pure
+    (eitherDecodeStrict' bytes :: Either String [Word8])
+  require (length values==64) "invalid_signer_length"
+  expected<-either reject pure (publicKey owner)
+  let key=BS.pack values
+  case Ed.secretKey (BS.take 32 key) of
+    CryptoPassed secret->do
+      let actual=BA.convert(Ed.toPublic secret) :: BS.ByteString
+      require (actual==BS.drop 32 key && actual==expected) "signer_mismatch"
+    CryptoFailed _->reject "invalid_signer"

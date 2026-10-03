@@ -391,14 +391,14 @@ ledgerMain = do
         expectStore "signing_backup_required" (evalRead reader $ ReadSigningDecision 100 intent 0)
         -- Exercise the real signer evaluator's refusal path; the manager forbids
         -- network access, so no identity RPC or signing can hide behind the test.
-        let publicKey=T.replicate 32 "1"
+        let publicKey="4zvwRjXUKGfvwnParsHAS3HuSVzV5cA4McphgmoCtajS"
             native=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:29432" "/unused/credential" "ecx-bridge-test"
               16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47"
             solana=Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing publicKey publicKey publicKey
             signing=SignerSettings native solana (H.SolanaPolicy "contract" "contract" publicKey publicKey publicKey (money 10) (money 10))
               "/unused/sdk" "/unused/key"
         bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "unauthorized signer reached network"}) closeManager $ \manager -> do
-          withSigner manager reader signing $ \interpret -> do
+          withTestSigningKey $ \keyFile->withSigner manager reader signing {signingKey=keyFile} $ \interpret -> do
             expectStore "signer_profile_mismatch" (interpret $ Request $ SignPrepared "other" intent 0)
             expectStore "invalid_signing_decision" (interpret $ Request $ SignPrepared "contract" intent 8)
             expectStore "signing_backup_required" (interpret $ Request $ SignPrepared "contract" intent 0)
@@ -1223,3 +1223,19 @@ fenceMain = do
       Fence.retireFence directory identity 2
       expectStore "worker_fence_retired" (withFencedWriter settings policy directory $ const $ pure ())
   putStrLn "PASS: real host fence, exclusive writer, durable uncertain-commit watermark, rollback, stale restart refusal and retirement"
+
+-- Public all-zero seed vector; never used on a chain or with funds.
+withTestSigningKey :: (FilePath -> IO a) -> IO a
+withTestSigningKey action=bracket temporary removeDirectoryRecursive $ \directory->do
+  let file=directory<>"/key.json"
+  BL.writeFile file (encode (replicate 32 (0::Int)<>[59, 106, 39, 188, 206, 182, 164, 45, 98, 163, 168, 208, 42, 111, 13, 115, 101, 50, 21, 119, 29, 226, 67, 166, 58, 192, 72, 161, 139, 89, 218, 41]))
+  setFileMode file 0o600
+  action file
+ where
+  temporary=do
+    (path,handle)<-openTempFile "/tmp" "ecx-signing-key"
+    hClose handle
+    removeFile path
+    createDirectory path
+    setFileMode path 0o700
+    pure path
