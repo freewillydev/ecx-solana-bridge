@@ -214,7 +214,7 @@ never point contract fixtures at custody. Direct binary invocation needs Cabal's
 | Mode | Additional environment / scope |
 | --- | --- |
 | Default | Financial/ledger contracts and local encrypted restic restoration |
-| `ECX_REBUILD_MIGRATION_ONLY=1` | Disposable restored, offline, populated schema-18 ledger with baseline DDL through 005; applies rebuild 001–003 and checks preserved history |
+| `ECX_REBUILD_MIGRATION_ONLY=1` | Disposable restored, offline, populated schema-18 ledger with baseline DDL through 005; applies rebuild 001–003 and checks preserved history; optional `ECX_REBUILD_MIGRATION_RECOVERY_CONFIG` runs observation-only reconciliation against real test chains |
 | `ECX_REBUILD_SETUP_ONLY=1` | `ECX_REBUILD_EXECUTABLE`; optional `ECX_REBUILD_SETUP_RESIDUE=1` |
 | `ECX_REBUILD_SERVER_ONLY=1` | `ECX_REBUILD_EXECUTABLE`; process/HTTP/private control |
 | `ECX_REBUILD_TLS_ONLY=1` | `ECX_REBUILD_TEST_SDK`; actual TLS and saved signing decisions |
@@ -234,9 +234,12 @@ The comparison includes cancellation, expiry/retry, replacement/winner and sourc
 recovery records. Two older archives preserved their records but failed cutover
 acceptance: each contains three payments without saved order cost policies; the
 rebuild refuses those payments rather than inventing historical limits. The original
-ledgers were untouched. These checks do not execute migrated payments or establish
-funded recovery parity. The schema-18 backups lacked baseline DDL 005: verify installed
-DDL, not only the version number.
+ledgers were untouched. The in-flight copy also passed real-node reconciliation
+through the critical evaluator: its signed native transaction remained unseen and
+pending, exact bytes/ledger history stayed unchanged, and repeated reconciliation
+was idempotent. No signer or broadcast was enabled. This proves retained-work recovery,
+not migrated settlement or funded recovery parity. The schema-18 backups lacked
+baseline DDL 005: verify installed DDL, not only the version number.
 
 Prior root Cabal, QuickCheck, PostgreSQL, TLS and local-restic runs passed their
 recorded scopes. Protocol mutations, receipt fixtures and local-restic transport

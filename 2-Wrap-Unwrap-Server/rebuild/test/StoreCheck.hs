@@ -129,7 +129,49 @@ migrationMain=do
       putStrLn ("Pending migrated attempts: "<>show(length pending))
     putStrLn ("Legacy payments missing saved cost policy: "<>show(length legacy))
     check "migration requires explicit legacy cost-policy review; history preserved but cutover not accepted" (null legacy)
+    recovery<-lookupEnv "ECX_REBUILD_MIGRATION_RECOVERY_CONFIG"
+    forM_ recovery $ migrationRecovery settings role (S.fingerprint original) connection
     putStrLn ("Populated migration PASS: "<>show(length attempts)<>" signed attempts; "<>show(length postings)<>" postings preserved; migrated payments readable")
+
+-- Observation-only recovery of saved bytes on real public test networks. Never
+-- start a signer, prepare a new payment, resume intake or broadcast from a copy.
+migrationRecovery :: PG.ConnectInfo -> String -> T.Text -> PG.Connection -> FilePath -> IO ()
+migrationRecovery settings role identity fixtures path=do
+  config<-Config.loadConfig path
+  unless (Config.profile config==W.L2LSignetDevnet && Config.fingerprint config==identity)
+    (fail "migration recovery requires matching public-test identity")
+  let temporary=do
+        (directory,handle)<-openTempFile "/tmp" "ecx-migration-recovery"
+        hClose handle; removeFile directory; PD.createDirectory directory 0o700
+        pure directory
+      check ok=unless ok (fail "migrated payment recovery contract failed")
+  bracket temporary removeDirectoryRecursive $ \directory->do
+    _<-evalRestore settings (AdoptLedger directory identity 0)
+    withFencedWriter settings (Config.storePolicy config) directory $ \writer->
+      withReader (settings {PG.connectUser=role}) identity (Config.backupRequired config) $ \reader->
+        bracket newRpcManager closeManager $ \manager->
+          withRuntime manager (Config.observerSettings config) (Config.solanaPolicy config) Nothing
+            (SigningEndpoint 9443 (directory </> "no-signer")) reader writer $ \worker _ _->do
+              pending<-evalRead reader PendingAttempts
+              check (not $ null pending)
+              before<-mapM (evalRead reader . ReadAttempt) pending
+              original<-fixture fixtures ArchiveRecords
+              mapM_ (worker . Request . ReconcilePayment) pending
+              after<-mapM (evalRead reader . ReadAttempt) pending
+              let settled=[signedId(recordedSigned row) | row<-after, recordedState row=="settled"]
+                  retained=[row | row<-after, signedId(recordedSigned row) `notElem` settled]
+              check (map recordedSigned before==map recordedSigned after && all (`elem` before) retained)
+              remaining<-evalRead reader PendingAttempts
+              check (sort remaining==sort(map (signedId . recordedSigned) retained))
+              state<-evalRead reader ReadState
+              check (ledgerPaused state)
+              snapshot<-fixture fixtures ArchiveRecords
+              when (null settled) $ check (snapshot==original)
+              mapM_ (worker . Request . ReconcilePayment) pending
+              repeated<-fixture fixtures ArchiveRecords
+              check (snapshot==repeated)
+              putStrLn ("Live migrated reconciliation PASS: "<>show(length settled)<>" settled; "<>
+                show(length retained)<>" retained pending; exact bytes and replay preserved")
 
 -- Actual chain history, isolated ledger, and observation-only DSL authority.
 -- No signer, customer deposit or treasury transfer is invoked by this contract.
