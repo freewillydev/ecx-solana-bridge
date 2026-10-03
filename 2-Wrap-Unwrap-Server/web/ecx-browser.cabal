@@ -8,8 +8,8 @@ build-type: Simple
 
 executable ecx-browser
   main-is: Main.hs
-  hs-source-dirs: ., ../types
-  other-modules: Browser, Bridge.Model
+  hs-source-dirs: ., ../rebuild/src
+  other-modules: Browser, Bridge.Domain, Bridge.Wire
   default-language: GHC2021
   default-extensions: OverloadedStrings, DeriveGeneric, DeriveAnyClass, DerivingStrategies
   ghc-options: -Wall -Wcompat -optl-sWASM=0

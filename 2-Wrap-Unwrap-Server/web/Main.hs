@@ -1,7 +1,10 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main (main) where
 
-import Bridge.Model
+import Bridge.Domain (Direction(..), parseCoins, renderCoins, gross, fee, net)
+import qualified Bridge.Domain as Domain
+import Bridge.Wire
+import Data.Char (isDigit)
 import qualified Browser as B
 import Codec.QRCode (encodeText, defaultQRCodeOptions, ErrorLevel(M), TextEncoding(Utf8WithoutECI), qrImageSize, toMatrix)
 import Control.Concurrent (forkIO, threadDelay)
@@ -42,9 +45,9 @@ instance Exception Failure
 failWith :: Text -> IO a
 failWith = throwIO . Failure
 validCapability :: Text -> Bool
-validCapability t = T.length t == 64 && T.all (\c -> asciiDigit c || c >= 'a' && c <= 'f') t
+validCapability t = T.length t == 64 && T.all (\c -> isDigit c || c >= 'a' && c <= 'f') t
 validId :: Text -> Bool
-validId t = not (T.null t) && T.length t <= 64 && T.all (\c -> asciiDigit c || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c `elem` ['-','_']) t
+validId t = not (T.null t) && T.length t <= 64 && T.all (\c -> isDigit c || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c `elem` ['-','_']) t
 
 text :: Text -> Text -> IO ()
 text key = B.setText (B.js key) . B.js
@@ -131,9 +134,9 @@ readDirection = do
   case d of "NativeToWrapped" -> pure NativeToWrapped; "WrappedToNative" -> pure WrappedToNative; _ -> failWith "Invalid direction."
 preview :: IO ()
 preview = do
-  d <- readDirection
+  _ <- readDirection
   a <- value "amount"
-  case parseCoins a >>= makeQuote d of
+  case parseCoins a >>= Domain.quote of
     Right q -> text "fee" (renderCoins $ fee q) >> text "net" (renderCoins $ net q)
     Left _ -> text "fee" "—" >> text "net" "—"
 showDirection :: IO ()

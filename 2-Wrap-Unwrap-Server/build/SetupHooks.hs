@@ -32,7 +32,7 @@ sdkRules = rules (static ()) $ \PreBuildComponentInputs{targetInfo=target,localB
       (output "Bridge/SDKBuild.hs" :| [output sdkName])
     registerRule_ "browser" $ staticRule
       (mkCommand (static Dict) (static buildBrowser) (getSymbolicPath directory))
-      (map dependency ["web/Main.hs", "web/Browser.hs", "types/Bridge/Model.hs",
+      (map dependency ["web/Main.hs", "web/Browser.hs", "rebuild/src/Bridge/Domain.hs", "rebuild/src/Bridge/Wire.hs",
                        "web/ecx-browser.cabal", "web/cabal.project", "web/cabal.project.freeze",
                        "web/index.html", "web/style.css"])
       (output "Bridge/BrowserBuild.hs" :| map output ["web/index.html", "web/style.css", "web/dist/wallet.js"])
@@ -83,7 +83,7 @@ buildBrowser directory = do
         : extras <> filter (\(key,_) -> key/="PATH" && key `notElem` map fst extras) environment
       args = ["exe:ecx-browser", "--project-dir=" <> source, "--builddir=" <> cache,
               "--with-compiler=" <> compiler,
-              "--with-ghc-pkg=" <> (takeDirectory compiler </> "javascript-unknown-ghcjs-ghc-pkg"), "-j1"]
+              "--with-hc-pkg=" <> (takeDirectory compiler </> "javascript-unknown-ghcjs-ghc-pkg"), "-j1"]
       command action = (proc "cabal" (action:args)){env=Just childEnv}
   (_,_,_,process) <- createProcess (command "build")
   status <- waitForProcess process

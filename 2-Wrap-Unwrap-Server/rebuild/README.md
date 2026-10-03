@@ -260,8 +260,11 @@ preserved privately. Dedicated writer/reader roles and fresh TLS/auth credential
 were configured, and actual observation-only custody matched while paused.
 The migrated server and signer are now running a bounded test round trip: a new
 50,000-unit unwrap quotes 500 fee and 49,500 payout, and its saved Devnet deposit
-was submitted. Completion, wrap-back and native earned-fee withdrawal remain
-pending. Never restore the pre-cutover ledger over newer on-chain activity.
+finalized and the unwrap paid native transaction
+`35cd02a112319cf73ccf8e7262e6fe5b0e0eaa9ffc2830220784517a114c4e12`.
+The 50,000-unit wrap-back deposit
+`445e65553b772d558ea3c67dcdf2433174ee99bfdfa579d31719f45f0939ed2e`
+was submitted; wrap-back settlement and native earned-fee withdrawal remain pending. Never restore the pre-cutover ledger over newer on-chain activity.
 Any future refund/recovery needing missing historical terms still requires explicit
 policy treatment; migration does not invent those terms.
 
@@ -323,6 +326,16 @@ order, and the original payout link remained correct. Stopping the server produc
 an explicit network error without losing the saved order. Refresh after restart
 cleared the error and showed paused intake. These checks do not establish actual
 Solana Pay wallet signing or every browser/error case.
+
+The browser now compiles the rebuilt `Bridge.Domain` and `Bridge.Wire` directly,
+sharing exact fee calculations and validated quote decoding with the server. Its
+legacy `Bridge.Model` dependency is removed; that 106-line file remains only for
+the baseline application pending retirement. Browser `Main.hs` is 336 → 339 lines,
+with no new source files or dependencies. Root Cabal builds the GHC-JavaScript
+assets and native server; the hook explicitly selects the matching package tool
+with `--with-hc-pkg`. Browser smoke checks against the migrated deployment passed
+configuration decoding and both fee previews (10,001 → 101 fee / 9,900 net),
+without console errors. This check did not create or submit a customer order.
 
 Native extra-deposit refund acceptance passed on L2L Signet. Confirmed receipt
 `cc36b9d6f9c1a494b8a7b1b2da1793330019e33765e9bfe8831685804cd29755:0`
