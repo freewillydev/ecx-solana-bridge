@@ -124,8 +124,23 @@ to the exact published pool and token pair. The reported aggregator fee was
 10 basis points, separate from the pool fee and the bridge's 1% conversion fee.
 Quotes change; these amounts are evidence snapshots, not customer price promises.
 
-Run `python3 scripts/check-market-routes --report /path/to/market-quotes.json`
-to repeat the read-only check. It supplies no wallet identity, signs nothing,
+From the repository root, repeat the read-only check through the pool's safe DSL:
+
+```sh
+cabal run -v0 ecx-pool -- quote-mainnet \
+  nNKg814Wq3uTkoG4fM8LzvBQv4Fu2iCgKFmK2YmPQzM \
+  EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v \
+  EVHqNdzjCupKi4rQkbuYw52sa1m8A7jeUAMP23S9AVVq \
+  1000000 100000000 > /path/to/market-quotes.json
+```
+
+The Haskell replacement passed both real quoted directions on October 3:
+1000000 USDC base units → 35807675 wrapped base units; 100000000 wrapped base
+units → 2731334 USDC base units. Both used the expected Whirlpool with a 10-basis-point
+aggregator fee. Cabal QuickCheck covers wrong pair/pool/amount, split routes,
+execution fields, error responses and integer limits.
+
+The operation supplies no wallet identity, signs nothing,
 and refuses unexpected pair/pool bindings or a non-direct route. It records
 response hashes and timestamps, and never calls `/execute`. The real endpoint
 accepted these requests without credentials, although the

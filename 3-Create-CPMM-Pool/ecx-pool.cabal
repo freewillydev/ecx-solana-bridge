@@ -13,7 +13,7 @@ library
   hs-source-dirs: .
   exposed-modules: Pool, Pool.Signing, Pool.Position, Pool.Liquidity, Pool.Operation
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:chain,
-    aeson, binary, bytestring, text, unix, http-client, base64-bytestring, crypton, ram
+    aeson, binary, bytestring, text, unix, http-client, http-types, time, base64-bytestring, crypton, ram
 
 executable ecx-pool
   default-language: GHC2021

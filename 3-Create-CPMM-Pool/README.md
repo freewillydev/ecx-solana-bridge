@@ -14,6 +14,7 @@ cabal run -v0 ecx-pool -- sign HTTPS_RPC MAX_FEE MAX_COST prepared.json PAYER_KE
 cabal run -v0 ecx-pool -- submit HTTPS_RPC ATTEMPT.json
 cabal run -v0 ecx-pool -- address devnet MINT_A MINT_B FEE_TIER_INDEX
 cabal run -v0 ecx-pool -- inspect devnet HTTPS_RPC POOL MINT_A MINT_B
+cabal run -v0 ecx-pool -- quote-mainnet POOL MINT_A MINT_B AMOUNT_A AMOUNT_B
 cabal run -v0 ecx-pool -- prepare-position devnet POSITION_REQUEST.json > position.json
 cabal run -v0 ecx-pool -- check-position HTTPS_RPC MAX_FEE MAX_COST position.json
 cabal run -v0 ecx-pool -- sign-position HTTPS_RPC MAX_FEE MAX_COST position.json PAYER_KEY POSITION_MINT_KEY NEW_ATTEMPT.json
@@ -24,7 +25,7 @@ cabal test ecx-pool:pool-test --offline -j1 --test-show-details=direct
 ```
 
 Choose `devnet` or `mainnet` explicitly. Mints must be in raw public-key byte order,
-not alphabetical order. The address command takes the actual fee-tier index;
+not alphabetical order (the quote command accepts either direction). The address command takes the actual fee-tier index;
 it is not necessarily the tick spacing. Inspection reads that index from the pool,
 independently derives its PDA through the existing Solana SDK and verifies it.
 
@@ -61,6 +62,19 @@ Full-range-only means tick spacing at least 32768, per the pinned
 [tick constants](https://github.com/orca-so/whirlpools/blob/f4b99e79e7140f3917e4ce81a2e8ad06ccdf8ce4/rust-sdk/core/src/constants/tick.rs).
 The current verifier covers classic SPL assets and the original mutable Orca
 program. It does not support Token-2022 assets or the separate immutable deployment.
+
+## Read-only market quotes
+
+`quote-mainnet` checks both directions against Jupiter Swap V2 using the supplied
+pool and positive integer base-unit amounts. It sends no wallet identity and rejects
+assembled transactions, API errors, mismatched quantities/pairs and anything other
+than a 100% direct route through that pool. HTTPS has no redirects or retries;
+responses are bounded to 1 MiB. Output includes the response hash and observation time.
+It is a closed safe operation, with no signing or execution path. A successful quote
+does not prove an executed trade, issuer approval or reserve backing. See the
+[published-pool command and acceptance](../2-Wrap-Unwrap-Server/docs/TOKEN-OPERATIONS.md#published-jupiter-routes).
+The endpoint currently accepts unauthenticated quote reads; an authentication
+refusal is an API-access problem, not evidence that liquidity is missing.
 
 ## Creation request
 

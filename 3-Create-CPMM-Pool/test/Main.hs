@@ -9,6 +9,7 @@ import Crypto.Error (CryptoFailable(..))
 import qualified Data.ByteArray as BA
 import Bridge.SolanaMessage (decodeTransaction,decodePoolTransaction,decodePositionTransaction,decodeLiquidityTransaction,Transaction(..),Message(..),base58)
 import Data.Bits (xor)
+import Data.Word (Word64)
 import Bridge.SDKBuild (sdkLibraryPath)
 import Paths_ecx_pool (getDataFileName)
 import Data.Aeson
@@ -84,7 +85,8 @@ main=do
         tx=TE.decodeUtf8 $ B64.encode $ B.singleton 1<>sig<>msg
     pure(S.Saved Devnet (S.Liquidity r p) 20000 20000000 (base58 sig) tx)) liquidityRequests
   results<-sequence
-    [ quickCheckResult $ once $ property $ all (\record->
+    [ quickCheckResult $ quoteContract expected
+    , quickCheckResult $ once $ property $ all (\record->
         not(isLeft $ S.validateSaved record) && (eitherDecode(encode record) :: Either String S.Saved)==Right record
         && isLeft(S.validateSaved record {S.identifier=S.identifier openingSaved})
         && isLeft(S.validateSaved record {S.action=S.action openingSaved})) liquiditySigned
@@ -199,3 +201,30 @@ mutateByte snapshot accountIndex offset=snapshot {accounts=[if index==accountInd
       _->Null
     _->Null
   change _=Null
+
+-- Generated amounts and one-field adversarial mutations exercise the route contract.
+quoteContract :: Expected -> Positive Word64 -> Positive Word64 -> Property
+quoteContract expected (Positive input) (Positive output)=
+  let info=object ["ammKey" .= pool expected,"inputMint" .= expectedA expected,"outputMint" .= expectedB expected,"label" .= ("Whirlpool"::Text)]
+      leg=object ["bps" .= (10000::Int),"swapInfo" .= info]
+      good=object ["inputMint" .= expectedA expected,"outputMint" .= expectedB expected
+        ,"inAmount" .= show input,"outAmount" .= show output,"swapMode" .= ("ExactIn"::Text)
+        ,"transaction" .= Null,"routePlan" .= [leg],"router" .= ("metis"::Text),"feeBps" .= (10::Int)]
+      change field value (Object fields)=Object(KM.insert field value fields)
+      change _ _ value=value
+      bad=[change field value good | (field,value)<-
+        [("inputMint",String $ expectedB expected),("outputMint",String $ expectedA expected)
+        ,("inAmount",String "0"),("swapMode",String "ExactOut"),("transaction",String "signed-bytes")
+        ,("taker",String $ pool expected),("errorCode",Number 0),("feeBps",Number 10001)
+        ,("routePlan",toJSON ([]::[Value])),("routePlan",toJSON [leg,leg])]]
+        <>[change "outAmount" (String n) good | n<-["","0","-1","01","1.0","1e2","18446744073709551616","123456789012345678901"]]
+        <>[change "routePlan" (toJSON [changed]) good | changed<-
+          [change "bps" (Number 9999) leg]
+          <>[change "swapInfo" (change field (String $ pool expected<>"x") info) leg | field<-["ammKey","inputMint","outputMint"]]]
+  in counterexample "quote binding/amount/route rejection" $
+    validateQuote expected input good==Right(output,Just "metis",Just "Whirlpool",Just 10)
+    && validateQuote expected input (change "transaction" (String "") good)==validateQuote expected input good
+    && isLeft(validateQuote expected 0 good)
+    && validateQuote expected input (change "outAmount" (String "18446744073709551615") good)
+      ==Right(maxBound,Just "metis",Just "Whirlpool",Just 10)
+    && all (isLeft . validateQuote expected input) bad

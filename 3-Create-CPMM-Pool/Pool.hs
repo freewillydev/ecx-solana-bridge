@@ -1,6 +1,9 @@
 {-# LANGUAGE GADTs, ForeignFunctionInterface #-}
 -- Closed, read-only liquidity operations. No signing key, ledger or custody access.
-module Pool (Network(..),Safe(..),Create(..),Prepared(..),Costs(..),validatePrepared,validateCreated,Expected(..),Snapshot(..),Report(..),Whirlpool(..),evalSafe,validate,decodePool,program,configuration,networkGenesis,accountData,parse,mintParser,vaultParser) where
+module Pool (Network(..),Safe(..),Create(..),Prepared(..),Costs(..),MarketQuote,validateQuote,validatePrepared,validateCreated,Expected(..),Snapshot(..),Report(..),Whirlpool(..),evalSafe,validate,decodePool,program,configuration,networkGenesis,accountData,parse,mintParser,vaultParser) where
+import Bridge.Identity (digest)
+import Data.Time.Clock (getCurrentTime)
+import Network.HTTP.Types.Status (statusCode)
 import Bridge.Error (require,reject)
 import Bridge.RPC
 import Bridge.Solana (tokenProgram)
@@ -8,7 +11,7 @@ import Bridge.SolanaMessage (publicKey,base58,decodePoolTransaction,Transaction(
 import Control.Exception (bracket)
 import Control.Monad (unless,(>=>))
 import Data.Aeson
-import Data.Aeson.Types (parseEither)
+import Data.Aeson.Types (parseEither,Parser)
 import Data.Binary.Get
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Base64 as B64
@@ -21,7 +24,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Foreign
 import Foreign.C.Types
-import Network.HTTP.Client (parseRequest,secure,closeManager)
+import Network.HTTP.Client (parseRequest,secure,closeManager,withResponse,redirectCount,responseBody,responseStatus,checkResponse,responseTimeout,responseTimeoutMicro)
 import System.Posix.DynamicLinker hiding (Null)
 
 data Network = Devnet | Mainnet deriving (Eq,Show)
@@ -111,6 +114,7 @@ validateCreated network r p expectedFee snapshot=do
   pure report
 
 data Safe a where
+  QuoteMainnet :: Expected -> Word64 -> Safe MarketQuote
   Check :: FilePath -> Network -> String -> Word64 -> Word64 -> Create -> Prepared -> Safe Costs
   LiquidityBytes :: FilePath -> Value -> Safe B.ByteString
   PositionBytes :: FilePath -> Text -> Text -> Text -> Text -> Safe B.ByteString
@@ -119,6 +123,19 @@ data Safe a where
   Inspect :: FilePath -> Network -> String -> Expected -> Safe Report
 
 evalSafe :: Safe a -> IO a
+evalSafe (QuoteMainnet expected quantity)=do
+  mapM_ (either reject (const $ pure ()) . publicKey) [pool expected,expectedA expected,expectedB expected]
+  require (quantity>0 && expectedA expected/=expectedB expected) "invalid_market_quote_request"
+  request<-parseRequest $ "https://api.jup.ag/swap/v2/order?inputMint="<>T.unpack(expectedA expected)
+    <>"&outputMint="<>T.unpack(expectedB expected)<>"&amount="<>show quantity
+  bracket newRpcManager closeManager $ \manager->withResponse
+    request {redirectCount=0,checkResponse = \_ _->pure (),responseTimeout=responseTimeoutMicro 25000000} manager $ \response->do
+      require (statusCode(responseStatus response)==200) "market_quote_http_status"
+      raw<-boundedBody (1024*1024) (responseBody response)
+      value<-either (const $ reject "invalid_market_quote_json") pure (eitherDecodeStrict' raw)
+      details<-either (const $ reject "market_quote_mismatch") pure (validateQuote expected quantity value)
+      observed<-getCurrentTime
+      pure(MarketQuote expected quantity details (T.pack $ show observed) (digest raw))
 evalSafe (LiquidityBytes library request)=invoke "ecx_liquidity_prepare_v1" library request
 evalSafe (PositionBytes library payerKey poolKey mintKey hash)=invoke "ecx_position_prepare_v1" library $ object
   ["protocol" .= (1::Int),"payer" .= payerKey,"pool" .= poolKey,"position_mint" .= mintKey,"blockhash" .= hash]
@@ -307,3 +324,42 @@ invoke symbol library value=do
         count<-peek lengthPtr
         require (status==0 && count>0 && count<=8192) "pool_sdk_failed"
         B.packCStringLen (castPtr output,fromIntegral count)
+
+-- Quote-only evidence is not trade execution or proof of token backing.
+data MarketQuote = MarketQuote Expected Word64 (Word64,Maybe Text,Maybe Text,Maybe Word16) Text Text
+instance ToJSON MarketQuote where
+  toJSON (MarketQuote expected quantity (output,router,poolLabel,fees) observed hash)=object
+    ["network" .= ("Solana mainnet-beta"::Text),"quoteOnly" .= True,"pool" .= pool expected
+    ,"inputMint" .= expectedA expected,"outputMint" .= expectedB expected,"inputBaseUnits" .= show quantity
+    ,"quotedOutputBaseUnits" .= show output,"router" .= router,"poolLabel" .= poolLabel
+    ,"routeBasisPoints" .= (10000::Int),"aggregatorFeeBasisPoints" .= fees
+    ,"observedAt" .= observed,"responseSha256" .= hash]
+
+validateQuote :: Expected -> Word64 -> Value -> Either String (Word64,Maybe Text,Maybe Text,Maybe Word16)
+validateQuote expected quantity=parseEither $ withObject "market quote" $ \o->do
+  source<-o .: "inputMint"; destination<-o .: "outputMint"; amount<-o .: "inAmount"
+  mode<-o .: "swapMode" :: Parser Text
+  transaction<-o .:? "transaction"; taker<-o .:? "taker" :: Parser (Maybe Value)
+  problem<-o .:? "errorCode" :: Parser (Maybe Value)
+  unless (quantity>0 && expectedA expected/=expectedB expected && source==expectedA expected
+    && destination==expectedB expected && amount==show quantity && mode=="ExactIn"
+    && transaction `elem` [Nothing,Just (String "")] && taker==Nothing && problem==Nothing)
+    (fail "quote identity or execution fields")
+  text<-o .: "outAmount"
+  unless (not(null text) && length text<=20 && all (\c->c>='0' && c<='9') text) (fail "invalid quote quantity")
+  output<-case readMaybe text :: Maybe Integer of
+    Just n | n>0 && n<=toInteger(maxBound::Word64) && show n==text->pure(fromInteger n)
+    _->fail "invalid quote quantity"
+  route<-o .: "routePlan"
+  poolLabel<-case route of
+    [leg]->withObject "route leg" (\r->do
+      weight<-r .: "bps" :: Parser Int
+      unless (weight==10000) (fail "split route")
+      r .: "swapInfo" >>= withObject "pool route" (\info->do
+        address<-info .: "ammKey"; a<-info .: "inputMint"; b<-info .: "outputMint"
+        unless (address==pool expected && a==source && b==destination) (fail "wrong pool route")
+        info .:? "label")) leg
+    _->fail "direct route required"
+  fees<-o .:? "feeBps"
+  unless (maybe True (<=10000) fees) (fail "invalid fee")
+  (,,,) output <$> o .:? "router" <*> pure poolLabel <*> pure fees
