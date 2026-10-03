@@ -14,7 +14,6 @@ import qualified Data.ByteString as BS
 import qualified Bridge.Postgres.Ledger as L
 import qualified Bridge.Postgres.Source as Source
 import qualified Bridge.Postgres.NativeRecovery as NativeRecovery
-import qualified Bridge.Postgres.LossCover as LossCover
 import System.Environment (lookupEnv)
 import Data.Maybe (fromMaybe)
 import Bridge.Ledger.Model (LossCapital(..),SourceCheck(..),Deposit(..),Attempt(..),PaymentCosts(..),NativeSettlementCheck(..))
@@ -387,18 +386,18 @@ lossCoverContract ledger = do
   revision <- L.ledgerAction ledger $ \c->do
     fixtureOperation c CustodyRevision
   before <- snapshot ledger
-  expectError "insufficient_loss_capital" $ LossCover.record ledger source recovery 100 capital reason sourceProof (custody revision)
-  expectError "source_loss_custody_not_current" $ LossCover.record ledger source recovery 100 capital reason sourceProof (custody $ revision+1)
-  expectError "source_loss_not_proven" $ LossCover.record ledger source (recovery+1) 100 capital reason sourceProof (custody revision)
+  expectError "insufficient_loss_capital" $ Source.recordLossCover ledger source recovery 100 capital reason sourceProof (custody revision)
+  expectError "source_loss_custody_not_current" $ Source.recordLossCover ledger source recovery 100 capital reason sourceProof (custody $ revision+1)
+  expectError "source_loss_not_proven" $ Source.recordLossCover ledger source (recovery+1) 100 capital reason sourceProof (custody revision)
   snapshot ledger >>= \after->require (before==after) "contract_loss_refusal_mutated"
   L.ledgerAction ledger $ \c->L.posting c "contract-extra-loss-capital" "synthetic database fixture only" [(Native,"float",1000),(Native,"external",-1000)]
   coverRevision <- L.ledgerAction ledger $ \c->do
     fixtureOperation c CustodyRevision
-  LossCover.record ledger source recovery 100 capital reason sourceProof (custody coverRevision)
-  LossCover.decision ledger did recovery >>= \saved->require (saved==Just(capital,reason)) "contract_loss_decision_missing"
+  Source.recordLossCover ledger source recovery 100 capital reason sourceProof (custody coverRevision)
+  Source.lossCoverDecision ledger did recovery >>= \saved->require (saved==Just(capital,reason)) "contract_loss_decision_missing"
   beforeReplay <- snapshot ledger
-  LossCover.record ledger source recovery 100 capital reason sourceProof (custody coverRevision)
-  expectError "source_loss_cover_conflict" $ LossCover.record ledger source recovery 100 capital "changed allocation reason" sourceProof (custody coverRevision)
+  Source.recordLossCover ledger source recovery 100 capital reason sourceProof (custody coverRevision)
+  expectError "source_loss_cover_conflict" $ Source.recordLossCover ledger source recovery 100 capital "changed allocation reason" sourceProof (custody coverRevision)
   snapshot ledger >>= \after->require (beforeReplay==after) "contract_loss_cover_repeated"
   L.ledgerAction ledger $ \c->do
     deficit <- M.findWithDefault 0 "source_deficit" <$> fixtureOperation c NativeCapital
@@ -453,7 +452,7 @@ coveredObligationContract ledger = forM_ ["ready","paying"] $ \prior->do
   capital <- LossCapital <$> either reject pure(amount 10000) <*> either reject pure(amount 0)
   revision <- L.ledgerAction ledger $ \c->do
     fixtureOperation c CustodyRevision
-  LossCover.record ledger source recovery 100 capital "isolated cover contract" proof (object["revision" .= revision,"checkedAt" .= (100::Int),"report" .= report])
+  Source.recordLossCover ledger source recovery 100 capital "isolated cover contract" proof (object["revision" .= revision,"checkedAt" .= (100::Int),"report" .= report])
   Source.coveredAuthorized ledger oid >>= \yes->require (not yes) "capital_cover_implicitly_authorized_payment"
   expectError "custody_not_reconciled" $ Source.coveredRecord ledger oid recovery 100 "explicit covered contract" proof
   fresh ledger

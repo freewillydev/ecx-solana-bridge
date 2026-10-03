@@ -274,6 +274,9 @@ The sequence below remains the broader refactor checklist, subject to that prior
    Native and Solana quote preflights now share Admission and one order-workflow
    entry point; discarded report types and the unused wallet-bound redemption
    preflight are removed. Actual Solana Pay deposits establish refund ownership.
+   Source recovery now owns loss-cover decisions, capital return and covered-payment
+   authorization together; their shared query excludes returned cover sequences.
+   The separate LossCover module is removed without changing transaction boundaries.
    Remove redundant wrappers immediately after their replacement works.
    The standalone TLS executable and Python certificate generator are retired;
    their real-validator assertions now run as generated QuickCheck cases inside

@@ -7,7 +7,6 @@ module Bridge.Recovery
 
 import qualified Bridge.Postgres.Custody as PgCustody
 import qualified Bridge.Postgres.Ledger as PgLedger
-import qualified Bridge.Postgres.LossCover as PgLossCover
 import qualified Bridge.Postgres.Settlement as PgSettlement
 import qualified Bridge.Postgres.Preparation as PgPreparation
 import qualified Bridge.Postgres.Replacement as PgReplacement
@@ -127,7 +126,7 @@ coverSourceLossWith clock transport c ledger did recovery capital reason=do
   require (recovery>0 && not (T.null $ T.strip reason) && T.length reason<=512) "invalid_source_loss_cover"
   health <- PgLedger.readiness ledger
   require (not $ available health) "pause_before_operator_action"
-  old <- PgLossCover.decision ledger did recovery
+  old <- PgSource.lossCoverDecision ledger did recovery
   case old of
     Just previous->require (previous==(capital,reason)) "source_loss_cover_conflict"
     Nothing->do
@@ -141,7 +140,7 @@ coverSourceLossWith clock transport c ledger did recovery capital reason=do
       -- ordinary custody readiness pass before the actual capital allocation.
       custodyReport <- inspectSourceLossCustodyWith clock transport c ledger
       now <- clock
-      PgLossCover.record ledger source recovery now capital reason sourceProof custodyReport
+      PgSource.recordLossCover ledger source recovery now capital reason sourceProof custodyReport
   pure $ object ["coveredSourceLoss" .= did,"recoverySequence" .= recovery,"capital" .= capital
     ,"paused" .= True,"signedOrSent" .= False]
 
