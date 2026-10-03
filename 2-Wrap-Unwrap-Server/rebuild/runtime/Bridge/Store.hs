@@ -2,10 +2,10 @@
 -- Closed ledger operations. Connections, queries and transaction callbacks never
 -- escape this module; the runtime will interpret its customer/operator DSL here.
 module Bridge.Store
-  ( Reader, Writer, StoreError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), LedgerState(..), WithdrawalView(..)
+  ( Reader, Writer, StoreError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), StorePolicy(..), AllocationClaim(..), LedgerState(..), WithdrawalView(..)
   , withReader, withWriter, evalRead, evalWrite ) where
 
-import Bridge.Identity (bearerHash,digest)
+import Bridge.Identity (bearerHash,digest,payInstruction)
 import qualified Bridge.Wire as W
 import Bridge.Domain
 import Bridge.Wire (PaymentTerms(..),PolicySnapshot(..),CostLimits(..))
@@ -19,7 +19,7 @@ import Data.Scientific (Scientific,floatingOrInteger)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Control.Concurrent.MVar
 import Control.Exception
-import Control.Monad (unless,forM_)
+import Control.Monad (unless,forM_,when)
 import Data.Aeson (FromJSON,ToJSON,encode,eitherDecodeStrict')
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
@@ -52,6 +52,12 @@ data OrderLimits = OrderLimits
   , graceSeconds :: Int64, maximumQueued :: Int, nativeDaily :: Amount, solanaDaily :: Amount }
   deriving (Eq,Show)
 
+data StorePolicy = StorePolicy
+  { executionTerms :: PaymentTerms, admissionLimits :: OrderLimits
+  , deploymentName :: Text, requireBackup :: Bool } deriving (Eq,Show)
+data AllocationClaim = AllocationClaim { allocationLabel :: Text, mayAllocate :: Bool }
+  deriving (Eq,Show)
+
 data StoreRead a where
   ReadState :: StoreRead LedgerState
   ReadBalances :: StoreRead (M.Map (Asset,Account) Integer)
@@ -60,12 +66,18 @@ data StoreRead a where
 data StoreWrite a where
   Pause :: Text -> StoreWrite ()
   CreateOrder :: Int64 -> Text -> W.OrderRequest -> StoreWrite Text
+  ClaimNative :: Int64 -> Text -> Text -> StoreWrite AllocationClaim
+  RecordNative :: Text -> Text -> Text -> Text -> StoreWrite Int64
+  BindSolana :: Int64 -> Text -> Text -> StoreWrite Int64
+  IssueInstruction :: Int64 -> Text -> Text -> StoreWrite W.OrderView
+  AcknowledgeBackup :: Text -> Int64 -> Text -> StoreWrite ()
+  ExpireQuotes :: Int64 -> StoreWrite ()
   ReserveFees :: Int64 -> Text -> Asset -> Amount -> Text -> Text -> StoreWrite WithdrawalView
   CancelFees :: Text -> Text -> StoreWrite WithdrawalView
 
 -- Reader has no writer connection, checkpoint or writable credentials.
 data Reader = Reader PG.ConnectInfo Text Bool
-data Writer = Writer (MVar (Maybe PG.Connection)) PaymentTerms OrderLimits (Int64 -> IO ())
+data Writer = Writer (MVar (Maybe PG.Connection)) StorePolicy (Int64 -> IO ())
 
 withReader :: PG.ConnectInfo -> Text -> Bool -> (Reader -> IO a) -> IO a
 withReader settings identity remote action = do
@@ -75,8 +87,10 @@ withReader settings identity remote action = do
 
 -- The checkpoint must persist the monotonic host fence before commit. It is
 -- infrastructure, not an operation supplied by a handler. No optional bypass.
-withWriter :: PG.ConnectInfo -> PaymentTerms -> OrderLimits -> (Int64 -> IO ()) -> (Writer -> IO a) -> IO a
-withWriter settings policy limit checkpoint action = bracket (PG.connect settings) PG.close $ \c -> do
+withWriter :: PG.ConnectInfo -> StorePolicy -> (Int64 -> IO ()) -> (Writer -> IO a) -> IO a
+withWriter settings config checkpoint action = bracket (PG.connect settings) PG.close $ \c -> do
+  let policy=executionTerms config; limit=admissionLimits config
+  require (not(T.null $ deploymentName config) && T.length(deploymentName config)<=64 && not(T.any (<= ' ') $ deploymentName config)) "invalid_deployment_name"
   minimumInput <- checked (amount 2)
   require (orderMinimum limit>=minimumInput && orderMaximum limit>=orderMinimum limit
     && quoteSeconds limit>0 && graceSeconds limit>=0 && maximumQueued limit>0
@@ -86,7 +100,7 @@ withWriter settings policy limit checkpoint action = bracket (PG.connect setting
   claimWorker c >>= flip require "worker_already_running"
   row <- metadata c (deploymentFingerprint $ paymentPolicy policy)
   checkpoint (S.criticalSequence row)
-  writer <- (\cell -> Writer cell policy limit checkpoint) <$> newMVar (Just c)
+  writer <- (\cell -> Writer cell config checkpoint) <$> newMVar (Just c)
   evalWrite writer (Pause "restart_requires_reconciliation")
   action writer
 
@@ -104,8 +118,50 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
         readOrder c identity (if remote then Just(S.backupSequence row) else Nothing) cap identifier
 
 evalWrite :: Writer -> StoreWrite a -> IO a
-evalWrite writer@(Writer _ policy limit _) operation = transaction writer $ \c -> case operation of
+evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
+ let policy=executionTerms config; limit=admissionLimits config in case operation of
   CreateOrder now header request -> createOrder c policy limit now header request
+  ClaimNative now header identifier -> do
+    row <- authorizedOrder c (deploymentFingerprint $ paymentPolicy policy) header identifier
+    request <- decodeSaved (S.requestJson row)
+    require (W.direction request==NativeToWrapped && S.instruction row==Nothing) "invalid_native_provisioning_order"
+    let label="ecx-bridge:v1:"<>deploymentName config<>":order:"<>identifier
+    old <- allocation c identifier
+    case old of
+      Just saved -> require (saved==label) "allocation_label_mismatch" >> pure(AllocationClaim label False)
+      Nothing -> do
+        intakeReady c (deploymentFingerprint $ paymentPolicy policy) now
+        require (S.status row=="Provisioning" && now<=S.deadline row) "deposit_window_closed"
+        n <- nextSequence c
+        _ <- O.runInsert c O.Insert {O.iTable=S.nativeAllocations,
+          O.iRows=[(O.sqlStrictText identifier,O.sqlStrictText label,O.sqlInt8 n)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+        pure (AllocationClaim label True)
+  RecordNative header identifier label address -> do
+    row <- authorizedOrder c (deploymentFingerprint $ paymentPolicy policy) header identifier
+    request <- decodeSaved (S.requestJson row)
+    saved <- allocation c identifier
+    require (saved==Just label && W.direction request==NativeToWrapped &&
+      not(T.null address) && T.length address<=128 && not(T.any (<= ' ') address)) "invalid_native_allocation_result"
+    saveInstruction c row address
+  BindSolana now header identifier -> do
+    row <- authorizedOrder c (deploymentFingerprint $ paymentPolicy policy) header identifier
+    request <- decodeSaved (S.requestJson row)
+    require (W.direction request==WrappedToNative) "invalid_solana_provisioning_order"
+    instruction <- checked (payInstruction identifier)
+    when (S.instruction row==Nothing) $ do
+      intakeReady c (deploymentFingerprint $ paymentPolicy policy) now
+      require (S.status row=="Provisioning" && now<=S.deadline row) "deposit_window_closed"
+    saveInstruction c row instruction
+  IssueInstruction now header identifier -> issueInstruction c config now header identifier
+  AcknowledgeBackup identity n snapshot -> do
+    row <- metadata c identity
+    require (T.length snapshot==64 && T.all (`elem` ("0123456789abcdef"::String)) snapshot) "invalid_backup_receipt"
+    require (n>=S.backupSequence row && n<=S.criticalSequence row) "invalid_backup_coverage"
+    when (n>S.backupSequence row) $ do
+      _ <- O.runUpdate c O.Update {O.uTable=S.deployment,O.uUpdateWith= \r->r {S.backupSequence=O.sqlInt8 n},
+        O.uWhere= \r->S.singleton r O..== O.sqlInt8 1,O.uReturning=O.rCount}
+      audit c "backup_acknowledged" (snapshot<>":"<>T.pack(show n))
+  ExpireQuotes now -> expireQuotes c now
   Pause explanation -> do
     validReason explanation
     count <- O.runUpdate c O.Update {O.uTable=S.deployment,
@@ -165,7 +221,8 @@ evalWrite writer@(Writer _ policy limit _) operation = transaction writer $ \c -
 -- row. Any unexpected failure fences this connection; only policy rejection
 -- with successful rollback permits reuse. No transaction spans chain RPC or remote backup.
 transaction :: Writer -> (PG.Connection -> IO a) -> IO a
-transaction (Writer cell policy _ checkpoint) action = do
+transaction (Writer cell config checkpoint) action = do
+  let policy=executionTerms config
   outcome <- modifyMVar cell $ \case
     Nothing -> pure (Nothing,Left (toException $ StoreError "ledger_connection_fenced"))
     Just c -> mask $ \restore -> do
@@ -439,3 +496,91 @@ reserveOrderCosts c limits costs booked identifier direction = do
     pure ()
 encodeSaved :: ToJSON a => a -> Text
 encodeSaved=TE.decodeUtf8 . BL.toStrict . encode
+
+-- The raw row remains private: public reads must apply visibility and recovery.
+authorizedOrder :: PG.Connection -> Text -> Text -> Text -> IO S.Order
+authorizedOrder c identity header identifier = do
+  cap <- checked (bearerHash header)
+  rows <- O.runSelect c $ do
+    row <- O.selectTable S.orders
+    O.where_ (S.orderId row O..== O.sqlStrictText identifier O..&& S.capabilityHash row O..== O.sqlStrictText cap)
+    pure row
+  row <- case rows of [one]->pure one; _->reject "order_not_found"
+  policy <- decodeSaved (S.policyJson row)
+  require (deploymentFingerprint policy==identity) "order_profile_mismatch"
+  pure row
+allocation :: PG.Connection -> Text -> IO (Maybe Text)
+allocation c identifier = do
+  rows <- O.runSelect c $ do
+    (key,label,_) <- O.selectTable S.nativeAllocations
+    O.where_ (key O..== O.sqlStrictText identifier)
+    pure label
+  case rows of []->pure Nothing; [label]->pure(Just label); _->reject "duplicate_native_allocation"
+saveInstruction :: PG.Connection -> S.Order -> Text -> IO Int64
+saveInstruction c row instruction = case (S.instruction row,S.instructionSequence row) of
+  (Just old,Just n) -> require (old==instruction && n>0) "instruction_is_immutable" >> pure n
+  (Nothing,Nothing) -> do
+    require (S.status row `elem` ["Provisioning","ExpiredUnfunded"]) "order_no_longer_provisioning"
+    n <- nextSequence c
+    _ <- O.runUpdate c O.Update {O.uTable=S.orders,
+      O.uUpdateWith= \r->r {S.instruction=O.toNullable $ O.sqlStrictText instruction,S.instructionSequence=O.toNullable $ O.sqlInt8 n,
+        S.status=O.ifThenElse (S.status r O..== O.sqlStrictText "Provisioning") (O.sqlStrictText "AwaitingDeposit") (S.status r)},
+      O.uWhere= \r->S.orderId r O..== O.sqlStrictText(S.orderId row),O.uReturning=O.rCount}
+    pure n
+  _ -> reject "invalid_instruction_state"
+issueInstruction :: PG.Connection -> StorePolicy -> Int64 -> Text -> Text -> IO W.OrderView
+issueInstruction c config now header identifier = do
+  let identity=deploymentFingerprint $ paymentPolicy $ executionTerms config
+  row <- authorizedOrder c identity header identifier
+  n <- maybe (reject "instruction_not_recorded") pure (S.instructionSequence row)
+  require (n>0 && S.instruction row/=Nothing && S.instructionIssued row `elem` [0,1]) "invalid_instruction_state"
+  d <- metadata c identity
+  require (not(requireBackup config) || S.backupSequence d>=n) "backup_pending"
+  cap <- checked (bearerHash header)
+  view <- readOrder c identity Nothing cap identifier
+  when (S.instructionIssued row==0) $ do
+    intakeReady c identity now
+    require (W.status view=="AwaitingDeposit" && now<=S.deadline row) "deposit_window_closed"
+    held <- O.runSelect c $ do
+      (key,_,_,phase) <- O.selectTable S.reservations
+      O.where_ (key O..== O.sqlStrictText identifier)
+      pure phase
+      :: IO [Text]
+    costs <- O.runSelect c $ do
+      (key,_,_,_,phase) <- O.selectTable S.operatingReservations
+      O.where_ (key O..== O.sqlStrictText identifier)
+      pure phase
+      :: IO [Text]
+    require (held==["quote"] && costs==["quote","quote"]) "quote_reservations_unavailable"
+    _ <- O.runUpdate c O.Update {O.uTable=S.orders,
+      O.uUpdateWith= \r->r {S.instructionIssued=O.sqlInt8 1},O.uWhere= \r->S.orderId r O..== O.sqlStrictText identifier,O.uReturning=O.rCount}
+    audit c "instruction_issued" identifier
+  pure view {W.depositInstruction=S.instruction row}
+expireQuotes :: PG.Connection -> Int64 -> IO ()
+expireQuotes c now = do
+  require (now>=0) "invalid_order_time"
+  expired <- O.runSelect c $ do
+    row <- O.selectTable S.orders
+    O.where_ (S.graceDeadline row O..< O.sqlInt8 now)
+    pure (S.orderId row)
+    :: IO [Text]
+  forM_ expired $ \identifier -> do
+    _ <- O.runUpdate c O.Update {O.uTable=S.reservations,
+      O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,O.sqlStrictText "released"),
+      O.uWhere= \(key,_,_,phase)->key O..== O.sqlStrictText identifier O..&& phase O..== O.sqlStrictText "quote",O.uReturning=O.rCount}
+    _ <- O.runUpdate c O.Update {O.uTable=S.operatingReservations,
+      O.uUpdateWith= \(key,kind,asset,n,_)->(key,kind,asset,n,O.sqlStrictText "released"),
+      O.uWhere= \(key,_,_,_,phase)->key O..== O.sqlStrictText identifier O..&& phase O..== O.sqlStrictText "quote",O.uReturning=O.rCount}
+    deposits <- O.runSelect c $ O.limit 1 $ do
+      (key,order) <- S.orderDeposits
+      O.where_ (O.matchNullable (O.sqlBool False) (O..== O.sqlStrictText identifier) order)
+      pure key
+      :: IO [Text]
+    when (null deposits) $ do
+      _ <- O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=O.sqlStrictText "ExpiredUnfunded"},
+        O.uWhere= \r->S.orderId r O..== O.sqlStrictText identifier O..&& O.in_ (map O.sqlStrictText ["Provisioning","AwaitingDeposit"]) (S.status r),O.uReturning=O.rCount}
+      pure ()
+audit :: PG.Connection -> Text -> Text -> IO ()
+audit c action detail = do
+  _ <- O.runInsert c O.Insert {O.iTable=S.audit,O.iRows=[(Nothing,O.sqlStrictText action,O.sqlStrictText detail)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  pure ()

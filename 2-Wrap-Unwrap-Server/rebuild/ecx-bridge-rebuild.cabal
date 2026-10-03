@@ -14,7 +14,7 @@ library
   import: settings
   hs-source-dirs: src
   exposed-modules: Bridge.Domain, Bridge.Identity, Bridge.Wire, Bridge.Operation, Bridge.Operation.Internal
-  build-depends: base >=4.20 && <4.23, aeson >=2.2 && <2.4, text >=2.1 && <2.2, containers, bytestring, crypton >=1 && <1.2, ram >=0.22 && <0.23
+  build-depends: base >=4.20 && <4.23, aeson >=2.2 && <2.4, text >=2.1 && <2.2, containers, bytestring, base16-bytestring, base58-bytestring, crypton >=1 && <1.2, ram >=0.22 && <0.23
 
 library customer-api
   import: settings

@@ -22,7 +22,9 @@ reservation/cancellation, verified against disposable PostgreSQL. Authorized sav
 historical terms, capability access, review overlays and backup-gated instruction
 visibility. Atomic order creation now includes idempotency, immutable terms,
 inventory and both operating holds, readiness and daily-budget checks, with
-PostgreSQL rollback/replay acceptance. Order provisioning, high-level evaluators, chain adapters and execution remain unfinished.
+PostgreSQL rollback/replay acceptance. Guarded instruction storage now covers native
+allocation claims, immutable results, derived Solana references, backup-gated first
+exposure and expiry preserving obligation holds. Native RPC provisioning, high-level evaluators, chain adapters and execution remain unfinished.
 No existing custody state has been moved. See the rebuild README for scoped counts
 and evidence; do not compare this subset against the entire old storage layer.
 

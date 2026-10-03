@@ -137,6 +137,30 @@ operating costs, saved order costs and operating reservations are 116 to 18 line
 in one schema file each; the additional fee-reservation read projection is three
 lines. These are piece-level comparisons, not whole-application totals.
 
-Order provisioning, the high-level safe/critical runtime, actual host fence,
+Guarded instruction storage is implemented: one-time native allocation claims,
+immutable native results, order-derived Solana Pay references, first exposure after
+backup/readiness/reservation checks, and quote expiry. Native replies arriving after
+expiry can be recorded without reopening the window. Previously issued instructions
+remain historical data, while quote expiry releases only provisional holds.
+`StorePolicy` binds immutable execution terms, admission limits, the native allocation
+label namespace and backup requirement at writer construction.
+
+The PostgreSQL runner checks allocation replay, wrong label/direction, immutable
+instruction replay, backup pending/forward/regression/profile rejection, both
+instruction types, late replies, historical exposure and preservation of obligation
+holds on repeated expiry. A pure vector checks the exact existing Solana Pay
+order-to-reference encoding. Native address strings in storage fixtures are not
+node validation or network acceptance: the real adapter must validate ownership,
+solvability and address type before recording an RPC result.
+
+For claim/record/bind/issue/expiry/backup-acknowledgment storage functions, the
+baseline is 146 lines across two files versus 127 across one replacement file,
+including the new private authorization/allocation/save/audit helpers and excluding
+shared transaction, identity and schema code. The native allocation mapping keeps
+all three existing columns. Both chains share immutable instruction recording;
+Solana binding no longer accepts a caller-chosen reference. This reduces duplicate
+update paths without discarding the late-native-reply recovery rule.
+
+Native RPC address provisioning, the high-level safe/critical runtime, actual host fence,
 chain adapters, signer and payment execution remain unfinished. Passing these
 checks is not payment, migration or real-chain acceptance.

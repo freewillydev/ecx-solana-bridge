@@ -1,6 +1,6 @@
 {-# LANGUAGE GADTs, ScopedTypeVariables #-}
 module Main (main) where
-import Bridge.Identity (capabilityHash)
+import Bridge.Identity (capabilityHash,payInstruction)
 import qualified Bridge.Wire as W
 import Data.Aeson (encode)
 import qualified Data.ByteString.Lazy as BL
@@ -32,6 +32,7 @@ main = do
       readerSettings=settings {PG.connectUser=readRole}
       policy=PaymentTerms (PolicySnapshot 2 "finalized" "contract") (CostLimits (money 10) (money 10) (money 10))
       limits=OrderLimits (money 2) (money 1000) 100 100 100 (money 100000) (money 100000)
+      store terms config=StorePolicy terms config "contract" True
       key=T.replicate 64 "a"
       reserve=ReserveFees 100 key Native (money 100) "recipient" "test owned revenue"
       check ok=unless ok (fail "store contract failed")
@@ -40,8 +41,8 @@ main = do
     withReader readerSettings "contract" True $ \reader -> do
       expectStore "unsafe_read_database_role" (withReader settings "contract" True $ const $ pure ())
       expectStore "ledger_profile_or_schema_mismatch" (withReader readerSettings "wrong" True $ const $ pure ())
-      withWriter settings policy limits (const $ pure ()) $ \writer -> do
-        expectStore "worker_already_running" (withWriter settings policy limits (const $ pure ()) $ const $ pure ())
+      withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
+        expectStore "worker_already_running" (withWriter settings (store policy limits) (const $ pure ()) $ const $ pure ())
         initial <- evalRead reader ReadBalances
         first <- evalWrite writer reserve
         replay <- evalWrite writer reserve
@@ -80,7 +81,7 @@ main = do
       fixture fixtures RefreshCustody
       beforeFailure <- evalRead reader ReadState
       let failCheckpoint n=when (n>ledgerSequence beforeFailure) (ioError $ userError "injected checkpoint failure")
-      withWriter settings policy limits failCheckpoint $ \writer -> do
+      withWriter settings (store policy limits) failCheckpoint $ \writer -> do
         failure <- try (evalWrite writer $ ReserveFees 100 (T.replicate 64 "c") Native (money 100) "recipient" "test rollback") :: IO (Either IOException WithdrawalView)
         check (case failure of Left _->True; Right _->False)
         expectStore "ledger_connection_fenced" (evalWrite writer (Pause "must fail"))
@@ -106,7 +107,7 @@ main = do
       fixture fixtures SeedIntake
       let newRequest=W.OrderRequest NativeToWrapped (money 100) "recipient" "refund" Nothing "new-wrap"
           create request=CreateOrder 100 auth request
-      withWriter settings policy limits (const $ pure ()) $ \writer -> do
+      withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
         expectStore "intake_paused" (evalWrite writer $ create newRequest)
         fixture fixtures ReadyIntake
         before <- fixture fixtures OrderSnapshot
@@ -138,7 +139,7 @@ main = do
         check (fee(W.quote otherView)==money 3 && net(W.quote otherView)==money 198)
         fixture fixtures ReadyIntake
         expectStore "scanners_not_fresh" (evalWrite writer $ CreateOrder 161 auth newRequest {W.idempotencyKey="old-scan"})
-      let failedAdmission config terms expected=withWriter settings terms config (const $ pure ()) $ \writer -> do
+      let failedAdmission config terms expected=withWriter settings (store terms config) (const $ pure ()) $ \writer -> do
             fixture fixtures ReadyIntake
             before <- fixture fixtures OrderSnapshot
             expectStore expected (evalWrite writer $ create newRequest {W.idempotencyKey="reject"})
@@ -147,6 +148,55 @@ main = do
       failedAdmission limits {maximumQueued=1} policy "queue_full"
       failedAdmission limits {nativeDaily=money 1} policy "operating_daily_limit"
       failedAdmission limits policy {paymentLimits=CostLimits (money 1000) (money 10) (money 10)} "insufficient_fee_budget"
+      withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
+        fixture fixtures ReadyIntake
+        native <- evalWrite writer (create newRequest {W.idempotencyKey="provision-native"})
+        solana <- evalWrite writer (create newRequest {W.idempotencyKey="provision-solana",W.direction=WrappedToNative,W.refund=""})
+        late <- evalWrite writer (create newRequest {W.idempotencyKey="provision-late"})
+        claim <- evalWrite writer (ClaimNative 100 auth native)
+        retryClaim <- evalWrite writer (ClaimNative 100 auth native)
+        check (mayAllocate claim && not(mayAllocate retryClaim) && allocationLabel claim==allocationLabel retryClaim)
+        lateClaim <- evalWrite writer (ClaimNative 100 auth late)
+        let address="tb1q9vl0cpvddncs78537mrpxawydzsgkz7k5hgj7w"
+        nativeSequence <- evalWrite writer (RecordNative auth native (allocationLabel claim) address)
+        replaySequence <- evalWrite writer (RecordNative auth native (allocationLabel claim) address)
+        check (nativeSequence==replaySequence)
+        expectStore "instruction_is_immutable" (evalWrite writer $ RecordNative auth native (allocationLabel claim) "different-address")
+        expectStore "invalid_native_allocation_result" (evalWrite writer $ RecordNative auth native "wrong-label" address)
+        expectStore "invalid_solana_provisioning_order" (evalWrite writer $ BindSolana 100 auth native)
+        solanaSequence <- evalWrite writer (BindSolana 100 auth solana)
+        solanaReplay <- evalWrite writer (BindSolana 100 auth solana)
+        check (solanaSequence==solanaReplay)
+        beforeExposure <- evalRead reader (ReadOrder auth native)
+        check (W.depositInstruction beforeExposure==Nothing)
+        expectStore "backup_pending" (evalWrite writer $ IssueInstruction 100 auth native)
+        let cover=do
+              stateNow <- evalRead reader ReadState
+              evalWrite writer (AcknowledgeBackup "contract" (ledgerSequence stateNow) (T.replicate 64 "0"))
+        stateNow <- evalRead reader ReadState
+        expectStore "invalid_backup_coverage" (evalWrite writer $ AcknowledgeBackup "contract" (ledgerSequence stateNow+1) (T.replicate 64 "0"))
+        expectStore "ledger_profile_or_schema_mismatch" (evalWrite writer $ AcknowledgeBackup "wrong" 0 (T.replicate 64 "0"))
+        cover
+        expectStore "invalid_backup_coverage" (evalWrite writer $ AcknowledgeBackup "contract" 0 (T.replicate 64 "0"))
+        nativeView <- evalWrite writer (IssueInstruction 100 auth native)
+        solanaView <- evalWrite writer (IssueInstruction 100 auth solana)
+        check (W.depositInstruction nativeView==Just address && Right (W.depositInstruction solanaView)==(Just <$> payInstruction solana))
+        fixture fixtures (ProtectHolds solana)
+        evalWrite writer (ExpireQuotes 301)
+        lateSequence <- evalWrite writer (RecordNative auth late (allocationLabel lateClaim) "late-native-address-fixture")
+        check (lateSequence>solanaSequence)
+        cover
+        lateView <- evalRead reader (ReadOrder auth late)
+        check (W.status lateView=="ExpiredUnfunded" && W.depositInstruction lateView==Nothing)
+        expectStore "scanners_not_fresh" (evalWrite writer $ IssueInstruction 301 auth late)
+        fixture fixtures ReadyIntake
+        expectStore "deposit_window_closed" (evalWrite writer $ IssueInstruction 100 auth late)
+        historical <- evalWrite writer (IssueInstruction 301 auth native)
+        check (W.status historical=="ExpiredUnfunded" && W.depositInstruction historical==Just address)
+        fixture fixtures (CheckPhases native "released") >>= check
+        fixture fixtures (CheckPhases solana "obligation") >>= check
+        evalWrite writer (ExpireQuotes 301)
+        fixture fixtures (CheckPhases solana "obligation") >>= check
       fixture fixtures LargeBalances
       huge <- evalRead reader ReadBalances
       check (M.lookup (Wrapped,Float) huge==Just (1000+2*toInteger(maxBound::Int64)))
@@ -176,6 +226,8 @@ data Fixture a where
   StaleCustody :: Fixture ()
   LargeBalances :: Fixture ()
   CheckHolds :: T.Text -> Direction -> Int64 -> Fixture Bool
+  ProtectHolds :: T.Text -> Fixture ()
+  CheckPhases :: T.Text -> T.Text -> Fixture Bool
 fixture :: PG.Connection -> Fixture a -> IO a
 fixture c Initialize = PG.withTransaction c $ do
   void $ O.runInsert c O.Insert {O.iTable=S.deployment,O.iRows=[S.Deployment (O.sqlInt8 1) (O.sqlInt8 18) (O.sqlStrictText "contract") (O.sqlInt8 0) (O.sqlInt8 0) (O.sqlInt8 1) (O.sqlStrictText "test")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
@@ -259,3 +311,23 @@ fixture c LargeBalances = PG.withTransaction c $ do
   void $ O.runInsert c O.Insert {O.iTable=S.postings,
     O.iRows=[(Nothing,text "large-balances",text "Wrapped",text account,O.sqlInt8 n)| (account,n)<-
       [("external",negate maxBound),("float",maxBound),("external",negate maxBound),("float",maxBound)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+
+fixture c (ProtectHolds identifier) = PG.withTransaction c $ do
+  void $ O.runUpdate c O.Update {O.uTable=S.reservations,
+    O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,O.sqlStrictText "obligation"),
+    O.uWhere= \(key,_,_,_)->key O..== O.sqlStrictText identifier,O.uReturning=O.rCount}
+  void $ O.runUpdate c O.Update {O.uTable=S.operatingReservations,
+    O.uUpdateWith= \(key,kind,asset,n,_)->(key,kind,asset,n,O.sqlStrictText "obligation"),
+    O.uWhere= \(key,_,_,_,_)->key O..== O.sqlStrictText identifier,O.uReturning=O.rCount}
+fixture c (CheckPhases identifier expected) = do
+  inventory <- O.runSelect c $ do
+    (key,_,_,phase) <- O.selectTable S.reservations
+    O.where_ (key O..== O.sqlStrictText identifier)
+    pure phase
+    :: IO [T.Text]
+  operating <- O.runSelect c $ do
+    (key,_,_,_,phase) <- O.selectTable S.operatingReservations
+    O.where_ (key O..== O.sqlStrictText identifier)
+    pure phase
+    :: IO [T.Text]
+  pure (inventory==[expected] && operating==[expected,expected])

@@ -110,3 +110,6 @@ scanHealth = O.table "scan_health" $ p4
   (O.requiredTableField "chain",O.requiredTableField "last_success",O.requiredTableField "last_error",O.requiredTableField "checked_at")
 checkpoints :: O.Table (TextField,TextField) (TextField,TextField)
 checkpoints = O.table "checkpoints" $ p2 (O.requiredTableField "chain",O.requiredTableField "anchor")
+nativeAllocations :: O.Table (TextField,TextField,IntField) (TextField,TextField,IntField)
+nativeAllocations = O.table "native_allocations" $ p3
+  (O.requiredTableField "order_id",O.requiredTableField "label",O.requiredTableField "critical_sequence")
