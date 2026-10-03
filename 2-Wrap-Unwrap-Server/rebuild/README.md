@@ -35,7 +35,7 @@ remaining recovery operations must be added with their concrete workflows.
 No generic SQL/IO operation, alternative database, synthetic receipt/order for
 withdrawal, or chain stand-in is permitted. Row access is Opaleye inside specific
 closed operation implementations. Driver transactions/migration DDL are explicit
-infrastructure. Transactions never span RPC/signing/backup. There is one payment
+infrastructure. Writer transactions never span RPC/signing/backup. There is one payment
 engine; funding determines principal accounting, not a second send implementation.
 
 ## Construction and acceptance
@@ -1253,3 +1253,42 @@ Still required: full replacement/reorg/rebroadcast acceptance on real chains, fu
 customer flows and wallet testing, deployed signer isolation, Haskell off-host
 backup/restore and populated migration. The baseline remains until parity and live
 acceptance; valuable-fund release also requires independent review.
+
+## Haskell ledger archive checkpoint
+
+`StoreBackup` contains one closed `ExportLedger` operation. It is separate from
+safe row reads because it writes private files; no customer or signer route exposes
+it. Its interpreter checks the SELECT-only role and schema/identity, exports a fixed
+PostgreSQL snapshot through Opaleye, and keeps that read-only repeatable-read
+transaction alive while `pg_dump` imports it. Paying-writer transactions and locks
+are not held. Startup/remote-backup integration remains pending.
+
+The archive mechanics stream to unique mode-0600 files in an existing owned 0700
+directory, bound subprocess duration, validate the custom archive with `pg_restore`,
+hash in 64-KiB chunks and fsync the archive, manifest and directory. The format-2
+manifest binds schema, identity, critical sequence and archive SHA-256; local success
+explicitly does not acknowledge remote durability. Partial files are removed on
+failure. PostgreSQL endpoint/user/password come from the actual reader settings;
+ambient PG service/endpoint options cannot select another database. Passwords are
+not placed in arguments. The read-only backup role needs SELECT on both tables and
+sequences; it must not receive sequence USAGE/UPDATE or other write privileges.
+
+Versus `4a9ad0e`, this adds **104 production lines**: Store 3,219 → 3,238,
+Catalog 65 → 70, and one new 80-line private Backup module (two files → three).
+The existing PostgreSQL contract grows **2,438 → 2,490** lines. The old standalone
+Python snapshot script is 167 lines, but this is not a like-for-like deletion:
+format 2 uses an exact archive digest rather than independently generated per-table
+JSON hashes. Baseline tooling stays until complete replacement acceptance.
+
+Validation uses actual `pg_dump` and `pg_restore` on disposable PostgreSQL databases,
+then compares deployment metadata, every signed-attempt record and every journal
+posting with closed Opaleye fixtures. It also checks the archive digest/manifest,
+private file modes, directory refusal, unique repeat archives and unchanged backup
+coverage. Root Cabal build and QuickCheck pass. Temporary databases, files and child
+processes are cleaned up. This is populated local archive restoration, not migration
+of existing custody or proof of an off-host/clean-host recovery procedure.
+
+Next: authenticated encrypted off-host upload/readback and acknowledgment, key/wallet
+recovery material, verified restore/fence adoption and runtime integration. The
+`backupRequired` startup refusal remains until those guarantees are implemented;
+there is no new promise that a local archive permits signing or sending.

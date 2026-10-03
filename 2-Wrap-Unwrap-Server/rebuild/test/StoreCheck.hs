@@ -30,6 +30,8 @@ import qualified Bridge.Fence as Fence
 import System.Directory (createDirectory,removeDirectoryRecursive,removeFile)
 import System.IO (openTempFile,hClose,withFile,IOMode(WriteMode))
 import System.Posix.Files (setFileMode)
+import qualified System.Posix.Files as Posix
+import Data.Bits ((.&.))
 import qualified Bridge.NativePayment as NP
 import Bridge.Error (reject)
 import Bridge.Observer (ObserverSettings(..))
@@ -820,6 +822,7 @@ ledgerMain = do
         forM_ ["Native","Solana","SolanaOperating"] $ \chain->do
           (_,problem,_)<-fixture fixtures (ReadScanHealth chain)
           check (problem/=Nothing)
+      archiveContract settings fixtures reader
       beforeLarge<-evalRead reader ReadBalances
       fixture fixtures LargeBalances
       huge <- evalRead reader ReadBalances
@@ -839,6 +842,7 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  ArchiveRecords :: Fixture ([S.Deployment],[S.Attempt],[(Int64,T.Text,T.Text,T.Text,Int64)])
   SourceRecipient :: T.Text -> T.Text -> Fixture ()
   TLSFunds :: Fixture ()
   FreshAt :: Int64 -> Fixture ()
@@ -884,6 +888,10 @@ data Fixture a where
   ProtectHolds :: T.Text -> Fixture ()
   CheckPhases :: T.Text -> T.Text -> Fixture Bool
 fixture :: PG.Connection -> Fixture a -> IO a
+fixture c ArchiveRecords = (,,)
+  <$> O.runSelect c (O.selectTable S.deployment)
+  <*> O.runSelect c (O.orderBy (O.asc S.attemptId) $ O.selectTable S.attempts)
+  <*> O.runSelect c (O.orderBy (O.asc $ \(n,_,_,_,_)->n) $ O.selectTable S.postings)
 fixture c (SourceRecipient key recipient) = void $ O.runUpdate c O.Update {O.uTable=S.obligations,
   O.uUpdateWith= \row->row {S.obligationRecipient=O.sqlStrictText recipient},
   O.uWhere= \row->S.obligationId row O..== O.sqlStrictText key,O.uReturning=O.rCount}
@@ -2436,3 +2444,47 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
         config=H.SolanaPolicy "contract" "contract" key key key (money 10) (money 10)
     bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "replacement replay reached network"}) closeManager $ \manager->
       withRuntime manager settings config Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \worker _ operator->either worker operator operation
+
+-- Real pg_dump/pg_restore, disposable database only. All row comparisons use
+-- closed Opaleye fixtures; createdb/restore/dropdb are schema infrastructure.
+archiveContract :: PG.ConnectInfo -> PG.Connection -> Reader -> IO ()
+archiveContract settings fixtures reader = do
+  let check ok=unless ok (fail "ledger archive contract failed")
+      temporary=do
+        (path,handle)<-openTempFile "/tmp" "ecx-ledger-archive"
+        hClose handle
+        removeFile path
+        createDirectory path
+        setFileMode path 0o700
+        pure path
+      restored=PG.connectDatabase settings<>"_restored"
+      endpoint=["--host="<>PG.connectHost settings,"--port="<>show(PG.connectPort settings),"--username="<>PG.connectUser settings]
+  bracket temporary removeDirectoryRecursive $ \directory->do
+    before<-evalRead reader ReadState
+    records<-fixture fixtures ArchiveRecords
+    expectStore "invalid_backup_directory" (evalBackup reader $ ExportLedger "relative")
+    setFileMode directory 0o755
+    expectStore "unsafe_backup_directory" (evalBackup reader $ ExportLedger directory)
+    setFileMode directory 0o700
+    archive<-evalBackup reader (ExportLedger directory)
+    check (archiveSequence archive==ledgerSequence before && archiveIdentity archive=="contract")
+    forM_ [archivePath archive,manifestPath archive] $ \path->do
+      status<-Posix.getSymbolicLinkStatus path
+      check (Posix.isRegularFile status && Posix.fileMode status .&. 0o077==0)
+    bytes<-BS.readFile (archivePath archive)
+    check (archiveHash archive==digest bytes && BS.take 5 bytes=="PGDMP")
+    manifest<-BS.readFile (manifestPath archive) >>= either fail pure . eitherDecodeStrict'
+    fieldValue "criticalSequence" manifest >>= check . (==ledgerSequence before)
+    fieldValue "sha256" manifest >>= check . (==archiveHash archive)
+    fieldValue "remoteDurabilityAcknowledged" manifest >>= check . (==False)
+    -- A second archive must not overwrite the first or advance coverage.
+    again<-evalBackup reader (ExportLedger directory)
+    check (archivePath again/=archivePath archive && manifestPath again/=manifestPath archive)
+    evalRead reader ReadState >>= check . (==before)
+    bracket_ (Process.callProcess "createdb" $ endpoint<>[restored])
+      (Process.callProcess "dropdb" $ endpoint<>["--force",restored]) $ do
+        Process.callProcess "pg_restore" (endpoint<>["--exit-on-error","--no-owner","--no-privileges","--dbname="<>restored,archivePath archive])
+        bracket (PG.connect settings {PG.connectDatabase=restored}) PG.close $ \connection->do
+          recovered<-fixture connection ArchiveRecords
+          check (records==recovered)
+    putStrLn "PASS: private snapshot archive, digest/manifest, unchanged coverage, populated restore of metadata, exact signed attempts and every ledger posting"

@@ -31,9 +31,9 @@ library store
   visibility: private
   hs-source-dirs: runtime
   exposed-modules: Bridge.Store, Bridge.Fence
-  other-modules: Bridge.Store.Schema, Bridge.Store.Catalog
+  other-modules: Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Store.Backup
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:chain, aeson, bytestring, text, containers,
-    crypton, time, directory, filepath, unix, scientific, opaleye ==0.10.8.0, postgresql-simple >=0.7 && <0.8,
+    crypton, time, directory, filepath, unix, process, scientific, opaleye ==0.10.8.0, postgresql-simple >=0.7 && <0.8,
     product-profunctors >=0.11 && <0.12
 
 library chain
@@ -80,7 +80,7 @@ executable rebuild-store-check
   ghc-options: -threaded -rtsopts -with-rtsopts=-N1
   hs-source-dirs: test, runtime, workflow
   main-is: StoreCheck.hs
-  other-modules: Bridge.Fence, Bridge.Store, Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.SigningTransport, Bridge.Critical, Bridge.Reconciliation, Bridge.Admission, Bridge.Order, Bridge.Web, Bridge.Config, Bridge.Control, Paths_ecx_bridge_rebuild
+  other-modules: Bridge.Fence, Bridge.Store, Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Store.Backup, Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.SigningTransport, Bridge.Critical, Bridge.Reconciliation, Bridge.Admission, Bridge.Order, Bridge.Web, Bridge.Config, Bridge.Control, Paths_ecx_bridge_rebuild
   autogen-modules: Paths_ecx_bridge_rebuild
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:customer-api, ecx-bridge-rebuild:chain, http-client, servant, servant-server, aeson, bytestring,
     containers, text, crypton, time, directory, scientific, opaleye, postgresql-simple, product-profunctors, QuickCheck,

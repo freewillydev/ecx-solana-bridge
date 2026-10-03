@@ -3,6 +3,7 @@
 -- escape this module; the runtime will interpret its customer/operator DSL here.
 module Bridge.Store
   ( Reader, Writer, BridgeError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), StorePolicy(..), AllocationClaim(..), LedgerState(..), WithdrawalView(..), PaymentView(..), PaymentStatus(..), PreparedPayment(..), SignedAttempt(..), RecordedAttempt(..), NativeLockWork(..), NativeSettlementCheck(..), CustodySnapshot(..)
+  , StoreBackup(..), LedgerArchive(..), evalBackup
   , withReader, withWriter, withFencedWriter, evalRead, evalWrite ) where
 
 import qualified Bridge.NativePayment as N
@@ -14,7 +15,8 @@ import qualified Bridge.Wire as W
 import Bridge.Domain
 import Bridge.Wire (PaymentTerms(..),PolicySnapshot(..),CostLimits(..),SignedAttempt(..))
 import qualified Bridge.Store.Schema as S
-import Bridge.Store.Catalog (claimWorker,verifyReadRole)
+import Bridge.Store.Catalog (claimWorker,verifyReadRole,exportSnapshot)
+import Bridge.Store.Backup (LedgerArchive(..),archiveLedger)
 import Crypto.Random (getRandomBytes)
 import qualified Data.ByteString as BS
 import Data.List (nub,sortOn)
@@ -78,6 +80,23 @@ data CustodySnapshot = CustodySnapshot
 data NativeSettlementCheck = NativeConfirming | NativeUnavailable Text
   | NativeReconfirmed W.PaymentCosts Text
   | NativeWinnerChanged [RecordedAttempt] Text W.PaymentCosts Text deriving (Eq,Show)
+
+-- Privileged local archive operation, deliberately absent from StoreRead and
+-- customer/signer capabilities. It never acknowledges off-host durability.
+data StoreBackup a where
+  ExportLedger :: FilePath -> StoreBackup LedgerArchive
+
+evalBackup :: Reader -> StoreBackup a -> IO a
+evalBackup (Reader settings identity _) (ExportLedger directory) =
+  bracket (PG.connect settings) PG.close $ \c ->
+    Tx.withTransactionMode (Tx.TransactionMode Tx.RepeatableRead Tx.ReadOnly) c $ do
+      verifyReadRole c >>= flip require "unsafe_read_database_role"
+      row <- metadata c identity
+      snapshots <- O.runSelect c (pure exportSnapshot)
+      snapshot <- case snapshots of
+        [value] -> pure value
+        _ -> reject "invalid_backup_snapshot"
+      archiveLedger settings directory identity (S.schemaVersion row) (S.criticalSequence row) snapshot
 
 data StoreRead a where
   ReadNativeReviews :: StoreRead [(Text,Text,Int64)]

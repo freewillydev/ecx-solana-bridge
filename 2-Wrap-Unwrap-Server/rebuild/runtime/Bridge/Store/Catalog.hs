@@ -1,5 +1,5 @@
 -- Fixed catalog expressions extracted from the baseline; no caller SQL.
-module Bridge.Store.Catalog (verifyReadRole, claimWorker) where
+module Bridge.Store.Catalog (verifyReadRole, claimWorker, exportSnapshot) where
 import Data.Profunctor.Product (p2,p3,p6)
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Opaleye as O
@@ -63,3 +63,8 @@ claimWorker connection = do
   claimed <- O.runSelect connection $ pure (Column (Expr.FunExpr "pg_catalog.pg_try_advisory_lock"
     [unColumn (O.sqlInt4 1162041393),unColumn (O.sqlInt4 18)]) :: O.Field O.SqlBool)
   pure (claimed==[True])
+
+-- Fixed built-in, used only by the closed archive operation while its read-only
+-- repeatable-read transaction remains alive for pg_dump to import the snapshot.
+exportSnapshot :: O.Field O.SqlText
+exportSnapshot = Column (Expr.FunExpr "pg_catalog.pg_export_snapshot" [])
