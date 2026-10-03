@@ -69,6 +69,7 @@ data CustodySnapshot = CustodySnapshot
   { custodyRevision :: Int64, custodyTotals :: M.Map Asset Integer
   , custodyHeads :: [(Text,Text)], custodySlot :: Int64, custodyPending :: [RecordedAttempt] } deriving (Eq,Show)
 data StoreRead a where
+  CheckIntake :: Int64 -> StoreRead ()
   ReadCustodyRevision :: StoreRead Int64
   ReadCustodySnapshot :: Int64 -> [(Text,Text)] -> Bool -> StoreRead CustodySnapshot
   ReadCustodyEvent :: Text -> Text -> StoreRead (Text,Text,Value)
@@ -152,6 +153,7 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
     verifyReadRole c >>= flip require "unsafe_read_database_role"
     row <- metadata c identity
     case operation of
+      CheckIntake now -> intakeReady c identity now
       ReadCustodyRevision -> readCustodyRevision c
       ReadCustodySnapshot now origins losses -> custodySnapshot c now origins losses
       ReadCustodyEvent chain identifier -> custodyEvent c chain identifier

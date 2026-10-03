@@ -3,7 +3,7 @@ module Bridge.NativePayment
   ( NativeRPC, Outpoint(..), NativeInput(..), NativeOutput(..), NativeTx(..)
   , NativePrevout(..), NativePlan(..), NativeDraft(..), NativeSigned(..)
   , decodeNativeTx, validateNativeTx, sameNativeTemplate, sameNativePrevouts
-  , newNativePlan, fundNativeDraft, signNativeDraft
+  , previewNativePayment, newNativePlan, fundNativeDraft, signNativeDraft
   , readNativePrevoutsWith, ownedNativeLocks, restoreNativeInputLocks, checkNativeAcceptance
   ) where
 
@@ -123,6 +123,25 @@ ownedScript call address = do
   script <- fieldValue "scriptPubKey" info
   require (hexText script && T.length script<=200) "invalid_native_script"
   pure script
+
+-- Admission uses existing owned change: no address allocation, locks or signing.
+previewNativePayment :: NativeRPC -> Profile -> Int -> Amount -> Text -> Amount -> IO ()
+previewNativePayment call selectedProfile depth feeLimit recipient quantity = do
+  require (depth>0 && depth<=1008 && units quantity>0 && units feeLimit>0) "invalid_native_plan"
+  script<-validateNativeRecipientWith call recipient
+  coins<-call True "listunspent" [toJSON depth,toJSON (9999999::Int),toJSON ([]::[Text]),Bool False,
+    object ["maximumCount" .= (100::Int)]] >>= parseValue parseJSON :: IO [Value]
+  require (length coins<=100) "native_admission_utxo_bounds"
+  addresses<-forM coins $ parseValue $ withObject "unspent" $ \o->do
+    safe<-o .: "safe"; spendable<-o .: "spendable"; solvable<-o .: "solvable"
+    confirmations<-o .: "confirmations"; address<-o .:? "address"
+    pure $ if safe && spendable && solvable && confirmations>=depth then address else Nothing
+  change<-case [a|Just a<-addresses] of a:_->pure a; []->reject "native_admission_funds_unavailable"
+  changeScript<-ownedScript call change
+  require (script/=changeScript) "bridge_owned_destination"
+  _<-fundNativeDraft call (NativePlan selectedProfile recipient script change changeScript quantity depth feeLimit)
+  locks<-call True "listlockunspent" [] >>= parseValue parseJSON :: IO [Outpoint]
+  require (null locks) "native_preparation_locks_require_review"
 
 newNativePlan :: NativeRPC -> Profile -> Int -> Amount -> Text -> Amount -> IO NativePlan
 newNativePlan call selectedProfile depth feeLimit recipient quantity = do

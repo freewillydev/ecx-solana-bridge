@@ -458,16 +458,31 @@ payments. Positive pending-transfer custody and funded Signet/Devnet acceptance,
 source-loss diagnostic dispatch, and integration with the complete scheduler are
 still required.
 
+Worker `ObserveChains` and `PrepareOutgoing` now share the existing critical gate
+with custody/sign/queue/send/reconciliation. Preparation checks read-only intake
+before any RPC and refreshes its customer source before saving a plan. A paused
+preparation is verified to refuse without reaching the network. Customer writes
+must still join this same gate when the complete runtime is assembled.
+
+Customer admission now has the baseline native dust/fee funding preview and Solana
+account/fee/rent/unsigned-simulation preflight. Its adapter, fingerprint, depth and
+fee settings must agree with the saved ledger policy. Captured native vectors and
+offline unsigned Solana message contracts verify preview behavior, no signing or
+sending, absent native funding, signed-preview refusal and simulation failure.
+Admission is not yet invoked by a complete customer order runtime; provisioning,
+backup acknowledgment and Servant interpretation still need integration.
+
 Scoped physical-line comparisons (not whole-product reduction claims):
 
 | Piece | Baseline | Rebuild | Scope limit |
 | --- | ---: | ---: | --- |
+| Admission/previews | 106 / 1 file | 86-line module + 20 lines in existing native adapter | Same total; customer runtime integration pending |
 | Custody chain workflow | 202 / 1 file | 188 / 1 file | Replacement-family and source-loss wrapper parity pending; not equivalent full-feature reduction |
 | Custody snapshot function | 79 / existing custody file | 71 / existing Store file | Reuses freshness/balance helpers; chain workflow pending |
 | Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
 | Signer module | 144 / 1 file | 73 / 1 file | Startup and replacement parity pending |
 | Signer transport | 103 / 1 file plus shared web boundary | 112 / 1 file | Includes local body/concurrency boundary; initial route only |
-| Worker signing/queue/send/reconciliation | Part of broader Runtime | 161 / 1 file (previous checkpoint 157) | Full runtime/submission acceptance remains |
+| Worker signing/queue/send/reconciliation | Part of broader Runtime | 172 / 1 file (previous checkpoint 161) | Full runtime/submission acceptance remains |
 | Focused source validation | 63-line mixed validation/storage/recovery function | 67-line dedicated module | Covered-source recovery is still separate unfinished work |
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |

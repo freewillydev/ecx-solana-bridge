@@ -388,8 +388,9 @@ main = do
             expectStore "signer_profile_mismatch" (interpret $ Request $ SignPrepared "other" intent 0)
             expectStore "invalid_signing_decision" (interpret $ Request $ SignPrepared "contract" intent 8)
             expectStore "signing_backup_required" (interpret $ Request $ SignPrepared "contract" intent 0)
-          withPaymentWorker manager (ObserverSettings native solana 2 "sol-origin" "opening-signature") (signingPolicy signing) (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret ->
+          withPaymentWorker manager (ObserverSettings native solana 2 "sol-origin" "opening-signature") (signingPolicy signing) (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret -> do
             expectStore "invalid_saved_payment" (interpret $ Request $ SignPreparedPayment intent)
+            expectStore "intake_paused" (interpret $ Request $ PrepareOutgoing intent)
           pausedAfterRefusal<-evalRead reader ReadState
           check (ledgerPaused pausedAfterRefusal)
         fixture fixtures CoverBackup

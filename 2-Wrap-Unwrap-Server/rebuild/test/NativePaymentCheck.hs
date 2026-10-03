@@ -52,6 +52,8 @@ checks = do
                 ,"confirmations" .= planDepth plan,"walletconflicts" .= ([]::[Text]),"blockhash" .= T.replicate 64 "e"]
               ("getblockheader",[String anchor])->pure $ object ["hash" .= anchor,"height" .= (16001::Int),"confirmations" .= planDepth plan]
               ("getblockhash",[Number 16001])->pure $ String $ T.replicate 64 "e"
+              ("listunspent",[_,_,_,Bool False,_])->pure $ toJSON [object ["safe" .= True,"spendable" .= True,
+                "solvable" .= True,"confirmations" .= planDepth plan,"address" .= planChange plan]]
               ("listlockunspent",[])->toJSON <$> readIORef locks
               ("lockunspent",[Bool False,v])->case fromJSON v of
                 Success ps | not(null ps)->modifyIORef' locks (<>ps) >> pure (Bool True)
@@ -88,7 +90,13 @@ checks = do
       prepared=PreparedPayment (PaymentView outgoing terms PaymentPaying) 0 (encoded plan) (Just $ encoded draft) (planFeeLimit plan)
       boundSigned=NativeSigned raw tx plan previous fee
   sequence
-    [ check "native settlement requires exact wallet effect and canonical confirmation depth" $ once $ ioProperty $ do
+    [ check "native admission previews actual policy without allocating locking signing or sending" $ once $ ioProperty $ do
+        (_,methods)<-contract (\_ v->pure v) $ \call->previewNativePayment call (planProfile plan) (planDepth plan) (planFeeLimit plan) (planRecipient plan) (planAmount plan)
+        (empty,_)<-contract (\method value->pure $ if method=="listunspent" then toJSON ([]::[Value]) else value) $ \call->
+          rejects "native_admission_funds_unavailable" (previewNativePayment call (planProfile plan) (planDepth plan) (planFeeLimit plan) (planRecipient plan) (planAmount plan))
+        pure (empty && "walletcreatefundedpsbt" `elem` methods && "gettxout" `elem` methods
+          && all (`notElem` methods) ["getnewaddress","getrawchangeaddress","lockunspent","walletprocesspsbt","sendrawtransaction"])
+    , check "native settlement requires exact wallet effect and canonical confirmation depth" $ once $ ioProperty $ do
         (observed,methods)<-contract (\_ v->pure v) $ \call->observeNativePayment call boundSigned
         let change method (Object fields) | method=="gettransaction"=pure $ Object $ KM.insert "confirmations" (Number 0) fields
             change _ value=pure value

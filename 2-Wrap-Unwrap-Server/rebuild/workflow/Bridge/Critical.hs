@@ -5,7 +5,7 @@ import Bridge.Operation.Internal
 import Bridge.Domain (Asset(..))
 import Bridge.Error
 import Bridge.Payment
-import Bridge.Observer (ObserverSettings(..))
+import Bridge.Observer (ObserverSettings(..),observeOnce)
 import Bridge.Reconciliation (reconcileCustody)
 import Bridge.PaymentSource (verifyPaymentSource)
 import qualified Bridge.Wire as W
@@ -37,8 +37,8 @@ import Network.TLS.Extra.Cipher (ciphersuite_default)
 import Data.X509.CertificateStore (makeCertificateStore)
 import qualified Servant.Client as SC
 
--- Preparation and backup have already committed. No transaction spans signing.
--- Full runtime will share this gate with other critical worker operations.
+-- One worker gate spans observation, custody, preparation, signing and sending.
+-- Customer mutations must join this gate when the customer runtime is wired.
 withPaymentWorker :: Manager -> ObserverSettings -> H.SolanaPolicy -> SigningEndpoint -> Reader -> Writer
   -> ((forall a. Request 'Worker 'Critical a -> IO a) -> IO b) -> IO b
 withPaymentWorker rpc settings config endpoint reader writer action = do
@@ -51,6 +51,17 @@ withPaymentWorker rpc settings config endpoint reader writer action = do
   let interpret :: forall a. Request 'Worker 'Critical a -> IO a
       interpret request=withMVar gate $ \_ -> evalCritical (resolve request)
       evalCritical :: forall a. DSL 'Worker 'Critical a -> IO a
+      evalCritical (WorkerDSL ObserveChains) = observeOnce rpc settings reader writer
+      evalCritical (WorkerDSL (PrepareOutgoing identifier)) = guarded $ do
+        now<-floor <$> getPOSIXTime
+        evalRead reader (CheckIntake now)
+        _<-evalRead reader (ReadPayment identifier)
+        _<-N.nativeIdentity rpc native
+        _<-S.solanaIdentity rpc solana
+        refreshSource identifier
+        _<-prepareUnsigned (floor <$> getPOSIXTime) (N.nativeCall rpc native) (S.solanaCall rpc solana)
+          (N.profile native) config reader writer identifier
+        pure ()
       evalCritical (WorkerDSL ReconcileCustody) = reconcileCustody rpc settings config reader writer
       evalCritical (WorkerDSL (QueuePayment txid)) = guarded $ do
         (recorded,_)<-loadActive txid

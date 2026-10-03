@@ -1,7 +1,8 @@
 -- Captured finalized Devnet proofs and offline SDK/RPC contracts, never sends.
 module SolanaPaymentCheck (checks) where
-import Bridge.Domain (Amount, Asset(..), amount, units, earnedFees, payment)
+import Bridge.Domain (Amount, Asset(..), Direction(..), amount, units, earnedFees, payment)
 import Bridge.Payment
+import Bridge.Admission (checkSolanaQuoteWith)
 import Bridge.PaymentObservation
 import Bridge.Store
 import qualified Bridge.Wire as W
@@ -62,7 +63,35 @@ checks=do
       verify=verifySigningReply (\_ _ _->fail "Solana validation must not call native RPC") W.L2LSignetDevnet config
   proofResults <- mapM captured ["new","existing"]
   local <- sequence
-    [ check "payment workflow verifies SDK bytes bound to earned funding and saved reference" $ once $ ioProperty $ do
+    [ check "Solana admission simulates an unsigned payout and rejects signed previews" $ once $ ioProperty $ do
+        let order=W.OrderRequest NativeToWrapped (amt 4) recipient "refund" Nothing "quote"
+            quoteRequest=request {helperReference="quote-check"}
+            memo=TE.encodeUtf8 $ helperMemo config quoteRequest
+            original=either error id (B64.decode $ TE.encodeUtf8 $ replyMessage reply)
+            body=BS.take (BS.length original-BS.length(TE.encodeUtf8 $ replyMemo reply)-1) original<>BS.singleton(fromIntegral $ BS.length memo)<>memo
+            preview=reply {replyMemo=TE.decodeUtf8 memo,replyMessage=TE.decodeUtf8 $ B64.encode body,
+              replyTransaction=TE.decodeUtf8 $ B64.encode $ BS.singleton 1<>BS.replicate 64 0<>body,replySignature=Nothing}
+            helper wanted=require (wanted==quoteRequest) "unexpected_quote_request" >> pure preview
+        calls<-newIORef ([]::[Text])
+        let preflight method args=do
+              modifyIORef' calls (<>[method])
+              case method of
+                "getLatestBlockhash"->pure $ context $ object ["blockhash" .= hash,"lastValidBlockHeight" .= (1000::Int)]
+                "getMultipleAccounts"->pure $ context $ toJSON [systemAccount 1,Null,tokenAccount config owner,systemAccount 10000000]
+                "simulateTransaction"->case args of
+                  [String raw,_]->do
+                    Transaction signatures _ _<-either reject pure (decodeTransaction raw)
+                    require (signatures==[BS.replicate 64 0]) "signed_preview"
+                    call Null method args
+                  _->fail "unexpected simulation parameters"
+                _->call Null method args
+        checkSolanaQuoteWith preflight helper config order
+        signedPreview<-rejectsAny (checkSolanaQuoteWith preflight (const $ pure reply) config order)
+        failedSimulation<-rejects "solana_simulation_failed" (checkSolanaQuoteWith
+          (\method args->if method=="simulateTransaction" then pure $ context $ object ["err" .= String "failure"] else preflight method args) helper config order)
+        methods<-readIORef calls
+        pure (signedPreview && failedSimulation && "simulateTransaction" `elem` methods && "sendTransaction" `notElem` methods)
+    , check "payment workflow verifies SDK bytes bound to earned funding and saved reference" $ once $ ioProperty $ do
         attempt<-verify prepared (SolanaReply boundSigned)
         verifySignedAttempt (\_ _ _->fail "unexpected RPC") W.L2LSignetDevnet config prepared attempt
         alteredEnvelope<-mapM (rejects "signer_attempt_mismatch" . verifySignedAttempt (\_ _ _->fail "unexpected RPC") W.L2LSignetDevnet config prepared)
