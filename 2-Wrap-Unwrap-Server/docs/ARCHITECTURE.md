@@ -156,10 +156,12 @@ Native admission verifies the real checkpoint/network and daemon-classified supp
 recipient/refund scripts, refusing owned/watch-only destinations. An unsigned funding
 probe applies actual daemon dust/fee policy to the exact amount, with no new address,
 lock or signature. It is conservative and is repeated at payment preparation.
-Solana admission validates real deployment, wallet owners, legacy ATAs, mint/program,
+Wrapping admission on Solana validates real deployment, wallet owners, legacy ATAs, mint/program,
 decimals, authority/layout, balances, fees, rent and blockhash context. Missing payout
 ATAs may be created; prefunded empty accounts reduce rent, never below zero.
 Delegates, close authorities and unsupported owner/account types are refused.
+Redemption admission checks deployment identity; source ownership is established from
+the actual Solana Pay deposit, without a pre-bound customer wallet.
 Admission/simulation success is not a future execution guarantee.
 
 Native address provisioning commits a unique claim before getnewaddress. Only the

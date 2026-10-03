@@ -1,6 +1,6 @@
 module Bridge.Order (OrderTransport(..), createCustomerOrder, createCustomerOrderWith) where
 
-import Bridge.Admission (checkSolanaQuoteFor)
+import Bridge.Admission (checkSolanaQuote)
 import Bridge.Config
 import Bridge.Native
 import Bridge.NativePayment
@@ -11,7 +11,6 @@ import Bridge.SolanaPay (payInstruction)
 import Bridge.Postgres.Ledger (Ledger,ledgerAction)
 import Bridge.Postgres.Order
 import Bridge.Postgres.Schema (ordersId)
-import Control.Monad (when)
 import Data.Int (Int64)
 import Network.HTTP.Client (Manager)
 import Data.Text (Text)
@@ -34,11 +33,8 @@ realOrderTransport manager c backup = OrderTransport epochSeconds admission iden
     nativeWalletReadyWith (nativeCall manager c) c now
   admission request=do
     _ <- checkNativeQuote manager c request
-    fee <- either reject pure (feeFor 100 $ input request)
-    netAmount <- either reject pure (amount $ toInteger(units $ input request)-toInteger(units fee))
-    _ <- solanaIdentity manager c
-    when (direction request==NativeToWrapped) $
-      checkSolanaQuoteFor manager c (Quote (input request) fee netAmount) request >> pure ()
+    if direction request==NativeToWrapped then checkSolanaQuote manager c request
+      else solanaIdentity manager c >> pure ()
 
 -- Every database action is short. Node calls and backup callbacks run only
 -- after their preceding durable mutation has committed and released the writer.

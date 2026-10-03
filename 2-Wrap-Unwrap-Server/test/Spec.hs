@@ -418,7 +418,6 @@ withSolanaAdmission action=do
   wallet<-fieldValue "wallet" value
   hash<-fieldValue "blockhash" value
   payout<-fieldValue "payout" value
-  deposit<-fieldValue "deposit" value
   let c=(cfg "/unused-admission-test"){deploymentId=deployment,mint=token,custodyOwner=custody,custodyAta=replySource payout
         ,maxSolAccountRent=amt 2100000}
       request=OrderRequest NativeToWrapped (amt 4) wallet "fixture-native-refund" Nothing "fixture-admission"
@@ -426,8 +425,9 @@ withSolanaAdmission action=do
         helperAmount r `shouldBe` amt 3
         helperReference r `shouldBe` "quote-check"
         helperBlockhash r `shouldBe` hash
-        (helperOwner r,helperRecipient r) `shouldBe` (if helperPayout r then (custody,wallet) else (wallet,custody))
-        pure (if helperPayout r then payout else deposit)
+        helperPayout r `shouldBe` True
+        (helperOwner r,helperRecipient r) `shouldBe` (custody,wallet)
+        pure payout
       call method params=case (method,params) of
         ("getLatestBlockhash",_) -> pure $ contextContract $ object ["blockhash" .= hash,"lastValidBlockHeight" .= (1000::Int)]
         ("getBlockHeight",_) -> pure (Number 900)
@@ -436,22 +436,18 @@ withSolanaAdmission action=do
           fieldValue "minContextSlot" options `shouldReturn` (100::Int)
           pure $ contextContract $ toJSON [systemContract 1000000,tokenContract c wallet,tokenContract c custody,systemContract 10000000]
         ("getFeeForMessage",[message,options]) -> do
-          message `shouldSatisfy` (`elem` map (toJSON . replyMessage) [payout,deposit])
+          message `shouldBe` toJSON (replyMessage payout)
           fieldValue "minContextSlot" options `shouldReturn` (100::Int)
           pure $ contextContract $ Number 5000
         ("getMinimumBalanceForRentExemption",[Number 165,_]) -> pure (Number 1488440)
         ("simulateTransaction",[transaction,options]) -> do
-          transaction `shouldSatisfy` (`elem` map (toJSON . replyTransaction) [payout,deposit])
+          transaction `shouldBe` toJSON (replyTransaction payout)
           fieldValue "sigVerify" options `shouldReturn` False
           fieldValue "replaceRecentBlockhash" options `shouldReturn` False
           fieldValue "minContextSlot" options `shouldReturn` (100::Int)
           pure $ contextContract $ object ["err" .= Null]
         _ -> expectationFailure ("unexpected quote RPC: "<>T.unpack method) >> pure Null
   action c request call helper
-
-redemptionAdmission :: OrderRequest -> OrderRequest
-redemptionAdmission request=request{direction=WrappedToNative,input=amt 3,sourceOwner=Just $ recipient request
-  ,refund=recipient request,recipient="fixture-native-recipient"}
 
 changeAdmissionAccount :: SolanaRPC -> Int -> (Value -> Value) -> SolanaRPC
 changeAdmissionAccount call index change method params=do
@@ -818,27 +814,15 @@ main=hspec $ do
       prepare stale `shouldThrow` isError "solana_context_too_old"
       prepare failed `shouldThrow` isError "solana_simulation_failed"
   describe "Solana quote admission (offline official-SDK and RPC contracts)" $ do
-    it "checks the exact net payout using only unsigned messages" $ withSolanaAdmission $ \c request call helper -> do
-      result<-checkSolanaQuoteWith call helper c request
-      checkedSolanaRole result `shouldBe` "payout"
-      checkedSolanaAmount result `shouldBe` amt 3
-      checkedSolanaOwner result `shouldBe` recipient request
-      checkedSolanaFee result `shouldBe` amt 5000
-      checkedSolanaRent result `shouldBe` amt 0
-      checkedSolanaDepositFee result `shouldBe` Nothing
+    it "checks the exact net payout using only unsigned messages" $ withSolanaAdmission $ \c request call helper ->
+      checkSolanaQuoteWith call helper c request `shouldReturn` ()
     it "admits an unfunded wrap recipient and missing ATA within the rent ceiling" $ withSolanaAdmission $ \c request call helper -> do
       let missing=changeAdmissionAccount (changeAdmissionAccount call 0 (const Null)) 1 (const Null)
-      checkedSolanaRent <$> checkSolanaQuoteWith missing helper c request `shouldReturn` amt 1488440
+      checkSolanaQuoteWith missing helper c{maxSolAccountRent=amt 1488440} request `shouldReturn` ()
     it "deducts only existing system-account lamports from ATA rent" $ withSolanaAdmission $ \c request call helper -> do
       let prefunded=changeAdmissionAccount call 1 (const $ systemContract 1000000)
-      checkedSolanaRent <$> checkSolanaQuoteWith prefunded helper c request `shouldReturn` amt 488440
-    it "checks gross redemption tokens, user deposit fees and the full-refund message" $ withSolanaAdmission $ \c request call helper -> do
-      let redeem=redemptionAdmission request
-          emptyCustody=changeAdmissionAccount call 2 (setPath ["data","parsed","info","tokenAmount","amount"] (String "0"))
-      result<-checkSolanaQuoteWith emptyCustody helper c redeem
-      checkedSolanaRole result `shouldBe` "refund"
-      checkedSolanaAmount result `shouldBe` amt 3
-      checkedSolanaDepositFee result `shouldBe` Just (amt 5000)
+      checkSolanaQuoteWith prefunded helper c{maxSolAccountRent=amt 488440} request `shouldReturn` ()
+      checkSolanaQuoteWith prefunded helper c{maxSolAccountRent=amt 488439} request `shouldThrow` isError "solana_rent_above_limit"
     it "rejects custody identities and mismatched source owners before any IO" $ withSolanaAdmission $ \c request _ _ -> do
       let noCall _ _=expectationFailure "RPC before owner binding" >> pure Null
           noHelper _=expectationFailure "helper before owner binding" >> reject "unexpected"
@@ -846,7 +830,7 @@ main=hspec $ do
       forM_ [custodyOwner c,custodyAta c,mint c] $ \bad ->
         check request{recipient=bad} `shouldThrow` isError "bridge_owned_destination"
       check request{sourceOwner=Just $ recipient request} `shouldThrow` isError "invalid_solana_owner_binding"
-      check (redemptionAdmission request){sourceOwner=Just $ custodyOwner c} `shouldThrow` isError "invalid_solana_owner_binding"
+      check request{direction=WrappedToNative} `shouldThrow` isError "invalid_solana_owner_binding"
       check request{recipient=T.replicate 1000 "a"} `shouldThrow` isError "invalid_public_key"
     it "rejects token, nonce and executable accounts passed as wallet owners" $ withSolanaAdmission $ \c request call helper -> do
       let bad=[tokenContract c (recipient request),setPath ["data"] (toJSON ["AA==","base64"::Text]) (systemContract 10000)
@@ -865,15 +849,6 @@ main=hspec $ do
         `shouldThrow` isError "insufficient_custody_tokens"
       checkSolanaQuoteWith (changeAdmissionAccount call 3 $ const $ systemContract 4999) helper c request
         `shouldThrow` isError "insufficient_operating_sol"
-    it "rejects missing/insufficient redemption tokens and insufficient customer SOL" $ withSolanaAdmission $ \c request call helper -> do
-      let redeem=redemptionAdmission request
-      checkSolanaQuoteWith (changeAdmissionAccount call 1 $ const Null) helper c redeem
-        `shouldThrow` isError "token_account_policy_mismatch"
-      checkSolanaQuoteWith (changeAdmissionAccount call 1 $ setPath ["data","parsed","info","tokenAmount","amount"] (String "2")) helper c redeem
-        `shouldThrow` isError "insufficient_source_tokens"
-      forM_ [Null,systemContract 4999] $ \wallet ->
-        checkSolanaQuoteWith (changeAdmissionAccount call 0 $ const wallet) helper c redeem
-          `shouldThrow` isError "insufficient_deposit_fee_sol"
     it "rejects fee/rent over budget and unavailable fee estimates" $ withSolanaAdmission $ \c request call helper -> do
       checkSolanaQuoteWith call helper c{maxSolFee=amt 4999} request `shouldThrow` isError "solana_fee_above_limit"
       checkSolanaQuoteWith (changeAdmissionAccount call 1 $ const Null) helper c{maxSolAccountRent=amt 1488439} request
