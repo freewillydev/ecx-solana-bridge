@@ -3,9 +3,9 @@ module Bridge.SolanaPay
   ( PayBinding(..), payInstruction, payReference, payURIFor, transactionKeys, verifyPay ) where
 import Bridge.Config (tokenProgram)
 import Bridge.Types
-import Bridge.SolanaDeposit (SolanaDeposit(..),transactionAccounts,historicalTokenBalance)
+import Bridge.SolanaDeposit (SolanaDeposit(..),transactionAccounts,historicalTokenBalance,depositInstructions)
 import Bridge.SolanaMessage (publicKey)
-import Control.Monad (unless,when)
+import Control.Monad (unless)
 import Data.Aeson
 import Data.Aeson.Types (Parser,parseEither)
 import Data.Binary.Get (getWord64le,runGet)
@@ -76,20 +76,9 @@ verify PayBinding{..} value = do
   keys <- accounts message meta
   referenceIndex <- case elemIndices payOrderReference static of [i]->pure i; _->fail "reference must be static"
   ensure (referenceIndex>=required && referenceIndex>=length static-readonlyUnsigned) "reference must be read-only non-signer"
-  let account i=if i>=0 && i<length keys then pure(keys!!i) else fail "invalid index"
   instructions <- get "instructions" message :: Parser [Value]
   ensure (not(null instructions) && length instructions<=4) "unsupported instructions"
-  decoded <- mapM (\ix->do
-    program <- get "programIdIndex" ix >>= account
-    indices <- get "accounts" ix :: Parser [Int]
-    names <- mapM account indices
-    raw <- get "data" ix
-    ensure (T.length raw<=512) "oversized instruction"
-    bytes <- maybe (fail "invalid instruction") pure(B58.decodeBase58 B58.bitcoinAlphabet $ TE.encodeUtf8 raw)
-    pure(program,indices,names,bytes)) instructions
-  let budget="ComputeBudget111111111111111111111111111111"
-  forMDecoded decoded budget
-  let semantic=[row | row@(p,_,_,_)<-decoded,p/=budget]
+  semantic <- depositInstructions keys instructions
   ensure (length semantic==1) "only the requested transfer is accepted"
   (sourceIndex,destinationIndex,source,owner,n) <- case semantic of
     [(p,indices,names,bytes)] | p==tokenProgram->do
@@ -115,5 +104,3 @@ verify PayBinding{..} value = do
   afterCustody <- historicalTokenBalance payMint destinationIndex payCustodyOwner post
   ensure (beforeSource-afterSource==toInteger(units n) && afterCustody-beforeCustody==toInteger(units n)) "historical balance mismatch"
   pure(SolanaDeposit paySignature slot source owner payMint payCustody n ("solana-pay:"<>payOrderReference))
- where
-  forMDecoded rows budget = mapM_ (\(p,indices,_,bytes)->when (p==budget) $ ensure (null indices && (BS.take 1 bytes==BS.singleton 2 && BS.length bytes==5 || BS.take 1 bytes==BS.singleton 3 && BS.length bytes==9)) "unsupported budget") rows

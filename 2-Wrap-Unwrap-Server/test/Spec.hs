@@ -1228,6 +1228,17 @@ main=hspec $ do
       verifiedOwner <$> Pay.verifyPay expected proof `shouldBe` Right owner
       Pay.verifyPay expected{Pay.payOrderReference="11111111111111111111111111111111"} proof `shouldSatisfy` either (const True) (const False)
       Pay.verifyPay expected (setPath ["transaction","message","header","numReadonlyUnsignedAccounts"] (Number 0) proof) `shouldSatisfy` either (const True) (const False)
+    it "rejects invalid instruction indices, encoding, size and budget directives" $
+      property $ forAll (chooseInt (2,10000)) $ \outside->
+        let instruction program indices bytes=object ["programIdIndex" .= (program::Int),"accounts" .= (indices::[Int]),"data" .= (bytes::Text)]
+            keys=["ComputeBudget111111111111111111111111111111","transfer-program"]
+            budget=base58 (BS.pack [2,0,0,0,0])
+            parse rows=parseEither (depositInstructions keys) rows
+            invalid=[instruction outside [] "",instruction (negate outside) [] ""
+              ,instruction 1 [outside] "",instruction 1 [-1] "",instruction 1 [] "0"
+              ,instruction 1 [] (T.replicate 513 "1"),instruction 0 [1] budget,instruction 0 [] "1"]
+        in conjoin [parse [instruction 0 [] budget]===Right []
+          ,property $ all (either (const True) (const False) . parse . (:[])) invalid]
     it "requires a unique historical token balance with the exact owner, mint and precision" $
       property $ forAll (chooseInteger (0,toInteger (maxBound::Int64))) $ \n->
         let entry=object ["accountIndex" .= (2::Int),"mint" .= ("expected-mint"::Text),"owner" .= ("expected-owner"::Text)

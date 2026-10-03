@@ -2,7 +2,7 @@
 -- An unclassified result must remain a liability and must not authorize a payout.
 module Bridge.SolanaDeposit
   ( DepositBinding(..), SolanaDeposit(..), verifyDeposit
-  , CustodyEffect(..), custodyEffect, LamportEffect(..), lamportEffect, transactionMemo, transactionAccounts, historicalTokenBalance
+  , CustodyEffect(..), custodyEffect, LamportEffect(..), lamportEffect, transactionMemo, transactionAccounts, historicalTokenBalance, depositInstructions
   ) where
 
 import Bridge.Config (tokenProgram)
@@ -167,21 +167,10 @@ verify DepositBinding{..} value = do
   keys <- get "accountKeys" message :: Parser [Text]
   ensure (required==1 && take 1 keys==[boundOwner]) "bound owner must be the payer and sole signer"
   accounts <- transactionAccounts message meta
-  let account i = if i>=0 && i<length accounts then pure (accounts!!i) else fail "bad account index"
   instructions <- get "instructions" message :: Parser [Value]
   ensure (length instructions>=2 && length instructions<=4) "unsupported instructions"
-  decoded <- mapM (\v -> do
-    p<-get "programIdIndex" v >>= account
-    is<-get "accounts" v :: Parser [Int]
-    as<-mapM account is
-    raw<-get "data" v
-    ensure (T.length raw<=512) "instruction too large"
-    dat<-maybe (fail "bad base58") pure (B58.decodeBase58 B58.bitcoinAlphabet (TE.encodeUtf8 raw))
-    pure (p,is,as,dat)) instructions
-  let budgetProgram="ComputeBudget111111111111111111111111111111"
-      memoProgram="MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
-      semantic=[x | x@(p,_,_,_)<-decoded,p/=budgetProgram]
-  mapM_ (\(p,is,_,dat)->when (p==budgetProgram) $ ensure (null is && (BS.take 1 dat==BS.singleton 2 && BS.length dat==5 || BS.take 1 dat==BS.singleton 3 && BS.length dat==9)) "unexpected budget instruction") decoded
+  semantic <- depositInstructions accounts instructions
+  let memoProgram="MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr"
   (sourceIndex,custodyIndex,source,rawAmount) <- case semantic of
     [(p,[sourceIndex,_,custodyIndex,_],[source,mint,custody,owner],dat),(m,[0],[memoOwner],memoBytes)] -> do
       ensure (p==tokenProgram && mint==boundMint && custody==boundCustody && owner==boundOwner) "wrong transfer"
@@ -221,3 +210,23 @@ historicalTokenBalance mint index owner entries = do
       raw <- get "amount" tokens
       toInteger . units <$> either (fail . T.unpack) pure(parseUnits raw)
     _->fail "missing historical balance"
+
+-- Decode bounded top-level instructions and remove only supported compute-budget
+-- directives. Each deposit protocol checks its own remaining instruction shape.
+depositInstructions :: [Text] -> [Value] -> Parser [(Text,[Int],[Text],BS.ByteString)]
+depositInstructions keys instructions = do
+  decoded <- mapM (\ix->do
+    program <- get "programIdIndex" ix >>= account
+    indices <- get "accounts" ix :: Parser [Int]
+    names <- mapM account indices
+    raw <- get "data" ix
+    ensure (T.length raw<=512) "oversized instruction"
+    bytes <- maybe (fail "invalid instruction") pure (B58.decodeBase58 B58.bitcoinAlphabet $ TE.encodeUtf8 raw)
+    when (program==budget) $ ensure (null indices &&
+      (BS.take 1 bytes==BS.singleton 2 && BS.length bytes==5 ||
+       BS.take 1 bytes==BS.singleton 3 && BS.length bytes==9)) "unsupported budget"
+    pure (program,indices,names,bytes)) instructions
+  pure [row | row@(program,_,_,_)<-decoded,program/=budget]
+ where
+  budget="ComputeBudget111111111111111111111111111111"
+  account i=if i>=0 && i<length keys then pure(keys!!i) else fail "invalid index"
