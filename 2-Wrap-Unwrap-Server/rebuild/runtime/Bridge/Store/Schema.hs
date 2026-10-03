@@ -277,3 +277,7 @@ replacementDecisions = O.table "native_replacement_drafts" $ p7
 replacementCancellationRows :: O.Table (IntField,TextField,IntField) (IntField,TextField,IntField)
 replacementCancellationRows = O.table "native_replacement_cancellations" $ p3
   (O.requiredTableField "draft_sequence",O.requiredTableField "reason",O.requiredTableField "critical_sequence")
+
+replacementMemberRows :: O.Table (IntField,TextField,IntField) (IntField,TextField,IntField)
+replacementMemberRows = O.table "native_replacement_members" $ p3
+  (O.requiredTableField "draft_sequence",O.requiredTableField "txid",O.requiredTableField "critical_sequence")

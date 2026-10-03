@@ -2259,5 +2259,33 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   restored<-evalWrite writer (AuthorizeSend 110 $ signedId wire)
   check (restored==parent)
   evalRead reader ReadBalances >>= check . (==before)
-  evalWrite writer (SettlePayment parent (W.PaymentCosts (money 1) (money 0)) "offline original winner after cancellation")
+  paused
+  expectStore "native_replacement_not_unsigned" (evalRead reader $ ReadReplacementSigning 110 decision)
+  second<-save "reviewed replacement"
+  expectStore "signing_backup_required" (evalRead reader $ ReadReplacementSigning 110 second)
+  fixture fixtures CoverBackup
+  expectStore "custody_not_reconciled" (evalRead reader $ ReadReplacementSigning 110 second)
+  fixture fixtures RefreshCustody
+  (family,savedDraft)<-evalRead reader (ReadReplacementSigning 110 second)
+  check (family==[(parent,signed)] && savedDraft==draft)
+  let replacement=signed {NP.signedNativeBytes="02",NP.signedNativeTransaction=NP.draftTransaction draft,NP.signedNativeFee=money 2}
+      record expected member=evalWrite writer (RecordReplacement 110 second expected member)
+  expectStore "native_replacement_family_changed" (record [] replacement)
+  expectStore "native_fee_mismatch" (record family replacement {NP.signedNativeFee=money 3})
+  child<-record family replacement
+  sequenceNo<-ledgerSequence <$> evalRead reader ReadState
+  record family replacement >>= check . (==child)
+  evalRead reader ReadState >>= check . (==sequenceNo) . ledgerSequence
+  evalRead reader (ReadReplacementMember second) >>= check . (==Just child)
+  expectStore "native_replacement_signature_conflict" (record family replacement {NP.signedNativeBytes="04"})
+  expectStore "native_replacement_already_signed" (evalWrite writer $ CancelReplacementDraft second "too late")
+  evalRead reader (ReadNativeFamily identifier) >>= check . (==[(parent,signed),(child,replacement)])
+  evalRead reader ReadBalances >>= check . (==before)
+  ready
+  expectStore "native_replacement_not_current" (evalWrite writer $ AuthorizeSend 110 $ signedId wire)
+  void $ evalWrite writer (MarkBroadcast 110 $ signedId $ recordedSigned child)
+  fixture fixtures CoverBackup
+  ready
+  authorized<-evalWrite writer (AuthorizeSend 110 $ signedId $ recordedSigned child)
+  evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 2) (money 0)) "offline replacement winner")
  where encodeText value=TE.decodeUtf8 (BL.toStrict $ encode value)

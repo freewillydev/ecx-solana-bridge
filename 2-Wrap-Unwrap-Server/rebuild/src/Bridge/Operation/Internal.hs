@@ -43,6 +43,7 @@ data OperatorWrite a where
 
 -- Initial signing is tied to a durable decision, never caller-supplied bytes.
 data SigningOperation a where
+  SignReplacement :: Text -> Int64 -> SigningOperation SignedAttempt
   SignPrepared :: Text -> Text -> Int -> SigningOperation SignedAttempt
 
 data WorkerOperation a where

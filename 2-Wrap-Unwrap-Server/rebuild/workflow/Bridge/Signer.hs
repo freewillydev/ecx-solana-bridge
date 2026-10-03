@@ -4,13 +4,13 @@
 module Bridge.Signer
   ( SigningAPI, signingAPI, signingServer, SignerSettings(..), withSigner, verifySigningKey, protectedSignerFile ) where
 import Bridge.Operation.Internal
-import Bridge.Wire (Profile(..),SignedAttempt)
+import Bridge.Wire (Profile(..),SignedAttempt(..))
 import Bridge.Identity (publicKey)
 import Bridge.Error
-import Bridge.Store (Reader,StoreRead(ReadSigningDecision),evalRead)
+import Bridge.Store (Reader,StoreRead(ReadSigningDecision,ReadReplacementSigning),RecordedAttempt(..),evalRead)
 import Bridge.Payment
 import qualified Bridge.Native as N
-import Bridge.NativePayment (signNativeDraft)
+import Bridge.NativePayment (signNativeDraft,signNativeReplacement,NativeSigned(..),NativeTx(..))
 import qualified Bridge.Solana as S
 import qualified Bridge.SolanaHelper as H
 import Bridge.SolanaPayment
@@ -18,7 +18,10 @@ import Crypto.Error (CryptoFailable(..))
 import qualified Crypto.PubKey.Ed25519 as Ed
 import qualified Data.ByteArray as BA
 import qualified Data.ByteString as BS
-import Data.Aeson (eitherDecodeStrict')
+import Data.Aeson (eitherDecodeStrict',encode)
+import Data.Int (Int64)
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.Text.Encoding as TE
 import Data.Bits ((.&.))
 import Data.Word (Word8)
 import System.FilePath (isAbsolute,takeDirectory)
@@ -32,12 +35,14 @@ import Network.HTTP.Client (Manager)
 import Servant
 
 -- Keep the shared API pure; only the critical runtime will generate ClientM.
-type SigningAPI = BasicAuth "signer" () :> "sign-preparation"
-  :> ReqBody '[JSON] (Text,Text,Int) :> Post '[JSON] SignedAttempt
+type SigningAPI = BasicAuth "signer" () :>
+  (("sign-preparation" :> ReqBody '[JSON] (Text,Text,Int) :> Post '[JSON] SignedAttempt)
+  :<|> ("sign-replacement" :> ReqBody '[JSON] (Text,Int64) :> Post '[JSON] SignedAttempt))
 signingAPI :: Proxy SigningAPI
 signingAPI=Proxy
 signingServer :: ServerT SigningAPI (Request 'Signer 'Critical)
-signingServer () (identity,identifier,generation)=Request (SignPrepared identity identifier generation)
+signingServer () = (\(identity,identifier,generation)->Request $ SignPrepared identity identifier generation)
+  :<|> (\(identity,decision)->Request $ SignReplacement identity decision)
 
 data SignerSettings = SignerSettings
   { signingNative :: N.NativeSettings, signingSolana :: S.SolanaSettings
@@ -59,6 +64,20 @@ withSigner manager reader settings action = do
   gate<-newMVar ()
   let interpret :: forall a. Request 'Signer 'Critical a -> IO a
       interpret request=withMVar gate $ \_ -> case resolve request of
+        SigningDSL (SignReplacement identity decision)->do
+          require (identity==H.fingerprint config) "signer_profile_mismatch"
+          let readDecision=do
+                now<-floor <$> getPOSIXTime
+                evalRead reader (ReadReplacementSigning now decision)
+          before@(family,draft)<-readDecision
+          now<-floor <$> getPOSIXTime
+          N.nativeWalletReadyWith (N.nativeCall manager native) native now
+          signed<-signNativeReplacement (N.nativeCall manager native) native (map snd family) draft
+          after<-readDecision
+          require (before==after) "signing_decision_changed"
+          parent<-case reverse family of (saved,_):_->pure saved; _->reject "native_replacement_family_bounds"
+          pure $ SignedAttempt (nativeTxid $ signedNativeTransaction signed) (signedNativeBytes signed)
+            (TE.decodeUtf8 $ BL.toStrict $ encode signed) (commonInput $ recordedSigned parent)
         SigningDSL (SignPrepared identity identifier generation)->do
           require (identity==H.fingerprint config) "signer_profile_mismatch"
           let readDecision=do

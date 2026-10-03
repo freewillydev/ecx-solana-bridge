@@ -75,6 +75,8 @@ data CustodySnapshot = CustodySnapshot
   { custodyRevision :: Int64, custodyTotals :: M.Map Asset Integer
   , custodyHeads :: [(Text,Text)], custodySlot :: Int64, custodyPending :: [RecordedAttempt] } deriving (Eq,Show)
 data StoreRead a where
+  ReadReplacementSigning :: Int64 -> Int64 -> StoreRead ([(RecordedAttempt,N.NativeSigned)],N.NativeDraft)
+  ReadReplacementMember :: Int64 -> StoreRead (Maybe RecordedAttempt)
   ReadNativeFamily :: Text -> StoreRead [(RecordedAttempt,N.NativeSigned)]
   ReadReplacementDecision :: Text -> Amount -> Text -> StoreRead (Maybe (Int64,Bool))
   ReadLossCover :: Text -> Int64 -> StoreRead (Maybe (Amount,Amount,Text))
@@ -122,6 +124,7 @@ data StoreRead a where
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
+  RecordReplacement :: Int64 -> Int64 -> [(RecordedAttempt,N.NativeSigned)] -> N.NativeSigned -> StoreWrite RecordedAttempt
   SaveReplacementDraft :: Int64 -> RecordedAttempt -> N.NativeDraft -> Text -> StoreWrite Int64
   CancelReplacementDraft :: Int64 -> Text -> StoreWrite ()
   CoverSourceLoss :: W.Deposit -> Int64 -> Int64 -> Amount -> Amount -> Text -> Value -> (Int64,Int64,Bool,Value) -> StoreWrite ()
@@ -218,6 +221,8 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
           O.where_ (S.eventId event O..== O.sqlStrictText identifier O..&& O.in_ (map O.sqlStrictText $ if chain=="Solana" then ["Solana","SolanaOperating"] else [chain]) (S.eventChain event))
           pure (S.eventId event)
         pure (not $ null (rows :: [Text]))
+      ReadReplacementSigning now decision -> replacementSigning c identity remote now decision
+      ReadReplacementMember decision -> replacementMember c decision
       ReadNativeFamily identifier -> nativeFamily c identity identifier
       ReadReplacementDecision parent fee reason -> replacementDecision c parent fee reason
       ReadNativeLockWork -> nativeLockWork c identity
@@ -360,6 +365,7 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
     _ <- O.runInsert c O.Insert {O.iTable=S.audit,
       O.iRows=[(Nothing,O.sqlStrictText "pause",O.sqlStrictText explanation)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
     pure ()
+  RecordReplacement now decision family signed -> recordReplacement c config now decision family signed
   SaveReplacementDraft now parent draft reason -> saveReplacementDraft c policy now parent draft reason
   CancelReplacementDraft sequenceNo reason -> cancelReplacementDraft c policy sequenceNo reason
   CoverSourceLoss source recovery now capital earned reason proof custody -> coverSourceLoss c policy source recovery now capital earned reason proof custody
@@ -2838,3 +2844,79 @@ cancelReplacementDraft c policy decision reason = do
       _<-O.runInsert c O.Insert {O.iTable=S.replacementCancellationRows,O.iRows=[(O.sqlInt8 decision,O.sqlStrictText reason,O.sqlInt8 sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
       audit c "native_replacement_cancelled" parent
     _->reject "duplicate_native_replacement_cancellation"
+
+replacementMember :: PG.Connection -> Int64 -> IO (Maybe RecordedAttempt)
+replacementMember c decision = do
+  rows<-O.runSelect c $ do
+    (n,tx,_)<-S.replacementMembers
+    O.where_ (n O..== O.sqlInt8 decision)
+    pure tx
+    :: IO [Text]
+  case rows of []->pure Nothing; [tx]->Just <$> readAttempt c tx; _->reject "duplicate_native_replacement_member"
+
+-- Read-only signer authorization. The pending draft intentionally blocks the
+-- ordinary send path, so this checks its own exact draft/family binding.
+replacementSigning :: PG.Connection -> Text -> Bool -> Int64 -> Int64 -> IO ([(RecordedAttempt,N.NativeSigned)],N.NativeDraft)
+replacementSigning c identity backed now decision = do
+  require (decision>0) "invalid_native_replacement_decision"
+  state<-metadata c identity
+  require (S.paused state==1) "pause_before_operator_action"
+  when backed $ require (S.backupSequence state>=S.criticalSequence state) "signing_backup_required"
+  fresh c now
+  old<-replacementMember c decision
+  cancelled<-O.runSelect c $ do
+    (n,_,_)<-S.replacementCancellations
+    O.where_ (n O..== O.sqlInt8 decision)
+    pure n
+    :: IO [Int64]
+  require (old==Nothing && null cancelled) "native_replacement_not_unsigned"
+  rows<-O.runSelect c $ do
+    (n,parent,fee,draft,hash,_)<-S.replacementDrafts
+    O.where_ (n O..== O.sqlInt8 decision)
+    pure (parent,fee,draft,hash)
+    :: IO [(Text,Int64,Text,Text)]
+  (txid,fee,raw,hash)<-case rows of [row]->pure row; _->reject "native_replacement_draft_missing"
+  parent<-readAttempt c txid
+  let identifier=recordedPayment parent
+  prepared<-readPreparation c identity identifier
+  require (recordedChain parent=="Native" && recordedState parent=="broadcast_intent"
+    && maybe False (>0) (recordedSequence parent) && recordedGeneration parent==preparedGeneration prepared
+    && savedStatus(preparedView prepared)==PaymentPaying && recordedFee parent==preparedFee prepared) "native_replacement_not_expected"
+  paymentSource c (savedPayment $ preparedView prepared)
+  family<-nativeFamily c identity identifier
+  require (fst(last family)==parent) "native_replacement_not_current"
+  currentHash<-paymentWorkHash c identifier
+  require (currentHash==hash) "native_replacement_work_changed"
+  draft<-decodeSaved raw
+  require (units(N.draftFee draft)==fee) "native_replacement_draft_changed"
+  checked (N.validateNativeReplacementDraft (map snd family) (N.draftFee draft) draft)
+  pure (family,draft)
+
+recordReplacement :: PG.Connection -> StorePolicy -> Int64 -> Int64 -> [(RecordedAttempt,N.NativeSigned)] -> N.NativeSigned -> IO RecordedAttempt
+recordReplacement c config now decision expected signed = do
+  let identity=deploymentFingerprint(paymentPolicy $ executionTerms config)
+      txid=N.nativeTxid(N.signedNativeTransaction signed); bytes=N.signedNativeBytes signed
+      policy=encodeSaved signed; text=O.sqlStrictText; num=O.sqlInt8
+  require (T.length bytes<=200000) "invalid_native_signed_bytes"
+  validateSavedJson 32768 policy
+  old<-replacementMember c decision
+  case old of
+    Just saved->do
+      let previous=recordedSigned saved
+      require (signedId previous==txid && signedBytes previous==bytes && signedPolicy previous==policy) "native_replacement_signature_conflict"
+      pure saved
+    Nothing->do
+      (family,draft)<-replacementSigning c identity (requireBackup config) now decision
+      require (family==expected) "native_replacement_family_changed"
+      checked (N.validateNativeFamily $ map snd family<>[signed])
+      require (N.sameNativeTemplate (N.draftTransaction draft) (N.signedNativeTransaction signed)
+        && N.draftFee draft==N.signedNativeFee signed && N.sameNativePrevouts (N.draftPrevouts draft) (N.signedNativePrevouts signed)) "native_replacement_signed_template_changed"
+      let parent=fst(last family)
+      n<-nextSequence c
+      count<-O.runInsert c O.Insert {O.iTable=S.attempts,
+        O.iRows=[S.Attempt (text txid) (text $ recordedPayment parent) (text bytes) (text policy) (num $ units $ recordedFee parent)
+          (text "signed") O.null O.null (num $ fromIntegral $ recordedGeneration parent)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      linked<-O.runInsert c O.Insert {O.iTable=S.replacementMemberRows,O.iRows=[(num decision,text txid,num n)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      require (count==1 && linked==1) "native_replacement_member_insert_failed"
+      audit c "native_replacement_signed" txid
+      readAttempt c txid

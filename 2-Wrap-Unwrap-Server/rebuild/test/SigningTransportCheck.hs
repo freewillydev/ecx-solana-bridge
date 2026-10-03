@@ -149,6 +149,9 @@ checks=sequence
           result=SignedAttempt "fixture-id" "fixture-bytes" "fixture-proof" Nothing
           evaluate :: forall a. Request 'Signer 'Critical a -> IO a
           evaluate request=case resolve request of
+            SigningDSL (SignReplacement identity decision)->do
+              modifyIORef' calls (<>[(identity,"replacement",fromIntegral decision)])
+              pure result
             SigningDSL (SignPrepared identity identifier generation)->do
               modifyIORef' calls (<>[(identity,identifier,generation)])
               require (identifier/="refused") "signing_backup_required"
@@ -166,10 +169,13 @@ checks=sequence
         ,send "/sign-preparation" auth "not-json"
         ,send "/sign-preparation" auth (encode $ replicate 4097 'x')
         ,send "/sign-preparation" (("Sec-Fetch-Site","cross-site"):auth) (body "payment")
-        ,send "/broadcast" auth (body "payment")]) app
+        ,send "/broadcast" auth (body "payment")
+        ,send "/sign-replacement" [] (encode ("deployment"::Text,7::Int))
+        ,send "/sign-replacement" auth (encode ("deployment"::Text,7::Int))
+        ,send "/sign-replacement" auth (body "wrong-shape")]) app
       observed<-readIORef calls
-      pure $ counterexample (show (map (statusCode . simpleStatus) responses,observed,map simpleBody responses)) $ map (statusCode . simpleStatus) responses==[401,403,200,409,400,413,403,404]
-        && observed==[("deployment","payment",0),("deployment","refused",0)]
+      pure $ counterexample (show (map (statusCode . simpleStatus) responses,observed,map simpleBody responses)) $ map (statusCode . simpleStatus) responses==[401,403,200,409,400,413,403,404,401,200,400]
+        && observed==[("deployment","payment",0),("deployment","refused",0),("deployment","replacement",7)]
         && case drop 2 responses of
           accepted:_->eitherDecode (simpleBody accepted)==Right result
             && lookup "Cache-Control" (simpleHeaders accepted)==Just "no-store"

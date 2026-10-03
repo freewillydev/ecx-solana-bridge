@@ -1210,3 +1210,41 @@ Haskell modules or executables. This adds missing behavior rather than reducing 
 lines. It reuses the payment/source checks and native validators instead of adding
 another customer-only replacement engine. Root Cabal build, QuickCheck and migrated
 PostgreSQL contracts pass; populated migration and live replacement remain unverified.
+
+## Replacement signing checkpoint
+
+`POST /sign-replacement` is a private authenticated signer route accepting only
+`[deploymentFingerprint, draftSequence]`. Its Servant handler packages the
+`SignReplacement` existential operation; the signing evaluator reads the exact
+saved family/draft, validates profile and native wallet state, signs through the
+shared adapter, and rereads the decision before returning a typed `SignedAttempt`.
+It cannot broadcast or write to the ledger. The original generated preparation
+client now selects its route from the combined API inside the critical evaluator.
+
+Closed Opaleye signing reads require pause, fresh custody, backup coverage, an
+uncancelled unsigned draft, the current broadcast parent, active preparation and
+source authorization, exact work hash and validated family/template. Recording a
+replacement atomically saves immutable bytes and the family link; exact replay
+returns the saved attempt, conflicting bytes are refused, and signed decisions
+cannot be cancelled. Once recorded, ordinary send selection accepts only the newest
+family member. Tests take that member through send authorization and settlement.
+
+Scoped counts: Store **2,840 → 2,922**, schema projections **279 → 283**, grammar
+**97 → 98**, signer **117 → 136**, critical runtime **484 → 485**: **+107 production
+lines in five existing files**, no new files or migration. Existing tests add **37
+net lines** across three files. This is added integration, not a net reduction; it
+reuses the same validators, signing gate, payment engine and authenticated transport.
+
+Cabal/QuickCheck verifies both signer handlers' existential resolution and private
+HTTP authentication/request shape. PostgreSQL contracts verify backup/freshness gates,
+cancelled drafts, changed families/fees, replay/conflicts, lineage, refusal to cancel
+signed work, newest-member selection, unchanged balances before settlement and ordinary
+replacement settlement using explicitly synthetic ledger records. The replacement
+operator/client workflow, family-aware observation/restart and winner changes remain
+unfinished. New-route live signing and funded-chain acceptance are not established
+by these isolated checks.
+
+The actual HTTPS worker/signer regression also passes with the combined API: invalid
+credentials/certificates are refused, the existing Solana SDK signature is persisted
+exactly, and replay makes no network call. This exercises the preparation route with
+offline RPC responses; it is not native replacement workflow acceptance.

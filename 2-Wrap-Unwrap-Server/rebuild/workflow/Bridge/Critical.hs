@@ -43,6 +43,7 @@ import qualified Network.Connection as NC
 import qualified Network.TLS as TLS
 import Network.TLS.Extra.Cipher (ciphersuite_default)
 import Data.X509.CertificateStore (makeCertificateStore)
+import Servant.API ((:<|>)(..))
 import qualified Servant.Client as SC
 
 -- The safe evaluator receives only read credentials and public configuration.
@@ -354,7 +355,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
                   body<-newIORef bytes
                   pure response {responseBody=atomicModifyIORef' body $ \chunk->(BS.empty,chunk)}}
           signed<-bracket (newManager settings) closeManager $ \local->do
-            let call=SC.client signingAPI credentials
+            let call :<|> _=SC.client signingAPI credentials
                 environment=SC.mkClientEnv local (SC.BaseUrl SC.Https "127.0.0.1" (signerPort endpoint) "")
             result<-SC.runClientM (call (H.fingerprint config,identifier,preparedGeneration prepared)) environment
             -- Even an HTTP failure may follow signing. Retain the preparation;
