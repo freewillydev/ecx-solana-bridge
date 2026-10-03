@@ -1,6 +1,7 @@
 -- Captured Devnet deposit; Pay/v0 rewrites below are offline parser contracts.
 module ObservationCheck (checks) where
-import Bridge.Domain (Amount, amount, units)
+import Bridge.Domain (Amount, Asset(..), amount, units)
+import qualified Bridge.Wire as W
 import Bridge.Error
 import Bridge.RPC (fieldValue)
 import Bridge.Solana (SignatureInfo(..),collectSignatures,tokenProgram)
@@ -42,7 +43,15 @@ checks=do
       effect=custodyEffect (boundSignature expected) (boundMint expected) (boundCustody expected) (boundCustodyOwner expected)
   versioned<-versionZero (boundCustody expected) payProof
   local<-sequence
-    [ check "captured Devnet deposit binds historical source owner memo and exact custody increase" $ once $
+    [ check "treasury outflows separate native fees token value and SOL debit" $ forAll (chooseInteger (1,1000000)) $ \n ->
+        let raw=T.pack(show $ negate n)
+        in W.economicOutflow "Native" (object ["walletNetUnits" .= raw,"feeUnits" .= amt 1])==Right (Native,amt(n+1),amt 1) &&
+          W.economicOutflow "Solana" (object ["delta" .= raw])==Right (Wrapped,amt n,amt 0) &&
+          W.economicOutflow "SolanaOperating" (object ["delta" .= raw,"feeUnits" .= amt 1])==Right (Sol,amt n,amt 1)
+    , check "treasury evidence refuses noncanonical oversized or nonnegative outflow" $ once $
+        all (isLeft . W.economicOutflow "Solana" . (\raw->object ["delta" .= (raw::Text)]))
+          ["-0","00","-01","1","1e2",T.replicate 10000 "9"]
+    , check "captured Devnet deposit binds historical source owner memo and exact custody increase" $ once $
         (verifiedAmount <$> verifyDeposit expected proof)==Right quantity &&
         transactionMemo proof==Just (boundMemo expected) &&
         (effectDelta <$> effect proof)==Right (toInteger $ units quantity)

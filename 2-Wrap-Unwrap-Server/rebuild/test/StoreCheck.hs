@@ -1,9 +1,9 @@
 {-# LANGUAGE GADTs, ScopedTypeVariables #-}
 module Main (main) where
-import Bridge.Identity (capabilityHash,payInstruction)
+import Bridge.Identity (capabilityHash,payInstruction,digest)
 import qualified Bridge.Wire as W
-import Data.Aeson (encode,object,(.=),Value(Null))
-import Data.Profunctor.Product (p8)
+import Data.Aeson (encode,object,(.=),toJSON,Value(Null),eitherDecodeStrict')
+import Data.Profunctor.Product (p5,p6,p8,p9)
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text.Encoding as TE
 import Bridge.Domain
@@ -325,6 +325,103 @@ main = do
         record (W.SourceRestored proof)
         returnedAgain<-evalRead reader ReadBalances
         check (returnedAgain==returned)
+      withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
+        fixture fixtures ReadyIntake
+        oid<-evalWrite writer (create newRequest {W.idempotencyKey="scanned-order",W.input=money 10})
+        claim<-evalWrite writer (ClaimNative 100 auth oid)
+        _<-evalWrite writer (RecordNative auth oid (allocationLabel claim) "scan-address-fixture")
+        let tx=T.replicate 64 "b"; did="native:"<>tx<>":0"
+            receipt=W.Deposit did (Just oid) Native (money 10) "block-1" 2 True 100
+            event=W.ChainEvent tx "incoming" "block-1" (object ["receipt" .= did])
+            batch previous next deposits events=W.ScanBatch "Native" "scan-origin" previous next 100 deposits events
+            commit b=evalWrite writer (CommitScan b)
+        previous<-evalRead reader (ReadCheckpoint "Native")
+        before<-evalRead reader ReadBalances
+        commit (batch previous "scan-1" [receipt] [event])
+        observed<-evalRead reader ReadBalances
+        check (M.findWithDefault 0 (Native,Principal) observed==M.findWithDefault 0 (Native,Principal) before+10)
+        commit (batch (Just "scan-1") "scan-1" [receipt {W.depositSeenAt=999}] [event])
+        replay<-evalRead reader ReadBalances
+        saved<-evalRead reader (ReadSource did)
+        check (observed==replay && W.depositSeenAt saved==100)
+        expectStore "stale_scan_cursor" (commit $ batch previous "stale" [] [])
+        expectStore "scan_origin_mismatch" (commit $ (batch (Just "scan-1") "wrong-origin" [] []) {W.scanOrigin="other"})
+        expectStore "conflicting_deposit_evidence" (commit $ batch (Just "scan-1") "conflict" [receipt {W.depositAmount=money 11}] [])
+        let provisional=receipt {W.depositId="native:rollback:0"}
+        expectStore "invalid_observation_kind" (commit $ batch (Just "scan-1") "rollback" [provisional] [event {W.chainEventKind="invalid"}])
+        expectStore "source_deposit_missing" (evalRead reader $ ReadSource "native:rollback:0")
+        afterFailure<-evalRead reader ReadBalances
+        cursor<-evalRead reader (ReadCheckpoint "Native")
+        check (afterFailure==observed && cursor==Just "scan-1")
+        evalWrite writer (PromoteDeposit 100 did) >>= check
+        workHash<-evalRead reader (ReadSourceWorkHash $ "convert:"<>oid)
+        let obligation=("convert:"<>oid,oid,did,"conversion"::T.Text,"Wrapped"::T.Text,9::Int64,"recipient"::T.Text)
+            expectedHash=digest $ BL.toStrict $ encode (toJSON [obligation]:replicate 5 (toJSON ([]::[Value])))
+        check (workHash==expectedHash)
+        commit (batch (Just "scan-1") "scan-2" [receipt {W.depositEligible=False,W.depositConfirmations=0,W.depositAnchor="unconfirmed"}] [event {W.chainEventAnchor="unconfirmed"}])
+        fixture fixtures (CheckSuspended oid did workHash) >>= check
+        lossState<-evalRead reader ReadState
+        check (ledgerPaused lossState && ledgerReason lossState=="source_reorg_review")
+        unchanged<-evalRead reader ReadBalances
+        check (unchanged==observed)
+        evalWrite writer (ScanFailed "Native" 101 "provider_down")
+        health<-fixture fixtures (ReadScanHealth "Native")
+        cursorAfterFailure<-evalRead reader (ReadCheckpoint "Native")
+        check (health==(Just 100,Just "provider_down",101) && cursorAfterFailure==Just "scan-2")
+        evalWrite writer (ScanFailed "Native" 102 "provider_down")
+        commit (batch (Just "scan-2") "scan-3" [] [])
+        recoveredHealth<-fixture fixtures (ReadScanHealth "Native")
+        check (recoveredHealth==(Just 100,Nothing,100))
+        -- A signature alone cannot explain an outflow; a recorded send intent can.
+        fixture fixtures (SeedScanAttempts oid)
+        hashWithAttempts<-evalRead reader (ReadSourceWorkHash $ "convert:"<>oid)
+        let attemptRows=[("saved-intent"::T.Text,"broadcast_intent"::T.Text,0::Int64,Just(1::Int64),Nothing::Maybe T.Text),
+              ("saved-signed","signed",0,Nothing,Nothing)]
+            expectedWithAttempts=digest $ BL.toStrict $ encode
+              [toJSON [obligation],toJSON [("Native"::T.Text,False,Nothing::Maybe T.Text)],
+               toJSON [(0::Int64,"{}"::T.Text,Just("{}"::T.Text),Nothing::Maybe T.Text,False)],
+               toJSON attemptRows,toJSON ([]::[Value]),toJSON ([]::[Value])]
+        check (hashWithAttempts/=workHash && hashWithAttempts==expectedWithAttempts)
+        fixture fixtures ReadyIntake
+        commit (batch (Just "scan-3") "scan-4" [] [W.ChainEvent "saved-signed" "outgoing" "anchor" (object [])])
+        signedReview<-fixture fixtures (ReadEventReview "Native" "saved-signed")
+        check (signedReview==1)
+        fixture fixtures ReadyIntake
+        commit (batch (Just "scan-4") "scan-5" [] [W.ChainEvent "saved-intent" "outgoing" "anchor" (object [])])
+        knownReview<-fixture fixtures (ReadEventReview "Native" "saved-intent")
+        knownState<-evalRead reader ReadState
+        check (knownReview==0 && not(ledgerPaused knownState))
+        let spend=W.ChainEvent "operator-spend" "outgoing" "anchor" (object ["walletNetUnits" .= ("-25"::T.Text),"feeUnits" .= money 1])
+        commit (batch (Just "scan-5") "scan-6" [] [spend])
+        fixture fixtures (ApproveScanSpend spend)
+        fixture fixtures ReadyIntake
+        commit (batch (Just "scan-6") "scan-7" [] [spend])
+        approved<-fixture fixtures (ReadEventReview "Native" "operator-spend")
+        approvedState<-evalRead reader ReadState
+        check (approved==0 && not(ledgerPaused approvedState))
+        commit (batch (Just "scan-7") "scan-8" [] [spend {W.chainEventAnchor="changed"}])
+        disputed<-fixture fixtures (ReadEventReview "Native" "operator-spend")
+        check (disputed==1)
+        commit (batch (Just "scan-8") "scan-9" [] [spend])
+        sticky<-fixture fixtures (ReadEventReview "Native" "operator-spend")
+        check (sticky==1)
+        wrapped<-evalRead reader (ReadSource "wrapped-source")
+        solCursor<-evalRead reader (ReadCheckpoint "Solana")
+        let solBatch prior next deposit=W.ScanBatch "Solana" "sol-origin" prior next 110 [deposit] []
+        expectStore "scan_asset_mismatch" (commit $ solBatch solCursor "wrong-asset" receipt)
+        commit (solBatch solCursor "sol-1" wrapped {W.depositEligible=False})
+        fixture fixtures (LatestSourceState "wrapped-source") >>= check . (=="unavailable")
+        commit (solBatch (Just "sol-1") "sol-2" wrapped)
+        fixture fixtures (LatestSourceState "wrapped-source") >>= check . (=="restored")
+        case W.depositOrder wrapped of
+          Just order->do view<-evalRead reader (ReadOrder auth order); check (W.status view=="NeedsReview")
+          Nothing->fail "bound receipt required"
+        fixture fixtures ResetOperatingScan
+        beforeSol<-evalRead reader ReadBalances
+        let funding=W.Deposit "sol-operating:fixture" Nothing Sol (money 3) "slot" 1 True 110
+        commit (W.ScanBatch "SolanaOperating" "opening-signature" Nothing "opening-signature" 110 [funding] [])
+        afterSol<-evalRead reader ReadBalances
+        check (M.findWithDefault 0 (Sol,Unallocated) afterSol==M.findWithDefault 0 (Sol,Unallocated) beforeSol+3)
       fixture fixtures LargeBalances
       huge <- evalRead reader ReadBalances
       check (M.lookup (Wrapped,Float) huge==Just (1000+2*toInteger(maxBound::Int64)))
@@ -343,6 +440,13 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  ResetOperatingScan :: Fixture ()
+  LatestSourceState :: T.Text -> Fixture T.Text
+  ReadScanHealth :: T.Text -> Fixture (Maybe Int64,Maybe T.Text,Int64)
+  ReadEventReview :: T.Text -> T.Text -> Fixture Int64
+  CheckSuspended :: T.Text -> T.Text -> T.Text -> Fixture Bool
+  SeedScanAttempts :: T.Text -> Fixture ()
+  ApproveScanSpend :: W.ChainEvent -> Fixture ()
   SeedSourceEvidence :: T.Text -> T.Text -> Fixture ()
   SourceEligibility :: T.Text -> Bool -> Fixture ()
   CoverSource :: T.Text -> Fixture ()
@@ -538,3 +642,56 @@ fixture c (CoverSource did) = PG.withTransaction c $ do
   void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(text event,text "test loss cover")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.postings,
     O.iRows=[(Nothing,text event,text "Native",text account,num delta) | (account,delta)<-[("float",-30),("earned",-20),("source_deficit",50)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+
+fixture c (ReadScanHealth chain) = do
+  rows<-O.runSelect c $ do
+    (key,success,failure,at)<-O.selectTable S.scanHealth
+    O.where_ (key O..== O.sqlStrictText chain)
+    pure (success,failure,at)
+  case rows of [row]->pure row; _->fail "missing scan health"
+fixture c (ReadEventReview chain identifier) = do
+  rows<-O.runSelect c $ do
+    row<-O.selectTable S.chainEvents
+    O.where_ (S.eventChain row O..== O.sqlStrictText chain O..&& S.eventId row O..== O.sqlStrictText identifier)
+    pure (S.eventReview row)
+  case rows of [row]->pure row; _->fail "missing chain event"
+fixture c (CheckSuspended oid did hash) = do
+  obligations<-O.runSelect c $ do
+    row<-O.selectTable S.obligations
+    O.where_ (S.obligationOrder row O..== O.sqlStrictText oid)
+    pure (S.obligationStatus row)
+    :: IO [T.Text]
+  proofs<-O.runSelect c $ do
+    (_,key,state,_,proof,_)<-O.selectTable S.sourceChecks
+    O.where_ (key O..== O.sqlStrictText did)
+    pure (state,proof)
+    :: IO [(T.Text,T.Text)]
+  let expected=object ["reason" .= ("source_eligibility_lost"::T.Text),"previousAnchor" .= ("block-1"::T.Text),
+        "anchor" .= ("unconfirmed"::T.Text),"reviewedObligations" .= [object ["intent" .= ("convert:"<>oid),"previousStatus" .= ("ready"::T.Text),"workHash" .= hash]]]
+  pure (obligations==["review"] && case proofs of [("unavailable",raw)]->eitherDecodeStrict' (TE.encodeUtf8 raw)==Right expected; _->False)
+fixture c (SeedScanAttempts oid) = PG.withTransaction c $ do
+  let text=O.sqlStrictText; num=O.sqlInt8; intent="convert:"<>oid
+      intents=O.table "intents" $ p5 (O.requiredTableField "id",O.requiredTableField "obligation_id",O.requiredTableField "chain",O.requiredTableField "common_input",O.requiredTableField "resolved")
+      preparations=O.table "preparations" $ p6 (O.requiredTableField "intent_id",O.requiredTableField "generation",O.requiredTableField "policy_json",O.requiredTableField "draft_json",O.requiredTableField "retired_txid",O.requiredTableField "cancelled")
+      attempts=O.table "attempts" $ p9 (O.requiredTableField "txid",O.requiredTableField "intent_id",O.requiredTableField "signed_bytes",O.requiredTableField "policy_json",O.requiredTableField "fee_limit",O.requiredTableField "state",O.requiredTableField "critical_sequence",O.requiredTableField "observation_json",O.requiredTableField "preparation_generation")
+  void $ O.runInsert c O.Insert {O.iTable=intents,O.iRows=[(text intent,text intent,text "Native",O.null,num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=preparations,O.iRows=[(text intent,num 0,text "{}",O.toNullable $ text "{}",O.null,num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=attempts,
+    O.iRows=[(text tx,text intent,text "fixture-bytes",text "{}",num 1,text state,sequenceNo,O.null,num 0) |
+      (tx,state,sequenceNo)<-[("saved-signed","signed",O.null),("saved-intent","broadcast_intent",O.toNullable $ num 1)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+fixture c (ApproveScanSpend event) = PG.withTransaction c $ do
+  let text=O.sqlStrictText
+      spends=O.table "treasury_spends" $ p6 (O.requiredTableField "chain",O.requiredTableField "event_id",O.requiredTableField "anchor",O.requiredTableField "economic_json",O.requiredTableField "proof_json",O.requiredTableField "critical_sequence")
+  economic<-either (fail . T.unpack) pure (W.economicOutflow "Native" $ W.chainEventEvidence event)
+  void $ O.runInsert c O.Insert {O.iTable=spends,O.iRows=[(text "Native",text $ W.chainEventId event,text $ W.chainEventAnchor event,text $ TE.decodeUtf8 $ BL.toStrict $ encode economic,text "{}",O.sqlInt8 1)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runUpdate c O.Update {O.uTable=S.chainEvents,O.uUpdateWith= \r->r {S.eventReview=O.sqlInt8 0},
+    O.uWhere= \r->S.eventChain r O..== text "Native" O..&& S.eventId r O..== text (W.chainEventId event),O.uReturning=O.rCount}
+
+fixture c ResetOperatingScan = void $ O.runDelete c O.Delete {O.dTable=S.checkpoints,
+  O.dWhere= \(chain,_)->chain O..== O.sqlStrictText "SolanaOperating",O.dReturning=O.rCount}
+fixture c (LatestSourceState did) = do
+  rows<-O.runSelect c $ fmap snd $ O.limit 1 $ O.orderBy (O.desc fst) $ do
+    (key,source,state,_,_,_)<-O.selectTable S.sourceChecks
+    O.where_ (source O..== O.sqlStrictText did)
+    pure (key,state)
+  case rows of [state]->pure state; _->fail "missing source recovery"

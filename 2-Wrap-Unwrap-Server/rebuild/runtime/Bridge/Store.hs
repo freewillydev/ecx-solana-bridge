@@ -20,8 +20,8 @@ import Data.Scientific (Scientific,floatingOrInteger)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Control.Concurrent.MVar
 import Control.Exception
-import Control.Monad (unless,forM_,when)
-import Data.Aeson (FromJSON,ToJSON,Value(Null),encode,eitherDecodeStrict',withObject,(.:))
+import Control.Monad (unless,forM,forM_,when)
+import Data.Aeson (FromJSON,ToJSON,Value(Null),object,(.=),encode,eitherDecodeStrict',withObject,(.:))
 import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
@@ -59,9 +59,13 @@ data StoreRead a where
   ReadWithdrawal :: Text -> StoreRead (Maybe WithdrawalView)
   ReadOrder :: Text -> Text -> StoreRead W.OrderView
   PromotionCandidates :: StoreRead [Text]
+  ReadSourceWorkHash :: Text -> StoreRead Text
+  ReadCheckpoint :: Text -> StoreRead (Maybe Text)
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
+  CommitScan :: W.ScanBatch -> StoreWrite ()
+  ScanFailed :: Text -> Int64 -> Text -> StoreWrite ()
   RecordSourceCheck :: W.Deposit -> W.SourceCheck -> StoreWrite ()
   PromoteDeposit :: Int64 -> Text -> StoreWrite Bool
   Pause :: Text -> StoreWrite ()
@@ -111,6 +115,8 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
     row <- metadata c identity
     case operation of
       ReadState -> pure (LedgerState (S.criticalSequence row) (S.backupSequence row) (S.paused row/=0) (S.pauseReason row))
+      ReadSourceWorkHash identifier -> sourceWorkHash c identifier
+      ReadCheckpoint chain -> readCheckpoint c chain
       ReadSource identifier -> readSource c identifier >>= asDeposit
       ReadSourceEvidence txid -> sourceEvidence c txid
       PromotionCandidates -> promotionCandidates c
@@ -123,6 +129,8 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
 evalWrite :: Writer -> StoreWrite a -> IO a
 evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
  let policy=executionTerms config; limit=admissionLimits config in case operation of
+  CommitScan batch -> commitScan c batch
+  ScanFailed chain now code -> scanFailed c chain now code
   RecordSourceCheck expected check -> do
     current <- readSource c (W.depositId expected)
     snapshot <- asDeposit current
@@ -757,3 +765,242 @@ recordSourceCheck c source check = do
       O.uUpdateWith= \row->row {S.paused=O.sqlInt8 1,S.pauseReason=O.sqlStrictText "source_recovery_review"},
       O.uWhere= \row->S.singleton row O..== O.sqlInt8 1,O.uReturning=O.rCount}
     audit c "source_recovery" (did<>":"<>state)
+
+-- Preserve the existing hash preimage exactly: changing it invalidates saved
+-- source-restoration and replacement approvals. Queries project only bound work.
+sourceWorkHash :: PG.Connection -> Text -> IO Text
+sourceWorkHash c intent = do
+  obligations <- O.runSelect c $ do
+    r <- O.selectTable S.obligations
+    O.where_ (S.obligationId r O..== O.sqlStrictText intent)
+    pure (S.obligationId r,S.obligationOrder r,S.obligationDeposit r,S.obligationKind r,S.obligationAsset r,S.obligationAmount r,S.obligationRecipient r)
+    :: IO [(Text,Text,Text,Text,Text,Int64,Text)]
+  work <- O.runSelect c $ do
+    (key,chain,resolved,common) <- S.workIntents
+    O.where_ (key O..== O.sqlStrictText intent)
+    pure (chain,resolved O..== O.sqlInt8 1,common)
+    :: IO [(Text,Bool,Maybe Text)]
+  preparations <- O.runSelect c $ O.orderBy (O.asc (\(n,_,_,_,_)->n)) $ do
+    (key,n,policy,draft,retired,cancelled) <- S.workPreparations
+    O.where_ (key O..== O.sqlStrictText intent)
+    pure (n,policy,draft,retired,cancelled O..== O.sqlInt8 1)
+    :: IO [(Int64,Text,Maybe Text,Maybe Text,Bool)]
+  attempts <- O.runSelect c $ O.orderBy (O.asc (\(_,_,n,_,_)->n) <> O.asc (\(tx,_,_,_,_)->tx)) $ do
+    (tx,key,state,n,sequenceNo,observation) <- S.workAttempts
+    O.where_ (key O..== O.sqlStrictText intent)
+    pure (tx,state,n,sequenceNo,observation)
+    :: IO [(Text,Text,Int64,Maybe Int64,Maybe Text)]
+  cancellations <- O.runSelect c $ O.orderBy (O.asc (\(n,_,_,_)->n)) $ do
+    (key,n,reason,cleanup,completed) <- S.workCancellations
+    O.where_ (key O..== O.sqlStrictText intent)
+    pure (n,reason,cleanup,completed O..== O.sqlInt8 1)
+    :: IO [(Int64,Text,Text,Bool)]
+  fees <- O.runSelect c $ do
+    (key,asset,n,released) <- S.workFees
+    O.where_ (key O..== O.sqlStrictText intent)
+    pure (asset,n,released O..== O.sqlInt8 1)
+    :: IO [(Text,Int64,Bool)]
+  drafts <- O.runSelect c $ O.orderBy (O.asc (\(n,_,_,_,_,_)->n)) $ do
+    draft@(_,parent,_,_,_,_) <- S.replacementDrafts
+    (tx,key,_,_,_,_) <- S.workAttempts
+    O.where_ (parent O..== tx O..&& key O..== O.sqlStrictText intent)
+    pure draft
+    :: IO [(Int64,Text,Int64,Text,Text,Text)]
+  cancelled <- O.runSelect c $ O.orderBy (O.asc (\(_,_,n)->n)) $ do
+    decision@(draft,_,_) <- S.replacementCancellations
+    (n,parent,_,_,_,_) <- S.replacementDrafts
+    (tx,key,_,_,_,_) <- S.workAttempts
+    O.where_ (draft O..== n O..&& parent O..== tx O..&& key O..== O.sqlStrictText intent)
+    pure decision
+    :: IO [(Int64,Text,Int64)]
+  let hashJson=digest . BL.toStrict . encode
+      base=hashJson (obligations,work,preparations,attempts,cancellations,fees)
+  pure (if null drafts && null cancelled then base else digest $ BL.toStrict $ encode (base,drafts,cancelled))
+
+scanAssets :: [(Text,Asset)]
+scanAssets=[("Native",Native),("Solana",Wrapped),("SolanaOperating",Sol)]
+readCheckpoint :: PG.Connection -> Text -> IO (Maybe Text)
+readCheckpoint c chain = do
+  require (chain `elem` map fst scanAssets) "invalid_scan_chain"
+  rows <- O.runSelect c $ do
+    (key,anchor) <- O.selectTable S.checkpoints
+    O.where_ (key O..== O.sqlStrictText chain)
+    pure anchor
+  case rows of []->pure Nothing; [anchor]->pure(Just anchor); _->reject "duplicate_checkpoint"
+
+observeDeposit :: PG.Connection -> W.Deposit -> IO ()
+observeDeposit c deposit = do
+  let did=W.depositId deposit; currency=W.depositAsset deposit; quantity=W.depositAmount deposit
+      seen=W.depositSeenAt deposit; depth=W.depositConfirmations deposit; eligible=W.depositEligible deposit
+      oid=W.depositOrder deposit; anchor=W.depositAnchor deposit
+  require (units quantity>0 && depth>=0 && seen>=0 && not(T.null did) && T.length did<=160) "invalid_deposit"
+  forM_ oid $ \identifier->do
+    orders <- O.runSelect c $ do
+      row <- O.selectTable S.orders
+      O.where_ (S.orderId row O..== O.sqlStrictText identifier)
+      pure (S.requestJson row,S.policyJson row)
+      :: IO [(Text,Text)]
+    (request,savedPolicy) <- case orders of
+      [(request,policy)]->(,) <$> decodeSaved request <*> decodeSaved policy
+      _->reject "deposit_order_missing"
+    require (sourceAsset (W.direction request)==currency) "deposit_asset_mismatch"
+    when (currency==Native && eligible) $ require (depth>=nativeDepth savedPolicy) "deposit_confirmation_policy_mismatch"
+  old <- O.runSelect c $ do
+    row <- O.selectTable S.deposits
+    O.where_ (S.depositId row O..== O.sqlStrictText did)
+    pure row
+    :: IO [S.Deposit]
+  let bit=if eligible then 1 else 0; text=O.sqlStrictText; num=O.sqlInt8
+  case old of
+    [] -> do
+      _ <- O.runInsert c O.Insert {O.iTable=S.deposits,
+        O.iRows=[S.Deposit (text did) (maybe O.null (O.toNullable . text) oid) (text $ T.pack $ show currency)
+          (num $ units quantity) (text anchor) (num seen) (num $ fromIntegral depth) (num bit) (num 0) (text "observed")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      post c ("deposit:"<>did) "observed customer value"
+        [Posting currency (maybe Unallocated (const Principal) oid) (toInteger $ units quantity),Posting currency External (negate $ toInteger $ units quantity)]
+    [previous] -> do
+      require (S.depositOrder previous==oid && S.depositAsset previous==T.pack(show currency) && S.depositAmount previous==units quantity) "conflicting_deposit_evidence"
+      _ <- O.runUpdate c O.Update {O.uTable=S.deposits,
+        O.uUpdateWith= \r->r {S.depositAnchor=text anchor,S.depositDepth=num $ fromIntegral depth,S.depositEligible=num bit},
+        O.uWhere= \r->S.depositId r O..== text did,O.uReturning=O.rCount}
+      current <- readSource c did
+      when (S.depositEligible previous==1 && not eligible) $ do
+        reviewed <- O.runSelect c $ do
+          row <- O.selectTable S.obligations
+          O.where_ (S.obligationDeposit row O..== text did O..&& O.in_ (map text ["ready","paying"]) (S.obligationStatus row))
+          pure (S.obligationId row,S.obligationStatus row)
+          :: IO [(Text,Text)]
+        work <- forM reviewed $ \(intent,state)->do
+          hash <- sourceWorkHash c intent
+          pure $ object ["intent" .= intent,"previousStatus" .= state,"workHash" .= hash]
+        recordSourceCheck c current $ W.SourceUnavailable $ object ["reason" .= ("source_eligibility_lost"::Text),
+          "previousAnchor" .= S.depositAnchor previous,"anchor" .= anchor,"reviewedObligations" .= work]
+      when (currency/=Native && eligible) $ do
+        history <- O.runSelect c $ O.limit 1 $ O.orderBy (O.desc (\(n,_,_)->n)) $ do
+          (key,source,state,loss,_,_) <- O.selectTable S.sourceChecks
+          O.where_ (source O..== text did)
+          pure (key,state,loss)
+          :: IO [(Int64,Text,Int64)]
+        case history of
+          [(_,state,0)] | state/="restored"->recordSourceCheck c current (W.SourceRestored $ object ["anchor" .= anchor,"verifiedBy" .= ("source_observer"::Text)])
+          _->pure ()
+      when (not eligible && S.depositAllocated previous==1) $ do
+        covered <- O.runSelect c $ do
+          key <- S.accountedLosses
+          O.where_ (key O..== text did)
+          pure key
+          :: IO [Text]
+        when (null covered) $ do
+          pauseScan c "source_reorg_review"
+          _ <- O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \r->r {S.obligationStatus=text "review"},
+            O.uWhere= \r->S.obligationDeposit r O..== text did O..&& O.not (O.in_ (map text ["paid","cancelled"]) (S.obligationStatus r)),O.uReturning=O.rCount}
+          pure ()
+    _->reject "duplicate_deposit"
+
+pauseScan :: PG.Connection -> Text -> IO ()
+pauseScan c reason = do
+  _ <- O.runUpdate c O.Update {O.uTable=S.deployment,
+    O.uUpdateWith= \r->r {S.paused=O.sqlInt8 1,S.pauseReason=O.sqlStrictText reason},
+    O.uWhere= \r->S.singleton r O..== O.sqlInt8 1,O.uReturning=O.rCount}
+  pure ()
+scanHealth :: PG.Connection -> Text -> Int64 -> Maybe Text -> IO ()
+scanHealth c chain now failure = do
+  old <- O.runSelect c $ do
+    (key,success,_,_) <- O.selectTable S.scanHealth
+    O.where_ (key O..== O.sqlStrictText chain)
+    pure success
+    :: IO [Maybe Int64]
+  let nullable=maybe O.null (O.toNullable . O.sqlInt8)
+      success=if failure==Nothing then Just now else case old of [prior]->prior; _->Nothing
+      row=(O.sqlStrictText chain,nullable success,maybe O.null (O.toNullable . O.sqlStrictText) failure,O.sqlInt8 now)
+  case old of
+    []->O.runInsert c O.Insert {O.iTable=S.scanHealth,O.iRows=[row],O.iReturning=O.rCount,O.iOnConflict=Nothing} >> pure ()
+    [_]->O.runUpdate c O.Update {O.uTable=S.scanHealth,O.uUpdateWith=const row,O.uWhere= \(key,_,_,_)->key O..== O.sqlStrictText chain,O.uReturning=O.rCount} >> pure ()
+    _->reject "duplicate_scan_health"
+scanFailed :: PG.Connection -> Text -> Int64 -> Text -> IO ()
+scanFailed c chain now code = do
+  require (chain `elem` map fst scanAssets && now>=0 && not(T.null code) && T.length code<=160) "invalid_scan_failure"
+  old <- O.runSelect c $ do
+    (key,_,failure,_) <- O.selectTable S.scanHealth
+    O.where_ (key O..== O.sqlStrictText chain)
+    pure failure
+    :: IO [Maybe Text]
+  when (old/=[Just code]) $ audit c "scanner_failure" (chain<>":"<>code)
+  scanHealth c chain now (Just code)
+  pauseScan c ("scanner_unavailable:"<>chain)
+
+commitScan :: PG.Connection -> W.ScanBatch -> IO ()
+commitScan c batch = do
+  let chain=W.scanChain batch; now=W.scanTime batch; origin=W.scanOrigin batch; next=W.scanNext batch
+      deposits=W.scanDeposits batch; events=W.scanEvents batch; text=O.sqlStrictText; num=O.sqlInt8
+  require (chain `elem` map fst scanAssets && now>=0 && length deposits<=1000 && length events<=1000) "invalid_scan_batch"
+  require (all (\anchor->not(T.null anchor) && T.length anchor<=128) [origin,next]) "invalid_scan_anchor"
+  require (all (\d->Just(W.depositAsset d)==lookup chain scanAssets) deposits) "scan_asset_mismatch"
+  previous <- readCheckpoint c chain
+  require (previous==W.scanPrevious batch) "stale_scan_cursor"
+  origins <- O.runSelect c $ do
+    (key,anchor) <- O.selectTable S.scanOrigins
+    O.where_ (key O..== text chain)
+    pure anchor
+    :: IO [Text]
+  case origins of
+    []->O.runInsert c O.Insert {O.iTable=S.scanOrigins,O.iRows=[(text chain,text origin)],O.iReturning=O.rCount,O.iOnConflict=Nothing} >> pure ()
+    [saved]->require (saved==origin) "scan_origin_mismatch"
+    _->reject "duplicate_scan_origin"
+  mapM_ (observeDeposit c) deposits
+  forM_ events $ \event->do
+    let identifier=W.chainEventId event; anchor=W.chainEventAnchor event; kind=W.chainEventKind event
+        proof=W.chainEventEvidence event
+        evidence=encodeSaved $ object ["chain" .= chain,"id" .= identifier,"anchor" .= anchor,"kind" .= kind,"proof" .= proof]
+        hash=digest (TE.encodeUtf8 evidence)
+        paymentChain=if chain=="SolanaOperating" then "Solana" else chain
+    require (not(T.null identifier) && T.length identifier<=128 && T.length anchor<=128) "invalid_observation_identity"
+    require (kind `elem` ["incoming","unmatched_incoming","outgoing","failed","reference","unsupported","unclassified","awaiting_verifier","disputed"]) "invalid_observation_kind"
+    require (T.length evidence<=8192) "observation_evidence_too_large"
+    attempts <- O.runSelect c $ do
+      (tx,intent,state,_,sequenceNo,observation) <- S.workAttempts
+      (key,currency,_,_) <- S.workIntents
+      O.where_ (intent O..== key O..&& tx O..== text identifier O..&& currency O..== text paymentChain)
+      pure (state,sequenceNo,observation)
+      :: IO [(Text,Maybe Int64,Maybe Text)]
+    formerWinners <- O.runSelect c $ do
+      (tx,observation) <- S.winnerHistory
+      O.where_ (tx O..== text identifier)
+      pure observation
+      :: IO [Text]
+    treasury <- O.runSelect c $ do
+      (currency,key,approvedAnchor,economic) <- S.treasurySpendEffects
+      O.where_ (currency O..== text chain O..&& key O..== text identifier)
+      pure (approvedAnchor,economic)
+      :: IO [(Text,Text)]
+    let known=any (\(state,sequenceNo,observation)->state `elem` ["broadcast_intent","settled","failed"] ||
+          state=="review" && paymentChain=="Native" && maybe False (>0) sequenceNo && maybe False (`elem` formerWinners) observation) attempts
+        approved=case W.economicOutflow chain proof of Right economic->treasury==[(anchor,encodeSaved economic)]; Left _->False
+        review=kind `elem` ["unsupported","unclassified","disputed"] || kind=="outgoing" && not known && not approved
+        bit=if review then 1 else 0
+    proofs <- O.runSelect c $ do
+      (key,_,_,_) <- O.selectTable S.observationEvidence
+      O.where_ (key O..== text hash)
+      pure key
+      :: IO [Text]
+    when (null proofs) $ do
+      _ <- O.runInsert c O.Insert {O.iTable=S.observationEvidence,O.iRows=[(text hash,text chain,text identifier,text evidence)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      pure ()
+    old <- O.runSelect c $ do
+      row <- O.selectTable S.chainEvents
+      O.where_ (S.eventChain row O..== text chain O..&& S.eventId row O..== text identifier)
+      pure (S.eventId row)
+      :: IO [Text]
+    case old of
+      [] -> O.runInsert c O.Insert {O.iTable=S.chainEvents,
+        O.iRows=[S.ChainEvent (text chain) (text identifier) (text kind) (text anchor) (text hash) (num now) (num now) (num bit)],O.iReturning=O.rCount,O.iOnConflict=Nothing} >> pure ()
+      [_] -> O.runUpdate c O.Update {O.uTable=S.chainEvents,
+        O.uUpdateWith= \r->r {S.eventKind=text kind,S.eventAnchor=text anchor,S.eventHash=text hash,S.eventLastSeen=num now,
+          S.eventReview=O.ifThenElse (S.eventReview r O..> num bit) (S.eventReview r) (num bit)},
+        O.uWhere= \r->S.eventChain r O..== text chain O..&& S.eventId r O..== text identifier,O.uReturning=O.rCount} >> pure ()
+      _->reject "duplicate_chain_event"
+    when review (pauseScan c $ "chain_review:"<>chain<>":"<>kind)
+  case previous of
+    Nothing->O.runInsert c O.Insert {O.iTable=S.checkpoints,O.iRows=[(text chain,text next)],O.iReturning=O.rCount,O.iOnConflict=Nothing} >> pure ()
+    Just _->O.runUpdate c O.Update {O.uTable=S.checkpoints,O.uUpdateWith=const(text chain,text next),O.uWhere= \(key,_)->key O..== text chain,O.uReturning=O.rCount} >> pure ()
+  scanHealth c chain now Nothing

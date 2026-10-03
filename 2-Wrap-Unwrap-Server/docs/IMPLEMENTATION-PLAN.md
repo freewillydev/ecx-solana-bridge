@@ -32,13 +32,14 @@ Solana message/SDK/payment validation now passes captured Devnet proofs and offl
 contracts; the actual cached SDK FFI matches its public-key codec vector.
 Solana deposit/Pay proof validation and anchored signature pagination now pass
 captured-effect and offline protocol tests. Adapter/workflow integration, high-level
-evaluators, native observation, atomic scan commits, observer orchestration,
+evaluators, native observation, observer orchestration,
 SDK build integration and durable execution remain unfinished. Closed deposit
 promotion now passes PostgreSQL acceptance for both directions, exact preserved
 holds, historical terms, rejection paths and restart replay. Source-check persistence
 now passes PostgreSQL snapshot/proof binding, loss/restoration replay and covered
 capital-return checks; native detection and recovery approval/cover authorization
-still need integration.
+still need integration. Atomic scan storage now passes cursor/receipt rollback,
+replay, source suspension, saved-work hashing and outgoing classification contracts.
 No existing custody state has been moved. See the rebuild README for scoped counts
 and evidence; do not compare this subset against the entire old storage layer.
 

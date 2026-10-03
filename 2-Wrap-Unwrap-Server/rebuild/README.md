@@ -282,8 +282,30 @@ known deficit, stale receipts/proof hashes, invalid evidence, restoration and ex
 covered-capital return/replay. All row fixtures use Opaleye. The test cover is seeded;
 operator cover authorization and actual native loss detection are not claimed done.
 
+Atomic scan commits now preserve receipts, immutable origins/evidence, cursors and
+health in one transaction. Cursor comparison refuses stale batches; duplicate
+receipts cannot credit twice. Eligibility loss captures the suspended work hash
+before review. Outgoing classification distinguishes a signed attempt from a
+persisted broadcast intent; treasury approval must match both anchor and economic
+effect. Changed evidence reopens sticky review. Failed scans preserve their cursor
+and last successful scan time.
+
+Scan functions are 213→187 lines; suspended-work hashing is 36→48 lines. Combined:
+249→235 lines across two baseline files versus one existing Store file, excluding
+shared helpers, schema and dispatcher. Explicit projected/ordered Opaleye queries
+replace broad row reads in the hash calculation while preserving its saved preimage.
+Schema and wire definitions add 42 lines each; no production file is added. These
+scoped counts are not a whole-repository reduction while the baseline is retained.
+
+The PostgreSQL contract passes receipt/cursor rollback, replay, immutable binding,
+source suspension/restoration, hash goldens, signed/broadcast classification and
+changed treasury evidence across all three streams. The full QuickCheck/protocol
+suite passes, including bounded canonical economic parsing. Treasury authorization
+is fixture-seeded; populated replacement/cancellation hash and former-winner cases
+still need workflow acceptance. These are storage/protocol checks, not funded scans.
+
 Connecting those adapters to the high-level safe/critical runtime, actual host fence,
 dedicated signer and durable payment execution remains unfinished. Native observation,
-atomic scan commits, suspended-work/approval binding, operator loss-cover authorization,
+restoration approval binding, operator loss-cover authorization,
 observer orchestration, broader recovery and SDK build integration also remain.
 Passing these checks is not end-to-end payment, migration or real-chain acceptance.

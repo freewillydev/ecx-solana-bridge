@@ -157,3 +157,45 @@ eventHeads = O.selectTable $ O.table "chain_events" $ p5
 observationEvidence :: O.Table (TextField,TextField,TextField,TextField) (TextField,TextField,TextField,TextField)
 observationEvidence = O.table "observation_evidence" $ p4
   (O.requiredTableField "hash",O.requiredTableField "chain",O.requiredTableField "event_id",O.requiredTableField "evidence_json")
+
+-- Fixed recovery projections. Only closed operations execute these queries.
+workIntents :: O.Select (TextField,TextField,IntField,O.FieldNullable O.SqlText)
+workIntents = O.selectTable $ O.table "intents" $ p4
+  (O.requiredTableField "id",O.requiredTableField "chain",O.requiredTableField "resolved",O.requiredTableField "common_input")
+workPreparations :: O.Select (TextField,IntField,TextField,O.FieldNullable O.SqlText,O.FieldNullable O.SqlText,IntField)
+workPreparations = O.selectTable $ O.table "preparations" $ p6
+  (O.requiredTableField "intent_id",O.requiredTableField "generation",O.requiredTableField "policy_json",O.requiredTableField "draft_json",O.requiredTableField "retired_txid",O.requiredTableField "cancelled")
+workAttempts :: O.Select (TextField,TextField,TextField,IntField,O.FieldNullable O.SqlInt8,O.FieldNullable O.SqlText)
+workAttempts = O.selectTable $ O.table "attempts" $ p6
+  (O.requiredTableField "txid",O.requiredTableField "intent_id",O.requiredTableField "state",O.requiredTableField "preparation_generation",O.requiredTableField "critical_sequence",O.requiredTableField "observation_json")
+workCancellations :: O.Select (TextField,IntField,TextField,TextField,IntField)
+workCancellations = O.selectTable $ O.table "preparation_cancellations" $ p5
+  (O.requiredTableField "intent_id",O.requiredTableField "generation",O.requiredTableField "reason",O.requiredTableField "cleanup_json",O.requiredTableField "completed")
+workFees :: O.Select (TextField,TextField,IntField,IntField)
+workFees = O.selectTable $ O.table "fee_reservations" $ p4
+  (O.requiredTableField "intent_id",O.requiredTableField "asset",O.requiredTableField "amount",O.requiredTableField "released")
+replacementDrafts :: O.Select (IntField,TextField,IntField,TextField,TextField,TextField)
+replacementDrafts = O.selectTable $ O.table "native_replacement_drafts" $ p6
+  (O.requiredTableField "critical_sequence",O.requiredTableField "parent_txid",O.requiredTableField "fee",O.requiredTableField "draft_json",O.requiredTableField "work_hash",O.requiredTableField "reason")
+replacementCancellations :: O.Select (IntField,TextField,IntField)
+replacementCancellations = O.selectTable $ O.table "native_replacement_cancellations" $ p3
+  (O.requiredTableField "draft_sequence",O.requiredTableField "reason",O.requiredTableField "critical_sequence")
+winnerHistory :: O.Select (TextField,TextField)
+winnerHistory = O.selectTable $ O.table "native_winner_changes" $ p2
+  (O.requiredTableField "previous_txid",O.requiredTableField "previous_observation")
+treasurySpendEffects :: O.Select (TextField,TextField,TextField,TextField)
+treasurySpendEffects = O.selectTable $ O.table "treasury_spends" $ p4
+  (O.requiredTableField "chain",O.requiredTableField "event_id",O.requiredTableField "anchor",O.requiredTableField "economic_json")
+scanOrigins :: O.Table (TextField,TextField) (TextField,TextField)
+scanOrigins = O.table "scan_origins" $ p2 (O.requiredTableField "chain",O.requiredTableField "anchor")
+
+data ChainEventF t n = ChainEvent
+  { eventChain :: t, eventId :: t, eventKind :: t, eventAnchor :: t, eventHash :: t
+  , eventFirstSeen :: n, eventLastSeen :: n, eventReview :: n } deriving (Eq,Show)
+$(makeAdaptorAndInstance "pChainEvent" ''ChainEventF)
+type ChainEvent = ChainEventF Text Int64
+chainEvents :: O.Table (ChainEventF TextField IntField) (ChainEventF TextField IntField)
+chainEvents = O.table "chain_events" $ pChainEvent ChainEvent
+  { eventChain=O.requiredTableField "chain",eventId=O.requiredTableField "event_id"
+  , eventKind=O.requiredTableField "kind",eventAnchor=O.requiredTableField "anchor",eventHash=O.requiredTableField "evidence_hash"
+  , eventFirstSeen=O.requiredTableField "first_seen",eventLastSeen=O.requiredTableField "last_seen",eventReview=O.requiredTableField "needs_review" }
