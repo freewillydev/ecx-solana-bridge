@@ -281,3 +281,14 @@ replacementCancellationRows = O.table "native_replacement_cancellations" $ p3
 replacementMemberRows :: O.Table (IntField,TextField,IntField) (IntField,TextField,IntField)
 replacementMemberRows = O.table "native_replacement_members" $ p3
   (O.requiredTableField "draft_sequence",O.requiredTableField "txid",O.requiredTableField "critical_sequence")
+
+-- Append-only settlement recovery and canonical winner history.
+nativeRecoveryRows :: O.Table (TextField,TextField,TextField,TextField,IntField) (TextField,TextField,TextField,TextField,IntField)
+nativeRecoveryRows = O.table "native_payment_recoveries" $ p5
+  (O.requiredTableField "txid",O.requiredTableField "previous_observation",O.requiredTableField "state",O.requiredTableField "observation_json",O.requiredTableField "critical_sequence")
+nativeRecoveryDetails :: O.Select (TextField,TextField,TextField,TextField,IntField)
+nativeRecoveryDetails = O.selectTable $ O.table "native_payment_recovery_state" $ p5
+  (O.requiredTableField "txid",O.requiredTableField "previous_observation",O.requiredTableField "state",O.requiredTableField "observation_json",O.requiredTableField "critical_sequence")
+nativeWinnerChanges :: O.Table (IntField,TextField,TextField,TextField,TextField,TextField,IntField) (IntField,TextField,TextField,TextField,TextField,TextField,IntField)
+nativeWinnerChanges = O.table "native_winner_changes" $ p7
+  (O.requiredTableField "critical_sequence",O.requiredTableField "previous_txid",O.requiredTableField "winner_txid",O.requiredTableField "previous_observation",O.requiredTableField "observation_json",O.requiredTableField "evidence_hash",O.requiredTableField "fee_delta")

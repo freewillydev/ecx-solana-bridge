@@ -511,7 +511,7 @@ ledgerMain = do
         evalRead reader PaymentCandidates >>= check . (==["fee:"<>withdrawalKey,intent])
         evalRead reader PendingAttempts >>= check . (==sort [signedId nativeSigned,"fixture-signed-solana"])
         let nativeTx=signedId nativeSigned; nativeCosts=W.PaymentCosts (money 3) (money 0)
-        expectStore "settlement_attempt_changed" (evalWrite writer $ SettlePayment nativeRecorded nativeCosts "offline-finalized-proof")
+        expectStore "settlement_attempt_changed" (evalWrite writer $ SettlePayment nativeRecorded nativeCosts "{\"offline\":true}")
         fixture fixtures ReadyIntake
         expectStore "broadcast_intent_required" (evalWrite writer $ AuthorizeSend 100 nativeTx)
         broadcastSequence<-evalWrite writer (MarkBroadcast 100 nativeTx)
@@ -524,13 +524,13 @@ ledgerMain = do
         authorized<-evalWrite writer (AuthorizeSend 100 nativeTx)
         check (recordedSigned authorized==nativeSigned && recordedSequence authorized==Just broadcastSequence)
         beforeSettlement<-evalRead reader ReadBalances
-        expectStore "settlement_fee_or_evidence_invalid" (evalWrite writer $ SettlePayment authorized (W.PaymentCosts (money 3) (money 1)) "offline-finalized-proof")
-        expectStore "settlement_attempt_changed" (evalWrite writer $ SettlePayment authorized {recordedSigned=nativeSigned {signedBytes="changed"}} nativeCosts "offline-finalized-proof")
-        evalWrite writer (SettlePayment authorized nativeCosts "offline-finalized-proof")
+        expectStore "settlement_fee_or_evidence_invalid" (evalWrite writer $ SettlePayment authorized (W.PaymentCosts (money 3) (money 1)) "{\"offline\":true}")
+        expectStore "settlement_attempt_changed" (evalWrite writer $ SettlePayment authorized {recordedSigned=nativeSigned {signedBytes="changed"}} nativeCosts "{\"offline\":true}")
+        evalWrite writer (SettlePayment authorized nativeCosts "{\"offline\":true}")
         afterSettlement<-evalRead reader ReadBalances
         let change account=M.findWithDefault 0 (Native,account) afterSettlement-M.findWithDefault 0 (Native,account) beforeSettlement
         check (change FeePending==(-10) && change Operating==(-3) && change External==13 && change Principal==0 && change Float==0 && change Earned==0)
-        evalWrite writer (SettlePayment authorized nativeCosts "offline-finalized-proof")
+        evalWrite writer (SettlePayment authorized nativeCosts "{\"offline\":true}")
         evalRead reader ReadBalances >>= check . (==afterSettlement)
         expectStore "settlement_evidence_conflict" (evalWrite writer $ SettlePayment authorized nativeCosts "changed-proof")
         completed<-evalRead reader (ReadPayment $ "fee:"<>withdrawalKey)
@@ -1077,8 +1077,16 @@ fixture c (SeedTreasuryEvidence chain key anchor kind review proof) = PG.withTra
   let text=O.sqlStrictText; num=O.sqlInt8
       raw=TE.decodeUtf8 $ BL.toStrict $ encode $ object ["chain" .= chain,"id" .= key,"anchor" .= anchor,"kind" .= kind,"proof" .= proof]
       hash=digest (TE.encodeUtf8 raw)
-  void $ O.runInsert c O.Insert {O.iTable=S.observationEvidence,O.iRows=[(text hash,text chain,text key,text raw)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-  void $ O.runInsert c O.Insert {O.iTable=S.chainEvents,O.iRows=[S.ChainEvent (text chain) (text key) (text kind) (text anchor) (text hash) (num 110) (num 110) (num review)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  prior<-O.runSelect c $ do
+    (h,_,_,_)<-O.selectTable S.observationEvidence
+    O.where_ (h O..== text hash)
+    pure h
+    :: IO [T.Text]
+  when (null prior) $ void $ O.runInsert c O.Insert {O.iTable=S.observationEvidence,O.iRows=[(text hash,text chain,text key,text raw)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  changed<-O.runUpdate c O.Update {O.uTable=S.chainEvents,
+    O.uUpdateWith= \event->event {S.eventAnchor=text anchor,S.eventKind=text kind,S.eventHash=text hash,S.eventReview=num review},
+    O.uWhere= \event->S.eventChain event O..== text chain O..&& S.eventId event O..== text key,O.uReturning=O.rCount}
+  when (changed==0) $ void $ O.runInsert c O.Insert {O.iTable=S.chainEvents,O.iRows=[S.ChainEvent (text chain) (text key) (text kind) (text anchor) (text hash) (num 110) (num 110) (num review)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
 fixture c (SeedSourceEvidence tx hash) = PG.withTransaction c $ do
   let text=O.sqlStrictText; num=O.sqlInt8
       heads=O.table "chain_events" $ p8 (O.requiredTableField "chain",O.requiredTableField "event_id",O.requiredTableField "kind",O.requiredTableField "anchor",O.requiredTableField "evidence_hash",O.requiredTableField "first_seen",O.requiredTableField "last_seen",O.requiredTableField "needs_review")
@@ -2305,11 +2313,67 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   fixture fixtures CoverBackup
   ready
   authorized<-evalWrite writer (AuthorizeSend 110 $ signedId $ recordedSigned child)
-  evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 2) (money 0)) "offline replacement winner")
+  let anchor=T.replicate 64 "a"
+      proof member block=encodeText $ object ["txid" .= signedId(recordedSigned member),"blockhash" .= block,"height" .= (100::Int),"requiredDepth" .= (2::Int)]
+  evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 2) (money 0)) $ proof child anchor)
   evalRead reader PendingAttempts >>= check . all (`notElem` [signedId wire,signedId(recordedSigned child)])
   evalRead reader ReadNativeLockWork >>= check . (==Nothing)
   evaluateOffline (Left $ Request $ ReconcilePayment $ signedId wire)
   evaluateOffline (Left $ Request $ ReconcilePayment $ signedId $ recordedSigned child)
+  -- Actual PostgreSQL winner history with synthetic chain evidence: principal
+  -- remains paid while either family member becomes the canonical winner.
+  settled<-evalRead reader (ReadAttempt $ signedId $ recordedSigned child)
+  settledBalances<-evalRead reader ReadBalances
+  let record saved result=evalWrite writer (RecordNativeSettlement saved result)
+      sequenceNo=ledgerSequence <$> evalRead reader ReadState
+      scanned saved block depth fee=fixture fixtures $ SeedTreasuryEvidence "Native" (signedId $ recordedSigned saved) block "outgoing" 0
+        (object ["confirmations" .= (depth::Int),"walletNetUnits" .= ("-10"::T.Text),"feeUnits" .= money fee])
+      costs fee=W.PaymentCosts (money fee) (money 0)
+      candidate saved=elem (signedId $ recordedSigned saved) . map (signedId.recordedSigned) <$> evalRead reader NativeSettlementCandidates
+      b=T.replicate 64 "b"; c=T.replicate 64 "c"; d=T.replicate 64 "d"
+  record settled NativeConfirming
+  n<-sequenceNo
+  record settled NativeConfirming
+  sequenceNo >>= check . (==n)
+  record settled (NativeUnavailable "offline unavailable")
+  n2<-sequenceNo
+  record settled (NativeUnavailable "offline unavailable")
+  sequenceNo >>= check . (==n2)
+  candidate settled >>= check
+  scanned settled b 1 2
+  expectStore "native_recovery_scan_not_current" (record settled $ NativeReconfirmed (costs 2) $ proof settled b)
+  expectStore "native_recovery_cost_changed" (record settled $ NativeReconfirmed (costs 3) $ proof settled b)
+  scanned settled b 2 2
+  record settled (NativeReconfirmed (costs 2) $ proof settled b)
+  reconfirmed<-evalRead reader (ReadAttempt $ signedId $ recordedSigned settled)
+  n3<-sequenceNo
+  record reconfirmed (NativeReconfirmed (costs 2) $ proof reconfirmed b)
+  sequenceNo >>= check . (==n3)
+  candidate reconfirmed >>= check . not
+  evalRead reader ReadBalances >>= check . (==settledBalances)
+  familyNow<-map fst <$> evalRead reader (ReadNativeFamily identifier)
+  scanned parent c 2 1
+  expectStore "native_replacement_family_changed" (record reconfirmed $ NativeWinnerChanged [] (signedId wire) (costs 1) $ proof parent c)
+  expectStore "native_recovery_policy_changed" (record reconfirmed $ NativeWinnerChanged familyNow (signedId wire) (costs 2) $ proof parent c)
+  record reconfirmed (NativeWinnerChanged familyNow (signedId wire) (costs 1) $ proof parent c)
+  changed<-evalRead reader (ReadAttempt $ signedId wire)
+  let lowerFee=M.insertWith (+) (Native,Operating) 1 $ M.insertWith (+) (Native,External) (-1) settledBalances
+  evalRead reader ReadBalances >>= check . (==lowerFee)
+  evalRead reader (ReadPayment identifier) >>= check . (==PaymentPaid) . savedStatus
+  expectStore "native_settlement_changed" (record reconfirmed $ NativeWinnerChanged familyNow (signedId wire) (costs 1) $ proof parent c)
+  candidate changed >>= check . not
+  updatedFamily<-map fst <$> evalRead reader (ReadNativeFamily identifier)
+  scanned child d 2 2
+  record changed (NativeWinnerChanged updatedFamily (signedId $ recordedSigned child) (costs 2) $ proof child d)
+  restoredWinner<-evalRead reader (ReadAttempt $ signedId $ recordedSigned child)
+  candidate restoredWinner >>= check . not
+  evalRead reader ReadBalances >>= check . (==settledBalances)
+  evalRead reader PendingAttempts >>= check . all (`notElem` [signedId wire,signedId(recordedSigned child)])
+  evalRead reader ReadState >>= check . ledgerPaused
+  -- Same winner/proof after a winner change creates no stale recovery decision.
+  n4<-sequenceNo
+  record restoredWinner (NativeReconfirmed (costs 2) $ proof restoredWinner d)
+  sequenceNo >>= check . (==n4)
  where
   encodeText value=TE.decodeUtf8 (BL.toStrict $ encode value)
   -- These branches must replay/cancel from the ledger alone. Unavailable

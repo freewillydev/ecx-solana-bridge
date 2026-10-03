@@ -2,7 +2,7 @@
 -- Closed ledger operations. Connections, queries and transaction callbacks never
 -- escape this module; the runtime will interpret its customer/operator DSL here.
 module Bridge.Store
-  ( Reader, Writer, BridgeError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), StorePolicy(..), AllocationClaim(..), LedgerState(..), WithdrawalView(..), PaymentView(..), PaymentStatus(..), PreparedPayment(..), SignedAttempt(..), RecordedAttempt(..), NativeLockWork(..), CustodySnapshot(..)
+  ( Reader, Writer, BridgeError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), StorePolicy(..), AllocationClaim(..), LedgerState(..), WithdrawalView(..), PaymentView(..), PaymentStatus(..), PreparedPayment(..), SignedAttempt(..), RecordedAttempt(..), NativeLockWork(..), NativeSettlementCheck(..), CustodySnapshot(..)
   , withReader, withWriter, withFencedWriter, evalRead, evalWrite ) where
 
 import qualified Bridge.NativePayment as N
@@ -24,8 +24,9 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Control.Concurrent.MVar
 import Control.Exception
 import Control.Monad (unless,forM,forM_,when)
-import Data.Aeson (Key,FromJSON,ToJSON,Value(Null),object,(.=),encode,eitherDecodeStrict',withObject,(.:),(.:?))
+import Data.Aeson (Key,FromJSON,ToJSON,Value(Null,Object),object,(.=),encode,eitherDecodeStrict',withObject,(.:),(.:?))
 import Data.Aeson.Types (parseEither)
+import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
 import Data.IORef (newIORef,readIORef,writeIORef)
@@ -74,7 +75,12 @@ data NativeLockWork = NativeLockWork
 data CustodySnapshot = CustodySnapshot
   { custodyRevision :: Int64, custodyTotals :: M.Map Asset Integer
   , custodyHeads :: [(Text,Text)], custodySlot :: Int64, custodyPending :: [RecordedAttempt] } deriving (Eq,Show)
+data NativeSettlementCheck = NativeConfirming | NativeUnavailable Text
+  | NativeReconfirmed W.PaymentCosts Text
+  | NativeWinnerChanged [RecordedAttempt] Text W.PaymentCosts Text deriving (Eq,Show)
+
 data StoreRead a where
+  NativeSettlementCandidates :: StoreRead [RecordedAttempt]
   ReadReplacementDraftContext :: Int64 -> Text -> Amount -> StoreRead [(RecordedAttempt,N.NativeSigned)]
   ReadReplacementSigning :: Int64 -> Int64 -> StoreRead ([(RecordedAttempt,N.NativeSigned)],N.NativeDraft)
   ReadReplacementPayment :: Int64 -> StoreRead Text
@@ -126,6 +132,7 @@ data StoreRead a where
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
+  RecordNativeSettlement :: RecordedAttempt -> NativeSettlementCheck -> StoreWrite ()
   RecordReplacement :: Int64 -> Int64 -> [(RecordedAttempt,N.NativeSigned)] -> N.NativeSigned -> StoreWrite RecordedAttempt
   SaveReplacementDraft :: Int64 -> RecordedAttempt -> N.NativeDraft -> Text -> StoreWrite Int64
   CancelReplacementDraft :: Int64 -> Text -> StoreWrite ()
@@ -223,6 +230,7 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
           O.where_ (S.eventId event O..== O.sqlStrictText identifier O..&& O.in_ (map O.sqlStrictText $ if chain=="Solana" then ["Solana","SolanaOperating"] else [chain]) (S.eventChain event))
           pure (S.eventId event)
         pure (not $ null (rows :: [Text]))
+      NativeSettlementCandidates -> nativeSettlementCandidates c
       ReadReplacementDraftContext now parent fee -> replacementDraftContext c identity now parent fee
       ReadReplacementSigning now decision -> replacementSigning c identity remote now decision
       ReadReplacementPayment decision -> do
@@ -298,6 +306,7 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
   RecordCustody revision now problem report -> recordCustody c revision now problem report
   MarkBroadcast now txid -> markBroadcast c config now txid
   AuthorizeSend now txid -> authorizeSend c config now txid
+  RecordNativeSettlement expected result -> recordNativeSettlement c (deploymentFingerprint $ paymentPolicy policy) expected result
   SettlePayment expected costs proof -> settlePayment c (deploymentFingerprint $ paymentPolicy policy) expected costs proof
   FailSolana expected fee proof -> failSolana c (deploymentFingerprint $ paymentPolicy policy) expected fee proof
   RefreshPaymentSource expected observed -> do
@@ -2948,3 +2957,159 @@ recordReplacement c config now decision expected signed = do
       require (count==1 && linked==1) "native_replacement_member_insert_failed"
       audit c "native_replacement_signed" txid
       readAttempt c txid
+
+-- Filter unchanged settled history in PostgreSQL before applying the recovery
+-- bound. The fixed JSON projections are inside this one closed Opaleye read.
+nativeSettlementCandidates :: PG.Connection -> IO [RecordedAttempt]
+nativeSettlementCandidates c = do
+  ids<-O.runSelect c $ O.limit 1001 $ O.orderBy (O.asc id) $ do
+    saved<-O.selectTable S.attempts
+    intent<-O.selectTable S.intents
+    O.where_ (S.attemptIntent saved O..== S.intentId intent O..&& S.intentChain intent O..== text "Native"
+      O..&& S.attemptState saved O..== text "settled")
+    -- CASE protects the native-only inner codec even if PostgreSQL evaluates
+    -- this expression before its WHERE filters (Solana proofs have another shape).
+    let proof=json $ O.ifThenElse (S.intentChain intent O..== text "Native" O..&& S.attemptState saved O..== text "settled")
+          (O.fromNullable (text "{}") (json (O.fromNullable (text "{}") $ S.attemptObservation saved) O..->> text "proof")) (text "{}")
+        anchor=O.fromNullable (text "") (proof O..->> text "blockhash")
+        depth=integer (proof O..->> text "requiredDepth") 0
+    healthy<-Exists.exists $ do
+      event<-O.selectTable S.chainEvents
+      (hash,_,_,raw)<-O.selectTable S.observationEvidence
+      let confirmations=integer ((json raw O..-> text "proof") O..->> text "confirmations") (-1)
+      O.where_ (S.eventChain event O..== text "Native" O..&& S.eventId event O..== S.attemptId saved
+        O..&& S.eventKind event O..== text "outgoing" O..&& S.eventReview event O..== O.sqlInt8 0
+        O..&& S.eventAnchor event O..== anchor O..&& S.eventHash event O..== hash
+        O..&& depth O..> O.sqlInt8 0 O..&& confirmations O..>= depth)
+      pure ()
+    reviewed<-Exists.exists $ do
+      (tx,state)<-S.nativeRecovery
+      O.where_ (tx O..== S.attemptId saved O..&& state O../= text "reconfirmed")
+      pure ()
+    O.where_ (O.not healthy O..|| reviewed)
+    pure (S.attemptId saved)
+  require (length ids<=1000) "native_settlement_recovery_backlog"
+  mapM (readAttempt c) ids
+ where
+  text=O.sqlStrictText
+  json :: S.TextField -> O.FieldNullable O.SqlJsonb
+  json=O.toNullable . O.unsafeCast "jsonb"
+  integer value fallback=O.unsafeCast "bigint" (O.fromNullable (text $ T.pack $ show (fallback::Int64)) value)
+
+-- Financial settlement stays final in the ledger. Confirmation loss creates a
+-- review, reconfirmation changes evidence only, and a family winner change books
+-- only its fee difference. No principal, reservation or intent is reopened.
+recordNativeSettlement :: PG.Connection -> Text -> RecordedAttempt -> NativeSettlementCheck -> IO ()
+recordNativeSettlement c identity expected result = do
+  let txid=signedId(recordedSigned expected); identifier=recordedPayment expected
+      text=O.sqlStrictText; num=O.sqlInt8
+  actual<-readAttempt c txid
+  require (actual==expected && recordedChain actual=="Native" && recordedState actual=="settled"
+    && maybe False (>0) (recordedSequence actual)) "native_settlement_changed"
+  context<-O.runSelect c $ do
+    intent<-O.selectTable S.intents
+    (key,asset,quantity,released)<-O.selectTable S.feeHolds
+    O.where_ (S.intentId intent O..== text identifier O..&& key O..== S.intentId intent)
+    pure (S.intentResolved intent,asset,quantity,released)
+    :: IO [(Int64,Text,Int64,Int64)]
+  require (context==[(1,"Native",units(recordedFee actual),1)]) "native_winner_context_changed"
+  previous<-maybe (reject "native_settlement_missing") pure (recordedObservation actual)
+  case result of
+    NativeWinnerChanged expectedFamily winnerId costs proof->do
+      family<-nativeFamily c identity identifier
+      require (map fst family==expectedFamily && winnerId/=txid && actual `elem` map fst family) "native_replacement_family_changed"
+      (winner,signed)<-case [(a,s)|(a,s)<-family,signedId(recordedSigned a)==winnerId] of
+        [member]->pure member; _->reject "native_family_winner_missing"
+      require (recordedState winner `elem` ["broadcast_intent","review"] && maybe False (>0) (recordedSequence winner)) "unrecorded_broadcast_observed"
+      oldSigned<-decodeSaved (signedPolicy $ recordedSigned actual)
+      oldCosts<-settledCosts actual oldSigned
+      hash<-nativeSettlementProof c winner signed costs proof
+      let saved=encodeSaved $ object ["costs" .= costs,"proof" .= proof]
+          delta=toInteger(units $ W.networkFee costs)-toInteger(units $ W.networkFee oldCosts)
+      require (T.length saved<=32768 && delta/=0 && abs delta<=toInteger(maxBound::Int64)) "invalid_native_settlement"
+      n<-nextSequence c
+      inserted<-O.runInsert c O.Insert {O.iTable=S.nativeWinnerChanges,
+        O.iRows=[(num n,text txid,text winnerId,text previous,text saved,text hash,num $ fromInteger delta)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      require (inserted==1) "native_winner_record_failed"
+      post c ("native-winner-fee:"<>T.pack(show n)) "canonical native winner fee adjustment"
+        [Posting Native Operating (negate delta),Posting Native External delta]
+      oldChanged<-O.runUpdate c O.Update {O.uTable=S.attempts,O.uUpdateWith= \r->r {S.attemptState=text "review"},O.uWhere= \r->S.attemptId r O..== text txid,O.uReturning=O.rCount}
+      newChanged<-O.runUpdate c O.Update {O.uTable=S.attempts,O.uUpdateWith= \r->r {S.attemptState=text "settled",S.attemptObservation=O.toNullable $ text saved},O.uWhere= \r->S.attemptId r O..== text winnerId,O.uReturning=O.rCount}
+      require (oldChanged==1 && newChanged==1) "native_winner_context_changed"
+      view<-readPayment c identity identifier
+      let customer=case paymentFunding(savedPayment view) of Conversion order _ _ _->Just order; Refund order _ _ _->Just order; EarnedFees{}->Nothing
+      forM_ customer $ \order->do
+        _<-O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.payoutTx=O.toNullable $ text winnerId},
+          O.uWhere= \r->S.orderId r O..== text order O..&& O.fromNullable (text "") (S.payoutTx r) O..== text txid,O.uReturning=O.rCount}
+        pure ()
+      pauseScan c "native_winner_changed"
+      audit c "native_winner_changed" (txid<>":"<>winnerId)
+    _->do
+      (state,saved)<-case result of
+        NativeConfirming->pure ("confirming",encodeSaved $ object ["reason" .= ("native_confirmation_policy_pending"::Text)])
+        NativeUnavailable reason->do
+          require (not(T.null reason) && T.length reason<=160) "invalid_native_recovery_reason"
+          pure ("unavailable",encodeSaved $ object ["reason" .= reason])
+        NativeReconfirmed costs proof->do
+          family<-nativeFamily c identity identifier
+          signed<-case [s|(a,s)<-family,a==actual] of [s]->pure s; _->reject "native_settlement_changed"
+          oldCosts<-settledCosts actual signed
+          require (costs==oldCosts) "native_recovery_cost_changed"
+          _<-nativeSettlementProof c actual signed costs proof
+          pure ("reconfirmed",encodeSaved $ object ["costs" .= costs,"proof" .= proof])
+      validateSavedJson 32768 saved
+      old<-O.runSelect c $ do
+        (tx,_,status,proof,_)<-S.nativeRecoveryDetails
+        O.where_ (tx O..== text txid)
+        pure (status,proof)
+        :: IO [(Text,Text)]
+      let base value=case value of Object fields->Object $ foldr KM.delete fields ["rebroadcastRecovery","operatorReason","rebroadcastProof"]; other->other
+      unchanged<-case old of
+        [(status,proof)] | status==state->(==) <$> (base <$> (decodeSaved proof :: IO Value)) <*> (decodeSaved saved :: IO Value)
+        []->pure (state=="reconfirmed" && previous==saved)
+        [_]->pure False
+        _->reject "duplicate_native_recovery_state"
+      unless unchanged $ do
+        n<-nextSequence c
+        _<-O.runInsert c O.Insert {O.iTable=S.nativeRecoveryRows,O.iRows=[(text txid,text previous,text state,text saved,num n)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+        when (state=="reconfirmed") $ do
+          _<-O.runUpdate c O.Update {O.uTable=S.attempts,O.uUpdateWith= \r->r {S.attemptObservation=O.toNullable $ text saved},O.uWhere= \r->S.attemptId r O..== text txid,O.uReturning=O.rCount}
+          pure ()
+        pauseScan c "native_settlement_recovery"
+        audit c "native_settlement_recovery" (txid<>":"<>state)
+
+settledCosts :: RecordedAttempt -> N.NativeSigned -> IO W.PaymentCosts
+settledCosts saved signed = do
+  observed<-maybe (reject "native_settlement_missing") decodeSaved (recordedObservation saved)
+  costs<-nativeProofField "costs" observed
+  proof<-nativeProofField "proof" observed >>= decodeSaved
+  txid<-nativeProofField "txid" proof
+  depth<-nativeProofField "requiredDepth" proof
+  require (txid==signedId(recordedSigned saved) && depth==N.planDepth(N.signedNativePlan signed)
+    && W.networkFee costs==N.signedNativeFee signed && units(W.accountRent costs)==0) "native_recovery_cost_changed"
+  pure costs
+
+nativeSettlementProof :: PG.Connection -> RecordedAttempt -> N.NativeSigned -> W.PaymentCosts -> Text -> IO Text
+nativeSettlementProof c saved signed costs raw = do
+  proof<-decodeSaved raw
+  txid<-nativeProofField "txid" proof
+  anchor<-nativeProofField "blockhash" proof
+  depth<-nativeProofField "requiredDepth" proof
+  height<-nativeProofField "height" proof :: IO Int64
+  let plan=N.signedNativePlan signed
+  require (txid==signedId(recordedSigned saved) && N.transactionId anchor && height>=0 && depth==N.planDepth plan
+    && W.networkFee costs==N.signedNativeFee signed && units(W.accountRent costs)==0) "native_recovery_policy_changed"
+  (kind,scanned,evidence)<-custodyEvent c "Native" txid
+  confirmations<-nativeProofField "confirmations" evidence
+  net<-nativeProofField "walletNetUnits" evidence
+  fee<-nativeProofField "feeUnits" evidence
+  require (kind=="outgoing" && scanned==anchor && confirmations>=depth
+    && net==T.pack(show $ negate $ toInteger $ units $ N.planAmount plan) && fee==N.signedNativeFee signed) "native_recovery_scan_not_current"
+  hashes<-O.runSelect c $ do
+    event<-O.selectTable S.chainEvents
+    O.where_ (S.eventChain event O..== O.sqlStrictText "Native" O..&& S.eventId event O..== O.sqlStrictText txid)
+    pure (S.eventHash event)
+  case hashes of [hash]->pure hash; _->reject "native_recovery_scan_not_current"
+
+nativeProofField :: FromJSON a => Key -> Value -> IO a
+nativeProofField key value=either (const $ reject "invalid_native_settlement") pure (parseEither (withObject "native proof" (.: key)) value)

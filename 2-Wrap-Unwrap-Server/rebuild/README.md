@@ -1196,25 +1196,40 @@ Closed pending reads now exclude resolved intents. Once one member settles, late
 reconciliation of siblings returns without RPC; their exact history remains intact.
 The Store also binds the original family member to the saved initial draft, and lock
 work reads validate replacement lineage before returning a multi-member family.
-Settled-family reorg/reconfirmation is separate unfinished recovery work, not handled
-by treating every historical losing attempt as a new pending payment.
+Settled-family recovery now has a separate closed worker operation. PostgreSQL filters
+healthy settled history before applying a 1,000-candidate bound. The runtime checks
+changed candidates through the shared family verifier even while paused or observing;
+unavailable RPC evidence records review and cannot authorize another payment.
 
-Latest checkpoint versus `b0ffcbb`: **4,043 → 4,151 production lines across the same
-five files** (+108, no new file/migration). Existing tests **2,752 → 2,825** across two
-files. This adds required integration; shared family verification, active-member
-selection and native confirmation/custody proofs avoid separate recovery engines.
-It does not claim a net whole-feature reduction or prove optimality from line counts.
+Confirmation loss/unavailability appends an immutable recovery decision. Reconfirmation
+requires the saved depth and costs plus current scanner evidence for the same bytes.
+A different canonical family winner must match the exact saved family and have recorded
+broadcast authority, the same amount/recipient/policy and corroborating scan evidence.
+Its atomic journal entry changes only the fee difference, retains the previous winner
+and evidence, and updates the customer payout link only when it still names that winner.
+Principal, released reservations and the resolved intent remain settled. The same
+operation supports customer and earned-fee payments; no synthetic order is introduced.
+Returning to a previous winner is supported, and old recovery rows cannot override a
+newer winner decision. Any new recovery decision leaves service paused for review.
 
-Validation: root Cabal build and QuickCheck; captured Signet templates with explicit
-offline RPC for absent, original-in-mempool, replacement-in-mempool and either-confirmed
-winner cases; idempotent lock recovery and rejection of an observed unsigned decision;
-disposable PostgreSQL contracts for lineage, original-draft binding, immutable decision
-and signature replay, synthetic settlement, pending-family closure and network-free
-sibling reconciliation. Actual executable/operator and HTTPS/SDK preparation-signing
-regressions also pass and clean up their processes. These checks do not constitute
-full native replacement operator-to-chain acceptance or live reorg evidence.
+Latest checkpoint versus `7cec1a8`: **3,908 → 4,110 production lines across the same
+four files** (+202, no new files/migrations); existing PostgreSQL contract
+**2,327 → 2,391** lines. This adds recovery functionality rather than reducing total
+code. It reuses the family validator, payment model, fee journal and existing recovery
+tables, including their append-only/binding triggers, instead of another payment engine.
 
-Still required: settled winner changes/reconfirmation, full replacement workflow
-acceptance, funded real-chain tests and deployed signer isolation. The family workflow
-is implemented but not yet accepted end to end on a live native node; the baseline
-remains until parity and populated migration.
+Validation: root Cabal build and QuickCheck; actual PostgreSQL confirmation-loss,
+unavailable/reconfirmed replay, scanner-depth/cost refusal, stale-snapshot rejection,
+lower-fee winner, return to the higher-fee winner, unchanged principal and resolved
+work, and exact fee-only balance deltas. The existing worker-unavailable-RPC contract
+also exercises durable recovery without money changes. Candidate filtering explicitly
+guards its native inner JSON codec: SQL WHERE evaluation order cannot be relied upon
+to exclude unrelated Solana proof formats before decoding. Existing synthetic Solana
+proofs exercise that guard. Actual executable and HTTPS/SDK regression checks also pass.
+These fixtures establish ledger/runtime contracts, not a live reorg or a newly signed
+native replacement. Captured-template family RPC checks remain separate evidence.
+
+Still required: explicitly approved rebroadcast of an evicted settled native payment,
+full replacement/reorg workflow acceptance, funded real-chain tests, deployed signer
+isolation, off-host backup/restore and populated migration. The baseline remains until
+parity and live acceptance; valuable-fund release also requires independent review.

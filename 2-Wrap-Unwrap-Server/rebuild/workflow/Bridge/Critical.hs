@@ -108,6 +108,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
           OperatorDSL PauseService{}->pure ()
           SigningDSL _->reject "signer_operation_forbidden"
           WorkerDSL RecoverNativeSources->pure ()
+          WorkerDSL RecoverNativeSettlements->pure ()
           WorkerDSL RecoverNativeLocks->pure ()
           WorkerDSL RunWorkerCycle->pure ()
           WorkerDSL ObserveChains->pure ()
@@ -307,6 +308,29 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         evalWrite writer (ResumeLedger now [("Native",N.nativeCheckpointHash native),("Solana",tokenOrigin settings),("SolanaOperating",operatingOrigin settings)] reviewed)
       evalCritical (WorkerDSL operation)=evalWorker operation
       evalWorker :: forall a. WorkerOperation a -> IO a
+      evalWorker RecoverNativeSettlements = guarded $ do
+        candidates<-evalRead reader NativeSettlementCandidates
+        outcomes<-forM candidates $ \saved->tryBridge $ do
+          inspected<-tryBridge $ do
+            (family,view)<-readSavedNativeFamily (N.nativeCall rpc native) native config reader (recordedPayment saved)
+            require (saved `elem` map fst family) "native_settlement_changed"
+            active<-activeNativeMember family view
+            case active of
+              Nothing->pure $ NativeUnavailable "native_settled_payment_unseen"
+              Just (winner,signed,depth,proof)->do
+                outcome<-nativeConfirmation (N.nativeCall rpc native) signed depth proof
+                case outcome of
+                  PaymentWaiting->pure NativeConfirming
+                  PaymentConfirmed costs evidence->pure $
+                    if winner==saved then NativeReconfirmed costs evidence
+                    else NativeWinnerChanged (map fst family) (signedId $ recordedSigned winner) costs evidence
+                  _->reject "unexpected_native_payment_failure"
+          let result=either (\(BridgeError code)->NativeUnavailable code) id inspected
+          committed<-tryBridge (evalWrite writer $ RecordNativeSettlement saved result)
+          case committed of
+            Right ()->pure ()
+            Left (BridgeError code)->evalWrite writer (RecordNativeSettlement saved $ NativeUnavailable code)
+        mapM_ (either throwIO pure) outcomes
       evalWorker RecoverNativeSources = do
         sources<-evalRead reader NativeSourceCandidates
         outcomes<-forM sources $ \source->tryBridge $ do
@@ -473,8 +497,9 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         now<-floor <$> getPOSIXTime
         evalWrite writer (ExpireQuotes now)
         outcomes<-reconcilePending
+        settled<-tryBridge (evalWorker RecoverNativeSettlements)
         evalWorker ReconcileCustody
-        mapM_ (either throwIO pure) (locks:scanned:sources:outcomes)
+        mapM_ (either throwIO pure) (locks:scanned:sources:settled:outcomes)
       -- Inspect each economic payment once, including all replacement members.
       -- A policy error on one family must not hide another finalized effect.
       reconcilePending=do
