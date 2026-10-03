@@ -1,8 +1,8 @@
 # Replacement bridge
 
 Baseline: `ba31b28`. This package is a replacement under construction, not a
-second deployed bridge. Root Cabal builds it alongside the baseline. It has no
-custody credentials or running bridge process. Its storage contracts use a
+second deployed bridge. Root Cabal builds it alongside the baseline. Its executable has been tested against disposable state; it has not been
+activated against existing custody. Its storage contracts use a
 disposable PostgreSQL database, never the existing custody database. Existing state
 must remain untouched until migration and real-chain acceptance pass.
 
@@ -58,6 +58,37 @@ establish authorization, finality or crash safety. No module-count or line-count
 quota substitutes for those requirements. Keep one build job and warm caches.
 Old installer artifacts do not certify this package. Off-host restoration,
 canonical activation and independent review remain explicit wider release gates.
+
+## Running the development executable
+
+From the repository root, Cabal builds the native application plus the existing
+SDK FFI and GHC JavaScript assets through `ecx-build-assets`:
+
+```sh
+cabal build ecx-bridge-rebuild:exe:ecx-bridge-rebuild -j1
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- check-config CONFIG
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- observe CONFIG
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- serve CONFIG
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- signer CONFIG KEYFILE
+```
+
+`CONFIG` is a reviewed deployment configuration, not the test fixture. Supply
+local `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER` and optional `PGPASSWORD` through
+the service environment; public modes also require a distinct SELECT-only
+`PGREADUSER` and optional `PGREADPASSWORD`. Signer mode uses its own SELECT-only
+`PGUSER`, native signing credential and private custody key. `ECX_INTERFACE_CONFIG`
+and `ECX_ASSETS` are optional overrides; assets default to Cabal-generated output.
+The existing schema-19 ledger and matching initialized host fence are prerequisites.
+`serve` enables the customer/payment mode but still starts paused and currently has
+no rebuilt resume command. `observe` refuses customer creation and outgoing sends.
+Neither command is public-release or canonical-custody approval.
+
+The process contract uses the existing disposable-database runner with
+`ECX_REBUILD_SERVER_ONLY=1` and `ECX_REBUILD_EXECUTABLE` set to the freshly built
+application. Invoke the runner through `cabal run` so Cabal supplies its fixture
+data directory (direct binary invocation requires `ecx_bridge_rebuild_datadir`).
+It creates and removes its own configuration, child process and host fence; it
+must never target the custody ledger. The shared PG server remains running.
 
 ## Current checkpoint
 
@@ -368,7 +399,8 @@ Servant BasicAuth, 16-request concurrency and 4096-byte input bounds. Critical o
 the private ClientM with pinned trust, no proxy/redirect/retry, a 60-second timeout
 and a 512-KiB response bound. Uncertain signing outcomes retain the preparation and
 pause. Existing recorded attempts are verified without another signer request.
-These are library entry points; no production executable calls them yet.
+The executable wires signer and public-worker modes separately; successful
+worker-to-signer TLS signing acceptance is still pending.
 
 Closed MarkBroadcast and AuthorizeSend operations require current intake/custody,
 saved paying work, source eligibility and the current native replacement member.
@@ -495,7 +527,8 @@ preparation, signing, settlement and failure, plus a real PostgreSQL runtime cyc
 with unavailable RPC retaining balances/pending work and recording all three scan
 failures. QuickCheck verifies loop backoff and cancellation. Positive funded cycles,
 native lock reconstruction, recovery-family parity and explicit resume remain
-unfinished; the loop is not yet attached to an executable or HTTP lifetime.
+unfinished. The executable now owns HTTP and the worker together through
+structured concurrency; either terminating cancels its sibling.
 
 Customer admission now has the baseline native dust/fee funding preview and Solana
 account/fee/rent/unsigned-simulation preflight. Its adapter, fingerprint, depth and
@@ -522,14 +555,28 @@ public settings from one validated record. The financial fingerprint matches the
 baseline executable and captured Devnet identity exactly; obsolete socket fields,
 missing history anchors, incompatible limits and unsafe public URLs are rejected.
 These are offline configuration checks, not live history-completeness proof.
-The executable and browser assets remain unwired; the worker loop still needs its
-server lifetime owner; this library checkpoint does not claim a running replacement service.
+The root-Cabal executable now wires this runtime to HTTP, the worker loop and the
+existing GHC-JavaScript browser build. `serve` and `observe` bind loopback, require
+separate database reader credentials and hold the durable host fence. Startup
+remains paused; there is no automatic resume or ledger/fence initialization.
+The separate `signer` mode checks its SELECT-only role and custody key before
+serving the authenticated HTTPS API. Public startup currently refuses canonical
+profiles and backup-required deployments until recovery integration is complete.
+
+Actual child-process acceptance on disposable PostgreSQL verifies browser HTML,
+CSS and generated JavaScript delivery, observation-only configuration, removed
+operator HTTP routes, unchanged balances, paused unavailable-RPC startup and host
+lock release after process termination. WAI tests cover fixed asset paths,
+missing-asset refusal, traversal/hidden-file rejection and browser security headers.
+This is executable/startup acceptance, not a funded bridge or browser-wallet test.
 
 Scoped physical-line comparisons (not whole-product reduction claims):
 
 | Piece | Baseline | Rebuild | Scope limit |
 | --- | ---: | ---: | --- |
 | Deployment configuration | 133 / 1 file | 136 / 1 file | Adds six typed settings builders and required history anchors; baseline identity preserved |
+| Executable startup/CLI | 91 / 1 file, plus baseline Runtime startup | 79 / 1 file | HTTP/worker lifetime and signer wired; operator/backup/init command parity unfinished |
+| Web boundary | 84 / 1 file | 71 / 1 file (previous checkpoint 53) | Shared customer/signer limits and fixed browser assets; no customer Unix listener |
 | Host fence | 132 / 1 file | 128 / 1 file + 7-line Store constructor | Same durable protocol; explicit directory replaces environment lookup |
 | Customer order workflow | 78 / 1 file | 63 / 1 file | Closed reads replace raw row/ledger access; funded HTTP acceptance pending |
 | Admission/previews | 106 / 1 file | 86-line module + 20 lines in existing native adapter | Same total; customer runtime wired, funded acceptance pending |
@@ -537,7 +584,7 @@ Scoped physical-line comparisons (not whole-product reduction claims):
 | Custody snapshot function | 79 / existing custody file | 71 / existing Store file | Reuses freshness/balance helpers; live acceptance pending |
 | Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
 | Signer module | 144 / 1 file | 117 / 1 file | Now includes startup key validation and shared file permissions; replacement parity pending |
-| Signer transport | 103 / 1 file plus shared web boundary | 69 / 1 file + shared 53-line Web module | Shared module also serves customer API; initial signer route only |
+| Signer transport | 103 / 1 file plus shared web boundary | 69 / 1 file + shared 71-line Web module | Shared module also serves customer API; initial signer route only |
 | Customer/worker runtime | Part of broader Runtime | 294 / 1 file (previous checkpoint 232) | Adds recovery-first cycle, refreshed custody/backup gates and bounded retry interval |
 | Focused source validation | 63-line mixed validation/storage/recovery function | 67-line dedicated module | Covered-source recovery is still separate unfinished work |
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
@@ -562,7 +609,7 @@ all journal rows. Terminal attempts are still checked individually, so long-hist
 performance remains to be measured. Source eligibility checking is shared with signing.
 
 Still required: successful TLS worker/signer integration and deployed OS/native-RPC
-authority separation; executable/browser integration and worker lifetime ownership;
+authority separation; private operator/recovery/resume integration and actual browser-wallet acceptance;
 integrated positive submission/reconciliation acceptance; retry, cancellation,
 replacement/winner changes and covered-source approvals generalized to earned
 funding; complete custody acceptance and Haskell backup/restore integration; actual populated-ledger migration and funded
@@ -573,5 +620,5 @@ real-chain acceptance permit deletion. Key seeds alone do not restore ledger his
 Startup integration finding: the retained baseline remote-backup adapter still
 invokes a Python uploader. It cannot be adopted as the final Haskell rebuild;
 replace that operational path before claiming complete backup/restore support.
-The host-fenced writer is ready for the executable, but does not itself initialize
-a database, configure a server, resume payment or provide remote backup.
+The executable uses the host-fenced writer, but does not initialize a database,
+initialize/adopt a fence, resume payment or provide remote backup.

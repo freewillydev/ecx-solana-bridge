@@ -10,7 +10,7 @@ import qualified Bridge.Fence as Fence
 import qualified Data.Text as T
 import System.Posix.Process (forkProcess,getProcessStatus,exitImmediately,ProcessStatus(..))
 import System.Exit (ExitCode(..))
-import Bridge.Web (customerApplication)
+import Bridge.Web (customerApplication,publicApplication)
 import qualified Bridge.Wire as W
 import qualified Bridge.Domain as D
 import qualified Data.Map.Strict as M
@@ -124,6 +124,24 @@ checks=sequence
       pure (map (statusCode . simpleStatus) responses==[200,200,200,200,400,409,400,413,403,404,404]
         && seen==["config","create","read","instructions"]
         && all ((==Just "no-store") . lookup "Cache-Control" . simpleHeaders) responses)
+  , check "public server serves only fixed assets with browser security headers" $ once $ ioProperty $
+      bracket temporary removeDirectoryRecursive $ \directory->do
+        createDirectory (directory</>"dist")
+        mapM_ (\(file,bytes)->BS.writeFile (directory</>file) bytes)
+          [("index.html","html-fixture"),("style.css","css-fixture"),("dist/wallet.js","js-fixture"),(".env","never-public")]
+        let forbid :: forall a. Plan 'Customer a -> IO a
+            forbid _=fail "static request reached DSL"
+            get path=srequest $ SRequest ((setPath defaultRequest path)
+              {requestHeaders=[("Sec-Fetch-Site","cross-site")]}) ""
+        app<-publicApplication directory forbid
+        replies<-runSession (mapM get ["/","/style.css","/wallet.js","/.env","/dist/wallet.js","/../.env"]) app
+        removeFile (directory</>"style.css")
+        missing<-refuses (publicApplication directory forbid)
+        pure (map (statusCode.simpleStatus) replies==[200,200,200,404,404,404]
+          && map simpleBody (take 3 replies)==["html-fixture","css-fixture","js-fixture"] && missing
+          && all (\reply->lookup "Referrer-Policy" (simpleHeaders reply)==Just "no-referrer"
+            && lookup "X-Content-Type-Options" (simpleHeaders reply)==Just "nosniff"
+            && lookup "Content-Security-Policy" (simpleHeaders reply)/=Nothing) replies)
   , check "signer HTTP authenticates before evaluating and bounds all request bodies" $ once $ ioProperty $ do
       calls<-newIORef ([]::[(Text,Text,Int)])
       let token=BS.replicate 64 97

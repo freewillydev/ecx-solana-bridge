@@ -1,5 +1,12 @@
 {-# LANGUAGE GADTs, ScopedTypeVariables #-}
 module Main (main) where
+import qualified Bridge.Config as Config
+import Paths_ecx_bridge_rebuild (getDataFileName)
+import qualified Network.HTTP.Client as HTTP
+import qualified Network.Socket as NS
+import qualified System.Process as Process
+import System.FilePath (takeDirectory)
+import Control.Concurrent (threadDelay)
 import Bridge.Identity (capabilityHash,payInstruction,digest)
 import qualified Bridge.Wire as W
 import Data.Aeson (encode,object,(.=),toJSON,Value(..),eitherDecodeStrict')
@@ -19,7 +26,7 @@ import Network.HTTP.Types (statusCode)
 import Bridge.Order
 import qualified Bridge.Fence as Fence
 import System.Directory (createDirectory,removeDirectoryRecursive,removeFile)
-import System.IO (openTempFile,hClose)
+import System.IO (openTempFile,hClose,withFile,IOMode(WriteMode))
 import System.Posix.Files (setFileMode)
 import Bridge.Error (reject)
 import Bridge.Observer (ObserverSettings(..))
@@ -43,10 +50,13 @@ import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Opaleye as O
-import System.Environment (getEnv,lookupEnv)
+import System.Environment (getEnv,lookupEnv,getEnvironment)
 
 main :: IO ()
-main = lookupEnv "ECX_REBUILD_FENCE_ONLY" >>= \mode->if mode==Just "1" then fenceMain else ledgerMain
+main = do
+  fence<-lookupEnv "ECX_REBUILD_FENCE_ONLY"
+  server<-lookupEnv "ECX_REBUILD_SERVER_ONLY"
+  if fence==Just "1" then fenceMain else if server==Just "1" then serverMain else ledgerMain
 
 ledgerMain :: IO ()
 ledgerMain = do
@@ -1270,3 +1280,67 @@ withTestSigningKey action=bracket temporary removeDirectoryRecursive $ \director
     createDirectory path
     setFileMode path 0o700
     pure path
+
+-- Real executable/HTTP/PG lifetime contract. RPC is deliberately unavailable;
+-- this verifies startup/refusal/shutdown, never network acceptance or a fake chain.
+serverMain :: IO ()
+serverMain = do
+  database<-getEnv "ECX_REBUILD_CONTRACT_DATABASE"
+  unless ("ecx_rebuild_contract_" `T.isPrefixOf` T.pack database) (fail "disposable database required")
+  user<-getEnv "USER"
+  role<-getEnv "ECX_REBUILD_CONTRACT_READER"
+  binary<-getEnv "ECX_REBUILD_EXECUTABLE"
+  environment<-getEnvironment
+  base<-getDataFileName "test/fixtures/deployment-config.json" >>= Config.loadConfig
+  let settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
+      check ok=unless ok (fail "server process contract failed")
+  -- Reuse the protected temporary-directory lifetime; the public seed is unused.
+  withTestSigningKey $ \keyFile->do
+    let directory=takeDirectory keyFile
+    port<-bracket (NS.socket NS.AF_INET NS.Stream NS.defaultProtocol) NS.close $ \sock->do
+      NS.bind sock (NS.SockAddrInet 0 (NS.tupleToHostAddress (127,0,0,1)))
+      address<-NS.getSocketName sock
+      case address of NS.SockAddrInet n _->pure (fromIntegral n); _->fail "unexpected listener address"
+    let config=base {Config.serverPort=port,Config.fenceDirectory=directory<>"/fence",
+          Config.nativeCookie=directory<>"/missing-cookie",Config.solanaRpc="https://127.0.0.1:1"}
+        identity=Config.fingerprint config
+        filename=directory<>"/config.json"
+        overrides=[("PGHOST","/tmp/ecx-pg-seam"),("PGPORT","29436"),("PGDATABASE",database),
+          ("PGUSER",user),("PGPASSWORD",""),("PGREADUSER",role),("PGREADPASSWORD","")]
+        childEnv=overrides<>filter (\(key,_)->key `notElem` (map fst overrides<>["ECX_ASSETS","ECX_INTERFACE_CONFIG"])) environment
+    Config.validateConfig config
+    BL.writeFile filename (encode config)
+    bracket (PG.connect settings) PG.close $ \connection->fixture connection (InitializeIdentity identity)
+    Fence.initializeFence (Config.fenceDirectory config) identity 0
+    withReader settings {PG.connectUser=role} identity False $ \reader->do
+      before<-evalRead reader ReadBalances
+      bracket (HTTP.newManager HTTP.defaultManagerSettings {HTTP.managerResponseTimeout=HTTP.responseTimeoutMicro 1000000}) HTTP.closeManager $ \manager->
+        withFile (directory<>"server.log") WriteMode $ \logFile->
+          Process.withCreateProcess (Process.proc binary ["observe",filename])
+            {Process.env=Just childEnv,Process.std_out=Process.UseHandle logFile,Process.std_err=Process.UseHandle logFile} $ \_ _ _ process->do
+              let get path=HTTP.parseRequest ("http://127.0.0.1:"<>show port<>path) >>= \request->HTTP.httpLbs request manager
+                  wait 0=fail "server did not bind"
+                  wait n=do
+                    alive<-Process.getProcessExitCode process
+                    check (alive==Nothing)
+                    result<-try (get "/api/v1/config") :: IO (Either HTTP.HttpException (HTTP.Response BL.ByteString))
+                    case result of Right reply->pure reply; Left _->threadDelay 50000 >> wait (n-1::Int)
+              public<-wait 100
+              check (statusCode(HTTP.responseStatus public)==200)
+              decoded<-either fail pure (eitherDecodeStrict' $ BL.toStrict $ HTTP.responseBody public)
+              check (W.pubDeployment decoded==Config.deploymentId config && not(W.pubIntakeEnabled decoded)
+                && W.pubAvailability decoded==W.Availability False "observation_only")
+              page<-get "/"
+              script<-get "/wallet.js"
+              style<-get "/style.css"
+              removed<-get "/operator"
+              check (all ((==200).statusCode.HTTP.responseStatus) [page,script,style]
+                && "A direct bridge." `T.isInfixOf` TE.decodeUtf8 (BL.toStrict $ HTTP.responseBody page)
+                && BL.length(HTTP.responseBody script)>1000 && statusCode(HTTP.responseStatus removed)==404)
+              evalRead reader ReadState >>= check . ledgerPaused
+              evalRead reader ReadBalances >>= check . (==before)
+      -- withCreateProcess terminated/reaped HTTP and worker together, releasing
+      -- the real host fence; no daemon or worker is left behind by this check.
+      Fence.withFence (Config.fenceDirectory config) identity (const $ pure ())
+      evalRead reader ReadBalances >>= check . (==before)
+  putStrLn "PASS: rebuilt executable, actual HTTP assets/config, paused unavailable-chain startup, unchanged balances and process/fence cleanup"
