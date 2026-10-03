@@ -70,11 +70,58 @@ import System.Environment (getEnv,lookupEnv,getEnvironment)
 
 main :: IO ()
 main = do
+  setup<-lookupEnv "ECX_REBUILD_SETUP_ONLY"
   fence<-lookupEnv "ECX_REBUILD_FENCE_ONLY"
   server<-lookupEnv "ECX_REBUILD_SERVER_ONLY"
   tls<-lookupEnv "ECX_REBUILD_TLS_ONLY"
   native<-lookupEnv "ECX_REBUILD_NATIVE_RECOVERY_ONLY"
-  if native==Just "1" then nativeRecoveryMain else if tls==Just "1" then tlsMain else if fence==Just "1" then fenceMain else if server==Just "1" then serverMain else ledgerMain
+  if setup==Just "1" then setupMain else if native==Just "1" then nativeRecoveryMain else if tls==Just "1" then tlsMain else if fence==Just "1" then fenceMain else if server==Just "1" then serverMain else ledgerMain
+
+-- Production initialization on a fresh migrated database, with no seeded funds.
+setupMain :: IO ()
+setupMain=do
+  database<-getEnv "ECX_REBUILD_CONTRACT_DATABASE"
+  unless ("ecx_rebuild_contract_" `T.isPrefixOf` T.pack database) (fail "disposable database required")
+  role<-getEnv "ECX_REBUILD_CONTRACT_READER"
+  user<-getEnv "USER"
+  configPath<-getDataFileName "test/fixtures/deployment-config.json"
+  config<-Config.loadConfig configPath
+  binary<-getEnv "ECX_REBUILD_EXECUTABLE"
+  environment<-getEnvironment
+  residue<-lookupEnv "ECX_REBUILD_SETUP_RESIDUE"
+  let settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
+      identity=Config.fingerprint config
+      initialize=evalSetup settings (InitializeLedger identity)
+      check ok=unless ok (fail "fresh initialization contract failed")
+      run=do
+        let overrides=[("PGHOST","/tmp/ecx-pg-seam"),("PGPORT","29436"),("PGDATABASE",database),("PGUSER",user),("PGPASSWORD","")]
+        (code,_,_)<-Process.readCreateProcessWithExitCode (Process.proc binary ["initialize-ledger",configPath])
+          {Process.env=Just $ overrides<>filter (not . T.isPrefixOf "PG" . T.pack . fst) environment} ""
+        check (code==ExitSuccess)
+  if residue==Just "1" then bracket (PG.connect settings) PG.close $ \fixtures->do
+    fixture fixtures SetupResidue
+    expectStore "initialization_requires_empty_ledger" initialize
+    (rows,attempts,postings)<-fixture fixtures ArchiveRecords
+    check (null rows && null attempts && null postings)
+   else do
+    expectStore "invalid_deployment_identity" (evalSetup settings $ InitializeLedger "invalid")
+    run
+    withReader settings {PG.connectUser=role} identity True $ \reader->do
+      before<-evalRead reader ReadState
+      check (before==LedgerState 0 0 True "installation_requires_reconciliation")
+      evalRead reader ReadBalances >>= check . M.null
+      evalRead reader PendingAttempts >>= check . null
+      expectStore "intake_paused" (evalRead reader $ CheckIntake 100)
+      run
+      evalRead reader ReadState >>= check . (==before)
+      expectStore "ledger_profile_or_schema_mismatch" (evalSetup settings $ InitializeLedger (T.replicate 64 "a"))
+      withWriter settings (Config.storePolicy config) (const $ pure ()) $ \writer->do
+        evalWrite writer (Pause "retained operator pause")
+        expectStore "worker_already_running" initialize
+      initialize
+      after<-evalRead reader ReadState
+      check (after==before {ledgerReason="retained operator pause"})
+  putStrLn "PASS: production ledger setup, zero balances, paused intake, unchanged repeat, identity/worker conflict and residual-state refusal (selected mode)"
 
 -- Real L2L Signet, using only fresh empty test-owned wallets. No funded wallet
 -- is unloaded, changed or copied; the node remains running after this check.
@@ -1075,6 +1122,7 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  SetupResidue :: Fixture ()
   SetPause :: Bool -> Fixture ()
   RestoreDatabases :: Fixture [T.Text]
   ArchiveRecords :: Fixture ([S.Deployment],[S.Attempt],[(Int64,T.Text,T.Text,T.Text,Int64)])
@@ -1130,6 +1178,8 @@ fixture c RestoreDatabases = O.runSelect c $ O.orderBy (O.asc id) $ do
   name<-O.selectTable $ O.tableWithSchema "pg_catalog" "pg_database" (O.requiredTableField "datname")
   O.where_ (O.like name $ O.sqlStrictText "ecx_restore_%")
   pure name
+fixture c SetupResidue = void $ O.runInsert c O.Insert {O.iTable=S.events,
+  O.iRows=[(O.sqlStrictText "orphaned-ledger-event",O.sqlStrictText "initialization must refuse surviving history")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
 fixture c ArchiveRecords = (,,)
   <$> O.runSelect c (O.selectTable S.deployment)
   <*> O.runSelect c (O.orderBy (O.asc S.attemptId) $ O.selectTable S.attempts)

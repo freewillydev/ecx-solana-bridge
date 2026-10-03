@@ -59,6 +59,39 @@ quota substitutes for those requirements. Keep one build job and warm caches.
 Old installer artifacts do not certify this package. Off-host restoration,
 canonical activation and independent review remain explicit wider release gates.
 
+## Fresh ledger setup
+
+For a genuinely new deployment, first apply the reviewed baseline PostgreSQL
+migrations 001–005 followed by rebuild migrations 001–003 to an empty database.
+DDL remains separate installation infrastructure; the command below does not run
+or verify the full migration definitions. Supply offline database-owner `PG*`
+credentials and a reviewed deployment config, then run from the repository root:
+
+```sh
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- initialize-ledger CONFIG
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- adopt-ledger CONFIG 0
+```
+
+`StoreSetup.InitializeLedger` is a closed offline GADT operation, absent from HTTP
+and signer capabilities. Under exclusive worker ownership and one transaction,
+Opaleye checks all 39 other retained bridge tables for rows before creating the
+schema-21 deployment singleton, uncertified custody singleton and operating clock.
+It creates no balances, scan origins, keys, orders, signatures or spending authority.
+The ledger starts paused with zero sequences; chain scans, treasury classification,
+reconciliation and explicit resume remain required. Existing identity/schema must
+match, and repeat setup leaves existing state untouched. Residual rows with missing
+deployment metadata are refused. Initialization never restores or repairs a ledger;
+existing deployments must use the recovery/migration procedures instead.
+
+Versus `6342d03`, this adds **47 production lines across the same three files**:
+Store 3,316 → 3,354, Schema 294 → 298 and Main 139 → 144. The shared acceptance
+runner grows 2,917 → 2,967. No dependency, service, migration or executable is added.
+The setup acceptance modes (`ECX_REBUILD_SETUP_ONLY=1`, optionally
+`ECX_REBUILD_SETUP_RESIDUE=1`) use fresh disposable PostgreSQL and the actual CLI;
+they cover paused zero-balance initialization, unchanged repeat, wrong identity,
+active worker exclusion and residual-history refusal. They require the migrated
+schema and do not certify installation or populated baseline cutover.
+
 ## Running the development executable
 
 From the repository root, Cabal builds the native application plus the existing

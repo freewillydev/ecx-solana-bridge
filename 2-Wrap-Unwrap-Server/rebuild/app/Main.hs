@@ -11,7 +11,7 @@ import qualified Bridge.Native as N
 import Bridge.Recovery (CustodyRecovery(..),evalCustodyRecovery)
 import Bridge.Signer
 import Bridge.SigningTransport
-import Bridge.Store (withReader,withFencedWriter,StoreRestore(..),evalRestore,BackupReceipt(..))
+import Bridge.Store (withReader,withFencedWriter,StoreRestore(..),evalRestore,StoreSetup(..),evalSetup,BackupReceipt(..))
 import Bridge.Web (publicApplication)
 import Bridge.Wire (Profile(..))
 import Control.Concurrent.Async (concurrently_)
@@ -76,6 +76,11 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
     restoreCommand path minimumText (\c->RecoverLedger backup (T.pack snapshot) directory (C.fingerprint c))
   command [mode,path,minimumText] | mode `elem` ["adopt-ledger","retire-ledger"] =
     restoreCommand path minimumText (\c->(if mode=="adopt-ledger" then AdoptLedger else RetireLedger) (C.fenceDirectory c) (C.fingerprint c))
+  command ["initialize-ledger",path]=do
+    c<-C.loadConfig path
+    database<-databaseSettings
+    evalSetup database (InitializeLedger $ C.fingerprint c)
+    LBS.putStrLn $ encode $ object ["fingerprint" .= C.fingerprint c]
   command ["operator",path]=do
     c<-C.loadConfig path
     bytes<-BS.hGet stdin 4097
@@ -103,7 +108,7 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
             concurrently_
               (runSettings (setHost "127.0.0.1" $ setPort (C.serverPort c) $ setTimeout 65 defaultSettings) app)
               (concurrently_ (runWorkerLoop worker) (runControl (C.fenceDirectory c) operatorControl))
-  command _=die "Usage: ecx-bridge-rebuild upload-custody CONFIG BACKUP_CONFIG MANIFEST MINIMUM_SEQUENCE | recover-custody CONFIG BACKUP_CONFIG SNAPSHOT DIRECTORY MINIMUM_SEQUENCE | backup-custody CONFIG KEYFILE DIRECTORY (offline custody authority, PG* and PGREADUSER) | check-custody CONFIG MANIFEST MINIMUM_SEQUENCE | backup-native-wallet CONFIG DESTINATION | restore-native-wallet CONFIG MANIFEST (offline custody authority; never overwrites a wallet) | adopt-ledger CONFIG MINIMUM_SEQUENCE | retire-ledger CONFIG MINIMUM_SEQUENCE | recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE | restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE (offline database owner) | check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE [BACKUP_CONFIG STAGING] (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
+  command _=die "Usage: ecx-bridge-rebuild initialize-ledger CONFIG (fresh migrated database only) | upload-custody CONFIG BACKUP_CONFIG MANIFEST MINIMUM_SEQUENCE | recover-custody CONFIG BACKUP_CONFIG SNAPSHOT DIRECTORY MINIMUM_SEQUENCE | backup-custody CONFIG KEYFILE DIRECTORY (offline custody authority, PG* and PGREADUSER) | check-custody CONFIG MANIFEST MINIMUM_SEQUENCE | backup-native-wallet CONFIG DESTINATION | restore-native-wallet CONFIG MANIFEST (offline custody authority; never overwrites a wallet) | adopt-ledger CONFIG MINIMUM_SEQUENCE | retire-ledger CONFIG MINIMUM_SEQUENCE | recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE | restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE (offline database owner) | check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE [BACKUP_CONFIG STAGING] (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
   startSigner path key backup=do
     c<-C.loadConfig path
     database<-databaseSettings

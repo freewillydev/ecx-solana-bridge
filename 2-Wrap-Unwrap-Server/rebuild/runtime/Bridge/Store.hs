@@ -3,6 +3,7 @@
 -- escape this module; the runtime will interpret its customer/operator DSL here.
 module Bridge.Store
   ( Reader, Writer, BridgeError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), StorePolicy(..), AllocationClaim(..), LedgerState(..), WithdrawalView(..), PaymentView(..), PaymentStatus(..), PreparedPayment(..), SignedAttempt(..), RecordedAttempt(..), NativeLockWork(..), NativeSettlementCheck(..), CustodySnapshot(..)
+  , StoreSetup(..), evalSetup
   , StoreBackup(..), LedgerArchive(..), BackupReceipt(..), evalBackup, StoreRestore(..), evalRestore, CustodyArchive(..)
   , withReader, withWriter, withFencedWriter, evalRead, evalWrite ) where
 
@@ -26,7 +27,7 @@ import Data.Scientific (Scientific,floatingOrInteger)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Control.Concurrent.MVar
 import Control.Exception
-import Control.Monad (unless,forM,forM_,when)
+import Control.Monad (unless,forM,forM_,when,void)
 import Data.Aeson (Key,FromJSON,ToJSON,Value(Null,Object),object,(.=),toJSON,encode,eitherDecodeStrict',withObject,(.:),(.:?))
 import Data.Aeson.Types (parseEither)
 import qualified Data.Aeson.KeyMap as KM
@@ -84,7 +85,44 @@ data NativeSettlementCheck = NativeConfirming | NativeUnavailable Text
   | NativeReconfirmed W.PaymentCosts Text
   | NativeWinnerChanged [RecordedAttempt] Text W.PaymentCosts Text deriving (Eq,Show)
 
--- Offline recovery uses startup-held credentials, never a Reader/paying Writer.
+-- Explicit fresh installation only. Schema DDL is applied separately; this
+-- operation cannot restore funds, adopt a fence or make an existing ledger empty.
+data StoreSetup a where
+  InitializeLedger :: Text -> StoreSetup ()
+
+evalSetup :: PG.ConnectInfo -> StoreSetup a -> IO a
+evalSetup settings (InitializeLedger identity) = do
+  require (T.length identity==64 && T.all (`elem` ("0123456789abcdef"::String)) identity) "invalid_deployment_identity"
+  bracket (PG.connect settings) PG.close $ \c->PG.withTransaction c $ do
+    claimWorker c >>= flip require "worker_already_running"
+    existing<-O.runSelect c (O.selectTable S.deployment) :: IO [S.Deployment]
+    case existing of
+      []->do
+        let exists table=Exists.exists (O.selectTable table >> pure ())
+        occupied<-O.runSelect c $ foldr (O..||) (O.sqlBool False) <$> sequence
+          [exists S.withdrawals, exists S.cancellations, exists S.events
+          ,exists S.postings, exists S.audit, exists S.custody
+          ,exists S.intentIds, exists S.orders, exists S.deposits
+          ,exists S.obligations, exists S.reservations, exists S.orderCosts
+          ,exists S.operatingReservations, exists S.operatingClock, exists S.operatingCosts
+          ,exists S.scanHealth, exists S.checkpoints, exists S.nativeAllocations
+          ,exists S.sourceChecks, exists S.sourceReturns, exists S.sourceLossCovers
+          ,exists S.observationEvidence, exists S.treasuryAllocations, exists S.treasurySpends
+          ,exists S.scanOrigins, exists S.chainEvents, exists S.preparations
+          ,exists S.feeHolds, exists S.attempts, exists S.sourceRecoveryDecisions
+          ,exists S.preparationCancellations, exists S.solanaExpiries, exists S.solanaRetryApprovals
+          ,exists S.replacementDecisions, exists S.replacementCancellationRows, exists S.replacementMemberRows
+          ,exists S.nativeRecoveryRows, exists S.nativeWinnerChanges, exists S.legacyHints]
+        require (occupied==[False]) "initialization_requires_empty_ledger"
+        now<-floor <$> getPOSIXTime
+        _<-O.runInsert c O.Insert {O.iTable=S.deployment,
+          O.iRows=[S.Deployment (O.sqlInt8 1) (O.sqlInt8 21) (O.sqlStrictText identity) (O.sqlInt8 0) (O.sqlInt8 0) (O.sqlInt8 1) (O.sqlStrictText "installation_requires_reconciliation")],
+          O.iReturning=O.rCount,O.iOnConflict=Nothing}
+        _<-O.runInsert c O.Insert {O.iTable=S.custody,O.iRows=[(O.sqlInt8 1,O.sqlInt8 0,O.null,O.null,O.null)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+        _<-O.runInsert c O.Insert {O.iTable=S.operatingClock,O.iRows=[(O.sqlInt8 1,O.sqlInt8 now)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+        pure ()
+      _->void (metadata c identity)
+
 -- Restoration needs database-creation authority; fence changes claim the paused
 -- ledger exclusively. No online handler receives these maintenance operations.
 data StoreRestore a where

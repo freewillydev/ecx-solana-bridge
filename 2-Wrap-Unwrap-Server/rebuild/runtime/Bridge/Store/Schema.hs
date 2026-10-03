@@ -292,3 +292,7 @@ nativeRecoveryDetails = O.selectTable $ O.table "native_payment_recovery_state" 
 nativeWinnerChanges :: O.Table (IntField,TextField,TextField,TextField,TextField,TextField,IntField) (IntField,TextField,TextField,TextField,TextField,TextField,IntField)
 nativeWinnerChanges = O.table "native_winner_changes" $ p7
   (O.requiredTableField "critical_sequence",O.requiredTableField "previous_txid",O.requiredTableField "winner_txid",O.requiredTableField "previous_observation",O.requiredTableField "observation_json",O.requiredTableField "evidence_hash",O.requiredTableField "fee_delta")
+
+-- Retained baseline rows also prevent accidental reinitialization.
+legacyHints :: O.Table (TextField,TextField) (TextField,TextField)
+legacyHints = O.table "hints" $ p2 (O.requiredTableField "order_id",O.requiredTableField "signature")
