@@ -1,7 +1,7 @@
 {-# LANGUAGE GADTs #-}
 module Main (main) where
 
-import qualified FenceCheck
+import qualified AuthorityCheck
 import qualified SourceApprovalCheck
 import Bridge.Types hiding (deploymentFingerprint)
 import Bridge.Ledger.Model (Deposit(..),Obligation(..),Preparation(..),CostLimits(..),ScanBatch(..),ChainEvent(..))
@@ -48,8 +48,9 @@ main :: IO ()
 main = getArgs >>= \case
   ["journal"] -> journalContracts
   ["source"] -> SourceApprovalCheck.run
-  "fence":arguments -> withArgs arguments FenceCheck.run
-  _ -> reject "postgres_contract_mode_required: journal | source | fence DATABASE_A DATABASE_B DIRECTORY"
+  "fence":arguments -> withArgs arguments AuthorityCheck.run
+  "observer":arguments -> withArgs ("observer":arguments) AuthorityCheck.run
+  _ -> reject "postgres_contract_mode_required: journal | source | fence DATABASE_A DATABASE_B DIRECTORY | observer BRIDGE_BINARY CONFIG DATABASE DIRECTORY"
 
 journalContracts :: IO ()
 journalContracts = do

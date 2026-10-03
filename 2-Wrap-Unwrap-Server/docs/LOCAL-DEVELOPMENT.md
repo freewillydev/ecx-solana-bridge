@@ -73,6 +73,14 @@ its rollback fixture. It verifies missing/stale/wrong-identity/retired fences,
 unchanged journal/watermarks and unopened API sockets. No chain or signer is used.
 Drop the disposable database/reader role and remove the temporary directory afterward.
 
+`observer BRIDGE_BINARY CONFIG DATABASE DIRECTORY` uses the same disposable
+database/reader/config setup to start the actual observer and test its customer
+HTTP and private local-control interfaces. Set `ECX_PORT` to an unused local port.
+The runner replaces the native cookie path with an absent file, exercises public
+configuration/audit and financial-command refusals, and verifies no order, attempt
+or critical sequence was created. Its child server is stopped on success or error.
+It replaces the retired Python runner that targeted removed operator HTTP routes.
+
 Other `integration/` runners cover recovery, snapshot/restore and real chains.
 Read their restrictions before running them; some sign or transfer test funds.
 Historical acceptance applies only to its recorded source/configuration/network.

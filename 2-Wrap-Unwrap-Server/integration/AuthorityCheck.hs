@@ -1,8 +1,13 @@
 {-# LANGUAGE GADTs #-}
--- Actual host locks/fsync and two disposable PostgreSQL databases. No chains.
-module FenceCheck (run) where
+-- Actual process/host authority and disposable PostgreSQL databases. No chains.
+module AuthorityCheck (run) where
+import Bridge.Control (callControl)
+import Bridge.RPC (fieldValue)
+import Control.Concurrent (threadDelay)
+import System.IO (withFile,IOMode(WriteMode))
 import Bridge.Config (Config(..),loadConfig,publicTestProfile)
 import Data.Aeson (encode,eitherDecode,object,(.=))
+import qualified Data.Aeson
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import System.Exit (ExitCode(..))
 import Bridge.Types
@@ -21,7 +26,7 @@ import System.FilePath ((</>))
 import System.Directory (renameFile,removeFile,createDirectory,doesPathExist)
 import System.Posix.Files (setFileMode,createSymbolicLink)
 import System.Posix.User (getEffectiveUserName)
-import System.Process (readProcess,readCreateProcessWithExitCode,proc,CreateProcess(..))
+import System.Process (readProcess,readCreateProcessWithExitCode,proc,CreateProcess(..),createProcess,terminateProcess,waitForProcess,getProcessExitCode,StdStream(..))
 import System.Timeout (timeout)
 import qualified Database.PostgreSQL.Simple as PG
 
@@ -38,7 +43,8 @@ settingsFor database=do
 
 run :: IO ()
 run=getArgs >>= \case
-  ["runtime",binary,config,database,directory]->runtimeContract binary config database directory
+  ["runtime",binary,config,database,directory]->runtimeContract False binary config database directory
+  ["observer",binary,config,database,directory]->runtimeContract True binary config database directory
   ["competing-worker",directory,identity,database]->do
     settings <- settingsFor database
     expect "worker_fence_locked" $ Fence.withFence directory (T.pack identity) $ \guard->
@@ -110,6 +116,7 @@ run=getArgs >>= \case
 
 -- Fixed fixture operations only; no row SQL or query callback from the runner.
 data Fixture a where
+  ReadEffects :: Fixture ([Orders],[Attempts],[Int64])
   RequireEmpty :: Fixture ()
   Initialize :: Text -> Fixture ()
   SetSequence :: Int64 -> Fixture ()
@@ -118,6 +125,8 @@ data Fixture a where
 
 fixture :: PG.Connection -> Fixture a -> IO a
 fixture connection = \case
+  ReadEffects -> (,,) <$> O.runSelect connection (O.selectTable ordersTable)
+    <*> O.runSelect connection (O.selectTable attemptsTable) <*> fixture connection ReadSequence
   RequireEmpty -> do
     rows <- O.runSelect connection (O.selectTable deploymentTable) :: IO [Deployment]
     require (null rows) "fresh_fence_database_required"
@@ -135,8 +144,8 @@ fixture connection = \case
 
 -- Exercise the installed command boundary as well as the fence implementation.
 -- Caller supplies a fresh migrated DB, SELECT-only PGREADUSER and unused directory.
-runtimeContract :: FilePath -> FilePath -> String -> FilePath -> IO ()
-runtimeContract binary config database directory = do
+runtimeContract :: Bool -> FilePath -> FilePath -> String -> FilePath -> IO ()
+runtimeContract observer binary config database directory = do
   settings <- settingsFor database
   exists <- doesPathExist directory
   require (not exists) "fresh_fence_directory_required"
@@ -144,7 +153,7 @@ runtimeContract binary config database directory = do
   setFileMode directory 0o700
   original <- loadConfig config
   require (publicTestProfile original) "public_test_profile_required"
-  let cfg=original {deploymentId="ecx-fence-runtime-contract",customerSocket=directory </> "customer.sock",adminSocket=directory </> "admin.sock"}
+  let cfg=original {deploymentId="ecx-fence-runtime-contract",customerSocket=directory </> "customer.sock",adminSocket=directory </> "admin.sock",nativeCookie=directory </> "absent-cookie"}
       configPath=directory </> "config.json"
       watermark=directory </> "fence/sequence.json"
       save value=LBS.writeFile configPath (encode value) >> setFileMode configPath 0o600
@@ -152,7 +161,7 @@ runtimeContract binary config database directory = do
   environment <- getEnvironment
   let overrides=[("PGHOST",PG.connectHost settings),("PGPORT",show $ PG.connectPort settings)
         ,("PGDATABASE",database),("PGUSER",PG.connectUser settings),("ECX_WORKER_FENCE_DIR",directory </> "fence")]
-      childEnvironment=overrides<>filter (\(key,_)->key `notElem` map fst overrides && key `notElem` ["PGPASSWORD","ECX_INTERFACE_CONFIG","ECX_PORT"]) environment
+      childEnvironment=overrides<>filter (\(key,_)->key `notElem` map fst overrides && key `notElem` ["PGPASSWORD","ECX_INTERFACE_CONFIG"]) environment
       command name expected = do
         result <- timeout 10000000 $ readCreateProcessWithExitCode
           (proc binary [name,configPath]) {env=Just childEnvironment} ""
@@ -165,27 +174,72 @@ runtimeContract binary config database directory = do
       audit=bracket (PG.connect settings) PG.close (\c->fixture c ReadAudit)
   bracket (PG.connect settings) PG.close (\c->fixture c RequireEmpty)
   command "postgres-init" Nothing
-  command "postgres-test-worker" (Just "worker_fence_not_initialized")
-  mutate 1
-  command "postgres-init-worker-fence" Nothing
-  saved <- BS.readFile watermark
-  command "postgres-init-worker-fence" (Just "worker_fence_already_initialized")
-  mutate 0
-  before <- audit
-  command "postgres-test-worker" (Just "stale_ledger_below_worker_fence")
-  command "test-worker" (Just "stale_ledger_below_worker_fence")
-  command "scan" (Just "local_operator_command_required")
-  after <- audit
-  require (before==after) "stale_cli_mutated_ledger"
-  BS.readFile watermark >>= \bytes->require (bytes==saved) "stale_cli_changed_watermark"
-  save cfg {deploymentId="different-fence-identity"}
-  command "postgres-test-worker" (Just "worker_fence_identity_mismatch")
-  save cfg
-  mutate 1
-  command "postgres-retire-worker" Nothing
-  retired <- BS.readFile watermark
-  command "postgres-test-worker" (Just "worker_fence_retired")
-  command "postgres-init-worker-fence" (Just "worker_fence_already_initialized")
-  BS.readFile watermark >>= \bytes->require (bytes==retired) "retired_cli_changed_watermark"
-  mapM_ (\path->doesPathExist path >>= \opened->require (not opened) "fenced_cli_opened_api") [customerSocket cfg,adminSocket cfg]
-  putStrLn "Worker CLI: missing/stale/identity/retired fences, aliases, unchanged journal/watermark and unopened API passed; no chain or signer"
+  if observer then observerContract binary cfg configPath childEnvironment settings directory else do
+    command "postgres-test-worker" (Just "worker_fence_not_initialized")
+    mutate 1
+    command "postgres-init-worker-fence" Nothing
+    saved <- BS.readFile watermark
+    command "postgres-init-worker-fence" (Just "worker_fence_already_initialized")
+    mutate 0
+    before <- audit
+    command "postgres-test-worker" (Just "stale_ledger_below_worker_fence")
+    command "test-worker" (Just "stale_ledger_below_worker_fence")
+    command "scan" (Just "local_operator_command_required")
+    after <- audit
+    require (before==after) "stale_cli_mutated_ledger"
+    BS.readFile watermark >>= \bytes->require (bytes==saved) "stale_cli_changed_watermark"
+    save cfg {deploymentId="different-fence-identity"}
+    command "postgres-test-worker" (Just "worker_fence_identity_mismatch")
+    save cfg
+    mutate 1
+    command "postgres-retire-worker" Nothing
+    retired <- BS.readFile watermark
+    command "postgres-test-worker" (Just "worker_fence_retired")
+    command "postgres-init-worker-fence" (Just "worker_fence_already_initialized")
+    BS.readFile watermark >>= \bytes->require (bytes==retired) "retired_cli_changed_watermark"
+    mapM_ (\path->doesPathExist path >>= \opened->require (not opened) "fenced_cli_opened_api") [customerSocket cfg,adminSocket cfg]
+    putStrLn "Worker CLI: missing/stale/identity/retired fences, aliases, unchanged journal/watermark and unopened API passed; no chain or signer"
+
+-- Exercise actual HTTP and local-control dispatch with no native RPC credential.
+observerContract :: FilePath -> Config -> FilePath -> [(String,String)] -> PG.ConnectInfo -> FilePath -> IO ()
+observerContract binary cfg configPath environment settings directory =
+  withFile (directory </> "observer.log") WriteMode $ \logHandle->
+    bracket (createProcess (proc binary ["postgres-api",configPath])
+      {env=Just environment,std_out=UseHandle logHandle,std_err=UseHandle logHandle})
+      (\(_,_,_,process)->terminateProcess process >> void (waitForProcess process)) $ \(_,_,_,process)->do
+        let ready=do
+              state <- getProcessExitCode process
+              require (state==Nothing) "observer_contract_process_exited"
+              sockets <- mapM doesPathExist [customerSocket cfg,adminSocket cfg]
+              if and sockets then pure () else threadDelay 100000 >> ready
+            http path body=do
+              result <- readProcess "curl" (["--silent","--show-error","--max-time","10","--unix-socket",customerSocket cfg
+                ,"http://localhost"<>path,"-H","Content-Type: application/json","-H","Authorization: Bearer "<>replicate 64 'a']
+                <>maybe [] (\value->["--data-binary",LBS.unpack $ encode value]) body) ""
+              either (const $ reject "invalid_observer_contract_reply") pure (eitherDecode $ LBS.pack result)
+            control name args=callControl cfg (object["operation" .= (name::Text),"arguments" .= args])
+            refused reply=require (reply==object["error" .= ("payment_worker_required"::Text)]) "observer_authority_escape"
+        started <- timeout 10000000 ready
+        require (started==Just ()) "observer_contract_startup_timeout"
+        public <- http "/api/v1/config" Nothing
+        observedProfile <- fieldValue "profile" public
+        intake <- fieldValue "intakeEnabled" public
+        availability <- fieldValue "availability" public
+        require (observedProfile==profile cfg && not intake && availability==Availability False "observation_only") "observer_public_authority_changed"
+        audit <- control "audit" (object [])
+        reviews <- fieldValue "nativeRecoveryReviews" audit
+        backlog <- fieldValue "nativeRecoveryBacklog" audit
+        require (reviews==([]::[Data.Aeson.Value]) && not backlog) "observer_audit_unavailable"
+        http "/api/v1/orders" (Just $ object ["direction" .= ("WrappedToNative"::Text),"input" .= ("10000"::Text)
+          ,"recipient" .= ("unused-observer-destination"::Text),"refund" .= (""::Text),"sourceOwner" .= (Nothing::Maybe Text)
+          ,"idempotencyKey" .= ("observer-contract"::Text)]) >>= refused
+        let one=Data.Aeson.toJSON (1::Int)
+        mapM_ (\(name,args)->control name args >>= refused)
+          [("resume",object []),("sign-native-replacement",one),("send-native-replacement",one)
+          ,("refund",Data.Aeson.toJSON ("no-observer-payment"::Text))
+          ,("approve-covered-source",Data.Aeson.toJSON ("no-payment"::Text,1::Int,"contract"::Text))
+          ,("allocate-treasury",Data.Aeson.toJSON ("no-capital"::Text,[("operating"::Text,"10000"::Text)],"contract"::Text))
+          ,("rebroadcast-native",Data.Aeson.toJSON ("no-payment"::Text,1::Int,"contract"::Text))]
+        effects <- bracket (PG.connect settings) PG.close (\c->fixture c ReadEffects)
+        require (effects==([],[],[0])) "observer_created_financial_authority"
+        putStrLn "Observer: customer config/order and local operator authority, audit and unchanged financial state passed; no chain credential or signer"

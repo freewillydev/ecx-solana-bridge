@@ -295,7 +295,9 @@ The sequence below remains the broader refactor checklist, subject to that prior
    Haskell raw row queries are removed. Fault-injection DDL stays explicit.
    The obsolete Python worker-fence runner is also replaced by a mode in this
    executable: actual CLI startup/alias refusals use the current schema, a restricted
-   reader and closed Opaleye rollback fixtures.
+   reader and closed Opaleye rollback fixtures. Observer-authority acceptance now
+   shares that runner and checks the actual customer API plus private local-control
+   protocol; its obsolete Python/operator-HTTP runner is removed.
    Receipt/page atomicity and delayed verification also use the PostgreSQL contract;
    legacy resume-policy checks remain until their whole workflow is migrated.
    Chain scanning no longer executes Opaleye directly: reference lookup, promotion
