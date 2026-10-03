@@ -6,6 +6,7 @@ module Bridge.Postgres.Schema where
 import Data.Int (Int64)
 import qualified Bridge.Ledger.Model as Domain
 import Data.Text (Text)
+import Data.Profunctor.Product (p3)
 import Data.Profunctor.Product.TH (makeAdaptorAndInstance)
 import qualified Opaleye as O
 
@@ -811,3 +812,19 @@ asAttempt :: Attempts -> Text -> Domain.Attempt
 asAttempt row chain = Domain.Attempt (attemptsTxid row) (attemptsIntentId row) chain
   (attemptsSignedBytes row) (attemptsPolicyJson row) (attemptsFeeLimit row)
   (attemptsState row) (attemptsCriticalSequence row)
+
+data FeeWithdrawalsF a b c d e f g = FeeWithdrawals
+ { feeWithdrawalsId :: a, feeWithdrawalsAsset :: b, feeWithdrawalsAmount :: c, feeWithdrawalsRecipient :: d, feeWithdrawalsPolicyJson :: e, feeWithdrawalsReason :: f, feeWithdrawalsSequence :: g }
+ deriving (Eq,Show)
+$(makeAdaptorAndInstance "pFeeWithdrawals" ''FeeWithdrawalsF)
+type FeeWithdrawals = FeeWithdrawalsF Text Text Int64 Text Text Text Int64
+type FeeWithdrawalsFields = FeeWithdrawalsF (O.Field O.SqlText) (O.Field O.SqlText) (O.Field O.SqlInt8)
+ (O.Field O.SqlText) (O.Field O.SqlText) (O.Field O.SqlText) (O.Field O.SqlInt8)
+feeWithdrawalsTable :: O.Table FeeWithdrawalsFields FeeWithdrawalsFields
+feeWithdrawalsTable = O.table "fee_withdrawals" $ pFeeWithdrawals (FeeWithdrawals
+ (O.requiredTableField "id") (O.requiredTableField "asset") (O.requiredTableField "amount")
+ (O.requiredTableField "recipient") (O.requiredTableField "policy_json")
+ (O.requiredTableField "reason") (O.requiredTableField "critical_sequence"))
+feeWithdrawalCancellationsTable :: O.Table (O.Field O.SqlText,O.Field O.SqlText,O.Field O.SqlInt8) (O.Field O.SqlText,O.Field O.SqlText,O.Field O.SqlInt8)
+feeWithdrawalCancellationsTable = O.table "fee_withdrawal_cancellations" $ p3
+ (O.requiredTableField "withdrawal_id",O.requiredTableField "reason",O.requiredTableField "critical_sequence")

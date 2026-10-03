@@ -277,6 +277,10 @@ The sequence below remains the broader refactor checklist, subject to that prior
    Source recovery now owns loss-cover decisions, capital return and covered-payment
    authorization together; their shared query excludes returned cover sequences.
    The separate LossCover module is removed without changing transaction boundaries.
+   Treasury now owns earned-fee reservation/cancellation, with table definitions
+   in Schema. Loss coverage and fee funding use Ledger's shared free-inventory
+   and earned-fee queries instead of rebuilding balances. The separate
+   FeeWithdrawal module is removed; signing/send integration remains unfinished.
    Remove redundant wrappers immediately after their replacement works.
    The standalone TLS executable and Python certificate generator are retired;
    their real-validator assertions now run as generated QuickCheck cases inside

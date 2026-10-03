@@ -1,7 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.Postgres.Ledger
   ( Ledger, withLedger, withGuardedLedger, ledgerAction, readiness, pause, criticalSequence, acknowledgeBackup, balances, posting
-  , reserveOrderCosts, freeInventory, freeOperating, checkOperatingCapacity, transferOrderCosts ) where
+  , reserveOrderCosts, earnedFees, freeInventory, freeOperating, checkOperatingCapacity, transferOrderCosts ) where
 
 import Bridge.Postgres.Schema
 import Bridge.Postgres.Catalog (claimWorkerSession)
@@ -151,6 +151,9 @@ freeInventory connection asset = do
     (\row->reservationsAsset row O..== O.sqlStrictText name O..&& reservationsPhase row O../= O.sqlStrictText "released")
     (O.selectTable reservationsTable) :: IO [Int64]
   pure (available-sum(map toInteger held))
+
+earnedFees :: PG.Connection -> Asset -> IO Integer
+earnedFees connection asset = accountBalance connection (T.pack(show asset)) "earned"
 
 operatingHolds :: PG.Connection -> Text -> IO Integer
 operatingHolds connection asset = do

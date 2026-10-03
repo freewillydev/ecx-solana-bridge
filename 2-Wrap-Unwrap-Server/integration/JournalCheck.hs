@@ -5,7 +5,6 @@ import qualified AuthorityCheck
 import qualified SourceApprovalCheck
 import Bridge.Types hiding (deploymentFingerprint)
 import Bridge.Ledger.Model (Deposit(..),Obligation(..),Preparation(..),CostLimits(..),ScanBatch(..),ChainEvent(..))
-import qualified Bridge.Postgres.FeeWithdrawal as Withdrawal
 import qualified Bridge.Postgres.Treasury as Treasury
 import qualified Bridge.Postgres.Preparation as Preparation
 import qualified Bridge.Postgres.Settlement as Settlement
@@ -147,8 +146,8 @@ feeWithdrawalProperties settings = do
             balance account rows=M.findWithDefault 0 (T.pack(show currency),account) rows
             readBalances=L.ledgerAction ledger L.balances
             fresh=L.ledgerAction ledger (\c->fixture c FreshFeeContract)
-            reserve identifier asset n recipient=void(Withdrawal.reserve ledger cfg 100 identifier asset (quantity n) recipient reason)
-            cancelFunding why=void(Withdrawal.cancel ledger key why)
+            reserve identifier asset n recipient=void(Treasury.reserveFees ledger cfg 100 identifier asset (quantity n) recipient reason)
+            cancelFunding why=void(Treasury.cancelFees ledger key why)
         before <- readBalances
         L.ledgerAction ledger $ \c->do
           fixture c (BeginFeeContract $ fingerprint cfg)
@@ -156,11 +155,11 @@ feeWithdrawalProperties settings = do
             [(currency,"earned",toInteger funded),(currency,"external",negate $ toInteger funded)]
         expectError "custody_not_reconciled" (reserve key currency holdings "recipient")
         fresh
-        expectError "fee_withdrawal_profile_mismatch" $ void(Withdrawal.reserve ledger
+        expectError "fee_withdrawal_profile_mismatch" $ void(Treasury.reserveFees ledger
           cfg{deploymentId="another-deployment"} 100 key currency (quantity holdings) "recipient" reason)
         expectError "invalid_fee_withdrawal" (reserve key Sol holdings "recipient")
         expectError "invalid_fee_withdrawal" (reserve key currency 0 "recipient")
-        expectError "invalid_fee_withdrawal" $ void(Withdrawal.reserve ledger
+        expectError "invalid_fee_withdrawal" $ void(Treasury.reserveFees ledger
           cfg{maxInput=quantity (holdings-1)} 100 key currency (quantity holdings) "recipient" reason)
         expectError "insufficient_earned_fees" (reserve key currency (balance "earned" before+toInteger funded+1) "recipient")
         reserve key currency holdings "recipient"

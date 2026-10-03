@@ -2,7 +2,7 @@ module Bridge.Postgres.Source (lossCoverDecision, recordLossCover, recordSourceC
 
 import Bridge.Types
 import Bridge.Ledger.Model (encodeRecord,decodeRecord,SourceCheck(..),Obligation(..),Deposit(..),LossCapital(..))
-import Bridge.Postgres.Ledger (Ledger,ledgerAction,balances)
+import Bridge.Postgres.Ledger (Ledger,ledgerAction,freeInventory,earnedFees)
 import Bridge.Postgres.Custody (freshC)
 import qualified Bridge.Postgres.Order as Order
 import Bridge.RPC (fieldValue)
@@ -10,7 +10,6 @@ import Data.Int (Int64)
 import Data.Aeson (object,(.=),eitherDecodeStrict')
 import qualified Data.Aeson.KeyMap as KM
 import Data.Maybe (catMaybes)
-import qualified Data.Map.Strict as M
 import Bridge.Postgres.Schema
 import Bridge.Postgres.Ledger (criticalSequence, posting)
 import Control.Monad (when, forM_)
@@ -469,14 +468,8 @@ recordLossCover ledger source recovery now capital reason sourceProof custodyPro
       require (block==sourceBlock && height==sourceHeight) "source_loss_custody_view_changed"
       current <- O.runSelect c $ fmap custodycheckRevision $ O.selectTable custodycheckTable :: IO [Int64]
       require (matched && current==[revision] && checked>=0 && checked<=now && toInteger now-toInteger checked<=60) "source_loss_custody_not_current"
-      bs <- balances c
-      held <- O.runSelect c $ do
-        r <- O.selectTable reservationsTable
-        O.where_(reservationsAsset r O..== text "Native" O..&& reservationsPhase r O../= text "released")
-        pure(reservationsAmount r)
-        :: IO [Int64]
-      let free=M.findWithDefault 0 ("Native","float") bs-sum(map toInteger held)
-          earned=M.findWithDefault 0 ("Native","earned") bs
+      free <- freeInventory c Native
+      earned <- earnedFees c Native
       require (free>=toInteger fromFloat && earned>=toInteger fromEarned) "insufficient_loss_capital"
       let proof=encodeRecord $ object["source" .= sourceProof,"custody" .= custodyProof]
       require (T.length proof<=32768) "source_loss_evidence_too_large"

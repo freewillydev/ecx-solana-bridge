@@ -1,8 +1,9 @@
-module Bridge.Postgres.Treasury (allocate, classifySpend) where
+module Bridge.Postgres.Treasury (allocate, classifySpend, reserveFees, cancelFees) where
 
 import Bridge.Ledger.Model (economicOutflow,encodeRecord,decodeRecord)
 import Control.Monad (forM_)
-import Bridge.Types
+import Bridge.Types hiding (deploymentFingerprint)
+import Bridge.Config
 import Bridge.RPC (fieldValue)
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema
@@ -22,7 +23,7 @@ allocate ledger now did split reason = ledgerAction ledger $ \c->do
       encoded=encodeRecord entries
   require (not(null entries) && length entries<=4 && length(nub names)==length names
     && all (`elem` ["float","backing","operating","lp"]) names
-    && all ((>0).units.snd) entries && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_treasury_allocation"
+    && all ((>0).units.snd) entries && validReason reason) "invalid_treasury_allocation"
   old <- O.runSelect c $ do
     r<-O.selectTable treasuryallocationsTable
     O.where_(treasuryallocationsDepositId r O..== text did)
@@ -99,15 +100,12 @@ allocate ledger now did split reason = ledgerAction ledger $ \c->do
       pure seqNo
     _->reject "duplicate_treasury_allocation"
   pure(object ["receipt" .= did,"criticalSequence" .= sequenceNumber,"signedOrSent" .= False])
- where
-  text=O.sqlStrictText
-  num=O.sqlInt8
 
 -- Record an already-observed operator outflow; never sign or broadcast here.
 -- The scanner supplies economic facts, the operator supplies ownership only.
 classifySpend :: Ledger -> Text -> Text -> Text -> IO Value
 classifySpend ledger stream txid reason = ledgerAction ledger $ \c->do
-  require (not(T.null $ T.strip reason) && T.length reason<=512) "invalid_treasury_spend_attestation"
+  require (validReason reason) "invalid_treasury_spend_attestation"
   paused <- O.runSelect c (fmap deploymentPaused $ O.selectTable deploymentTable) :: IO [Int64]
   require (paused==[1]) "treasury_spend_requires_pause"
   rows <- O.runSelect c $ do
@@ -162,5 +160,76 @@ classifySpend ledger stream txid reason = ledgerAction ledger $ \c->do
     , O.uWhere= \row->chaineventsChain row O..== text stream O..&& chaineventsEventId row O..== text txid O..&& chaineventsNeedsReview row O../= O.sqlInt8 0
     , O.uReturning=O.rCount }
   pure(object["transaction" .= txid,"criticalSequence" .= sequenceNo,"signedOrSent" .= False])
- where
-  text=O.sqlStrictText
+
+-- Internal funding only; no handler or signing/send authority.
+-- Caller must validate the recipient on the real chain before exposing this
+-- stage as an operator command. Immutable policy supplies later payment limits.
+reserveFees :: Ledger -> Config -> Int64 -> Text -> Asset -> Amount -> Text -> Text -> IO Value
+reserveFees ledger cfg now key currency n destination explanation = ledgerAction ledger $ \c->do
+ require (now>=0 && T.length key==64 && T.all (`elem` ("0123456789abcdef"::String)) key
+   && currency `elem` [Native,Wrapped] && units n>0 && n<=maxInput cfg
+   && not(T.null destination) && T.length destination<=128 && validReason explanation) "invalid_fee_withdrawal"
+ deployment<-O.runSelect c $ fmap (\d->(deploymentPaused d,deploymentFingerprint d)) $ O.selectTable deploymentTable :: IO [(Int64,Text)]
+ require(map snd deployment==[fingerprint cfg]) "fee_withdrawal_profile_mismatch"
+ let saved=encodeRecord $ object
+       ["fingerprint" .= fingerprint cfg,"policy" .= PolicySnapshot (nativeConfirmations cfg) "finalized" (fingerprint cfg),
+        "nativeFee" .= maxNativeFee cfg,"solanaFee" .= maxSolFee cfg,"solanaRent" .= maxSolAccountRent cfg]
+     expected :: FeeWithdrawals
+     expected=FeeWithdrawals key (T.pack $ show currency) (units n) destination saved explanation 0
+ old <- O.runSelect c $ do
+   w<-O.selectTable feeWithdrawalsTable
+   O.where_(feeWithdrawalsId w O..== text key)
+   pure w
+ seqNo <- case (old :: [FeeWithdrawals]) of
+   [w]->require (w{feeWithdrawalsSequence=0}==expected) "fee_withdrawal_conflict" >> pure(feeWithdrawalsSequence w)
+   []->do
+     require(map fst deployment==[1]) "fee_withdrawal_requires_pause"
+     freshC c now
+     earned<-earnedFees c currency
+     require(earned>=toInteger(units n)) "insufficient_earned_fees"
+     seqNo<-criticalSequence c
+     _<-O.runInsert c O.Insert {O.iTable=feeWithdrawalsTable,O.iRows=[FeeWithdrawals (text key) (text $ T.pack(show currency)) (num $ units n) (text destination) (text saved) (text explanation) (num seqNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+     posting c ("fee-reserve:"<>key) "reserve earned fees for operator withdrawal"
+       [(currency,"earned",negate $ toInteger $ units n),(currency,"fee_pending",toInteger $ units n)]
+     pure seqNo
+   _->reject "duplicate_fee_withdrawal"
+ pure(object["withdrawal" .= key,"criticalSequence" .= seqNo,"signedOrSent" .= False])
+
+-- Cancellation returns funds only before any payment intent exists. A signed
+-- or uncertain payment must use payment recovery, never this funding release.
+cancelFees :: Ledger -> Text -> Text -> IO Value
+cancelFees ledger key explanation = ledgerAction ledger $ \c->do
+ require(validReason explanation) "invalid_fee_withdrawal_cancellation"
+ old<-O.runSelect c $ do
+   row@(identifier,_,_)<-O.selectTable feeWithdrawalCancellationsTable
+   O.where_(identifier O..== text key)
+   pure row
+ seqNo<-case (old :: [(Text,Text,Int64)]) of
+   [(_,saved,s)]->require(saved==explanation) "fee_withdrawal_cancellation_conflict" >> pure s
+   []->do
+     ws<-O.runSelect c $ do
+       w<-O.selectTable feeWithdrawalsTable
+       O.where_(feeWithdrawalsId w O..== text key)
+       pure w
+     w<-case (ws :: [FeeWithdrawals]) of [one]->pure one;_->reject "fee_withdrawal_not_found"
+     work<-O.runSelect c $ do
+       i<-O.selectTable intentsTable
+       O.where_(intentsId i O..== text("fee:"<>key))
+       pure(intentsId i)
+       :: IO [Text]
+     require(null work) "fee_withdrawal_payment_exists"
+     currency<-case feeWithdrawalsAsset w of "Native"->pure Native;"Wrapped"->pure Wrapped;_->reject "invalid_fee_withdrawal_asset"
+     seqNo<-criticalSequence c
+     _<-O.runInsert c O.Insert {O.iTable=feeWithdrawalCancellationsTable,O.iRows=[(text key,text explanation,num seqNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+     posting c ("fee-cancel:"<>key) "cancel unsigned operator fee reservation"
+       [(currency,"fee_pending",negate $ toInteger $ feeWithdrawalsAmount w),(currency,"earned",toInteger $ feeWithdrawalsAmount w)]
+     pure seqNo
+   _->reject "duplicate_fee_withdrawal_cancellation"
+ pure(object["withdrawal" .= key,"criticalSequence" .= seqNo,"signedOrSent" .= False])
+
+validReason :: Text -> Bool
+validReason value=not(T.null $ T.strip value) && T.length value<=512
+text :: Text -> O.Field O.SqlText
+text=O.sqlStrictText
+num :: Int64 -> O.Field O.SqlInt8
+num=O.sqlInt8
