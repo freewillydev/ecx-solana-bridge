@@ -5,6 +5,7 @@ synopsis: Replacement ECX bridge with explicit payment funding
 license: MIT
 build-type: Simple
 data-files: test/fixtures/*.json, migrations/*.sql
+extra-source-files: test/formal/*.tla, test/formal/*.cfg
 
 common settings
   default-language: GHC2021

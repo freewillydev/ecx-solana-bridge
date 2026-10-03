@@ -1,7 +1,9 @@
-{-# LANGUAGE DataKinds, FunctionalDependencies, RoleAnnotations #-}
+{-# LANGUAGE DataKinds, FunctionalDependencies, RoleAnnotations, TypeFamilies #-}
 -- Grammar only. Neither requests nor DSL values contain executable IO.
 module Bridge.Operation.Internal where
 
+import Data.Aeson (ToJSON,FromJSON(..),genericParseJSON,defaultOptions,Options(..))
+import GHC.Generics (Generic)
 import Bridge.Domain (Asset,Amount)
 import Bridge.Wire
 import Data.Kind (Type)
@@ -47,12 +49,46 @@ data OperatorWrite a where
   PauseService :: Text -> OperatorWrite ()
   ResumeService :: OperatorWrite ()
 
+-- Data families are generative and injective in BOTH indices. No type-family
+-- injectivity annotation is needed. Each instance has its own output constructor.
+data family Result (severity :: Severity) (op :: Type -> Type)
+type PreparedResult = Result 'Critical SignPrepared
+data instance Result 'Critical SignPrepared = PreparedResult { preparedOutput :: !SignedAttempt } deriving (Eq,Show,Generic)
+instance ToJSON PreparedResult
+instance FromJSON PreparedResult where
+  parseJSON = genericParseJSON defaultOptions { rejectUnknownFields = True }
+type ReplacementResult = Result 'Critical SignReplacement
+data instance Result 'Critical SignReplacement = ReplacementResult { replacementOutput :: !SignedAttempt } deriving (Eq,Show,Generic)
+instance ToJSON ReplacementResult
+instance FromJSON ReplacementResult where
+  parseJSON = genericParseJSON defaultOptions { rejectUnknownFields = True }
+type DraftResult = Result 'Critical DraftReplacement
+data instance Result 'Critical DraftReplacement = DraftResult { draftOutput :: !NativeDraft } deriving (Eq,Show,Generic)
+instance ToJSON DraftResult
+instance FromJSON DraftResult where
+  parseJSON = genericParseJSON defaultOptions { rejectUnknownFields = True }
+type CheckpointResult = Result 'Critical CheckpointCustody
+data instance Result 'Critical CheckpointCustody = CheckpointResult { checkpointOutput :: !BackupReceipt } deriving (Eq,Show,Generic)
+instance ToJSON CheckpointResult
+instance FromJSON CheckpointResult where
+  parseJSON = genericParseJSON defaultOptions { rejectUnknownFields = True }
+
 -- Initial signing is tied to a durable decision, never caller-supplied bytes.
+data CheckpointCustody a where
+  CheckpointCustody :: Text -> Int64 -> CheckpointCustody CheckpointResult
+data DraftReplacement a where
+  DraftReplacement :: Text -> Text -> Amount -> DraftReplacement DraftResult
+data SignReplacement a where
+  SignReplacement :: Text -> Int64 -> SignReplacement ReplacementResult
+data SignPrepared a where
+  SignPrepared :: Text -> Text -> Int -> SignPrepared PreparedResult
+
+-- Closed signer instruction set, populated by the Operation.command instances.
 data SigningOperation a where
-  CheckpointCustody :: Text -> Int64 -> SigningOperation BackupReceipt
-  DraftReplacement :: Text -> Text -> Amount -> SigningOperation NativeDraft
-  SignReplacement :: Text -> Int64 -> SigningOperation SignedAttempt
-  SignPrepared :: Text -> Text -> Int -> SigningOperation SignedAttempt
+  PreparedSigning :: SignPrepared a -> SigningOperation a
+  ReplacementSigning :: SignReplacement a -> SigningOperation a
+  DraftSigning :: DraftReplacement a -> SigningOperation a
+  CheckpointSigning :: CheckpointCustody a -> SigningOperation a
 
 data WorkerOperation a where
   CheckpointBackup :: Int64 -> WorkerOperation ()
@@ -79,10 +115,15 @@ data DSL (caller :: Caller) (severity :: Severity) a where
 instance Operation 'Operator 'Safe OperatorRead where command = ReadOperator
 instance Operation 'Operator 'Critical OperatorWrite where command = OperatorDSL
 instance Operation 'Worker 'Critical WorkerOperation where command = WorkerDSL
-instance Operation 'Signer 'Critical SigningOperation where command = SigningDSL
+instance Operation 'Signer 'Critical SignPrepared where command = SigningDSL . PreparedSigning
+instance Operation 'Signer 'Critical SignReplacement where command = SigningDSL . ReplacementSigning
+instance Operation 'Signer 'Critical DraftReplacement where command = SigningDSL . DraftSigning
+instance Operation 'Signer 'Critical CheckpointCustody where command = SigningDSL . CheckpointSigning
 instance Operation 'Customer 'Safe CustomerRead where command = ReadCustomer
 instance Operation 'Customer 'Critical CustomerWrite where command = WriteCustomer
 
+-- A signer input fixes a to Result severity op before op is existentially hidden.
+-- Packaging preserves that result identity; no IO or runtime cast enters Request.
 data Request (caller :: Caller) (severity :: Severity) a where
   Request :: Operation caller severity op => op a -> Request caller severity a
 

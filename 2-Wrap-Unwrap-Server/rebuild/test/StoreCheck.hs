@@ -52,7 +52,7 @@ import qualified Bridge.SolanaPayment as SP
 import qualified Network.Wai.Handler.Warp as Warp
 import qualified Data.ByteString as BS
 import Data.Time.Clock.POSIX (getPOSIXTime)
-import Bridge.Operation.Internal (Request(..),SigningOperation(..),WorkerOperation(..))
+import Bridge.Operation.Internal (Request(..),SignPrepared(..),CheckpointCustody(..),WorkerOperation(..))
 import qualified Bridge.Native as N
 import qualified Bridge.Solana as Solana
 import qualified Bridge.SolanaHelper as H
@@ -2728,9 +2728,9 @@ tlsMain=do
                 checkpoints<-newIORef (0::Int)
                 let evaluate :: forall a. Request 'Op.Signer 'Op.Critical a -> IO a
                     evaluate request=case Op.resolve request of
-                      Op.SigningDSL CheckpointCustody{}->do
+                      Op.SigningDSL (Op.CheckpointSigning CheckpointCustody{})->do
                         modifyIORef' checkpoints (+1)
-                        readIORef checkpointReply >>= maybe (reject "checkpoint_fixture_refused") pure
+                        Op.CheckpointResult <$> (readIORef checkpointReply >>= maybe (reject "checkpoint_fixture_refused") pure)
                       _->signer request
                 bracket (forkIO $ runSigningServer (endpoint port) evaluate) killThread $ \_thread->do
                   let wait 0=fail "TLS signer did not bind"

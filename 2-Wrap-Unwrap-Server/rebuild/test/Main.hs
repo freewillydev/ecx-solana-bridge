@@ -1,4 +1,4 @@
-{-# LANGUAGE DataKinds, GADTs #-}
+{-# LANGUAGE DataKinds, GADTs, TypeOperators, TypeFamilies #-}
 module Main (main) where
 
 import qualified SigningTransportCheck
@@ -12,10 +12,11 @@ import Servant.API ((:<|>)(..))
 import Bridge.Domain
 import Data.Aeson (eitherDecode,encode)
 import Data.Int (Int64)
+import Data.Type.Equality ((:~:)(Refl))
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import System.Exit (exitFailure)
-import Test.QuickCheck hiding (total)
+import Test.QuickCheck hiding (total,Result)
 
 main :: IO ()
 main = do
@@ -35,9 +36,12 @@ main = do
     , check "signer handler resolves an existential to a signer-only critical operation" $ once $ property $
         let prepared :<|> replacement :<|> draft :<|> checkpoint=signingServer ()
         in case (resolve $ prepared ("deployment","payment",3),resolve $ replacement ("deployment",7),resolve $ draft ("deployment","parent",good $ amount 2),resolve $ checkpoint ("deployment",9)) of
-          (SigningDSL (SignPrepared identity identifier generation),SigningDSL (SignReplacement other decision),SigningDSL (DraftReplacement third parent fee),SigningDSL (CheckpointCustody fourth sequenceNo))->
+          (SigningDSL (PreparedSigning (SignPrepared identity identifier generation)),SigningDSL (ReplacementSigning (SignReplacement other decision)),SigningDSL (DraftSigning (DraftReplacement third parent fee)),SigningDSL (CheckpointSigning (CheckpointCustody fourth sequenceNo)))->
             identity=="deployment" && identifier=="payment" && generation==3 && other==identity && decision==7 && third==identity && parent=="parent" && units fee==2 && fourth==identity && sequenceNo==9
           _->False
+    , check "result equality determines both severity and operation" $ once $ property $
+        case resultIndices (Refl :: Result 'Critical SignPrepared :~: Result 'Critical SignPrepared) of
+          (Refl,Refl)->True
     , check "typed signer result preserves all evidence through JSON" $ once $ property $
         let result=W.SignedAttempt "id" "bytes" "proof" (Just "outpoint")
         in eitherDecode (encode result)==Right result
@@ -132,3 +136,7 @@ handlerContract =
           ReadCustomer (PaymentInstructions auth oid) -> auth=="auth" && oid=="order"
         _ -> False
   in and [configOK,createOK,statusOK,instructionsOK]
+
+-- GHC must derive both equalities from family-result equality, without casts.
+resultIndices :: Result s op :~: Result t other -> (s :~: t, op :~: other)
+resultIndices Refl = (Refl,Refl)

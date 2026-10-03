@@ -12,7 +12,7 @@ import System.Directory (removeDirectoryRecursive)
 import System.FilePath (takeDirectory)
 import System.Timeout (timeout)
 import Data.Aeson (encode)
-import Bridge.Wire (Profile(..),SignedAttempt(..),NativeDraft,BackupReceipt(..))
+import Bridge.Wire (Profile(..),SignedAttempt(..))
 import Bridge.Domain (Amount)
 import Bridge.Error
 import Bridge.Store (Reader,StoreRead(ReadState,ReadSigningDecision,ReadReplacementSigning,ReadReplacementDraftContext),LedgerState(..),RecordedAttempt(..),evalRead)
@@ -33,10 +33,10 @@ import Servant
 
 -- Keep the shared API pure; only the critical runtime will generate ClientM.
 type SigningAPI = BasicAuth "signer" () :>
-  (("sign-preparation" :> ReqBody '[JSON] (Text,Text,Int) :> Post '[JSON] SignedAttempt)
-  :<|> ("sign-replacement" :> ReqBody '[JSON] (Text,Int64) :> Post '[JSON] SignedAttempt)
-  :<|> ("draft-replacement" :> ReqBody '[JSON] (Text,Text,Amount) :> Post '[JSON] NativeDraft)
-  :<|> ("checkpoint-custody" :> ReqBody '[JSON] (Text,Int64) :> Post '[JSON] BackupReceipt))
+  (("sign-preparation" :> ReqBody '[JSON] (Text,Text,Int) :> Post '[JSON] PreparedResult)
+  :<|> ("sign-replacement" :> ReqBody '[JSON] (Text,Int64) :> Post '[JSON] ReplacementResult)
+  :<|> ("draft-replacement" :> ReqBody '[JSON] (Text,Text,Amount) :> Post '[JSON] DraftResult)
+  :<|> ("checkpoint-custody" :> ReqBody '[JSON] (Text,Int64) :> Post '[JSON] CheckpointResult))
 signingAPI :: Proxy SigningAPI
 signingAPI=Proxy
 signingServer :: ServerT SigningAPI (Request 'Signer 'Critical)
@@ -66,7 +66,7 @@ withSigner manager reader settings action = do
   gate<-newMVar ()
   let interpret :: forall a. Request 'Signer 'Critical a -> IO a
       interpret request=withMVar gate $ \_ -> case resolve request of
-        SigningDSL (CheckpointCustody identity minimumSequence)->do
+        SigningDSL (CheckpointSigning (CheckpointCustody identity minimumSequence))->do
           require (identity==H.fingerprint config && minimumSequence>=0) "invalid_custody_checkpoint"
           (deployment,backup,parent)<-maybe (reject "custody_checkpoint_not_configured") pure (signingBackup settings)
           require (C.fingerprint deployment==identity && C.nativeSettings deployment==native
@@ -78,8 +78,8 @@ withSigner manager reader settings action = do
               after<-evalRead reader ReadState
               require (ledgerSequence after==sequenceNo) "custody_backup_changed"
               pure receipt
-          maybe (reject "custody_checkpoint_timeout") pure result
-        SigningDSL (DraftReplacement identity parent fee)->do
+          CheckpointResult <$> maybe (reject "custody_checkpoint_timeout") pure result
+        SigningDSL (DraftSigning (DraftReplacement identity parent fee))->do
           require (identity==H.fingerprint config) "signer_profile_mismatch"
           let readDecision=do
                 now<-floor <$> getPOSIXTime
@@ -88,8 +88,8 @@ withSigner manager reader settings action = do
           draft<-draftNativeReplacement (N.nativeCall manager native) native (map snd before) fee
           after<-readDecision
           require (before==after) "signing_decision_changed"
-          pure draft
-        SigningDSL (SignReplacement identity decision)->do
+          pure $ DraftResult draft
+        SigningDSL (ReplacementSigning (SignReplacement identity decision))->do
           require (identity==H.fingerprint config) "signer_profile_mismatch"
           let readDecision=do
                 now<-floor <$> getPOSIXTime
@@ -101,9 +101,9 @@ withSigner manager reader settings action = do
           after<-readDecision
           require (before==after) "signing_decision_changed"
           parent<-case reverse family of (saved,_):_->pure saved; _->reject "native_replacement_family_bounds"
-          pure $ SignedAttempt (nativeTxid $ signedNativeTransaction signed) (signedNativeBytes signed)
+          pure $ ReplacementResult $ SignedAttempt (nativeTxid $ signedNativeTransaction signed) (signedNativeBytes signed)
             (TE.decodeUtf8 $ BL.toStrict $ encode signed) (commonInput $ recordedSigned parent)
-        SigningDSL (SignPrepared identity identifier generation)->do
+        SigningDSL (PreparedSigning (SignPrepared identity identifier generation))->do
           require (identity==H.fingerprint config) "signer_profile_mismatch"
           let readDecision=do
                 now<-floor <$> getPOSIXTime
@@ -126,5 +126,5 @@ withSigner manager reader settings action = do
           verified<-verifySigningReply (N.nativeCall manager native) (N.profile native) config before reply
           after<-readDecision
           require (before==after) "signing_decision_changed"
-          pure verified
+          pure $ PreparedResult verified
   action interpret

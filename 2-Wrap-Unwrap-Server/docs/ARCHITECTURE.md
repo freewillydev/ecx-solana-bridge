@@ -90,6 +90,54 @@ Do not introduce severity casts, incoherent authorization instances, MonadIO, ar
 callbacks, generic RunQuery/RunSQL, or an unnecessary free-monad framework. Weekly
 supply limits and multisig in its comments are design notes, not current guarantees.
 
+## Signer result identity and formal model
+
+`Operation.Internal` declares `data family Result (severity :: Severity)
+(op :: Type -> Type)`. Data-family identity is injective in both arguments;
+`test/Main.hs` includes a polymorphic equality witness that GHC must typecheck
+without casts. Each signer input is a separate GADT whose result fixes both
+indices before `Request caller severity a` existentially hides its operation.
+The existing `Operation.command` instances generate the closed `SigningDSL`.
+Both the server interpreter and critical client dispatch use that typeclass path.
+
+| Authenticated POST path | Operation type | Result constructor |
+| --- | --- | --- |
+| `/sign-preparation` | `SignPrepared` | `PreparedResult` |
+| `/sign-replacement` | `SignReplacement` | `ReplacementResult` |
+| `/draft-replacement` | `DraftReplacement` | `DraftResult` |
+| `/checkpoint-custody` | `CheckpointCustody` | `CheckpointResult` |
+
+The four data instances have disjoint JSON record fields and reject unknown fields.
+The actual Servant test checks all sixteen response/decoder combinations. Worker
+and signer must upgrade together: this deliberately changes the private signer
+response format. Customer responses and durable signed bytes are unchanged.
+
+[SignerPaths.tla](../rebuild/test/formal/SignerPaths.tla) defines `OutputStates` as
+an explicit set and checks that each member has exactly one generating API path.
+It models receive, authentication/routing, typeclass resolution, evaluation and
+refusal, with abstract saved-authorization and stability guards. `Alignment` binds
+every emitted constructor to its originating path; `OnlyEvaluatorCreates` checks
+that no other transition produces it. The supplied two-request model exhaustively
+checks interleavings, invalid paths, failed authorization and failed decision checks.
+It reached 12,769 distinct states with no violations using TLC 1.7.4. Deliberate
+wrong-output, authentication-bypass and reused-constructor mutations are rejected.
+The module contains the transition-by-transition inductive argument; there is no
+TLAPS-checked unbounded theorem or automatically verified Haskell refinement.
+
+Run from `rebuild/test/formal/` with the official TLA+ 1.7.4 `tla2tools.jar`:
+
+```sh
+java -Xmx256m -XX:+UseParallelGC -cp /path/to/tla2tools.jar tlc2.TLC -workers 1 -metadir /tmp/ecx-tlc-states -config SignerPaths.cfg SignerPaths.tla
+```
+
+The property concerns successful evaluator emissions through the production API.
+It does not make ordinary data constructors or JSON unforgeable: trusted Haskell
+code/tests can construct values, and JSON decoders necessarily construct them too.
+The production entry point passes `withSigner` directly to `runSigningServer`;
+TLS/authentication and independent saved-decision validation remain essential.
+Retries may repeat the same result through the same path. The model does not prove
+cryptography, chain/ledger validity, process isolation or all other critical DSLs.
+
 ## Database and custody authority
 
 All application row access, diagnostics and test fixtures must use Opaleye, within

@@ -28,11 +28,12 @@ import Bridge.Web (customerApplication,publicApplication)
 import qualified Bridge.Wire as W
 import qualified Bridge.Domain as D
 import qualified Data.Map.Strict as M
-import Bridge.Operation.Internal
+import Bridge.Operation.Internal hiding (Result)
 import Bridge.Error
 import Bridge.Wire (SignedAttempt(..))
 import Control.Exception (bracket,try,throwIO,AsyncException(..))
 import Data.Aeson (encode,eitherDecode)
+import Data.Either (isLeft)
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Base64 as B64
@@ -185,19 +186,19 @@ checks=sequence
           unsigned=W.NativeDraft "fixture-psbt" (W.NativeTx "fixture-id" 2 0 [] []) [] quantity
           evaluate :: forall a. Request 'Signer 'Critical a -> IO a
           evaluate request=case resolve request of
-            SigningDSL (CheckpointCustody identity sequenceNo)->do
+            SigningDSL (CheckpointSigning (CheckpointCustody identity sequenceNo))->do
               modifyIORef' calls (<>[(identity,"checkpoint",fromIntegral sequenceNo)])
-              pure $ W.BackupReceipt identity sequenceNo (T.replicate 64 "a") (T.replicate 64 "b")
-            SigningDSL (DraftReplacement identity parent fee)->do
+              pure $ CheckpointResult $ W.BackupReceipt identity sequenceNo (T.replicate 64 "a") (T.replicate 64 "b")
+            SigningDSL (DraftSigning (DraftReplacement identity parent fee))->do
               modifyIORef' calls (<>[(identity,parent,fromIntegral $ D.units fee)])
-              pure unsigned
-            SigningDSL (SignReplacement identity decision)->do
+              pure $ DraftResult unsigned
+            SigningDSL (ReplacementSigning (SignReplacement identity decision))->do
               modifyIORef' calls (<>[(identity,"replacement",fromIntegral decision)])
-              pure result
-            SigningDSL (SignPrepared identity identifier generation)->do
+              pure $ ReplacementResult result
+            SigningDSL (PreparedSigning (SignPrepared identity identifier generation))->do
               modifyIORef' calls (<>[(identity,identifier,generation)])
               require (identifier/="refused") "signing_backup_required"
-              pure result
+              pure $ PreparedResult result
           auth=[("Authorization","Basic "<>B64.encode ("worker:"<>token))]
           body identifier=encode ("deployment"::Text,identifier::Text,0::Int)
           send path headers bytes=srequest $ SRequest
@@ -224,10 +225,17 @@ checks=sequence
       observed<-readIORef calls
       pure $ counterexample (show (map (statusCode . simpleStatus) responses,observed,map simpleBody responses)) $ map (statusCode . simpleStatus) responses==[401,403,200,409,400,413,403,404,401,200,400,401,200,400,401,200,400]
         && observed==[("deployment","payment",0),("deployment","refused",0),("deployment","replacement",7),("deployment","parent",2),("deployment","checkpoint",9)]
-        && eitherDecode (simpleBody $ responses!!12)==Right unsigned
-        && eitherDecode (simpleBody $ responses!!15)==Right (W.BackupReceipt "deployment" 9 (T.replicate 64 "a") (T.replicate 64 "b"))
+        && eitherDecode (simpleBody $ responses!!9)==Right (ReplacementResult result)
+        && let outputs=map (simpleBody . (responses!!)) [2,9,12,15]
+               decoders=[isLeft . (eitherDecode :: BL.ByteString -> Either String PreparedResult)
+                        ,isLeft . (eitherDecode :: BL.ByteString -> Either String ReplacementResult)
+                        ,isLeft . (eitherDecode :: BL.ByteString -> Either String DraftResult)
+                        ,isLeft . (eitherDecode :: BL.ByteString -> Either String CheckpointResult)]
+           in and [decode bytes == (i/=j) | (i,decode)<-zip [0::Int ..] decoders,(j,bytes)<-zip [0..] outputs]
+        && eitherDecode (simpleBody $ responses!!12)==Right (DraftResult unsigned)
+        && eitherDecode (simpleBody $ responses!!15)==Right (CheckpointResult $ W.BackupReceipt "deployment" 9 (T.replicate 64 "a") (T.replicate 64 "b"))
         && case drop 2 responses of
-          accepted:_->eitherDecode (simpleBody accepted)==Right result
+          accepted:_->eitherDecode (simpleBody accepted)==Right (PreparedResult result)
             && lookup "Cache-Control" (simpleHeaders accepted)==Just "no-store"
           _->False
   , check "signer startup binds protected keypair seed and public half to the custody owner" $ once $ ioProperty $
