@@ -1356,7 +1356,7 @@ connections require inspection. Interruptions during an uncertain CREATE DATABAS
 may leave an inaccessible staging database to inspect, never an activated worker.
 The source ledger and surviving host fence remain untouched.
 
-Latest checkpoint versus `a622bb2`: **94 added production lines across the same
+Local-restore checkpoint versus `a622bb2`: **94 added production lines across the same
 three files** (Backup 208 → 273, Store 3,249 → 3,272, Main 87 → 93), no new files or
 executables. Shared manifest validation and bounded PostgreSQL process handling
 replace duplicate upload-only logic. The existing PostgreSQL contract grows
@@ -1368,8 +1368,43 @@ post-restore rejection and staging cleanup. The actual executable successfully
 runs the new command and rejects a stale snapshot. Root Cabal build, QuickCheck,
 PostgreSQL/restic and executable/HTTP contracts pass.
 
-Still required: key/wallet recovery material, authenticated download/restore orchestration,
-fence adoption, acknowledgment and runtime integration, then acceptance using
-independent off-host storage. The `backupRequired` startup refusal remains until
-those guarantees are implemented; neither a local archive, upload-only receipt nor
-staged restored database permits signing or sending.
+Recovery can now start directly from an authenticated snapshot:
+
+```sh
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE
+```
+
+`SNAPSHOT` must be its full 64-character lowercase ID, never `latest` or an
+abbreviation. `STAGING` is an existing owned 0700 directory. `BACKUP_CONFIG` uses
+the protected HTTPS repository/password settings described above, preferably with
+separate recovery credentials. Read-only restic commands use `--no-lock`; upload
+continues to use locking. No ambient restic override, local cache, repository
+initialization or pruning is allowed by this path.
+
+The closed `RecoverLedger` operation checks the authenticated snapshot's two generated
+file paths and manifest, then binds its deployment and sequence tags, fingerprint,
+schema, archive filename and independently known minimum sequence. It fetches only
+those two files into a fresh private subdirectory; it does not extract a snapshot
+tree or accept a remote-selected local destination. Archive output streams directly
+to disk, is SHA-256 checked, and then passes through the same staging restore.
+The operation removes its plaintext subdirectory on completion/failure. It still
+returns only a restricted paused database; fence adoption and service activation
+are separate decisions.
+
+Latest checkpoint versus `d5315b0`: **57 added production lines across the same
+three files** (Backup 273 → 319, Store 3,272 → 3,279, Main 93 → 97), no new files or
+executables. Manifest and receipt parsing, subprocess limits and CLI dispatch are
+shared with the existing paths. The test's handwritten download/copy procedure is
+replaced by the production downloader: PostgreSQL contract 2,585 → 2,600 lines.
+Actual restic download and populated restoration preserve exact bytes, signed
+attempts and ledger postings; invalid snapshot selector, identity, sequence and
+password refusal preserve the source and leave no staging directories. The real
+CLI refuses a local repository. Root Cabal build, QuickCheck, PostgreSQL/restic and
+executable/HTTP contracts pass. This uses a private local-repository storage seam;
+production still requires HTTPS, and independent off-host acceptance remains open.
+
+Still required: key/wallet recovery material, fence adoption, acknowledgment and
+runtime integration, then acceptance using independent off-host storage. The
+`backupRequired` startup refusal remains until those guarantees are implemented;
+neither an archive, upload-only receipt nor staged restored database permits signing
+or sending.

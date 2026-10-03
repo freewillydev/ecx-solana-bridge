@@ -1,7 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables,DeriveGeneric #-}
 -- Private archive mechanics. Only Store's closed backup evaluator supplies the
 -- exported snapshot and metadata; no SQL or remote acknowledgment lives here.
-module Bridge.Store.Backup (LedgerArchive(..),archiveLedger,RemoteBackup,loadRemoteBackup,uploadRemoteArchive,BackupReceipt(..),uploadArchive,loadLedgerArchive,restoreLedger,discardRestore) where
+module Bridge.Store.Backup (LedgerArchive(..),archiveLedger,RemoteBackup,loadRemoteBackup,uploadRemoteArchive,BackupReceipt(..),uploadArchive,loadLedgerArchive,restoreLedger,discardRestore,downloadRemoteArchive,downloadArchive) where
 
 import Bridge.Error
 import Control.Exception (IOException,bracket,bracketOnError,catch,onException,mask)
@@ -15,12 +15,13 @@ import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
-import Data.List (isPrefixOf,sort)
+import Data.List (isPrefixOf,isSuffixOf,sort)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Database.PostgreSQL.Simple as PG
 import Database.PostgreSQL.Simple.Types (Identifier(..))
-import System.Directory (removeFile)
+import System.Directory (removeFile,removeDirectoryRecursive)
+import qualified System.Posix.Directory as PosixDirectory
 import GHC.Generics (Generic)
 import qualified Network.HTTP.Client as HTTP
 import qualified Network.Socket as Socket
@@ -156,23 +157,24 @@ uploadArchive program repository password archive = do
       paths=[archivePath archive,manifestPath archive]
       run=resticJSON program repository password
   messages<-run (["backup","--json"]<>concatMap (\tag->["--tag",T.unpack tag]) tags<>paths)
-  records<-mapM decode (filter (not . BS.null) $ BS.split 10 messages)
+  records<-mapM decodeReceipt (filter (not . BS.null) $ BS.split 10 messages)
   let summaries=[record | record@(Object fields)<-records, parseEither (.: "message_type") fields==Right ("summary"::Text)]
   snapshot<-case summaries of
-    [summary]->member "snapshot_id" summary
+    [summary]->receiptField "snapshot_id" summary
     _->reject "backup_receipt_missing"
   require (T.length snapshot==64 && T.all (`elem` ("0123456789abcdef"::String)) snapshot) "invalid_backup_receipt"
-  metadata<-run ["cat","snapshot",T.unpack snapshot] >>= decode
-  savedPaths<-member "paths" metadata
-  savedTags<-member "tags" metadata
+  metadata<-run ["cat","snapshot",T.unpack snapshot] >>= decodeReceipt
+  savedPaths<-receiptField "paths" metadata
+  savedTags<-receiptField "tags" metadata
   require (sort savedPaths==sort paths && all (`elem` (savedTags::[Text])) tags) "backup_snapshot_mismatch"
   downloaded<-run ["dump",T.unpack snapshot,manifestPath archive]
   require (downloaded==manifest) "backup_manifest_readback_mismatch"
   pure (BackupReceipt identity sequenceNo snapshot checksum)
- where
-  decode bytes=either (const $ reject "invalid_backup_receipt") pure (eitherDecodeStrict' bytes)
-  member :: FromJSON a => Key -> Value -> IO a
-  member key value=either (const $ reject "invalid_backup_receipt") pure (parseEither (withObject "backup receipt" (.: key)) value)
+
+decodeReceipt :: BS.ByteString -> IO Value
+decodeReceipt bytes=either (const $ reject "invalid_backup_receipt") pure (eitherDecodeStrict' bytes)
+receiptField :: FromJSON a => Key -> Value -> IO a
+receiptField key value=either (const $ reject "invalid_backup_receipt") pure (parseEither (withObject "backup receipt" (.: key)) value)
 
 -- One bounded stdout pipe; stderr is discarded without risking credentials in
 -- errors. No shell, ambient repository/password override, cache or child workers.
@@ -180,7 +182,8 @@ resticJSON :: FilePath -> FilePath -> FilePath -> [String] -> IO BS.ByteString
 resticJSON program repository password arguments = do
   inherited<-getEnvironment
   let environment=("GOMAXPROCS","2"):filter ((`elem` ["PATH","HOME","TMPDIR","LANG"]) . fst) inherited
-      args=["--no-cache","--repository-file",repository,"--password-file",password]<>arguments
+      readOnly=case arguments of command:_->command `elem` ["cat","dump"]; _->False
+      args=["--no-cache"]<>["--no-lock" | readOnly]<>["--repository-file",repository,"--password-file",password]<>arguments
   withBinaryFile "/dev/null" WriteMode $ \sink->
     withCreateProcess (proc program args) {env=Just environment,std_in=NoStream,std_out=CreatePipe,std_err=UseHandle sink,close_fds=True} $ \_ output _ process->do
       let kill=do
@@ -209,6 +212,15 @@ loadLedgerArchive identity minimumSequence manifest = do
   require (minimumSequence>=0 && not(T.null identity)) "invalid_restore_policy"
   privateDirectory (takeDirectory manifest)
   bytes<-readPrivate manifest
+  archive<-manifestArchive identity minimumSequence manifest bytes
+  privateFile (archivePath archive)
+  actual<-withBinaryFile (archivePath archive) ReadMode (hashChunks hashInit)
+  require (archiveHash archive==actual) "backup_archive_mismatch"
+  pure archive
+
+manifestArchive :: Text -> Int64 -> FilePath -> BS.ByteString -> IO LedgerArchive
+manifestArchive identity minimumSequence manifest bytes = do
+  require (BS.length bytes<=8192) "backup_file_too_large"
   value<-either (const $ reject "invalid_backup_manifest") pure (eitherDecodeStrict' bytes)
   (version,name,checksum,saved,schema,sequenceNo,remote)<-
     either (const $ reject "invalid_backup_manifest") pure $ parseEither
@@ -224,10 +236,44 @@ loadLedgerArchive identity minimumSequence manifest = do
         ,"fingerprint" .= (saved::Text),"schemaVersion" .= schema,"criticalSequence" .= (sequenceNo::Int64)
         ,"remoteDurabilityAcknowledged" .= remote]
   require (value==expected) "invalid_backup_manifest"
-  privateFile path
-  actual<-withBinaryFile path ReadMode (hashChunks hashInit)
-  require (checksum==actual) "backup_archive_mismatch"
   pure (LedgerArchive path manifest checksum saved sequenceNo)
+
+-- Authentication is provided by restic; only these two bound files are fetched,
+-- never a directory/tree extraction or an archive-selected local destination.
+downloadRemoteArchive :: RemoteBackup -> Text -> Text -> Int64 -> FilePath -> IO LedgerArchive
+downloadRemoteArchive remote=downloadArchive (restic remote) (repositoryFile remote) (passwordFile remote)
+
+downloadArchive :: FilePath -> FilePath -> FilePath -> Text -> Text -> Int64 -> FilePath -> IO LedgerArchive
+downloadArchive program repository password snapshot identity minimumSequence directory = do
+  require (isAbsolute program) "invalid_backup_configuration"
+  require (T.length snapshot==64 && T.all (`elem` ("0123456789abcdef"::String)) snapshot) "invalid_backup_snapshot"
+  require (minimumSequence>=0 && not(T.null identity)) "invalid_restore_policy"
+  privateDirectory directory
+  privateFile repository
+  privateFile password
+  let run=resticJSON program repository password
+  metadata<-run ["cat","snapshot",T.unpack snapshot] >>= decodeReceipt
+  paths<-receiptField "paths" metadata
+  tags<-receiptField "tags" metadata
+  require (length paths==2 && all (\path->isAbsolute path && normalise path==path) paths) "backup_snapshot_mismatch"
+  (archiveSource,manifestSource)<-case ([path | path<-paths,".dump-" `isSuffixOf` path],[path | path<-paths,".manifest-" `isSuffixOf` path]) of
+    ([archive],[manifest]) | takeDirectory archive==takeDirectory manifest -> pure(archive,manifest)
+    _->reject "backup_snapshot_mismatch"
+  manifestBytes<-run ["dump",T.unpack snapshot,manifestSource]
+  suffix<-TE.decodeUtf8 . Hex.encode <$> (getRandomBytes 16 :: IO BS.ByteString)
+  let stage=directory</>"recovery-"<>T.unpack suffix
+      manifest=stage</>takeFileName manifestSource
+      writePrivate path bytes=bracket
+        (openFd path WriteOnly defaultFileFlags {creat=Just 0o600,exclusive=True,nofollow=True,cloexec=True} >>= fdToHandle)
+        hClose (\handle->BS.hPut handle bytes)
+  archive<-manifestArchive identity minimumSequence manifest manifestBytes
+  let expectedTags=["ecx-bridge-critical","deployment:"<>identity,"sequence:"<>T.pack(show $ archiveSequence archive)]
+  require (takeFileName(archivePath archive)==takeFileName archiveSource && all (`elem` (tags::[Text])) expectedTags) "backup_snapshot_mismatch"
+  bracketOnError (PosixDirectory.createDirectory stage 0o700 >> pure stage) removeDirectoryRecursive $ \_->do
+    writePrivate manifest manifestBytes
+    writePrivate (archivePath archive) BS.empty
+    _<-run ["dump",T.unpack snapshot,archiveSource,"--target",archivePath archive]
+    loadLedgerArchive identity minimumSequence manifest
 
 -- Explicit offline schema infrastructure. Generated names, template0 and revoked
 -- PUBLIC access isolate staging; never restore into a caller-selected database.

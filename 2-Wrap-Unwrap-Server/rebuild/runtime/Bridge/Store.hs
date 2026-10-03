@@ -16,7 +16,7 @@ import Bridge.Domain
 import Bridge.Wire (PaymentTerms(..),PolicySnapshot(..),CostLimits(..),SignedAttempt(..))
 import qualified Bridge.Store.Schema as S
 import Bridge.Store.Catalog (claimWorker,verifyReadRole,exportSnapshot)
-import Bridge.Store.Backup (LedgerArchive(..),archiveLedger,BackupReceipt(..),loadRemoteBackup,uploadRemoteArchive,loadLedgerArchive,restoreLedger,discardRestore)
+import Bridge.Store.Backup (LedgerArchive(..),archiveLedger,BackupReceipt(..),loadRemoteBackup,uploadRemoteArchive,loadLedgerArchive,restoreLedger,discardRestore,downloadRemoteArchive)
 import Crypto.Random (getRandomBytes)
 import qualified Data.ByteString as BS
 import Data.List (nub,sortOn)
@@ -38,7 +38,8 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Database.PostgreSQL.Simple.Transaction as Tx
-import System.Directory (removeFile)
+import System.Directory (removeFile,removeDirectoryRecursive)
+import System.FilePath (takeDirectory)
 import qualified Opaleye as O
 import qualified Opaleye.Exists as Exists
 import qualified Opaleye.Internal.Locking as Locking
@@ -86,8 +87,14 @@ data NativeSettlementCheck = NativeConfirming | NativeUnavailable Text
 -- paying Writer. No online handler receives this capability or chooses a target.
 data StoreRestore a where
   RestoreLedger :: FilePath -> Text -> Int64 -> StoreRestore (Text,Int64)
+  RecoverLedger :: FilePath -> Text -> FilePath -> Text -> Int64 -> StoreRestore (Text,Int64)
 
 evalRestore :: PG.ConnectInfo -> StoreRestore a -> IO a
+evalRestore settings (RecoverLedger configuration snapshot directory identity minimumSequence) = do
+  remote<-loadRemoteBackup configuration
+  bracket (downloadRemoteArchive remote snapshot identity minimumSequence directory)
+    (removeDirectoryRecursive . takeDirectory . manifestPath) $ \archive->
+      evalRestore settings (RestoreLedger (manifestPath archive) identity minimumSequence)
 evalRestore settings (RestoreLedger manifest identity minimumSequence) = do
   archive<-loadLedgerArchive identity minimumSequence manifest
   bracketOnError (restoreLedger settings archive) discardRestore $ \target->

@@ -30,7 +30,7 @@ import qualified Network.Wai.Test as WaiTest
 import Network.HTTP.Types (statusCode,status200)
 import Bridge.Order
 import qualified Bridge.Fence as Fence
-import System.Directory (createDirectory,removeDirectoryRecursive,removeFile,findExecutable)
+import System.Directory (createDirectory,removeDirectoryRecursive,removeFile,findExecutable,listDirectory)
 import System.IO (openTempFile,hClose,withFile,IOMode(WriteMode))
 import System.Posix.Files (setFileMode)
 import qualified System.Posix.Files as Posix
@@ -1511,6 +1511,16 @@ serverMain = do
           check (case rows of [row]->S.fingerprint row==identity && S.paused row==1; _->False)
       (refused,_,err)<-runRestore 1
       check (refused/=ExitSuccess && "backup_snapshot_too_old" `T.isInfixOf` T.pack err)
+      let backupConfig=directory</>"backup.json"
+          repositoryFile=directory</>"repository"
+          passwordFile=directory</>"password"
+      BS.writeFile repositoryFile "/tmp/not-a-remote-repository"
+      BS.writeFile passwordFile "offline-test-password"
+      BL.writeFile backupConfig $ encode $ object ["restic" .= ("/unused/restic"::T.Text),"repositoryFile" .= repositoryFile,"passwordFile" .= passwordFile]
+      mapM_ (\path->setFileMode path 0o600) [backupConfig,repositoryFile,passwordFile]
+      (denied,_,message)<-Process.readCreateProcessWithExitCode
+        (Process.proc binary ["recover-ledger",filename,backupConfig,replicate 64 'a',directory,"0"]) {Process.env=Just childEnv} ""
+      check (denied/=ExitSuccess && "https_backup_repository_required" `T.isInfixOf` T.pack message)
       bracket (HTTP.newManager HTTP.defaultManagerSettings {HTTP.managerResponseTimeout=HTTP.responseTimeoutMicro 1000000}) HTTP.closeManager $ \manager->
         withFile (directory<>"server.log") WriteMode $ \logFile->
           Process.withCreateProcess (Process.proc binary ["observe",filename])
@@ -2536,7 +2546,6 @@ archiveContract settings fixtures reader = do
     let repository=directory</>"repository"
         password=directory</>"password"
         configuration=directory</>"backup.json"
-        downloaded=directory</>"download.dump"
         protected path contents=BS.writeFile path contents >> setFileMode path 0o600
         localRepository=TE.encodeUtf8 $ T.pack(directory</>"encrypted-repository")
         upload=Backup.uploadArchive program repository password
@@ -2562,24 +2571,30 @@ archiveContract settings fixtures reader = do
     Process.callProcess program (common<>["init","--quiet"])
     receipt<-upload archive
     check (receiptIdentity receipt==archiveIdentity archive && receiptSequence receipt==archiveSequence archive && receiptArchiveHash receipt==archiveHash archive)
-    -- Real encrypted repository readback and database restoration, not a mock
-    -- restic receipt. A local repository never changes worker backup coverage.
-    withFile downloaded WriteMode $ \output->
-      Process.withCreateProcess (Process.proc program (common<>["dump",T.unpack $ receiptSnapshot receipt,archivePath archive]))
-        {Process.std_out=Process.UseHandle output} $ \_ _ _ process->
-          Process.waitForProcess process >>= check . (==ExitSuccess)
-    BS.readFile downloaded >>= check . (==bytes)
-    setFileMode downloaded 0o600
-    -- Preserve the verified manifest fields while binding the downloaded local filename.
-    let recoveredManifest=directory</>"recovered.json"
-    manifestBytes<-case manifest of
-      Object fields->pure $ encode $ Object $ KM.insert "archive" (toJSON ("download.dump"::T.Text)) fields
-      _->fail "manifest object required"
-    protected recoveredManifest (BL.toStrict manifestBytes)
-    restore recoveredManifest
+    let download identifier expected minimumSequence=Backup.downloadArchive program repository password identifier expected minimumSequence directory
+        snapshot=receiptSnapshot receipt
+        clean=removeDirectoryRecursive . takeDirectory . manifestPath
+    filesBefore<-sort <$> listDirectory directory
+    expectStore "https_backup_repository_required" (evalRestore settings $ RecoverLedger configuration snapshot directory "contract" 0)
+    expectStore "invalid_backup_snapshot" (download "latest" "contract" 0)
+    expectStore "invalid_restore_policy" (download snapshot "contract" (-1))
+    expectStore "backup_identity_mismatch" (download snapshot "other" 0)
+    expectStore "backup_snapshot_too_old" (download snapshot "contract" (archiveSequence archive+1))
+    -- Production downloader and production restore, with real restic encryption.
+    -- The private local-repository seam grants no worker coverage.
+    bracket (download snapshot "contract" (archiveSequence archive)) clean $ \recovered->do
+      check (takeDirectory(manifestPath recovered)/=directory && archiveHash recovered==archiveHash archive)
+      BS.readFile (archivePath recovered) >>= check . (==bytes)
+      forM_ [archivePath recovered,manifestPath recovered] $ \path->do
+        status<-Posix.getSymbolicLinkStatus path
+        check (Posix.isRegularFile status && Posix.fileMode status .&. 0o077==0)
+      restore (manifestPath recovered)
+    (sort <$> listDirectory directory) >>= check . (==filesBefore)
     fixture fixtures RestoreDatabases >>= check . (==databasesBefore)
     protected password "wrong-passphrase"
     expectStore "backup_process_failed" (upload archive)
+    expectStore "backup_process_failed" (download snapshot "contract" 0)
+    (sort <$> listDirectory directory) >>= check . (==filesBefore)
     evalRead reader ReadState >>= check . (==before)
     fixture fixtures ArchiveRecords >>= check . (==records)
-    putStrLn "PASS: restricted paused restore, stale/identity/schema/hash refusal, failed-stage cleanup, private snapshot, real restic encryption/readback/restore, repository/permission/integrity/password refusal, unchanged coverage, exact signed attempts and every ledger posting"
+    putStrLn "PASS: authenticated download, restricted paused restore, stale/identity/schema/hash refusal, failed-stage cleanup, private snapshot, real restic encryption/readback/restore, repository/permission/integrity/password refusal, unchanged coverage, exact signed attempts and every ledger posting"
