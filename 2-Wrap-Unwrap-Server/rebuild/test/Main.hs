@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds, GADTs #-}
 module Main (main) where
 
+import Bridge.Identity (bearerHash,capabilityHash)
 import Bridge.API (customerServer)
 import Bridge.Operation.Internal
 import qualified Bridge.Wire as W
@@ -16,7 +17,11 @@ import Test.QuickCheck hiding (total)
 main :: IO ()
 main = do
   results <- sequence
-    [ check "customer handlers preserve request, result type and severity" $ once $ property handlerContract
+    [ check "capabilities retain baseline hashing and reject malformed headers" $ once $ property $
+        and [capabilityHash (T.replicate 64 "0")==Right "c7de6a9548a8cbddf66a91b07bedaa2949ebe64ce649be6d584f7ba7122b4c04"
+            ,bearerHash ("Bearer "<>T.replicate 64 "0")==capabilityHash (T.replicate 64 "0")
+            ,all (isLeft . bearerHash) ["", "bearer "<>T.replicate 64 "0", "Bearer "<>T.replicate 64 "A", "Bearer "<>T.replicate 64 "0"<>" "]]
+    , check "customer handlers preserve request, result type and severity" $ once $ property handlerContract
     , check "serialized quotes cannot change saved accounting" $ forAll (chooseInteger (2,1000000000)) $ \n ->
         let q=good (quote $ good $ amount n)
         in conjoin [eitherDecode (encode q)===Right q,

@@ -3,7 +3,7 @@
 module Bridge.Store.Schema where
 import Data.Int (Int64)
 import Data.Text (Text)
-import Data.Profunctor.Product (p2,p3,p5)
+import Data.Profunctor.Product (p2,p3,p4,p5)
 import Data.Profunctor.Product.TH (makeAdaptorAndInstance)
 import qualified Opaleye as O
 
@@ -50,3 +50,41 @@ custody = O.table "custody_check" $ p5
   (O.requiredTableField "singleton",O.requiredTableField "revision",O.requiredTableField "checked_revision",O.requiredTableField "checked_at",O.requiredTableField "last_error")
 intentIds :: O.Table TextField TextField
 intentIds = O.table "intents" (O.requiredTableField "id")
+
+data OrderF t n nt nn = Order
+  { orderId :: t, capabilityHash :: t, idempotencyKey :: t, requestHash :: t
+  , requestJson :: t, quoteJson :: t, policyJson :: t, status :: t
+  , deadline :: n, graceDeadline :: n, instruction :: nt, instructionSequence :: nn
+  , payoutTx :: nt, instructionIssued :: n } deriving (Eq,Show)
+$(makeAdaptorAndInstance "pOrder" ''OrderF)
+type Order = OrderF Text Int64 (Maybe Text) (Maybe Int64)
+type OrderFields = OrderF TextField IntField (O.FieldNullable O.SqlText) (O.FieldNullable O.SqlInt8)
+orders :: O.Table OrderFields OrderFields
+orders = O.table "orders" $ pOrder Order
+  { orderId=O.requiredTableField "id", capabilityHash=O.requiredTableField "capability_hash"
+  , idempotencyKey=O.requiredTableField "idempotency_key", requestHash=O.requiredTableField "request_hash"
+  , requestJson=O.requiredTableField "request_json", quoteJson=O.requiredTableField "quote_json"
+  , policyJson=O.requiredTableField "policy_json", status=O.requiredTableField "status"
+  , deadline=O.requiredTableField "deadline", graceDeadline=O.requiredTableField "grace_deadline"
+  , instruction=O.requiredTableField "instruction", instructionSequence=O.requiredTableField "instruction_sequence"
+  , payoutTx=O.requiredTableField "payout_tx", instructionIssued=O.requiredTableField "instruction_issued" }
+
+-- Read projections for recovery overlays. They grant no update capability.
+nativeRecovery, sourceRecovery :: O.Select (TextField,TextField)
+nativeRecovery = O.selectTable $ O.table "native_payment_recovery_state" $ p2
+  (O.requiredTableField "txid",O.requiredTableField "state")
+sourceRecovery = O.selectTable $ O.table "source_recovery_state" $ p2
+  (O.requiredTableField "deposit_id",O.requiredTableField "state")
+accountedLosses :: O.Select TextField
+accountedLosses = O.selectTable $ O.table "accounted_source_losses" (O.requiredTableField "deposit_id")
+orderDeposits :: O.Select (TextField,O.FieldNullable O.SqlText)
+orderDeposits = O.selectTable $ O.table "deposits" $ p2
+  (O.requiredTableField "id",O.requiredTableField "order_id")
+orderObligations :: O.Select (TextField,TextField,TextField,TextField)
+orderObligations = O.selectTable $ O.table "obligations" $ p4
+  (O.requiredTableField "id",O.requiredTableField "order_id",O.requiredTableField "deposit_id",O.requiredTableField "status")
+intentObligations, attemptIntents :: O.Select (TextField,TextField)
+intentObligations = O.selectTable $ O.table "intents" $ p2
+  (O.requiredTableField "id",O.requiredTableField "obligation_id")
+attemptIntents = O.selectTable $ O.table "attempts" $ p2
+  (O.requiredTableField "txid",O.requiredTableField "intent_id")

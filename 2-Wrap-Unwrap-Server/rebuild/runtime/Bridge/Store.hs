@@ -5,6 +5,8 @@ module Bridge.Store
   ( Reader, Writer, StoreError(..), StoreRead(..), StoreWrite(..), LedgerState(..), WithdrawalView(..)
   , withReader, withWriter, evalRead, evalWrite ) where
 
+import Bridge.Identity (bearerHash)
+import qualified Bridge.Wire as W
 import Bridge.Domain
 import Bridge.Wire (PaymentTerms(..),PolicySnapshot(..))
 import qualified Bridge.Store.Schema as S
@@ -12,7 +14,7 @@ import Bridge.Store.Catalog (claimWorker,verifyReadRole)
 import Control.Concurrent.MVar
 import Control.Exception
 import Control.Monad (unless)
-import Data.Aeson (encode,eitherDecodeStrict')
+import Data.Aeson (FromJSON,encode,eitherDecodeStrict')
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
 import qualified Data.Map.Strict as M
@@ -43,18 +45,19 @@ data StoreRead a where
   ReadState :: StoreRead LedgerState
   ReadBalances :: StoreRead (M.Map (Asset,Account) Integer)
   ReadWithdrawal :: Text -> StoreRead (Maybe WithdrawalView)
+  ReadOrder :: Text -> Text -> StoreRead W.OrderView
 data StoreWrite a where
   Pause :: Text -> StoreWrite ()
   ReserveFees :: Int64 -> Text -> Asset -> Amount -> Text -> Text -> StoreWrite WithdrawalView
   CancelFees :: Text -> Text -> StoreWrite WithdrawalView
 
 -- Reader has no writer connection, checkpoint or writable credentials.
-data Reader = Reader PG.ConnectInfo Text
+data Reader = Reader PG.ConnectInfo Text Bool
 data Writer = Writer (MVar (Maybe PG.Connection)) PaymentTerms Amount (Int64 -> IO ())
 
-withReader :: PG.ConnectInfo -> Text -> (Reader -> IO a) -> IO a
-withReader settings identity action = do
-  let reader = Reader settings identity
+withReader :: PG.ConnectInfo -> Text -> Bool -> (Reader -> IO a) -> IO a
+withReader settings identity remote action = do
+  let reader = Reader settings identity remote
   _ <- evalRead reader ReadState
   action reader
 
@@ -71,7 +74,7 @@ withWriter settings policy limit checkpoint action = bracket (PG.connect setting
   action writer
 
 evalRead :: Reader -> StoreRead a -> IO a
-evalRead (Reader settings identity) operation = bracket (PG.connect settings) PG.close $ \c ->
+evalRead (Reader settings identity remote) operation = bracket (PG.connect settings) PG.close $ \c ->
   Tx.withTransactionMode (Tx.TransactionMode Tx.RepeatableRead Tx.ReadOnly) c $ do
     verifyReadRole c >>= flip require "unsafe_read_database_role"
     row <- metadata c identity
@@ -79,6 +82,9 @@ evalRead (Reader settings identity) operation = bracket (PG.connect settings) PG
       ReadState -> pure (LedgerState (S.criticalSequence row) (S.backupSequence row) (S.paused row/=0) (S.pauseReason row))
       ReadBalances -> balances c
       ReadWithdrawal key -> readWithdrawal c key
+      ReadOrder header identifier -> do
+        cap <- checked (bearerHash header)
+        readOrder c identity (if remote then Just(S.backupSequence row) else Nothing) cap identifier
 
 evalWrite :: Writer -> StoreWrite a -> IO a
 evalWrite writer@(Writer _ policy limit _) operation = transaction writer $ \c -> case operation of
@@ -248,3 +254,54 @@ checked :: Either Text a -> IO a
 checked=either reject pure
 validReason :: Text -> IO ()
 validReason r=require (not(T.null $ T.strip r) && T.length r<=512) "invalid_reason"
+
+-- Authorized saved view, never re-quote. The reader transaction keeps all
+-- recovery overlays and backup coverage in the same repeatable-read snapshot.
+readOrder :: PG.Connection -> Text -> Maybe Int64 -> Text -> Text -> IO W.OrderView
+readOrder c identity coverage cap identifier = do
+  rows <- O.runSelect c $ do
+    r <- O.selectTable S.orders
+    O.where_ (S.orderId r O..== O.sqlStrictText identifier O..&& S.capabilityHash r O..== O.sqlStrictText cap)
+    pure r
+  r <- case (rows :: [S.Order]) of [one]->pure one; _->reject "order_not_found"
+  request <- decodeSaved (S.requestJson r)
+  savedQuote <- decodeSaved (S.quoteJson r)
+  policy <- decodeSaved (S.policyJson r)
+  require (W.input request==gross savedQuote && W.deploymentFingerprint policy==identity) "saved_order_terms_mismatch"
+  visible <- case (S.instructionIssued r,S.instructionSequence r,S.instruction r) of
+    (0,_,_) -> pure Nothing
+    (1,Just sequenceNumber,Just instruction) -> do
+      require (sequenceNumber>0 && maybe True (>=sequenceNumber) coverage) "backup_pending"
+      pure (Just instruction)
+    _ -> reject "invalid_instruction_state"
+  native <- O.runSelect c $ O.limit 1 $ do
+    (tx,state) <- S.nativeRecovery
+    (attempt,intent) <- S.attemptIntents
+    (intentId,obligation) <- S.intentObligations
+    (obligationId,order,_,_) <- S.orderObligations
+    O.where_ (tx O..== attempt O..&& intent O..== intentId O..&& obligation O..== obligationId
+      O..&& order O..== O.sqlStrictText identifier O..&& state O../= O.sqlStrictText "reconfirmed")
+    pure tx
+    :: IO [Text]
+  obligations <- O.runSelect c $ do
+    (_,order,deposit,state) <- S.orderObligations
+    O.where_ (order O..== O.sqlStrictText identifier)
+    pure (deposit,state)
+    :: IO [(Text,Text)]
+  sources <- O.runSelect c $ do
+    (deposit,state) <- S.sourceRecovery
+    (depositId,order) <- S.orderDeposits
+    O.where_ (deposit O..== depositId O..&& state O../= O.sqlStrictText "restored"
+      O..&& O.matchNullable (O.sqlBool False) (O..== O.sqlStrictText identifier) order)
+    pure deposit
+    :: IO [Text]
+  accounted <- if null sources then pure [] else O.runSelect c (do
+    deposit <- S.accountedLosses
+    O.where_ (O.in_ (map O.sqlStrictText sources) deposit)
+    pure deposit) :: IO [Text]
+  let review=not(null native) || any ((=="review").snd) obligations ||
+        any (\deposit->deposit `notElem` accounted || (deposit,"paid") `notElem` obligations) sources
+  pure (W.OrderView identifier request savedQuote (if review then "NeedsReview" else S.status r)
+    (S.deadline r) visible (S.payoutTx r) policy)
+decodeSaved :: FromJSON a => Text -> IO a
+decodeSaved=either (const $ reject "corrupt_ledger_json") pure . eitherDecodeStrict' . TE.encodeUtf8

@@ -93,6 +93,25 @@ slice is 367 production lines in three files plus a 105-line contract runner.
 Other baseline storage behavior has not been ported, so those totals are not a
 whole-storage reduction claim.
 
-Customer order storage, the high-level safe/critical runtime, actual host fence,
+Saved-order reads now verify bearer capabilities using the exact baseline digest,
+load historical terms without repricing, check request/quote/profile consistency,
+hide unissued instructions and enforce configured backup coverage. Recovery
+projections retain the original native/source/accounted-loss rules. The PostgreSQL
+runner checks wrong/missing capabilities, hidden/uncovered instructions, saved
+7% historical fees, corrupt/mismatched terms and explicit obligation review.
+Native/source recovery overlays still need dedicated fixture coverage as their
+write paths are ported; this is not live reorg acceptance.
+
+For the saved-order read/visibility/recovery queries plus the orders table mapping,
+the baseline has 101 lines across two files; the replacement has 83 across two
+files (excluding imports, dispatcher branches and capability hashing in both).
+The query now fetches the authorized order once; accounted-loss reads are restricted
+to that order's affected receipts. The orders mapping alone is 38 to 17 lines with
+all 14 columns preserved. Capability hashing is a separate 18-line pure module,
+extracted from the prior scattered helpers; no new authentication scheme is used.
+The earlier 367-line storage count describes the fee checkpoint, not the current
+expanded storage total.
+
+Customer order creation/provisioning, the high-level safe/critical runtime, actual host fence,
 chain adapters, signer and payment execution remain unfinished. Passing these
 checks is not payment, migration or real-chain acceptance.

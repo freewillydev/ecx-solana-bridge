@@ -18,8 +18,9 @@ its installer or reorganizing its modules.
 Current replacement checkpoint: pure monetary/funding/accounting types, preserved
 customer wire records, caller/severity-indexed existential requests and four
 restricted Servant handlers. The private Opaleye store now implements ledger reads and atomic pause/earned-fee
-reservation/cancellation, verified against disposable PostgreSQL. Customer order
-storage, high-level evaluators, chain adapters and execution remain unfinished.
+reservation/cancellation, verified against disposable PostgreSQL. Authorized saved-order reads now preserve
+historical terms, capability access, review overlays and backup-gated instruction
+visibility. Customer order creation/provisioning, high-level evaluators, chain adapters and execution remain unfinished.
 No existing custody state has been moved. See the rebuild README for scoped counts
 and evidence; do not compare this subset against the entire old storage layer.
 
