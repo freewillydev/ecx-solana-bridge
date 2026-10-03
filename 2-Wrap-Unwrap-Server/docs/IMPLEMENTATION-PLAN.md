@@ -184,20 +184,49 @@ This off-host recovery path is still a release gate, not a current one-command p
 
 ## Ordered execution
 
-Immediate priority, per the latest instructions: finish the direct HTTP server,
-dedicated signer with critical-only communication, Solana SDK Haskell FFI and
-Haskell frontend using GHC's JavaScript backend (no WebAssembly). Complete and
-verify those replacements together before the next repository-wide deletion pass.
-Use Marcus's `marcusmmmz/wecx-mint` compact root (README, package files and
-scripts) as the layout reference. Cabal files replace npm application files;
-`scripts/server.hs` is the named server entry point. Keep source, interface,
-configuration and tests only where this service requires them, consolidate
-operational scripts, and avoid separate top-level folders for each acceptance
-runner, backend, language or historical phase.
-Then remove every obsolete or irrelevant tracked file/folder, including retired
-frontend/helper/proxy code and unused deployment/test tools. Preserve essential
-invariant checks, dependency locks and licenses; do not hide clutter elsewhere.
-The sequence below remains the broader refactor checklist, subject to that priority.
+The current goal is a reviewable Signet/Devnet bridge. Complete the current
+architecture end to end before optional module-count or line-count reductions.
+Historical funded evidence is a regression baseline, not acceptance of the new
+signer and GHC JavaScript browser. The latest inventory found stale helper
+sandbox deployment, removed-route checks, standalone Rust examples and Python
+row access. These are concrete remaining work, not release evidence.
+
+Complete these milestones in order:
+
+1. **Deploy the authority boundary.** Install a separate signer OS user/service,
+   SELECT-only PostgreSQL identity, protected TLS/auth/private signing files and
+   restricted native worker RPC credentials. Remove worker membership/access to
+   native full-authority credentials and custody keys. Verify permitted worker
+   methods and refusal of signing/key export at the real node. Retire the old
+   helper subprocess/sandbox. Do not regenerate existing custody keys or reset
+   the ledger. A second process without credential isolation does not pass.
+2. **Accept the current customer product.** With that signer and the current
+   browser, complete both funded L2L Signet/Solana Devnet directions, refund,
+   saved-order reload, restart and interrupted signed-attempt recovery. Use an
+   actual supported Solana Pay wallet for the customer signing check. Preserve
+   exact source revision and transaction identifiers in one acceptance record;
+   injected database fixtures do not establish network or wallet behavior.
+3. **Finish earned-fee withdrawal.** Connect earned-fund reservation through the
+   same durable signing/send/settlement workflow using an explicit funding type.
+   Cover cancellation, retry and interrupted operation without synthetic orders
+   or deposits, and accept a bounded withdrawal on the real test networks.
+4. **Retire incompatible tooling in one pass.** Move unique Python row assertions
+   and acceptance behavior into the Cabal/Opaleye runner; remove superseded
+   scripts, obsolete helper configuration and standalone Rust example entry
+   points once their needed functionality is covered. Keep operational backup
+   behavior until its replacement is verified. Update installation and recovery
+   configuration to the actual signer layout, including private credentials.
+5. **Produce the review checkpoint.** Run a consolidated current-source build,
+   QuickCheck/database checks and the acceptance above; reconcile README,
+   architecture, operating instructions and GitHub to the tested commit. Clearly
+   separate the reviewable public-test milestone from off-host clean-host restore,
+   broader loss/reorg acceptance, canonical activation and independent review.
+
+No arbitrary module/file target is a completion gate. Keep one build job, reuse
+warm caches, and stop only task-owned temporary services. Packaging for both Linux
+architectures follows substantive runtime acceptance, not each source edit.
+The workstreams below retain the broader requirements and invariants; their
+numbering is not a competing execution priority.
 
 1. **Freeze behavior and classify the tree.** Preserve the baseline commit and a
    consistent private ledger backup. Map every file to keep, merge/rewrite, remove,

@@ -135,7 +135,24 @@ SELECT-only PostgreSQL role before enabling the paying worker. The worker uses
 Servant ClientM, certificate validation and BasicAuth only from its critical DSL
 evaluator; it disables redirects, proxies and retries. Rotate token/certificate
 with the worker paused and restart the signer; preserve its custody keys and ledger.
-Existing installed services still require the dedicated-signer deployment update.
+The `deploy/ecx-bridge-signer.service` unit defines the target signer process.
+It uses OS user `ecx-signer` and PostgreSQL role `ecx_read`; `pg_ident.conf`
+permits that mapping, but never maps the signer to `ecx_worker`. Its private
+configuration is `/etc/ecx-bridge/signing/private.json`, containing only
+`nativeSigningCookie` and `solanaSigningKey` absolute paths. The directory is
+root-owned mode 0750 with group `ecx-signer`; the private configuration and
+Solana key are signer-owned mode 0600. The adjacent TLS private key specified
+above is also signer-owned mode 0600. Shared configuration/token traversal uses
+the `ecx-worker` group; PostgreSQL peer authentication still denies this OS user
+writer access. The signer unit cannot access the worker's private/fence state.
+
+The installer does not yet provision this unit or these credentials. Do not enable
+it against the old worker deployment: first replace the worker's native cookie
+with a separately authenticated, method-restricted credential, remove the worker
+from `ecx-node`, and verify denial of signing/export methods. The signer can use
+the node cookie, but the worker must not read it or the signer-only files. Existing
+installed services still require this coordinated deployment update; this unit
+alone is not evidence of isolation or funded acceptance.
 
 New orders charge 1% both ways; saved quotes keep their terms. Check inventory,
 fee budgets, deadlines and exact network/token identities before real tests.

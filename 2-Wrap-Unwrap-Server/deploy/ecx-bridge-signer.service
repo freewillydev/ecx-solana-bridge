@@ -1,0 +1,37 @@
+[Unit]
+Description=ECX bridge restricted signing authority
+After=network-online.target ecx-bridge-node.service ecx-bridge-postgres.service
+Requires=ecx-bridge-postgres.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ecx-signer
+Group=ecx-signer
+# Shared config/PostgreSQL socket traversal and signer-only native cookie.
+# The worker must not belong to ecx-signer or ecx-node.
+SupplementaryGroups=ecx-worker ecx-node
+UMask=0077
+Environment=PGHOST=/run/ecx-postgres
+Environment=PGPORT=29436
+Environment=PGDATABASE=ecx_bridge
+Environment=PGUSER=ecx_read
+ExecStart=/opt/ecx-bridge/current/bin/ecx-bridge signer /etc/ecx-bridge/worker.json /etc/ecx-bridge/signing/private.json
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+InaccessiblePaths=-/var/lib/ecx-bridge/private -/var/lib/ecx-bridge/fence
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+LockPersonality=true
+LimitNOFILE=256
+TasksMax=32
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
