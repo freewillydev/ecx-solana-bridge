@@ -1073,11 +1073,8 @@ unchanged suspended-work hash and previous state. The proof must match the scann
 outpoint and the custody report's native block/height. Exact replay changes nothing;
 restoration and coverage approvals cannot be substituted for each other.
 
-This checkpoint does not finish covered-source payment execution. Existing preparation,
-signing and sending still require an eligible physical source; the next integration
-must explicitly authorize an active, approved cover at all those boundaries and
-repeat the missing-source proof. Approval itself neither resumes nor sends nor marks
-the source eligible. Do not treat this intermediate command as operational recovery.
+Covered-source execution now uses the shared payment engine as described below.
+Approval itself neither resumes nor sends nor marks the source eligible.
 
 Scoped changes from the preceding rebuild checkpoint: Store **2,613 → 2,640 lines**,
 critical runtime **460 → 478**, control **127 → 130**, operation grammar **96 → 97**;
@@ -1092,3 +1089,31 @@ contracts. Contracts exercise missing cover, stale custody, mismatched observati
 and block, changed payment work, approval-kind confusion, conflicting replay,
 unchanged money, retained pause and source ineligibility. These are local contracts,
 not funded-chain or deployed signer-isolation acceptance.
+
+## Covered-source payment checkpoint
+
+One closed source-authorization check is shared by preparation, signing-decision
+reads, signed-attempt recording, send authorization and unsigned-cancellation retry.
+It accepts physical eligibility or an active full native cover, a currently accounted
+missing-source loss, unreviewed incoming chain evidence and an approval for that exact
+obligation/cover. A returned cover or unavailable source evidence cannot authorize
+payment. No source eligibility flag is fabricated. Worker preparation/sign/send paths
+repeat the complete native missing-source proof against the current scanner snapshot;
+the dedicated signer independently reads the same durable authorization before and
+after signing. This does not give the signer a write or broadcast capability.
+
+Disposable PostgreSQL acceptance now takes an approved covered order through actual
+ledger preparation, signing authorization, exact attempt recording, broadcast intent,
+send authorization and balanced settlement. Transaction bytes/effects are explicit
+offline fixtures, not live signatures/broadcasts. Tests prove unavailable evidence
+blocks signing, attempt recording and sending; re-proving the same covered loss permits
+continuation; settlement replay changes no money; source return repays the original
+capital; the old cover cannot authorize a later loss.
+
+Scoped counts versus the prior checkpoint: Store **2,640 → 2,675 lines**, critical
+runtime **478 → 484**: **+41 production lines across two existing files**. The shared
+contract file grows **2,122 → 2,170**. No new files, schema, services or evaluators.
+This adds missing behavior through one predicate instead of copying a separate
+covered-payment engine. Root Cabal build, QuickCheck and PostgreSQL contracts pass.
+Funded-chain execution, covered-source expiry/retry combinations and native replacement
+families still require further work/acceptance; these checks do not close release gates.

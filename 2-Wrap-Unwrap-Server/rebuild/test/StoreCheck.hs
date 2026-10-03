@@ -793,11 +793,11 @@ ledgerMain = do
       withWriter settings (store policy limits) (const $ pure ()) $ \writer->do
         fixture fixtures OrderWorkflowFunds
         orderWorkflowContract fixtures reader writer (store policy limits)
+        restorationContract fixtures reader writer
         refundContract fixtures reader writer
         cancellationContract fixtures reader writer
         expiryContract fixtures reader writer
         treasuryContract fixtures reader writer
-        restorationContract fixtures reader writer
         -- Actual runtime cycle with unavailable RPC: retain all money, stay
         -- paused, record scanner failures, and never reach signer credentials.
         let cycleKey=T.replicate 32 "1"
@@ -2096,6 +2096,7 @@ restorationContract fixtures reader writer=do
   revision<-evalRead reader ReadCustodyRevision
   evalWrite writer (CoverSourceLoss source loss 110 (money 10) (money 0) "replace missing capital" proof (revision,110,True,report))
   evalRead reader (CheckCoveredSource key loss)
+  expectStore "source_not_eligible" (evalRead reader $ CheckPaymentSource key)
   expectStore "source_approval_not_expected" (evalRead reader $ CheckSourceRestoration key loss)
   let approveCovered evidence=evalWrite writer (ApproveCoveredSource 110 key loss "covered loss reviewed" evidence)
   expectStore "custody_not_reconciled" (approveCovered proof)
@@ -2120,3 +2121,50 @@ restorationContract fixtures reader writer=do
   check (ledgerSequence replayed==ledgerSequence approved)
   expectStore "source_approval_conflict" (evalWrite writer $ ApproveCoveredSource 110 key loss "changed" proof)
   evalRead reader ReadBalances >>= check . (==coveredBalances)
+
+  evalRead reader (CheckPaymentSource key)
+  evalWrite writer (RecordSourceCheck source $ W.SourceUnavailable $ object ["reason" .= ("offline"::T.Text)])
+  expectStore "source_not_eligible" (evalRead reader $ CheckPaymentSource key)
+  evalWrite writer (RecordSourceCheck source $ W.SourceMissing proof)
+  evalRead reader (CheckPaymentSource key)
+  fixture fixtures ReadyIntake
+  void $ evalWrite writer (PreparePayment 110 key (money 10) "{}")
+  evalWrite writer (SaveDraft key 0 "{}")
+  fixture fixtures CoverBackup
+  fixture fixtures ReadyIntake
+  decision<-evalRead reader (ReadSigningDecision 110 key 0)
+  let attempt=SignedAttempt "covered-conversion" "offline-covered-bytes" "{}" Nothing
+      evidenceUnavailable=evalWrite writer (RecordSourceCheck source $ W.SourceUnavailable $ object ["reason" .= ("offline"::T.Text)])
+      ready=fixture fixtures CoverBackup >> fixture fixtures ReadyIntake
+  evidenceUnavailable
+  ready
+  expectStore "source_not_eligible" (evalRead reader $ ReadSigningDecision 110 key 0)
+  expectStore "source_not_eligible" (evalWrite writer $ RecordAttempt decision attempt)
+  evalWrite writer (RecordSourceCheck source $ W.SourceMissing proof)
+  ready
+  signed<-evalWrite writer (RecordAttempt decision attempt)
+  fixture fixtures ReadyIntake
+  void $ evalWrite writer (MarkBroadcast 110 $ signedId $ recordedSigned signed)
+  fixture fixtures CoverBackup
+  fixture fixtures ReadyIntake
+  evidenceUnavailable
+  ready
+  expectStore "source_not_eligible" (evalWrite writer $ AuthorizeSend 110 "covered-conversion")
+  evalWrite writer (RecordSourceCheck source $ W.SourceMissing proof)
+  ready
+  authorized<-evalWrite writer (AuthorizeSend 110 "covered-conversion")
+  beforePaid<-evalRead reader ReadBalances
+  evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 1) (money 0)) "offline-covered-effect")
+  afterPaid<-evalRead reader ReadBalances
+  let delta asset account=M.findWithDefault 0 (asset,account) afterPaid-M.findWithDefault 0 (asset,account) beforePaid
+  check (delta Native Principal==(-10) && delta Native Float==9 && delta Native Earned==1
+    && delta Wrapped Float==(-9) && delta Sol Operating==(-1))
+  evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 1) (money 0)) "offline-covered-effect")
+  evalRead reader ReadBalances >>= check . (==afterPaid)
+  void restore
+  returned<-evalRead reader ReadBalances
+  check (M.findWithDefault 0 (Native,Float) returned==M.findWithDefault 0 (Native,Float) afterPaid+10)
+  suspend
+  lostAgain<-evalRead reader (ReadSource did)
+  evalWrite writer (RecordSourceCheck lostAgain $ W.SourceMissing proof)
+  expectStore "source_not_eligible" (evalRead reader $ CheckPaymentSource key)

@@ -104,6 +104,7 @@ data StoreRead a where
   ReadAttempt :: Text -> StoreRead RecordedAttempt
   ReadPreparation :: Text -> StoreRead PreparedPayment
   ReadPayment :: Text -> StoreRead PaymentView
+  CheckPaymentSource :: Text -> StoreRead ()
   ReadPaymentSource :: Text -> StoreRead (Maybe W.PaymentSource)
   ReadWithdrawal :: Text -> StoreRead (Maybe WithdrawalView)
   ReadPayableOrder :: Int64 -> Text -> Text -> StoreRead W.OrderView
@@ -234,6 +235,7 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
       ReadAttempt identifier -> readAttempt c identifier
       ReadPreparation identifier -> readPreparation c identity identifier
       ReadPayment identifier -> readPayment c identity identifier
+      CheckPaymentSource identifier -> readPayment c identity identifier >>= paymentSource c . savedPayment
       ReadPaymentSource identifier -> readPaymentSource c identity identifier
       PendingVerification -> pendingVerification c
       LookupReferences keys -> lookupReferences c keys
@@ -1397,8 +1399,7 @@ preparePayment c config now identifier allowance plan = do
  where
   nullable=maybe O.null (O.toNullable . O.sqlStrictText)
   transfer oid receipt kind currency = do
-    source <- readSource c receipt
-    require (S.depositEligible source==1) "source_not_eligible"
+    sourceAuthorized c identifier receipt >>= \authorized->require authorized "source_not_eligible"
     count <- O.runUpdate c O.Update {O.uTable=S.operatingReservations,
       O.uUpdateWith= \(order,purpose,asset,n,_)->(order,purpose,asset,n,O.sqlStrictText "transferred"),
       O.uWhere= \(order,purpose,asset,n,phase)->order O..== O.sqlStrictText oid O..&& purpose O..== O.sqlStrictText kind O..&& asset O..== O.sqlStrictText(T.pack $ show currency) O..&& n O..>= O.sqlInt8(units allowance) O..&& O.in_ (map O.sqlStrictText ["quote","obligation"]) phase,O.uReturning=O.rCount}
@@ -1536,7 +1537,41 @@ paymentSource c outgoing = case paymentFunding outgoing of
   EarnedFees{}->pure ()
   Conversion _ receipt _ _->eligible receipt
   Refund _ receipt _ _->eligible receipt
- where eligible receipt=readSource c receipt >>= \source->require (S.depositEligible source==1) "source_not_eligible"
+ where eligible receipt=sourceAuthorized c (paymentId outgoing) receipt >>= \authorized->require authorized "source_not_eligible"
+
+-- Physical eligibility or one still-active capital cover approved for this exact
+-- obligation. An approval for a returned cover cannot authorize a later loss.
+sourceAuthorized :: PG.Connection -> Text -> Text -> IO Bool
+sourceAuthorized c identifier receipt = do
+  source<-readSource c receipt
+  if S.depositEligible source==1 then pure True else do
+    rows<-O.runSelect c $ do
+      obligation<-O.selectTable S.obligations
+      accounted<-S.accountedLosses
+      (cover,key,quantity,_,_)<-S.activeSourceCovers
+      O.where_ (S.obligationId obligation O..== O.sqlStrictText identifier
+        O..&& S.obligationDeposit obligation O..== O.sqlStrictText receipt
+        O..&& O.in_ (map O.sqlStrictText ["ready","paying"]) (S.obligationStatus obligation)
+        O..&& accounted O..== O.sqlStrictText receipt O..&& key O..== accounted
+        O..&& quantity O..== O.sqlInt8(S.depositAmount source))
+      pure cover
+      :: IO [Int64]
+    case rows of
+      [cover] | S.depositAsset source=="Native"->do
+        tx<-case T.splitOn ":" receipt of ["native",tx,_]->pure tx; _->reject "invalid_native_deposit_id"
+        _<-sourceEvidence c tx
+        approvals<-O.runSelect c $ do
+          (key,_,_,_,_,_,proof,n)<-O.selectTable S.sourceRecoveryDecisions
+          O.where_ (key O..== O.sqlStrictText identifier O..&& n O..> O.sqlInt8 cover)
+          pure proof
+          :: IO [Text]
+        matches<-forM approvals $ \raw->do
+          proof<-decodeSaved raw
+          saved<-either (const $ reject "invalid_source_approval") pure (parseEither (withObject "approval" (.:? "sourceCover")) proof)
+          pure (saved==Just cover)
+        pure (or matches)
+      []->pure False
+      _->reject "invalid_source_cover_authorization"
 
 sendContext :: PG.Connection -> Text -> Text -> IO RecordedAttempt
 sendContext c identity txid = do
@@ -2137,7 +2172,7 @@ finishCancellation c config expected reason cleanup = do
         _<-O.runUpdate c O.Update {O.uTable=S.preparations,O.uUpdateWith= \(key,g,p,d,r,_)->(key,g,p,d,r,num 1),O.uWhere= \(key,g,_,_,_,_)->key O..== text identifier O..&& g O..== num(fromIntegral generation),O.uReturning=O.rCount}
         _<-O.runUpdate c O.Update {O.uTable=S.intents,O.uUpdateWith= \r->r {S.intentResolved=num 1},O.uWhere= \r->S.intentId r O..== text identifier,O.uReturning=O.rCount}
         forM_ binding $ \(oid,receipt,isRefund)->do
-          eligible<-(==1).S.depositEligible <$> readSource c receipt
+          eligible<-sourceAuthorized c identifier receipt
           let retryable=eligible && generation<7
           _<-O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \r->r {S.obligationStatus=text(if retryable then "ready" else "review")},O.uWhere= \r->S.obligationId r O..== text identifier,O.uReturning=O.rCount}
           _<-O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text(if not retryable then "NeedsReview" else if isRefund then "Refunding" else "Ready")},O.uWhere= \r->S.orderId r O..== text oid O..&& S.status r O../= text "Paid",O.uReturning=O.rCount}

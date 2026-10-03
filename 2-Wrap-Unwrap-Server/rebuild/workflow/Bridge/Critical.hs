@@ -460,14 +460,20 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
       refreshSource identifier = do
         source<-evalRead reader (ReadPaymentSource identifier)
         forM_ source $ \binding->do
-          case W.depositAsset (W.sourceDeposit binding) of
-            Native->N.nativeIdentity rpc native >> pure ()
-            Wrapped->S.solanaIdentity rpc solana >> pure ()
-            Sol->reject "unsupported_source_asset"
-          observed<-verifyPaymentSource (N.nativeCall rpc native) (S.solanaCall rpc solana)
-            (fmap (\url->RPC.rpc rpc url Nothing) $ S.solanaVerifierRpc solana) (N.profile native) config binding
-          evalWrite writer (RefreshPaymentSource (W.sourceDeposit binding) observed)
-          require (W.depositEligible observed) "source_not_eligible"
+          let saved=W.sourceDeposit binding
+          if W.depositAsset saved==Native && not(W.depositEligible saved) then do
+            evalRead reader (CheckPaymentSource identifier)
+            proof<-proveMissing saved
+            evalWrite writer (RecordSourceCheck saved $ W.SourceMissing proof)
+           else do
+            case W.depositAsset saved of
+              Native->N.nativeIdentity rpc native >> pure ()
+              Wrapped->S.solanaIdentity rpc solana >> pure ()
+              Sol->reject "unsupported_source_asset"
+            observed<-verifyPaymentSource (N.nativeCall rpc native) (S.solanaCall rpc solana)
+              (fmap (\url->RPC.rpc rpc url Nothing) $ S.solanaVerifierRpc solana) (N.profile native) config binding
+            evalWrite writer (RefreshPaymentSource saved observed)
+          evalRead reader (CheckPaymentSource identifier)
   action interpret customerRequest customerRequest
 
 -- The caller owns this lifetime (run it alongside HTTP with structured concurrency).
