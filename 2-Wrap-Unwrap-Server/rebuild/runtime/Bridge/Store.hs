@@ -35,6 +35,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Database.PostgreSQL.Simple.Transaction as Tx
 import qualified Opaleye as O
+import qualified Opaleye.Exists as Exists
 import qualified Opaleye.Internal.Locking as Locking
 
 data LedgerState = LedgerState
@@ -77,6 +78,8 @@ data StoreRead a where
   ReadCustodySnapshot :: Int64 -> [(Text,Text)] -> Bool -> StoreRead CustodySnapshot
   ReadCustodyEvent :: Text -> Text -> StoreRead (Text,Text,Value)
   HasCustodyEvent :: Text -> Text -> StoreRead Bool
+  PendingAttempts :: StoreRead [Text]
+  PaymentCandidates :: StoreRead [Text]
   ReadState :: StoreRead LedgerState
   ReadBalances :: StoreRead (M.Map (Asset,Account) Integer)
   ReadPaymentWork :: Text -> StoreRead (PaymentView,Maybe PreparedPayment,[Text])
@@ -180,6 +183,8 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
           O.where_ (S.eventId event O..== O.sqlStrictText identifier O..&& O.in_ (map O.sqlStrictText $ if chain=="Solana" then ["Solana","SolanaOperating"] else [chain]) (S.eventChain event))
           pure (S.eventId event)
         pure (not $ null (rows :: [Text]))
+      PendingAttempts -> pendingAttempts c
+      PaymentCandidates -> paymentCandidates c
       ReadState -> pure (LedgerState (S.criticalSequence row) (S.backupSequence row) (S.paused row/=0) (S.pauseReason row))
       ReadPaymentWork identifier -> paymentWork c identity identifier
       ReadSigningDecision now identifier generation -> signingDecision c identity remote now identifier generation
@@ -1714,3 +1719,53 @@ recordCustody c expected now problem report = do
     O.uWhere= \(key,_,_,_,_)->key O..== number 1,O.uReturning=O.rCount}
   _<-O.runUpdate c O.Update {O.uTable=S.custodyReport,O.uUpdateWith= \(key,_)->(key,maybe O.null (O.toNullable.text.encodeSaved) report),O.uWhere= \(key,_)->key O..== number 1,O.uReturning=O.rCount}
   pure ()
+
+-- Bounded restart work. Recorded effects are checked even while intake is paused.
+pendingAttempts :: PG.Connection -> IO [Text]
+pendingAttempts c = do
+  rows<-O.runSelect c $ O.limit 1001 $ O.orderBy (O.asc id) $ do
+    row<-O.selectTable S.attempts
+    O.where_ (O.in_ (map O.sqlStrictText ["signed","broadcast_intent"]) (S.attemptState row))
+    pure (S.attemptId row)
+  require (length rows<=1000) "pending_attempts_too_large"
+  pure rows
+
+-- Prefer the existing intent on each chain; never prepare a competing payment.
+-- Resolved intents and cancelled withdrawals are excluded in PostgreSQL, so old
+-- history cannot fill the bounded live queue. Every candidate is revalidated.
+paymentCandidates :: PG.Connection -> IO [Text]
+paymentCandidates c = do
+  active<-O.runSelect c $ O.limit 1001 $ do
+    row<-O.selectTable S.intents
+    O.where_ (S.intentResolved row O..== O.sqlInt8 0)
+    pure (S.intentId row,S.intentChain row)
+    :: IO [(Text,Text)]
+  let absent identifier=do
+        found<-Exists.exists $ do
+          row<-O.selectTable S.intents
+          O.where_ (S.intentId row O..== identifier)
+          pure ()
+        O.where_ (O.not found)
+      orders=do
+        row<-O.selectTable S.obligations
+        O.where_ (S.obligationStatus row O..== O.sqlStrictText "ready")
+        absent (S.obligationId row)
+        pure (S.obligationId row,S.obligationAsset row)
+      fees=do
+        row<-O.selectTable S.withdrawals
+        let identifier=O.sqlStrictText "fee:" O..++ S.withdrawalId row
+        absent identifier
+        cancelled<-Exists.exists $ do
+          (key,_,_)<-O.selectTable S.cancellations
+          O.where_ (key O..== S.withdrawalId row)
+          pure ()
+        O.where_ (O.not cancelled)
+        pure (identifier,S.asset row)
+  ready<-O.runSelect c $ O.limit 1001 $ O.orderBy (O.asc fst) $ O.unionAll orders fees
+    :: IO [(Text,Text)]
+  require (length ready<=1000 && length active<=2
+    && all ((`elem` ["Native","Solana"]).snd) active
+    && length(nub $ map snd active)==length active
+    && all ((`elem` ["Native","Wrapped"]).snd) ready) "payment_queue_requires_review"
+  let waiting=[(key,if asset=="Native" then "Native" else "Solana")|(key,asset)<-ready]
+  pure [key|chain<-["Native","Solana"],key<-take 1 ([i|(i,currency)<-active,currency==chain]<>[i|(i,currency)<-waiting,currency==chain])]

@@ -1,6 +1,6 @@
-{-# LANGUAGE DataKinds, GADTs, RankNTypes #-}
+{-# LANGUAGE DataKinds, GADTs, RankNTypes, ScopedTypeVariables #-}
 -- The signer ClientM is constructed only inside this critical evaluator.
-module Bridge.Critical (CustomerSettings(..),withRuntime) where
+module Bridge.Critical (CustomerSettings(..),withRuntime,runWorkerLoop) where
 import Bridge.Operation.Internal
 import Bridge.Domain (Asset(..),gross)
 import Bridge.Identity (payURIFor)
@@ -14,7 +14,7 @@ import Bridge.Observer (ObserverSettings(..),observeOnce)
 import Bridge.Reconciliation (reconcileCustody)
 import Bridge.PaymentSource (verifyPaymentSource)
 import qualified Bridge.Wire as W
-import Control.Monad (forM_)
+import Control.Monad (forM_,when,forever)
 import Bridge.NativePayment (NativeSigned,checkNativeAcceptance)
 import Bridge.SolanaPayment (SolanaSigned,signedSolanaPlan,solPlanRecent,checkBlockhashWindow)
 import Data.Text (Text)
@@ -29,8 +29,10 @@ import qualified Bridge.Native as N
 import qualified Bridge.SolanaHelper as H
 import Bridge.RPC (boundedBody,parseValue)
 import qualified Bridge.RPC as RPC
+import Control.Concurrent (threadDelay)
+import System.IO (hPutStrLn,stderr)
 import Control.Concurrent.MVar (newMVar,withMVar)
-import Control.Exception (bracket,onException,try)
+import Control.Exception (bracket,onException,try,catch,throwIO,IOException)
 import Data.IORef (newIORef,atomicModifyIORef')
 import qualified Data.ByteString as BS
 import Data.Time.Clock.POSIX (getPOSIXTime)
@@ -98,6 +100,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         let command=resolve request
         case command of
           SigningDSL _->reject "signer_operation_forbidden"
+          WorkerDSL RunWorkerCycle->pure ()
           WorkerDSL ObserveChains->pure ()
           WorkerDSL ReconcileCustody->pure ()
           WorkerDSL ReconcilePayment{}->pure ()
@@ -111,8 +114,10 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
       evalCritical (WriteCustomer (Bridge.Operation.Internal.CreateOrder header request))=do
         c<-customer
         createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (coverBackup c) reader writer header request
-      evalCritical (WorkerDSL ObserveChains) = observeOnce rpc settings reader writer
-      evalCritical (WorkerDSL (PrepareOutgoing identifier)) = guarded $ do
+      evalCritical (WorkerDSL operation)=evalWorker operation
+      evalWorker :: forall a. WorkerOperation a -> IO a
+      evalWorker ObserveChains = observeOnce rpc settings reader writer
+      evalWorker (PrepareOutgoing identifier) = guarded $ do
         now<-floor <$> getPOSIXTime
         evalRead reader (CheckIntake now)
         _<-evalRead reader (ReadPayment identifier)
@@ -122,13 +127,13 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         _<-prepareUnsigned (floor <$> getPOSIXTime) (N.nativeCall rpc native) (S.solanaCall rpc solana)
           (N.profile native) config reader writer identifier
         pure ()
-      evalCritical (WorkerDSL ReconcileCustody) = reconcileCustody rpc settings config reader writer
-      evalCritical (WorkerDSL (QueuePayment txid)) = guarded $ do
+      evalWorker ReconcileCustody = reconcileCustody rpc settings config reader writer
+      evalWorker (QueuePayment txid) = guarded $ do
         (recorded,_)<-loadActive txid
         refreshSource (recordedPayment recorded)
         now<-floor <$> getPOSIXTime
         evalWrite writer (MarkBroadcast now txid)
-      evalCritical (WorkerDSL (BroadcastPayment txid)) = guarded $ do
+      evalWorker (BroadcastPayment txid) = guarded $ do
         (recorded,reply)<-loadActive txid
         require (recordedState recorded=="broadcast_intent") "broadcast_intent_required"
         observed<-observe reply
@@ -147,12 +152,12 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
                 ["encoding" .= ("base64"::Text),"skipPreflight" .= False,"preflightCommitment" .= ("confirmed"::Text),"maxRetries" .= (0::Int)]] >>= parseValue parseJSON
             require (actual==txid) "broadcast_identifier_mismatch"
           _->recordOutcome recorded observed
-      evalCritical (WorkerDSL (ReconcilePayment txid)) = guarded $ do
+      evalWorker (ReconcilePayment txid) = guarded $ do
         recorded<-evalRead reader (ReadAttempt txid)
         if recordedState recorded `elem` ["settled","failed"] then pure () else do
           (current,reply)<-loadActive txid
           observe reply >>= recordOutcome current
-      evalCritical (WorkerDSL (SignPreparedPayment identifier)) = signing `onException` evalWrite writer (Pause "signing_requires_review")
+      evalWorker (SignPreparedPayment identifier) = signing `onException` evalWrite writer (Pause "signing_requires_review")
        where
         signing = do
           (_,saved,attempts)<-evalRead reader (ReadPaymentWork identifier)
@@ -194,6 +199,56 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
           verifySignedAttempt (N.nativeCall rpc native) (N.profile native) config prepared signed
           recorded<-evalWrite writer (RecordAttempt prepared signed)
           pure (signedId $ recordedSigned recorded)
+      evalWorker RunWorkerCycle = cycleWork `catch` (\(BridgeError code)->
+        if code=="custody_not_reconciled" then pure () else evalWrite writer (Pause code) >> reject code)
+       where
+        cycleWork = do
+          scanned<-tryBridge (evalWorker ObserveChains)
+          now<-floor <$> getPOSIXTime
+          evalWrite writer (ExpireQuotes now)
+          pending<-evalRead reader PendingAttempts
+          -- A policy error on one attempt must not hide another finalized effect.
+          outcomes<-mapM (tryBridge . evalWorker . ReconcilePayment) pending
+          evalWorker ReconcileCustody
+          mapM_ (either throwIO pure) (scanned:outcomes)
+          state<-evalRead reader ReadState
+          when (paying && not(ledgerPaused state)) $ do
+            candidates<-evalRead reader PaymentCandidates
+            forM_ candidates $ \identifier->do
+              freshIntake
+              (_,_,attempts)<-evalRead reader (ReadPaymentWork identifier)
+              txid<-case attempts of
+                []->do
+                  evalWorker (PrepareOutgoing identifier)
+                  freshIntake
+                  backupDecisions
+                  evalWorker (SignPreparedPayment identifier)
+                [saved]->pure saved
+                _->reject "payment_requires_recovery"
+              freshIntake
+              _<-evalWorker (QueuePayment txid)
+              backupDecisions
+              freshIntake
+              evalWorker (BroadcastPayment txid)
+        freshIntake=do
+          now<-floor <$> getPOSIXTime
+          result<-tryBridge (evalRead reader $ CheckIntake now)
+          case result of
+            Left (BridgeError "custody_not_reconciled")->do
+              evalWorker ReconcileCustody
+              later<-floor <$> getPOSIXTime
+              evalRead reader (CheckIntake later)
+            _->either throwIO pure result
+        backupDecisions=do
+          c<-customer
+          when (requireBackup $ customerPolicy c) $ do
+            before<-evalRead reader ReadState
+            when (ledgerBackup before<ledgerSequence before) $ do
+              coverBackup c (ledgerSequence before)
+              after<-evalRead reader ReadState
+              require (ledgerBackup after>=ledgerSequence before) "backup_pending"
+        tryBridge :: IO a -> IO (Either BridgeError a)
+        tryBridge work=try (work `catch` (\(_::IOException)->reject "worker_io_unavailable"))
       guarded :: IO a -> IO a
       guarded operation=operation `onException` evalWrite writer (Pause "payment_requires_reconciliation")
       decode :: FromJSON a => Text -> IO a
@@ -230,3 +285,10 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
           evalWrite writer (RefreshPaymentSource (W.sourceDeposit binding) observed)
           require (W.depositEligible observed) "source_not_eligible"
   action interpret customerRequest
+
+-- The caller owns this lifetime (run it alongside HTTP with structured concurrency).
+-- Async cancellation and database failures escape; they are never retried as work.
+runWorkerLoop :: (forall a. Request 'Worker 'Critical a -> IO a) -> IO ()
+runWorkerLoop evaluate=forever $ do
+  evaluate (Request RunWorkerCycle) `catch` (\(BridgeError code)->hPutStrLn stderr ("worker: "<>T.unpack code))
+  threadDelay 15000000

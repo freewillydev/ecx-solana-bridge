@@ -2,6 +2,8 @@
 -- Actual WAI/Servant boundary; the closed evaluator returns public fixture data.
 -- Only a public zero-seed key vector; no chain RPC or funds are used here.
 module SigningTransportCheck (checks) where
+import Bridge.Critical (runWorkerLoop)
+import System.Timeout (timeout)
 import Bridge.Signer (verifySigningKey)
 import Bridge.SigningTransport
 import qualified Bridge.Fence as Fence
@@ -15,7 +17,7 @@ import qualified Data.Map.Strict as M
 import Bridge.Operation.Internal
 import Bridge.Error
 import Bridge.Wire (SignedAttempt(..))
-import Control.Exception (bracket,try)
+import Control.Exception (bracket,try,throwIO,AsyncException(..))
 import Data.Aeson (encode,eitherDecode)
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as BS
@@ -34,7 +36,19 @@ import Test.QuickCheck
 
 checks :: IO [Result]
 checks=sequence
-  [ check "host fence persists monotonic ownership and refuses competing or retired workers" $ once $ ioProperty $
+  [ check "worker loop backs off after policy errors and propagates shutdown" $ once $ ioProperty $ do
+      calls<-newIORef (0::Int)
+      let refuse :: forall a. Request 'Worker 'Critical a -> IO a
+          refuse request=case resolve request of
+            WorkerDSL RunWorkerCycle->modifyIORef' calls (+1) >> reject "offline_loop_contract"
+            _->fail "loop dispatched unexpected operation"
+          stop :: forall a. Request 'Worker 'Critical a -> IO a
+          stop _=throwIO ThreadKilled
+      waited<-timeout 100000 (runWorkerLoop refuse)
+      count<-readIORef calls
+      stopped<-try (runWorkerLoop stop) :: IO (Either AsyncException ())
+      pure (waited==Nothing && count==1 && stopped==Left ThreadKilled)
+  , check "host fence persists monotonic ownership and refuses competing or retired workers" $ once $ ioProperty $
       bracket temporary removeDirectoryRecursive $ \directory->do
         let identity=T.replicate 64 "a"; file=directory</>"sequence.json"
         missing<-refuses (Fence.withFence directory identity $ const $ pure ())

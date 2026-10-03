@@ -70,10 +70,13 @@ ledgerMain = do
       expectStore "ledger_profile_or_schema_mismatch" (withReader readerSettings "wrong" True $ const $ pure ())
       withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
         expectStore "worker_already_running" (withWriter settings (store policy limits) (const $ pure ()) $ const $ pure ())
+        evalRead reader PendingAttempts >>= check . null
+        evalRead reader PaymentCandidates >>= check . null
         initial <- evalRead reader ReadBalances
         first <- evalWrite writer reserve
         replay <- evalWrite writer reserve
         check (first==replay && withdrawalSequence first==1)
+        evalRead reader PaymentCandidates >>= check . (==["fee:"<>key])
         feeView<-evalRead reader (ReadPayment $ "fee:"<>key)
         check (savedPayment feeView==withdrawalPayment first && savedTerms feeView==policy && savedStatus feeView==PaymentReady)
         expectStore "payment_not_found" (evalRead reader $ ReadPayment "absent")
@@ -90,6 +93,7 @@ ledgerMain = do
         check (M.filter (/=0) restored==M.filter (/=0) initial)
         cancelledView<-evalRead reader (ReadPayment $ "fee:"<>key)
         check (savedStatus cancelledView==PaymentCancelled)
+        evalRead reader PaymentCandidates >>= check . null
         expectStore "fee_withdrawal_cancellation_conflict" (evalWrite writer (CancelFees key "changed"))
         resumed <- evalWrite writer reserve
         check (withdrawalCancellation resumed==Just("cancel",2))
@@ -367,6 +371,8 @@ ledgerMain = do
         (readyWork,noPreparation,noAttempts)<-evalRead reader (ReadPaymentWork intent)
         check (savedStatus readyWork==PaymentReady && noPreparation==Nothing && null noAttempts)
         prepared<-evalWrite writer (PreparePayment 100 intent (money 10) "{}")
+        selected<-evalRead reader PaymentCandidates
+        check (intent `elem` selected && length selected<=2)
         sequenceBefore<-evalRead reader ReadState
         replayPrepared<-evalWrite writer (PreparePayment 100 intent (money 10) "{}")
         sequenceAfter<-evalRead reader ReadState
@@ -428,6 +434,7 @@ ledgerMain = do
         afterSignature<-evalRead reader ReadBalances
         check (recorded==repeated && recordedSigned recorded==signed && recordedState recorded=="signed" &&
           recordedSequence recorded==Nothing && ledgerSequence firstSequence==ledgerSequence secondSequence && beforeSignature==afterSignature)
+        evalRead reader PendingAttempts >>= check . (==["fixture-signed-solana"])
         expectStore "attempt_identity_conflict" (evalWrite writer $ RecordAttempt decision signed {signedBytes="different"})
         expectStore "attempt_already_recorded" (evalWrite writer $ RecordAttempt decision signed {signedId="another-signature"})
         fixture fixtures CoverBackup
@@ -449,6 +456,8 @@ ledgerMain = do
         let nativeSigned=SignedAttempt (T.replicate 64 "f") "native-fixture-bytes" "{\"nativeSigned\":true}" (Just "fixture-prevout:0")
         nativeRecorded<-evalWrite writer (RecordAttempt earnedDraft nativeSigned)
         check (recordedChain nativeRecorded=="Native" && recordedSigned nativeRecorded==nativeSigned && recordedState nativeRecorded=="signed")
+        evalRead reader PaymentCandidates >>= check . (==["fee:"<>withdrawalKey,intent])
+        evalRead reader PendingAttempts >>= check . (==sort [signedId nativeSigned,"fixture-signed-solana"])
         let nativeTx=signedId nativeSigned; nativeCosts=W.PaymentCosts (money 3) (money 0)
         expectStore "settlement_attempt_changed" (evalWrite writer $ SettlePayment nativeRecorded nativeCosts "offline-finalized-proof")
         fixture fixtures ReadyIntake
@@ -474,6 +483,8 @@ ledgerMain = do
         expectStore "settlement_evidence_conflict" (evalWrite writer $ SettlePayment authorized nativeCosts "changed-proof")
         completed<-evalRead reader (ReadPayment $ "fee:"<>withdrawalKey)
         check (savedStatus completed==PaymentPaid)
+        evalRead reader PendingAttempts >>= check . (notElem nativeTx)
+        evalRead reader PaymentCandidates >>= check . (notElem ("fee:"<>withdrawalKey))
         bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "terminal payment must not call RPC"}) closeManager $ \manager ->
           withRuntime manager (ObserverSettings native solana 2 "sol-origin" "opening-signature") (signingPolicy signing) Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret _customer ->
             interpret (Request $ ReconcilePayment nativeTx)
@@ -527,6 +538,8 @@ ledgerMain = do
         expectStore "failure_evidence_conflict" (evalWrite writer $ FailSolana failedAttempt (money 3) "offline-failure-proof")
         failedView<-evalRead reader (ReadPayment ("convert:"<>failedPayment))
         check (savedStatus failedView==PaymentReview)
+        evalRead reader PendingAttempts >>= check . null
+        evalRead reader PaymentCandidates >>= check . (notElem ("convert:"<>failedPayment))
       withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
         let tx=T.replicate 64 "d"; did="native:"<>tx<>":0"; hash=T.replicate 64 "e"
             proof=object ["observationHash" .= hash]
@@ -692,6 +705,24 @@ ledgerMain = do
       withWriter settings (store policy limits) (const $ pure ()) $ \writer->do
         fixture fixtures OrderWorkflowFunds
         orderWorkflowContract fixtures reader writer (store policy limits)
+        -- Actual runtime cycle with unavailable RPC: retain all money, stay
+        -- paused, record scanner failures, and never reach signer credentials.
+        let cycleKey=T.replicate 32 "1"
+            cycleNative=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:29432" "/unused/credential" "ecx-bridge-test"
+              16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47"
+            cycleSolana=Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing cycleKey cycleKey cycleKey
+            cyclePolicy=H.SolanaPolicy "contract" "contract" cycleKey cycleKey cycleKey (money 10) (money 10)
+        beforeCycle<-evalRead reader ReadBalances
+        pendingBeforeCycle<-evalRead reader PendingAttempts
+        bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> reject "offline_cycle_rpc"}) closeManager $ \manager ->
+          withRuntime manager (ObserverSettings cycleNative cycleSolana 2 "sol-origin" "opening-signature") cyclePolicy Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret _customer ->
+            void (try (interpret $ Request RunWorkerCycle) :: IO (Either BridgeError ()))
+        evalRead reader ReadBalances >>= check . (==beforeCycle)
+        evalRead reader ReadState >>= check . ledgerPaused
+        evalRead reader PendingAttempts >>= check . (==pendingBeforeCycle)
+        forM_ ["Native","Solana","SolanaOperating"] $ \chain->do
+          (_,problem,_)<-fixture fixtures (ReadScanHealth chain)
+          check (problem/=Nothing)
       beforeLarge<-evalRead reader ReadBalances
       fixture fixtures LargeBalances
       huge <- evalRead reader ReadBalances

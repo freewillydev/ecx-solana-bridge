@@ -478,6 +478,25 @@ under that gate. The separate safe evaluator receives only the SELECT-only reade
 and public configuration. Observation-only mode refuses customer creation and
 worker preparation/signing/queue/send before taking the gate.
 
+`RunWorkerCycle` now composes observation, quote expiry, pending-attempt recovery,
+custody certification and payment progression under that same gate. Scan and
+individual attempt policy errors are retained while the remaining attempts are
+checked. A failed cycle stays paused; successful custody certification never
+resumes a deployment. Paying cycles refresh invalidated custody checks and require
+recorded backup coverage before signing/sending. Existing unsigned preparations
+and exact signed bytes are reused. New work is limited to one candidate per chain,
+prioritizing unfinished intents and excluding cancelled/settled withdrawals in
+PostgreSQL; earned-fee payments use the same progression as customer obligations.
+
+The 15-second worker loop dispatches only that closed operation. Policy failures
+back off; asynchronous shutdown and database failures escape to the future server
+lifetime owner. Tests verify queue selection across reservation, cancellation,
+preparation, signing, settlement and failure, plus a real PostgreSQL runtime cycle
+with unavailable RPC retaining balances/pending work and recording all three scan
+failures. QuickCheck verifies loop backoff and cancellation. Positive funded cycles,
+native lock reconstruction, recovery-family parity and explicit resume remain
+unfinished; the loop is not yet attached to an executable or HTTP lifetime.
+
 Customer admission now has the baseline native dust/fee funding preview and Solana
 account/fee/rent/unsigned-simulation preflight. Its adapter, fingerprint, depth and
 fee settings must agree with the saved ledger policy. Captured native vectors and
@@ -503,7 +522,8 @@ public settings from one validated record. The financial fingerprint matches the
 baseline executable and captured Devnet identity exactly; obsolete socket fields,
 missing history anchors, incompatible limits and unsafe public URLs are rejected.
 These are offline configuration checks, not live history-completeness proof.
-The executable, scheduler and browser assets remain unwired; this library checkpoint does not claim a running replacement service.
+The executable and browser assets remain unwired; the worker loop still needs its
+server lifetime owner; this library checkpoint does not claim a running replacement service.
 
 Scoped physical-line comparisons (not whole-product reduction claims):
 
@@ -518,10 +538,14 @@ Scoped physical-line comparisons (not whole-product reduction claims):
 | Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
 | Signer module | 144 / 1 file | 117 / 1 file | Now includes startup key validation and shared file permissions; replacement parity pending |
 | Signer transport | 103 / 1 file plus shared web boundary | 69 / 1 file + shared 53-line Web module | Shared module also serves customer API; initial signer route only |
-| Customer/worker runtime | Part of broader Runtime | 232 / 1 file (previous worker-only checkpoint 172) | Adds safe evaluation, shared gate, customer dispatch and mode/config checks |
+| Customer/worker runtime | Part of broader Runtime | 294 / 1 file (previous checkpoint 232) | Adds recovery-first cycle, refreshed custody/backup gates and bounded retry interval |
 | Focused source validation | 63-line mixed validation/storage/recovery function | 67-line dedicated module | Covered-source recovery is still separate unfinished work |
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |
+
+This worker checkpoint adds 62 lines to the existing runtime and 55 to Store, plus
+one grammar constructor, with no new production files. It adds missing integration;
+it is not a size reduction or full parity with the baseline recovery scheduler.
 
 The key verifier is 15 lines versus the baseline's 16-line verification function,
 excluding comments/imports and shared permission checks. It now runs inside
@@ -538,7 +562,7 @@ all journal rows. Terminal attempts are still checked individually, so long-hist
 performance remains to be measured. Source eligibility checking is shared with signing.
 
 Still required: successful TLS worker/signer integration and deployed OS/native-RPC
-authority separation; executable/scheduler/browser integration;
+authority separation; executable/browser integration and worker lifetime ownership;
 integrated positive submission/reconciliation acceptance; retry, cancellation,
 replacement/winner changes and covered-source approvals generalized to earned
 funding; complete custody acceptance and Haskell backup/restore integration; actual populated-ledger migration and funded
