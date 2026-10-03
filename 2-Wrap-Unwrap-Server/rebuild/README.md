@@ -1,1741 +1,273 @@
 # Replacement bridge
 
-Baseline: `ba31b28`. This package is a replacement under construction, not a
-second production bridge. Root Cabal builds it alongside the baseline. Its executable now starts against a separately funded Signet/Devnet deployment;
-it has not been activated against the baseline's custody. Storage contracts use a
-disposable PostgreSQL database, never either custody database. Existing state
-must remain untouched until migration and real-chain acceptance pass.
+A connection-free ECX/Solana bridge charging 1% in both directions. This Cabal
+package replaces baseline `ba31b28`; it is not yet release-ready. Keep the baseline
+and its custody ledger until populated migration and real-chain parity pass.
+Detailed development history and previous per-piece line comparisons are in Git
+(up to `814af5f`); this document describes the current review target.
 
-The isolated deployment `rebuild-live-20261003` uses a fresh native wallet, Solana
-key and persistent ledger. Actual receipts allocated through the operator
-DSL: 1,500 native operating units, 25,000 wrapped inventory units and 100,000,000
-lamports, plus 10,000 confirmed native inventory units in transaction
-`0e13f399038fab8415a602bae841ae0c75f710678fe3d781e3897dc624747ff5`;
-allocation advanced the critical sequence to 4.
-The node's worker allowlist must include read-only `decodescript` for admission,
-while signing/key methods remain forbidden. The operator socket needs a short
-private fence directory (macOS rejected the original 113-byte socket path).
-Keys, funding attempts, private configuration and the persistent ledger are retained
-outside Git; stopping test processes must not remove them. OS-user isolation,
-off-host backup and manual wallet signing remain separate acceptance gates.
+## Audit path
 
-At source `c17e52d`, a dedicated Haskell tester used the SDK's validated unsigned
-token-transfer template with the order's readonly Solana Pay reference, signed with
-its own key, simulated, and saved exact bytes before submitting 10,000 wrapped units:
-`34xGfjKRoLb6MsWkgYtTCByoZpVSBWFmStZYkToHBPQTL6UdrXwna9QQPv7sS2zap3kMncJoNcFAmx9kVDaG7KP6`.
-The bridge accepted the deposit and its dedicated signer authorized the 9,900-unit
-native payout `c816a2f9f3eda53ab93cbf8687a9b5286cad69133b34d3b5ad774f56c6de2c1f`.
-The native node reports a separate 208-unit network fee. The order remains `Paying`
-while that payout awaits confirmation; final settlement is not yet accepted.
-Saved-order reload and identical create replay return the same order; a wrong
-capability is refused. Restart starts paused at sequence 9, preserves the order,
-and leaves exactly one native outgoing transaction. This proves neither arbitrary
-crash recovery nor real-wallet UX. Both directions, refunds, fee withdrawal and
-confirmed settlement still need funded acceptance. No production code, dependency
-or service was added for this exercise; the tester and private evidence stay outside Git.
+| Responsibility | Source within this package |
+| --- | --- |
+| Money, immutable quotes, explicit customer/earned funding | `src/Bridge/Domain.hs`, `Wire.hs` |
+| Caller/severity GADTs, typeclass and existential requests | `src/Bridge/Operation/Internal.hs` |
+| Restricted customer facade and four pure handlers | `src/Bridge/Operation.hs`, `api/Bridge/API.hs` |
+| Safe/critical evaluation and payment orchestration | `workflow/Bridge/Critical.hs` |
+| Admission, orders, payment, observation and custody | `workflow/Bridge/{Admission,Order,Payment,Observer,Reconciliation}.hs` |
+| Closed Opaleye operations and atomic ledger transitions | `runtime/Bridge/Store.hs`, `Store/{Schema,Catalog}.hs` |
+| Actual native/Solana RPC, codecs and effect validation | `chain/Bridge/` |
+| Independent signing checks and authenticated HTTPS | `workflow/Bridge/{Signer,SigningTransport,Credentials}.hs` |
+| Private operator commands | `workflow/Bridge/Control.hs` |
+| Host fence, encrypted archives and custody recovery | `runtime/Bridge/{Fence,Store/Backup}.hs`, `workflow/Bridge/Recovery.hs` |
+| Configuration, browser serving and resource lifetime | `workflow/Bridge/{Config,Web}.hs`, `app/Main.hs` |
+| QuickCheck/protocol and PostgreSQL acceptance | `test/Main.hs`, `test/StoreCheck.hs` |
 
-The required product remains connection-free native/wrapped conversion at 1% both
-ways, refunds, earned-fee withdrawal, durable recovery, the four customer routes,
-private operator control and dedicated authenticated signer. Development uses real
-L2L Signet/Solana Devnet; existing ECX betanet support is retained during cutover.
+The exact supplied [Main.hs](../docs/reference/Main.hs) remains the architectural
+reference, unmodified and excluded from builds. Servant handlers return
+`Plan caller a`, packaging `Request caller severity a` with its `Operation`
+dictionary. The interpreter resolves that dictionary to a closed DSL. Concrete
+results, not existential values, are serialized over HTTP. Caller authority and
+severity remain distinct; customer-critical requests cannot become signer/operator
+requests. Safe and critical evaluators are separate, with one authorized runtime
+critical dispatch. Cabal components hide privileged modules from the customer API.
 
-## Ownership and dependency direction
+There is one HTTP/worker process and one dedicated signer. The worker serves HTML,
+CSS and the shared Haskell browser compiled by GHC's JavaScript backend. The Solana
+SDK is Rust behind bounded Haskell FFI, not a signing subprocess. PostgreSQL,
+native daemon, Solana RPC and restic remain external dependencies.
 
-| Part | Owns | May depend on |
-| --- | --- | --- |
-| Domain | Exact money, explicit funding, terms, states and accounting decisions | Pure libraries |
-| Operations | Operation classes, existential Request, severity/caller DSL | Domain |
-| Store | Opaleye schema and atomic implementations of closed operations | Domain |
-| Native / Solana | Actual RPC, bounded codecs and effect validation | Domain |
-| Workflow | Prepare, journal, sign, save bytes, authorize/send, observe, settle and recover | Domain, Store, adapters |
-| Runtime | Safe/critical capabilities, authorization, one critical dispatch, scheduling | Operations, Workflow |
-| Signer | Restricted Servant API and independent durable authorization | Operations, read-only Store, adapters |
-| Interface | Four Servant handlers and Haskell/GHC-JavaScript browser | Restricted Operations and wire records |
+## Financial and authority boundaries
 
-The user's exact `../docs/reference/Main.hs` remains the typeclass/GADT reference.
-Handlers return `Plan caller a` containing `Request caller severity a`; the operation dictionary
-converts it to the DSL only at the interpreter boundary. Safe and critical
-evaluators are separate. Critical signer ClientM access is private. Customers
-cannot import the runtime or construct operator authority. The customer API already has a separate Cabal component that hides the internal
-grammar and has no database, runtime or signer dependency. The grammar also contains signer, worker and operator status/pause/resume operations;
-remaining recovery operations must be added with their concrete workflows.
+- Application row access, diagnostics and fixtures use Opaleye only inside specific
+  closed operations. No handler receives a connection, generic query or IO callback.
+  Driver connection/transaction control and reviewed schema DDL are infrastructure.
+- Safe reads and the signer use SELECT-only roles. The writer owns the ledger
+  advisory lock and a private monotonic host fence. Startup always pauses intake.
+  Unexpected database failures fence the writer; stale snapshots cannot lower its
+  watermark. Writer transactions do not span RPC, signing or remote backup.
+- The critical evaluator alone constructs signer `ClientM` calls. The loopback HTTPS
+  API accepts saved preparation/replacement decisions and custody checkpoints,
+  never arbitrary bytes/RPC. It uses protected authentication, certificate pinning,
+  bounded messages/timeouts and no automatic retries. The signer validates durable
+  authority before and after signing, and never broadcasts or writes ledger rows.
+- Worker native credentials must forbid signing/key export, including
+  `walletprocesspsbt` even for unsigned requests. Replacement drafting therefore
+  belongs at the signer. Observation, unsigned funding, `decodescript`, input locks
+  and saved-byte submission require their specific permitted node methods.
+  Separate OS credentials must also prevent reading the signing keys/full cookie;
+  the current single-user local test does not prove that isolation.
+- Integer accounting separates principal, float, earned fees, operating funds,
+  unallocated receipts and protected allocations. New quotes use ceiling-rounded
+  1% fees; saved terms never change. Network costs do not reduce the quoted payout.
+- Conversion, refund and earned-fee withdrawal share one payment engine. It commits
+  preparation and authorization, saves exact signed bytes, records broadcast intent,
+  rechecks source/coverage/limits, and submits those bytes. Only independently
+  observed effects settle accounting. An uncertain response grants no new payment.
+- Duplicate receipts/settlements are rejected. Cancellation cannot erase signatures.
+  Solana retry requires verified expiry and explicit approval. Native replacements,
+  winner changes and rebroadcast preserve one economic payout and immutable history.
+  Covered-source payment requires current loss proof, full capital cover and a
+  separate saved approval; it never fabricates physical source eligibility.
+- Required backup coverage gates instructions, signing and sending. Custody
+  checkpoints upload and read back the complete bundle before acknowledging its
+  exact current sequence. Slow backups trigger fresh scans/reconciliation, not
+  extended quote deadlines or waived coverage. Missing backup configuration refuses
+  required checkpoints. Local tests use `backupRequired=false` explicitly.
 
-No generic SQL/IO operation, alternative database, synthetic receipt/order for
-withdrawal, or chain stand-in is permitted. Row access is Opaleye inside specific
-closed operation implementations. Driver transactions/migration DDL are explicit
-infrastructure. Writer transactions never span RPC/signing/backup. There is one payment
-engine; funding determines principal accounting, not a second send implementation.
+## Customer and operator interfaces
 
-## Construction and acceptance
+| Customer route | Purpose |
+| --- | --- |
+| `GET /api/v1/config` | Identity, fees, limits, links and availability |
+| `POST /api/v1/orders` | Create or recover an immutable order |
+| `GET /api/v1/orders/:id` | Authorized saved-order status |
+| `POST /api/v1/orders/:id/transaction` | Authorized Solana Pay instructions |
 
-1. Pure domain and property checks. Exact monetary parsing is extracted from the
-   baseline; funding distinguishes conversion, refund and earned fees from day one.
-2. Complete operation grammar and restricted customer handlers. Compile-failure
-   checks prove customer code cannot reach critical operator/signer capabilities.
-3. Store plus native/Solana adapters. Preserve unique sources, balanced journal,
-   immutable quotes/signed bytes, sequence fencing and migration of existing state.
-4. Shared payment and recovery workflow, including fee withdrawal. Reuse reviewed
-   baseline validators; copy only code required by the actual flow.
-5. Runtime, signer and browser; funded wrap/unwrap/refund/withdrawal, reload,
-   interruptions and restart on real networks, then actual wallet acceptance.
-6. One current operating/review guide and Cabal acceptance runner; coordinated
-   replacement/deletion of superseded code after state and behavior equivalence.
+Save a random 32-byte capability and idempotency key before creating an order.
+Send `Authorization: Bearer <64 lowercase hex characters>`; only its hash is stored.
+The public order ID does not grant access. Amounts are decimal base-unit strings.
+Wrapping supplies a Solana recipient and native refund address. Unwrapping supplies
+an external native recipient; verified deposit effects establish the refund owner.
+There is no website wallet connection. A Solana Pay reference binds the deposit;
+QR codes/payment links alone are not proof of payment. Supported-wallet signing and
+browser reload/error behavior still need end-to-end acceptance.
 
-Each piece gets focused checks before integration; file-local tests alone cannot
-establish authorization, finality or crash safety. No module-count or line-count
-quota substitutes for those requirements. Keep one build job and warm caches.
-Old installer artifacts do not certify this package. Off-host restoration,
-canonical activation and independent review remain explicit wider release gates.
+Operator commands are JSON on stdin to `operator CONFIG`. They use the private
+mode-0600 control socket under the owned mode-0700 fence directory, then the same
+DSL dispatcher. This is not the signer transport or a public operator HTTP API.
+Keep that directory short enough for the host's Unix-socket path limit.
+[Control.hs](workflow/Bridge/Control.hs) defines exact accepted fields and rejects
+unknown fields. Commands include:
 
-## Real-chain observer acceptance
+- `status`, `native-reviews`, `pause`, `resume`;
+- `allocate-treasury`, `classify-spend`, `withdraw-fees`, `cancel-fees`, `refund`;
+- `cancel-preparation`, `retry-solana`;
+- `cover-source-loss`, `approve-covered-source`, `approve-source-recovery`;
+- `draft-replacement`, `sign-replacement`, `cancel-replacement`, `rebroadcast-native`.
 
-The shared acceptance runner accepts `ECX_REBUILD_LIVE_OBSERVER_CONFIG` pointing
-to a private, validated L2L Signet/Solana Devnet config. It requires the usual
-fresh disposable `ECX_REBUILD_CONTRACT_DATABASE` and SELECT-only
-`ECX_REBUILD_CONTRACT_READER`. It initializes its own empty ledger and temporary
-host fence, then runs the actual observation-only critical dispatcher twice.
-All three scanner health records must report success; repeat observation must leave
-accounting unchanged, with no pending signed attempts and intake still paused.
-Signing and broadcasting requests must be rejected before accessing nonexistent
-signer credentials. Before scanning, the production native authority check requires
-all 13 signing/key-export methods to return explicit forbidden-method responses.
-It also checks actual `decodescript` access, needed by customer admission.
-The supplied config must therefore use a restricted worker RPC credential, not the
-node cookie. All application row assertions remain closed Opaleye fixtures.
-The runner does not start a daemon, move funds or change the existing custody ledger.
+Allocation requires a verified unbound receipt, exact split, paused service and
+current custody. Resume independently recovers pending work and checks node
+permissions, scans, custody and required backup; pause/resume is not a bypass.
+Token issuance, metadata and pool administration remain outside bridge custody in
+[1-Make-Wrapped-ECX](../../1-Make-Wrapped-ECX/README.md) and
+[3-Create-CPMM-Pool](../../3-Create-CPMM-Pool/README.md).
 
-The original run passed against the real L2L Signet checkpoint 16000
-(`00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47`),
-the existing `ecx-bridge-fresh-treasury` test wallet and Solana Devnet mint
-`Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM`. The reused old config's checkpoint
-16551 was correctly refused because it postdated that wallet's birth; only the
-private disposable-test config was moved to the verified earlier checkpoint.
-This is live observer/ledger integration, not funded wrap/unwrap, custody-balance
-certification, OS isolation or migration acceptance. Existing ledgers were untouched;
-temporary databases and fences were removed. Versus `48112a0`, this adds 53 lines
-to the existing acceptance runner (2,967 → 3,020), with no production change, new
-file, service or dependency.
+## Build and run
 
-The subsequent restricted-credential run also passed on the real node. Its dedicated
-worker `rpcauth` identity has a fixed RPC allowlist for observation, unsigned
-preparation, saved-byte submission and input locks. The administrative cookie remains
-available to the signer/operator. The test node was gracefully restarted once and
-all three preexisting wallets reloaded; no funds moved. Credentials and the rollback
-config remain private and outside Git. The other local Bitcoin daemon was untouched.
-Versus `d46455f`, requiring the real authority check adds one line to the same
-acceptance runner (3,020 → 3,021), with no production change. This verifies node-level
-RPC separation, not separate OS identities: the current local user still has access
-to the administrative cookie. Deployed cross-UID custody isolation remains unproven.
-
-## Fresh ledger setup
-
-For a genuinely new deployment, first apply the reviewed baseline PostgreSQL
-migrations 001–005 followed by rebuild migrations 001–003 to an empty database.
-DDL remains separate installation infrastructure; the command below does not run
-or verify the full migration definitions. Supply offline database-owner `PG*`
-credentials and a reviewed deployment config, then run from the repository root:
-
-```sh
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- initialize-ledger CONFIG
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- adopt-ledger CONFIG 0
-```
-
-`StoreSetup.InitializeLedger` is a closed offline GADT operation, absent from HTTP
-and signer capabilities. Under exclusive worker ownership and one transaction,
-Opaleye checks all 39 other retained bridge tables for rows before creating the
-schema-21 deployment singleton, uncertified custody singleton and operating clock.
-It creates no balances, scan origins, keys, orders, signatures or spending authority.
-The ledger starts paused with zero sequences; chain scans, treasury classification,
-reconciliation and explicit resume remain required. Existing identity/schema must
-match, and repeat setup leaves existing state untouched. Residual rows with missing
-deployment metadata are refused. Initialization never restores or repairs a ledger;
-existing deployments must use the recovery/migration procedures instead.
-
-Versus `6342d03`, this adds **47 production lines across the same three files**:
-Store 3,316 → 3,354, Schema 294 → 298 and Main 139 → 144. The shared acceptance
-runner grows 2,917 → 2,967. No dependency, service, migration or executable is added.
-The setup acceptance modes (`ECX_REBUILD_SETUP_ONLY=1`, optionally
-`ECX_REBUILD_SETUP_RESIDUE=1`) use fresh disposable PostgreSQL and the actual CLI;
-they cover paused zero-balance initialization, unchanged repeat, wrong identity,
-active worker exclusion and residual-history refusal. They require the migrated
-schema and do not certify installation or populated baseline cutover.
-
-## Running the development executable
-
-From the repository root, Cabal builds the native application plus the existing
-SDK FFI and GHC JavaScript assets through `ecx-build-assets`:
+Run from the repository root; use one build job and reuse compiler/SDK caches:
 
 ```sh
 cabal build ecx-bridge-rebuild:exe:ecx-bridge-rebuild -j1
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- check-config CONFIG
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- observe CONFIG
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- serve CONFIG
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- signer CONFIG KEYFILE
+cabal test ecx-bridge-rebuild:rebuild-test -j1 --test-show-details=direct
+bridge() { cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- "$@"; }
+bridge check-config CONFIG
+bridge check-signer SIGNER_CONFIG KEYFILE
+bridge observe CONFIG
+# Or, in place of observe:
+bridge serve CONFIG
+# In a separate process:
+bridge signer SIGNER_CONFIG KEYFILE
+# With required custody checkpoint support, use instead:
+bridge signer SIGNER_CONFIG KEYFILE BACKUP_CONFIG STAGING
 ```
 
-`CONFIG` is a reviewed deployment configuration, not the test fixture. Supply
-local `PGHOST`, `PGPORT`, `PGDATABASE`, `PGUSER` and optional `PGPASSWORD` through
-the service environment; public modes also require a distinct SELECT-only
-`PGREADUSER` and optional `PGREADPASSWORD`. Signer mode uses its own SELECT-only
-`PGUSER`, native signing credential and private custody key. `ECX_INTERFACE_CONFIG`
-and `ECX_ASSETS` are optional overrides; assets default to Cabal-generated output.
-The existing schema-21 ledger and matching initialized host fence are prerequisites.
-`serve` enables the customer/payment mode but starts paused; explicit operator resume
-requires successful recovery, reconciliation and readiness checks. `observe` refuses
-customer creation and outgoing sends.
-Neither command is public-release or canonical-custody approval.
-
-The process contract uses the existing disposable-database runner with
-`ECX_REBUILD_SERVER_ONLY=1` and `ECX_REBUILD_EXECUTABLE` set to the freshly built
-application. Invoke the runner through `cabal run` so Cabal supplies its fixture
-data directory (direct binary invocation requires `ecx_bridge_rebuild_datadir`).
-It creates and removes its own configuration, child process and host fence; it
-must never target the custody ledger. The shared PG server remains running.
-
-## Current checkpoint
-
-Implemented: checked monetary/funding types, balanced settlement calculations,
-validated quote decoding, the existing customer wire format, existential requests
-and the four pure Servant handlers. Funding has read-only patterns; money and
-quotes have ordinary accessors so record updates cannot bypass validation.
-QuickCheck covers money, fees, historical terms and funding accounting; handler
-checks inspect actual requests and their DSL conversion. The private storage component now provides closed read operations and atomic
-pause/earned-fee reservation/cancellation operations against the existing schema.
-It exposes no connection/query callback. It checks read-role privileges and ledger
-identity, shares the baseline writer lock, requires a durable checkpoint callback,
-and fences unexpected transaction failures. Returned withdrawals include cancellation
-state; replay cannot silently reactivate released money.
-
-`rebuild-store-check` is the Cabal-built PostgreSQL contract runner. Supply a fresh
-fully migrated `ECX_REBUILD_CONTRACT_DATABASE` with the `ecx_rebuild_contract_`
-prefix, `ECX_REBUILD_CONTRACT_READER` with a SELECT-only role, and `USER` for fixture
-setup on `/tmp/ecx-pg-seam:29436`. Apply baseline PostgreSQL migrations 001–005,
-then the Cabal-packaged `rebuild/migrations/001.sql` through `003.sql` (schema 21). It refuses an unprefixed database. Fixtures and
-assertions use Opaleye; schema/role provisioning is separate DDL. Checks cover role
-and profile refusal, exclusive writer ownership, exact replay/conflicts, custody
-freshness, insufficient earned revenue, cancellation and checkpoint rollback/fencing,
-plus 25 randomized reserve/cancel cycles. The fixture checkpoint is deliberately
-in-memory/no-op except during failure injection; this is not host-fence acceptance.
-
-Size comparison (physical lines, including comments/blanks): the six equivalent
-full table mappings for deployment, events, postings, audit, fee withdrawals and
-cancellations occupy 89 declaration lines in the baseline schema versus 34 here,
-in one schema file in each version. Repeated per-column type parameters and
-read/write aliases are removed; mapped columns are retained. This is a table-mapping comparison, not a whole-storage reduction claim.
-
-Saved-order reads now verify bearer capabilities using the exact baseline digest,
-load historical terms without repricing, check request/quote/profile consistency,
-hide unissued instructions and enforce configured backup coverage. Recovery
-projections retain the original native/source/accounted-loss rules. The PostgreSQL
-runner checks wrong/missing capabilities, hidden/uncovered instructions, saved
-7% historical fees, corrupt/mismatched terms and explicit obligation review.
-Native/source recovery overlays still need dedicated fixture coverage as their
-write paths are ported; this is not live reorg acceptance.
-
-For the saved-order read/visibility/recovery queries plus the orders table mapping,
-the baseline has 101 lines across two files; the replacement has 83 across two
-files (excluding imports, dispatcher branches and capability hashing in both).
-The query now fetches the authorized order once; accounted-loss reads are restricted
-to that order's affected receipts. The orders mapping alone is 38 to 17 lines with
-all 14 columns preserved. Capability hashing is a separate 18-line pure module,
-extracted from the prior scattered helpers; no new authentication scheme is used.
-The earlier 367-line storage count describes the fee checkpoint, not the current
-expanded storage total.
-
-Atomic order creation is now implemented as a closed write operation returning
-only an order ID. It checks capability/idempotency, request shape, amount/queue
-limits, pause/scanner/custody readiness and available payout inventory. It saves
-immutable 1% terms, inventory holds and both conversion/refund operating allowances
-in one transaction. The existing monotonic operating clock, payment/order holds
-and daily cost budgets are retained. Chain address preflight and instruction
-provisioning must still run through their separate workflow before exposure.
-
-The PostgreSQL contract now checks both directions and upward rounding, exact
-inventory and operating holds, identical replay, changed-request rejection, stale
-custody/scans, pause, queue/input limits, insufficient inventory/operating funds and
-daily budgets. Rejected requests leave no added orders, holds or cost reservations.
-Balance reads use Opaleye numeric aggregation in PostgreSQL and checked exact
-Integer decoding; a contract verifies totals beyond Int64 without loading the
-entire postings history into the process.
-
-Order-admission/budget functions occupy 144 lines across two baseline files versus
-125 across one replacement file, counting the named creation/readiness/inventory/
-cost-budget functions and their balance/freshness helpers, excluding shared
-transaction/authentication plumbing and schema declarations. The seven equivalent
-full table mappings for reservations, checkpoints, scan health, operating clock,
-operating costs, saved order costs and operating reservations are 116 to 18 lines
-in one schema file each; the additional fee-reservation read projection is three
-lines. These are piece-level comparisons, not whole-application totals.
-
-Guarded instruction storage is implemented: one-time native allocation claims,
-immutable native results, order-derived Solana Pay references, first exposure after
-backup/readiness/reservation checks, and quote expiry. Native replies arriving after
-expiry can be recorded without reopening the window. Previously issued instructions
-remain historical data, while quote expiry releases only provisional holds.
-`StorePolicy` binds immutable execution terms, admission limits, the native allocation
-label namespace and backup requirement at writer construction.
-
-The PostgreSQL runner checks allocation replay, wrong label/direction, immutable
-instruction replay, backup pending/forward/regression/profile rejection, both
-instruction types, late replies, historical exposure and preservation of obligation
-holds on repeated expiry. A pure vector checks the exact existing Solana Pay
-order-to-reference encoding. Native address strings in storage fixtures are not
-node validation or network acceptance: the real adapter must validate ownership,
-solvability and address type before recording an RPC result.
-
-For claim/record/bind/issue/expiry/backup-acknowledgment storage functions, the
-baseline is 146 lines across two files versus 127 across one replacement file,
-including the new private authorization/allocation/save/audit helpers and excluding
-shared transaction, identity and schema code. The native allocation mapping keeps
-all three existing columns. Both chains share immutable instruction recording;
-Solana binding no longer accepts a caller-chosen reference. This reduces duplicate
-update paths without discarding the late-native-reply recovery rule.
-
-The private chain component now contains the existing HTTP JSON-RPC transport,
-native identity/wallet/address-allocation checks and Solana identity/token-account
-checks, with chain-specific settings independent of the old application Config.
-The retired Unix HTTP transport and application-wide PaymentTransport record are
-not carried over. Native credentials are read with a 4,097-byte bound before the
-4,096-byte limit check. Native amounts reject extreme exponent overflow; negative
-Retry-After values fail closed. Mutation/unknown-method retries remain forbidden.
-Solana public-key decoding has a length bound before Base58 work.
-
-QuickCheck/protocol contracts cover exact native amounts, response bounds, bounded
-read retries, mutation non-retry, native endpoint/wallet/checkpoint constraints,
-L2L identity refusals, one-time allocation recovery, Solana endpoint independence
-and token program/mint/owner/layout/delegate/close-authority rejection. The new
-transport also returned the expected genesis from the real public Solana Devnet
-endpoint. That is a live read-only transport check, not funded wallet or mint/custody
-acceptance. The PostgreSQL contract passed after the shared error-type extraction.
-
-Production counts: RPC 103 to 83 lines (one file each); native 128 to 151 (one file
-each); Solana 82 to 108 (one file each). The chain files grow because settings and
-validation move out of the old application-wide Config. An 11-line shared error
-module replaces the replacement store's local exception definition and supports
-both components. These are literal module counts, not a like-for-like total
-reduction claim; the principal gain is clear dependencies and retained protocol
-checks, with targeted input/retry hardening.
-
-Native payment preparation/validation/signing is extracted into the private chain
-component. It retains independently checked owned prevouts, exact recipient/change,
-fee totals/ceiling, chain replay fields, saved-PSBT comparison, lock recovery and
-post-signing/mempool checks. Preparation always requests no input locks; durable
-workflow orchestration must save the draft before signing restores them. The shared
-unchecked signing helper is private. Saved records now also reject malformed
-transaction IDs/outpoints/scripts, zero outputs, excessive confirmation policy and
-empty/oversized PSBTs before signing.
-
-This piece is 257 production lines in one file versus 243 in one baseline file.
-The increase includes explicit exports and validation; no size reduction is claimed.
-Its 143-line QuickCheck/protocol module uses one unchanged captured public L2L
-Signet fixture, distributed through Cabal. Tests cover successful offline
-preparation/signing, refusal before signing when current input evidence changes,
-post-signing template/fee rejection, corrupt saved drafts, output/fee mutations,
-coinbase maturity, replay policy and idempotent lock recovery. The complete rebuild
-pure/protocol suite passes. Offline fixture replay is not a new funded chain test.
-
-Solana message validation, the bounded SDK FFI and payment preparation/outcome
-verification are now extracted into the private chain component. A small public
-payment policy replaces the old application-wide Config; SDK library and signer
-key paths are explicit invocation inputs. Signed and unsigned SDK calls share
-encoding/invocation/reply validation, while the unsigned entry point supplies no
-key path. Bounded public-key parsing is shared with Identity. Transaction/message
-base64 text is size-checked before decoding; the Haskell validator still checks the
-exact instructions, account flags, message, mint, amount, memo and Ed25519 signature.
-
-The three production files total 477 lines versus 465 previously: message
-115→117, helper/FFI 149→154, payment 201→206. Added policy declarations, explicit
-exports and bounds outweigh removed duplicate invocation/key parsing. This is a
-boundary improvement, not a total size reduction. The 144-line QuickCheck/protocol
-module reuses four unchanged fixtures. It checks signed/unsigned SDK vectors,
-signature/amount mutation, unsigned simulation, rent top-ups, fee/rent/context/hash
-limits and captured finalized Devnet outcomes for both new and existing ATAs.
-The complete rebuild suite passes. A separate root-Cabal REPL smoke check invoked
-the cached actual SDK dylib through the new FFI: preview message and deterministic
-signature matched the exact public codec-key fixture. The temporary public test-key
-file was removed and the REPL exited. This is offline SDK execution, not new funded
-Devnet acceptance or a new clean-build SDK test.
-
-Deposit proof validation is consolidated: one module supports historical memo
-orders and connection-free Solana Pay, classifies token/SOL custody effects, and
-checks historical owners and exact balance changes. Shared account parsing now
-rejects duplicate/malformed keys for every proof path. Instruction count/account
-lists and order-reference decoding are bounded. Unmatched receipts still expose
-their custody effect without granting payout authority. Existing order-to-reference
-encoding is unchanged. Anchored, bounded signature pagination is extracted into
-the existing Solana adapter; provider gaps/repeated pages cannot advance a cursor.
-
-The baseline deposit/Pay modules total 338 lines in two files versus 297 lines in
-one replacement file, plus three added lines in the existing Identity module.
-History definitions retain the original 32 lines, moved from Observer into Solana
-with their imports/exports. QuickCheck covers the captured Devnet memo deposit,
-Solana Pay and loaded-account JSON rewrites, historical ownership/amount/memo,
-malformed instructions/accounts, exact URI amounts, bounded pagination and captured
-SOL fee/rent effects. Pay/v0 rewrites are offline parser contracts, not captured
-wallet flows. The complete rebuild suite passes; no funded transaction was sent.
-
-Closed store operations now select promotion candidates and promote an observed
-receipt into one conversion obligation. SQL orders/limits candidate selection
-instead of loading/sorting the full history. Promotion checks saved deployment,
-quote, amount/asset, native depth, timing and pending state; it verifies exact payout
-inventory plus both saved operating allowances before atomically allocating the
-receipt, transferring holds and recording the immutable net/recipient. It neither
-moves money nor signs. Duplicate/late/partial receipts retain their liabilities;
-replays, including restart, cannot produce another conversion. Reviewed/expired
-orders cannot be reopened by this operation.
-
-The disposable PostgreSQL contract passes both directions, duplicate receipts,
-confirmation/timing refusals, unknown/unconfirmed receipts, missing-allowance
-rollback, unchanged balances, historical 7% terms and restart replay. Row fixtures
-use Opaleye; no live ledger was changed. Promotion/candidate functions are 52→83
-lines; the corresponding full deposit/obligation definitions are 57→27, preserving
-all 18 columns. Combined: 109→110 lines across two existing production files,
-excluding shared dispatch/transaction code. Extra checks account for the larger
-functions; compact named records remove generated schema repetition. Review
-projections and test fixtures now reuse those mappings.
-
-Source-check persistence is implemented behind a closed write operation. It
-compares the complete saved receipt snapshot and, for conclusive checks, the current
-unreviewed native observation hash. It records pending/missing/restored/unavailable
-states without treating provider failure as proven loss. A proven deficit and its
-reversal are balanced and replay-safe; restoration returns any still-active loss
-cover's exact float/earned split once. Every changed recovery stays paused. The
-latest recovery is selected with a SQL limit and cover returns use the existing
-active-cover view instead of loading/filtering all cover history.
-
-Source persistence/evidence/return functions total 100→82 lines across one file
-each, including the new closed write branch and excluding shared helpers/schema.
-The existing private schema and wire modules gain fixed projections and typed
-receipt/check records; no new production file is added. PostgreSQL acceptance
-covers ordinary pending, missing-value replay, unavailable evidence preserving a
-known deficit, stale receipts/proof hashes, invalid evidence, restoration and exact
-covered-capital return/replay. All row fixtures use Opaleye. The test cover is seeded;
-native loss detection is now wired through the closed worker operation (see below);
-covered-payment approval and funded loss acceptance remain unfinished.
-
-Atomic scan commits now preserve receipts, immutable origins/evidence, cursors and
-health in one transaction. Cursor comparison refuses stale batches; duplicate
-receipts cannot credit twice. Eligibility loss captures the suspended work hash
-before review. Outgoing classification distinguishes a signed attempt from a
-persisted broadcast intent; treasury approval must match both anchor and economic
-effect. Changed evidence reopens sticky review. Failed scans preserve their cursor
-and last successful scan time.
-
-Scan functions are 213→187 lines; suspended-work hashing is 36→48 lines. Combined:
-249→235 lines across two baseline files versus one existing Store file, excluding
-shared helpers, schema and dispatcher. Explicit projected/ordered Opaleye queries
-replace broad row reads in the hash calculation while preserving its saved preimage.
-Schema and wire definitions add 42 lines each; no production file is added. These
-scoped counts are not a whole-repository reduction while the baseline is retained.
-
-The PostgreSQL contract passes receipt/cursor rollback, replay, immutable binding,
-source suspension/restoration, hash goldens, signed/broadcast classification and
-changed treasury evidence across all three streams. The full QuickCheck/protocol
-suite passes, including bounded canonical economic parsing. Treasury authorization
-is fixture-seeded; populated replacement/cancellation hash and former-winner cases
-still need workflow acceptance. These are storage/protocol checks, not funded scans.
-
-Native wallet observation is now a read-only adapter returning a complete scan
-batch. It validates actual chain/wallet identity, wallet tip and scan origin,
-re-reads canonical gettransaction evidence across removed/re-added history, checks
-owned output scripts and exact amounts, and binds receipts to saved order depth.
-Duplicate receipt identities and insufficient historical scan depth are refused.
-Its clock/cursor and instruction lookup are explicit inputs; it cannot commit rows.
-Two closed store reads supply instruction binding and maximum historical depth;
-the latter selects distinct policies rather than every duplicate policy row.
-
-Observer functions are 94→98 lines, plus 17→17 for the two store reads: 111→115
-across two production files in each version. The new dedicated native-observation
-module is 114 lines including imports/comments; the old functions shared the mixed
-chain Observer module. This is separation of evidence gathering from persistence,
-not a size reduction. Existing tests gain captured-output RPC contracts for reorg
-overlap, historical depth, unbound receipts, negative confirmations, identity,
-origin, script/amount and duplicate-output refusals. Full QuickCheck/protocol and
-disposable PostgreSQL suites pass; closed lookup reads are verified in PostgreSQL.
-No live wallet was scanned, and no funds were sent.
-
-Solana token and fee-payer observation now return the same atomic scan batch.
-They retain anchored history, pending verifier rechecks, legacy memo/Pay binding,
-historical refund owner, independent proof comparison and actual token/SOL effects.
-Unsupported/disputed evidence is quarantined; missing evidence cannot become an
-eligible bound receipt. Operating history must include the zero opening balance.
-Shared RPC encoders stay in Solana; identity checks use explicit primary/verifier
-read capabilities and refuse a missing configured verifier. Closed Opaleye reads
-select pending verification with SQL ordering/limit and match at most two reference
-orders, rejecting ambiguity without loading all matching records.
-
-The two Solana scan functions and cursor guard total 116→119 lines; their two store
-lookup functions are 22→18. Combined: 138→137 across two production files in each
-version, excluding imports and dispatch. The dedicated SolanaObservation module is
-138 lines. Shared adapter extraction adds 11 lines in Solana. A 50-line Observer
-workflow now constructs the real adapters, gathers/commits each stream, records
-failures and promotes candidates through closed store operations. It replaces the
-previous observer's intertwined adapter/store setup, but is not a total-module
-reduction claim while construction retains the baseline.
-
-Full QuickCheck/protocol checks pass captured memo effects, offline Pay rewrites,
-independent verification agreement/unavailability/dispute, pending work outside the
-current history window, missing/unsupported transactions and captured SOL costs.
-PostgreSQL contracts pass reference matching/bounds and pending-proof clearing.
-The workflow builds through root Cabal; it has not yet run against live nodes or
-been connected to the final critical runtime. No live custody state was changed.
-
-## Payment and signer checkpoint
-
-One checked PaymentView represents conversion, refund or earned-fee funding with
-immutable saved terms. Initial preparation shares order operating-budget rules,
-persists a generation-bound plan/draft and excludes concurrent work per chain.
-The 36-line schema-19 migration binds intents to exactly one obligation or earned
-withdrawal, preserves existing attempt bytes, excludes the baseline worker and
-pauses the deployment. It has only been applied to disposable databases.
-
-The common payment workflow prepares unsigned work and validates signer replies.
-Native returned bytes are independently decoded against the saved draft; Solana
-messages, signatures and derived payment references are checked locally. The signer
-accepts only deployment/payment/generation identifiers through its critical-only
-existential DSL operation, uses read-only Opaleye authorization, serializes signing
-and rereads the exact decision before releasing a typed SignedAttempt. The worker
-independently validates every returned field before immutable, replay-safe storage.
-
-SigningTransport provides loopback HTTPS, protected auth/certificate/key files,
-Servant BasicAuth, 16-request concurrency and 4096-byte input bounds. Critical owns
-the private ClientM with pinned trust, no proxy/redirect/retry, a 60-second timeout
-and a 512-KiB response bound. Uncertain signing outcomes retain the preparation and
-pause. Existing recorded attempts are verified without another signer request.
-The executable wires signer and public-worker modes separately; successful
-offline worker-to-signer TLS/SDK integration now passes (see below); funded and
-separate-OS-user signing acceptance remains pending.
-
-Closed MarkBroadcast and AuthorizeSend operations require current intake/custody,
-saved paying work, source eligibility and the current native replacement member.
-Pending replacement drafts block sending. Broadcast intent saves a critical
-sequence; identical replay preserves it. Send authorization requires applicable
-backup coverage, including recorded source-restoration approvals. Covered-source
-spending remains unported and refuses; it is not silently treated as eligible.
-
-SettlePayment binds the exact saved attempt, actual costs and proof, allows only a
-recorded broadcast intent, checks the live fee hold and excludes another winner.
-It uses the Domain funding accounting for customer and earned funds alike, then
-atomically resolves the intent and releases appropriate holds. FailSolana books
-only the proven network fee and retains principal/inventory for recovery. Identical
-outcomes are idempotent; changed evidence/costs/bytes refuse. Paused operation may
-record proven effects. These store operations do not verify chain finality or send
-transactions themselves. ReconcilePayment now obtains evidence through the real
-adapters under the critical gate: native bytes/fee/wallet conflict checks followed
-by canonical block/depth checks, or finalized Solana message/balance-effect checks.
-It verifies deployment identity and the saved attempt before applying a result.
-Unseen/waiting effects leave accounting unchanged; unavailable or conflicting
-proofs pause processing. Terminal paid/failed records return without RPC. This is
-pending-attempt reconciliation, not post-settlement reorg/winner recovery.
-
-PaymentSource now binds a focused chain read to the immutable customer request,
-policy, instruction and saved receipt. Native checks cover exact outpoint/value,
-owned script, wallet conflicts and canonical confirmation depth; Solana checks
-legacy memo or Pay reference, exact value/slot and any configured independent
-provider. A closed snapshot-checked refresh preserves receipt identity, first-seen
-time, balances and scanner cursors. Unchanged snapshots avoid unnecessary writes;
-changed eligibility uses the same suspension logic as scanning. Earned funding has
-no synthetic source receipt. Signing, queueing and submission use this common check.
-
-QueuePayment records broadcast intent and returns its sequence for backup.
-BroadcastPayment independently revalidates the saved attempt, checks for already
-observed effects, refreshes its source, checks native mempool acceptance or the
-Solana validity window, and authorizes the exact saved record after backup coverage.
-Only then does it call the real chain's send method, once, and check the returned
-identifier. Submission does not settle. An exception retains durable work and
-pauses; there is no automatic send retry or transaction spanning backup/RPC.
-These branches compile but still need positive integrated submission acceptance.
-Source changes that invalidate custody require recertification before sending;
-full runtime scheduling and that recertification remain to be connected.
-
-
-Current evidence:
-
-- Cabal QuickCheck passes protocol vectors, independent native decoding, Solana
-  signature/reference and typed reply mutations, and existential handler checks.
-  The SDK workflow vector uses a public test seed, never funded or broadcast.
-  Focused source checks cover native ownership/depth/canonicality and both Solana
-  deposit forms, including independent-provider disagreement and changed amounts.
-  Captured Signet/Devnet outcomes exercise the actual observer functions, including
-  missing versus unavailable, insufficient depth, conflicting/noncanonical native
-  effects, finalized commitment, missing finalized evidence and fee-only failed
-  Solana effects (the latter are labelled offline mutations of captured proofs).
-- Actual WAI/Servant checks cover auth, typed replies, refusals, malformed/oversized
-  bodies, cross-site requests, absent broadcast route and evaluator call counts.
-  Credential tests cover modes, parent permissions, symlinks, token format and port.
-  Signer startup now requires a protected standard Solana keypair whose seed,
-  public half and configured custody owner agree. Key and transport credentials
-  share the permission validator. Offline checks use a public all-zero seed vector
-  and reject changed seeds/owners/public halves, invalid bytes, oversized files,
-  symlinks and group-readable private keys. PostgreSQL signer-refusal contracts
-  still pass after startup validation; no custody key or funds are used.
-- Disposable PostgreSQL contracts pass signing/broadcast gates, exact saved bytes,
-  restart reads, replay and source refusal. Settlement checks verify a 7% historical
-  conversion, earned withdrawal without customer debit, finalized-failure fee-only
-  accounting, changed-evidence/cost refusal and no duplicate postings. Proofs/bytes
-  in database fixtures are labelled offline data, not real-chain acceptance. Source
-  refresh tests verify snapshot/immutable-binding refusal and unchanged money/cursor;
-  earned withdrawals return no customer source.
-- Only operation-origin policy refusals permit connection reuse after rollback.
-  IO and typed checkpoint failures fence the writer. `withFencedWriter` now holds
-  the host lock for the complete writer lifetime and fsyncs its monotonic sequence
-  before commit. The real filesystem/PostgreSQL contract preserves an advanced
-  watermark across an injected rollback and refuses the stale ledger on restart;
-  balances remain unchanged. Filesystem contracts cover competing processes,
-  same-process ownership, permissions, symlinks, identity, reinitialization and
-  retirement. This does not revoke copied keys on another host.
-
-Custody storage now has closed revision/snapshot/evidence reads and a revision-bound
-report write. It reuses the aggregated balance read and scanner freshness check,
-checks source/native recovery and terminal-payment evidence, and includes bounded
-pending attempts. PostgreSQL acceptance covers origins, scan freshness, review
-refusal, report validation, revision mismatch, failure pause, no implicit resume,
-and unchanged balances/revision. The critical worker now evaluates `ReconcileCustody` with configured origins and
-actual chain transports. Inspection checks native balance/history/canonical-block
-consistency, finalized Solana accounts/history, optional independent-provider
-agreement, a 60-second deadline and the unchanged ledger revision. Pending effects
-must match verified saved bytes and both scanner evidence and actual transaction
-effects. Offline RPC contracts over PostgreSQL cover matching/mismatched balances,
-history advancement, changed native views, provider disagreement, timeout and a
-revision changed during inspection. This is not live-chain acceptance.
-
-Native replacement families explicitly refuse custody certification until the
-winner-proof recovery port is complete; they must never be summed as independent
-payments. Positive pending-transfer custody and funded Signet/Devnet acceptance,
-source-loss diagnostic dispatch, and integration with the complete scheduler are
-still required.
-
-Worker `ObserveChains` and `PrepareOutgoing` now share the existing critical gate
-with custody/sign/queue/send/reconciliation. Preparation checks read-only intake
-before any RPC and refreshes its customer source before saving a plan. A paused
-preparation is verified to refuse without reaching the network. `withRuntime` now
-resolves both customer writes and worker requests through one critical dispatch
-under that gate. The separate safe evaluator receives only the SELECT-only reader
-and public configuration. Observation-only mode refuses customer creation and
-worker preparation/signing/queue/send before taking the gate.
-
-`RunWorkerCycle` now composes observation, quote expiry, pending-attempt recovery,
-custody certification and payment progression under that same gate. Scan and
-individual attempt policy errors are retained while the remaining attempts are
-checked. A failed cycle stays paused; successful custody certification never
-resumes a deployment. Paying cycles refresh invalidated custody checks and require
-recorded backup coverage before signing/sending. Existing unsigned preparations
-and exact signed bytes are reused. New work is limited to one candidate per chain,
-prioritizing unfinished intents and excluding cancelled/settled withdrawals in
-PostgreSQL; earned-fee payments use the same progression as customer obligations.
-
-The 15-second worker loop dispatches only that closed operation. Policy failures
-back off; asynchronous shutdown and database failures escape to the future server
-lifetime owner. Tests verify queue selection across reservation, cancellation,
-preparation, signing, settlement and failure, plus a real PostgreSQL runtime cycle
-with unavailable RPC retaining balances/pending work and recording all three scan
-failures. QuickCheck verifies loop backoff and cancellation. Positive funded cycles,
-replacement-family lock recovery, recovery-family parity and explicit resume remain
-unfinished. The executable now owns HTTP and the worker together through
-structured concurrency; either terminating cancels its sibling.
-
-Native lock reconstruction now runs before chain scanning, independently of Solana
-availability, through `RecoverNativeLocks`. The closed store read binds the native
-intent, active generation, pending cancellation and at most eight saved attempts.
-Recovery shares native plan/PSBT validation with signing. It restores only still-owned
-saved inputs; undrafted/cancelling work and already-confirmed/mempool spends only
-verify existing locks. Unknown locks are never cleared. Changed inputs, unrecorded
-broadcasts and unsupported replacement families refuse recovery and retain pause.
-A snapshot-bound closed audit write records restorations without changing balances
-or financial sequence. Captured Signet protocol checks cover idempotency, earned
-funding, cancellation, confirmed/mempool/unseen outcomes and changed PSBT/prevouts;
-PostgreSQL checks cover native work selection, audit binding and unchanged money.
-These do not replace actual daemon-restart or replacement-family acceptance.
-The implementation stays in Payment: 135 → 199 lines in that existing file, plus
-41 Store lines, 8 runtime lines, 6 adapter lines and one grammar constructor; no new
-production file. Baseline lock recovery occupied 71 lines plus shared helpers and
-included family handling still pending here, so this is not an equivalent reduction.
-
-Customer admission now has the baseline native dust/fee funding preview and Solana
-account/fee/rent/unsigned-simulation preflight. Its adapter, fingerprint, depth and
-fee settings must agree with the saved ledger policy. Captured native vectors and
-offline unsigned Solana message contracts verify preview behavior, no signing or
-sending, absent native funding, signed-preview refusal and simulation failure.
-The customer order workflow now invokes admission for new orders only, commits
-provisioning claims/instructions, requests backup and verifies recorded coverage
-before exposure. Closed `FindOrder` and `ReadProvisioning` reads preserve the
-capability/request binding and hide unissued instructions from ordinary reads.
-PostgreSQL workflow tests cover backup callbacks without acknowledgment, replay
-while paused without repeat admission/identity calls, changed-request refusal,
-capability isolation and recovery after a lost native allocation reply with only
-one address allocation. These are offline RPC contracts, not funded acceptance.
-`customerApplication` hoists the four pure Servant handlers into this runtime.
-Safe Solana Pay instructions check the order, backup visibility, deadline and
-intake in one database snapshot. WAI tests verify all four endpoint results,
-missing authorization, malformed/oversized bodies, cross-site rejection and removed
-routes. An actual PostgreSQL-backed HTTP order read and runtime replay pass without
-network access; observation-only restrictions and configuration mismatch also pass.
-Signer and customer HTTP share one bounded-body/concurrency/no-cache middleware.
-Deployment configuration now derives adapter, observer, ledger, signer-policy and
-public settings from one validated record. The financial fingerprint matches the
-baseline executable and captured Devnet identity exactly; obsolete socket fields,
-missing history anchors, incompatible limits and unsafe public URLs are rejected.
-These are offline configuration checks, not live history-completeness proof.
-The root-Cabal executable now wires this runtime to HTTP, the worker loop and the
-existing GHC-JavaScript browser build. `serve` and `observe` bind loopback, require
-separate database reader credentials and hold the durable host fence. Startup
-remains paused; there is no automatic resume or ledger/fence initialization.
-The separate `signer` mode checks its SELECT-only role and custody key before
-serving the authenticated HTTPS API. Public startup currently refuses canonical
-profiles and backup-required deployments until recovery integration is complete.
-
-Actual child-process acceptance on disposable PostgreSQL verifies browser HTML,
-CSS and generated JavaScript delivery, observation-only configuration, removed
-operator HTTP routes, unchanged balances, paused unavailable-RPC startup and host
-lock release after process termination. WAI tests cover fixed asset paths,
-missing-asset refusal, traversal/hidden-file rejection and browser security headers.
-This is executable/startup acceptance, not a funded bridge or browser-wallet test.
-
-## Signed Solana expiry and retry checkpoint
-
-Unseen signed Solana payments now enter expiry recovery through the same critical
-reconciliation path. An expired wall-clock timeout or missing RPC status is not
-proof. Each configured provider must report the expected genesis, finalized height
-past the saved validity limit, a current finalized slot, an invalid blockhash,
-absent transaction/status, and both complete account histories through the immutable
-token/operating origins. Failed history entries count as observations too. Canonical
-mode requires the independent provider. History traversal retains the bounded
-scanner contract; missing/truncated/oversized histories fail closed.
-
-Verified expiry atomically preserves the signed bytes, retires that preparation,
-releases only unused operating capacity and leaves customer principal/inventory (or
-earned principal) untouched in review. Retired attempts leave the executable queue;
-their original policy, draft and allowance remain readable for revalidation even
-when later generations use a different fee hold.
-
-The private command `{"operation":"retry-solana","transaction":"SIGNATURE","reason":"reviewed expiry"}`
-uses the operator existential and critical evaluator. It requires pause, revalidates
-the exact signed attempt, refreshes its source, repeats complete expiry proof and
-custody reconciliation, and records immutable approval for the latest retired
-generation. It does not sign, send or resume. The existing preparation engine then
-re-reserves operating capacity and creates the next bounded generation after resume.
-Mixed histories of approved expiry and unsigned cancellation are supported; another
-recorded, unexpired attempt blocks retry. Customer conversion/refund and earned
-payments share this engine. Earned-reservation release remains restricted to wholly
-unsigned cancellation history; proved expiry permits retry, not that release command.
-
-Verified locally: provider disagreement, non-expiry, stale context/height, valid
-blockhash, incomplete histories, observed failed signatures and observed transactions
-all reject expiry. PostgreSQL contracts verify exact-attempt binding, immutable bytes,
-no balance movement, replay/conflict handling, explicit latest-generation approval,
-old-callback isolation, mixed histories, fresh preparation and earned-payment retry.
-The executable rejects private retry commands in observation mode. Funded expiry,
-wallet interaction and restart acceptance on real networks remain release work.
-
-Scoped counts: expiry-proof function **43 baseline lines → 41 rebuild lines**,
-using the same bounded history collector. Existing observation module **95 → 140**,
-critical runtime **352 → 380**, control **106 → 109** lines, all still one file each.
-Store grows **150 net lines**, including shared retry-history checks and customer
-status updates; schema projections add seven lines. **No new files or migration**.
-These additions complete another recovery path; they are not a whole-repository
-size reduction or a claim of release readiness.
-
-## Unsigned cancellation and retry checkpoint
-
-The private command is `{"operation":"cancel-preparation","payment":"PAYMENT_ID","generation":0,"reason":"maintenance"}`.
-It resolves through the operator existential and the single critical evaluator.
-Cancellation requires pause, source verification, fresh custody, the exact current
-generation and no recorded signature in that generation. Its cleanup plan comes
-from the saved economic policy and draft, never operator-supplied outpoints.
-Native PSBT/template/fee validation is shared with signing; Solana policy/request
-validation is also shared and permits an unsigned expired blockhash to be discarded.
-
-The ledger first saves the immutable cleanup/reason with a critical sequence.
-Native cleanup unlocks only listed saved inputs, refuses foreign locks and never
-sends Core an empty unlock list. A lost reply leaves cancellation pending; retry
-rechecks current locks and the same saved plan. Completion records a second durable
-sequence and resolves the intent while retaining principal, inventory and its fee
-hold. A pending cancellation blocks draft/signature mutation in both application
-checks and database triggers. Completed old-generation callbacks cannot change new work.
-
-The existing preparation engine can reuse a completed, wholly unsigned cancellation,
-with fresh budgeting and a new generation, without creating another payment engine.
-The worker selects these retries as eligible work. After eight generations it leaves
-the payment in review; it does not leave an unpayable item silently Ready. Earned
-payments use the same path and may instead release their reserved revenue after
-completed cancellation. Signed Solana expiry uses the separate proof/approval path above; native replacement
-is still unfinished.
-
-`migrations/002.sql` advances rebuild schema 19 to 20. Its 29-line forward migration
-retains the old records and changes the fee-release trigger to accept only paused,
-resolved, fully cancelled unsigned work with released fee capacity. It still rejects
-pending preparations or any recorded attempt. Migrations require the worker stopped;
-this migration has run only against disposable databases, not existing custody.
-
-Cabal/QuickCheck checks cover saved Native/Solana cleanup, absent drafts, invalid
-policy, lost unlock replies and foreign/empty locks. PostgreSQL checks cover journal
-and sequence invariants, pending/replayed/conflicting cancellation, signed refusal,
-all eight generations, stale completion, held fees, earned retry/release and the
-independent SQL refusal of premature earned release. Runtime observation mode
-rejects cancellation. Actual funded interrupted-cancellation/restart acceptance remains.
-
-Scoped counts: native unlock **9 baseline lines → 8 rebuild lines** (excluding shared
-lock validation). Existing `Payment.hs` **199 → 222**, `Critical.hs` **326 → 352**, and
-`Control.hs` **103 → 106** lines, each still one file. Store grows **149 net lines**
-for cancellation, earned resolution and retry eligibility; schema projections add
-four lines. **No new Haskell production file**; the sole new file is the forward
-migration. This adds missing behavior rather than claiming a whole-feature reduction.
-
-## Refund authorization checkpoint
-
-The private command `{"operation":"refund","deposit":"DEPOSIT_ID"}` resolves
-through the operator existential and critical evaluator to one atomic Opaleye
-operation. It returns a typed `RefundAuthorization`, not unstructured JSON.
-The command cannot supply a destination or amount. New authorization requires
-paused service, fresh custody, an eligible receipt and preserved cost policy.
-Native refunds use the saved customer refund address; connection-free Solana
-refunds require the verified owner and matching reference from current receipt
-evidence. Historical owner-bound orders retain their original policy.
-
-Unresolved payment work blocks refunds, settled principal cannot be refunded
-again, and another unpaid obligation on the same order must finish first. An
-unstarted conversion may be cancelled atomically into a full-principal refund.
-Refund authorization never signs, broadcasts or posts a principal debit: it creates
-the ordinary `Refund` payment for the shared engine and advances the critical
-sequence. Replays return the saved result without another reservation or sequence.
-The engine retains source rechecks, backup coverage and actual-effect settlement.
-
-Quote expiry or a completed conversion can release the original refund operating
-allowance. Authorization restores it only after the shared operating-capital and
-daily-budget checks; it cannot silently reuse a spent allowance. Conversion holds
-are released while refund holds remain protected. Additional deposits after a
-completed conversion preserve that order's Paid status and original payout.
-
-PostgreSQL contracts cover partial native refunds, replay/sequence/balance invariants,
-conversion cancellation, unresolved-payment and already-settled refusal, expired
-allowance restoration, Solana verified-owner binding, missing/mismatched proof
-rejection and observation-only runtime refusal. The executable control check also
-rejects a caller-supplied refund recipient. These are disposable ledger tests;
-funded refund signing/submission remains part of real-chain acceptance.
-
-Scoped size: authorization **72 baseline lines → 93 rebuild lines**, inside an
-existing storage module on both sides. The extra checks cover pause/freshness,
-durable sequencing and re-reserving expired operating budgets. Integration adds
-one grammar constructor, a five-line result record, one parser branch and three
-runtime lines; **no new production file or refund-specific payout engine**.
-This checkpoint increases source size to complete required behavior; it is not
-presented as a reduction or a claim of perfect security.
-
-## Operator capital coverage
-
-The private operator DSL now accepts:
-
-```json
-{"operation":"cover-source-loss","deposit":"native:<txid>:<vout>","recovery":123,"float":"30","earned":"20","reason":"cover the verified 50-unit loss"}
-```
-
-New coverage requires pause and a fresh native missing-source proof. A separate
-read-only custody inspection includes proved deficits without certifying ordinary
-readiness. Its balances must match, its native block/height must match the source
-proof, and its ledger revision and timestamp must still be current at commit.
-The receipt snapshot and latest missing recovery sequence must also remain exact.
-The operator's two nonnegative contributions must cover the entire receipt;
-only free native float and earned fees can be used. Active inventory reservations
-and earned withdrawal reservations remain protected. Principal, operating budgets,
-backing and LP allocations are unavailable to this command.
-
-The immutable cover, fenced sequence and balanced deficit/capital posting commit
-atomically. Exact replay changes nothing; changed contributions or reason conflict.
-The source remains ineligible and the service stays paused. Coverage itself grants
-no signing, sending or payment-resumption authority. If the physical source
-returns, the existing recovery journal returns the saved capital split exactly
-once. Covered-payment approval and the corresponding send-source authorization
-remain the next implementation step; this command alone cannot resume a payment.
-
-The coverage-write function is **57 lines versus 66** in retained `Source.hs`,
-excluding shared helper functions on both sides. Store adds 76 total lines for
-closed operations/read/replay/write, plus three schema projection lines. There
-are **no new files or migrations**. The read-only loss custody wrapper reuses the
-normal inspection path. The old test-only cover insertion was removed: PostgreSQL
-contracts now perform actual coverage, including conflict/replay, stale revision/
-time, mismatched block, partial coverage, protected earned reservations and exact
-capital return. Build, QuickCheck and executable operator checks pass. Funded loss
-coverage and clean-host recovery are still acceptance gates.
-
-## Native source-loss inspection
-
-The worker now runs a bounded native source-recovery pass after scanning and before
-custody reconciliation, including while paused and during explicit resume. Closed
-Opaleye reads select at most 1,000 ineligible/recovering native receipts and load
-their saved order binding and scanner evidence. No caller supplies a query or RPC
-method. The shared native inspector verifies network/wallet context, exact owned
-outpoint/amount, immutable customer instruction/policy, scanner depth/anchor and
-current canonical wallet position. A missing source requires negative wallet
-confirmations, the explicit mempool-not-found response and an absent UTXO. A
-timeout or unsupported response is not loss. A second identical wallet transaction
-read detects an inconsistent view. Confirmed return and still-pending sources use
-the same inspector, with coinbase maturity handling for unbound receipts.
-
-Results use the existing append-only recovery operation and balanced deficit/
-return journals. Unavailable observations preserve the existing loss and hold the
-service for review. The pass visits the other candidates before propagating a
-recording failure. It neither approves recovery nor signs/sends. Capital coverage is now implemented; covered-source approval remains unfinished.
-This inspection supplies the chain proof for both.
-
-Build, QuickCheck, PostgreSQL and executable checks pass. Captured-output/offline
-RPC tests cover missing/restored/pending outcomes, unknown mempool results, a live
-mempool entry, an unspent output, stale scanner state and a changed transaction
-view. Database contracts cover candidate selection/evidence reads and the existing
-loss/return persistence. Live reorg/loss recovery remains unverified.
-The inspector is **73 lines versus 75** in retained `Reorg.hs`; identity checking
-now belongs to the caller and ledger reads to closed Store operations. The whole
-PaymentSource module grows **67 → 147** lines, Store adds 33 and runtime adds 16,
-plus one grammar line; there are **no new files or migrations**. This is recovery
-integration, not a whole-repo reduction. Existing native script/transaction-ID
-validators are reused rather than copied.
-
-## Restored-source approval
-
-The private operator DSL now accepts:
-
-```json
-{"operation":"approve-source-recovery","payment":"<obligation ID>","restoration":123,"reason":"reviewed restored deposit"}
-```
-
-This approves an existing restoration sequence, not a caller-supplied source proof.
-The runtime requires pause, checks the expected restoration, rechecks the actual
-source, reconciles pending payments and custody, then records approval. The final
-Opaleye transaction repeats the latest-restoration and exact suspended-work checks.
-The source must be eligible and its latest recovery must say restored with zero
-shortfall. The obligation must still be under review. The recorded suspension
-must follow any previous approval, name this obligation exactly once and retain
-its unchanged work hash. Pending preparation cancellation prevents approval.
-
-The approval preserves the prior `ready` or `paying` state and records custody,
-loss/restoration sequences, reason, work hash and a new fenced critical sequence.
-It changes no money and does not sign, send or resume. Exact replay is idempotent;
-changed reasons conflict. Replaying an old approval during a newer suspension
-cannot revive the payment. Covered/permanently lost sources cannot use this
-restoration command; their separate payment-approval workflow remains unfinished.
-
-Build, QuickCheck, disposable PostgreSQL and executable operator checks pass.
-Contracts cover pause/freshness, stale restoration, changed payment history,
-immutable replay, preserved balances, repeated loss/return and observation-only
-refusal. Funded recovery and prepared/signed-payment recovery acceptance remain
-open. This checkpoint adds 101 net storage/schema lines, 15 runtime lines and
-four grammar/control lines, with no new files or migrations. The executable test
-now explicitly terminates and waits for its child before checking fence release;
-this fixes a cleanup race exposed by the threaded test runner. The retained baseline combines restored and covered
-approval; comparing its complete function size to this restored-only subset would
-misstate parity. Existing work hashing, source checks, custody and backup barriers
-are reused rather than introducing another recovery engine.
-
-## HTTPS worker/signer integration
-
-The existing `rebuild-store-check` executable has an opt-in TLS contract:
+Cabal hooks build SDK/browser inputs. `CONFIG` is a reviewed private deployment
+configuration, not a fixture. Supply local `PGHOST`, `PGPORT`, `PGDATABASE`,
+`PGUSER`, optional `PGPASSWORD`, and a distinct SELECT-only `PGREADUSER`/optional
+`PGREADPASSWORD` for the worker. The signer uses its SELECT-only `PGUSER`, full
+native signing credential and custody key. Reader roles need SELECT on tables and
+sequences, not sequence USAGE/UPDATE. `ECX_INTERFACE_CONFIG` and `ECX_ASSETS` are
+optional; assets normally come from Cabal. The protected signer token is at
+`signerAuthFile`, certificate at `.pem`, private TLS key at `.key`.
+
+`serve` starts paused and permits explicit guarded resume. `observe` refuses order
+creation and outgoing sends. Public modes currently require L2L Signet/Devnet or
+ECX betanet/Devnet profiles; canonical activation is not approved or accepted.
+
+For a genuinely new deployment, apply reviewed baseline PostgreSQL migrations
+001–005, then rebuild migrations 001–003 to an empty database, and run:
 
 ```sh
-ECX_REBUILD_TLS_ONLY=1 ECX_REBUILD_TEST_SDK=/absolute/path/libecx_solana_sdk.dylib \
-  cabal run ecx-bridge-rebuild:rebuild-store-check --offline
+bridge initialize-ledger CONFIG
+bridge adopt-ledger CONFIG 0
 ```
 
-Like its other modes, supply `ECX_REBUILD_CONTRACT_DATABASE` and
-`ECX_REBUILD_CONTRACT_READER` for a disposable, migrated PostgreSQL database
-(prefixed `ecx_rebuild_contract_`), using the existing local test PostgreSQL port.
-It requires `openssl` for temporary certificates. Direct binary execution also
-needs `ecx_bridge_rebuild_datadir` pointing at this directory; Cabal run supplies it.
-It never connects to a live chain. The Solana HTTP responses are explicit offline
-protocol fixtures; the public seed is the existing unfunded SDK test vector.
-
-This contract runs the production critical evaluator, its private generated
-Servant HTTPS client, the production signer server/evaluator with a SELECT-only
-reader, and the actual Solana SDK FFI. The SDK-generated signature/bytes must match
-the preserved fixture exactly. Incorrect authentication and an untrusted TLS
-certificate both fail before signer chain calls and leave no recorded attempt.
-After valid signing, the worker independently validates and persists the exact
-reply; balances do not change. Removing its credential file then replaying the
-same payment succeeds without further RPC/signing. No broadcast method is allowed
-by the fixture server. Temporary listeners, keys and certificates are scoped to
-the test lifetime. The contract executable uses one threaded RTS capability.
-
-Build, TLS/SDK contract and the standard PostgreSQL contracts pass. This closes
-the previously untested successful HTTPS integration, not deployed process
-isolation: both evaluators run in separate threads of one test process. Separate
-OS users/native RPC restrictions, real chain responses, lost-reply recovery and
-funded end-to-end payments remain acceptance requirements.
-No production source changed and no files or Haskell dependencies were added. The existing
-contract file grows by 128 net lines, plus one Cabal runtime-options line. This
-adds integration evidence, not a source-size reduction or full release acceptance.
-
-## Observed treasury spending
-
-The private operator command is:
-
-```json
-{"operation":"classify-spend","chain":"Native","transaction":"<observed transaction>","reason":"I attest this was an operator treasury spend"}
-```
-
-Supported streams are `Native`, `Solana` (wrapped tokens) and `SolanaOperating`
-(SOL). It returns the recorded critical sequence. It never signs or submits a
-transaction. While paused, an operator may classify a scanner-recorded outgoing
-effect with immutable ownership attestation. Amounts/fees come exclusively from
-saved chain evidence. Any recorded bridge attempt, including earned withdrawals
-and expired signatures, is excluded. Native principal outflow consumes free float
-and its network fee consumes operating allocation; token outflow consumes free
-float, and SOL outflow consumes operating allocation. Customer inventory holds
-and both order/payment fee holds remain protected. Principal, backing, LP and
-unallocated receipts are not sources of spendable capital.
-
-The balanced journal, immutable approval and sequence commit atomically. Only the
-matching event's review flag is cleared; no global review reset or automatic
-resume occurs. Exact replay makes no additional posting and preserves custody
-revision. A changed anchor, economic effect or attestation conflicts, retaining
-review. Unlike new funding allocation, this operation cannot require a successful
-prior custody reconciliation: the unexplained outgoing effect is what must first
-be booked. Reconciliation and explicit resume still follow it.
-
-The function is **60 lines versus 57** in retained `Postgres/Treasury.hs`, with
-shared typed evidence and balance helpers excluded on both sides. This is a small
-increase, not a reduction; it adds an affected-row check and uses the rebuild's
-closed operation boundary. There are **zero new files or migrations**. PostgreSQL
-contracts verify native/token/SOL postings, pause, replay/revision stability,
-changed-anchor/ownership rejection, missing evidence, customer/earned-attempt
-exclusion and protection of active inventory/operating reservations. Cabal build,
-QuickCheck and executable operator checks pass. Real-chain operator spending and
-custody reconciliation remain acceptance work. The executable smoke test passed
-on rerun after one startup timeout with no server error output; its cause has not
-been established, so that first-run startup behavior remains an acceptance concern.
-
-## Verified treasury allocation
-
-The private operator DSL accepts:
-
-```json
-{"operation":"allocate-treasury","deposit":"<observed receipt ID>","split":[["float","700"],["operating","300"]],"reason":"I attest these are operator-owned funds"}
-```
-
-The result is the durable decision sequence. New allocation requires paused
-operation and a fresh custody reconciliation from the worker. It takes only an
-eligible, unallocated, unbound receipt with current matching chain evidence and
-no customer obligation. Native receipts must meet configured confirmation depth.
-Native evidence must contain exactly one matching unbound receipt; token/SOL
-balance changes must equal the saved amount, and failed SOL effects are refused.
-The ownership attestation is immutable. It asserts ownership, not arbitrary money:
-positive, unique splits must equal the observed receipt exactly. Only `float`,
-`operating`, `backing` and `lp` are allowed; SOL can fund only `operating`.
-A balanced journal entry, allocation proof, receipt state and fenced sequence
-commit together. Exact replay, including reordered splits, returns the original
-sequence without changing money or requiring another custody check. Changed
-splits/attestation conflict. No allocation command signs or sends coins.
-
-The allocation function is **70 lines versus 83** in retained `Postgres/Treasury.hs`
-(signature through last statement, excluding imports/shared helpers on both sides).
-It reuses current evidence decoding and ledger helpers, adds the explicit native
-depth check and verifies affected row counts. Integration adds 15 lines outside
-that function, with **zero new files or migrations**. The retained baseline is
-still present until migration and real-chain parity; this is not a repo-wide cut.
-Disposable PostgreSQL contracts exercise all three assets, protected accounts,
-exact replay, conflict, pause/freshness, amount mismatch, failed SOL, mismatched
-anchors, reviewed evidence, shallow/ineligible receipts and customer-fund refusal.
-Cabal/QuickCheck and actual operator transport checks pass. These fixtures do not
-prove funded-chain acceptance. Observed treasury-spend classification is implemented below the same closed
-operator boundary; real-chain treasury acceptance remains outstanding.
-
-## Earned-fee operator integration
-
-The private operator interface now accepts:
-
-```json
-{"operation":"withdraw-fees","id":"<64 lowercase hexadecimal characters>","asset":"Native","amount":"10000","recipient":"<destination>","reason":"operator revenue withdrawal"}
-{"operation":"cancel-fees","id":"<same identifier>","reason":"cancel unsigned withdrawal"}
-```
-
-Both return the durable `fee:<id>` payment identifier. `asset` is `Native` or
-`Wrapped`; amounts are integer base-unit strings. These commands do not sign or
-send immediately. New reservations require paused operation, actual chain identity
-and destination/payout preflight, fresh custody, available earned revenue and
-immutable terms. Solana withdrawals preview the exact requested amount, without
-applying a second wrapping fee. Customer quotes and withdrawals share that preview.
-Exact reservation replay checks saved terms without requiring another RPC call;
-a cancelled identifier remains cancelled. Changed terms conflict. Cancellation
-requires pause and the existing ledger rules: no signed or uncertain payout may
-release its reservation. Completed unsigned preparation cancellation is supported.
-After explicit resume, the existing worker handles preparation, signing, backup
-gates, submission and settlement through the same payment engine as customer work.
-Observation-only mode rejects both commands before reaching the network or writer.
-
-This checkpoint adds no files, database operations or migrations. Physical module
-counts: Admission **86 → 90**, Critical **380 → 409**, Control **109 → 115**,
-plus three grammar/import lines. These are integration additions, not a size
-reduction. Sharing the exact-amount preview avoids a second Solana validation path;
-closed operator constructors retain the single authorized critical dispatch.
-Cabal build/QuickCheck, disposable PostgreSQL replay/conflict/cancellation contracts
-and executable operator transport checks pass. Captured/offline preview tests are
-not proof of a funded withdrawal; live two-process withdrawal acceptance remains.
-Observed operator-spend classification is now implemented; live treasury acceptance remains outstanding.
-
-## Private operator checkpoint
-
-`cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- operator CONFIG`
-reads one bounded JSON command from stdin. Supported commands are
-`{"operation":"status"}`, `{"operation":"pause","reason":"maintenance"}`,
-`{"operation":"resume"}` and the refund command described above. Unknown operations and fields are refused. The local
-control socket is `operator.sock` inside the host-fence directory: owner-only
-permissions are required, and unsafe pre-existing paths are never removed.
-This is operator control; signer communication remains authenticated Servant HTTPS.
-
-The parsed command hides its concrete result in `ControlPlan`, retains `ToJSON`,
-and carries `Plan Operator a`. Only the evaluated result is serialized. Status
-uses the SELECT-only evaluator; pause/resume enter the same critical gate as all
-worker effects. Observation mode permits status/pause but refuses resume before
-network or ledger mutation. No customer route grants operator authority.
-
-Resume requires explicit native RPC signing/export denial, a recovery pass, refreshed
-pending sources and a fresh custody check. One Opaleye transaction then compares the
-exact pending attempts, rejects unresolved unsigned intents, reviewed obligations,
-missing historical cost policy, per-asset source deficits and insufficient operating
-allocations, and only then unpauses with an audit entry. Custody review checks are
-reused rather than copied. The shared recovery pass does not swallow errors for
-explicit resume; only the background scheduler may defer a custody check.
-
-Verified locally: Cabal/QuickCheck protocol tests (including each of the thirteen
-forbidden native methods), PostgreSQL positive resume and refusal/rollback for
-stale scans, legacy costs and reviewed obligations, safe operator reads, observation
-mode rejection, actual executable CLI/status/pause, unknown-field and permission
-refusal, unchanged balances and temporary process/fence cleanup. The HTTP startup
-check allows twenty seconds for local startup instead of five and includes the
-child log on timeout. These disposable-state checks do not prove funded-chain resume.
-
-Scoped counts: private transport **105 lines / 1 baseline file → 102 / 1 rebuild
-file**, excluding the old shared listener. At that checkpoint the transport handled three commands;
-the baseline handles more, so this is not equivalent feature parity. It adds strict
-field parsing and owner/type/mode checks directly. Runtime **302 → 323 lines / one
-file**, executable **79 → 87 / one file**, and Store **+57 net lines** for atomic
-resume plus shared operating holds. The grammar and wire records gain operator
-capabilities/status; no second financial evaluator or recovery module was added.
-Smaller source is not a security certification; positive funded resume, pending-family
-recovery and full operator-command parity still require acceptance.
-
-Scoped physical-line comparisons (not whole-product reduction claims):
-
-| Piece | Baseline | Rebuild | Scope limit |
-| --- | ---: | ---: | --- |
-| Deployment configuration | 133 / 1 file | 136 / 1 file | Adds six typed settings builders and required history anchors; baseline identity preserved |
-| Executable startup/CLI | 91 / 1 file, plus baseline Runtime startup | 87 / 1 file | HTTP/worker/control lifetime and signer wired; backup/init and other operator command parity unfinished |
-| Web boundary | 84 / 1 file | 71 / 1 file (previous checkpoint 53) | Shared customer/signer limits and fixed browser assets; no customer Unix listener |
-| Host fence | 132 / 1 file | 128 / 1 file + 7-line Store constructor | Same durable protocol; explicit directory replaces environment lookup |
-| Customer order workflow | 78 / 1 file | 63 / 1 file | Closed reads replace raw row/ledger access; funded HTTP acceptance pending |
-| Admission/previews | 106 / 1 file | 86-line module + 20 lines in existing native adapter | Same total; customer runtime wired, funded acceptance pending |
-| Custody chain workflow | 202 / 1 file | 188 / 1 file | Replacement-family and source-loss wrapper parity pending; not equivalent full-feature reduction |
-| Custody snapshot function | 79 / existing custody file | 71 / existing Store file | Reuses freshness/balance helpers; live acceptance pending |
-| Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
-| Signer module | 144 / 1 file | 117 / 1 file | Now includes startup key validation and shared file permissions; replacement parity pending |
-| Signer transport | 103 / 1 file plus shared web boundary | 69 / 1 file + shared 71-line Web module | Shared module also serves customer API; initial signer route only |
-| Customer/worker runtime | Part of broader Runtime | 460 / 1 file (previous checkpoint 444) | Adds operator capital coverage; single critical dispatch retained |
-| Focused source validation | 63-line mixed validation/storage/recovery function | 147-line module including native loss inspector | Covered-source approval remains unfinished; larger functional scope |
-| Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
-| Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |
-
-This worker checkpoint adds 62 lines to the existing runtime and 55 to Store, plus
-one grammar constructor, with no new production files. It adds missing integration;
-it is not a size reduction or full parity with the baseline recovery scheduler.
-
-The key verifier is 15 lines versus the baseline's 16-line verification function,
-excluding comments/imports and shared permission checks. It now runs inside
-`withSigner`, before handing out the evaluator, rather than relying on a separate
-maintenance command. Signer plus transport grew from the previous 159 to 186 lines
-across the same two files to add this startup check; moving permissions is not
-counted as a feature reduction.
-
-Custody storage adds five schema-projection lines and no production files. The
-snapshot comparison excludes shared helpers, grammar, evidence/revision reads and
-tests on both sides; it is not a whole-feature line comparison. Indexed evidence
-reads avoid loading the complete evidence table; aggregate balances avoid loading
-all journal rows. Terminal attempts are still checked individually, so long-history
-performance remains to be measured. Source eligibility checking is shared with signing.
-
-Still required: funded TLS worker/signer integration and deployed OS/native-RPC
-authority separation; remaining private recovery commands and funded resume/browser-wallet acceptance;
-integrated positive submission/reconciliation and funded Solana expiry/retry acceptance;
-native replacement/winner changes and covered-source approvals generalized to earned
-funding; complete custody acceptance and Haskell backup/restore integration; actual populated-ledger migration and funded
-Signet/Devnet flows. Supported-wallet signing, off-host restore, canonical activation
-and independent review remain release gates. Retain the baseline until parity and
-real-chain acceptance permit deletion. Key seeds alone do not restore ledger history.
-
-Startup integration finding: the retained baseline remote-backup adapter still
-invokes a Python uploader. It cannot be adopted as the final Haskell rebuild;
-replace that operational path before claiming complete backup/restore support.
-The executable uses the host-fenced writer, but does not initialize a database,
-initialize/adopt a fence or provide remote backup. Guarded private resume is now
-wired; real-chain acceptance of that workflow remains outstanding.
-
-## Covered-source approval checkpoint
-
-Private command `{"operation":"approve-covered-source","payment":"convert:ORDER",
-"recovery":123,"reason":"reviewed covered loss"}` records a distinct paused
-operator decision. It obtains its own native missing-source proof, reconciles pending
-attempts and custody, and atomically verifies the latest full loss, active full cover,
-unchanged suspended-work hash and previous state. The proof must match the scanned
-outpoint and the custody report's native block/height. Exact replay changes nothing;
-restoration and coverage approvals cannot be substituted for each other.
-
-Covered-source execution now uses the shared payment engine as described below.
-Approval itself neither resumes nor sends nor marks the source eligible.
-
-Scoped changes from the preceding rebuild checkpoint: Store **2,613 → 2,640 lines**,
-critical runtime **460 → 478**, control **127 → 130**, operation grammar **96 → 97**;
-**four existing production files, no new files or schema**. Tests **2,081 → 2,122**
-in the existing PostgreSQL contract file. This is required integration, not a net
-size reduction. Both approval kinds share one work-history check and atomic writer;
-capital coverage and approval share one source/custody proof verifier. No new
-query escape hatch or critical evaluator is introduced.
-
-Validation: root Cabal build, QuickCheck/protocol suite and disposable PostgreSQL
-contracts. Contracts exercise missing cover, stale custody, mismatched observation
-and block, changed payment work, approval-kind confusion, conflicting replay,
-unchanged money, retained pause and source ineligibility. These are local contracts,
-not funded-chain or deployed signer-isolation acceptance.
-
-## Covered-source payment checkpoint
-
-One closed source-authorization check is shared by preparation, signing-decision
-reads, signed-attempt recording, send authorization and unsigned-cancellation retry.
-It accepts physical eligibility or an active full native cover, a currently accounted
-missing-source loss, unreviewed incoming chain evidence and an approval for that exact
-obligation/cover. A returned cover or unavailable source evidence cannot authorize
-payment. No source eligibility flag is fabricated. Worker preparation/sign/send paths
-repeat the complete native missing-source proof against the current scanner snapshot;
-the dedicated signer independently reads the same durable authorization before and
-after signing. This does not give the signer a write or broadcast capability.
-
-Disposable PostgreSQL acceptance now takes an approved covered order through actual
-ledger preparation, signing authorization, exact attempt recording, broadcast intent,
-send authorization and balanced settlement. Transaction bytes/effects are explicit
-offline fixtures, not live signatures/broadcasts. Tests prove unavailable evidence
-blocks signing, attempt recording and sending; re-proving the same covered loss permits
-continuation; settlement replay changes no money; source return repays the original
-capital; the old cover cannot authorize a later loss.
-
-Scoped counts versus the prior checkpoint: Store **2,640 → 2,675 lines**, critical
-runtime **478 → 484**: **+41 production lines across two existing files**. The shared
-contract file grows **2,122 → 2,170**. No new files, schema, services or evaluators.
-This adds missing behavior through one predicate instead of copying a separate
-covered-payment engine. Root Cabal build, QuickCheck and PostgreSQL contracts pass.
-Funded-chain execution and native replacement families still require further
-work/acceptance; these checks do not close release gates.
-
-## Covered retry and native-family rules
-
-Covered-source authorization checks backing independently of payment execution state.
-Each closed payment operation still enforces its own state, so verified Solana expiry
-can enter operator review without losing a valid capital cover. Retry still requires
-an explicit paused approval, current source proof, fresh custody and verified expiry;
-review alone cannot prepare or send. The PostgreSQL contract now exercises a covered
-payment through expiry, refused unapproved retry, refused retry with unavailable source
-evidence, approved retry, unsigned cancellation, another generation and settlement.
-Saved payout terms remain identical. This fixes the duplicate state restriction with
-**no net production-line increase** in Store (**2,675 → 2,675**); the existing contract
-grows **2,170 → 2,201** lines. No new operation, table or file is needed.
-
-Native replacement's pure rules are now in the existing native adapter. The baseline's
-**48-line** `replacementOutputs`/family/draft validation block is retained unchanged,
-plus its exports/imports: adapter **293 → 343 lines**, one existing file. This is a
-validated extraction, not a claim of algorithmic improvement or whole-feature reduction.
-Keeping the rules beside the shared transaction validator avoids another module and
-keeps the immutable-input/payout/fee constraints visible together. QuickCheck checks
-bounded increasing fees, unchanged recipient, conservation of value, duplicate/oversized
-families and input/output/replay-policy mutations against the captured Signet template;
-test module **269 → 299** lines. Synthetic mutations are not valid newly signed chain
-transactions. The current replacement integration and remaining acceptance gates are described below.
-
-Validation: Cabal executable/contract build, QuickCheck suite and the full disposable
-PostgreSQL contract passed. No existing custody state was migrated or chain transaction
-submitted by these tests. The baseline remains required until parity and live acceptance.
-
-## Native replacement: current integration
-
-Operator commands now pass through the constrained existential, critical DSL and
-one private typed Servant client:
-
-- `draft-replacement` accepts `parent`, base-unit string `fee`, and `reason`.
-  It checks pause, source and custody, requests a typed unsigned draft from the
-  signer, validates the family/template and atomically saves the decision.
-- `sign-replacement` accepts only the durable `decision` sequence. It refreshes
-  source, backup and custody, requests signing, independently decodes the returned
-  bytes and checks the saved family/template, then atomically records the member.
-- `cancel-replacement` accepts `decision` and `reason`; only unsigned work can be
-  cancelled. Repeating a cancelled draft request cannot reactivate it. Exact saved
-  draft/signature replay and cancellation require no RPC or signing credentials.
-
-All three operator commands are forbidden in observation mode. Customers cannot
-construct them. Signer HTTP handlers package typed operations; only their evaluator
-performs RPC. `draft-replacement` belongs at the signer because unsigned construction
-uses `walletprocesspsbt`, which the worker's restricted credentials must not allow.
-The draft route accepts deployment, parent and fee, never arbitrary RPC or PSBT input.
-It rechecks the same closed Opaleye preflight before and after construction. The
-signing route accepts deployment and decision, independently checks immutable terms
-and authorization before/after signing, and never writes the ledger or broadcasts.
-
-One client dispatch now owns TLS certificate pinning, protected authentication,
-loopback/no-proxy/no-redirect policy, bounded responses and no automatic retries for
-preparation signing, replacement drafting and replacement signing. Native wire records
-moved unchanged into the existing wire module so the grammar can name `NativeDraft`
-without depending on RPC. No second codec or new module was introduced.
-
-Store reads and atomic writes share parent/family/source/fee/custody checks. Schema
-21's existing migration preserves active fee reservations, lineage, append-only draft
-and cancellation decisions, and customer or earned funding. Pending drafts block sends;
-signed members cannot be cancelled; send selection requires the latest member and
-backup coverage includes cancellations. Actual custody databases remain unmigrated.
-
-The worker now uses replacement families for send selection, observation, input-lock
-recovery and custody. A shared verifier checks the original preparation, immutable
-member records and bytes, recorded broadcast authority, and two consistent native
-chain/wallet views. The current mempool spender or confirmed winner contributes one
-custody adjustment; competing signatures are not separate payouts. Observation can
-settle either the original or replacement. Only the latest member can proceed to send.
-Sending waits if any member is confirmed or the latest is already in the mempool.
-Absent families recover only their verified owned inputs; active spends are never
-relocked. Recovery groups work by payment to avoid repeating family RPC inspection.
-
-Closed pending reads now exclude resolved intents. Once one member settles, later
-reconciliation of siblings returns without RPC; their exact history remains intact.
-The Store also binds the original family member to the saved initial draft, and lock
-work reads validate replacement lineage before returning a multi-member family.
-Settled-family recovery now has a separate closed worker operation. PostgreSQL filters
-healthy settled history before applying a 1,000-candidate bound. The runtime checks
-changed candidates through the shared family verifier even while paused or observing;
-unavailable RPC evidence records review and cannot authorize another payment.
-
-Confirmation loss/unavailability appends an immutable recovery decision. Reconfirmation
-requires the saved depth and costs plus current scanner evidence for the same bytes.
-A different canonical family winner must match the exact saved family and have recorded
-broadcast authority, the same amount/recipient/policy and corroborating scan evidence.
-Its atomic journal entry changes only the fee difference, retains the previous winner
-and evidence, and updates the customer payout link only when it still names that winner.
-Principal, released reservations and the resolved intent remain settled. The same
-operation supports customer and earned-fee payments; no synthetic order is introduced.
-Returning to a previous winner is supported, and old recovery rows cannot override a
-newer winner decision. Any new recovery decision leaves service paused for review.
-
-Approved native rebroadcast now completes the code path for an evicted settled
-payment. Private `native-reviews` returns transaction/state/recovery-sequence triples
-through the safe interpreter. `rebroadcast-native` accepts only `transaction`,
-`recovery` and `reason`, through the operator critical DSL. Observation mode refuses
-rebroadcast; there is no new customer HTTP or signer route.
-
-The closed ledger operations require pause, the exact settled attempt/family, a
-resolved intent and released fee reservation, paid funding with eligible or approved
-covered source, and a current confirmation-pending or proven-unseen review. The
-immutable approval binds the recovery sequence, exact byte hash, family and reason.
-Before sending, the runtime proves no family member is active, checks the source,
-backs up the decision, then repeats source/family/input checks and atomic authorization.
-Backup coverage must include every current critical decision. Only the original saved
-bytes are sent; there is no signing, new reservation, principal posting or automatic
-send retry. Normal custody readiness is intentionally not required for this repair:
-the already-booked payment is absent, and the checked original inputs must still be
-owned and unspent. It never authorizes a new economic payment.
-
-A repeat absence check retains a rebroadcast approval for an explicit retry after a
-lost response. Changed recovery evidence invalidates that approval; an unrelated RPC
-error is not proof of absence. Reconfirmation/winner change also removes its authority.
-The shared settled-intent guard serves both finality recovery and rebroadcast.
-
-Latest checkpoint versus `942a658`: **3,955 → 4,091 production lines across the same
-four files** (+136, no new files/migrations); existing PostgreSQL contract
-**2,391 → 2,438** lines. This adds the missing controlled repair path using the existing
-recovery journal and family/source/backup checks, rather than another signing engine.
-
-Validation: root Cabal build and QuickCheck; PostgreSQL proof/byte/family/sequence
-binding, changed-reason refusal, immutable approval replay, backup and pause gates,
-preservation of approval through unchanged absence, stale-approval/RPC-error refusal,
-unchanged balances and resolved work. The critical interpreter's stale-approval path
-is checked with a network-rejecting manager. The actual executable tests private
-command parsing, read-only review output, observation-mode refusal, rejection of a
-caller-supplied byte field, and process/fence cleanup. These checks do not establish
-a live rebroadcast or a complete operator-to-native-node recovery acceptance run.
-
-Still required: full replacement/reorg/rebroadcast acceptance on real chains, funded
-customer flows and wallet testing, deployed signer isolation, Haskell off-host
-backup/restore and populated migration. The baseline remains until parity and live
-acceptance; valuable-fund release also requires independent review.
-
-## Haskell encrypted ledger backup checkpoint
-
-`StoreBackup` contains closed `ExportLedger` and `UploadLedger` operations. It is separate from
-safe row reads because it writes private files; no customer or signer route exposes
-it. Its interpreter checks the SELECT-only role and schema/identity, exports a fixed
-PostgreSQL snapshot through Opaleye, and keeps that read-only repeatable-read
-transaction alive while `pg_dump` imports it. Paying-writer transactions and locks
-are not held. Startup/remote-backup integration remains pending.
-
-The archive mechanics stream to unique mode-0600 files in an existing owned 0700
-directory, bound subprocess duration, validate the custom archive with `pg_restore`,
-hash in 64-KiB chunks and fsync the archive, manifest and directory. The format-2
-manifest binds schema, identity, critical sequence and archive SHA-256; local success
-explicitly does not acknowledge remote durability. Partial files are removed on
-failure. PostgreSQL endpoint/user/password come from the actual reader settings;
-ambient PG service/endpoint options cannot select another database. Passwords are
-not placed in arguments. The read-only backup role needs SELECT on both tables and
-sequences; it must not receive sequence USAGE/UPDATE or other write privileges.
-
-Versus `4a9ad0e`, this adds **104 production lines**: Store 3,219 → 3,238,
-Catalog 65 → 70, and one new 80-line private Backup module (two files → three).
-The existing PostgreSQL contract grows **2,438 → 2,490** lines. The old standalone
-Python snapshot script is 167 lines, but this is not a like-for-like deletion:
-format 2 uses an exact archive digest rather than independently generated per-table
-JSON hashes. Baseline tooling stays until complete replacement acceptance.
-
-Validation uses actual `pg_dump` and `pg_restore` on disposable PostgreSQL databases,
-then compares deployment metadata, every signed-attempt record and every journal
-posting with closed Opaleye fixtures. It also checks the archive digest/manifest,
-private file modes, directory refusal, unique repeat archives and unchanged backup
-coverage. Root Cabal build and QuickCheck pass. Temporary databases, files and child
-processes are cleaned up. This is populated local archive restoration, not migration
-of existing custody or proof of an off-host/clean-host recovery procedure.
-
-`UploadLedger` validates protected configuration, exports through the same operation,
-then uploads after the read-only database transaction has closed. The configuration
-contains only absolute `restic`, `repositoryFile` and `passwordFile` paths. It rejects
-unknown fields, oversized/unprotected/symlink files, local/plain-HTTP repositories,
-and loopback/unspecified resolved addresses, including IPv4-mapped IPv6. The supported
-backend is `rest:https://...`; credentials remain in files, not arguments or reports.
-DNS checks cannot prove physical host independence or prevent later DNS changes;
-that remains deployment acceptance.
-
-The private uploader verifies the exact manifest and archive digest, requires a
-successful restic backup, and validates its full snapshot ID, exact paths and required
-identity/sequence tags. It decrypts the manifest back from that snapshot and requires
-byte equality before returning a receipt. It uses no cache or ambient restic overrides,
-bounds output/time, limits Go parallelism, and kills a child on cancellation/failure.
-The upload operation removes its temporary local archive and manifest on success or
-failure. No automatic retry, pruning, repository initialization or ledger acknowledgment
-is performed by production upload. These use restic's documented
-[REST backend](https://github.com/restic/restic/blob/master/doc/030_preparing_a_new_repo.rst),
-[scripting output](https://github.com/restic/restic/blob/master/doc/075_scripting.rst)
-and [snapshot readback](https://github.com/restic/restic/blob/master/doc/design.rst).
-
-The encrypted-storage acceptance uses an actual disposable local restic repository,
-validates authenticated metadata/manifest, decrypts the archive, compares its bytes
-and repeats populated PostgreSQL restoration. Local/plain-HTTP/loopback repository,
-unprotected credentials, changed sequence/digest and wrong password all refuse.
-Coverage remains unchanged. This exercises the private storage seam; the production
-operation refuses local repositories. It is not evidence of external HTTPS access,
-physical off-host durability, or complete custody recovery.
-
-Latest change versus `084e700`: **139 added production lines in the same two files**
-(Backup 80 → 208; Store 3,238 → 3,249), no new files or executables. Existing PostgreSQL
-contract 2,490 → 2,535. This adds the missing encrypted upload and authenticated
-readback, reusing the archive operation and one bounded subprocess path. It removes
-neither the retained baseline nor any required custody protections. Root Cabal build,
-QuickCheck and real PostgreSQL/restic acceptance pass.
-
-The existing executable now provides offline ledger restoration:
-
-```sh
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE
-```
-
-Run this with a separate local database owner authorized to create databases. Use a
-trusted, private archive/manifest in an owned 0700 directory and an independently
-known minimum sequence (including any surviving fence/receipts); do not guess zero
-to bypass stale-backup refusal. This restores the ledger only, not signing keys,
-service roles, a host fence or a running bridge.
-
-The closed `StoreRestore` operation shares the uploader's strict manifest/digest
-validation, then creates a randomly named `ecx_restore_...` database from template0
-with connections initially disabled. It revokes PUBLIC access before enabling
-connections and invokes `pg_restore` as one transaction without old ownership or
-privilege grants. It does not overwrite a caller-selected or existing database.
-These fixed, identifier-quoted DDL operations and pg_restore are offline schema
-infrastructure; all restored-row validation and changes use Opaleye inside the
-closed operation. No handler receives database-creation authority.
-
-After restore, it compares the actual ledger identity/schema/sequence, marks it
-paused, invalidates the old custody certification and appends an archive-hash audit.
-It preserves principal, balances, attempts and critical/backup sequences. It returns
-the staging database name; it never initializes/adopts a fence, grants service
-access, changes deployment configuration, resumes service, signs or sends. Failed
-verification drops only its new staging database, without FORCE; unexpected live
-connections require inspection. Interruptions during an uncertain CREATE DATABASE
-may leave an inaccessible staging database to inspect, never an activated worker.
-The source ledger and surviving host fence remain untouched.
-
-Local-restore checkpoint versus `a622bb2`: **94 added production lines across the same
-three files** (Backup 208 → 273, Store 3,249 → 3,272, Main 87 → 93), no new files or
-executables. Shared manifest validation and bounded PostgreSQL process handling
-replace duplicate upload-only logic. The existing PostgreSQL contract grows
-2,535 → 2,585 lines, while its handwritten test restore is replaced by the production
-operation. Actual local and encrypted-restic restoration preserve every signed
-attempt and posting; tests verify pause/custody reset, runtime-role connection
-refusal, wrong identity/schema/hash and stale snapshot refusal, false-sequence
-post-restore rejection and staging cleanup. The actual executable successfully
-runs the new command and rejects a stale snapshot. Root Cabal build, QuickCheck,
-PostgreSQL/restic and executable/HTTP contracts pass.
-
-Recovery can now start directly from an authenticated snapshot:
-
-```sh
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE
-```
-
-`SNAPSHOT` must be its full 64-character lowercase ID, never `latest` or an
-abbreviation. `STAGING` is an existing owned 0700 directory. `BACKUP_CONFIG` uses
-the protected HTTPS repository/password settings described above, preferably with
-separate recovery credentials. Read-only restic commands use `--no-lock`; upload
-continues to use locking. No ambient restic override, local cache, repository
-initialization or pruning is allowed by this path.
-
-The closed `RecoverLedger` operation checks the authenticated snapshot's two generated
-file paths and manifest, then binds its deployment and sequence tags, fingerprint,
-schema, archive filename and independently known minimum sequence. It fetches only
-those two files into a fresh private subdirectory; it does not extract a snapshot
-tree or accept a remote-selected local destination. Archive output streams directly
-to disk, is SHA-256 checked, and then passes through the same staging restore.
-The operation removes its plaintext subdirectory on completion/failure. It still
-returns only a restricted paused database; fence adoption and service activation
-are separate decisions.
-
-Encrypted-recovery checkpoint versus `d5315b0`: **57 added production lines across the same
-three files** (Backup 273 → 319, Store 3,272 → 3,279, Main 93 → 97), no new files or
-executables. Manifest and receipt parsing, subprocess limits and CLI dispatch are
-shared with the existing paths. The test's handwritten download/copy procedure is
-replaced by the production downloader: PostgreSQL contract 2,585 → 2,600 lines.
-Actual restic download and populated restoration preserve exact bytes, signed
-attempts and ledger postings; invalid snapshot selector, identity, sequence and
-password refusal preserve the source and leave no staging directories. The real
-CLI refuses a local repository. Root Cabal build, QuickCheck, PostgreSQL/restic and
-executable/HTTP contracts pass. This uses a private local-repository storage seam;
-production still requires HTTPS, and independent off-host acceptance remains open.
-
-Offline host-fence adoption and retirement are now available:
-
-```sh
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- adopt-ledger CONFIG MINIMUM_SEQUENCE
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- retire-ledger CONFIG MINIMUM_SEQUENCE
-```
-
-Select the intended ledger explicitly through `PGDATABASE`; the command returns its
-name and critical sequence. Both closed maintenance operations claim the normal
-worker advisory lock and lock the deployment row. They validate identity/schema,
-require pause and the independently known minimum sequence, then change only the
-configured host fence. No ledger row, balance, authorization or backup coverage is
-changed. A live worker is refused even if using a different fence directory.
-
-Adoption initializes a missing fence or advances an existing matching watermark.
-Equal-sequence replay is unchanged. It rejects a greater surviving watermark,
-wrong identity, corruption, unsafe permissions, an active filesystem lock or a
-retired fence. It never replaces the fence with an older snapshot. Retirement is
-permanent for that local fence and exactly replayable; it does not erase the
-watermark. A lower ledger after an uncertain commit cannot adopt or retire over
-the higher watermark. This local tombstone disables cooperating workers only:
-retiring the old deployment still requires stopping/revoking its separate signing
-authority, particularly across hosts. Neither command resumes service.
-
-Latest checkpoint versus `a4ffb6f`: **50 added production lines across the same
-three files** (Fence 128 → 148, Store 3,279 → 3,307, Main 97 → 99), no new files or
-executables. Initialization/adoption share directory validation, and both offline
-operations share the paused-ledger ownership check. Existing PostgreSQL contract
-2,600 → 2,643 lines. Actual PostgreSQL/filesystem tests cover initialization, replay,
-forward adoption, both lock conflicts, pause/identity/minimum refusal, retirement
-and the higher watermark left by an injected uncertain commit. The real executable
-initializes its fence with `adopt-ledger`, later retires it, and refuses re-adoption;
-its HTTP/lifetime checks preserve balances and clean up the process. Root Cabal
-build and QuickCheck pass. This checkpoint does not re-prove off-host key isolation
-or funded cross-host recovery.
-
-Native wallet recovery has two closed offline adapter operations in
-`chain/Bridge/Native.hs`, available through the existing executable:
-
-```sh
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- backup-native-wallet CONFIG DESTINATION
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- restore-native-wallet CONFIG MANIFEST
-```
-
-Use a configuration whose native credentials have offline custody authority and
-an existing mode-0700 staging directory owned by the node/evaluator UID. Backup
-creates the new absolute `DESTINATION` through the real node's `backupwallet` and
-writes `DESTINATION.json` mode 0600. It refuses existing files, including a leftover
-manifest. The manifest binds the checkpoint/profile, source wallet name, file hash
-and public descriptor state; it excludes cookies and local credential paths.
-Its relative archive name lets both files move together. Both files and the parent
-directory are synchronized before success. This manifest provides local integrity;
-authenticated off-host storage and complete custody coverage remain separate gates.
-
-Restore reads the bounded private manifest, rejects unknown fields, unsafe paths,
-changed files and the wrong network, then restores into the configured unused wallet
-name. The configured name may differ for isolated recovery testing; this does not
-migrate the bridge's financial identity. Descriptor checks permit only lookahead
-range expansion because the real daemon replenishes its keypool on load; keys,
-next indices and other descriptor fields remain exact. Neither operation retries
-uncertain mutations, overwrites a wallet, deletes failed restores or resumes a bridge.
-
-The first adapter checkpoint added 96 production lines to Native (163 → 259).
-Durable manifests and command integration now add **44 production lines across the
-same two files**, versus `e6715c7`: Native 259 → 294 and Main 99 → 108. Existing
-ChainCheck grows 267 → 286 and StoreCheck 2,690 → 2,709; no new files, dependencies,
-services or HTTP endpoints. This adds recovery functionality rather than claiming
-a line reduction. Manifest construction and verification share the exact format;
-there is no second serialization type or in-memory-only recovery token to retain.
-
-Root Cabal build/QuickCheck and a fresh empty wallet on the actual L2L Signet node
-pass. **Separate application invocations** back up and restore after relocating the
-files. The restored wallet preserves its label and next address; its restored
-private key signs a message verified by the node. Malformed/path-traversing,
-wrong-checkpoint, altered-hash, oversized and exposed manifests are refused.
-Test wallets/staging are removed; funded wallets and the shared daemon remain
-untouched. Repeat through `rebuild-store-check` with
-`ECX_REBUILD_NATIVE_RECOVERY_ONLY=1`, `ECX_REBUILD_EXECUTABLE` pointing to the Cabal
-application binary, `ECX_REBUILD_NATIVE_RECOVERY_COOKIE` and
-`ECX_REBUILD_NATIVE_WALLET_DIRECTORY` identifying the local L2L Signet node.
-
-This does not grant the web worker backup/key access or change the signer API.
-Encrypted wallets still require separately retained unlock material. Populated and
-encrypted wallets and cross-UID deployment still need acceptance; a native-only backup cannot
-recover customer orders, signed attempts or Solana custody.
-
-Local custody export and offline inspection now compose these existing pieces:
-
-```sh
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- backup-custody CONFIG KEYFILE DIRECTORY
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- check-custody CONFIG MANIFEST MINIMUM_SEQUENCE
-```
-
-`backup-custody` needs offline native/key authority, the existing host fence,
-writer `PG*` credentials and a distinct SELECT-only `PGREADUSER`/`PGREADPASSWORD`.
-The reader must address the same database. It holds both worker ownership locks,
-pauses the ledger, and creates a unique mode-0700 subdirectory under the existing
-private `DIRECTORY`. No SQL transaction spans native RPC. The six bound files are
-the ledger dump/manifest, native wallet/manifest, verified Solana key and deployment
-configuration. Source/copy public-key checks and an unchanged critical sequence
-bind the export; the completion manifest is written and synchronized last.
-Failure cleans only the newly created staging directory. The source remains paused.
-Encrypted native wallets are explicitly refused until their unlock material can be
-verified and included; same-UID node/key/staging access is currently required.
-
-`check-custody` requires neither database credentials nor network access. It checks
-private permissions, the exact file set, hashes, network/wallet/deployment identity,
-Solana key identity and the independently supplied minimum ledger sequence. Archive
-names are relative; a bundle can move as a unit. Large archives are hashed once by
-the existing native/ledger inspectors. Inspection does not install keys, restore a
-ledger, adopt a fence, acknowledge backup coverage or resume service. Restoring the
-ledger still performs its database-level validation and invalidates old custody
-certification. Private transport credentials must be provisioned on the new host;
-this bundle preserves custody keys/configuration, not old RPC cookies or TLS tokens.
-
-Versus `3ac1877`, this adds **195 production lines across four files**: one new
-167-line `workflow/Bridge/Recovery.hs`, Native 294 → 302, Store 3,307 → 3,309 and
-Main 108 → 126. The existing acceptance runner grows 2,709 → 2,803. No new process,
-executable, schema or external dependency was added; the workflow component now
-references the already-used PostgreSQL driver for offline connection settings.
-This is missing recovery functionality, not a claimed reduction of the baseline.
-
-Acceptance uses actual PostgreSQL, a fresh empty real L2L Signet wallet and a
-public never-funded Solana key vector. Independent CLI invocations export, relocate
-and inspect the bundle after deleting the original test key, with unavailable
-RPC/database credentials. Component restoration preserves every fixture journal
-entry, the native label/next address/private-key signing, and the Solana key identity.
-Both worker-lock conflicts, an injected mid-export failure, altered files, stale
-snapshots, wrong identities and exposed key permissions are rejected; staging,
-restored databases and test wallets are cleaned up. Run the existing native recovery
-contract with `ECX_REBUILD_CUSTODY_ONLY=1` plus disposable migrated PostgreSQL
-`ECX_REBUILD_CONTRACT_DATABASE`/`ECX_REBUILD_CONTRACT_READER`. These financial records
-are database fixtures, not evidence of funded Solana or cross-host recovery.
-
-Encrypted custody transfer now uses the existing restic process boundary:
-
-```sh
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- upload-custody CONFIG BACKUP_CONFIG MANIFEST MINIMUM_SEQUENCE
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- recover-custody CONFIG BACKUP_CONFIG SNAPSHOT DIRECTORY MINIMUM_SEQUENCE
-```
-
-`BACKUP_CONFIG` has the existing protected `restic`, `repositoryFile` and
-`passwordFile` fields. Production requires HTTPS storage away from loopback;
-repository initialization, credentials and an independently retained password
-remain operator responsibilities. Upload performs full local inspection, snapshots
-exactly the seven bound files with custody/deployment/sequence tags, verifies its
-receipt, then downloads and inspects the entire encrypted snapshot before returning
-its ID and manifest hash. Readback staging is removed. This receipt does not update
-ledger coverage or grant send/sign authority.
-
-Recovery requires a full snapshot ID, the expected configured identity and an
-independently known minimum sequence. It checks the authenticated snapshot's exact
-paths/tags and shared manifest grammar before creating private staging. Fixed files
-stream to mode-0600 destinations; there is no directory/archive extraction. The
-completion manifest is written last. Full native/ledger/key/configuration inspection
-must pass before the command returns the retained staging manifest. Failed download
-or semantic validation removes only that new staging directory. Keys are never
-printed, and recovery does not install them, adopt a fence or resume a worker.
-
-Versus `d1fa0ef`: **120 added production lines across the same four files**:
-Backup 319 → 419, Store 3,309 → 3,316, Main 126 → 139; Recovery stays at 167 lines
-while gaining both operations. Ledger-only and custody transfer share one uploader
-and bounded process runner; custody manifests have one parser/encoding. The existing
-acceptance runner grows 2,803 → 2,853, sharing its restic repository setup. No new
-files, dependencies, executables, services or schema were added.
-
-Real local restic acceptance deletes the plaintext bundle, downloads seven private
-files, passes independent CLI inspection and restores the PostgreSQL fixture journal
-and actual L2L Signet wallet from that decrypted bundle. Ledger-only snapshots,
-`latest`, stale/wrong-identity snapshots and wrong passwords are refused; source
-coverage remains unchanged. The original ledger-only encryption/restore regression
-and root Cabal QuickCheck pass. These tests use the private local-repository transport
-seam plus the production semantic inspector; the production HTTPS workflow builds
-and rejects local repositories. They do not prove off-host HTTPS availability,
-remote durability or the production upload/readback composition against a server.
-
-Custody checkpoints now connect that recovery pipeline to the critical evaluator:
-
-```sh
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- signer CONFIG KEYFILE BACKUP_CONFIG STAGING
-```
-
-The signer retains its SELECT-only database role and owns backup credentials and
-private staging. Its authenticated `checkpoint-custody` route accepts only the
-configured deployment identity and minimum sequence. The handler packages a
-constrained existential `Request`; the signing evaluator exports the complete
-bundle, uploads it, downloads and semantically verifies it, rechecks the sequence,
-and returns a typed receipt. Plaintext staging is removed on success or failure.
-The operation has a five-minute deadline; signing requests retain their existing
-client timeout. Omitting backup configuration explicitly refuses checkpoints.
-
-Only the worker's private critical evaluator constructs the Servant client and
-acknowledges the receipt through the closed Opaleye operation. It requires the exact
-current sequence, matching identity and canonical snapshot/manifest hashes, then
-rechecks that no financial decision changed. Unknown, malformed, stale or foreign
-replies grant no coverage. Covered requests replay without contacting the signer.
-Customer settings no longer accept a generic backup callback. Order instructions,
-payment/replacement/send barriers and explicit resume use the same operation;
-existing freshness and accounting checks remain authoritative afterward. Slow
-checkpoints can exceed the 60-second scan/custody window: the shared intake check
-refreshes stale scans and reconciliation before exposing an instruction or signing
-or sending a payment. Paused replacement signing and resume also rescan after
-checkpointing. Refresh does not extend deadlines or waive coverage when it discovers
-new financial decisions. Such changes still need their own covered authorization.
-The blanket `backupRequired` startup refusal is removed. Missing or unsuccessful
-signer backup configuration still prevents new required coverage; startup itself
-never grants permission to sign, expose a deposit instruction or send.
-
-Versus `04458a7`, this integration adds **52 production lines** across **8 → 9
-files**, totaling 1,862 → 1,914 for the affected production modules. Signer 149 →
-130 is not a standalone reduction: its unchanged credential checks now occupy one
-shared private 47-line module used by signing and recovery. Critical 624 → 637,
-Recovery 167 → 174, operation grammar 105 → 107, Wire 190 → 194, Backup 419 → 417;
-Main remains 139 and signing transport remains 69. No new service, schema or
-external dependency is introduced. This is integration of missing functionality,
-not a claim of a smaller overall repository or perfect security.
-
-Root Cabal builds and QuickCheck pass. Actual TLS plus PostgreSQL acceptance checks
-foreign/stale/future/malformed/refused checkpoint replies, exact acknowledgment and
-network-free replay, while preserving SDK signing and saved bytes. Those receipts
-are explicitly fixtures, not remote durability evidence. The existing real Signet
-recovery contract also verifies a SELECT-only online export while the worker owns
-the ledger, followed by bundle inspection; encrypted local-restic restoration and
-the financial/ledger regression pass. The delayed-backup PostgreSQL contract proves
-that stale evidence hides instructions, retry preserves the saved quote/deadline and
-balances without repeating admission, and refreshed evidence cannot revive an
-expired quote. Clock and freshness changes in that contract are fixtures, not a
-measurement of off-host latency. Versus `3c41149`, the freshness integration changes
-only Critical (637 → 643 production lines) and the existing acceptance runner
-(2,891 → 2,917); it adds no file, operation, dependency or service.
-
-Still required: actual off-host HTTPS checkpoint/upload/readback acceptance,
-encrypted-wallet unlock material, cross-UID deployment and funded recovery. Local
-restic and receipt fixtures do not establish those guarantees. An offline upload or
-adopted paused ledger still cannot acknowledge itself or automatically resume.
+Initialization claims exclusive ownership, refuses residual financial rows, creates
+only schema-21 metadata/custody/clock rows, and starts paused with zero sequences.
+Matching repeat initialization preserves state. It does not run/verify full DDL,
+restore coins/history, initialize keys or authorize sending. Existing custody must
+use recovery/migration, never a fresh ledger with its old keys.
+
+## Backup and recovery
+
+Offline maintenance uses closed operations in the same executable:
+
+| Command after `bridge` | Result |
+| --- | --- |
+| `backup-native-wallet CONFIG DESTINATION` | New node wallet archive and durable manifest |
+| `restore-native-wallet CONFIG MANIFEST` | Restore into an unused configured wallet name |
+| `backup-custody CONFIG KEYFILE DIRECTORY` | Pause/exclusively export a complete custody bundle |
+| `check-custody CONFIG MANIFEST MINIMUM_SEQUENCE` | Offline bundle identity/integrity inspection |
+| `upload-custody CONFIG BACKUP_CONFIG MANIFEST MINIMUM_SEQUENCE` | Upload, download and inspect the complete encrypted snapshot |
+| `recover-custody CONFIG BACKUP_CONFIG SNAPSHOT DIRECTORY MINIMUM_SEQUENCE` | Retain a verified decrypted bundle in new private staging |
+| `restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE` | Restore into a new restricted paused staging database |
+| `recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE` | Download/verify the ledger archive, then the same staging restore |
+| `adopt-ledger CONFIG MINIMUM_SEQUENCE` | Initialize/advance a matching host fence without lowering it |
+| `retire-ledger CONFIG MINIMUM_SEQUENCE` | Permanently retire the matching local fence |
+
+Use independently known minimum sequences and full 64-character snapshot IDs,
+never `latest` or guessed zero. Staging must be owned/private; destinations must
+not already exist. Database restoration needs separate database-creation authority.
+Custody export needs writer/reader database credentials and offline native/key access;
+it requires the worker stopped. No command overwrites a wallet, automatically
+activates restored custody, acknowledges itself or resumes the worker.
+
+The bundle binds ledger dump/manifest, native wallet/manifest, Solana key and
+configuration; its completion manifest is written last. It preserves signing state
+and financial history, not old RPC cookies/TLS credentials. Native encrypted-wallet
+unlock material is not yet supported: export refuses encrypted wallets. Same-UID
+native/key/staging access is currently required.
+
+`BACKUP_CONFIG` contains protected absolute `restic`, `repositoryFile` and
+`passwordFile` paths. Production accepts `rest:https://...` away from loopback,
+not local/plain-HTTP storage. Repository creation and independently retained
+credentials/password are operator responsibilities. Restore verifies authenticated
+paths/tags, hashes, schema, identity and sequence, streams fixed files without tree
+extraction, then validates the restored database through closed Opaleye operations.
+Failed staging is cleaned where safe; uncertain database creation may require
+inspection. Restored custody certification is invalidated. Fence retirement does
+not revoke signing credentials on another host; that requires explicit revocation.
+
+Local encrypted-restic tests are not proof of off-host durability. Key seeds alone
+cannot restore order history, saved signatures, authorization or missing funds.
+
+## Verification and current evidence
+
+The existing `rebuild-store-check` Cabal executable uses a fresh disposable migrated
+PostgreSQL database and SELECT-only role, supplied by
+`ECX_REBUILD_CONTRACT_DATABASE` and `ECX_REBUILD_CONTRACT_READER`. Inspect
+[test/StoreCheck.hs](test/StoreCheck.hs) for fixture setup and mode requirements;
+never point contract fixtures at custody. Direct binary invocation needs Cabal's
+`ecx_bridge_rebuild_datadir`; `cabal run` supplies packaged fixture data.
+
+| Mode | Additional environment / scope |
+| --- | --- |
+| Default | Financial/ledger contracts and local encrypted restic restoration |
+| `ECX_REBUILD_SETUP_ONLY=1` | `ECX_REBUILD_EXECUTABLE`; optional `ECX_REBUILD_SETUP_RESIDUE=1` |
+| `ECX_REBUILD_SERVER_ONLY=1` | `ECX_REBUILD_EXECUTABLE`; process/HTTP/private control |
+| `ECX_REBUILD_TLS_ONLY=1` | `ECX_REBUILD_TEST_SDK`; actual TLS and saved signing decisions |
+| `ECX_REBUILD_FENCE_ONLY=1` | Actual PostgreSQL/filesystem ownership and watermark contracts |
+| `ECX_REBUILD_NATIVE_RECOVERY_ONLY=1` | Executable, `ECX_REBUILD_NATIVE_RECOVERY_COOKIE`, `ECX_REBUILD_NATIVE_WALLET_DIRECTORY`; fresh real-node test wallet |
+| `ECX_REBUILD_CUSTODY_ONLY=1` | With native recovery mode and disposable DB; complete bundle restoration |
+| `ECX_REBUILD_LIVE_OBSERVER_CONFIG=CONFIG` | Real-chain scans through observation-only DSL; restricted native credentials |
+
+Prior root Cabal, QuickCheck, PostgreSQL, TLS and local-restic runs passed their
+recorded scopes. Protocol mutations, receipt fixtures and local-restic transport
+seams do not establish funded chain behavior or production off-host HTTPS operation.
+The live observer contract verifies all three scans, unchanged repeated accounting,
+refusal of signing/broadcast, all 13 forbidden native signing/key methods, and
+permitted `decodescript` access needed for customer admission.
+
+At `c17e52d`, isolated deployment `rebuild-live-20261003` used fresh custody keys,
+wallet and persistent ledger, independent of baseline custody. Operator DSL allocation
+accepted 1,500 native operating units, 10,000 native float units, 25,000 wrapped
+float units and 100,000,000 lamports. A dedicated Haskell tester submitted a real
+10,000-unit Solana Pay deposit with the order's readonly reference:
+`34xGfjKRoLb6MsWkgYtTCByoZpVSBWFmStZYkToHBPQTL6UdrXwna9QQPv7sS2zap3kMncJoNcFAmx9kVDaG7KP6`.
+The bridge/dedicated signer sent the quoted 9,900-unit native payout:
+`c816a2f9f3eda53ab93cbf8687a9b5286cad69133b34d3b5ad774f56c6de2c1f`,
+with a separate 208-unit network fee. After one native confirmation, the paused
+worker reconciled it to `Paid` with unchanged quoted terms and payout identity.
+Reload and identical create replay match; a wrong capability is refused. Restart
+preserved the order, paused at sequence 9 and left one native outgoing transaction.
+The test minimum was then lowered to 1,000 units (existing terms unchanged), and
+a reverse wrap quoted 1,000 gross, 10 fee and 990 net. Its native deposit
+`8e9488e637a62b1aa26f15173b3a6baf81e8bf04d999e37cb52132d0a280d0be`
+is submitted; confirmation and wrapped payout remain pending. This does not prove
+arbitrary crash recovery or a real customer wallet. Private keys/attempts/ledger
+remain outside Git.
+
+## Remaining release work, in order
+
+1. Complete funded wrap/unwrap settlement, refund, earned withdrawal, restart and
+   interrupted-attempt acceptance on the actual test networks. Finish real wallet
+   signing and browser/reload/error acceptance; keep tester-client evidence distinct.
+2. Prove populated baseline migration and financial/recovery parity, then remove the
+   superseded application and duplicate tooling. Retain unique checks until covered.
+   Consolidate stale repository-wide architecture/operating documents around the
+   accepted rebuild; their earlier checkpoints are not current release certification.
+3. Verify replacement/reorg/winner-change/rebroadcast and covered-source flows with
+   real effects, including funded restore. Complete cross-UID signer isolation,
+   encrypted-wallet unlock handling and off-host HTTPS/cross-host recovery.
+4. Complete required Haskell/FFI token administration and selected real pool workflow;
+   retire standalone legacy Rust/Python tools after their required behavior is covered.
+   Confirm canonical token authority, backing, liquidity and actual route availability.
+5. Finish the current installer/upgrade path last, test clean Linux installation and
+   restoration on both architectures, review dependencies, and obtain independent
+   security review before valuable-fund/public activation. The old installer is not
+   certification of this process design.
+
+The objective is a smaller reasoning surface with every retained behavior verified.
+Neither fewer lines, passing fixtures nor a successful test transfer proves perfect
+security or completes the remaining gates.
