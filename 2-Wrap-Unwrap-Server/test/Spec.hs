@@ -679,8 +679,8 @@ main=hspec $ do
     it "checks the full native refund and exact net redemption without signing or locking" $ withNativeAdmission $ \c plan calls call -> do
       let wrap=req{refund=planRecipient plan}
           redeem=req{direction=WrappedToNative,input=amt 101011,recipient=planRecipient plan}
-      checkNativeQuoteWith call c wrap `shouldReturn` NativeQuoteCheck "refund" (planRecipientScript plan) (amt 100000) (amt 282)
-      checkNativeQuoteWith call c redeem `shouldReturn` NativeQuoteCheck "payout" (planRecipientScript plan) (amt 100000) (amt 282)
+      checkNativeQuoteWith call c wrap `shouldReturn` ()
+      checkNativeQuoteWith call c redeem `shouldReturn` ()
       methods<-readIORef calls
       methods `shouldSatisfy` all (`notElem` ["getnewaddress","getrawchangeaddress","lockunspent","walletprocesspsbt","finalizepsbt","sendrawtransaction"])
       length (filter (=="walletcreatefundedpsbt") methods) `shouldBe` 2

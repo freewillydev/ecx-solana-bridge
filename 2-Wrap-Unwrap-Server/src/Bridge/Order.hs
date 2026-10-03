@@ -1,6 +1,6 @@
 module Bridge.Order (OrderTransport(..), createCustomerOrder, createCustomerOrderWith) where
 
-import Bridge.Admission (checkSolanaQuote)
+import Bridge.Admission (checkOrderAdmission)
 import Bridge.Config
 import Bridge.Native
 import Bridge.NativePayment
@@ -24,17 +24,13 @@ data OrderTransport = OrderTransport
   }
 
 realOrderTransport :: Manager -> Config -> (Int64 -> IO ()) -> OrderTransport
-realOrderTransport manager c backup = OrderTransport epochSeconds admission identity (nativeCall manager c) backup
+realOrderTransport manager c backup = OrderTransport epochSeconds (checkOrderAdmission manager c) identity (nativeCall manager c) backup
  where
   identity=do
     _ <- nativeIdentity manager c
     _ <- solanaIdentity manager c
     now <- epochSeconds
     nativeWalletReadyWith (nativeCall manager c) c now
-  admission request=do
-    _ <- checkNativeQuote manager c request
-    if direction request==NativeToWrapped then checkSolanaQuote manager c request
-      else solanaIdentity manager c >> pure ()
 
 -- Every database action is short. Node calls and backup callbacks run only
 -- after their preceding durable mutation has committed and released the writer.

@@ -130,9 +130,10 @@ that separation and real two-process acceptance remain release work.
 | `POST /api/v1/orders/:id/transaction` | Authorized payment instructions for the bound order |
 
 No wallet connection is required. Native wrapping supplies a Solana recipient and
-native refund address; redemption binds the source Solana owner, native recipient
-and Solana Pay reference. The customer's wallet signs its own deposit. Copy/QR/payment
-links and saved-order recovery are presentation, not authority to credit a deposit.
+native refund address; redemption binds the native recipient and Solana Pay
+reference, then derives the refund owner from the verified deposit. The customer's
+wallet signs its own deposit. Copy/QR/payment links and saved-order recovery are
+presentation, not authority to credit a deposit.
 There are no public operator, health, readiness or deposit-hint endpoints.
 
 Before creating an order, save a random 32-byte capability and idempotency key.
@@ -152,8 +153,9 @@ binding, deadlines, confirmation/finality policy and deployment fingerprint.
 Only an exact qualifying deposit earns the conversion; ambiguous, partial, extra,
 late or unknown receipts retain their liabilities and enter review/refund handling.
 
-Native admission verifies the real checkpoint/network and daemon-classified supported
-recipient/refund scripts, refusing owned/watch-only destinations. An unsigned funding
+`Admission` owns both preflights, called once by the order workflow. It does not
+reserve funds or grant signing/send authority. Native admission verifies the real
+checkpoint/network and daemon-classified supported recipient/refund scripts, refusing owned/watch-only destinations. An unsigned funding
 probe applies actual daemon dust/fee policy to the exact amount, with no new address,
 lock or signature. It is conservative and is repeated at payment preparation.
 Wrapping admission on Solana validates real deployment, wallet owners, legacy ATAs, mint/program,

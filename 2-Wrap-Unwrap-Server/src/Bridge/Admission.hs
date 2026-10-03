@@ -1,22 +1,58 @@
-module Bridge.Admission (checkSolanaQuote, checkSolanaQuoteWith) where
+module Bridge.Admission (checkOrderAdmission, checkNativeQuoteWith, checkSolanaQuoteWith) where
 
 import Bridge.Config
+import Bridge.Native
+import Bridge.NativePayment
 import Bridge.RPC
 import Bridge.Solana
 import Bridge.SolanaHelper
 import Bridge.SolanaPayment
 import Bridge.SolanaMessage (publicKey)
 import Bridge.Types
-import Control.Monad (when)
+import Control.Monad (forM, when)
 import Data.Aeson
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.HTTP.Client (Manager)
 
-checkSolanaQuote :: Manager -> Config -> OrderRequest -> IO ()
-checkSolanaQuote manager c request = do
+-- Neither preflight grants signing or send authority. Identity is checked for
+-- both chains; native policy covers a wrap refund or the redemption payout.
+checkOrderAdmission :: Manager -> Config -> OrderRequest -> IO ()
+checkOrderAdmission manager c request = do
+  _ <- nativeIdentity manager c
+  checkNativeQuoteWith (nativeCall manager c) c request
   _ <- solanaIdentity manager c
-  checkSolanaQuoteWith (solanaCall manager c) (invokeUnsignedHelper c) c request
+  when (direction request==NativeToWrapped) $
+    checkSolanaQuoteWith (solanaCall manager c) (invokeUnsignedHelper c) c request
+
+-- The selected daemon applies its actual dust/fee policy. Use an EXISTING
+-- owned address for change, no input locks, no key allocation and no signer.
+-- Discard the unsigned draft: it is neither a reservation nor a payment.
+checkNativeQuoteWith :: NativeRPC -> Config -> OrderRequest -> IO ()
+checkNativeQuoteWith call cfg request = do
+  require (input request>=minInput cfg && input request<=maxInput cfg) "amount_outside_limits"
+  q <- either reject pure (makeQuote (direction request) (input request))
+  let wrapping=direction request==NativeToWrapped
+      destination=if wrapping then refund request else recipient request
+      quantity=if wrapping then gross q else net q
+      depth=nativeConfirmations cfg
+  require (depth>0 && depth<=1008 && units (maxNativeFee cfg)>0) "invalid_native_plan"
+  script <- validateNativeRecipientWith call destination
+  coins <- call True "listunspent" [toJSON depth,toJSON (9999999::Int),toJSON ([]::[Text]),Bool False
+    ,object ["maximumCount" .= (100::Int)]] >>= parseValue parseJSON :: IO [Value]
+  require (length coins<=100) "native_admission_utxo_bounds"
+  addresses <- forM coins $ parseValue $ withObject "unspent" $ \o -> do
+    safe <- o .: "safe"; spendable <- o .: "spendable"; solvable <- o .: "solvable"
+    confirmations <- o .: "confirmations"
+    address <- o .:? "address"
+    pure $ if safe && spendable && solvable && confirmations>=depth then address else Nothing
+  change <- case [a | Just a<-addresses] of a:_ -> pure a; [] -> reject "native_admission_funds_unavailable"
+  changeScript <- ownedScript call change
+  require (script/=changeScript) "bridge_owned_destination"
+  let plan=NativePlan (profile cfg) destination script change changeScript quantity depth (maxNativeFee cfg)
+  _ <- fundNativeDraftWith False call plan
+  locks <- call True "listlockunspent" [] >>= parseValue parseJSON :: IO [Outpoint]
+  require (null locks) "native_preparation_locks_require_review"
 
 -- This check has no signer, wallet mutation or ledger mutation. Its previews
 -- contain only zero signatures and are never returned as deposit instructions.
