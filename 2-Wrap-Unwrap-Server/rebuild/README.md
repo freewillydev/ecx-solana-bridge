@@ -241,6 +241,16 @@ was idempotent. No signer or broadcast was enabled. This proves retained-work re
 not migrated settlement or funded recovery parity. The schema-18 backups lacked
 baseline DDL 005: verify installed DDL, not only the version number.
 
+A fresh copy of the larger `ecx_bridge_runtime` ledger was also checked: 17 orders,
+18 attempts, schema 18 and critical sequence 82. Financial history and identity
+survived migration. Despite retained signed/broadcast-intent history, no attempts
+belonged to unresolved intents. Cutover still failed on three **paid** historical
+obligations with no `order_cost_limits` row. Their signed records retain the cost
+bounds for their outgoing chain, but not the complete original order cost policy.
+The original database and a consistent private dump are preserved. Supporting this
+history requires explicit treatment of missing terms; do not invent limits or
+mistake historical attempt states for pending economic payments.
+
 Prior root Cabal, QuickCheck, PostgreSQL, TLS and local-restic runs passed their
 recorded scopes. Protocol mutations, receipt fixtures and local-restic transport
 seams do not establish funded chain behavior or production off-host HTTPS operation.
@@ -286,8 +296,8 @@ refund for that order; arbitrary status/payout input is forbidden. Repair advanc
 the fenced critical sequence and records both payout links in the audit. Exact
 replay changes nothing. The actual test ledger was repaired at sequence 26 with
 unchanged balances/refund and the original full customer response restored.
-The full PostgreSQL contract, Cabal build and QuickCheck pass. Native refunds/fee withdrawals,
-arbitrary crash recovery and real-wallet UX remain unproven.
+The full PostgreSQL contract, Cabal build and QuickCheck pass. Native fee withdrawals, broader crash recovery and real-wallet signing remain
+unproven; the later native-refund/restart check is recorded below.
 Private keys/attempts/ledger remain outside Git.
 
 The current GHC-JavaScript browser was also checked against the live rebuilt
@@ -300,20 +310,25 @@ an explicit network error without losing the saved order. Refresh after restart
 cleared the error and showed paused intake. These checks do not establish actual
 Solana Pay wallet signing or every browser/error case.
 
-Native extra-deposit refund acceptance is in progress. Confirmed receipt
+Native extra-deposit refund acceptance passed on L2L Signet. Confirmed receipt
 `cc36b9d6f9c1a494b8a7b1b2da1793330019e33765e9bfe8831685804cd29755:0`
 authorized a 1,000-unit refund with exact authorization replay. The signed refund
 `b677dff8985c20c1582be020a2485733c37e401302ef292852e857bacfaa75fc`
 was broadcast with a node-reported 392-unit fee. Both processes were stopped while
 it remained pending; restart retained the same attempt and balances and paused
-intake. Confirmation and ledger settlement remain pending; do not count this as
-completed native-refund acceptance yet.
+intake. The refund then confirmed and settled through paused recovery. The tester
+received the full 1,000 units, native principal returned to zero, and operating
+funds decreased by exactly 392 units (1,292 → 900). Authorization replay remained
+identical; the original completed-order response and payout link were unchanged.
+The attempt remained unique and settled. Both temporary processes were stopped
+after acceptance; keys, ledger, exact attempts and private evidence remain saved.
 
 ## Remaining release work, in order
 
-1. Extend the funded tests to native refunds/fee withdrawals and remaining
-   interrupted-attempt recovery on the actual test networks. Finish real wallet
-   signing and browser/reload/error acceptance; keep tester-client evidence distinct.
+1. Extend funded tests to native earned-fee withdrawals and remaining interruption
+   boundaries on the actual test networks. Finish actual Solana Pay wallet signing
+   and the remaining browser cases; keep tester-client evidence distinct from wallet
+   acceptance. Native refunds and restart of the broadcast refund now pass above.
 2. Prove populated baseline migration and financial/recovery parity, then remove the
    superseded application and duplicate tooling. Retain unique checks until covered.
    Consolidate stale repository-wide architecture/operating documents around the
