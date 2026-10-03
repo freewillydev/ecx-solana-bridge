@@ -749,6 +749,7 @@ ledgerMain = do
       withWriter settings (store policy limits) (const $ pure ()) $ \writer->do
         fixture fixtures OrderWorkflowFunds
         orderWorkflowContract fixtures reader writer (store policy limits)
+        refundContract fixtures reader writer
         -- Actual runtime cycle with unavailable RPC: retain all money, stay
         -- paused, record scanner failures, and never reach signer credentials.
         let cycleKey=T.replicate 32 "1"
@@ -806,6 +807,8 @@ data Fixture a where
   OperatingPhase :: T.Text -> T.Text -> Fixture ()
   HistoricalHolds :: T.Text -> Fixture ()
   PromotionFunds :: Fixture ()
+  CheckRefundHolds :: T.Text -> Asset -> Fixture Bool
+  RefundProof :: T.Text -> T.Text -> T.Text -> Fixture ()
   SeedReceipt :: T.Text -> Maybe T.Text -> Asset -> Int64 -> Int64 -> Bool -> Int64 -> Fixture ()
   CheckPromotion :: T.Text -> T.Text -> Asset -> Int64 -> T.Text -> Fixture Bool
   Initialize :: Fixture ()
@@ -932,6 +935,19 @@ fixture c PromotionFunds = PG.withTransaction c $ do
   void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(text "promotion-funds",text "test operating budget")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.postings,
     O.iRows=[(Nothing,text "promotion-funds",text asset,text account,O.sqlInt8 n)|asset<-["Native","Sol"],(account,n)<-[("external",-10000),("operating",10000)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+fixture c (CheckRefundHolds oid asset) = do
+  rows<-O.runSelect c $ do
+    (key,kind,currency,_,phase)<-O.selectTable S.operatingReservations
+    O.where_ (key O..== O.sqlStrictText oid)
+    pure (kind,currency,phase)
+    :: IO [(T.Text,T.Text,T.Text)]
+  pure (length rows==2 && ("refund",T.pack(show asset),"obligation") `elem` rows && all (\(kind,_,phase)->kind/="conversion" || phase=="released") rows)
+fixture c (RefundProof signature instruction owner) = PG.withTransaction c $ do
+  let text=O.sqlStrictText; num=O.sqlInt8
+      hash="refund-proof:"<>signature
+      proof=text $ TE.decodeUtf8 $ BL.toStrict $ encode $ object ["proof" .= object ["instruction" .= instruction,"verifiedOwner" .= owner]]
+  void $ O.runInsert c O.Insert {O.iTable=S.observationEvidence,O.iRows=[(text hash,text "Solana",text signature,proof)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.chainEvents,O.iRows=[S.ChainEvent (text "Solana") (text signature) (text "incoming") (text "fixture-anchor") (text hash) (num 110) (num 110) (num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
 fixture c (SeedReceipt did oid asset quantity depth eligible seen) = PG.withTransaction c $ do
   let text=O.sqlStrictText; num=O.sqlInt8
       account=maybe "unallocated" (const "principal") oid
@@ -1243,6 +1259,7 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       ledgerBefore<-evalRead reader ReadState
       check (W.paused service==ledgerPaused ledgerBefore)
       expectStore "observation_only" (operatorControl $ Op.operator Op.ResumeService)
+      expectStore "observation_only" (operatorControl $ Op.operator $ Op.RefundDeposit "missing")
       operatorControl (Op.operator $ Op.PauseService "operator contract")
       serviceAfter<-operatorControl (Op.operatorRead Op.ServiceState)
       check (W.paused serviceAfter && W.pauseReason serviceAfter=="operator contract")
@@ -1392,6 +1409,9 @@ serverMain = do
               check (W.paused service)
               refused<-control (object ["operation" .= ("resume"::T.Text)])
               check (refused==object ["error" .= ("observation_only"::T.Text)])
+              refundRefused<-control (object ["operation" .= ("refund"::T.Text),"deposit" .= ("missing"::T.Text)])
+              check (refundRefused==object ["error" .= ("observation_only"::T.Text)])
+              expectStore "invalid_operator_operation" (control $ object ["operation" .= ("refund"::T.Text),"deposit" .= ("missing"::T.Text),"recipient" .= ("attacker"::T.Text)])
               expectStore "invalid_operator_operation" (control $ object ["operation" .= ("resume"::T.Text),"bypass" .= True])
               _<-control (object ["operation" .= ("pause"::T.Text),"reason" .= ("operator process contract"::T.Text)])
               evalRead reader ReadState >>= check . ledgerPaused
@@ -1406,3 +1426,97 @@ serverMain = do
       Fence.withFence (Config.fenceDirectory config) identity (const $ pure ())
       evalRead reader ReadBalances >>= check . (==before)
   putStrLn "PASS: rebuilt executable, actual HTTP assets/config, paused unavailable-chain startup, unchanged balances and process/fence cleanup"
+
+refundContract :: PG.Connection -> Reader -> Writer -> IO ()
+refundContract fixtures reader writer=do
+  let header="Bearer "<>T.replicate 64 "0"
+      check :: HasCallStack => Bool -> IO ()
+      check ok=unless ok (fail $ "refund contract failed\n"<>prettyCallStack callStack)
+      make name direction=do
+        fixture fixtures ReadyIntake
+        let request=W.OrderRequest direction (money 10) "recipient" (if direction==NativeToWrapped then "native-refund" else "") Nothing name
+        oid<-evalWrite writer (CreateOrder 110 header request)
+        if direction==NativeToWrapped then do
+          claim<-evalWrite writer (ClaimNative 110 header oid)
+          void $ evalWrite writer (RecordNative header oid (allocationLabel claim) ("refund-address-"<>name))
+        else void $ evalWrite writer (BindSolana 110 header oid)
+        pure oid
+      ready=evalWrite writer (Pause "refund contract") >> fixture fixtures RefreshCustody
+      receipt did oid asset n=fixture fixtures (SeedReceipt did (Just oid) asset n 2 True 110)
+      authorize did=evalWrite writer (AuthorizeRefund 110 did)
+  oid<-make "refund-partial" NativeToWrapped
+  receipt "refund-partial-source" oid Native 9
+  expectStore "pause_before_operator_action" (authorize "refund-partial-source")
+  ready
+  before<-evalRead reader ReadBalances
+  state<-evalRead reader ReadState
+  saved<-authorize "refund-partial-source"
+  replay<-authorize "refund-partial-source"
+  check (saved==W.RefundAuthorization "refund:refund-partial-source" "native-refund" (money 9) && replay==saved)
+  evalRead reader ReadBalances >>= check . (==before)
+  later<-evalRead reader ReadState
+  check (ledgerSequence later==ledgerSequence state+1)
+  paymentView<-evalRead reader (ReadPayment $ W.refundPayment saved)
+  check (savedStatus paymentView==PaymentReady && paymentAsset(savedPayment paymentView)==Native && paymentAmount(savedPayment paymentView)==money 9)
+  source<-evalRead reader (ReadPaymentSource $ W.refundPayment saved)
+  check (fmap (W.depositId.W.sourceDeposit) source==Just "refund-partial-source")
+  receipt "refund-extra-source" oid Native 3
+  ready
+  expectStore "other_obligation_must_resolve_before_refund" (authorize "refund-extra-source")
+  converted<-make "refund-conversion" NativeToWrapped
+  receipt "refund-conversion-source" converted Native 10
+  evalWrite writer (PromoteDeposit 110 "refund-conversion-source") >>= check
+  ready
+  void $ authorize "refund-conversion-source"
+  evalRead reader (ReadPayment $ "convert:"<>converted) >>= check . (==PaymentCancelled) . savedStatus
+  -- A settled conversion cannot be refunded a second time.
+  fixture fixtures (SourceEligibility "historical-fee" True)
+  ready
+  expectStore "principal_already_resolved" (authorize "historical-fee")
+  paidReceipt<-evalRead reader (ReadSource "historical-fee")
+  paidOrder<-maybe (fail "missing paid order") pure (W.depositOrder paidReceipt)
+  paidBefore<-evalRead reader (ReadOrder header paidOrder)
+  receipt "refund-after-paid" paidOrder Native 3
+  ready
+  extra<-authorize "refund-after-paid"
+  check (W.refundAmount extra==money 3)
+  paidAfter<-evalRead reader (ReadOrder header paidOrder)
+  check (W.status paidAfter=="Paid" && W.payoutTx paidAfter==W.payoutTx paidBefore)
+  fixture fixtures (CheckRefundHolds paidOrder Native) >>= check
+  racing<-make "refund-racing" NativeToWrapped
+  receipt "refund-racing-source" racing Native 10
+  evalWrite writer (PromoteDeposit 110 "refund-racing-source") >>= check
+  fixture fixtures ReadyIntake
+  void $ evalWrite writer (PreparePayment 110 ("convert:"<>racing) (money 20) "{}")
+  ready
+  expectStore "refund_would_race_payment" (authorize "refund-racing-source")
+  late<-make "refund-late" NativeToWrapped
+  evalWrite writer (ExpireQuotes 500)
+  receipt "refund-late-source" late Native 9
+  ready
+  void $ authorize "refund-late-source"
+  checkPhases<-fixture fixtures (CheckRefundHolds late Native)
+  check checkPhases
+  unwrap<-make "refund-solana" WrappedToNative
+  let signature="refund-solana-signature"; did="solana:"<>signature; owner="4zvwRjXUKGfvwnParsHAS3HuSVzV5cA4McphgmoCtajS"
+  receipt did unwrap Wrapped 7
+  ready
+  expectStore "custody_history_not_current" (authorize did)
+  instruction<-either (fail . T.unpack) pure (payInstruction unwrap)
+  fixture fixtures (RefundProof signature instruction owner)
+  ready
+  solRefund<-authorize did
+  check (W.refundRecipient solRefund==owner && W.refundAmount solRefund==money 7)
+  fixture fixtures (CheckRefundHolds unwrap Sol) >>= check
+  forM_ [("wrong-reference","solana-pay:wrong",owner,"refund_reference_mismatch"),
+         ("wrong-owner","", "invalid", "invalid_public_key")] $ \(name,reference,badOwner,code)->do
+    target<-make name WrappedToNative
+    let sig="refund-"<>name; sourceId="solana:"<>sig
+    receipt sourceId target Wrapped 5
+    bound<-either (fail . T.unpack) pure (payInstruction target)
+    fixture fixtures (RefundProof sig (if T.null reference then bound else reference) badOwner)
+    ready
+    beforeRejected<-evalRead reader ReadBalances
+    expectStore code (authorize sourceId)
+    evalRead reader ReadBalances >>= check . (==beforeRejected)
+  expectStore "refundable_deposit_not_found" (ready >> authorize "unknown-source")

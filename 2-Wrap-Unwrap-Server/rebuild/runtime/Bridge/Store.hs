@@ -7,7 +7,7 @@ module Bridge.Store
 
 import Bridge.Error
 import Bridge.Fence (withFence)
-import Bridge.Identity (bearerHash,digest,payInstruction)
+import Bridge.Identity (bearerHash,digest,payInstruction,publicKey)
 import Text.Read (readMaybe)
 import qualified Bridge.Wire as W
 import Bridge.Domain
@@ -105,6 +105,7 @@ data StoreRead a where
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
+  AuthorizeRefund :: Int64 -> Text -> StoreWrite W.RefundAuthorization
   ResumeLedger :: Int64 -> [(Text,Text)] -> [RecordedAttempt] -> StoreWrite ()
   RecordNativeLockRestore :: NativeLockWork -> Int -> StoreWrite ()
   RecordCustody :: Int64 -> Int64 -> Maybe Text -> Maybe Value -> StoreWrite ()
@@ -223,6 +224,7 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
 evalWrite :: Writer -> StoreWrite a -> IO a
 evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
  let policy=executionTerms config; limit=admissionLimits config in case operation of
+  AuthorizeRefund now receipt -> authorizeRefund c config now receipt
   ResumeLedger now origins reviewed -> resumeLedger c config now origins reviewed
   RecordNativeLockRestore expected count -> do
     current<-nativeLockWork c (deploymentFingerprint $ paymentPolicy policy)
@@ -1867,3 +1869,99 @@ resumeLedger c config now origins reviewed = do
     O.uWhere= \row->S.singleton row O..== O.sqlInt8 1,O.uReturning=O.rCount}
   intakeReady c identity now
   audit c "resume" "checks_complete"
+
+-- Reuse the ordinary payment engine, retaining all principal and saved terms.
+-- No caller-supplied recipient, amount or signed bytes are accepted.
+authorizeRefund :: PG.Connection -> StorePolicy -> Int64 -> Text -> IO W.RefundAuthorization
+authorizeRefund c config now receipt = do
+  let text=O.sqlStrictText; num=O.sqlInt8; identifier="refund:"<>receipt
+      identity=deploymentFingerprint $ paymentPolicy $ executionTerms config
+      result ob=W.RefundAuthorization (S.obligationId ob) (S.obligationRecipient ob)
+        <$> checked (amount $ toInteger $ S.obligationAmount ob)
+  existing<-O.runSelect c $ do
+    ob<-O.selectTable S.obligations
+    O.where_ (S.obligationDeposit ob O..== text receipt O..&& S.obligationKind ob O..== text "refund")
+    pure ob
+    :: IO [S.Obligation]
+  case existing of
+    [ob]->result ob
+    []->do
+      state<-metadata c identity
+      require (S.paused state==1) "pause_before_operator_action"
+      fresh c now
+      rows<-O.runSelect c $ do
+        d<-O.selectTable S.deposits
+        q<-O.selectTable S.orders
+        (key,nativeFee,solFee,rent)<-O.selectTable S.orderCosts
+        O.where_ (S.depositId d O..== text receipt O..&& O.matchNullable (O.sqlBool False) (O..== S.orderId q) (S.depositOrder d) O..&& key O..== S.orderId q)
+        pure(d,q,nativeFee,solFee,rent)
+        :: IO [(S.Deposit,S.Order,Int64,Int64,Int64)]
+      (d,q,nativeFee,solFee,rent)<-case rows of
+        [row@(d,_,_,_,_)] | S.depositEligible d==1->pure row
+        _->reject "refundable_deposit_not_found"
+      request<-decodeSaved (S.requestJson q)
+      policy<-decodeSaved (S.policyJson q)
+      let oid=S.orderId q; native=W.direction request==NativeToWrapped
+          feeAsset=if native then Native else Sol
+      require (deploymentFingerprint policy==identity && S.depositAsset d==T.pack(show $ sourceAsset $ W.direction request)) "unsupported_refund_asset"
+      require (not native || S.depositDepth d>=fromIntegral(nativeDepth policy)) "source_not_eligible"
+      allowance<-checked $ amount $ if native then toInteger nativeFee else toInteger solFee+toInteger rent
+      require (nativeFee>0 && solFee>0 && rent>=0) "invalid_order_cost_policy"
+      unresolved<-O.runSelect c $ do
+        i<-O.selectTable S.intents
+        ob<-O.selectTable S.obligations
+        O.where_ (O.matchNullable (O.sqlBool False) (O..== S.obligationId ob) (S.intentObligation i) O..&& S.obligationOrder ob O..== text oid O..&& S.intentResolved i O..== num 0)
+        pure (S.intentId i)
+        :: IO [Text]
+      require (null unresolved) "refund_would_race_payment"
+      obligations<-O.runSelect c $ do
+        ob<-O.selectTable S.obligations
+        O.where_ (S.obligationOrder ob O..== text oid O..&& S.obligationStatus ob O../= text "cancelled")
+        pure ob
+        :: IO [S.Obligation]
+      require (all (\ob->S.obligationDeposit ob==receipt || S.obligationStatus ob=="paid") obligations) "other_obligation_must_resolve_before_refund"
+      let active=filter ((==receipt).S.obligationDeposit) obligations
+      require (length active<=1 && all ((`elem` ["ready","review"]).S.obligationStatus) active) "principal_already_resolved"
+      destination<-if native then pure (W.refund request) else case W.sourceOwner request of
+        Just owner->checked (publicKey owner) >> pure owner
+        Nothing->do
+          signature<-maybe (reject "invalid_solana_deposit_id") pure (T.stripPrefix "solana:" receipt)
+          (kind,_,proof)<-custodyEvent c "Solana" signature
+          require (kind=="incoming") "verified_refund_owner_missing"
+          instruction<-field "instruction" proof
+          require (S.instruction q==Just instruction) "refund_reference_mismatch"
+          owner<-field "verifiedOwner" proof
+          _<-checked (publicKey owner)
+          pure owner
+      require (not(T.null destination) && T.length destination<=128) "invalid_destination"
+      -- Resolved failed/cancelled preparations may retain unused operating holds.
+      -- No unresolved intent survives the check above, so release only this work.
+      forM_ active $ \old->do
+        _<-O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \r->r {S.obligationStatus=text "cancelled"},O.uWhere= \r->S.obligationId r O..== text(S.obligationId old),O.uReturning=O.rCount}
+        _<-O.runUpdate c O.Update {O.uTable=S.feeHolds,O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,num 1),O.uWhere= \(key,_,_,_)->key O..== text(S.obligationId old),O.uReturning=O.rCount}
+        pure ()
+      _<-O.runUpdate c O.Update {O.uTable=S.reservations,O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,text "released"),O.uWhere= \(key,_,_,_)->key O..== text oid,O.uReturning=O.rCount}
+      _<-O.runUpdate c O.Update {O.uTable=S.operatingReservations,O.uUpdateWith= \(key,kind,asset,n,_)->(key,kind,asset,n,text "released"),O.uWhere= \(key,kind,_,_,_)->key O..== text oid O..&& kind O..== text "conversion",O.uReturning=O.rCount}
+      holds<-O.runSelect c $ do
+        (key,kind,asset,n,phase)<-O.selectTable S.operatingReservations
+        O.where_ (key O..== text oid O..&& kind O..== text "refund")
+        pure (asset,n,phase)
+        :: IO [(Text,Int64,Text)]
+      phase<-case holds of
+        [(asset,n,phase)] | asset==T.pack(show feeAsset) && n==units allowance->pure phase
+        _->reject "operating_reservation_missing"
+      -- Expired quotes and additional receipts need a fresh budget reservation.
+      when (phase `notElem` ["quote","obligation"]) $ do
+        require (phase `elem` ["released","transferred"]) "invalid_reservation_phase"
+        booked<-balances c
+        operatingCapacity c (admissionLimits config) booked [(feeAsset,allowance)]
+      _<-O.runUpdate c O.Update {O.uTable=S.operatingReservations,O.uUpdateWith= \(key,kind,asset,n,_)->(key,kind,asset,n,text "obligation"),O.uWhere= \(key,kind,_,_,_)->key O..== text oid O..&& kind O..== text "refund",O.uReturning=O.rCount}
+      _<-nextSequence c
+      let ob=S.Obligation identifier oid receipt "refund" (S.depositAsset d) (S.depositAmount d) destination "ready"
+      _<-O.runInsert c O.Insert {O.iTable=S.obligations,O.iRows=[S.Obligation (text identifier) (text oid) (text receipt) (text "refund") (text $ S.depositAsset d) (num $ S.depositAmount d) (text destination) (text "ready")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      _<-O.runUpdate c O.Update {O.uTable=S.deposits,O.uUpdateWith= \r->r {S.depositAllocated=num 1},O.uWhere= \r->S.depositId r O..== text receipt,O.uReturning=O.rCount}
+      _<-O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text "Refunding"},O.uWhere= \r->S.orderId r O..== text oid O..&& S.status r O../= text "Paid",O.uReturning=O.rCount}
+      audit c "refund_authorized" receipt
+      result ob
+    _->reject "duplicate_refund"
+  where field key value=either (const $ reject "invalid_refund_evidence") pure (parseEither (withObject "refund evidence" (.: key)) value)

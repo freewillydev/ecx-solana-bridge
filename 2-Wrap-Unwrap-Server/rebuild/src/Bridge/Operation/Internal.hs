@@ -27,6 +27,7 @@ data OperatorRead a where
   ServiceState :: OperatorRead ServiceStatus
 
 data OperatorWrite a where
+  RefundDeposit :: Text -> OperatorWrite RefundAuthorization
   PauseService :: Text -> OperatorWrite ()
   ResumeService :: OperatorWrite ()
 

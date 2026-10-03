@@ -587,12 +587,52 @@ lock release after process termination. WAI tests cover fixed asset paths,
 missing-asset refusal, traversal/hidden-file rejection and browser security headers.
 This is executable/startup acceptance, not a funded bridge or browser-wallet test.
 
+## Refund authorization checkpoint
+
+The private command `{"operation":"refund","deposit":"DEPOSIT_ID"}` resolves
+through the operator existential and critical evaluator to one atomic Opaleye
+operation. It returns a typed `RefundAuthorization`, not unstructured JSON.
+The command cannot supply a destination or amount. New authorization requires
+paused service, fresh custody, an eligible receipt and preserved cost policy.
+Native refunds use the saved customer refund address; connection-free Solana
+refunds require the verified owner and matching reference from current receipt
+evidence. Historical owner-bound orders retain their original policy.
+
+Unresolved payment work blocks refunds, settled principal cannot be refunded
+again, and another unpaid obligation on the same order must finish first. An
+unstarted conversion may be cancelled atomically into a full-principal refund.
+Refund authorization never signs, broadcasts or posts a principal debit: it creates
+the ordinary `Refund` payment for the shared engine and advances the critical
+sequence. Replays return the saved result without another reservation or sequence.
+The engine retains source rechecks, backup coverage and actual-effect settlement.
+
+Quote expiry or a completed conversion can release the original refund operating
+allowance. Authorization restores it only after the shared operating-capital and
+daily-budget checks; it cannot silently reuse a spent allowance. Conversion holds
+are released while refund holds remain protected. Additional deposits after a
+completed conversion preserve that order's Paid status and original payout.
+
+PostgreSQL contracts cover partial native refunds, replay/sequence/balance invariants,
+conversion cancellation, unresolved-payment and already-settled refusal, expired
+allowance restoration, Solana verified-owner binding, missing/mismatched proof
+rejection and observation-only runtime refusal. The executable control check also
+rejects a caller-supplied refund recipient. These are disposable ledger tests;
+funded refund signing/submission remains part of real-chain acceptance.
+
+Scoped size: authorization **72 baseline lines → 93 rebuild lines**, inside an
+existing storage module on both sides. The extra checks cover pause/freshness,
+durable sequencing and re-reserving expired operating budgets. Integration adds
+one grammar constructor, a five-line result record, one parser branch and three
+runtime lines; **no new production file or refund-specific payout engine**.
+This checkpoint increases source size to complete required behavior; it is not
+presented as a reduction or a claim of perfect security.
+
 ## Private operator checkpoint
 
 `cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- operator CONFIG`
 reads one bounded JSON command from stdin. Supported commands are
-`{"operation":"status"}`, `{"operation":"pause","reason":"maintenance"}` and
-`{"operation":"resume"}`. Unknown operations and fields are refused. The local
+`{"operation":"status"}`, `{"operation":"pause","reason":"maintenance"}`,
+`{"operation":"resume"}` and the refund command described above. Unknown operations and fields are refused. The local
 control socket is `operator.sock` inside the host-fence directory: owner-only
 permissions are required, and unsafe pre-existing paths are never removed.
 This is operator control; signer communication remains authenticated Servant HTTPS.
@@ -620,7 +660,7 @@ check allows twenty seconds for local startup instead of five and includes the
 child log on timeout. These disposable-state checks do not prove funded-chain resume.
 
 Scoped counts: private transport **105 lines / 1 baseline file → 102 / 1 rebuild
-file**, excluding the old shared listener. The new transport handles three commands;
+file**, excluding the old shared listener. At that checkpoint the transport handled three commands;
 the baseline handles more, so this is not equivalent feature parity. It adds strict
 field parsing and owner/type/mode checks directly. Runtime **302 → 323 lines / one
 file**, executable **79 → 87 / one file**, and Store **+57 net lines** for atomic
@@ -644,7 +684,7 @@ Scoped physical-line comparisons (not whole-product reduction claims):
 | Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
 | Signer module | 144 / 1 file | 117 / 1 file | Now includes startup key validation and shared file permissions; replacement parity pending |
 | Signer transport | 103 / 1 file plus shared web boundary | 69 / 1 file + shared 71-line Web module | Shared module also serves customer API; initial signer route only |
-| Customer/worker runtime | Part of broader Runtime | 323 / 1 file (previous checkpoint 302) | Adds operator authority and guarded resume; retains one critical dispatch |
+| Customer/worker runtime | Part of broader Runtime | 326 / 1 file (previous checkpoint 323) | Adds refund authorization to guarded operator controls; retains one critical dispatch |
 | Focused source validation | 63-line mixed validation/storage/recovery function | 67-line dedicated module | Covered-source recovery is still separate unfinished work |
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |

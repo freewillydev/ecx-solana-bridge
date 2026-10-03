@@ -149,3 +149,8 @@ data PaymentSource = PaymentSource
 data ServiceStatus = ServiceStatus
   { paused :: !Bool, pauseReason :: !Text, criticalSequence :: !Int64, backupSequence :: !Int64 }
   deriving stock (Eq,Show,Generic) deriving anyclass (ToJSON,FromJSON)
+
+-- Saved refund destination and full principal; callers never choose either.
+data RefundAuthorization = RefundAuthorization
+  { refundPayment :: !Text, refundRecipient :: !Text, refundAmount :: !Amount }
+  deriving stock (Eq,Show,Generic) deriving anyclass (ToJSON,FromJSON)

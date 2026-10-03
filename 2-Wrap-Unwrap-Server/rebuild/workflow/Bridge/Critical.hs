@@ -119,6 +119,9 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
       evalCritical (WriteCustomer (Bridge.Operation.Internal.CreateOrder header request))=do
         c<-customer
         createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (coverBackup c) reader writer header request
+      evalCritical (OperatorDSL (RefundDeposit receipt))=do
+        now<-floor <$> getPOSIXTime
+        evalWrite writer (AuthorizeRefund now receipt)
       evalCritical (OperatorDSL (PauseService reason))=evalWrite writer (Pause reason)
       evalCritical (OperatorDSL ResumeService)=guarded $ do
         state<-evalRead reader ReadState
