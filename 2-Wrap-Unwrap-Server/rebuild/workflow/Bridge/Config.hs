@@ -29,7 +29,7 @@ import System.IO (withBinaryFile,IOMode(ReadMode))
 
 data Config = Config
   { profile :: !Profile, deploymentId :: !Text, nativeRpc :: !String
-  , nativeCookie :: !FilePath, nativeWallet :: !Text
+  , nativeCookie :: !FilePath, nativeWallet :: !Text, nativeUnlockFile :: !(Maybe FilePath)
   , nativeCheckpointHeight :: !Int64, nativeCheckpointHash :: !Text
   , solanaRpc :: !String, solanaVerifierRpc :: !(Maybe String), mint :: !Text
   , custodyOwner :: !Text, custodyAta :: !Text
@@ -84,6 +84,7 @@ validateConfig c = do
   S.validateSolanaSettings (solanaSettings c)
   require (all isAbsolute [fenceDirectory c,signerAuthFile c,solanaSdkLibrary c]
     && normalise(fenceDirectory c)==fenceDirectory c) "absolute_paths_required"
+  mapM_ (\filename->require (isAbsolute filename && normalise filename==filename) "absolute_credential_path_required") (nativeUnlockFile c)
   require (all (\n->n>0 && n<=65535) [serverPort c,signerPort c] && serverPort c/=signerPort c
     && signerAuthFile c/=nativeCookie c) "invalid_server_endpoints"
   require (units(minInput c)>=2 && minInput c<=maxInput c && units(maxInput c)<=1000000000000000) "invalid_limits"
@@ -133,4 +134,3 @@ validateInterface c links = do
     Just address->T.length address<=320 && T.count "@" address==1 && T.all (\x->x `elem` ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._+-@"::String)) address
     Nothing->False
   allowedHost names url = maybe False (\r->host r `elem` names) (parseLink url)
-

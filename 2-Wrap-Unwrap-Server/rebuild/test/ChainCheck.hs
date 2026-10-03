@@ -42,14 +42,16 @@ checks = (\deployment native solana observation common->deployment<>native<>sola
           expected=sameName && descriptors && not scanning
       result<-try (nativeWalletInfoWith call settings) :: IO (Either BridgeError Value)
       pure $ case result of Right value->expected && value==wallet; Left (BridgeError code)->not expected && code=="native_wallet_not_ready"
-  , check "native signing requires local keys and an unexpired wallet unlock" $ \(keys::Bool) (external::Bool)->
+  , check "native address readiness permits locked local keys; signing requires a current unlock" $ \(keys::Bool) (external::Bool)->
       forAll (elements [Nothing,Just 0,Just 99,Just 100,Just 101]) $ \unlocked->ioProperty $ do
         let wallet=object (["walletname" .= nativeWallet settings,"descriptors" .= True,"scanning" .= False,
               "private_keys_enabled" .= keys,"external_signer" .= external]<>maybe [] (\n->["unlocked_until" .= (n::Int64)]) unlocked)
             call scoped method args=if (scoped,method,args)==(True,"getwalletinfo",[]) then pure wallet else fail "unexpected wallet RPC"
             expected=keys && not external && maybe True (>100) unlocked
+        receiving<-try (nativeWalletKeysWith call settings) :: IO (Either BridgeError Value)
         result<-try (nativeWalletReadyWith call settings 100) :: IO (Either BridgeError ())
-        pure $ case result of Right ()->expected; Left (BridgeError code)->not expected && code=="native_wallet_not_ready"
+        let receivingOK=case receiving of Right value->keys && not external && value==wallet; Left (BridgeError code)->not(keys && not external) && code=="native_wallet_not_ready"
+        pure $ receivingOK && case result of Right ()->expected; Left (BridgeError code)->not expected && code=="native_wallet_not_ready"
   , check "native worker credentials must explicitly deny every signing/export method" $ once $ ioProperty $ do
       calls<-newIORef ([]::[Text])
       verifyNativeBoundaryWith $ \wallet method args->do
@@ -59,7 +61,7 @@ checks = (\deployment native solana observation common->deployment<>native<>sola
       refusals<-mapM (\method->rejects "native_signing_authority_not_separated" $
         verifyNativeBoundaryWith $ \_ name _->if name==method then pure Null else reject "rpc_method_forbidden") methods
       unknown<-rejects "native_signing_authority_not_separated" (verifyNativeBoundaryWith $ \_ _ _->reject "rpc_transport_unknown_outcome")
-      pure (length methods==13 && and refusals && unknown)
+      pure (length methods==14 && "walletlock" `elem` methods && and refusals && unknown)
   , check "Solana token account accepts only the saved mint/owner and supported layout" $ once $ property $
       let key=T.replicate 32 "1"
           info=object ["owner" .= key,"mint" .= key,"state" .= ("initialized"::Text),"isNative" .= False,
@@ -102,7 +104,7 @@ checks = (\deployment native solana observation common->deployment<>native<>sola
       result <- retryRateLimitedRead (\n->modifyIORef' waits (<>[n])) "getTransaction" action
       count <- readIORef calls; delays <- readIORef waits
       pure (result && count==3 && delays==[5000000,8000000])
-  , check "mutations and unknown methods never retry" $ forAll (elements ["sendTransaction","sendrawtransaction","walletprocesspsbt","getnewaddress","backupwallet","restorewallet","futureMethod"]) $ \method -> ioProperty $ do
+  , check "mutations and unknown methods never retry" $ forAll (elements ["sendTransaction","sendrawtransaction","walletprocesspsbt","walletpassphrase","walletlock","getnewaddress","backupwallet","restorewallet","futureMethod"]) $ \method -> ioProperty $ do
       calls <- newIORef (0::Int); waits <- newIORef (0::Int)
       refused <- rejects "rpc_rate_limited" $ retryRateLimitedRead (\_->modifyIORef' waits (+1)) method
         (modifyIORef' calls (+1) >> pure (Left Nothing :: Either (Maybe Int) ()))
@@ -201,21 +203,21 @@ checks = (\deployment native solana observation common->deployment<>native<>sola
         counts<-(,) <$> readIORef backups <*> readIORef restores
         pure (and (invalidManifests<>[oversized,exposedManifest,duplicate,existingManifest,exposed,corrupt,occupied,shrunk,mismatch,race])
           && not ("/unused/credential" `BS.isInfixOf` manifestBytes) && counts==(2,3))
-  , check "native allocation never repeats getnewaddress after a lost claim" $ once $ ioProperty $ do
+  , check "locked-wallet allocation never repeats getnewaddress after a lost claim" $ once $ ioProperty $ do
       saved <- newIORef False; allocations <- newIORef (0::Int)
       let label="ecx-bridge:v1:contract:order:known"
           address="tb1q9vl0cpvddncs78537mrpxawydzsgkz7k5hgj7w"
           call _ method _=case method of
-            "getwalletinfo"->pure $ object ["walletname" .= nativeWallet settings,"descriptors" .= True,"scanning" .= False,"private_keys_enabled" .= True,"external_signer" .= False]
+            "getwalletinfo"->pure $ object ["walletname" .= nativeWallet settings,"descriptors" .= True,"scanning" .= False,"private_keys_enabled" .= True,"external_signer" .= False,"unlocked_until" .= (0::Int)]
             "getaddressesbylabel"->do
               exists<-readIORef saved
               if exists then pure $ object [K.fromText address .= object ["purpose" .= ("receive"::Text)]] else reject "rpc_error_-11"
             "getnewaddress"->writeIORef saved True >> modifyIORef' allocations (+1) >> pure (String address)
             "getaddressinfo"->pure $ object ["address" .= address,"ismine" .= True,"solvable" .= True,"ischange" .= False,"labels" .= [label],"scriptPubKey" .= ("0014"<>T.replicate 40 "0")]
             _->fail "unexpected allocation method"
-      unresolved <- rejects "native_allocation_unresolved" (recoverNativeAddressWith call settings 100 False label)
-      first <- recoverNativeAddressWith call settings 100 True label
-      retry <- recoverNativeAddressWith call settings 100 False label
+      unresolved <- rejects "native_allocation_unresolved" (recoverNativeAddressWith call settings False label)
+      first <- recoverNativeAddressWith call settings True label
+      retry <- recoverNativeAddressWith call settings False label
       count <- readIORef allocations
       pure (unresolved && first==address && retry==address && count==1)
   ]

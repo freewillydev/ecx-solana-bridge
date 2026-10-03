@@ -113,7 +113,7 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
     database<-databaseSettings
     withReader database (C.fingerprint c) (C.backupRequired c) $ \reader->
       bracket newRpcManager closeManager $ \manager->
-        runSigner manager reader (SignerSettings (C.nativeSettings c) (C.solanaSettings c) (C.solanaPolicy c) (C.solanaSdkLibrary c) key ((\(configuration,parent)->(c,configuration,parent)) <$> backup))
+        runSigner manager reader (SignerSettings (C.nativeSettings c) (C.solanaSettings c) (C.solanaPolicy c) (C.solanaSdkLibrary c) key (C.nativeUnlockFile c) ((\(configuration,parent)->(c,configuration,parent)) <$> backup))
           (SigningEndpoint (C.signerPort c) (C.signerAuthFile c))
   restoreCommand path minimumText operation=do
     c<-C.loadConfig path

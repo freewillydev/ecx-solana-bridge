@@ -1,7 +1,7 @@
 {-# LANGUAGE GADTs, ScopedTypeVariables #-}
 module Bridge.Native
   ( NativeSettings(..), validateNativeSettings, nativeCall, nativeIdentity, nativeIdentityWith
-  , verifyNativeBoundaryWith, validateNativeRecipientWith, nativeWalletInfoWith, nativeWalletReadyWith
+  , verifyNativeBoundaryWith, validateNativeRecipientWith, nativeWalletInfoWith, nativeWalletKeysWith, nativeWalletReadyWith
   , NativeRecovery(..), evalNativeRecoveryWith
   , recoverNativeAddressWith, nativeHistory, nativeAmount, nativeNumber, signetChallenge ) where
 
@@ -101,20 +101,28 @@ nativeWalletInfoWith call c = do
   require (name==nativeWallet c && descriptors && scanning==Bool False) "native_wallet_not_ready"
   pure wallet
 
-nativeWalletReadyWith :: (Bool -> Text -> [Value] -> IO Value) -> NativeSettings -> Int64 -> IO ()
-nativeWalletReadyWith call c now = do
+-- Receiving addresses uses the descriptor keypool while an encrypted wallet is
+-- locked. Private-key availability and signing readiness are separate checks.
+nativeWalletKeysWith :: (Bool -> Text -> [Value] -> IO Value) -> NativeSettings -> IO Value
+nativeWalletKeysWith call c = do
   wallet <- nativeWalletInfoWith call c
   keys <- fieldValue "private_keys_enabled" wallet
   external <- fieldValue "external_signer" wallet
+  require (keys && not external) "native_wallet_not_ready"
+  pure wallet
+
+nativeWalletReadyWith :: (Bool -> Text -> [Value] -> IO Value) -> NativeSettings -> Int64 -> IO ()
+nativeWalletReadyWith call c now = do
+  wallet <- nativeWalletKeysWith call c
   unlocked <- parseValue (withObject "wallet" (.:? "unlocked_until")) wallet :: IO (Maybe Int64)
-  require (keys && not external && maybe True (>now) unlocked) "native_wallet_not_ready"
+  require (maybe True (>now) unlocked) "native_wallet_not_ready"
 
 -- A durable ledger claim supplies fresh=True exactly once. Recovery only reads
 -- the saved label; absent/ambiguous evidence never permits a second allocation.
-recoverNativeAddressWith :: (Bool -> Text -> [Value] -> IO Value) -> NativeSettings -> Int64 -> Bool -> Text -> IO Text
-recoverNativeAddressWith call c now fresh label = do
+recoverNativeAddressWith :: (Bool -> Text -> [Value] -> IO Value) -> NativeSettings -> Bool -> Text -> IO Text
+recoverNativeAddressWith call c fresh label = do
   require (not (T.null label) && T.length label<=160) "invalid_allocation_label"
-  nativeWalletReadyWith call c now
+  _<-nativeWalletKeysWith call c
   prior <- lookupLabel
   address <- case prior of
     Just a -> pure a
@@ -165,7 +173,7 @@ nativeNumber a = Number (fromIntegral (units a) / 100000000)
 verifyNativeBoundaryWith :: (Bool -> Text -> [Value] -> IO Value) -> IO ()
 verifyNativeBoundaryWith call = mapM_ denied
   ["walletprocesspsbt","signrawtransactionwithwallet","signmessage","dumpprivkey",
-   "dumpwallet","gethdkeys","listdescriptors","walletpassphrase","walletpassphrasechange",
+   "dumpwallet","gethdkeys","listdescriptors","walletpassphrase","walletpassphrasechange","walletlock",
    "encryptwallet","importprivkey","importwallet","backupwallet"]
  where
   denied method = do

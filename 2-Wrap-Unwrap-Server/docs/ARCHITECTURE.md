@@ -42,12 +42,13 @@ Keep it unmodified, outside production builds, and read it before changing this 
 The production core retains its typeclass/constrained-existential/GADT design:
 
 ```haskell
-class Operation (caller :: Caller) (severity :: Severity) (op :: Type -> Type)
-    | op -> caller severity where
-  command :: op a -> DSL caller severity a
+class Operation (caller :: Caller) (severity :: Severity)
+    (op :: Severity -> Type -> Type) | caller -> op, op -> caller where
+  command :: op severity a -> DSL caller severity a
+  interpretOperation :: Handlers severity f -> op severity a -> f a
 
 data Request (caller :: Caller) (severity :: Severity) a where
-  Request :: Operation caller severity op => op a -> Request caller severity a
+  Request :: Operation caller severity op => op severity a -> Request caller severity a
 
 resolve :: Request caller severity a -> DSL caller severity a
 resolve (Request operation) = command operation
@@ -55,6 +56,22 @@ resolve (Request operation) = command operation
 
 `Request caller severity a` hides the operation type, retaining its dictionary,
 result, caller and severity. `Plan caller a` holds a safe or critical request.
+The four callers determine four closed, severity-indexed operation families through
+`caller -> op`; `op -> caller` prevents reassignment. Six concrete instances cover
+customer/operator safe and critical operations, and worker/signer critical operations.
+Concrete instance heads prevent overlapping specializations from replacing dispatch.
+Each DSL constructor carries its fully specified `Operation` context, which must
+unify with the existential request's caller, severity and family. `Instruction` is a
+matching-only pattern synonym exposing that dictionary from the closed DSL.
+Both evaluators delegate through `interpretOperation` to private, severity-indexed
+`Handlers`; instances only select a typed handler, with no Monad or IO capability.
+Safe handlers contain only reads. No runtime type comparison or cast grants authority.
+The grammar and both critical interpreters treat incomplete matches as build errors.
+A new signer instruction needs a closed grammar case and a corresponding private
+critical transport implementation; all signer access still passes the one dispatcher.
+Compile checks reject a new family, a duplicate concrete instance, wrong caller or
+severity, and a request resolved into a mismatched DSL context.
+
 Customer handlers have type `ServerT CustomerAPI (Plan 'Customer)`; they package
 operations, not IO or an already evaluated result. Servant's hoist resolves the
 dictionary to a DSL and evaluates it. Only the concrete result is serialized.
@@ -62,9 +79,10 @@ The signer uses `ServerT SigningAPI (Request 'Signer 'Critical)` and resolves it
 own `SigningDSL` under separate authorization and serialization.
 
 Safe and critical evaluators remain separate. `Critical.hs` has one runtime
-`evalCritical` call in private `dispatch`; external authority is checked before
-waiting for the workflow gate. Internal signer requests use that same dispatch
-under the already-held gate, without reacquiring it. The `SigningDSL` branch alone
+`evalCritical` call in private `dispatch`. `evalCritical` itself checks external
+authority before acquiring the workflow gate. Its handlers and signer transport are
+local to that evaluator. Internal signer requests resolve their class dictionaries
+inside the already-locked evaluation, without reentering `evalCritical` or its gate. The private signing handler selected by that evaluator alone
 constructs the signer ClientM and independently refuses observation-only mode.
 The gate spans chain calls and individual database transactions, so scanning cannot
 change a payment's observed source midway through a workflow. Safe reads remain
@@ -99,8 +117,9 @@ supply limits and multisig in its comments are design notes, not current guarant
 (op :: Type -> Type)`. Data-family identity is injective in both arguments;
 `test/Main.hs` includes a polymorphic equality witness that GHC must typecheck
 without casts. Each signer input is a separate GADT whose result fixes both
-indices before `Request caller severity a` existentially hides its operation.
-The existing `Operation.command` instances generate the closed `SigningDSL`.
+indices before the `SignerCommand` family packages that leaf. `Request caller severity a`
+hides the family while retaining its precise result. The `Operation.command` instance
+generates the closed `SigningDSL`.
 Both the server interpreter and critical client dispatch use that typeclass path.
 
 | Authenticated POST path | Operation type | Result constructor |
@@ -177,7 +196,14 @@ the TLS key is signer-only. Local operator control remains a separate mode-0600
 framed Unix socket, not an operator HTTP API or a signer transport.
 
 The signer checks deployment, saved authorization, transaction effects and limits
-before and after signing; it never broadcasts. The SDK Rust library is reached only
+before and after signing; it never broadcasts.
+For an encrypted native wallet, optional `nativeUnlockFile` supplies a signer-only
+0600 UTF-8 passphrase file (1–1024 bytes, no NUL or line endings). Unlock/sign/relock
+stays inside the signer gate, including cleanup after an uncertain unlock reply.
+The node enforces a 120-second unlock lease if the process dies or relocking fails.
+The worker can allocate cached descriptor addresses while locked, but its RPC
+credentials must deny both unlocking and locking. Unencrypted wallets keep their
+existing readiness path. The SDK Rust library is reached only
 through bounded Haskell FFI, with caller-owned buffers and no allocator/pointer
 ownership crossing the ABI. Unsigned construction supplies public identities and no
 key path; Haskell independently validates messages and signatures. Simulation uses
@@ -368,6 +394,15 @@ covering the exact required sequence; successful callback return alone is insuff
 Backups must preserve PostgreSQL financial records, exact signed attempts, native
 wallet/descriptors/keys, Solana key, private signer configuration and sequence/identity
 manifests. Key seeds alone cannot recover order/payment decisions or prevent duplicates.
+Encrypted native wallets require `nativeUnlockFile` for custody export, even if
+already unlocked. Format-2 custody bundles bind the exact copied secret, encrypted
+state and file set; unencrypted bundles retain the exact format-1 grammar. Export
+validates the copied secret against the live wallet before and after backup, and
+rechecks source bytes/state. Wallet encryption/passphrase administration must stay
+quiescent during export. Offline inspection verifies bindings and integrity without
+unlocking; a restore/sign test establishes that the archived secret opens the wallet.
+After relocation, set the signer's `nativeUnlockFile` to the restored private
+`native-unlock` file. The saved original path is not used by offline inspection.
 
 Restore into staging from authenticated off-host encrypted storage, verify identities,
 restore/adopt the sequence fence without lowering it, migrate forward, rescan/reconcile

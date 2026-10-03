@@ -76,10 +76,10 @@ It is a design reference, excluded from production builds.
 
 Keep the valid typeclass/constrained-existential/GADT design:
 
-    class Operation s op | op -> s where
-      command :: op a -> DSL s a
-    data Request s a where
-      Request :: Operation s op => op a -> Request s a
+    class Operation caller s op | caller -> op, op -> caller where
+      command :: op s a -> DSL caller s a
+    data Request caller s a where
+      Request :: Operation caller s op => op s a -> Request caller s a
     resolve (Request op) = command op
 
 Servant handlers construct typed plans containing existential Request values and

@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds, GADTs, ScopedTypeVariables #-}
 module Main (main) where
 import qualified Bridge.Config as Config
+import qualified Bridge.Credentials as Credentials
 import Paths_ecx_bridge_rebuild (getDataFileName)
 import qualified Network.HTTP.Client as HTTP
 import qualified Network.Socket as NS
@@ -54,7 +55,7 @@ import qualified Bridge.SolanaPayment as SP
 import qualified Network.Wai.Handler.Warp as Warp
 import qualified Data.ByteString as BS
 import Data.Time.Clock.POSIX (getPOSIXTime)
-import Bridge.Operation.Internal (Request(..),CheckpointCustody(..),WorkerOperation(..))
+import Bridge.Operation.Internal (Request(..),workerRequest,CheckpointCustody(..),WorkerOperation(..))
 import Servant.API (BasicAuthData(..))
 import qualified Bridge.Native as N
 import qualified Bridge.Solana as Solana
@@ -77,6 +78,7 @@ import System.Environment (getEnv,lookupEnv,getEnvironment)
 
 main :: IO ()
 main = do
+  credentialsContract
   migration<-lookupEnv "ECX_REBUILD_MIGRATION_ONLY"
   live<-lookupEnv "ECX_REBUILD_LIVE_OBSERVER_CONFIG"
   setup<-lookupEnv "ECX_REBUILD_SETUP_ONLY"
@@ -84,9 +86,106 @@ main = do
   server<-lookupEnv "ECX_REBUILD_SERVER_ONLY"
   tls<-lookupEnv "ECX_REBUILD_TLS_ONLY"
   native<-lookupEnv "ECX_REBUILD_NATIVE_RECOVERY_ONLY"
+  encrypted<-lookupEnv "ECX_REBUILD_ENCRYPTED_NATIVE_ONLY"
+  custody<-lookupEnv "ECX_REBUILD_CUSTODY_ONLY"
+  when (encrypted==Just "1" && (native/=Just "1" || custody/=Just "1"))
+    (fail "encrypted native acceptance requires native recovery and custody modes")
   if migration==Just "1" then migrationMain else case live of
     Just path->liveObserverMain path
     Nothing->if setup==Just "1" then setupMain else if native==Just "1" then nativeRecoveryMain else if tls==Just "1" then tlsMain else if fence==Just "1" then fenceMain else if server==Just "1" then serverMain else ledgerMain
+
+-- Offline credential/RPC contract. The fixture records only method names, never
+-- secrets; real encrypted-wallet recovery is exercised separately below.
+credentialsContract :: IO ()
+credentialsContract=withTestSigningKey $ \key->do
+  let file=takeDirectory key </> "native-unlock"
+      secret=" exact café passphrase "
+      bytes=TE.encodeUtf8 secret
+      write value=BS.writeFile file value >> setFileMode file 0o600
+      check ok=unless ok (fail "native unlock credential contract failed")
+      native=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:1" "/unused" "unlock-contract"
+        16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47"
+  write bytes
+  Credentials.readNativeUnlock file >>= check . (==secret)
+  write (BS.replicate 1024 97)
+  Credentials.readNativeUnlock file >>= check . (==T.replicate 1024 "a")
+  forM_ [BS.empty,BS.replicate 1025 97,BS.singleton 255,BS.pack [97,0,98],"a\nb","a\rb"] $ \invalid->do
+    write invalid
+    expectStore "invalid_native_unlock_file" (Credentials.readNativeUnlock file)
+  write bytes
+  setFileMode file 0o644
+  expectStore "unsafe_signer_file_permissions" (Credentials.readNativeUnlock file)
+  setFileMode file 0o600
+  bracket_ (Posix.createSymbolicLink file (file<>".link")) (removeFile $ file<>".link") $
+    expectStore "unsafe_signer_file_permissions" (Credentials.readNativeUnlock $ file<>".link")
+  bracket_ (Posix.createLink file (file<>".hard")) (removeFile $ file<>".hard") $
+    expectStore "unsafe_signer_file_permissions" (Credentials.readNativeUnlock file)
+  expiry<-newIORef (0::Int64)
+  mode<-newIORef ("ok"::T.Text)
+  methods<-newIORef ([]::[T.Text])
+  let record method=modifyIORef' methods (<>[method])
+      call wallet method arguments=do
+        check wallet
+        record method
+        behavior<-readIORef mode
+        case (method,arguments) of
+          ("getwalletinfo",[])->do
+            untilTime<-readIORef expiry
+            pure $ object $ ["walletname" .= N.nativeWallet native,"descriptors" .= True,
+              "scanning" .= False,"private_keys_enabled" .= True,"external_signer" .= False]
+              <>["unlocked_until" .= untilTime | behavior/="unencrypted"]
+          ("walletpassphrase",[String supplied,Number lease])->do
+            check (lease==120)
+            unless (supplied==secret) (reject "rpc_error_-14")
+            now<-floor <$> getPOSIXTime
+            writeIORef expiry (now+120)
+            when (behavior=="ambiguous") (reject "rpc_transport_unknown_outcome")
+            pure Null
+          ("walletlock",[])->do
+            when (behavior=="lock-failure") (reject "rpc_transport_unknown_outcome")
+            writeIORef expiry 0
+            pure Null
+          _->fail "unexpected credential fixture RPC"
+      scoped=Credentials.withNativeUnlock call native (Just file)
+      reset behavior=writeIORef methods [] >> writeIORef expiry 0 >> writeIORef mode behavior
+      finished expected=do
+        readIORef methods >>= check . (==expected)
+        readIORef expiry >>= check . (==0)
+      begin=["getwalletinfo","walletpassphrase"]
+      complete=begin<>["getwalletinfo","action","walletlock"]
+  scoped (record "action")
+  finished complete
+  reset "ok"
+  write "wrong-passphrase"
+  expectStore "rpc_error_-14" (scoped $ record "action")
+  finished (begin<>["walletlock"])
+  write bytes
+  reset "ambiguous"
+  expectStore "rpc_transport_unknown_outcome" (scoped $ record "action")
+  finished (begin<>["walletlock"])
+  reset "ok"
+  expectStore "credential_action_failure" (scoped $ record "action" >> reject "credential_action_failure")
+  finished complete
+  reset "ok"
+  interrupted<-try (scoped $ record "action" >> throwIO UserInterrupt) :: IO (Either AsyncException ())
+  check (interrupted==Left UserInterrupt)
+  finished complete
+  reset "lock-failure"
+  before<-floor <$> getPOSIXTime
+  expectStore "rpc_transport_unknown_outcome" (scoped $ record "action")
+  readIORef methods >>= check . (==complete)
+  after<-floor <$> getPOSIXTime
+  readIORef expiry >>= check . (\n->n>=before+120 && n<=after+120)
+  reset "ok"
+  expectStore "native_wallet_not_ready" (Credentials.withNativeUnlock call native Nothing $ record "action")
+  finished ["getwalletinfo"]
+  reset "unencrypted"
+  expectStore "native_unlock_requires_encrypted_wallet" (scoped $ record "action")
+  finished ["getwalletinfo"]
+  reset "unencrypted"
+  Credentials.withNativeUnlock call native Nothing (record "action")
+  finished ["getwalletinfo","action"]
+  putStrLn "PASS: exact private unlock files, bounds/UTF-8/permissions/link refusal, finite unlock lease and cleanup after rejection, ambiguity, action failure and interruption"
 
 -- Restore an offline schema-18 backup into a disposable database and apply any
 -- missing baseline migrations through 005 before invoking this mode.
@@ -163,7 +262,7 @@ migrationRecovery settings role identity fixtures path=do
               pending<-evalRead reader PendingAttempts
               before<-mapM (evalRead reader . ReadAttempt) pending
               original<-fixture fixtures ArchiveRecords
-              mapM_ (worker . Request . ReconcilePayment) pending
+              mapM_ (worker . workerRequest . ReconcilePayment) pending
               after<-mapM (evalRead reader . ReadAttempt) pending
               let settled=[signedId(recordedSigned row) | row<-after, recordedState row=="settled"]
                   retained=[row | row<-after, signedId(recordedSigned row) `notElem` settled]
@@ -174,11 +273,11 @@ migrationRecovery settings role identity fixtures path=do
               check (ledgerPaused state)
               snapshot<-fixture fixtures ArchiveRecords
               when (null settled) $ check (snapshot==original)
-              mapM_ (worker . Request . ReconcilePayment) pending
+              mapM_ (worker . workerRequest . ReconcilePayment) pending
               repeated<-fixture fixtures ArchiveRecords
               check (snapshot==repeated)
-              worker (Request ObserveChains)
-              worker (Request ReconcileCustody)
+              worker (workerRequest ObserveChains)
+              worker (workerRequest ReconcileCustody)
               (checkedAt,_,problem)<-fixture fixtures ReadCustodyCheck
               check (checkedAt/=Nothing && problem==Nothing)
               evalRead reader ReadState >>= check . ledgerPaused
@@ -218,7 +317,7 @@ liveObserverMain path=do
           withRuntime manager (Config.observerSettings config) (Config.solanaPolicy config) (Just customer)
             (SigningEndpoint 1 "/unavailable-signer-credentials") reader writer $ \worker _ _->do
               let scan=do
-                    worker (Request ObserveChains)
+                    worker (workerRequest ObserveChains)
                     health<-bracket (PG.connect settings) PG.close (\c->fixture c LiveScanHealth)
                     check (map (\(chain,_,_)->chain) health==["Native","Solana","SolanaOperating"])
                     forM_ health $ \(_,at,problem)->do
@@ -230,8 +329,8 @@ liveObserverMain path=do
               evalRead reader ReadBalances >>= check . (==balances)
               evalRead reader PendingAttempts >>= check . null
               evalRead reader ReadState >>= check . ledgerPaused
-              expectStore "observation_only" (worker $ Request $ SignPreparedPayment "forbidden")
-              expectStore "observation_only" (worker $ Request $ BroadcastPayment "forbidden")
+              expectStore "observation_only" (worker $ workerRequest $ SignPreparedPayment "forbidden")
+              expectStore "observation_only" (worker $ workerRequest $ BroadcastPayment "forbidden")
   putStrLn "PASS: real L2L Signet restricted RPC authority and Solana Devnet scans through rebuild DSL, persisted cursors, repeat accounting, paused ledger and signing/send refusal; no funds moved"
 
 -- Production initialization on a fresh migrated database, with no seeded funds.
@@ -285,6 +384,7 @@ setupMain=do
 nativeRecoveryMain :: IO ()
 nativeRecoveryMain = do
   binary<-getEnv "ECX_REBUILD_EXECUTABLE"
+  encrypted<-(==Just "1") <$> lookupEnv "ECX_REBUILD_ENCRYPTED_NATIVE_ONLY"
   base<-getDataFileName "test/fixtures/deployment-config.json" >>= Config.loadConfig
   cookie<-getEnv "ECX_REBUILD_NATIVE_RECOVERY_COOKIE"
   walletDirectory<-getEnv "ECX_REBUILD_NATIVE_WALLET_DIRECTORY"
@@ -305,6 +405,8 @@ nativeRecoveryMain = do
             if isDoesNotExistError e then pure () else throwIO e)
         allocate label kind=call source True "getnewaddress" [String label,String kind] >>= \v->case v of
           String address->pure address; _->fail "expected native address"
+        locked wallet=when encrypted $ call wallet True "getwalletinfo" []
+          >>= fieldValue "unlocked_until" >>= check . (==(0::Int64))
     _<-N.nativeIdentity manager source
     bracket_ (void $ call source False "createwallet" [toJSON sourceName,Bool False,Bool False,String "",Bool False,Bool True,Bool False])
       (cleanup sourceName) $
@@ -312,7 +414,9 @@ nativeRecoveryMain = do
         removeDirectoryRecursive $ \directory->do
         address<-allocate "recovery-label" "bech32"
         legacy<-allocate "recovery-signing-proof" "legacy"
-        let sourceConfig=base {Config.nativeWallet=sourceName,Config.nativeCookie=cookie}
+        let unlock=directory </> "native-unlock"
+            sourceConfig=base {Config.nativeWallet=sourceName,Config.nativeCookie=cookie,
+              Config.nativeUnlockFile=if encrypted then Just unlock else Nothing}
             targetConfig=sourceConfig {Config.nativeWallet=targetName}
             sourceFile=directory </> "source.json"
             targetFile=directory </> "target.json"
@@ -321,6 +425,20 @@ nativeRecoveryMain = do
               (code,out,_)<-Process.readProcessWithExitCode binary [command,config,file] ""
               check (code==ExitSuccess)
               either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ T.pack out)
+        when encrypted $ do
+          -- This wallet was created immediately above under a random name. Do
+          -- not encrypt an existing wallet, even if a test environment is wrong.
+          balances<-call source True "getbalances" [] >>= fieldValue "mine"
+          forM_ ["trusted","untrusted_pending","immature"] $ \name->
+            fieldValue name balances >>= check . (==Number 0)
+          let secret=" disposable native recovery café passphrase "
+          BS.writeFile unlock (TE.encodeUtf8 secret)
+          setFileMode unlock 0o600
+          void $ call source True "encryptwallet" [String secret]
+          locked source
+          Credentials.withNativeUnlock (call source) source (Just unlock) $
+            void $ call source True "keypoolrefill" [Number 100]
+          locked source
         BL.writeFile sourceFile (encode sourceConfig)
         BL.writeFile targetFile (encode targetConfig)
         output<-runCommand "backup-native-wallet" sourceFile (directory </> "wallet.bak")
@@ -332,16 +450,22 @@ nativeRecoveryMain = do
         bundled<-lookupEnv "ECX_REBUILD_CUSTODY_ONLY"
         nativeManifest<-if bundled==Just "1" then custodyBundleContract binary manager sourceConfig directory
           else pure (moved </> "wallet.bak.json")
+        locked source
+        -- This uses only the encrypted wallet's cached descriptor keypool.
         expectedNext<-allocate "next-label" "bech32"
         void $ call source False "unloadwallet" [toJSON sourceName,Bool False]
         bracket_ (pure ()) (cleanup targetName) $ do
           result<-runCommand "restore-native-wallet" targetFile nativeManifest
           fieldValue "wallet" result >>= check . (==targetName)
-          recovered<-N.recoverNativeAddressWith (call target) target 0 False "recovery-label"
+          recovered<-N.recoverNativeAddressWith (call target) target False "recovery-label"
           check (recovered==address)
+          locked target
           next<-call target True "getnewaddress" [String "next-label",String "bech32"]
           check (next==String expectedNext)
-          signature<-call target True "signmessage" [String legacy,String "ECX empty-wallet recovery acceptance"]
+          let restoredUnlock=if encrypted then Just (takeDirectory nativeManifest </> "native-unlock") else Nothing
+          signature<-Credentials.withNativeUnlock (call target) target restoredUnlock $
+            call target True "signmessage" [String legacy,String "ECX empty-wallet recovery acceptance"]
+          locked target
           verified<-call target False "verifymessage" [String legacy,signature,String "ECX empty-wallet recovery acceptance"]
           check (verified==Bool True)
     putStrLn "Real L2L Signet wallet backup/restore in separate executable processes with relocated durable manifest: descriptor state, labels, next address and private-key signing PASS; test wallets removed."
@@ -370,6 +494,9 @@ custodyBundleContract binary manager base directory=withTestSigningKey $ \key->d
         check (code==ExitSuccess)
         either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ T.pack out)
       export=evalCustodyRecovery manager config (ExportCustody settings readerSettings key directory)
+      native=Config.nativeSettings config
+      call=N.nativeCall manager native
+      locked=call True "getwalletinfo" [] >>= fieldValue "unlocked_until" >>= check . (==(0::Int64))
   Config.validateConfig config
   BL.writeFile file (encode config)
   BL.writeFile offlineFile (encode config {Config.nativeRpc="http://127.0.0.1:1",Config.nativeCookie="/unavailable-cookie"})
@@ -377,6 +504,18 @@ custodyBundleContract binary manager base directory=withTestSigningKey $ \key->d
     fixture fixtures (InitializeIdentity identity)
     Fence.initializeFence (Config.fenceDirectory config) identity 0
     beforeFiles<-listDirectory directory
+    forM_ (Config.nativeUnlockFile config) $ \unlock->do
+      locked
+      let missing=evalCustodyRecovery manager config {Config.nativeUnlockFile=Nothing}
+            (ExportCustody settings readerSettings key directory)
+      expectStore "encrypted_native_wallet_recovery_material_required" missing
+      Credentials.withNativeUnlock call native (Just unlock) $
+        expectStore "encrypted_native_wallet_recovery_material_required" missing
+      locked
+      saved<-BS.readFile unlock
+      (BS.writeFile unlock "wrong-passphrase" >> expectStore "rpc_error_-14" export)
+        `finally` BS.writeFile unlock saved
+      locked
     withFencedWriter settings (Config.storePolicy config) (Config.fenceDirectory config) $ \_->do
       expectStore "worker_fence_locked" export
       -- The signer has only SELECT authority and can checkpoint while the
@@ -407,6 +546,16 @@ custodyBundleContract binary manager base directory=withTestSigningKey $ \key->d
     let relocated=directory </> "relocated-custody"
         manifest=relocated </> "custody.json"
     renameDirectory (takeDirectory original) relocated
+    archive<-evalRestore settings (InspectCustodyFiles manifest identity 0)
+    metadata<-BS.readFile manifest >>= either fail pure . eitherDecodeStrict'
+    let encrypted=case Config.nativeUnlockFile config of Just _->True; Nothing->False
+    check (custodyEncrypted archive==encrypted && M.member "native-unlock" (custodyFiles archive)==encrypted)
+    fieldValue "format" metadata >>= check . (==(if encrypted then 2 else 1::Int))
+    forM_ (Config.nativeUnlockFile config) $ \unlock->do
+      expected<-Credentials.readNativeUnlock unlock
+      Credentials.readNativeUnlock (relocated </> "native-unlock") >>= check . (==expected)
+      locked
+      removeFile unlock
     -- Neither the original signing file nor a DB/RPC connection is available
     -- to the next process. Only the relocated bundle remains for inspection.
     removeFile key
@@ -426,6 +575,15 @@ custodyBundleContract binary manager base directory=withTestSigningKey $ \key->d
       setFileMode (relocated </> "solana-key.json") 0o644
       expectStore "unsafe_custody_backup_file" (inspect $ InspectCustody manifest 0)
       setFileMode (relocated </> "solana-key.json") 0o600
+      when encrypted $ do
+        let unlock=relocated </> "native-unlock"
+        savedUnlock<-BS.readFile unlock
+        BS.appendFile unlock "changed"
+        expectStore "custody_backup_hash_mismatch" (inspect $ InspectCustody manifest 0)
+        BS.writeFile unlock savedUnlock
+        setFileMode unlock 0o644
+        expectStore "unsafe_custody_backup_file" (inspect $ InspectCustody manifest 0)
+        setFileMode unlock 0o600
       inspect (InspectCustody manifest 0) >>= check . (==0)
     recoveredManifest<-encryptedCustodyContract binary manager config offlineFile noPG manifest directory
     let recoveredDirectory=takeDirectory recoveredManifest
@@ -443,7 +601,7 @@ custodyBundleContract binary manager base directory=withTestSigningKey $ \key->d
           && case rows of [row]->S.fingerprint row==identity && S.paused row==1 && S.criticalSequence row==0; _->False)
     fixture fixtures ArchiveRecords >>= check . (==records)
     verifySigningKey (Config.custodyOwner config) (recoveredDirectory </> "solana-key.json")
-    putStrLn "PASS: exclusive custody export, six bound files, relocated offline inspection without original key/DB/RPC, integrity/minimum/identity/permissions refusal, exact journal restore and unchanged source ledger"
+    putStrLn "PASS: exclusive custody export, bound recovery files, relocated offline inspection without original credentials/DB/RPC, integrity/minimum/identity/permissions refusal, exact journal restore and unchanged source ledger"
     pure (recoveredDirectory </> "native-wallet.json")
 
 -- Local encrypted-repository seam only. Production still requires off-host HTTPS;
@@ -474,7 +632,7 @@ encryptedCustodyContract binary manager config offlineFile environment manifest 
   expectStore "backup_process_failed" (download snapshot identity 0)
   BS.writeFile password secret
   (sort <$> listDirectory directory) >>= check . (==before)
-  -- No plaintext bundle remains. Restore all seven files from real restic.
+  -- No plaintext bundle remains. Restore the complete file set from real restic.
   removeDirectoryRecursive (takeDirectory manifest)
   recovered<-download snapshot identity 0
   let path=custodyManifest recovered
@@ -488,7 +646,7 @@ encryptedCustodyContract binary manager config offlineFile environment manifest 
   check (code==ExitSuccess)
   value<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ T.pack out)
   fieldValue "fingerprint" value >>= check . (==identity)
-  putStrLn "PASS: real restic full-custody encryption/download after plaintext removal, seven private files, ledger-only/latest/stale/identity/password refusal, production HTTPS restriction and independent CLI inspection"
+  putStrLn "PASS: real restic full-custody encryption/download after plaintext removal, private recovery files, ledger-only/latest/stale/identity/password refusal, production HTTPS restriction and independent CLI inspection"
   pure path
 
 testRepository :: FilePath -> IO (FilePath,FilePath,FilePath,FilePath)
@@ -908,7 +1066,7 @@ ledgerMain = do
               16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47"
             solana=Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing publicKey publicKey publicKey
             signing=SignerSettings native solana (H.SolanaPolicy "contract" "contract" publicKey publicKey publicKey (money 10) (money 10))
-              "/unused/sdk" "/unused/key" Nothing
+              "/unused/sdk" "/unused/key" Nothing Nothing
         bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "unauthorized signer reached network"}) closeManager $ \manager -> do
           withTestSigningKey $ \keyFile->do
             let token=BS.replicate 64 97
@@ -926,8 +1084,8 @@ ledgerMain = do
             refused "invalid_signing_decision" "/sign-preparation" ("contract"::T.Text,intent,8::Int)
             refused "signing_backup_required" "/sign-preparation" ("contract"::T.Text,intent,0::Int)
           withRuntime manager (ObserverSettings native solana 2 "sol-origin" "opening-signature") (signingPolicy signing) Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret _customer _operator -> do
-            expectStore "invalid_saved_payment" (interpret $ Request $ SignPreparedPayment intent)
-            expectStore "intake_paused" (interpret $ Request $ PrepareOutgoing intent)
+            expectStore "invalid_saved_payment" (interpret $ workerRequest $ SignPreparedPayment intent)
+            expectStore "intake_paused" (interpret $ workerRequest $ PrepareOutgoing intent)
           pausedAfterRefusal<-evalRead reader ReadState
           check (ledgerPaused pausedAfterRefusal)
         fixture fixtures CoverBackup
@@ -1020,7 +1178,7 @@ ledgerMain = do
         evalRead reader PaymentCandidates >>= check . (notElem ("fee:"<>withdrawalKey))
         bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "terminal payment must not call RPC"}) closeManager $ \manager ->
           withRuntime manager (ObserverSettings native solana 2 "sol-origin" "opening-signature") (signingPolicy signing) Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret _customer _operator ->
-            interpret (Request $ ReconcilePayment nativeTx)
+            interpret (workerRequest $ ReconcilePayment nativeTx)
         evalRead reader ReadBalances >>= check . (==afterSettlement)
         fixture fixtures (SeedReceipt "unknown-source" Nothing Native 10 2 True 100)
         evalWrite writer (PromoteDeposit 100 "unknown-source") >>= check . not
@@ -1293,8 +1451,8 @@ ledgerMain = do
         bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> reject "offline_cycle_rpc"}) closeManager $ \manager ->
           withRuntime manager (ObserverSettings cycleNative cycleSolana 2 "sol-origin" "opening-signature") cyclePolicy Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret _customer _operator ->
             do
-              interpret (Request $ ReconcilePayment "expiry-signed-0")
-              void (try (interpret $ Request RunWorkerCycle) :: IO (Either BridgeError ()))
+              interpret (workerRequest $ ReconcilePayment "expiry-signed-0")
+              void (try (interpret $ workerRequest RunWorkerCycle) :: IO (Either BridgeError ()))
         evalRead reader ReadBalances >>= check . (==beforeCycle)
         evalRead reader ReadState >>= check . ledgerPaused
         evalRead reader PendingAttempts >>= check . (==pendingBeforeCycle)
@@ -1936,8 +2094,8 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       saved<-customer (Op.safe $ Op.OrderStatus header wrapId)
       check (saved==recovered)
       expectStore "observation_only" (customer $ Op.customer $ Op.CreateOrder header wrapping)
-      expectStore "observation_only" (worker $ Request $ SignPreparedPayment "missing")
-      expectStore "observation_only" (worker $ Request $ BroadcastPayment "missing")
+      expectStore "observation_only" (worker $ workerRequest $ SignPreparedPayment "missing")
+      expectStore "observation_only" (worker $ workerRequest $ BroadcastPayment "missing")
       expectStore "deposit_window_closed" (customer $ Op.safe $ Op.PaymentInstructions header oid)
       app<-customerApplication customer
       response<-WaiTest.runSession (WaiTest.srequest $ WaiTest.SRequest
@@ -2742,7 +2900,7 @@ tlsMain=do
           Warp.testWithApplication (pure rpcApplication) $ \rpcPort->
             bracket (newManager defaultManagerSettings {managerModifyRequest= \request->pure request {HTTP.secure=False,HTTP.host="127.0.0.1",HTTP.port=rpcPort}}) closeManager $ \manager->do
                 let credentials=BasicAuthData "worker" (BS.replicate 64 97)
-                signer<-signerApplication manager reader (SignerSettings native solana config sdk keyFile Nothing) credentials
+                signer<-signerApplication manager reader (SignerSettings native solana config sdk keyFile Nothing Nothing) credentials
                 -- Receipt fixtures exercise HTTPS and the actual worker's
                 -- acknowledgment gate, not off-host backup durability.
                 checkpointReply<-newIORef (Nothing :: Maybe W.BackupReceipt)
@@ -2763,7 +2921,7 @@ tlsMain=do
                   wait 200
                   withRuntime manager (ObserverSettings native solana 1 "origin" "origin") config Nothing (endpoint port) reader writer $ \worker _ _->do
                     writeFile auth (replicate 64 'b')
-                    expectStore "signer_outcome_unknown" (worker $ Request $ SignPreparedPayment identifier)
+                    expectStore "signer_outcome_unknown" (worker $ workerRequest $ SignPreparedPayment identifier)
                     readIORef calls >>= check . null
                     evalRead reader PendingAttempts >>= check . null
                     writeFile auth (replicate 64 'a')
@@ -2771,7 +2929,7 @@ tlsMain=do
                     fixture fixtures ReadyIntake
                     clock<-floor <$> getPOSIXTime
                     fixture fixtures (FreshAt clock)
-                    expectStore "signer_outcome_unknown" (worker $ Request $ SignPreparedPayment identifier)
+                    expectStore "signer_outcome_unknown" (worker $ workerRequest $ SignPreparedPayment identifier)
                     readIORef calls >>= check . null
                     evalRead reader PendingAttempts >>= check . null
                     BS.writeFile (auth<>".pem") certificate
@@ -2779,7 +2937,7 @@ tlsMain=do
                     later<-floor <$> getPOSIXTime
                     fixture fixtures (FreshAt later)
                     before<-evalRead reader ReadBalances
-                    signed<-worker (Request $ SignPreparedPayment identifier)
+                    signed<-worker (workerRequest $ SignPreparedPayment identifier)
                     check (Just signed==H.replySignature reply)
                     saved<-evalRead reader (ReadAttempt signed)
                     check (signedBytes(recordedSigned saved)==H.replyTransaction reply && recordedState saved=="signed")
@@ -2787,7 +2945,7 @@ tlsMain=do
                     covered<-ledgerBackup <$> evalRead reader ReadState
                     check (sequenceNo>covered)
                     let receipt=W.BackupReceipt identity sequenceNo (T.replicate 64 "a") (T.replicate 64 "b")
-                        checkpoint=worker (Request $ CheckpointBackup sequenceNo)
+                        checkpoint=worker (workerRequest $ CheckpointBackup sequenceNo)
                     expectStore "signer_outcome_unknown" checkpoint
                     forM_ [receipt {W.receiptIdentity="other"},receipt {W.receiptSequence=sequenceNo-1},
                       receipt {W.receiptSequence=sequenceNo+1},receipt {W.receiptSnapshot="latest"},
@@ -2803,7 +2961,7 @@ tlsMain=do
                     removeFile auth
                     checkpoint
                     readIORef checkpoints >>= check . (==checkpointCalls)
-                    replay<-worker (Request $ SignPreparedPayment identifier)
+                    replay<-worker (workerRequest $ SignPreparedPayment identifier)
                     check (replay==signed)
                     readIORef calls >>= check . (==count) . length
                     evalRead reader ReadBalances >>= check . (==before)
@@ -2828,7 +2986,7 @@ tlsMain=do
                     forM_ [1,2::Int] $ \_->do
                       countBefore<-fixture fixtures RecoveryPauseCount
                       writeIORef calls []
-                      outcome<-try (worker $ Request RunWorkerCycle) :: IO (Either BridgeError ())
+                      outcome<-try (worker $ workerRequest RunWorkerCycle) :: IO (Either BridgeError ())
                       check (case outcome of Left _->True; _->False)
                       countAfter<-fixture fixtures RecoveryPauseCount
                       check (countAfter-countBefore==3) -- native lock + both payment failures
@@ -3164,8 +3322,8 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 2) (money 0)) $ proof child anchor)
   evalRead reader PendingAttempts >>= check . all (`notElem` [signedId wire,signedId(recordedSigned child)])
   evalRead reader ReadNativeLockWork >>= check . (==Nothing)
-  evaluateOffline (Left $ Request $ ReconcilePayment $ signedId wire)
-  evaluateOffline (Left $ Request $ ReconcilePayment $ signedId $ recordedSigned child)
+  evaluateOffline (Left $ workerRequest $ ReconcilePayment $ signedId wire)
+  evaluateOffline (Left $ workerRequest $ ReconcilePayment $ signedId $ recordedSigned child)
   -- Actual PostgreSQL winner history with synthetic chain evidence: principal
   -- remains paid while either family member becomes the canonical winner.
   settled<-evalRead reader (ReadAttempt $ signedId $ recordedSigned child)

@@ -438,7 +438,17 @@ only its disposable ledger afterward. The duplicate 102-line Python
 `PostgresEncryptedBackupCheck.py` is retired: real restic upload/download, restricted
 PostgreSQL restoration and wrong-password/integrity checks already run here.
 The older snapshot checker remains until its separate row-content checks are
-accounted for; this does not establish off-host recovery or encrypted-wallet unlock.
+accounted for; these tests do not establish off-host recovery.
+
+Encrypted native custody recovery now passes on a fresh, empty real L2L Signet
+wallet. The test exports a format-2 bundle, removes the source unlock file, downloads
+from the encrypted restic repository, restores the wallet under another name, signs
+with the archived secret and verifies relocking. Unencrypted format-1 recovery also
+passes. The optional `nativeUnlockFile` is a protected, exact UTF-8 file; the signer
+uses a 120-second unlock lease and cleanup on failure. Wrong/missing secrets,
+ambiguous unlock replies, interruption, permissions and file bindings are covered.
+These local empty-wallet checks do not establish a funded encrypted-wallet payout,
+OS isolation, concurrent administrative passphrase changes or off-host recovery.
 
 ## Remaining release work, in order
 
@@ -455,7 +465,7 @@ accounted for; this does not establish off-host recovery or encrypted-wallet unl
 3. Verify replacement/reorg/winner-change/rebroadcast and covered-source flows with
    real effects, including in-flight restore and clean-host wallet activation. Same-host
    funded ledger restoration/reconciliation now passes. Complete cross-UID signer isolation,
-   encrypted-wallet unlock handling and off-host HTTPS/cross-host recovery.
+   funded encrypted-wallet signing and off-host HTTPS/cross-host recovery.
 4. Complete required Haskell/FFI token administration and selected real pool workflow;
    token mint/burn now has a Cabal CLI, separate critical signing/submission, and
    finalized Devnet round-trip/replay acceptance. Mint creation reuses the same

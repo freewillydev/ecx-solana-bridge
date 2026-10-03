@@ -12,6 +12,7 @@ import Servant.API ((:<|>)(..))
 import Bridge.Domain
 import Data.Aeson (eitherDecode,encode)
 import Data.Int (Int64)
+import Data.Functor.Const (Const(..))
 import Data.Type.Equality ((:~:)(Refl))
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
@@ -39,6 +40,27 @@ main = do
           (SigningDSL (PreparedSigning (SignPrepared identity identifier generation)),SigningDSL (ReplacementSigning (SignReplacement other decision)),SigningDSL (DraftSigning (DraftReplacement third parent fee)),SigningDSL (CheckpointSigning (CheckpointCustody fourth sequenceNo)))->
             identity=="deployment" && identifier=="payment" && generation==3 && other==identity && decision==7 && third==identity && parent=="parent" && units fee==2 && fourth==identity && sequenceNo==9
           _->False
+    , check "constrained DSL view selects only its typed interpreter handler" $ once $ property $
+        let safeHandlers=SafeHandlers (const $ Const "customer-read") (const $ Const "operator-read")
+            criticalHandlers=CriticalHandlers (const $ Const "customer-write") (const $ Const "operator-write")
+              (const $ Const "worker") signing
+            signing :: SigningOperation a -> Const T.Text a
+            signing value=Const $ case value of
+              PreparedSigning{} -> "prepared"
+              ReplacementSigning{} -> "replacement"
+              DraftSigning{} -> "draft"
+              CheckpointSigning{} -> "checkpoint"
+            select :: Handlers severity (Const T.Text) -> DSL caller severity a -> T.Text
+            select handlers (Instruction op)=getConst $ interpretOperation handlers op
+        in and [select safeHandlers (command $ CustomerQuery PublicConfig)=="customer-read"
+          ,select safeHandlers (command $ OperatorQuery ServiceState)=="operator-read"
+          ,select criticalHandlers (command $ CustomerChange $ CreateOrder "auth" $ W.OrderRequest NativeToWrapped (good $ amount 100) "dest" "refund" Nothing "key")=="customer-write"
+          ,select criticalHandlers (command $ OperatorChange $ PauseService "reason")=="operator-write"
+          ,select criticalHandlers (command $ WorkerAction RunWorkerCycle)=="worker"
+          ,select criticalHandlers (command $ SignerAction $ PreparedSigning $ SignPrepared "deployment" "payment" 3)=="prepared"
+          ,select criticalHandlers (command $ SignerAction $ ReplacementSigning $ SignReplacement "deployment" 7)=="replacement"
+          ,select criticalHandlers (command $ SignerAction $ DraftSigning $ DraftReplacement "deployment" "parent" (good $ amount 2))=="draft"
+          ,select criticalHandlers (command $ SignerAction $ CheckpointSigning $ CheckpointCustody "deployment" 9)=="checkpoint"]
     , check "result equality determines both severity and operation" $ once $ property $
         case resultIndices (Refl :: Result 'Critical SignPrepared :~: Result 'Critical SignPrepared) of
           (Refl,Refl)->True

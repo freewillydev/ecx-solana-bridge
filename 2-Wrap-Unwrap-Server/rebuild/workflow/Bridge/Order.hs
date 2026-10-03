@@ -27,7 +27,8 @@ createCustomerOrder manager settings config store sdk backup = createCustomerOrd
   identity=do
     _<-N.nativeIdentity manager native
     _<-S.solanaIdentity manager (solanaSettings settings)
-    clock >>= N.nativeWalletReadyWith (N.nativeCall manager native) native
+    _<-N.nativeWalletKeysWith (N.nativeCall manager native) native
+    pure ()
   transport=OrderTransport clock (checkOrderAdmission manager settings config store sdk) identity (N.nativeCall manager native) backup
 
 -- The runtime's critical gate spans this workflow, but no DB transaction spans
@@ -53,7 +54,7 @@ createCustomerOrderWith transport native remote reader writer header requested =
         NativeToWrapped->do
           started<-orderClock transport
           claim<-evalWrite writer (ClaimNative started header identifier)
-          address<-N.recoverNativeAddressWith (orderNative transport) native started (mayAllocate claim) (allocationLabel claim)
+          address<-N.recoverNativeAddressWith (orderNative transport) native (mayAllocate claim) (allocationLabel claim)
           evalWrite writer (RecordNative header identifier (allocationLabel claim) address)
         WrappedToNative->do
           started<-orderClock transport

@@ -7,10 +7,10 @@ import qualified Bridge.Config as C
 import Bridge.Error
 import Bridge.Identity (digest)
 import qualified Bridge.Native as N
-import Bridge.Credentials (verifySigningKey)
+import Bridge.Credentials (verifySigningKey,readNativeUnlock,withNativeUnlock)
 import Bridge.Store
 import Control.Exception (bracket,bracketOnError)
-import Control.Monad (forM,void)
+import Control.Monad (forM,forM_,void,when)
 import Crypto.Hash (Context,Digest,SHA256,hashInit,hashUpdate,hashFinalize)
 import Crypto.Random (getRandomBytes)
 import Data.Aeson
@@ -19,9 +19,11 @@ import Data.Bits ((.&.))
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
+import Data.Maybe (isJust)
 import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import qualified Database.PostgreSQL.Simple as PG
 import Network.HTTP.Client (Manager)
 import System.Directory (removeDirectoryRecursive)
@@ -59,21 +61,26 @@ evalCustodyRecovery manager config operation = do
     InspectCustody manifest minimumSequence -> do
       metadata<-evalRestore PG.defaultConnectInfo (InspectCustodyFiles manifest identity minimumSequence)
       let sequenceNo=custodySequence metadata; ledger=custodyLedger metadata; files=custodyFiles metadata
+          encrypted=custodyEncrypted metadata
           directory=takeDirectory manifest
           verify name expected=require (M.lookup name files==Just expected) "custody_backup_hash_mismatch"
       -- Each large archive is hashed once by its existing closed inspector.
       archive<-evalRestore PG.defaultConnectInfo (InspectLedger (directory </> ledger) identity minimumSequence)
       (wallet,nativePath,nativeHash)<-N.evalNativeRecoveryWith call native
         (N.InspectNativeWalletBackup $ directory </> "native-wallet.json")
-      require (M.keys files==M.keys (M.fromList [(name,()) | name<-bundleFiles archive])
+      require (M.keys files==M.keys (M.fromList [(name,()) | name<-bundleFiles archive encrypted])
         && nativePath==directory </> "native-wallet" && wallet==C.nativeWallet config
         && archiveSequence archive==sequenceNo) "custody_backup_binding_mismatch"
       verify (takeFileName $ archivePath archive) (archiveHash archive)
       verify "native-wallet" nativeHash
       mapM_ (\name->hashFile (directory </> name) >>= verify name)
-        [ledger,"native-wallet.json","deployment.json","solana-key.json"]
+        ([ledger,"native-wallet.json","deployment.json","solana-key.json"]<>["native-unlock" | encrypted])
       savedConfig<-C.loadConfig (directory </> "deployment.json")
       require (C.fingerprint savedConfig==identity) "backup_identity_mismatch"
+      require (isJust(C.nativeUnlockFile savedConfig)==encrypted) "custody_backup_binding_mismatch"
+      -- Configuration records its old operational path; inspection uses only
+      -- the bound copy, so recovery remains offline after moving the bundle.
+      when encrypted $ void $ readNativeUnlock (directory </> "native-unlock")
       verifySigningKey (C.custodyOwner config) (directory </> "solana-key.json")
       pure sequenceNo
     UploadCustody configuration manifest minimumSequence -> do
@@ -104,13 +111,16 @@ evalCustodyRecovery manager config operation = do
     before<-evalRead reader ReadState
     require (minimumSequence>=0 && ledgerSequence before>=minimumSequence) "invalid_custody_checkpoint"
     require (not offline || ledgerPaused before) "custody_backup_requires_pause"
-    -- Check again after export so encryption during the snapshot cannot
-    -- silently introduce a dependency on missing unlock material.
-    let unencrypted=do
+    -- Validate the copied secret and recheck after export. Wallet administration
+    -- must be quiescent: before/after checks cannot detect an A-to-B-to-A change.
+    let unlockMaterial=do
           wallet<-N.nativeWalletInfoWith call native
-          require (case wallet of Object o->not(KM.member "unlocked_until" o); _->False)
+          let encrypted=case wallet of Object o->KM.member "unlocked_until" o; _->False
+          require (not encrypted || isJust(C.nativeUnlockFile config))
             "encrypted_native_wallet_recovery_material_required"
-    unencrypted
+          traverse readNativeUnlock (C.nativeUnlockFile config)
+    unlock<-unlockMaterial
+    let encrypted=isJust unlock
     suffix<-T.unpack . T.take 32 . digest <$> (getRandomBytes 16 :: IO BS.ByteString)
     let directory=parent </> "custody-"<>suffix
     bracketOnError (PD.createDirectory directory 0o700 >> pure directory) removeDirectoryRecursive $ \_->do
@@ -118,24 +128,29 @@ evalCustodyRecovery manager config operation = do
       writePrivate (directory </> "solana-key.json") (BL.fromStrict keyBytes)
       verifySigningKey (C.custodyOwner config) (directory </> "solana-key.json")
       writePrivate (directory </> "deployment.json") (encode config)
+      forM_ unlock $ writePrivate (directory </> "native-unlock") . BL.fromStrict . TE.encodeUtf8
+      let validateUnlock=withNativeUnlock call native ((const $ directory </> "native-unlock") <$> unlock) (pure ())
+      validateUnlock
       archive<-evalBackup reader (ExportLedger directory)
       void $ N.evalNativeRecoveryWith call native (N.BackupNativeWallet $ directory </> "native-wallet")
-      unencrypted
+      validateUnlock
+      currentUnlock<-unlockMaterial
+      require (currentUnlock==unlock) "custody_backup_key_changed"
       after<-evalRead reader ReadState
       require ((not offline || ledgerPaused after) && ledgerSequence before==ledgerSequence after
         && archiveSequence archive==ledgerSequence after && archiveIdentity archive==identity) "custody_backup_changed"
       currentKey<-readPrivate 4096 key
       require (currentKey==keyBytes) "custody_backup_key_changed"
-      files<-M.fromList <$> forM (bundleFiles archive) (\name->(,) name <$> hashFile (directory </> name))
+      files<-M.fromList <$> forM (bundleFiles archive encrypted) (\name->(,) name <$> hashFile (directory </> name))
       let manifest=directory </> "custody.json"
-      writePrivate manifest (encode $ CustodyArchive manifest identity (archiveSequence archive) (takeFileName $ manifestPath archive) files)
+      writePrivate manifest (encode $ CustodyArchive manifest identity (archiveSequence archive) (takeFileName $ manifestPath archive) files encrypted)
       sync directory
       sync parent
       pure (manifest,archiveSequence archive)
 
-bundleFiles :: LedgerArchive -> [FilePath]
-bundleFiles archive=[takeFileName $ archivePath archive,takeFileName $ manifestPath archive,
-  "native-wallet","native-wallet.json","deployment.json","solana-key.json"]
+bundleFiles :: LedgerArchive -> Bool -> [FilePath]
+bundleFiles archive encrypted=[takeFileName $ archivePath archive,takeFileName $ manifestPath archive,
+  "native-wallet","native-wallet.json","deployment.json","solana-key.json"]<>["native-unlock" | encrypted]
 
 privateDirectory :: FilePath -> IO ()
 privateDirectory path=do

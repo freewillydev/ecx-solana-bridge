@@ -1,4 +1,5 @@
 {-# LANGUAGE DataKinds, GADTs, RankNTypes, TypeOperators #-}
+{-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- Dedicated signing evaluator: read-only ledger, private signing credentials,
 -- no writer or broadcast operation. The real evaluator never escapes its API.
 module Bridge.Signer
@@ -9,6 +10,7 @@ import Bridge.Credentials
 import qualified Bridge.Config as C
 import Bridge.Recovery
 import Control.Exception (bracket,catch)
+import Control.Monad (forM_)
 import System.Directory (removeDirectoryRecursive)
 import System.FilePath (takeDirectory)
 import System.Timeout (timeout)
@@ -51,14 +53,15 @@ type SigningAPI = BasicAuth "signer" () :>
 signingAPI :: Proxy SigningAPI
 signingAPI=Proxy
 signingServer :: ServerT SigningAPI (Request 'Signer 'Critical)
-signingServer () = (\(identity,identifier,generation)->Request $ SignPrepared identity identifier generation)
-  :<|> (\(identity,decision)->Request $ SignReplacement identity decision)
-  :<|> (\(identity,parent,fee)->Request $ DraftReplacement identity parent fee)
-  :<|> (\(identity,minimumSequence)->Request $ CheckpointCustody identity minimumSequence)
+signingServer () = (\(identity,identifier,generation)->Request $ SignerAction $ PreparedSigning $ SignPrepared identity identifier generation)
+  :<|> (\(identity,decision)->Request $ SignerAction $ ReplacementSigning $ SignReplacement identity decision)
+  :<|> (\(identity,parent,fee)->Request $ SignerAction $ DraftSigning $ DraftReplacement identity parent fee)
+  :<|> (\(identity,minimumSequence)->Request $ SignerAction $ CheckpointSigning $ CheckpointCustody identity minimumSequence)
 
 data SignerSettings = SignerSettings
   { signingNative :: N.NativeSettings, signingSolana :: S.SolanaSettings
   , signingPolicy :: H.SolanaPolicy, signingLibrary :: FilePath, signingKey :: FilePath
+  , signingNativeUnlock :: Maybe FilePath
   , signingBackup :: Maybe (C.Config,FilePath,FilePath) }
 
 -- The gate serializes complete decisions, including RPC/FFI and the second read.
@@ -73,14 +76,15 @@ signerApplication manager reader settings credentials = do
   N.validateNativeSettings native
   S.validateSolanaSettings solana
   verifySigningKey (S.custodyOwner solana) (signingKey settings)
+  forM_ (signingNativeUnlock settings) $ \path->readNativeUnlock path >> pure ()
   gate<-newMVar ()
-  let interpret :: forall a. Request 'Signer 'Critical a -> IO a
-      interpret request=withMVar gate $ \_ -> case resolve request of
+  let evalSigningCritical :: forall a. Request 'Signer 'Critical a -> IO a
+      evalSigningCritical request=withMVar gate $ \_ -> case resolve request of
         SigningDSL (CheckpointSigning (CheckpointCustody identity minimumSequence))->do
           require (identity==H.fingerprint config && minimumSequence>=0) "invalid_custody_checkpoint"
           (deployment,backup,parent)<-maybe (reject "custody_checkpoint_not_configured") pure (signingBackup settings)
           require (C.fingerprint deployment==identity && C.nativeSettings deployment==native
-            && C.solanaSettings deployment==solana) "signer_profile_mismatch"
+            && C.solanaSettings deployment==solana && C.nativeUnlockFile deployment==signingNativeUnlock settings) "signer_profile_mismatch"
           result<-timeout 300000000 $ bracket
             (evalCustodyRecovery manager deployment $ ExportCheckpoint reader (signingKey settings) parent minimumSequence)
             (removeDirectoryRecursive . takeDirectory . fst) $ \(manifest,sequenceNo)->do
@@ -105,9 +109,8 @@ signerApplication manager reader settings credentials = do
                 now<-floor <$> getPOSIXTime
                 evalRead reader (ReadReplacementSigning now decision)
           before@(family,draft)<-readDecision
-          now<-floor <$> getPOSIXTime
-          N.nativeWalletReadyWith (N.nativeCall manager native) native now
-          signed<-signNativeReplacement (N.nativeCall manager native) native (map snd family) draft
+          signed<-withNativeUnlock (N.nativeCall manager native) native (signingNativeUnlock settings) $
+            signNativeReplacement (N.nativeCall manager native) native (map snd family) draft
           after<-readDecision
           require (before==after) "signing_decision_changed"
           parent<-case reverse family of (saved,_):_->pure saved; _->reject "native_replacement_family_bounds"
@@ -123,9 +126,8 @@ signerApplication manager reader settings credentials = do
           reply<-case plan of
             NativeAuthorization saved draft->do
               _<-N.nativeIdentity manager native
-              now<-floor <$> getPOSIXTime
-              N.nativeWalletReadyWith (N.nativeCall manager native) native now
-              NativeReply <$> signNativeDraft (N.nativeCall manager native) saved draft
+              withNativeUnlock (N.nativeCall manager native) native (signingNativeUnlock settings) $
+                NativeReply <$> signNativeDraft (N.nativeCall manager native) saved draft
             SolanaAuthorization saved expected->do
               _<-S.solanaIdentity manager solana
               let limits=config {H.maxSolFee=solPlanFeeLimit saved,H.maxSolAccountRent=solPlanRentLimit saved}
@@ -137,7 +139,7 @@ signerApplication manager reader settings credentials = do
           after<-readDecision
           require (before==after) "signing_decision_changed"
           pure $ PreparedResult verified
-  signingApplication credentials interpret
+  signingApplication credentials evalSigningCritical
 
 -- Startup exposes an authenticated application/server, never its evaluator.
 runSigner :: Manager -> Reader -> SignerSettings -> SigningEndpoint -> IO ()

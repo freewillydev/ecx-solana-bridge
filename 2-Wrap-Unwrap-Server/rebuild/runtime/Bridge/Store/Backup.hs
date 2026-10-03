@@ -282,15 +282,16 @@ downloadArchive program repository password snapshot identity minimumSequence di
     _<-run ["dump",T.unpack snapshot,archiveSource,"--target",archivePath archive]
     loadLedgerArchive identity minimumSequence manifest
 
--- Seven fixed files, with one shared manifest grammar for export/inspection and
+-- Seven fixed files, or eight for an encrypted native wallet, share one grammar for
 -- transport. Parsing establishes paths/identity, not semantic recovery authority.
 data CustodyArchive = CustodyArchive
   { custodyManifest :: FilePath, custodyIdentity :: Text, custodySequence :: Int64
-  , custodyLedger :: FilePath, custodyFiles :: M.Map FilePath Text } deriving (Eq,Show)
+  , custodyLedger :: FilePath, custodyFiles :: M.Map FilePath Text, custodyEncrypted :: Bool } deriving (Eq,Show)
 instance ToJSON CustodyArchive where
-  toJSON archive=object ["format" .= (1::Int),"fingerprint" .= custodyIdentity archive
+  toJSON archive=object $ ["format" .= (if custodyEncrypted archive then 2 else 1::Int),"fingerprint" .= custodyIdentity archive
     ,"criticalSequence" .= custodySequence archive,"ledgerManifest" .= custodyLedger archive
     ,"files" .= custodyFiles archive,"remoteDurabilityAcknowledged" .= False]
+    <> ["nativeEncrypted" .= True | custodyEncrypted archive]
 
 loadCustodyArchive :: Text -> Int64 -> FilePath -> IO CustodyArchive
 loadCustodyArchive identity minimumSequence manifest = do
@@ -301,16 +302,16 @@ custodyArchive identity minimumSequence manifest bytes = do
   require (minimumSequence>=0 && not(T.null identity)) "invalid_restore_policy"
   require (BS.length bytes<=8192) "backup_file_too_large"
   value<-either (const $ reject "invalid_custody_manifest") pure (eitherDecodeStrict' bytes)
-  (saved,n,ledger,files)<-either (const $ reject "invalid_custody_manifest") pure $
-    parseEither (withObject "custody manifest" $ \o->(,,,) <$> o .: "fingerprint" <*> o .: "criticalSequence"
-      <*> o .: "ledgerManifest" <*> o .: "files") value
-  let archive=CustodyArchive manifest saved n ledger files
+  (saved,n,ledger,files,encrypted)<-either (const $ reject "invalid_custody_manifest") pure $
+    parseEither (withObject "custody manifest" $ \o->(,,,,) <$> o .: "fingerprint" <*> o .: "criticalSequence"
+      <*> o .: "ledgerManifest" <*> o .: "files" <*> o .:? "nativeEncrypted" .!= False) value
+  let archive=CustodyArchive manifest saved n ledger files encrypted
       basename name=name==takeFileName name && name `notElem` ["",".",".."]
       checksum value=T.length value==64 && T.all (`elem` ("0123456789abcdef"::String)) value
       dumps=filter (".dump-" `isSuffixOf`) (M.keys files)
   require (takeFileName manifest=="custody.json" && value==toJSON archive && all basename (M.keys files) && all checksum (M.elems files)
     && ".manifest-" `isSuffixOf` ledger && length dumps==1
-    && sort(M.keys files)==sort([ledger,"native-wallet","native-wallet.json","deployment.json","solana-key.json"]<>dumps))
+    && sort(M.keys files)==sort([ledger,"native-wallet","native-wallet.json","deployment.json","solana-key.json"]<>dumps<>["native-unlock" | encrypted]))
     "invalid_custody_manifest"
   require (saved==identity) "backup_identity_mismatch"
   require (n>=minimumSequence) "backup_snapshot_too_old"
@@ -344,7 +345,7 @@ downloadCustodyArchive program repository password snapshot identity minimumSequ
   metadata<-run ["cat","snapshot",T.unpack snapshot] >>= decodeReceipt
   paths<-receiptField "paths" metadata
   tags<-receiptField "tags" metadata
-  require (length paths==7 && all (\path->isAbsolute path && normalise path==path) paths) "backup_snapshot_mismatch"
+  require (length paths `elem` [7,8] && all (\path->isAbsolute path && normalise path==path) paths) "backup_snapshot_mismatch"
   source<-case filter ((=="custody.json").takeFileName) paths of
     [manifest]->pure manifest
     _->reject "backup_snapshot_mismatch"
