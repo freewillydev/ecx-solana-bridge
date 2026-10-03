@@ -718,6 +718,42 @@ runtime lines; **no new production file or refund-specific payout engine**.
 This checkpoint increases source size to complete required behavior; it is not
 presented as a reduction or a claim of perfect security.
 
+## Restored-source approval
+
+The private operator DSL now accepts:
+
+```json
+{"operation":"approve-source-recovery","payment":"<obligation ID>","restoration":123,"reason":"reviewed restored deposit"}
+```
+
+This approves an existing restoration sequence, not a caller-supplied source proof.
+The runtime requires pause, checks the expected restoration, rechecks the actual
+source, reconciles pending payments and custody, then records approval. The final
+Opaleye transaction repeats the latest-restoration and exact suspended-work checks.
+The source must be eligible and its latest recovery must say restored with zero
+shortfall. The obligation must still be under review. The recorded suspension
+must follow any previous approval, name this obligation exactly once and retain
+its unchanged work hash. Pending preparation cancellation prevents approval.
+
+The approval preserves the prior `ready` or `paying` state and records custody,
+loss/restoration sequences, reason, work hash and a new fenced critical sequence.
+It changes no money and does not sign, send or resume. Exact replay is idempotent;
+changed reasons conflict. Replaying an old approval during a newer suspension
+cannot revive the payment. Covered/permanently lost sources cannot use this
+restoration command; their distinct cover/approval workflow remains unfinished.
+
+Build, QuickCheck, disposable PostgreSQL and executable operator checks pass.
+Contracts cover pause/freshness, stale restoration, changed payment history,
+immutable replay, preserved balances, repeated loss/return and observation-only
+refusal. Funded recovery and prepared/signed-payment recovery acceptance remain
+open. This checkpoint adds 101 net storage/schema lines, 15 runtime lines and
+four grammar/control lines, with no new files or migrations. The executable test
+now explicitly terminates and waits for its child before checking fence release;
+this fixes a cleanup race exposed by the threaded test runner. The retained baseline combines restored and covered
+approval; comparing its complete function size to this restored-only subset would
+misstate parity. Existing work hashing, source checks, custody and backup barriers
+are reused rather than introducing another recovery engine.
+
 ## HTTPS worker/signer integration
 
 The existing `rebuild-store-check` executable has an opt-in TLS contract:
@@ -919,7 +955,7 @@ Scoped physical-line comparisons (not whole-product reduction claims):
 | Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
 | Signer module | 144 / 1 file | 117 / 1 file | Now includes startup key validation and shared file permissions; replacement parity pending |
 | Signer transport | 103 / 1 file plus shared web boundary | 69 / 1 file + shared 71-line Web module | Shared module also serves customer API; initial signer route only |
-| Customer/worker runtime | Part of broader Runtime | 413 / 1 file (previous checkpoint 412) | Adds observed treasury-spend classification; single critical dispatch retained |
+| Customer/worker runtime | Part of broader Runtime | 428 / 1 file (previous checkpoint 413) | Adds restored-source approval; single critical dispatch retained |
 | Focused source validation | 63-line mixed validation/storage/recovery function | 67-line dedicated module | Covered-source recovery is still separate unfinished work |
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |

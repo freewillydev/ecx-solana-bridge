@@ -761,6 +761,7 @@ ledgerMain = do
         cancellationContract fixtures reader writer
         expiryContract fixtures reader writer
         treasuryContract fixtures reader writer
+        restorationContract fixtures reader writer
         -- Actual runtime cycle with unavailable RPC: retain all money, stay
         -- paused, record scanner failures, and never reach signer credentials.
         let cycleKey=T.replicate 32 "1"
@@ -800,6 +801,7 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  SourceRecipient :: T.Text -> T.Text -> Fixture ()
   TLSFunds :: Fixture ()
   FreshAt :: Int64 -> Fixture ()
   ChangeTreasuryAnchor :: T.Text -> T.Text -> Fixture ()
@@ -845,6 +847,9 @@ data Fixture a where
   ProtectHolds :: T.Text -> Fixture ()
   CheckPhases :: T.Text -> T.Text -> Fixture Bool
 fixture :: PG.Connection -> Fixture a -> IO a
+fixture c (SourceRecipient key recipient) = void $ O.runUpdate c O.Update {O.uTable=S.obligations,
+  O.uUpdateWith= \row->row {S.obligationRecipient=O.sqlStrictText recipient},
+  O.uWhere= \row->S.obligationId row O..== O.sqlStrictText key,O.uReturning=O.rCount}
 fixture c TLSFunds = PG.withTransaction c $ do
   let text=O.sqlStrictText
   void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(text "tls-funds",text "offline signing contract funds")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
@@ -1303,6 +1308,7 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       ledgerBefore<-evalRead reader ReadState
       check (W.paused service==ledgerPaused ledgerBefore)
       expectStore "observation_only" (operatorControl $ Op.operator Op.ResumeService)
+      expectStore "observation_only" (operatorControl $ Op.operator $ Op.RestoreSource "missing" 1 "restored")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.ClassifySpend "Native" "missing" "owned")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.AllocateReceipt "missing" [("float",money 1)] "owned")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.WithdrawFees (T.replicate 64 "a") Native (money 1) "recipient" "test")
@@ -1439,7 +1445,8 @@ serverMain = do
       bracket (HTTP.newManager HTTP.defaultManagerSettings {HTTP.managerResponseTimeout=HTTP.responseTimeoutMicro 1000000}) HTTP.closeManager $ \manager->
         withFile (directory<>"server.log") WriteMode $ \logFile->
           Process.withCreateProcess (Process.proc binary ["observe",filename])
-            {Process.env=Just childEnv,Process.std_out=Process.UseHandle logFile,Process.std_err=Process.UseHandle logFile} $ \_ _ _ process->do
+            {Process.env=Just childEnv,Process.std_out=Process.UseHandle logFile,Process.std_err=Process.UseHandle logFile} $ \_ _ _ process->
+            flip finally (Process.terminateProcess process >> void (Process.waitForProcess process)) $ do
               let get path=HTTP.parseRequest ("http://127.0.0.1:"<>show port<>path) >>= \request->HTTP.httpLbs request manager
                   wait 0=readFile (directory<>"server.log") >>= fail . ("server did not bind: "<>)
                   wait n=do
@@ -1472,6 +1479,8 @@ serverMain = do
                 object ["operation" .= ("cancel-fees"::T.Text),"id" .= ("missing"::T.Text),"reason" .= ("test"::T.Text)]] $ \command->do
                   result<-control command
                   check (result==object ["error" .= ("observation_only"::T.Text)])
+              restorationRefused<-control (object ["operation" .= ("approve-source-recovery"::T.Text),"payment" .= ("missing"::T.Text),"restoration" .= (1::Int),"reason" .= ("restored"::T.Text)])
+              check (restorationRefused==object ["error" .= ("observation_only"::T.Text)])
               spendRefused<-control (object ["operation" .= ("classify-spend"::T.Text),"chain" .= ("Native"::T.Text),"transaction" .= ("missing"::T.Text),"reason" .= ("owned"::T.Text)])
               check (spendRefused==object ["error" .= ("observation_only"::T.Text)])
               allocationRefused<-control (object ["operation" .= ("allocate-treasury"::T.Text),"deposit" .= ("missing"::T.Text),"split" .= [("float"::T.Text,money 1)],"reason" .= ("owned"::T.Text)])
@@ -1490,7 +1499,7 @@ serverMain = do
               cliStatus<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ T.pack out)
               check (W.paused cliStatus)
               evalRead reader ReadBalances >>= check . (==before)
-      -- withCreateProcess terminated/reaped HTTP and worker together, releasing
+      -- Explicit termination/wait reaped HTTP and worker together, releasing
       -- the real host fence; no daemon or worker is left behind by this check.
       Fence.withFence (Config.fenceDirectory config) identity (const $ pure ())
       evalRead reader ReadBalances >>= check . (==before)
@@ -1986,3 +1995,66 @@ tlsMain=do
                     methods<-readIORef calls
                     check ("simulateTransaction" `elem` methods && "sendTransaction" `notElem` methods)
   putStrLn "PASS: actual HTTPS worker/signer evaluators, auth/certificate refusal, SDK signature, exact persisted bytes and network-free replay; offline RPC vectors only"
+
+restorationContract :: PG.Connection -> Reader -> Writer -> IO ()
+restorationContract fixtures reader writer=do
+  let check ok=unless ok (fail $ "source restoration contract failed\n"<>prettyCallStack callStack)
+      header="Bearer "<>T.replicate 64 "8"
+      request=W.OrderRequest NativeToWrapped (money 10) "recipient" "refund" Nothing "restoration-contract"
+      tx=T.replicate 64 "8"; did="native:"<>tx<>":0"; observationHash=T.replicate 64 "f"
+      approve key sequenceNo reason=evalWrite writer (ApproveSourceRestoration 110 key sequenceNo reason)
+      restore=do
+        source<-evalRead reader (ReadSource did)
+        let returned=source {W.depositEligible=True,W.depositConfirmations=2}
+        evalWrite writer (RefreshPaymentSource source returned)
+        evalWrite writer (RecordSourceCheck returned $ W.SourceRestored $ object ["observationHash" .= observationHash])
+        ledgerSequence <$> evalRead reader ReadState
+      suspend=do
+        source<-evalRead reader (ReadSource did)
+        evalWrite writer (RefreshPaymentSource source source {W.depositEligible=False,W.depositConfirmations=0})
+  fixture fixtures ReadyIntake
+  oid<-evalWrite writer (CreateOrder 110 header request)
+  claim<-evalWrite writer (ClaimNative 110 header oid)
+  void $ evalWrite writer (RecordNative header oid (allocationLabel claim) "restoration-address")
+  fixture fixtures (SeedReceipt did (Just oid) Native 10 2 True 110)
+  fixture fixtures (SeedSourceEvidence tx observationHash)
+  evalWrite writer (PromoteDeposit 110 did) >>= check
+  let key="convert:"<>oid
+  savedHash<-evalRead reader (ReadSourceWorkHash key)
+  suspend
+  evalRead reader (ReadPayment key) >>= check . (==PaymentReview) . savedStatus
+  before<-evalRead reader ReadBalances
+  restoration<-restore
+  evalRead reader (ReadSourceWorkHash key) >>= check . (==savedHash)
+  evalRead reader (CheckSourceRestoration key restoration)
+  expectStore "source_approval_not_expected" (evalRead reader $ CheckSourceRestoration key (restoration-1))
+  expectStore "custody_not_reconciled" (approve key restoration "source reviewed")
+  fixture fixtures ReadyIntake
+  expectStore "pause_before_operator_action" (approve key restoration "source reviewed")
+  evalWrite writer (Pause "source contract")
+  fixture fixtures RefreshCustody
+  fixture fixtures (SourceRecipient key "changed")
+  expectStore "source_review_work_changed" (approve key restoration "source reviewed")
+  fixture fixtures (SourceRecipient key "recipient")
+  fixture fixtures RefreshCustody
+  approve key restoration "source reviewed"
+  recorded<-evalRead reader ReadState
+  check (ledgerPaused recorded)
+  evalRead reader (ReadPayment key) >>= check . (==PaymentReady) . savedStatus
+  evalRead reader (ReadSourceApproval key restoration) >>= check . (==Just "source reviewed")
+  approve key restoration "source reviewed"
+  replay<-evalRead reader ReadState
+  check (ledgerSequence replay==ledgerSequence recorded)
+  expectStore "source_approval_conflict" (approve key restoration "changed reason")
+  evalRead reader ReadBalances >>= check . (==before)
+  -- Old approval replay cannot revive a second suspension, even after return.
+  suspend
+  approve key restoration "source reviewed"
+  evalRead reader (ReadPayment key) >>= check . (==PaymentReview) . savedStatus
+  second<-restore
+  check (second>restoration)
+  evalRead reader (CheckSourceRestoration key second)
+  fixture fixtures RefreshCustody
+  approve key second "second restoration"
+  evalRead reader (ReadPayment key) >>= check . (==PaymentReady) . savedStatus
+  evalRead reader ReadBalances >>= check . (==before)

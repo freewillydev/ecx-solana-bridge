@@ -33,6 +33,9 @@ controlPlan=withObject "operator command" $ \o->do
   case command of
     "status"->fields ["operation"] >> pure (ControlPlan $ operatorRead ServiceState)
     "pause"->fields ["operation","reason"] >> (ControlPlan . operator . PauseService <$> o .: "reason")
+    "approve-source-recovery"->do
+      fields ["operation","payment","restoration","reason"]
+      ControlPlan . operator <$> (RestoreSource <$> o .: "payment" <*> o .: "restoration" <*> o .: "reason")
     "classify-spend"->do
       fields ["operation","chain","transaction","reason"]
       ControlPlan . operator <$> (ClassifySpend <$> o .: "chain" <*> o .: "transaction" <*> o .: "reason")

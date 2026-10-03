@@ -23,7 +23,7 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Control.Concurrent.MVar
 import Control.Exception
 import Control.Monad (unless,forM,forM_,when)
-import Data.Aeson (Key,FromJSON,ToJSON,Value(Null),object,(.=),encode,eitherDecodeStrict',withObject,(.:))
+import Data.Aeson (Key,FromJSON,ToJSON,Value(Null),object,(.=),encode,eitherDecodeStrict',withObject,(.:),(.:?))
 import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
@@ -74,6 +74,8 @@ data CustodySnapshot = CustodySnapshot
   { custodyRevision :: Int64, custodyTotals :: M.Map Asset Integer
   , custodyHeads :: [(Text,Text)], custodySlot :: Int64, custodyPending :: [RecordedAttempt] } deriving (Eq,Show)
 data StoreRead a where
+  ReadSourceApproval :: Text -> Int64 -> StoreRead (Maybe Text)
+  CheckSourceRestoration :: Text -> Int64 -> StoreRead ()
   ReadSolanaExpiry :: Text -> StoreRead (Maybe Text)
   ReadRetryApproval :: Text -> StoreRead (Maybe Text)
   ReadRecordedPreparation :: Text -> StoreRead PreparedPayment
@@ -111,6 +113,7 @@ data StoreRead a where
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
+  ApproveSourceRestoration :: Int64 -> Text -> Int64 -> Text -> StoreWrite ()
   ClassifyTreasurySpend :: Text -> Text -> Text -> StoreWrite Int64
   AllocateTreasury :: Int64 -> Text -> [(Text,Amount)] -> Text -> StoreWrite Int64
   RecordSolanaExpiry :: RecordedAttempt -> Text -> StoreWrite ()
@@ -206,6 +209,8 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
       PendingAttempts -> pendingAttempts c
       PaymentCandidates -> paymentCandidates c
       ReadState -> pure (LedgerState (S.criticalSequence row) (S.backupSequence row) (S.paused row/=0) (S.pauseReason row))
+      ReadSourceApproval key restoration -> sourceApproval c key restoration
+      CheckSourceRestoration key restoration -> sourceRestoration c key restoration >> pure ()
       ReadSolanaExpiry txid -> expiryProof c txid
       ReadRetryApproval txid -> retryReason c txid
       ReadRecordedPreparation txid -> recordedPreparation c identity txid
@@ -334,6 +339,7 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
     _ <- O.runInsert c O.Insert {O.iTable=S.audit,
       O.iRows=[(Nothing,O.sqlStrictText "pause",O.sqlStrictText explanation)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
     pure ()
+  ApproveSourceRestoration now key restoration reason -> approveSourceRestoration c policy now key restoration reason
   ClassifyTreasurySpend chain key reason -> classifyTreasurySpend c policy chain key reason
   AllocateTreasury now receipt split reason -> allocateTreasury c policy now receipt split reason
   ReserveFees now key currency n destination explanation -> do
@@ -2403,3 +2409,96 @@ classifyTreasurySpend c policy chain key reason = do
     O.uWhere= \row->S.eventChain row O..== text chain O..&& S.eventId row O..== text key O..&& S.eventReview row O../= num 0,O.uReturning=O.rCount}
   pure sequenceNo
  where field name value=either (const $ reject "invalid_treasury_evidence") pure (parseEither (withObject "treasury evidence" (.: name)) value)
+
+sourceApproval :: PG.Connection -> Text -> Int64 -> IO (Maybe Text)
+sourceApproval c key restoration = do
+  rows<-O.runSelect c $ do
+    (identifier,sequenceNo,_,_,_,reason,proof,_)<-O.selectTable S.sourceRecoveryDecisions
+    O.where_ (identifier O..== O.sqlStrictText key O..&& sequenceNo O..== O.sqlInt8 restoration)
+    pure (reason,proof)
+    :: IO [(Text,Text)]
+  case rows of
+    []->pure Nothing
+    [(reason,raw)]->do
+      proof<-decodeSaved raw
+      cover<-either (const $ reject "invalid_source_approval") pure (parseEither (withObject "approval" (.:? "sourceCover")) proof) :: IO (Maybe Int64)
+      require (cover==Nothing) "source_approval_kind_mismatch"
+      pure (Just reason)
+    _->reject "duplicate_source_approval"
+
+-- Bind approval to the latest restoration and the exact suspended work. Source
+-- eligibility alone cannot revive an obligation or approve a newer work history.
+sourceRestoration :: PG.Connection -> Text -> Int64 -> IO (S.Obligation,Text,Int64,Text)
+sourceRestoration c key restoration = do
+  let text=O.sqlStrictText; num=O.sqlInt8
+  rows<-O.runSelect c $ do
+    obligation<-O.selectTable S.obligations
+    deposit<-O.selectTable S.deposits
+    O.where_ (S.obligationId obligation O..== text key O..&& S.obligationDeposit obligation O..== S.depositId deposit)
+    pure (obligation,deposit)
+    :: IO [(S.Obligation,S.Deposit)]
+  (obligation,deposit)<-case rows of [row]->pure row; _->reject "source_approval_not_expected"
+  history<-O.runSelect c $ O.orderBy (O.desc (\(n,_,_,_,_,_)->n)) $ do
+    row@(_,receipt,_,_,_,_)<-O.selectTable S.sourceChecks
+    O.where_ (receipt O..== text(S.depositId deposit))
+    pure row
+    :: IO [(Int64,Text,Text,Int64,Text,Int64)]
+  require (S.obligationStatus obligation=="review" && S.depositEligible deposit==1 && case history of
+    (_,_,"restored",0,_,n):_->n==restoration; _->False) "source_approval_not_expected"
+  approvals<-O.runSelect c $ do
+    (identifier,n)<-S.sourceApprovals
+    O.where_ (identifier O..== text key)
+    pure n
+    :: IO [Int64]
+  let cutoff=maximum(0:approvals)
+  reviews<-forM [row | row@(_,_,_,_,_,n)<-history,n>cutoff && n<restoration] $ \(_,_,_,_,raw,n)->do
+    evidence<-decodeSaved raw
+    reason<-either (const $ reject "invalid_source_recovery_evidence") pure (parseEither (withObject "recovery" (.:? "reason")) evidence)
+    if reason/=Just ("source_eligibility_lost"::Text) then pure [] else do
+      entries<-field "reviewedObligations" evidence :: IO [Value]
+      matches<-forM entries $ \entry->do
+        identifier<-field "intent" entry
+        if identifier/=key then pure [] else do
+          previous<-field "previousStatus" entry; hash<-field "workHash" entry
+          pure [(previous,n,hash)]
+      require (length(concat matches)<=1) "source_review_context_missing"
+      pure (concat matches)
+  (previous,loss,expected)<-case concat reviews of
+    row@(state,_,_):_ | state `elem` ["ready","paying"]->pure row
+    _->reject "source_review_context_missing"
+  actual<-sourceWorkHash c key
+  require (expected==actual) "source_review_work_changed"
+  pending<-O.runSelect c $ do
+    (identifier,g,_,_,done)<-S.workCancellations
+    O.where_ (identifier O..== text key O..&& done O..== num 0)
+    pure g
+    :: IO [Int64]
+  require (null pending) "preparation_cancellation_pending"
+  pure (obligation,previous,loss,actual)
+ where field name value=either (const $ reject "invalid_source_recovery_evidence") pure (parseEither (withObject "recovery" (.: name)) value)
+
+approveSourceRestoration :: PG.Connection -> PaymentTerms -> Int64 -> Text -> Int64 -> Text -> IO ()
+approveSourceRestoration c policy now key restoration reason = do
+  validReason reason
+  require (restoration>0) "invalid_source_approval"
+  state<-metadata c (deploymentFingerprint $ paymentPolicy policy)
+  require (S.paused state==1) "pause_before_operator_action"
+  old<-sourceApproval c key restoration
+  case old of
+    Just previous->require (previous==reason) "source_approval_conflict"
+    Nothing->do
+      (_,previous,loss,hash)<-sourceRestoration c key restoration
+      fresh c now
+      checks<-O.runSelect c $ do
+        (_,revision,_,at,_)<-O.selectTable S.custody
+        (_,report)<-O.selectTable S.custodyReport
+        pure (revision,at,report)
+        :: IO [(Int64,Maybe Int64,Maybe Text)]
+      let proof=encodeSaved $ object ["custody" .= checks,"sourceRestoration" .= restoration]
+          text=O.sqlStrictText; num=O.sqlInt8
+      require (T.length proof<=32768) "source_approval_evidence_too_large"
+      sequenceNo<-nextSequence c
+      count<-O.runInsert c O.Insert {O.iTable=S.sourceRecoveryDecisions,O.iRows=[(text key,num restoration,num loss,text previous,text hash,text reason,text proof,num sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      updated<-O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \row->row {S.obligationStatus=text previous},O.uWhere= \row->S.obligationId row O..== text key,O.uReturning=O.rCount}
+      require (count==1 && updated==1) "source_approval_changed"
+      audit c "source_recovery_approved" key

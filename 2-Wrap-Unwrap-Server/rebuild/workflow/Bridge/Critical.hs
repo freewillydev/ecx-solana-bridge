@@ -120,6 +120,21 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
       evalCritical (WriteCustomer (Bridge.Operation.Internal.CreateOrder header request))=do
         c<-customer
         createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (coverBackup c) reader writer header request
+      evalCritical (OperatorDSL (RestoreSource key restoration reason))=guarded $ do
+        require (restoration>0 && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_source_approval"
+        state<-evalRead reader ReadState
+        require (ledgerPaused state) "pause_before_operator_action"
+        previous<-evalRead reader (ReadSourceApproval key restoration)
+        case previous of
+          Just old->require (old==reason) "source_approval_conflict"
+          Nothing->do
+            evalRead reader (CheckSourceRestoration key restoration)
+            refreshSource key
+            pending<-evalRead reader PendingAttempts
+            mapM_ (evalWorker . ReconcilePayment) pending
+            evalWorker ReconcileCustody
+            now<-floor <$> getPOSIXTime
+            evalWrite writer (ApproveSourceRestoration now key restoration reason)
       evalCritical (OperatorDSL (ClassifySpend chain key reason))=evalWrite writer (ClassifyTreasurySpend chain key reason)
       evalCritical (OperatorDSL (AllocateReceipt receipt split reason))=do
         now<-floor <$> getPOSIXTime

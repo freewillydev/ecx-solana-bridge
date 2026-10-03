@@ -3,7 +3,7 @@
 module Bridge.Store.Schema where
 import Data.Int (Int64)
 import Data.Text (Text)
-import Data.Profunctor.Product (p2,p3,p4,p5,p6)
+import Data.Profunctor.Product (p2,p3,p4,p5,p6,p8)
 import Data.Profunctor.Product.TH (makeAdaptorAndInstance)
 import qualified Opaleye as O
 
@@ -246,9 +246,11 @@ attempts = O.table "attempts" $ pAttempt Attempt
 replacementMembers :: O.Select (IntField,TextField,IntField)
 replacementMembers = O.selectTable $ O.table "native_replacement_members" $ p3
   (O.requiredTableField "draft_sequence",O.requiredTableField "txid",O.requiredTableField "critical_sequence")
+sourceRecoveryDecisions :: O.Table (TextField,IntField,IntField,TextField,TextField,TextField,TextField,IntField) (TextField,IntField,IntField,TextField,TextField,TextField,TextField,IntField)
+sourceRecoveryDecisions = O.table "source_recovery_approvals" $ p8
+  (O.requiredTableField "obligation_id",O.requiredTableField "restoration_sequence",O.requiredTableField "loss_sequence",O.requiredTableField "prior_status",O.requiredTableField "work_hash",O.requiredTableField "reason",O.requiredTableField "proof_json",O.requiredTableField "critical_sequence")
 sourceApprovals :: O.Select (TextField,IntField)
-sourceApprovals = O.selectTable $ O.table "source_recovery_approvals" $ p2
-  (O.requiredTableField "obligation_id",O.requiredTableField "critical_sequence")
+sourceApprovals = fmap (\(key,_,_,_,_,_,_,n)->(key,n)) (O.selectTable sourceRecoveryDecisions)
 
 provenLosses :: O.Select TextField
 provenLosses = O.selectTable $ O.table "proven_source_losses" (O.requiredTableField "deposit_id")

@@ -28,6 +28,7 @@ data OperatorRead a where
   ServiceState :: OperatorRead ServiceStatus
 
 data OperatorWrite a where
+  RestoreSource :: Text -> Int64 -> Text -> OperatorWrite ()
   ClassifySpend :: Text -> Text -> Text -> OperatorWrite Int64
   AllocateReceipt :: Text -> [(Text,Amount)] -> Text -> OperatorWrite Int64
   WithdrawFees :: Text -> Asset -> Amount -> Text -> Text -> OperatorWrite Text
