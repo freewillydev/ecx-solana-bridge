@@ -2,6 +2,7 @@
 -- Grammar only. Neither requests nor DSL values contain executable IO.
 module Bridge.Operation.Internal where
 
+import Bridge.Domain (Asset,Amount)
 import Bridge.Wire
 import Data.Kind (Type)
 import Data.Text (Text)
@@ -27,6 +28,8 @@ data OperatorRead a where
   ServiceState :: OperatorRead ServiceStatus
 
 data OperatorWrite a where
+  WithdrawFees :: Text -> Asset -> Amount -> Text -> Text -> OperatorWrite Text
+  CancelFeeWithdrawal :: Text -> Text -> OperatorWrite Text
   RetrySolanaPayment :: Text -> Text -> OperatorWrite ()
   CancelPreparation :: Text -> Int -> Text -> OperatorWrite ()
   RefundDeposit :: Text -> OperatorWrite RefundAuthorization

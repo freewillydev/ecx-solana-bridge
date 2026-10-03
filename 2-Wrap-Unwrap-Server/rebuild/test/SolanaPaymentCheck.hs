@@ -2,7 +2,7 @@
 module SolanaPaymentCheck (checks) where
 import Bridge.Domain (Amount, Asset(..), Direction(..), amount, units, earnedFees, payment)
 import Bridge.Payment
-import Bridge.Admission (checkSolanaQuoteWith)
+import Bridge.Admission (checkSolanaQuoteWith,checkSolanaPayoutWith)
 import Bridge.PaymentObservation
 import Bridge.Store
 import qualified Bridge.Wire as W
@@ -122,6 +122,7 @@ checks=do
                   _->fail "unexpected simulation parameters"
                 _->call Null method args
         checkSolanaQuoteWith preflight helper config order
+        checkSolanaPayoutWith preflight helper config recipient (amt 3)
         signedPreview<-rejectsAny (checkSolanaQuoteWith preflight (const $ pure reply) config order)
         failedSimulation<-rejects "solana_simulation_failed" (checkSolanaQuoteWith
           (\method args->if method=="simulateTransaction" then pure $ context $ object ["err" .= String "failure"] else preflight method args) helper config order)

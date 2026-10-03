@@ -2,8 +2,9 @@
 -- The signer ClientM is constructed only inside this critical evaluator.
 module Bridge.Critical (CustomerSettings(..),withRuntime,runWorkerLoop) where
 import Bridge.Operation.Internal
-import Bridge.Domain (Asset(..),gross,paymentAsset)
+import Bridge.Domain (Asset(..),gross,paymentAsset,paymentId,units)
 import Bridge.Identity (payURIFor)
+import Bridge.Admission (checkSolanaPayoutWith)
 import Bridge.Order (createCustomerOrder)
 import Data.Int (Int64)
 import qualified Data.Map.Strict as M
@@ -15,7 +16,7 @@ import Bridge.Reconciliation (reconcileCustody)
 import Bridge.PaymentSource (verifyPaymentSource)
 import qualified Bridge.Wire as W
 import Control.Monad (forM_,when,forever)
-import Bridge.NativePayment (NativeSigned,checkNativeAcceptance,releaseNativeInputLocks)
+import Bridge.NativePayment (NativeSigned,previewNativePayment,checkNativeAcceptance,releaseNativeInputLocks)
 import Bridge.SolanaPayment (SolanaSigned,signedSolanaPlan,solPlanRecent,checkBlockhashWindow)
 import Data.Text (Text)
 import Bridge.PaymentObservation
@@ -119,6 +120,34 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
       evalCritical (WriteCustomer (Bridge.Operation.Internal.CreateOrder header request))=do
         c<-customer
         createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (coverBackup c) reader writer header request
+      evalCritical (OperatorDSL (WithdrawFees key asset quantity recipient reason))=guarded $ do
+        c<-customer
+        require (T.length key==64 && T.all (`elem` ("0123456789abcdef"::String)) key
+          && not(T.null $ T.strip reason) && T.length reason<=512
+          && units quantity>0 && quantity<=orderMaximum(admissionLimits $ customerPolicy c)
+          && asset `elem` [Native,Wrapped]) "invalid_fee_withdrawal"
+        previous<-evalRead reader (ReadWithdrawal key)
+        case previous of
+          Just _->pure () -- Store checks exact immutable replay before returning it.
+          Nothing->do
+            state<-evalRead reader ReadState
+            require (ledgerPaused state) "pause_before_operator_action"
+            case asset of
+              Native->do
+                _<-N.nativeIdentity rpc native
+                previewNativePayment (N.nativeCall rpc native) (N.profile native) (defaultNativeDepth settings)
+                  (W.savedNativeFee $ W.paymentLimits $ executionTerms $ customerPolicy c) recipient quantity
+              Wrapped->do
+                _<-S.solanaIdentity rpc solana
+                checkSolanaPayoutWith (S.solanaCall rpc solana) (H.invokeUnsignedHelper (unsignedSdk c) config) config recipient quantity
+              Sol->reject "invalid_payout_asset"
+            evalWorker ReconcileCustody
+        now<-floor <$> getPOSIXTime
+        paymentId . withdrawalPayment <$> evalWrite writer (ReserveFees now key asset quantity recipient reason)
+      evalCritical (OperatorDSL (CancelFeeWithdrawal key reason))=do
+        state<-evalRead reader ReadState
+        require (ledgerPaused state) "pause_before_operator_action"
+        paymentId . withdrawalPayment <$> evalWrite writer (CancelFees key reason)
       evalCritical (OperatorDSL (RetrySolanaPayment txid reason))=guarded $ do
         require (not(T.null $ T.strip reason) && T.length reason<=512) "invalid_retry_approval"
         previous<-evalRead reader (ReadRetryApproval txid)

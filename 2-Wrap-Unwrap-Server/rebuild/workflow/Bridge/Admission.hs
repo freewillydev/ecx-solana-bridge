@@ -1,5 +1,5 @@
 -- Previews grant no authority and never sign, allocate keys, or send.
-module Bridge.Admission (checkOrderAdmission,checkSolanaQuoteWith) where
+module Bridge.Admission (checkOrderAdmission,checkSolanaQuoteWith,checkSolanaPayoutWith) where
 import Bridge.Domain (Direction(..),units,amount)
 import qualified Bridge.Domain as D
 import Bridge.Wire (OrderRequest(..),PaymentTerms(..),CostLimits(..),PolicySnapshot(..))
@@ -43,8 +43,12 @@ checkSolanaQuoteWith :: SolanaRPC -> (HelperRequest -> IO HelperReply) -> Solana
 checkSolanaQuoteWith call helper c request = do
   require (direction request==NativeToWrapped && sourceOwner request==Nothing) "invalid_solana_owner_binding"
   quote <- either reject pure(D.quote (input request))
-  let owner=recipient request
-      outgoing=D.net quote
+  checkSolanaPayoutWith call helper c (recipient request) (D.net quote)
+
+-- Customer quotes and earned withdrawals validate the same exact payout.
+checkSolanaPayoutWith :: SolanaRPC -> (HelperRequest -> IO HelperReply) -> SolanaPolicy -> Text -> D.Amount -> IO ()
+checkSolanaPayoutWith call helper c owner outgoing = do
+  require (units outgoing>0) "invalid_payout_amount"
   require (T.length owner<=44) "invalid_public_key"
   _ <- either reject pure (publicKey owner)
   require (owner `notElem` [custodyOwner c,custodyAta c,mint c]) "bridge_owned_destination"

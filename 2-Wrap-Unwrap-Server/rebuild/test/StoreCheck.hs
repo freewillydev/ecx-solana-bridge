@@ -1276,6 +1276,8 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       ledgerBefore<-evalRead reader ReadState
       check (W.paused service==ledgerPaused ledgerBefore)
       expectStore "observation_only" (operatorControl $ Op.operator Op.ResumeService)
+      expectStore "observation_only" (operatorControl $ Op.operator $ Op.WithdrawFees (T.replicate 64 "a") Native (money 1) "recipient" "test")
+      expectStore "observation_only" (operatorControl $ Op.operator $ Op.CancelFeeWithdrawal "missing" "test")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.RefundDeposit "missing")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.CancelPreparation "missing" 0 "test")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.RetrySolanaPayment "missing" "test")
@@ -1295,7 +1297,16 @@ orderWorkflowContract fixtures reader writer storePolicy = do
         ((WaiTest.setPath Wai.defaultRequest ("/api/v1/orders/"<>TE.encodeUtf8 wrapId))
           {Wai.requestHeaders=[("Authorization",TE.encodeUtf8 header)]}) "") app
       check (statusCode(WaiTest.simpleStatus response)==200 && eitherDecodeStrict' (BL.toStrict $ WaiTest.simpleBody response)==Right recovered)
-    withRuntime manager chainSettings config (Just customerSettings {publicConfiguration=public {W.pubIntakeEnabled=True}}) endpoint reader writer $ \_ customer _operator->do
+    withRuntime manager chainSettings config (Just customerSettings {publicConfiguration=public {W.pubIntakeEnabled=True}}) endpoint reader writer $ \_ customer operatorControl->do
+      let withdrawal=T.replicate 64 "a"
+      before<-evalRead reader ReadState
+      result<-operatorControl (Op.operator $ Op.WithdrawFees withdrawal Native (money 100) "recipient" "test owned revenue")
+      cancelled<-operatorControl (Op.operator $ Op.CancelFeeWithdrawal withdrawal "cancel")
+      after<-evalRead reader ReadState
+      check (result=="fee:"<>withdrawal && cancelled==result && ledgerSequence before==ledgerSequence after)
+      expectStore "fee_withdrawal_conflict" (operatorControl $ Op.operator $ Op.WithdrawFees withdrawal Native (money 101) "recipient" "test owned revenue")
+      expectStore "fee_withdrawal_cancellation_conflict" (operatorControl $ Op.operator $ Op.CancelFeeWithdrawal withdrawal "changed")
+      expectStore "invalid_fee_withdrawal" (operatorControl $ Op.operator $ Op.WithdrawFees withdrawal Sol (money 1) "recipient" "test")
       saved<-customer (Op.customer $ Op.CreateOrder header wrapping)
       check (W.depositInstruction saved==W.depositInstruction recovered && W.quote saved==W.quote recovered)
     expectStore "customer_configuration_mismatch" $ withRuntime manager chainSettings config
@@ -1428,6 +1439,10 @@ serverMain = do
               check (W.paused service)
               refused<-control (object ["operation" .= ("resume"::T.Text)])
               check (refused==object ["error" .= ("observation_only"::T.Text)])
+              forM_ [object ["operation" .= ("withdraw-fees"::T.Text),"id" .= T.replicate 64 "a","asset" .= Native,"amount" .= money 1,"recipient" .= ("recipient"::T.Text),"reason" .= ("test"::T.Text)],
+                object ["operation" .= ("cancel-fees"::T.Text),"id" .= ("missing"::T.Text),"reason" .= ("test"::T.Text)]] $ \command->do
+                  result<-control command
+                  check (result==object ["error" .= ("observation_only"::T.Text)])
               refundRefused<-control (object ["operation" .= ("refund"::T.Text),"deposit" .= ("missing"::T.Text)])
               check (refundRefused==object ["error" .= ("observation_only"::T.Text)])
               retryRefused<-control (object ["operation" .= ("retry-solana"::T.Text),"transaction" .= ("missing"::T.Text),"reason" .= ("test"::T.Text)])

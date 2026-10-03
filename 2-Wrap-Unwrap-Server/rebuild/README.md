@@ -717,6 +717,39 @@ runtime lines; **no new production file or refund-specific payout engine**.
 This checkpoint increases source size to complete required behavior; it is not
 presented as a reduction or a claim of perfect security.
 
+## Earned-fee operator integration
+
+The private operator interface now accepts:
+
+```json
+{"operation":"withdraw-fees","id":"<64 lowercase hexadecimal characters>","asset":"Native","amount":"10000","recipient":"<destination>","reason":"operator revenue withdrawal"}
+{"operation":"cancel-fees","id":"<same identifier>","reason":"cancel unsigned withdrawal"}
+```
+
+Both return the durable `fee:<id>` payment identifier. `asset` is `Native` or
+`Wrapped`; amounts are integer base-unit strings. These commands do not sign or
+send immediately. New reservations require paused operation, actual chain identity
+and destination/payout preflight, fresh custody, available earned revenue and
+immutable terms. Solana withdrawals preview the exact requested amount, without
+applying a second wrapping fee. Customer quotes and withdrawals share that preview.
+Exact reservation replay checks saved terms without requiring another RPC call;
+a cancelled identifier remains cancelled. Changed terms conflict. Cancellation
+requires pause and the existing ledger rules: no signed or uncertain payout may
+release its reservation. Completed unsigned preparation cancellation is supported.
+After explicit resume, the existing worker handles preparation, signing, backup
+gates, submission and settlement through the same payment engine as customer work.
+Observation-only mode rejects both commands before reaching the network or writer.
+
+This checkpoint adds no files, database operations or migrations. Physical module
+counts: Admission **86 → 90**, Critical **380 → 409**, Control **109 → 115**,
+plus three grammar/import lines. These are integration additions, not a size
+reduction. Sharing the exact-amount preview avoids a second Solana validation path;
+closed operator constructors retain the single authorized critical dispatch.
+Cabal build/QuickCheck, disposable PostgreSQL replay/conflict/cancellation contracts
+and executable operator transport checks pass. Captured/offline preview tests are
+not proof of a funded withdrawal; live two-process withdrawal acceptance remains.
+Treasury allocation and observed operator-spend classification still need porting.
+
 ## Private operator checkpoint
 
 `cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- operator CONFIG`
@@ -774,7 +807,7 @@ Scoped physical-line comparisons (not whole-product reduction claims):
 | Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
 | Signer module | 144 / 1 file | 117 / 1 file | Now includes startup key validation and shared file permissions; replacement parity pending |
 | Signer transport | 103 / 1 file plus shared web boundary | 69 / 1 file + shared 71-line Web module | Shared module also serves customer API; initial signer route only |
-| Customer/worker runtime | Part of broader Runtime | 380 / 1 file (previous checkpoint 352) | Adds proved Solana expiry/retry; single critical dispatch retained; retains one critical dispatch |
+| Customer/worker runtime | Part of broader Runtime | 409 / 1 file (previous checkpoint 380) | Adds earned-fee operator integration; single critical dispatch retained |
 | Focused source validation | 63-line mixed validation/storage/recovery function | 67-line dedicated module | Covered-source recovery is still separate unfinished work |
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |
