@@ -173,8 +173,16 @@ custodyBundleContract binary manager base directory=withTestSigningKey $ \key->d
     fixture fixtures (InitializeIdentity identity)
     Fence.initializeFence (Config.fenceDirectory config) identity 0
     beforeFiles<-listDirectory directory
-    withFencedWriter settings (Config.storePolicy config) (Config.fenceDirectory config) $ \_->
+    withFencedWriter settings (Config.storePolicy config) (Config.fenceDirectory config) $ \_->do
       expectStore "worker_fence_locked" export
+      -- The signer has only SELECT authority and can checkpoint while the
+      -- worker retains exclusive ownership. Both use the same bundle format.
+      withReader readerSettings identity (Config.backupRequired config) $ \reader->do
+        expectStore "invalid_custody_checkpoint" (evalCustodyRecovery manager config $ ExportCheckpoint reader key directory 1)
+        bracket (evalCustodyRecovery manager config $ ExportCheckpoint reader key directory 0)
+          (removeDirectoryRecursive . takeDirectory . fst) $ \(checkpoint,n)->do
+            check (n==0)
+            evalCustodyRecovery manager config (InspectCustody checkpoint n) >>= check . (==n)
     withWriter settings (Config.storePolicy config) (const $ pure ()) $ \_->
       expectStore "worker_already_running" export
     failedBackups<-newIORef (0::Int)
@@ -664,9 +672,11 @@ ledgerMain = do
               16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47"
             solana=Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing publicKey publicKey publicKey
             signing=SignerSettings native solana (H.SolanaPolicy "contract" "contract" publicKey publicKey publicKey (money 10) (money 10))
-              "/unused/sdk" "/unused/key"
+              "/unused/sdk" "/unused/key" Nothing
         bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "unauthorized signer reached network"}) closeManager $ \manager -> do
           withTestSigningKey $ \keyFile->withSigner manager reader signing {signingKey=keyFile} $ \interpret -> do
+            expectStore "custody_checkpoint_not_configured" (interpret $ Request $ CheckpointCustody "contract" 0)
+            expectStore "invalid_custody_checkpoint" (interpret $ Request $ CheckpointCustody "other" 0)
             expectStore "signer_profile_mismatch" (interpret $ Request $ SignPrepared "other" intent 0)
             expectStore "invalid_signing_decision" (interpret $ Request $ SignPrepared "contract" intent 8)
             expectStore "signing_backup_required" (interpret $ Request $ SignPrepared "contract" intent 0)
@@ -1568,7 +1578,7 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       config=H.SolanaPolicy "contract" "contract" key key key (money 10) (money 10)
       public=W.PublicConfiguration W.L2LSignetDevnet "devnet" (W.InterfaceConfig Nothing Nothing Nothing Nothing Nothing)
         "contract" key key 8 (money 2) (money 1000) (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]) False False (W.Availability False "starting")
-      customerSettings=CustomerSettings public storePolicy "/unused/sdk" backup
+      customerSettings=CustomerSettings public storePolicy "/unused/sdk"
       endpoint=SigningEndpoint 9443 "/unused/auth"
   bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "runtime replay/read reached network"}) closeManager $ \manager->do
     withRuntime manager chainSettings config (Just customerSettings) endpoint reader writer $ \worker customer operatorControl->do
@@ -2309,8 +2319,18 @@ tlsMain=do
             case address of NS.SockAddrInet p _->pure (fromIntegral p); _->fail "unexpected listener"
           Warp.testWithApplication (pure rpcApplication) $ \rpcPort->
             bracket (newManager defaultManagerSettings {managerModifyRequest= \request->pure request {HTTP.secure=False,HTTP.host="127.0.0.1",HTTP.port=rpcPort}}) closeManager $ \manager->
-              withSigner manager reader (SignerSettings native solana config sdk keyFile) $ \signer->
-                bracket (forkIO $ runSigningServer (endpoint port) signer) killThread $ \_thread->do
+              withSigner manager reader (SignerSettings native solana config sdk keyFile Nothing) $ \signer->do
+                -- Receipt fixtures exercise HTTPS and the actual worker's
+                -- acknowledgment gate, not off-host backup durability.
+                checkpointReply<-newIORef (Nothing :: Maybe W.BackupReceipt)
+                checkpoints<-newIORef (0::Int)
+                let evaluate :: forall a. Request 'Op.Signer 'Op.Critical a -> IO a
+                    evaluate request=case Op.resolve request of
+                      Op.SigningDSL CheckpointCustody{}->do
+                        modifyIORef' checkpoints (+1)
+                        readIORef checkpointReply >>= maybe (reject "checkpoint_fixture_refused") pure
+                      _->signer request
+                bracket (forkIO $ runSigningServer (endpoint port) evaluate) killThread $ \_thread->do
                   let wait 0=fail "TLS signer did not bind"
                       wait n=do
                         result<-try $ bracket (NS.socket NS.AF_INET NS.Stream NS.defaultProtocol) NS.close $ \socket->NS.connect socket (NS.SockAddrInet (fromIntegral port) (NS.tupleToHostAddress (127,0,0,1)))
@@ -2338,15 +2358,33 @@ tlsMain=do
                     check (Just signed==H.replySignature reply)
                     saved<-evalRead reader (ReadAttempt signed)
                     check (signedBytes(recordedSigned saved)==H.replyTransaction reply && recordedState saved=="signed")
+                    sequenceNo<-ledgerSequence <$> evalRead reader ReadState
+                    covered<-ledgerBackup <$> evalRead reader ReadState
+                    check (sequenceNo>covered)
+                    let receipt=W.BackupReceipt identity sequenceNo (T.replicate 64 "a") (T.replicate 64 "b")
+                        checkpoint=worker (Request $ CheckpointBackup sequenceNo)
+                    expectStore "signer_outcome_unknown" checkpoint
+                    forM_ [receipt {W.receiptIdentity="other"},receipt {W.receiptSequence=sequenceNo-1},
+                      receipt {W.receiptSequence=sequenceNo+1},receipt {W.receiptSnapshot="latest"},
+                      receipt {W.receiptArchiveHash=T.replicate 64 "A"}] $ \bad->do
+                        writeIORef checkpointReply (Just bad)
+                        expectStore "invalid_custody_checkpoint_receipt" checkpoint
+                        evalRead reader ReadState >>= check . (==covered) . ledgerBackup
+                    writeIORef checkpointReply (Just receipt)
+                    checkpoint
+                    evalRead reader ReadState >>= check . (==sequenceNo) . ledgerBackup
+                    checkpointCalls<-readIORef checkpoints
                     count<-length <$> readIORef calls
                     removeFile auth
+                    checkpoint
+                    readIORef checkpoints >>= check . (==checkpointCalls)
                     replay<-worker (Request $ SignPreparedPayment identifier)
                     check (replay==signed)
                     readIORef calls >>= check . (==count) . length
                     evalRead reader ReadBalances >>= check . (==before)
                     methods<-readIORef calls
                     check ("simulateTransaction" `elem` methods && "sendTransaction" `notElem` methods)
-  putStrLn "PASS: actual HTTPS worker/signer evaluators, auth/certificate refusal, SDK signature, exact persisted bytes and network-free replay; offline RPC vectors only"
+  putStrLn "PASS: actual HTTPS worker/signer evaluators, auth/certificate refusal, SDK signature, persisted bytes, checkpoint receipt rejection/acknowledgment/replay; offline RPC and receipt fixtures only"
 
 restorationContract :: PG.Connection -> Reader -> Writer -> IO ()
 restorationContract fixtures reader writer=do

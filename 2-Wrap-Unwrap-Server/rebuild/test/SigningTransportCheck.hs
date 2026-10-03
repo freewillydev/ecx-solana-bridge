@@ -151,6 +151,9 @@ checks=sequence
           unsigned=W.NativeDraft "fixture-psbt" (W.NativeTx "fixture-id" 2 0 [] []) [] quantity
           evaluate :: forall a. Request 'Signer 'Critical a -> IO a
           evaluate request=case resolve request of
+            SigningDSL (CheckpointCustody identity sequenceNo)->do
+              modifyIORef' calls (<>[(identity,"checkpoint",fromIntegral sequenceNo)])
+              pure $ W.BackupReceipt identity sequenceNo (T.replicate 64 "a") (T.replicate 64 "b")
             SigningDSL (DraftReplacement identity parent fee)->do
               modifyIORef' calls (<>[(identity,parent,fromIntegral $ D.units fee)])
               pure unsigned
@@ -180,11 +183,15 @@ checks=sequence
         ,send "/sign-replacement" auth (body "wrong-shape")
         ,send "/draft-replacement" [] (encode ("deployment"::Text,"parent"::Text,quantity))
         ,send "/draft-replacement" auth (encode ("deployment"::Text,"parent"::Text,quantity))
-        ,send "/draft-replacement" auth (body "numeric-fee-forbidden")]) app
+        ,send "/draft-replacement" auth (body "numeric-fee-forbidden")
+        ,send "/checkpoint-custody" [] (encode ("deployment"::Text,9::Int))
+        ,send "/checkpoint-custody" auth (encode ("deployment"::Text,9::Int))
+        ,send "/checkpoint-custody" auth (body "wrong-shape")]) app
       observed<-readIORef calls
-      pure $ counterexample (show (map (statusCode . simpleStatus) responses,observed,map simpleBody responses)) $ map (statusCode . simpleStatus) responses==[401,403,200,409,400,413,403,404,401,200,400,401,200,400]
-        && observed==[("deployment","payment",0),("deployment","refused",0),("deployment","replacement",7),("deployment","parent",2)]
+      pure $ counterexample (show (map (statusCode . simpleStatus) responses,observed,map simpleBody responses)) $ map (statusCode . simpleStatus) responses==[401,403,200,409,400,413,403,404,401,200,400,401,200,400,401,200,400]
+        && observed==[("deployment","payment",0),("deployment","refused",0),("deployment","replacement",7),("deployment","parent",2),("deployment","checkpoint",9)]
         && eitherDecode (simpleBody $ responses!!12)==Right unsigned
+        && eitherDecode (simpleBody $ responses!!15)==Right (W.BackupReceipt "deployment" 9 (T.replicate 64 "a") (T.replicate 64 "b"))
         && case drop 2 responses of
           accepted:_->eitherDecode (simpleBody accepted)==Right result
             && lookup "Cache-Control" (simpleHeaders accepted)==Just "no-store"

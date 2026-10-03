@@ -48,11 +48,13 @@ data OperatorWrite a where
 
 -- Initial signing is tied to a durable decision, never caller-supplied bytes.
 data SigningOperation a where
+  CheckpointCustody :: Text -> Int64 -> SigningOperation BackupReceipt
   DraftReplacement :: Text -> Text -> Amount -> SigningOperation NativeDraft
   SignReplacement :: Text -> Int64 -> SigningOperation SignedAttempt
   SignPrepared :: Text -> Text -> Int -> SigningOperation SignedAttempt
 
 data WorkerOperation a where
+  CheckpointBackup :: Int64 -> WorkerOperation ()
   RecoverNativeSettlements :: WorkerOperation ()
   RecoverNativeSources :: WorkerOperation ()
   RecoverNativeLocks :: WorkerOperation ()

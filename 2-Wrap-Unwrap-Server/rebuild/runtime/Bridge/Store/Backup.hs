@@ -4,6 +4,7 @@
 module Bridge.Store.Backup (LedgerArchive(..),archiveLedger,RemoteBackup,loadRemoteBackup,uploadRemoteArchive,BackupReceipt(..),uploadArchive,loadLedgerArchive,restoreLedger,discardRestore,downloadRemoteArchive,downloadArchive
   , CustodyArchive(..),loadCustodyArchive,uploadRemoteCustody,uploadCustodyArchive,downloadRemoteCustody,downloadCustodyArchive) where
 
+import Bridge.Wire (BackupReceipt(..))
 import Bridge.Error
 import Bridge.Identity (digest)
 import Control.Exception (IOException,bracket,bracketOnError,catch,onException,mask)
@@ -89,9 +90,6 @@ data RemoteBackup = RemoteBackup
   deriving (Generic)
 instance FromJSON RemoteBackup where
   parseJSON=genericParseJSON defaultOptions {rejectUnknownFields=True}
-data BackupReceipt = BackupReceipt
-  { receiptIdentity :: Text, receiptSequence :: Int64, receiptSnapshot :: Text
-  , receiptArchiveHash :: Text } deriving (Eq,Show)
 
 privateDirectory :: FilePath -> IO ()
 privateDirectory directory = do

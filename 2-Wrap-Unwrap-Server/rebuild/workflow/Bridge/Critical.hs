@@ -48,7 +48,7 @@ import Servant.API ((:<|>)(..))
 import qualified Servant.Client as SC
 
 -- The safe evaluator receives only read credentials and public configuration.
--- It cannot access the writer, signer transport, backup callback or RPC manager.
+-- It cannot access the writer, signer transport, backup credentials or RPC manager.
 evalSafe :: Reader -> Maybe W.PublicConfiguration -> DSL caller 'Safe a -> IO a
 evalSafe reader public operation = case operation of
   ReadOperator NativeReviews->evalRead reader ReadNativeReviews
@@ -76,7 +76,7 @@ evalSafe reader public operation = case operation of
 
 data CustomerSettings = CustomerSettings
   { publicConfiguration :: W.PublicConfiguration, customerPolicy :: StorePolicy
-  , unsignedSdk :: FilePath, coverBackup :: Int64 -> IO () }
+  , unsignedSdk :: FilePath }
 
 -- Startup supplies capabilities. Customer and worker requests share one dispatch
 -- and one gate; safe reads have no writer, signer or network capability.
@@ -124,7 +124,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
       evalCritical (SigningDSL _)=reject "signer_operation_forbidden"
       evalCritical (WriteCustomer (Bridge.Operation.Internal.CreateOrder header request))=do
         c<-customer
-        createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (coverBackup c) reader writer header request
+        createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (evalWorker . CheckpointBackup) reader writer header request
       evalCritical (OperatorDSL (RebroadcastNative txid anchor reason))=guarded $ do
         require (NP.transactionId txid && anchor>0 && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_native_rebroadcast_approval"
         (saved,family,current)<-evalRead reader (ReadNativeRebroadcastContext txid)
@@ -329,11 +329,23 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         ids<-evalRead reader PendingAttempts
         reviewed<-mapM (evalRead reader . ReadAttempt) ids
         forM_ reviewed (refreshSource . recordedPayment)
+        backupDecisions
         evalWorker ReconcileCustody
         now<-floor <$> getPOSIXTime
         evalWrite writer (ResumeLedger now [("Native",N.nativeCheckpointHash native),("Solana",tokenOrigin settings),("SolanaOperating",operatingOrigin settings)] reviewed)
       evalCritical (WorkerDSL operation)=evalWorker operation
       evalWorker :: forall a. WorkerOperation a -> IO a
+      evalWorker (CheckpointBackup minimumSequence) = guarded $ do
+        before<-evalRead reader ReadState
+        require (minimumSequence>=0 && minimumSequence<=ledgerSequence before) "invalid_custody_checkpoint"
+        when (ledgerBackup before<minimumSequence) $ do
+          receipt<-callSigner (CheckpointCustody (H.fingerprint config) minimumSequence)
+          let hash value=T.length value==64 && T.all (`elem` ("0123456789abcdef"::String)) value
+          require (W.receiptIdentity receipt==H.fingerprint config && W.receiptSequence receipt==ledgerSequence before
+            && hash (W.receiptSnapshot receipt) && hash (W.receiptArchiveHash receipt)) "invalid_custody_checkpoint_receipt"
+          after<-evalRead reader ReadState
+          require (ledgerSequence after==ledgerSequence before) "custody_backup_changed"
+          evalWrite writer (AcknowledgeBackup (W.receiptIdentity receipt) (W.receiptSequence receipt) (W.receiptSnapshot receipt))
       evalWorker RecoverNativeSettlements = guarded $ do
         candidates<-evalRead reader NativeSettlementCandidates
         outcomes<-forM candidates $ \saved->tryBridge $ do
@@ -484,7 +496,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         when (requireBackup $ customerPolicy c) $ do
           before<-evalRead reader ReadState
           when (ledgerBackup before<ledgerSequence before) $ do
-            coverBackup c (ledgerSequence before)
+            evalWorker (CheckpointBackup $ ledgerSequence before)
             after<-evalRead reader ReadState
             require (ledgerBackup after>=ledgerSequence before) "backup_pending"
       callSigner :: SigningOperation a -> IO a
@@ -496,16 +508,17 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
               ,TLS.clientSupported=(TLS.clientSupported base) {TLS.supportedCiphers=ciphersuite_default}}
             settings=managerSetProxy noProxy (mkManagerSettings (NC.TLSSettings tls) Nothing)
               {managerRetryableException=const False,managerIdleConnectionCount=0
-              ,managerResponseTimeout=responseTimeoutMicro 60000000
+              ,managerResponseTimeout=responseTimeoutMicro (case operation of CheckpointCustody{}->315000000; _->60000000)
               ,managerModifyRequest= \request->pure request {redirectCount=0}
               ,managerModifyResponse= \response->do
                 bytes<-boundedBody 524288 (responseBody response)
                 body<-newIORef bytes
                 pure response {responseBody=atomicModifyIORef' body $ \chunk->(BS.empty,chunk)}}
         bracket (newManager settings) closeManager $ \local->do
-          let prepared :<|> replacement :<|> draft=SC.client signingAPI credentials
+          let prepared :<|> replacement :<|> draft :<|> checkpoint=SC.client signingAPI credentials
               environment=SC.mkClientEnv local (SC.BaseUrl SC.Https "127.0.0.1" (signerPort endpoint) "")
               call=case operation of
+                CheckpointCustody identity minimumSequence->checkpoint (identity,minimumSequence)
                 SignPrepared identity identifier generation->prepared (identity,identifier,generation)
                 SignReplacement identity decision->replacement (identity,decision)
                 DraftReplacement identity parent fee->draft (identity,parent,fee)

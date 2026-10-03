@@ -66,4 +66,4 @@ runSigningServer endpoint evaluate = do
   protectedSignerFile key True False
   app<-signingApplication credentials evaluate
   runTLS (tlsSettings (signerAuthFile endpoint<>".pem") key)
-    (setHost "127.0.0.1" $ setPort (signerPort endpoint) $ setTimeout 65 defaultSettings) app
+    (setHost "127.0.0.1" $ setPort (signerPort endpoint) $ setTimeout 315 defaultSettings) app

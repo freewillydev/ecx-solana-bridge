@@ -1,13 +1,13 @@
 {-# LANGUAGE GADTs #-}
--- Offline custody bundle. No HTTP route, signing capability or ledger acknowledgment.
--- The writer session is held across export, but no DB transaction spans RPC.
+-- Closed custody recovery. The signer may export with read-only authority;
+-- only the worker can acknowledge a checkpoint. No DB transaction spans RPC.
 module Bridge.Recovery (CustodyRecovery(..),evalCustodyRecovery) where
 
 import qualified Bridge.Config as C
 import Bridge.Error
 import Bridge.Identity (digest)
 import qualified Bridge.Native as N
-import Bridge.Signer (verifySigningKey)
+import Bridge.Credentials (verifySigningKey)
 import Bridge.Store
 import Control.Exception (bracket,bracketOnError)
 import Control.Monad (forM,void)
@@ -33,10 +33,11 @@ import System.Posix.IO hiding (sync)
 import System.Posix.Unistd (fileSynchronise)
 import System.Posix.User (getEffectiveUserID)
 
--- Credentials originate only at offline startup. Inspection needs neither a
+-- Credentials originate only at process startup. Inspection needs neither a
 -- database connection nor network access, so it remains usable after host loss.
 data CustodyRecovery a where
   ExportCustody :: PG.ConnectInfo -> PG.ConnectInfo -> FilePath -> FilePath -> CustodyRecovery (FilePath,Int64)
+  ExportCheckpoint :: Reader -> FilePath -> FilePath -> Int64 -> CustodyRecovery (FilePath,Int64)
   InspectCustody :: FilePath -> Int64 -> CustodyRecovery Int64
   UploadCustody :: FilePath -> FilePath -> Int64 -> CustodyRecovery BackupReceipt
   RecoverCustody :: FilePath -> Text -> FilePath -> Int64 -> CustodyRecovery (FilePath,Int64)
@@ -52,40 +53,9 @@ evalCustodyRecovery manager config operation = do
       require (PG.connectHost writerSettings==PG.connectHost readerSettings
         && PG.connectPort writerSettings==PG.connectPort readerSettings
         && PG.connectDatabase writerSettings==PG.connectDatabase readerSettings) "custody_backup_database_mismatch"
-      privateDirectory parent
-      verifySigningKey (C.custodyOwner config) key
       withFencedWriter writerSettings (C.storePolicy config) (C.fenceDirectory config) $ \_ ->
-       withReader readerSettings identity (C.backupRequired config) $ \reader->do
-        before<-evalRead reader ReadState
-        require (ledgerPaused before) "custody_backup_requires_pause"
-        -- Check again after export so encryption during the snapshot cannot
-        -- silently introduce a dependency on missing unlock material.
-        let unencrypted=do
-              wallet<-N.nativeWalletInfoWith call native
-              require (case wallet of Object o->not(KM.member "unlocked_until" o); _->False)
-                "encrypted_native_wallet_recovery_material_required"
-        unencrypted
-        suffix<-T.unpack . T.take 32 . digest <$> (getRandomBytes 16 :: IO BS.ByteString)
-        let directory=parent </> "custody-"<>suffix
-        bracketOnError (PD.createDirectory directory 0o700 >> pure directory) removeDirectoryRecursive $ \_->do
-          keyBytes<-readPrivate 4096 key
-          writePrivate (directory </> "solana-key.json") (BL.fromStrict keyBytes)
-          verifySigningKey (C.custodyOwner config) (directory </> "solana-key.json")
-          writePrivate (directory </> "deployment.json") (encode config)
-          archive<-evalBackup reader (ExportLedger directory)
-          void $ N.evalNativeRecoveryWith call native (N.BackupNativeWallet $ directory </> "native-wallet")
-          unencrypted
-          after<-evalRead reader ReadState
-          require (ledgerPaused after && ledgerSequence before==ledgerSequence after
-            && archiveSequence archive==ledgerSequence after) "custody_backup_changed"
-          currentKey<-readPrivate 4096 key
-          require (currentKey==keyBytes) "custody_backup_key_changed"
-          files<-M.fromList <$> forM (bundleFiles archive) (\name->(,) name <$> hashFile (directory </> name))
-          let manifest=directory </> "custody.json"
-          writePrivate manifest (encode $ CustodyArchive manifest identity (archiveSequence archive) (takeFileName $ manifestPath archive) files)
-          sync directory
-          sync parent
-          pure (manifest,archiveSequence archive)
+        withReader readerSettings identity (C.backupRequired config) $ \reader->export True reader key parent 0
+    ExportCheckpoint reader key parent minimumSequence -> export False reader key parent minimumSequence
     InspectCustody manifest minimumSequence -> do
       metadata<-evalRestore PG.defaultConnectInfo (InspectCustodyFiles manifest identity minimumSequence)
       let sequenceNo=custodySequence metadata; ledger=custodyLedger metadata; files=custodyFiles metadata
@@ -125,6 +95,43 @@ evalCustodyRecovery manager config operation = do
         (removeDirectoryRecursive . takeDirectory . custodyManifest) $ \archive->do
           n<-evalCustodyRecovery manager config (InspectCustody (custodyManifest archive) minimumSequence)
           pure (custodyManifest archive,n)
+
+ where
+  export offline reader key parent minimumSequence=do
+    privateDirectory parent
+    verifySigningKey (C.custodyOwner config) key
+    let identity=C.fingerprint config; native=C.nativeSettings config; call=N.nativeCall manager native
+    before<-evalRead reader ReadState
+    require (minimumSequence>=0 && ledgerSequence before>=minimumSequence) "invalid_custody_checkpoint"
+    require (not offline || ledgerPaused before) "custody_backup_requires_pause"
+    -- Check again after export so encryption during the snapshot cannot
+    -- silently introduce a dependency on missing unlock material.
+    let unencrypted=do
+          wallet<-N.nativeWalletInfoWith call native
+          require (case wallet of Object o->not(KM.member "unlocked_until" o); _->False)
+            "encrypted_native_wallet_recovery_material_required"
+    unencrypted
+    suffix<-T.unpack . T.take 32 . digest <$> (getRandomBytes 16 :: IO BS.ByteString)
+    let directory=parent </> "custody-"<>suffix
+    bracketOnError (PD.createDirectory directory 0o700 >> pure directory) removeDirectoryRecursive $ \_->do
+      keyBytes<-readPrivate 4096 key
+      writePrivate (directory </> "solana-key.json") (BL.fromStrict keyBytes)
+      verifySigningKey (C.custodyOwner config) (directory </> "solana-key.json")
+      writePrivate (directory </> "deployment.json") (encode config)
+      archive<-evalBackup reader (ExportLedger directory)
+      void $ N.evalNativeRecoveryWith call native (N.BackupNativeWallet $ directory </> "native-wallet")
+      unencrypted
+      after<-evalRead reader ReadState
+      require ((not offline || ledgerPaused after) && ledgerSequence before==ledgerSequence after
+        && archiveSequence archive==ledgerSequence after && archiveIdentity archive==identity) "custody_backup_changed"
+      currentKey<-readPrivate 4096 key
+      require (currentKey==keyBytes) "custody_backup_key_changed"
+      files<-M.fromList <$> forM (bundleFiles archive) (\name->(,) name <$> hashFile (directory </> name))
+      let manifest=directory </> "custody.json"
+      writePrivate manifest (encode $ CustodyArchive manifest identity (archiveSequence archive) (takeFileName $ manifestPath archive) files)
+      sync directory
+      sync parent
+      pure (manifest,archiveSequence archive)
 
 bundleFiles :: LedgerArchive -> [FilePath]
 bundleFiles archive=[takeFileName $ archivePath archive,takeFileName $ manifestPath archive,

@@ -1579,9 +1579,51 @@ seam plus the production semantic inspector; the production HTTPS workflow build
 and rejects local repositories. They do not prove off-host HTTPS availability,
 remote durability or the production upload/readback composition against a server.
 
-Still required: backup acknowledgment/runtime integration, encrypted-wallet unlock
-material and cross-UID deployment, then independent off-host and funded recovery
-acceptance.
-The `backupRequired` startup refusal remains until those guarantees are implemented;
-an archive, upload-only receipt or adopted paused ledger does not automatically
-permit signing or sending.
+Custody checkpoints now connect that recovery pipeline to the critical evaluator:
+
+```sh
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- signer CONFIG KEYFILE BACKUP_CONFIG STAGING
+```
+
+The signer retains its SELECT-only database role and owns backup credentials and
+private staging. Its authenticated `checkpoint-custody` route accepts only the
+configured deployment identity and minimum sequence. The handler packages a
+constrained existential `Request`; the signing evaluator exports the complete
+bundle, uploads it, downloads and semantically verifies it, rechecks the sequence,
+and returns a typed receipt. Plaintext staging is removed on success or failure.
+The operation has a five-minute deadline; signing requests retain their existing
+client timeout. Omitting backup configuration explicitly refuses checkpoints.
+
+Only the worker's private critical evaluator constructs the Servant client and
+acknowledges the receipt through the closed Opaleye operation. It requires the exact
+current sequence, matching identity and canonical snapshot/manifest hashes, then
+rechecks that no financial decision changed. Unknown, malformed, stale or foreign
+replies grant no coverage. Covered requests replay without contacting the signer.
+Customer settings no longer accept a generic backup callback. Order instructions,
+payment/replacement/send barriers and explicit resume use the same operation;
+existing freshness and accounting checks remain authoritative afterward.
+The blanket `backupRequired` startup refusal is removed. Missing or unsuccessful
+signer backup configuration still prevents new required coverage; startup itself
+never grants permission to sign, expose a deposit instruction or send.
+
+Versus `04458a7`, this integration adds **52 production lines** across **8 → 9
+files**, totaling 1,862 → 1,914 for the affected production modules. Signer 149 →
+130 is not a standalone reduction: its unchanged credential checks now occupy one
+shared private 47-line module used by signing and recovery. Critical 624 → 637,
+Recovery 167 → 174, operation grammar 105 → 107, Wire 190 → 194, Backup 419 → 417;
+Main remains 139 and signing transport remains 69. No new service, schema or
+external dependency is introduced. This is integration of missing functionality,
+not a claim of a smaller overall repository or perfect security.
+
+Root Cabal builds and QuickCheck pass. Actual TLS plus PostgreSQL acceptance checks
+foreign/stale/future/malformed/refused checkpoint replies, exact acknowledgment and
+network-free replay, while preserving SDK signing and saved bytes. Those receipts
+are explicitly fixtures, not remote durability evidence. The existing real Signet
+recovery contract also verifies a SELECT-only online export while the worker owns
+the ledger, followed by bundle inspection; encrypted local-restic restoration and
+the financial/ledger regression remain required checks.
+
+Still required: actual off-host HTTPS checkpoint/upload/readback acceptance,
+encrypted-wallet unlock material, cross-UID deployment and funded recovery. Local
+restic and receipt fixtures do not establish those guarantees. An offline upload or
+adopted paused ledger still cannot acknowledge itself or automatically resume.

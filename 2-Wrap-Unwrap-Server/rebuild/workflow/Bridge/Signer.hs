@@ -4,31 +4,27 @@
 module Bridge.Signer
   ( SigningAPI, signingAPI, signingServer, SignerSettings(..), withSigner, verifySigningKey, protectedSignerFile ) where
 import Bridge.Operation.Internal
-import Bridge.Wire (Profile(..),SignedAttempt(..),NativeDraft)
+import Bridge.Credentials
+import qualified Bridge.Config as C
+import Bridge.Recovery
+import Control.Exception (bracket)
+import System.Directory (removeDirectoryRecursive)
+import System.FilePath (takeDirectory)
+import System.Timeout (timeout)
+import Data.Aeson (encode)
+import Bridge.Wire (Profile(..),SignedAttempt(..),NativeDraft,BackupReceipt(..))
 import Bridge.Domain (Amount)
-import Bridge.Identity (publicKey)
 import Bridge.Error
-import Bridge.Store (Reader,StoreRead(ReadSigningDecision,ReadReplacementSigning,ReadReplacementDraftContext),RecordedAttempt(..),evalRead)
+import Bridge.Store (Reader,StoreRead(ReadState,ReadSigningDecision,ReadReplacementSigning,ReadReplacementDraftContext),LedgerState(..),RecordedAttempt(..),evalRead)
 import Bridge.Payment
 import qualified Bridge.Native as N
 import Bridge.NativePayment (draftNativeReplacement,signNativeDraft,signNativeReplacement,NativeSigned(..),NativeTx(..))
 import qualified Bridge.Solana as S
 import qualified Bridge.SolanaHelper as H
 import Bridge.SolanaPayment
-import Crypto.Error (CryptoFailable(..))
-import qualified Crypto.PubKey.Ed25519 as Ed
-import qualified Data.ByteArray as BA
-import qualified Data.ByteString as BS
-import Data.Aeson (eitherDecodeStrict',encode)
 import Data.Int (Int64)
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text.Encoding as TE
-import Data.Bits ((.&.))
-import Data.Word (Word8)
-import System.FilePath (isAbsolute,takeDirectory)
-import System.IO (withBinaryFile,IOMode(ReadMode))
-import System.Posix.Files
-import System.Posix.User (getEffectiveUserID)
 import Control.Concurrent.MVar (newMVar,withMVar)
 import Data.Text (Text)
 import Data.Time.Clock.POSIX (getPOSIXTime)
@@ -39,17 +35,20 @@ import Servant
 type SigningAPI = BasicAuth "signer" () :>
   (("sign-preparation" :> ReqBody '[JSON] (Text,Text,Int) :> Post '[JSON] SignedAttempt)
   :<|> ("sign-replacement" :> ReqBody '[JSON] (Text,Int64) :> Post '[JSON] SignedAttempt)
-  :<|> ("draft-replacement" :> ReqBody '[JSON] (Text,Text,Amount) :> Post '[JSON] NativeDraft))
+  :<|> ("draft-replacement" :> ReqBody '[JSON] (Text,Text,Amount) :> Post '[JSON] NativeDraft)
+  :<|> ("checkpoint-custody" :> ReqBody '[JSON] (Text,Int64) :> Post '[JSON] BackupReceipt))
 signingAPI :: Proxy SigningAPI
 signingAPI=Proxy
 signingServer :: ServerT SigningAPI (Request 'Signer 'Critical)
 signingServer () = (\(identity,identifier,generation)->Request $ SignPrepared identity identifier generation)
   :<|> (\(identity,decision)->Request $ SignReplacement identity decision)
   :<|> (\(identity,parent,fee)->Request $ DraftReplacement identity parent fee)
+  :<|> (\(identity,minimumSequence)->Request $ CheckpointCustody identity minimumSequence)
 
 data SignerSettings = SignerSettings
   { signingNative :: N.NativeSettings, signingSolana :: S.SolanaSettings
-  , signingPolicy :: H.SolanaPolicy, signingLibrary :: FilePath, signingKey :: FilePath }
+  , signingPolicy :: H.SolanaPolicy, signingLibrary :: FilePath, signingKey :: FilePath
+  , signingBackup :: Maybe (C.Config,FilePath,FilePath) }
 
 -- The gate serializes complete decisions, including RPC/FFI and the second read.
 -- Database read transactions finish before any external work starts.
@@ -67,6 +66,19 @@ withSigner manager reader settings action = do
   gate<-newMVar ()
   let interpret :: forall a. Request 'Signer 'Critical a -> IO a
       interpret request=withMVar gate $ \_ -> case resolve request of
+        SigningDSL (CheckpointCustody identity minimumSequence)->do
+          require (identity==H.fingerprint config && minimumSequence>=0) "invalid_custody_checkpoint"
+          (deployment,backup,parent)<-maybe (reject "custody_checkpoint_not_configured") pure (signingBackup settings)
+          require (C.fingerprint deployment==identity && C.nativeSettings deployment==native
+            && C.solanaSettings deployment==solana) "signer_profile_mismatch"
+          result<-timeout 300000000 $ bracket
+            (evalCustodyRecovery manager deployment $ ExportCheckpoint reader (signingKey settings) parent minimumSequence)
+            (removeDirectoryRecursive . takeDirectory . fst) $ \(manifest,sequenceNo)->do
+              receipt<-evalCustodyRecovery manager deployment (UploadCustody backup manifest sequenceNo)
+              after<-evalRead reader ReadState
+              require (ledgerSequence after==sequenceNo) "custody_backup_changed"
+              pure receipt
+          maybe (reject "custody_checkpoint_timeout") pure result
         SigningDSL (DraftReplacement identity parent fee)->do
           require (identity==H.fingerprint config) "signer_profile_mismatch"
           let readDecision=do
@@ -116,34 +128,3 @@ withSigner manager reader settings action = do
           require (before==after) "signing_decision_changed"
           pure verified
   action interpret
-
--- Secret files permit group read only for the shared auth token. Certificates
--- may be public, but neither they nor their parent may be replaced by that group.
-protectedSignerFile :: FilePath -> Bool -> Bool -> IO ()
-protectedSignerFile path secret shared = do
-  require (isAbsolute path) "absolute_credential_path_required"
-  uid<-getEffectiveUserID
-  file<-getSymbolicLinkStatus path
-  parent<-getFileStatus (takeDirectory path)
-  let mode=fileMode file .&. 0o777
-  require (isRegularFile file && fileOwner file `elem` [0,uid]
-    && fileOwner parent `elem` [0,uid] && fileMode parent .&. 0o022==0
-    && if secret then mode==0o600 || shared && mode==0o640 else mode .&. 0o022==0) "unsafe_signer_file_permissions"
-
--- Standard Solana CLI keypair: seed plus derived public key, never printed.
--- Validate before accepting requests; the SDK checks again when it signs.
-verifySigningKey :: Text -> FilePath -> IO ()
-verifySigningKey owner filename = do
-  protectedSignerFile filename True False
-  bytes<-withBinaryFile filename ReadMode (`BS.hGet` 4097)
-  require (BS.length bytes<=4096) "signer_file_too_large"
-  values<-either (const $ reject "invalid_signer_json") pure
-    (eitherDecodeStrict' bytes :: Either String [Word8])
-  require (length values==64) "invalid_signer_length"
-  expected<-either reject pure (publicKey owner)
-  let key=BS.pack values
-  case Ed.secretKey (BS.take 32 key) of
-    CryptoPassed secret->do
-      let actual=BA.convert(Ed.toPublic secret) :: BS.ByteString
-      require (actual==BS.drop 32 key && actual==expected) "signer_mismatch"
-    CryptoFailed _->reject "invalid_signer"

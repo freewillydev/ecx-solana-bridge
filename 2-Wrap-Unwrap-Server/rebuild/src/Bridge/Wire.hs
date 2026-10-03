@@ -188,3 +188,7 @@ data NativeSigned = NativeSigned
   , signedNativePlan :: !NativePlan, signedNativePrevouts :: ![NativePrevout]
   , signedNativeFee :: !Amount
   } deriving (Eq,Show,Generic,ToJSON,FromJSON)
+
+data BackupReceipt = BackupReceipt
+  { receiptIdentity :: Text, receiptSequence :: Int64, receiptSnapshot :: Text
+  , receiptArchiveHash :: Text } deriving stock (Eq,Show,Generic) deriving anyclass (ToJSON,FromJSON)
