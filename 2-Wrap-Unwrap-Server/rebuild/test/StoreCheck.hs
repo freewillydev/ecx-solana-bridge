@@ -32,7 +32,7 @@ import qualified Network.Wai.Test as WaiTest
 import Network.HTTP.Types (statusCode,status200)
 import Bridge.Order
 import qualified Bridge.Fence as Fence
-import System.Directory (createDirectory,removeDirectoryRecursive,removeFile,findExecutable,listDirectory)
+import System.Directory (createDirectory,removeDirectoryRecursive,removeFile,findExecutable,listDirectory,renameFile)
 import System.IO (openTempFile,hClose,withFile,IOMode(WriteMode))
 import System.Posix.Files (setFileMode)
 import qualified System.Posix.Files as Posix
@@ -79,6 +79,8 @@ main = do
 -- is unloaded, changed or copied; the node remains running after this check.
 nativeRecoveryMain :: IO ()
 nativeRecoveryMain = do
+  binary<-getEnv "ECX_REBUILD_EXECUTABLE"
+  base<-getDataFileName "test/fixtures/deployment-config.json" >>= Config.loadConfig
   cookie<-getEnv "ECX_REBUILD_NATIVE_RECOVERY_COOKIE"
   walletDirectory<-getEnv "ECX_REBUILD_NATIVE_WALLET_DIRECTORY"
   unless (isAbsolute walletDirectory) (fail "absolute node wallet directory required")
@@ -105,11 +107,28 @@ nativeRecoveryMain = do
         removeDirectoryRecursive $ \directory->do
         address<-allocate "recovery-label" "bech32"
         legacy<-allocate "recovery-signing-proof" "legacy"
-        backup<-N.evalNativeRecoveryWith (call source) source (N.BackupNativeWallet $ directory </> "wallet.bak")
+        let sourceConfig=base {Config.nativeWallet=sourceName,Config.nativeCookie=cookie}
+            targetConfig=sourceConfig {Config.nativeWallet=targetName}
+            sourceFile=directory </> "source.json"
+            targetFile=directory </> "target.json"
+            moved=directory </> "moved"
+            runCommand command config file=do
+              (code,out,_)<-Process.readProcessWithExitCode binary [command,config,file] ""
+              check (code==ExitSuccess)
+              either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ T.pack out)
+        BL.writeFile sourceFile (encode sourceConfig)
+        BL.writeFile targetFile (encode targetConfig)
+        output<-runCommand "backup-native-wallet" sourceFile (directory </> "wallet.bak")
+        original<-fieldValue "manifest" output
+        check (original==directory </> "wallet.bak.json")
+        PD.createDirectory moved 0o700
+        renameFile original (moved </> "wallet.bak.json")
+        renameFile (directory </> "wallet.bak") (moved </> "wallet.bak")
         expectedNext<-allocate "next-label" "bech32"
         void $ call source False "unloadwallet" [toJSON sourceName,Bool False]
         bracket_ (pure ()) (cleanup targetName) $ do
-          N.evalNativeRecoveryWith (call target) target (N.RestoreNativeWallet backup)
+          result<-runCommand "restore-native-wallet" targetFile (moved </> "wallet.bak.json")
+          fieldValue "wallet" result >>= check . (==targetName)
           recovered<-N.recoverNativeAddressWith (call target) target 0 False "recovery-label"
           check (recovered==address)
           next<-call target True "getnewaddress" [String "next-label",String "bech32"]
@@ -117,7 +136,7 @@ nativeRecoveryMain = do
           signature<-call target True "signmessage" [String legacy,String "ECX empty-wallet recovery acceptance"]
           verified<-call target False "verifymessage" [String legacy,signature,String "ECX empty-wallet recovery acceptance"]
           check (verified==Bool True)
-    putStrLn "Real L2L Signet wallet backup/restore: descriptor state, labels, next address and private-key signing PASS; test wallets removed."
+    putStrLn "Real L2L Signet wallet backup/restore in separate executable processes with relocated durable manifest: descriptor state, labels, next address and private-key signing PASS; test wallets removed."
 
 ledgerMain :: IO ()
 ledgerMain = do

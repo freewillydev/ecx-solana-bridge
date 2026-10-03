@@ -25,6 +25,7 @@ import Control.Exception (try,bracket)
 import Data.Aeson hiding (Result)
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Aeson.Key as K
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Int (Int64)
@@ -142,6 +143,21 @@ checks = (\deployment native solana observation common->deployment<>native<>sola
               _->fail "unexpected recovery request"
             run config=evalNativeRecoveryWith (call config) config
         backup<-run settings (BackupNativeWallet path)
+        manifestBytes<-BS.readFile backup
+        manifest<-either fail pure (eitherDecodeStrict' manifestBytes)
+        invalidManifests<-mapM (\(code,keys,value)->do
+          BL.writeFile backup (encode $ replace keys value manifest)
+          rejects code (run target $ RestoreNativeWallet backup))
+          [("invalid_native_backup_manifest",["archive"],String "../wallet.bak")
+          ,("invalid_native_backup_manifest",["extra"],Bool True)
+          ,("native_backup_network_mismatch",["checkpointHeight"],Number 16001)
+          ,("native_backup_hash_mismatch",["sha256"],String $ T.replicate 64 "0")]
+        BS.writeFile backup (BS.replicate 1048577 32)
+        oversized<-rejects "native_backup_manifest_too_large" (run target $ RestoreNativeWallet backup)
+        BS.writeFile backup manifestBytes
+        setFileMode backup 0o644
+        exposedManifest<-rejects "unsafe_native_backup_file" (run target $ RestoreNativeWallet backup)
+        setFileMode backup 0o600
         duplicate<-rejects "native_backup_destination_exists" (run settings $ BackupNativeWallet path)
         setFileMode path 0o644
         exposed<-rejects "unsafe_native_backup_file" (run target $ RestoreNativeWallet backup)
@@ -160,6 +176,8 @@ checks = (\deployment native solana observation common->deployment<>native<>sola
         writeIORef changed True
         mismatch<-rejects "native_restore_descriptors_mismatch" (run target $ RestoreNativeWallet backup)
         removeFile path
+        existingManifest<-rejects "native_backup_destination_exists" (run settings $ BackupNativeWallet path)
+        removeFile backup
         writeIORef changed False
         let changing wallet method args=do
               result<-call settings wallet method args
@@ -167,7 +185,8 @@ checks = (\deployment native solana observation common->deployment<>native<>sola
               pure result
         race<-rejects "native_wallet_changed_during_backup" (evalNativeRecoveryWith changing settings $ BackupNativeWallet path)
         counts<-(,) <$> readIORef backups <*> readIORef restores
-        pure (and [duplicate,exposed,corrupt,occupied,shrunk,mismatch,race] && counts==(2,3))
+        pure (and (invalidManifests<>[oversized,exposedManifest,duplicate,existingManifest,exposed,corrupt,occupied,shrunk,mismatch,race])
+          && not ("/unused/credential" `BS.isInfixOf` manifestBytes) && counts==(2,3))
   , check "native allocation never repeats getnewaddress after a lost claim" $ once $ ioProperty $ do
       saved <- newIORef False; allocations <- newIORef (0::Int)
       let label="ecx-bridge:v1:contract:order:known"

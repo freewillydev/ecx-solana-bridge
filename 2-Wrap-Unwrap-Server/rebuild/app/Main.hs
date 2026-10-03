@@ -7,6 +7,7 @@ import Bridge.Critical (CustomerSettings(..),withRuntime,runWorkerLoop)
 import Bridge.Control (runControl,callControl)
 import Bridge.Error
 import Bridge.RPC (newRpcManager)
+import qualified Bridge.Native as N
 import Bridge.Signer
 import Bridge.SigningTransport
 import Bridge.Store (withReader,withFencedWriter,StoreRestore(..),evalRestore)
@@ -35,6 +36,14 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
  where
   command ["check-config",path]=C.loadConfig path >>= LBS.putStrLn . encode . object . pure . ("fingerprint" .=) . C.fingerprint
   command ["check-signer",path,key]=C.loadConfig path >>= \c->verifySigningKey (C.custodyOwner c) key >> putStrLn "Custody signer valid"
+  command [mode,path,file] | mode `elem` ["backup-native-wallet","restore-native-wallet"] = do
+    c<-C.loadConfig path
+    bracket newRpcManager closeManager $ \manager->do
+      let native=C.nativeSettings c
+          run=N.evalNativeRecoveryWith (N.nativeCall manager native) native
+      if mode=="backup-native-wallet"
+        then run (N.BackupNativeWallet file) >>= LBS.putStrLn . encode . object . pure . ("manifest" .=)
+        else run (N.RestoreNativeWallet file) >> LBS.putStrLn (encode $ object ["wallet" .= C.nativeWallet c])
   command ["restore-ledger",path,manifest,minimumText]=restoreCommand path minimumText (\c->RestoreLedger manifest (C.fingerprint c))
   command ["recover-ledger",path,backup,snapshot,directory,minimumText]=
     restoreCommand path minimumText (\c->RecoverLedger backup (T.pack snapshot) directory (C.fingerprint c))
@@ -77,7 +86,7 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
             concurrently_
               (runSettings (setHost "127.0.0.1" $ setPort (C.serverPort c) $ setTimeout 65 defaultSettings) app)
               (concurrently_ (runWorkerLoop worker) (runControl (C.fenceDirectory c) operatorControl))
-  command _=die "Usage: ecx-bridge-rebuild adopt-ledger CONFIG MINIMUM_SEQUENCE | retire-ledger CONFIG MINIMUM_SEQUENCE | recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE | restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE (offline database owner) | check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
+  command _=die "Usage: ecx-bridge-rebuild backup-native-wallet CONFIG DESTINATION | restore-native-wallet CONFIG MANIFEST (offline custody authority; never overwrites a wallet) | adopt-ledger CONFIG MINIMUM_SEQUENCE | retire-ledger CONFIG MINIMUM_SEQUENCE | recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE | restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE (offline database owner) | check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
   restoreCommand path minimumText operation=do
     c<-C.loadConfig path
     minimumSequence<-maybe (reject "invalid_restore_policy") pure (readMaybe minimumText)

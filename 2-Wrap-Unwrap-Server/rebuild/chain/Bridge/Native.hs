@@ -2,7 +2,7 @@
 module Bridge.Native
   ( NativeSettings(..), validateNativeSettings, nativeCall, nativeIdentity, nativeIdentityWith
   , verifyNativeBoundaryWith, validateNativeRecipientWith, nativeWalletInfoWith, nativeWalletReadyWith
-  , NativeRecovery(..), NativeWalletBackup, evalNativeRecoveryWith
+  , NativeRecovery(..), evalNativeRecoveryWith
   , recoverNativeAddressWith, nativeHistory, nativeAmount, nativeNumber, signetChallenge ) where
 
 import Bridge.Wire (Profile(..))
@@ -15,6 +15,7 @@ import Data.Aeson
 import Data.Bits ((.&.))
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
+import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BC
 import Data.Int (Int64)
@@ -22,8 +23,8 @@ import Data.Scientific (Scientific, coefficient, base10Exponent)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.HTTP.Client (Manager,parseRequest,host,path,queryString,requestHeaders)
-import System.IO (Handle,withBinaryFile,IOMode(ReadMode))
-import System.FilePath (isAbsolute,normalise,takeDirectory)
+import System.IO (Handle,withBinaryFile,IOMode(ReadMode),hClose,hFlush)
+import System.FilePath (isAbsolute,normalise,takeDirectory,takeFileName,(</>))
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files
 import System.Posix.IO
@@ -175,11 +176,8 @@ verifyNativeBoundaryWith call = mapM_ denied
 -- and this evaluator must share a private staging directory under the same UID.
 -- An encrypted wallet still requires its separately retained unlock material.
 data NativeRecovery a where
-  BackupNativeWallet :: FilePath -> NativeRecovery NativeWalletBackup
-  RestoreNativeWallet :: NativeWalletBackup -> NativeRecovery ()
--- Only a checked backup can supply restore evidence; no private descriptors are
--- exported over RPC. This in-memory evidence is not a durable recovery manifest.
-data NativeWalletBackup = NativeWalletBackup NativeSettings FilePath Text [Value]
+  BackupNativeWallet :: FilePath -> NativeRecovery FilePath
+  RestoreNativeWallet :: FilePath -> NativeRecovery ()
 
 evalNativeRecoveryWith :: (Bool -> Text -> [Value] -> IO Value) -> NativeSettings -> NativeRecovery a -> IO a
 evalNativeRecoveryWith call c operation = do
@@ -188,9 +186,9 @@ evalNativeRecoveryWith call c operation = do
   case operation of
     BackupNativeWallet destination -> do
       privateParent destination
-      exists<-(getSymbolicLinkStatus destination >> pure True) `catch` (\(e::IOException)->
-        if isDoesNotExistError e then pure False else throwIO e)
-      require (not exists) "native_backup_destination_exists"
+      let manifest=destination<>".json"
+      absent destination
+      absent manifest
       before<-descriptors
       result<-call True "backupwallet" [toJSON destination]
       require (result==Null) "unexpected_rpc_schema"
@@ -198,13 +196,40 @@ evalNativeRecoveryWith call c operation = do
       after<-descriptors
       require (before==after) "native_wallet_changed_during_backup"
       sync destination
-      sync (takeDirectory destination)
       checksum<-withBinaryFile destination ReadMode (hashChunks hashInit)
-      pure (NativeWalletBackup c destination checksum before)
-    RestoreNativeWallet (NativeWalletBackup source backup checksum expected) -> do
-      require (profile source==profile c && nativeCheckpointHeight source==nativeCheckpointHeight c
-        && nativeCheckpointHash source==nativeCheckpointHash c) "native_backup_network_mismatch"
-      privateParent backup
+      let evidence=manifestValue (profile c) (nativeCheckpointHeight c) (nativeCheckpointHash c)
+            (nativeWallet c) (takeFileName destination) checksum before
+          encoded=encode evidence
+      require (BL.length encoded<=1048576) "native_backup_manifest_too_large"
+      bracket (openFd manifest WriteOnly defaultFileFlags
+        {creat=Just 0o600,exclusive=True,nofollow=True,cloexec=True} >>= fdToHandle) hClose $ \handle->do
+          BL.hPut handle encoded
+          hFlush handle
+      sync manifest
+      sync (takeDirectory destination)
+      pure manifest
+    RestoreNativeWallet manifest -> do
+      privateParent manifest
+      privateBackup manifest
+      bytes<-withBinaryFile manifest ReadMode (`BS.hGet` 1048577)
+      require (BS.length bytes<=1048576) "native_backup_manifest_too_large"
+      value<-either (const $ reject "invalid_native_backup_manifest") pure (eitherDecodeStrict' bytes)
+      version<-fieldValue "format" value :: IO Int
+      savedProfile<-fieldValue "profile" value
+      height<-fieldValue "checkpointHeight" value
+      checkpoint<-fieldValue "checkpointHash" value
+      wallet<-fieldValue "wallet" value
+      name<-fieldValue "archive" value
+      checksum<-fieldValue "sha256" value
+      expected<-fieldValue "descriptors" value
+      require (version==1 && value==manifestValue savedProfile height checkpoint wallet name checksum expected
+        && name==takeFileName name && name `notElem` ["",".",".."]
+        && T.length checksum==64 && T.all (`elem` ("0123456789abcdef"::String)) checksum
+        && not(null expected)) "invalid_native_backup_manifest"
+      require (savedProfile==profile c && height==nativeCheckpointHeight c
+        && checkpoint==nativeCheckpointHash c) "native_backup_network_mismatch"
+      validateNativeSettings c {nativeWallet=wallet}
+      let backup=takeDirectory manifest </> name
       privateBackup backup
       actual<-withBinaryFile backup ReadMode (hashChunks hashInit)
       require (actual==checksum) "native_backup_hash_mismatch"
@@ -218,6 +243,16 @@ evalNativeRecoveryWith call c operation = do
       matching<-and <$> sequence (zipWith sameDescriptor expected restored)
       require (length restored==length expected && matching) "native_restore_descriptors_mismatch"
  where
+  -- Only public descriptors and relative archive names enter the manifest;
+  -- cookie paths and other local credentials are deliberately excluded.
+  manifestValue savedProfile height checkpoint wallet name checksum values=object
+    ["format" .= (1::Int),"profile" .= (savedProfile::Profile),"checkpointHeight" .= (height::Int64)
+    ,"checkpointHash" .= (checkpoint::Text),"wallet" .= (wallet::Text),"archive" .= (name::FilePath)
+    ,"sha256" .= (checksum::Text),"descriptors" .= (values::[Value])]
+  absent path=do
+    exists<-(getSymbolicLinkStatus path >> pure True) `catch` (\(e::IOException)->
+      if isDoesNotExistError e then pure False else throwIO e)
+    require (not exists) "native_backup_destination_exists"
   descriptors = do
     wallet<-nativeWalletInfoWith call c
     keys<-fieldValue "private_keys_enabled" wallet

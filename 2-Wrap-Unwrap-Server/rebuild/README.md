@@ -1439,30 +1439,56 @@ its HTTP/lifetime checks preserve balances and clean up the process. Root Cabal
 build and QuickCheck pass. This checkpoint does not re-prove off-host key isolation
 or funded cross-host recovery.
 
-Native wallet recovery now has two closed offline adapter operations in
-`chain/Bridge/Native.hs`: backup through the real node's `backupwallet`, and restore
-into an unused wallet name. The opaque evidence binds the checkpoint/profile,
-private file hash and public descriptor state. The adapter rejects existing paths,
-unsafe ownership/modes, changed backups and descriptor/allocation drift. Restore
-permits only lookahead-range expansion because the real daemon replenishes its
-keypool on load; keys, next indices and other descriptor fields remain exact.
-Neither operation retries uncertain mutations or deletes a failed restore.
+Native wallet recovery has two closed offline adapter operations in
+`chain/Bridge/Native.hs`, available through the existing executable:
 
-Against `f0b0517`, Native grows **163 → 259 lines in the same one production file**
-(+96; added recovery functionality, not a reduction). Existing tests grow ChainCheck
-209 → 267 and StoreCheck 2,643 → 2,690; no new files, services or dependencies.
-Root Cabal QuickCheck and a fresh empty wallet on the actual L2L Signet node pass:
-backup/restore preserves the label and next allocated address, and the restored
-private key signs a message verified by the node. Test wallets/staging are removed;
-funded wallets and the shared daemon remain untouched. Repeat through the existing
-`rebuild-store-check` executable with `ECX_REBUILD_NATIVE_RECOVERY_ONLY=1`,
-`ECX_REBUILD_NATIVE_RECOVERY_COOKIE` and `ECX_REBUILD_NATIVE_WALLET_DIRECTORY`.
+```sh
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- backup-native-wallet CONFIG DESTINATION
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- restore-native-wallet CONFIG MANIFEST
+```
 
-This is an offline adapter with in-memory evidence, not yet a durable custody
-bundle or an application CLI. It requires same-UID node/staging access and does
-not grant the web worker backup/key access or add a signer HTTP endpoint.
-Encrypted wallets require separately retained unlock material. Populated/encrypted
-wallets, cross-UID deployment and coherent ledger/key snapshots still need acceptance.
+Use a configuration whose native credentials have offline custody authority and
+an existing mode-0700 staging directory owned by the node/evaluator UID. Backup
+creates the new absolute `DESTINATION` through the real node's `backupwallet` and
+writes `DESTINATION.json` mode 0600. It refuses existing files, including a leftover
+manifest. The manifest binds the checkpoint/profile, source wallet name, file hash
+and public descriptor state; it excludes cookies and local credential paths.
+Its relative archive name lets both files move together. Both files and the parent
+directory are synchronized before success. This manifest provides local integrity;
+authenticated off-host storage and complete custody coverage remain separate gates.
+
+Restore reads the bounded private manifest, rejects unknown fields, unsafe paths,
+changed files and the wrong network, then restores into the configured unused wallet
+name. The configured name may differ for isolated recovery testing; this does not
+migrate the bridge's financial identity. Descriptor checks permit only lookahead
+range expansion because the real daemon replenishes its keypool on load; keys,
+next indices and other descriptor fields remain exact. Neither operation retries
+uncertain mutations, overwrites a wallet, deletes failed restores or resumes a bridge.
+
+The first adapter checkpoint added 96 production lines to Native (163 → 259).
+Durable manifests and command integration now add **44 production lines across the
+same two files**, versus `e6715c7`: Native 259 → 294 and Main 99 → 108. Existing
+ChainCheck grows 267 → 286 and StoreCheck 2,690 → 2,709; no new files, dependencies,
+services or HTTP endpoints. This adds recovery functionality rather than claiming
+a line reduction. Manifest construction and verification share the exact format;
+there is no second serialization type or in-memory-only recovery token to retain.
+
+Root Cabal build/QuickCheck and a fresh empty wallet on the actual L2L Signet node
+pass. **Separate application invocations** back up and restore after relocating the
+files. The restored wallet preserves its label and next address; its restored
+private key signs a message verified by the node. Malformed/path-traversing,
+wrong-checkpoint, altered-hash, oversized and exposed manifests are refused.
+Test wallets/staging are removed; funded wallets and the shared daemon remain
+untouched. Repeat through `rebuild-store-check` with
+`ECX_REBUILD_NATIVE_RECOVERY_ONLY=1`, `ECX_REBUILD_EXECUTABLE` pointing to the Cabal
+application binary, `ECX_REBUILD_NATIVE_RECOVERY_COOKIE` and
+`ECX_REBUILD_NATIVE_WALLET_DIRECTORY` identifying the local L2L Signet node.
+
+This does not grant the web worker backup/key access or change the signer API.
+Encrypted wallets still require separately retained unlock material. Populated and
+encrypted wallets, cross-UID deployment, and the coherent ledger/Solana-key/native
+wallet bundle still need integration and acceptance; a native-only backup cannot
+recover customer orders, signed attempts or Solana custody.
 
 Still required: durable key/wallet recovery material, backup acknowledgment and
 runtime integration, then independent off-host storage and real-custody acceptance.
