@@ -172,29 +172,50 @@ struct TokenRequest {
     verb: TokenVerb,
     authority: String,
     mint: String,
-    account: String,
-    amount: String,
+    account: Option<String>,
+    amount: Option<String>,
+    seed: Option<String>,
+    rent: Option<String>,
     blockhash: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum TokenVerb { Mint, Burn }
+enum TokenVerb { Mint, Burn, Create }
 fn prepare_token(r: &TokenRequest) -> Result<String, &'static str> {
     if r.protocol != 1 { return Err("invalid_protocol"); }
     let authority = key(&r.authority)?;
     let mint = key(&r.mint)?;
-    let account = key(&r.account)?;
+    let program = spl_token_interface::id();
+    let blockhash = Hash::from_str(&r.blockhash).map_err(|_| "invalid_blockhash")?;
+    if matches!(r.verb, TokenVerb::Create) {
+        let seed = r.seed.as_deref().ok_or("missing_mint_seed")?;
+        let rent = raw_amount(r.rent.as_deref().ok_or("missing_mint_rent")?)?;
+        if r.account.is_some() || r.amount.is_some() || seed.is_empty() || seed.len()>32 || !authority.is_on_curve()
+            || Pubkey::create_with_seed(&authority, seed, &program).map_err(|_| "invalid_seed")? != mint {
+            return Err("invalid_mint_creation");
+        }
+        let instructions = [solana_system_interface::instruction::create_account_with_seed(
+            &authority, &mint, &authority, seed, rent, 82, &program),
+            spl_token_interface::instruction::initialize_mint2(&program, &mint, &authority, None, 8)
+                .map_err(|_| "invalid_mint_initialization")?];
+        let message=Message::new_with_blockhash(&instructions,Some(&authority),&blockhash);
+        return bincode::serialize(&Transaction::new_unsigned(message)).map(|bytes| STANDARD.encode(bytes))
+            .map_err(|_| "serialization_failed");
+    }
+    if r.seed.is_some() || r.rent.is_some() { return Err("unexpected_creation_fields"); }
+    let account = key(r.account.as_deref().ok_or("missing_token_account")?)?;
     let program = spl_token_interface::id();
     if !authority.is_on_curve() || [mint, account, program].contains(&authority)
         || mint == account || mint == program || account == program {
         return Err("invalid_admin_accounts");
     }
-    let amount = raw_amount(&r.amount)?;
+    let amount = raw_amount(r.amount.as_deref().ok_or("missing_amount")?)?;
     let instruction = match r.verb {
         TokenVerb::Mint => spl_token_interface::instruction::mint_to_checked(
             &program, &mint, &account, &authority, &[], amount, 8),
         TokenVerb::Burn => spl_token_interface::instruction::burn_checked(
             &program, &account, &mint, &authority, &[], amount, 8),
+        TokenVerb::Create => return Err("invalid_admin_instruction"),
     }.map_err(|_| "invalid_admin_instruction")?;
     let blockhash = Hash::from_str(&r.blockhash).map_err(|_| "invalid_blockhash")?;
     let message = Message::new_with_blockhash(&[instruction], Some(&authority), &blockhash);

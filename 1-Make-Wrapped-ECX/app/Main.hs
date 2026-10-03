@@ -1,6 +1,7 @@
 module Main (main) where
 import Token
 import Data.Text (Text)
+import qualified Data.Text as T
 import qualified Token.Network as Network
 import Text.Read (readMaybe)
 import Token.Signing
@@ -16,6 +17,7 @@ import System.IO (withBinaryFile,IOMode(ReadMode))
 
 main :: IO ()
 main=getArgs >>= \args->case args of
+  ["address",owner,label]->either (die . show) (L.putStrLn . encode) (mintAddress (T.pack owner) (T.pack label))
   ["prepare",path]->do
     bytes<-readBounded path
     request<-either die pure (eitherDecodeStrict' bytes)
@@ -36,7 +38,7 @@ main=getArgs >>= \args->case args of
     (request,unsigned)<-readPrepared prepared
     identifier<-evalCritical (Sign keyfile output request unsigned)
     L.putStrLn $ encode $ object ["signature" .= identifier,"saved" .= output]
-  _->die "Usage: ecx-token prepare REQUEST.json | check devnet|mainnet HTTPS_RPC MAX_FEE PREPARED.json | submit devnet|mainnet HTTPS_RPC MAX_FEE ATTEMPT.json | sign PREPARED.json AUTHORITY_KEY.json NEW_ATTEMPT.json (prepare/check/sign never broadcast; submit sends saved bytes)"
+  _->die "Usage: ecx-token address AUTHORITY SEED | prepare REQUEST.json | check devnet|mainnet HTTPS_RPC MAX_FEE PREPARED.json | submit devnet|mainnet HTTPS_RPC MAX_FEE ATTEMPT.json | sign PREPARED.json AUTHORITY_KEY.json NEW_ATTEMPT.json (prepare/check/sign never broadcast; submit sends saved bytes)"
 
 readBounded :: FilePath -> IO B.ByteString
 readBounded path=do

@@ -19,6 +19,7 @@ import Bridge.SDKBuild (sdkLibraryPath)
 import Bridge.SolanaMessage (Transaction(..),decodeTransaction,base58)
 import qualified Data.ByteString as B
 import Data.Text (Text)
+import qualified Data.Text as T
 import Data.Either (isLeft)
 import Control.Exception (SomeException,try,bracket)
 import System.Exit (exitFailure)
@@ -42,6 +43,17 @@ main=do
             transfer=H.HelperRequest False (authority original) recipient (money 3) (blockhash original) "order-1"
         reply<-H.invokeUnsignedHelper sdkLibraryPath config transfer
         pure (H.replySignature reply==Nothing && H.replyDestination reply==account original)
+    , quickCheckWithResult stdArgs {maxSuccess=40} $ forAll (choose (1,32)) $ \size->ioProperty $ do
+        let owner=authority(request Mint 1)
+            label=T.replicate size "x"
+            derived=either (error . show) id (mintAddress owner label)
+            creation=CreateMint owner derived label 1461600 (blockhash $ request Mint 1)
+        transaction<-evalSafe (Prepare sdkLibraryPath creation)
+        pure (eitherDecode(encode creation)==Right creation && not(isLeft $ validate creation transaction)
+          && isLeft(validate creation {rent=1} transaction)
+          && isLeft(validate creation {seed="different"} transaction)
+          && isLeft(validate creation {mint=mint(request Mint 1)} transaction)
+          && isLeft(mintAddress owner (T.replicate 33 "x")))
     , quickCheckResult $ once $ ioProperty signingCheck
     , quickCheckResult $ once $ property $
         eitherDecode (encode $ request Mint maxBound)==Right(request Mint maxBound)

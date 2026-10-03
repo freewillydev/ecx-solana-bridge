@@ -26,11 +26,10 @@ spl-token-interface = "=3.0.0"
 spl-associated-token-account-interface = "=2.0.0"
 spl-memo-interface = "=2.0.0"
 
+solana-system-interface = { version = "=2.0.0", features = ["bincode"] }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1
 strip = true
 panic = "unwind"
-
-[dev-dependencies]
-solana-system-interface = { version = "=2.0.0", features = ["bincode"] }

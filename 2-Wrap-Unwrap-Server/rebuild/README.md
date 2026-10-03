@@ -304,7 +304,8 @@ Private keys/attempts/ledger remain outside Git.
    encrypted-wallet unlock handling and off-host HTTPS/cross-host recovery.
 4. Complete required Haskell/FFI token administration and selected real pool workflow;
    token mint/burn now has a Cabal CLI, separate critical signing/submission, and
-   finalized Devnet round-trip/replay acceptance. Mint creation, metadata and
+   finalized Devnet round-trip/replay acceptance. Mint creation reuses the same
+   workflow and has finalized Devnet acceptance. Metadata and
    administration expiry recovery remain unfinished.
    retire standalone legacy Rust/Python tools after their required behavior is covered.
    Confirm canonical token authority, backing, liquidity and actual route availability.

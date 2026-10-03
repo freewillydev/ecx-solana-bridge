@@ -36,14 +36,23 @@ evalSafe (Check network endpoint feeLimit request unsigned)=do
         accountInfo address=call "getAccountInfo" [toJSON address,options] >>= fieldValue "value"
     genesis<-call "getGenesisHash" [] >>= parseValue parseJSON :: IO Text
     require (genesis==case network of Devnet->"EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"; Mainnet->"5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d") "wrong_token_network"
-    mintInfo<-accountInfo (mint request) >>= parseValue inspectMint
-    tokenInfo<-accountInfo (account request) >>= parseValue inspectAccount
-    let (mintAuthority,supply)=mintInfo
-        (owner,balance,token)=tokenInfo
-    require (token==mint request) "token_account_mint_mismatch"
-    case action request of
-      Mint->require (mintAuthority==Just(authority request) && toInteger supply+toInteger(quantity request)<=toInteger(maxBound::Word64)) "token_mint_authority_or_supply"
-      Burn->require (owner==authority request && balance>=quantity request && supply>=quantity request) "token_burn_authority_or_balance"
+    rentCost<-case request of
+      CreateMint{}->do
+        existing<-accountInfo (mint request)
+        require (existing==Null) "mint_already_exists"
+        minimumRent<-call "getMinimumBalanceForRentExemption" [toJSON (82::Int),object ["commitment" .= ("finalized"::Text)]] >>= parseValue parseJSON :: IO Integer
+        require (minimumRent>0 && minimumRent==toInteger(rent request)) "mint_rent_mismatch"
+        pure minimumRent
+      Request{}->do
+        mintInfo<-accountInfo (mint request) >>= parseValue inspectMint
+        tokenInfo<-accountInfo (account request) >>= parseValue inspectAccount
+        let (mintAuthority,supply)=mintInfo
+            (owner,balance,token)=tokenInfo
+        require (token==mint request) "token_account_mint_mismatch"
+        case action request of
+          Mint->require (mintAuthority==Just(authority request) && toInteger supply+toInteger(quantity request)<=toInteger(maxBound::Word64)) "token_mint_authority_or_supply"
+          Burn->require (owner==authority request && balance>=quantity request && supply>=quantity request) "token_burn_authority_or_balance"
+        pure 0
     -- Both writable token accounts and the mint are checked above; reject a
     -- non-system fee payer, even if an RPC simulation would accept it.
     payer<-accountInfo (authority request)
@@ -53,7 +62,7 @@ evalSafe (Check network endpoint feeLimit request unsigned)=do
     require (payerOwner=="11111111111111111111111111111111" && not executable) "unsupported_token_fee_payer"
     feeValue<-call "getFeeForMessage" [toJSON $ TE.decodeUtf8 $ B64.encode message,object ["commitment" .= ("finalized"::Text)]]
     fee<-fieldValue "value" feeValue :: IO (Maybe Integer)
-    n<-case fee of Just n | n>0 && n<=toInteger feeLimit && n<=lamports->pure(fromInteger n); _->reject "token_fee_unavailable_or_excessive"
+    n<-case fee of Just n | n>0 && n<=toInteger feeLimit && n+rentCost<=lamports->pure(fromInteger n); _->reject "token_fee_unavailable_or_excessive"
     simulation<-call "simulateTransaction" [toJSON unsigned,object
       ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text),"sigVerify" .= False,"replaceRecentBlockhash" .= False]]
     result<-fieldValue "value" simulation
