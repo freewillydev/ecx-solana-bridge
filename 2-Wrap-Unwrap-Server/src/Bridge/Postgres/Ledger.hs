@@ -146,11 +146,11 @@ posting connection event note rows = do
 freeInventory :: PG.Connection -> Asset -> IO Integer
 freeInventory connection asset = do
   let name=T.pack(show asset)
-  bs <- balances connection
+  available <- accountBalance connection name "float"
   held <- O.runSelect connection $ fmap reservationsAmount $ selectWhere
     (\row->reservationsAsset row O..== O.sqlStrictText name O..&& reservationsPhase row O../= O.sqlStrictText "released")
     (O.selectTable reservationsTable) :: IO [Int64]
-  pure (M.findWithDefault 0 (name,"float") bs-sum(map toInteger held))
+  pure (available-sum(map toInteger held))
 
 operatingHolds :: PG.Connection -> Text -> IO Integer
 operatingHolds connection asset = do
@@ -163,13 +163,19 @@ operatingHolds connection asset = do
     (O.selectTable operatingreservationsTable) :: IO [Int64]
   pure (sum (map toInteger (fees<>orders)))
 
+-- Filter before reading the journal; summation remains unbounded Integer.
+accountBalance :: PG.Connection -> Text -> Text -> IO Integer
+accountBalance connection asset account = do
+  rows <- O.runSelect connection $ fmap postingsDelta $ selectWhere
+    (\row->postingsAsset row O..== O.sqlStrictText asset O..&& postingsAccount row O..== O.sqlStrictText account)
+    (O.selectTable postingsTable) :: IO [Int64]
+  pure (sum $ map toInteger rows)
+
 freeOperating :: PG.Connection -> Text -> IO Integer
 freeOperating connection asset = do
-  rows <- O.runSelect connection $ fmap postingsDelta $ selectWhere
-    (\row->postingsAsset row O..== O.sqlStrictText asset O..&& postingsAccount row O..== O.sqlStrictText "operating")
-    (O.selectTable postingsTable) :: IO [Int64]
+  available <- accountBalance connection asset "operating"
   held <- operatingHolds connection asset
-  pure (sum (map toInteger rows)-held)
+  pure (available-held)
 
 operatingTime :: PG.Connection -> IO Int64
 operatingTime connection = do
@@ -197,9 +203,9 @@ checkOperatingCapacity connection cfg costs = do
   now <- operatingTime connection
   forM_ costs $ \(asset,n)->do
     require (asset `elem` ["Native","Sol"] && n>=0) "invalid_operating_reservation"
-    free <- freeOperating connection asset
-    require (free>=toInteger n) "insufficient_fee_budget"
+    available <- accountBalance connection asset "operating"
     held <- operatingHolds connection asset
+    require (available-held>=toInteger n) "insufficient_fee_budget"
     spent <- operatingSpent connection asset now
     let limit=if asset=="Native" then maxNativeDailyCost cfg else maxSolDailyCost cfg
     require (spent+held+toInteger n<=toInteger (units limit)) "operating_daily_limit"
