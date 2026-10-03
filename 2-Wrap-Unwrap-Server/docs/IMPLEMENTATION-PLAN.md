@@ -46,7 +46,7 @@ and review steps as well as files and lines.
 
 The supplied original is preserved verbatim at `docs/reference/Main.hs`, received
 2026-10-02 from `/Users/lukekensik/Downloads/Main.hs`. Its SHA-256 and design mapping
-are in OPERATION-DSL.md. Read this 118-line reference before changing operation
+are in ARCHITECTURE.md. Read this 118-line reference before changing operation
 types, handlers or interpreter boundaries. Preserve its constrained typeclasses,
 GADTs and severity intent while correcting unfinished or permissive sketch types.
 It is a design reference, excluded from production builds.

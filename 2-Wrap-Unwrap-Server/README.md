@@ -186,7 +186,7 @@ Jupiter was part of the intended market path, not a replacement for native wrapp
 - [`docs/TOKEN-OPERATIONS.md`](docs/TOKEN-OPERATIONS.md): pinned upstream token tools, separate authorities, inventory funding and external liquidity.
 - [`docs/OPERATIONS.md`](docs/OPERATIONS.md): customer flow, restricted diagnostics, backup limitations, separate token and liquidity administration.
 - [Release review](docs/RELEASE-REVIEW.md): current evidence and remaining gates.
-- [`docs/CONTRACTS.md`](docs/CONTRACTS.md): accounting, amount, API and recovery contracts; historical checkpoints are explicitly distinguished from current public-test operation in STATUS.
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md): source-linked DSL, custody, accounting, API and recovery contracts; release evidence is kept separately.
 - [`docs/LOCAL-DEVELOPMENT.md`](docs/LOCAL-DEVELOPMENT.md): local operation and dedicated public-test procedures.
 - [`docs/THIRD-PARTY.md`](docs/THIRD-PARTY.md): notice provenance, 377-entry dependency collection and remaining review.
 

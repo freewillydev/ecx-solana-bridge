@@ -5,7 +5,7 @@ human-auditable simplification: remove duplication, obsolete artifacts and unnec
 abstractions while preserving required behavior and financial invariants.
 
 Before operation, handler or interpreter changes, read 2-Wrap-Unwrap-Server/docs/reference/Main.hs in full
-and 2-Wrap-Unwrap-Server/docs/OPERATION-DSL.md. Main.hs is the user's exact architectural reference from
+and 2-Wrap-Unwrap-Server/docs/ARCHITECTURE.md. Main.hs is the user's exact architectural reference from
 “Add interactive environment prompts”, supplied 2026-10-02. Keep it unmodified and
 outside production builds. Preserve the typeclass/constrained-existential/GADT
 severity design; correct the sketch's incomplete or permissive types as explained

@@ -1,7 +1,7 @@
 # Local development
 
 Follow [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md) and read
-[OPERATION-DSL.md](OPERATION-DSL.md) plus the preserved Main.hs before changing
+[ARCHITECTURE.md](ARCHITECTURE.md) plus the preserved Main.hs before changing
 handlers or interpreters. The old run diary and SQLite procedures are retained in
 [Git history](https://github.com/ekulkisnek/ecx-solana-bridge/blob/aa09e1e/docs/LOCAL-DEVELOPMENT.md);
 they are not current operating instructions.
