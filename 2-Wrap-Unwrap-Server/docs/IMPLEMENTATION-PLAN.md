@@ -26,8 +26,10 @@ PostgreSQL rollback/replay acceptance. Guarded instruction storage now covers na
 allocation claims, immutable results, derived Solana references, backup-gated first
 exposure and expiry preserving obligation holds. The private chain component now
 has HTTP RPC plus native identity/wallet/allocation and Solana identity/account
-checks, with protocol tests and a real Devnet genesis read. Adapter/workflow integration,
-high-level evaluators, chain adapters and execution remain unfinished.
+checks, with protocol tests and a real Devnet genesis read. Native payment preparation
+and signing checks now pass captured-transaction and offline RPC contracts.
+Adapter/workflow integration, high-level evaluators, Solana payments, chain observation
+and durable execution remain unfinished.
 No existing custody state has been moved. See the rebuild README for scoped counts
 and evidence; do not compare this subset against the entire old storage layer.
 

@@ -186,6 +186,25 @@ both components. These are literal module counts, not a like-for-like total
 reduction claim; the principal gain is clear dependencies and retained protocol
 checks, with targeted input/retry hardening.
 
+Native payment preparation/validation/signing is extracted into the private chain
+component. It retains independently checked owned prevouts, exact recipient/change,
+fee totals/ceiling, chain replay fields, saved-PSBT comparison, lock recovery and
+post-signing/mempool checks. Preparation always requests no input locks; durable
+workflow orchestration must save the draft before signing restores them. The shared
+unchecked signing helper is private. Saved records now also reject malformed
+transaction IDs/outpoints/scripts, zero outputs, excessive confirmation policy and
+empty/oversized PSBTs before signing.
+
+This piece is 257 production lines in one file versus 243 in one baseline file.
+The increase includes explicit exports and validation; no size reduction is claimed.
+Its 143-line QuickCheck/protocol module uses one unchanged captured public L2L
+Signet fixture, distributed through Cabal. Tests cover successful offline
+preparation/signing, refusal before signing when current input evidence changes,
+post-signing template/fee rejection, corrupt saved drafts, output/fee mutations,
+coinbase maturity, replay policy and idempotent lock recovery. The complete rebuild
+pure/protocol suite passes. Offline fixture replay is not a new funded chain test.
+
 Connecting those adapters to the high-level safe/critical runtime, actual host fence,
-chain adapters, signer and payment execution remain unfinished. Passing these
-checks is not payment, migration or real-chain acceptance.
+dedicated signer and durable payment execution remains unfinished. Solana payment
+construction/validation, chain observation and recovery integration also remain.
+Passing these checks is not payment, migration or real-chain acceptance.

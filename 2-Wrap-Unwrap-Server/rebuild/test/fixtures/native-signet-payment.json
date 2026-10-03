@@ -1,0 +1,80 @@
+{
+  "provenance": {
+    "network": "public-l2l-signet",
+    "capturedUtc": "2026-10-01T01:37:27.155113+00:00",
+    "txid": "b2278e8dd0be7be001a5630545ddb73c83423ee1ee7dbd0327675e27f1642bd3",
+    "note": "Read-only replay of an already confirmed standalone public-chain probe. Parent output is spent; this fixture does not assert a currently spendable UTXO or a bridge order."
+  },
+  "plan": {
+    "planProfile": "L2LSignetDevnet",
+    "planRecipient": "tb1qqq606d6hcwkf3mu5us3m6848ylz4chnkvat79g",
+    "planRecipientScript": "00140034fd3757c3ac98ef94e423bd1ea727c55c5e76",
+    "planChange": "tb1q8km4dw4czsdlnq0n2rpc2l7j8gpk5k6d2a5rwe",
+    "planChangeScript": "00143db756bab8141bf981f350c3857fd23a036a5b4d",
+    "planAmount": "100000",
+    "planDepth": 1,
+    "planFeeLimit": "1000"
+  },
+  "previous": [
+    {
+      "prevout": {
+        "txid": "d42c6d553922668bd9176bf52b0e1b446751da7dd6d818cb97e48581856453fe",
+        "vout": 1
+      },
+      "prevoutAmount": "2000000",
+      "prevoutScript": "00140cd7e9d72450ee5b99e25e0046fd475d68bac2e0",
+      "prevoutDepth": 10,
+      "prevoutCoinbase": false
+    }
+  ],
+  "fee": "282",
+  "decoded": {
+    "txid": "b2278e8dd0be7be001a5630545ddb73c83423ee1ee7dbd0327675e27f1642bd3",
+    "hash": "4c631086f1d761776990e57edd77ac7728795195091d678751d6b176586dc2bb",
+    "version": 2,
+    "size": 222,
+    "vsize": 141,
+    "weight": 561,
+    "locktime": 0,
+    "vin": [
+      {
+        "txid": "d42c6d553922668bd9176bf52b0e1b446751da7dd6d818cb97e48581856453fe",
+        "vout": 1,
+        "scriptSig": {
+          "asm": "",
+          "hex": ""
+        },
+        "txinwitness": [
+          "304402205c01f18dcf252cf402902a53a1b1e3fbb7161b9e4f88424c337004a0331c411b0220534496d5b747589edb569842e720ab27101b896140dc48b2bae64d86d7937c4901",
+          "0375bb85ea67bfad380c95456b1f10899068e59d1d5348db052694364005b1feb9"
+        ],
+        "sequence": 4294967294
+      }
+    ],
+    "vout": [
+      {
+        "value": 0.01899718,
+        "n": 0,
+        "scriptPubKey": {
+          "asm": "0 3db756bab8141bf981f350c3857fd23a036a5b4d",
+          "desc": "addr(tb1q8km4dw4czsdlnq0n2rpc2l7j8gpk5k6d2a5rwe)#h5eq4wte",
+          "hex": "00143db756bab8141bf981f350c3857fd23a036a5b4d",
+          "address": "tb1q8km4dw4czsdlnq0n2rpc2l7j8gpk5k6d2a5rwe",
+          "type": "witness_v0_keyhash"
+        }
+      },
+      {
+        "value": 0.001,
+        "n": 1,
+        "scriptPubKey": {
+          "asm": "0 0034fd3757c3ac98ef94e423bd1ea727c55c5e76",
+          "desc": "addr(tb1qqq606d6hcwkf3mu5us3m6848ylz4chnkvat79g)#hm9l9928",
+          "hex": "00140034fd3757c3ac98ef94e423bd1ea727c55c5e76",
+          "address": "tb1qqq606d6hcwkf3mu5us3m6848ylz4chnkvat79g",
+          "type": "witness_v0_keyhash"
+        }
+      }
+    ]
+  },
+  "raw": "02000000000101fe5364858185e497cb18d8d67dda5167441b0e2bf56b17d98b662239556d2cd40100000000feffffff02c6fc1c00000000001600143db756bab8141bf981f350c3857fd23a036a5b4da0860100000000001600140034fd3757c3ac98ef94e423bd1ea727c55c5e760247304402205c01f18dcf252cf402902a53a1b1e3fbb7161b9e4f88424c337004a0331c411b0220534496d5b747589edb569842e720ab27101b896140dc48b2bae64d86d7937c4901210375bb85ea67bfad380c95456b1f10899068e59d1d5348db052694364005b1feb900000000"
+}

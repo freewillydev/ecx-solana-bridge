@@ -1,6 +1,7 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 -- Offline protocol contracts. They do not emulate a network or prove live flows.
 module ChainCheck (checks) where
+import qualified NativePaymentCheck
 import Bridge.Domain
 import Bridge.Error
 import Bridge.Native
@@ -21,7 +22,7 @@ import qualified Data.Text as T
 import Test.QuickCheck hiding (label)
 
 checks :: IO [Result]
-checks = sequence
+checks = (<>) <$> NativePaymentCheck.checks <*> sequence
   [ check "Solana token account accepts only the saved mint/owner and supported layout" $ once $ property $
       let key=T.replicate 32 "1"
           info=object ["owner" .= key,"mint" .= key,"state" .= ("initialized"::Text),"isNative" .= False,
