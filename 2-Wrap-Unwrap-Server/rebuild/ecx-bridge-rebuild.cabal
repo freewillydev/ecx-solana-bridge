@@ -25,6 +25,16 @@ library customer-api
     servant >=0.20 && <0.21, servant-server >=0.20 && <0.21
   mixins: ecx-bridge-rebuild hiding (Bridge.Operation.Internal)
 
+library store
+  import: settings
+  visibility: private
+  hs-source-dirs: runtime
+  exposed-modules: Bridge.Store
+  other-modules: Bridge.Store.Schema, Bridge.Store.Catalog
+  build-depends: base, ecx-bridge-rebuild, aeson, bytestring, text, containers,
+    opaleye ==0.10.8.0, postgresql-simple >=0.7 && <0.8,
+    product-profunctors >=0.11 && <0.12
+
 test-suite rebuild-test
   import: settings
   type: exitcode-stdio-1.0
@@ -32,3 +42,12 @@ test-suite rebuild-test
   main-is: Main.hs
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:customer-api, servant, aeson, text, containers,
     QuickCheck >=2.15 && <2.19
+
+-- Explicitly invoked against a disposable migrated database, never live custody.
+executable rebuild-store-check
+  import: settings
+  hs-source-dirs: test, runtime
+  main-is: StoreCheck.hs
+  other-modules: Bridge.Store, Bridge.Store.Schema, Bridge.Store.Catalog
+  build-depends: base, ecx-bridge-rebuild, aeson, bytestring,
+    containers, text, opaleye, postgresql-simple, product-profunctors, QuickCheck

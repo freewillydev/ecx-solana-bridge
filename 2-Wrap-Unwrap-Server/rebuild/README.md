@@ -2,7 +2,8 @@
 
 Baseline: `ba31b28`. This package is a replacement under construction, not a
 second deployed bridge. Root Cabal builds it alongside the baseline. It has no
-custody credentials, network process or ledger connection yet. Existing state
+custody credentials or running bridge process. Its storage contracts use a
+disposable PostgreSQL database, never the existing custody database. Existing state
 must remain untouched until migration and real-chain acceptance pass.
 
 The required product remains connection-free native/wrapped conversion at 1% both
@@ -66,6 +67,32 @@ validated quote decoding, the existing customer wire format, existential request
 and the four pure Servant handlers. Funding has read-only patterns; money and
 quotes have ordinary accessors so record updates cannot bypass validation.
 QuickCheck covers money, fees, historical terms and funding accounting; handler
-checks inspect actual requests and their DSL conversion. This package has no
-runtime evaluator, storage, chain adapter or executable yet. Passing these tests
-is not payment or migration acceptance.
+checks inspect actual requests and their DSL conversion. The private storage component now provides closed read operations and atomic
+pause/earned-fee reservation/cancellation operations against the existing schema.
+It exposes no connection/query callback. It checks read-role privileges and ledger
+identity, shares the baseline writer lock, requires a durable checkpoint callback,
+and fences unexpected transaction failures. Returned withdrawals include cancellation
+state; replay cannot silently reactivate released money.
+
+`rebuild-store-check` is the Cabal-built PostgreSQL contract runner. Supply a fresh
+fully migrated `ECX_REBUILD_CONTRACT_DATABASE` with the `ecx_rebuild_contract_`
+prefix, `ECX_REBUILD_CONTRACT_READER` with a SELECT-only role, and `USER` for fixture
+setup on `/tmp/ecx-pg-seam:29436`. It refuses an unprefixed database. Fixtures and
+assertions use Opaleye; schema/role provisioning is separate DDL. Checks cover role
+and profile refusal, exclusive writer ownership, exact replay/conflicts, custody
+freshness, insufficient earned revenue, cancellation and checkpoint rollback/fencing,
+plus 25 randomized reserve/cancel cycles. The fixture checkpoint is deliberately
+in-memory/no-op except during failure injection; this is not host-fence acceptance.
+
+Size comparison (physical lines, including comments/blanks): the six equivalent
+full table mappings for deployment, events, postings, audit, fee withdrawals and
+cancellations occupy 89 declaration lines in the baseline schema versus 34 here,
+in one schema file in each version. Repeated per-column type parameters and
+read/write aliases are removed; mapped columns are retained. The current storage
+slice is 367 production lines in three files plus a 105-line contract runner.
+Other baseline storage behavior has not been ported, so those totals are not a
+whole-storage reduction claim.
+
+Customer order storage, the high-level safe/critical runtime, actual host fence,
+chain adapters, signer and payment execution remain unfinished. Passing these
+checks is not payment, migration or real-chain acceptance.

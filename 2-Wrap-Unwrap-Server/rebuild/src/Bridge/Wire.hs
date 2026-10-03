@@ -59,3 +59,24 @@ instructionJSON :: Options
 instructionJSON = defaultOptions {fieldLabelModifier = \field -> case drop 11 field of
   first:rest -> toLower first:rest
   [] -> []}
+
+data CostLimits = CostLimits
+  { savedNativeFee :: !Amount, savedSolanaFee :: !Amount, savedSolanaRent :: !Amount }
+  deriving (Eq,Show)
+
+-- Immutable execution terms shared by customer payouts and earned-fee funding.
+-- The fee-funding JSON layout is retained exactly for existing reservations.
+data PaymentTerms = PaymentTerms
+  { paymentPolicy :: !PolicySnapshot, paymentLimits :: !CostLimits }
+  deriving (Eq,Show)
+instance ToJSON PaymentTerms where
+  toJSON (PaymentTerms policy limits) = object
+    ["fingerprint" .= deploymentFingerprint policy,"policy" .= policy,
+     "nativeFee" .= savedNativeFee limits,"solanaFee" .= savedSolanaFee limits,
+     "solanaRent" .= savedSolanaRent limits]
+instance FromJSON PaymentTerms where
+  parseJSON = withObject "payment terms" $ \o->do
+    identity <- o .: "fingerprint"
+    policy <- o .: "policy"
+    if identity/=deploymentFingerprint policy then fail "payment_profile_mismatch" else
+      PaymentTerms policy <$> (CostLimits <$> o .: "nativeFee" <*> o .: "solanaFee" <*> o .: "solanaRent")
