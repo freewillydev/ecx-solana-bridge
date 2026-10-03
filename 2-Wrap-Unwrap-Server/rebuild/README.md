@@ -404,6 +404,15 @@ acceptance databases/role were removed. These local checks do not certify cross-
 signer isolation or cross-host recovery. The legacy runner retains only its journal
 and source modes until their remaining parity review is complete.
 
+Recovery parity now includes source loss after a payout has already been signed.
+The existing PostgreSQL restoration contract verifies return/approval to `paying`,
+subsequent loss covered by operator capital, idempotent covered approval, preservation
+of the exact signed attempt, and refusal to send until backup covers the new approval.
+Settlement still posts principal/fees once and source return restores capital once.
+The full ledger/real-restic contract passes; chain effects in this case are explicit
+offline fixtures, not a funded reorg claim. Legacy source tests remain pending review
+of multi-payment failure traversal and customer winner-link parity.
+
 ## Remaining release work, in order
 
 1. Extend funded tests to remaining interruption boundaries on the actual test

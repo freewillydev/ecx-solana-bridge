@@ -2895,7 +2895,37 @@ restorationContract fixtures reader writer=do
   check (savedPayment(preparedView finalDecision)==savedPayment(preparedView decision))
   signed<-evalWrite writer (RecordAttempt finalDecision attempt)
   fixture fixtures ReadyIntake
-  void $ evalWrite writer (MarkBroadcast 110 $ signedId $ recordedSigned signed)
+  oldSend<-evalWrite writer (MarkBroadcast 110 $ signedId $ recordedSigned signed)
+  fixture fixtures CoverBackup
+  -- Recover already-signed work, preserving its bytes and paying state.
+  void restore
+  suspend
+  evalRead reader (ReadPayment key) >>= check . (==PaymentReview) . savedStatus
+  payingReturn<-restore
+  evalWrite writer (Pause "review signed source restoration")
+  fixture fixtures RefreshCustody
+  approve key payingReturn "signed source returned"
+  evalRead reader (ReadPayment key) >>= check . (==PaymentPaying) . savedStatus
+  preserved<-evalRead reader (ReadAttempt "covered-conversion")
+  check (recordedSigned preserved==recordedSigned signed)
+  suspend
+  payingSource<-evalRead reader (ReadSource did)
+  evalWrite writer (RecordSourceCheck payingSource $ W.SourceMissing proof)
+  payingLoss<-ledgerSequence <$> evalRead reader ReadState
+  payingRevision<-evalRead reader ReadCustodyRevision
+  evalWrite writer (CoverSourceLoss payingSource payingLoss 110 (money 10) (money 0)
+    "cover signed source loss" proof (payingRevision,110,True,report))
+  certify
+  evalWrite writer (ApproveCoveredSource 110 key payingLoss "signed loss reviewed" proof)
+  payingApproval<-ledgerSequence <$> evalRead reader ReadState
+  evalWrite writer (ApproveCoveredSource 110 key payingLoss "signed loss reviewed" proof)
+  evalRead reader ReadState >>= check . (==payingApproval) . ledgerSequence
+  evalRead reader (ReadPayment key) >>= check . (==PaymentPaying) . savedStatus
+  evalRead reader (ReadSource did) >>= check . not . W.depositEligible
+  fixture fixtures ReadyIntake
+  newSend<-evalWrite writer (MarkBroadcast 110 "covered-conversion")
+  check (newSend>oldSend && newSend>=payingApproval)
+  expectStore "backup_pending" (evalWrite writer $ AuthorizeSend 110 "covered-conversion")
   fixture fixtures CoverBackup
   fixture fixtures ReadyIntake
   evidenceUnavailable
@@ -2904,6 +2934,7 @@ restorationContract fixtures reader writer=do
   evalWrite writer (RecordSourceCheck source $ W.SourceMissing proof)
   ready
   authorized<-evalWrite writer (AuthorizeSend 110 "covered-conversion")
+  check (recordedSigned authorized==recordedSigned signed)
   beforePaid<-evalRead reader ReadBalances
   evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 1) (money 0)) "offline-covered-effect")
   afterPaid<-evalRead reader ReadBalances
