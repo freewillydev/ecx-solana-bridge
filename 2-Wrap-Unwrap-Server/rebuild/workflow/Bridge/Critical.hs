@@ -46,8 +46,11 @@ import qualified Servant.Client as SC
 
 -- The safe evaluator receives only read credentials and public configuration.
 -- It cannot access the writer, signer transport, backup callback or RPC manager.
-evalSafe :: Reader -> Maybe W.PublicConfiguration -> DSL 'Customer 'Safe a -> IO a
+evalSafe :: Reader -> Maybe W.PublicConfiguration -> DSL caller 'Safe a -> IO a
 evalSafe reader public operation = case operation of
+  ReadOperator ServiceState->do
+    state<-evalRead reader ReadState
+    pure $ W.ServiceStatus (ledgerPaused state) (ledgerReason state) (ledgerSequence state) (ledgerBackup state)
   ReadCustomer PublicConfig->do
     configuration<-configured
     if not(W.pubIntakeEnabled configuration) then pure configuration {W.pubAvailability=W.Availability False "observation_only"} else do
@@ -74,7 +77,7 @@ data CustomerSettings = CustomerSettings
 -- Startup supplies capabilities. Customer and worker requests share one dispatch
 -- and one gate; safe reads have no writer, signer or network capability.
 withRuntime :: Manager -> ObserverSettings -> H.SolanaPolicy -> Maybe CustomerSettings -> SigningEndpoint -> Reader -> Writer
-  -> ((forall a. Request 'Worker 'Critical a -> IO a) -> (forall a. Plan 'Customer a -> IO a) -> IO b) -> IO b
+  -> ((forall a. Request 'Worker 'Critical a -> IO a) -> (forall a. Plan 'Customer a -> IO a) -> (forall a. Plan 'Operator a -> IO a) -> IO b) -> IO b
 withRuntime rpc settings config customerSettings endpoint reader writer action = do
   let native=nativeSettings settings; solana=solanaSettings settings
   require (N.profile native==S.solanaProfile solana && S.mint solana==H.mint config
@@ -99,6 +102,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
       interpret request=do
         let command=resolve request
         case command of
+          OperatorDSL PauseService{}->pure ()
           SigningDSL _->reject "signer_operation_forbidden"
           WorkerDSL RecoverNativeLocks->pure ()
           WorkerDSL RunWorkerCycle->pure ()
@@ -107,7 +111,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
           WorkerDSL ReconcilePayment{}->pure ()
           _->require paying "observation_only"
         withMVar gate $ \_ -> evalCritical command
-      customerRequest :: forall a. Plan 'Customer a -> IO a
+      customerRequest :: forall caller a. Plan caller a -> IO a
       customerRequest (SafePlan request)=evalSafe reader (publicConfiguration <$> customerSettings) (resolve request)
       customerRequest (CriticalPlan request)=interpret request
       evalCritical :: forall caller a. DSL caller 'Critical a -> IO a
@@ -115,6 +119,18 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
       evalCritical (WriteCustomer (Bridge.Operation.Internal.CreateOrder header request))=do
         c<-customer
         createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (coverBackup c) reader writer header request
+      evalCritical (OperatorDSL (PauseService reason))=evalWrite writer (Pause reason)
+      evalCritical (OperatorDSL ResumeService)=guarded $ do
+        state<-evalRead reader ReadState
+        require (ledgerPaused state) "pause_before_operator_action"
+        N.verifyNativeBoundaryWith (N.nativeCall rpc native)
+        recoverPending
+        ids<-evalRead reader PendingAttempts
+        reviewed<-mapM (evalRead reader . ReadAttempt) ids
+        forM_ reviewed (refreshSource . recordedPayment)
+        evalWorker ReconcileCustody
+        now<-floor <$> getPOSIXTime
+        evalWrite writer (ResumeLedger now [("Native",N.nativeCheckpointHash native),("Solana",tokenOrigin settings),("SolanaOperating",operatingOrigin settings)] reviewed)
       evalCritical (WorkerDSL operation)=evalWorker operation
       evalWorker :: forall a. WorkerOperation a -> IO a
       evalWorker RecoverNativeLocks = guarded $ do
@@ -210,15 +226,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         if code=="custody_not_reconciled" then pure () else evalWrite writer (Pause code) >> reject code)
        where
         cycleWork = do
-          locks<-tryBridge (evalWorker RecoverNativeLocks)
-          scanned<-tryBridge (evalWorker ObserveChains)
-          now<-floor <$> getPOSIXTime
-          evalWrite writer (ExpireQuotes now)
-          pending<-evalRead reader PendingAttempts
-          -- A policy error on one attempt must not hide another finalized effect.
-          outcomes<-mapM (tryBridge . evalWorker . ReconcilePayment) pending
-          evalWorker ReconcileCustody
-          mapM_ (either throwIO pure) (locks:scanned:outcomes)
+          recoverPending
           state<-evalRead reader ReadState
           when (paying && not(ledgerPaused state)) $ do
             candidates<-evalRead reader PaymentCandidates
@@ -255,8 +263,21 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
               coverBackup c (ledgerSequence before)
               after<-evalRead reader ReadState
               require (ledgerBackup after>=ledgerSequence before) "backup_pending"
-        tryBridge :: IO a -> IO (Either BridgeError a)
-        tryBridge work=try (work `catch` (\(_::IOException)->reject "worker_io_unavailable"))
+      -- Explicit resume must retain every recovery error; the scheduler alone
+      -- may defer a custody check while waiting for the next observation cycle.
+      recoverPending :: IO ()
+      recoverPending=do
+        locks<-tryBridge (evalWorker RecoverNativeLocks)
+        scanned<-tryBridge (evalWorker ObserveChains)
+        now<-floor <$> getPOSIXTime
+        evalWrite writer (ExpireQuotes now)
+        pending<-evalRead reader PendingAttempts
+        -- A policy error on one attempt must not hide another finalized effect.
+        outcomes<-mapM (tryBridge . evalWorker . ReconcilePayment) pending
+        evalWorker ReconcileCustody
+        mapM_ (either throwIO pure) (locks:scanned:outcomes)
+      tryBridge :: IO a -> IO (Either BridgeError a)
+      tryBridge work=try (work `catch` (\(_::IOException)->reject "worker_io_unavailable"))
       guarded :: IO a -> IO a
       guarded operation=operation `onException` evalWrite writer (Pause "payment_requires_reconciliation")
       decode :: FromJSON a => Text -> IO a
@@ -292,7 +313,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
             (fmap (\url->RPC.rpc rpc url Nothing) $ S.solanaVerifierRpc solana) (N.profile native) config binding
           evalWrite writer (RefreshPaymentSource (W.sourceDeposit binding) observed)
           require (W.depositEligible observed) "source_not_eligible"
-  action interpret customerRequest
+  action interpret customerRequest customerRequest
 
 -- The caller owns this lifetime (run it alongside HTTP with structured concurrency).
 -- Async cancellation and database failures escape; they are never retried as work.

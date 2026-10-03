@@ -4,6 +4,7 @@ module Main (main) where
 import qualified Bridge.Config as C
 import Bridge.BrowserBuild (browserAssetsDirectory)
 import Bridge.Critical (CustomerSettings(..),withRuntime,runWorkerLoop)
+import Bridge.Control (runControl,callControl)
 import Bridge.Error
 import Bridge.RPC (newRpcManager)
 import Bridge.Signer
@@ -13,7 +14,8 @@ import Bridge.Web (publicApplication)
 import Bridge.Wire (Profile(..))
 import Control.Concurrent.Async (concurrently_)
 import Control.Exception (bracket,catch)
-import Data.Aeson (encode,object,(.=))
+import Data.Aeson (encode,object,(.=),eitherDecodeStrict')
+import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import Data.Maybe (fromMaybe)
 import qualified Database.PostgreSQL.Simple as PG
@@ -22,7 +24,7 @@ import Network.Wai.Handler.Warp (runSettings,setHost,setPort,setTimeout,defaultS
 import System.Environment (getArgs,lookupEnv)
 import System.Exit (die,exitFailure)
 import System.FilePath (isAbsolute)
-import System.IO (stderr)
+import System.IO (stderr,stdin)
 import System.Posix.User (getEffectiveUserName)
 import Text.Read (readMaybe)
 
@@ -32,6 +34,12 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
  where
   command ["check-config",path]=C.loadConfig path >>= LBS.putStrLn . encode . object . pure . ("fingerprint" .=) . C.fingerprint
   command ["check-signer",path,key]=C.loadConfig path >>= \c->verifySigningKey (C.custodyOwner c) key >> putStrLn "Custody signer valid"
+  command ["operator",path]=do
+    c<-C.loadConfig path
+    bytes<-BS.hGet stdin 4097
+    require (BS.length bytes<=4096) "operator_message_too_large"
+    value<-either (const $ reject "invalid_operator_request") pure (eitherDecodeStrict' bytes)
+    callControl (C.fenceDirectory c) value >>= LBS.putStrLn . encode
   command ["signer",path,key]=do
     c<-C.loadConfig path
     database<-databaseSettings
@@ -58,12 +66,12 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
     withReader readerSettings (C.fingerprint c) (C.backupRequired c) $ \reader->
       withFencedWriter database policy (C.fenceDirectory c) $ \writer->
         bracket newRpcManager closeManager $ \manager->
-          withRuntime manager (C.observerSettings c) (C.solanaPolicy c) (Just customer) endpoint reader writer $ \worker evaluate->do
+          withRuntime manager (C.observerSettings c) (C.solanaPolicy c) (Just customer) endpoint reader writer $ \worker evaluate operatorControl->do
             app<-publicApplication assets evaluate
             concurrently_
               (runSettings (setHost "127.0.0.1" $ setPort (C.serverPort c) $ setTimeout 65 defaultSettings) app)
-              (runWorkerLoop worker)
-  command _=die "Usage: ecx-bridge-rebuild check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE (SELECT-only PGUSER) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
+              (concurrently_ (runWorkerLoop worker) (runControl (C.fenceDirectory c) operatorControl))
+  command _=die "Usage: ecx-bridge-rebuild check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
 
 databaseSettings :: IO PG.ConnectInfo
 databaseSettings = do

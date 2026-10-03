@@ -32,7 +32,17 @@ import Test.QuickCheck hiding (label)
 
 checks :: IO [Result]
 checks = (\deployment native solana observation common->deployment<>native<>solana<>observation<>common) <$> deploymentChecks <*> NativePaymentCheck.checks <*> SolanaPaymentCheck.checks <*> ObservationCheck.checks <*> sequence
-  [ check "Solana token account accepts only the saved mint/owner and supported layout" $ once $ property $
+  [ check "native worker credentials must explicitly deny every signing/export method" $ once $ ioProperty $ do
+      calls<-newIORef ([]::[Text])
+      verifyNativeBoundaryWith $ \wallet method args->do
+        if wallet && null args then modifyIORef' calls (method:) else fail "unexpected boundary request"
+        reject "rpc_method_forbidden"
+      methods<-readIORef calls
+      refusals<-mapM (\method->rejects "native_signing_authority_not_separated" $
+        verifyNativeBoundaryWith $ \_ name _->if name==method then pure Null else reject "rpc_method_forbidden") methods
+      unknown<-rejects "native_signing_authority_not_separated" (verifyNativeBoundaryWith $ \_ _ _->reject "rpc_transport_unknown_outcome")
+      pure (length methods==13 && and refusals && unknown)
+  , check "Solana token account accepts only the saved mint/owner and supported layout" $ once $ property $
       let key=T.replicate 32 "1"
           info=object ["owner" .= key,"mint" .= key,"state" .= ("initialized"::Text),"isNative" .= False,
             "tokenAmount" .= object ["decimals" .= (8::Int),"amount" .= ("123"::Text)]]

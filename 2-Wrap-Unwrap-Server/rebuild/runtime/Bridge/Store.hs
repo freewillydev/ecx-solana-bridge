@@ -105,6 +105,7 @@ data StoreRead a where
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
+  ResumeLedger :: Int64 -> [(Text,Text)] -> [RecordedAttempt] -> StoreWrite ()
   RecordNativeLockRestore :: NativeLockWork -> Int -> StoreWrite ()
   RecordCustody :: Int64 -> Int64 -> Maybe Text -> Maybe Value -> StoreWrite ()
   MarkBroadcast :: Int64 -> Text -> StoreWrite Int64
@@ -222,6 +223,7 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
 evalWrite :: Writer -> StoreWrite a -> IO a
 evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
  let policy=executionTerms config; limit=admissionLimits config in case operation of
+  ResumeLedger now origins reviewed -> resumeLedger c config now origins reviewed
   RecordNativeLockRestore expected count -> do
     current<-nativeLockWork c (deploymentFingerprint $ paymentPolicy policy)
     require (current==Just expected && not(lockCancelling expected) && preparedDraft(lockPreparation expected)/=Nothing && count>0 && count<=100) "native_lock_work_changed"
@@ -1226,23 +1228,14 @@ operatingCapacity c limits booked allowances = do
   forM_ allowances $ \(asset,quantity)->do
     let daily=if asset==Native then nativeDaily limits else solanaDaily limits
     let name=T.pack(show asset)
-    orderHolds <- O.runSelect c $ do
-      (_,_,currency,n,phase) <- O.selectTable S.operatingReservations
-      O.where_ (currency O..== O.sqlStrictText name O..&& O.in_ (map O.sqlStrictText ["quote","obligation"]) phase)
-      pure n
-      :: IO [Int64]
-    paymentHolds <- O.runSelect c $ do
-      (currency,n,released) <- S.feeReservations
-      O.where_ (currency O..== O.sqlStrictText name O..&& released O..== O.sqlInt8 0)
-      pure n
-      :: IO [Int64]
+    held<-operatingHolds c asset
     spending <- O.runSelect c $ do
       (posting,_,currency,_,delta) <- O.selectTable S.postings
       (cost,at) <- O.selectTable S.operatingCosts
       O.where_ (posting O..== cost O..&& currency O..== O.sqlStrictText name O..&& at O..> O.sqlInt8 (now-86400))
       pure delta
       :: IO [Int64]
-    let held=sum(map toInteger $ orderHolds<>paymentHolds); needed=toInteger(units quantity)
+    let needed=toInteger(units quantity)
     require (M.findWithDefault 0 (asset,Operating) booked-held>=needed) "insufficient_fee_budget"
     require (negate(sum(map toInteger spending))+held+needed<=toInteger(units daily)) "operating_daily_limit"
 
@@ -1810,3 +1803,67 @@ nativeLockWork c identity = do
       attempts<-mapM (readAttempt c) ids
       pure (Just $ NativeLockWork prepared cancelling attempts)
     _->reject "native_lock_recovery_bounds"
+
+operatingHolds :: PG.Connection -> Asset -> IO Integer
+operatingHolds c asset = do
+  let name=T.pack(show asset)
+  orderHolds <- O.runSelect c $ do
+    (_,_,currency,n,phase) <- O.selectTable S.operatingReservations
+    O.where_ (currency O..== O.sqlStrictText name O..&& O.in_ (map O.sqlStrictText ["quote","obligation"]) phase)
+    pure n
+    :: IO [Int64]
+  paymentHolds <- O.runSelect c $ do
+    (currency,n,released) <- S.feeReservations
+    O.where_ (currency O..== O.sqlStrictText name O..&& released O..== O.sqlInt8 0)
+    pure n
+    :: IO [Int64]
+  pure (sum $ map toInteger $ orderHolds<>paymentHolds)
+
+-- One atomic resume after the runtime has verified the exact saved attempts.
+-- Reuse custody's review/source/journal checks instead of maintaining a second set.
+resumeLedger :: PG.Connection -> StorePolicy -> Int64 -> [(Text,Text)] -> [RecordedAttempt] -> IO ()
+resumeLedger c config now origins reviewed = do
+  let identity=deploymentFingerprint $ paymentPolicy $ executionTerms config
+      txid=signedId.recordedSigned
+  state<-metadata c identity
+  require (S.paused state==1) "pause_before_operator_action"
+  snapshot<-custodySnapshot c now origins False
+  fresh c now
+  require (sortOn txid (custodyPending snapshot)==sortOn txid reviewed
+    && all ((`elem` ["signed","broadcast_intent"]).recordedState) reviewed) "resume_payment_changed"
+  unresolved<-O.runSelect c $ do
+    row<-O.selectTable S.intents
+    O.where_ (S.intentResolved row O..== O.sqlInt8 0)
+    pure (S.intentId row)
+  require (all (`elem` map recordedPayment reviewed) unresolved) "unresolved_intents_require_review"
+  problems<-O.runSelect c $ O.limit 1 $ do
+    row<-O.selectTable S.obligations
+    O.where_ (S.obligationStatus row O..== O.sqlStrictText "review")
+    pure (S.obligationId row)
+    :: IO [Text]
+  require (null problems) "obligations_require_review"
+  legacy<-O.runSelect c $ O.limit 1 $ do
+    row<-O.selectTable S.orders
+    costs<-Exists.exists $ do
+      (key,_,_,_)<-O.selectTable S.orderCosts
+      O.where_ (key O..== S.orderId row)
+      pure ()
+    unpaid<-Exists.exists $ do
+      ob<-O.selectTable S.obligations
+      O.where_ (S.obligationOrder ob O..== S.orderId row
+        O..&& O.not(O.in_ (map O.sqlStrictText ["paid","cancelled"]) (S.obligationStatus ob)))
+      pure ()
+    O.where_ (O.not costs O..&& (unpaid O..|| O.not(O.in_ (map O.sqlStrictText ["Paid","Refunded","ExpiredUnfunded"]) (S.status row))))
+    pure (S.orderId row)
+    :: IO [Text]
+  require (null legacy) "legacy_order_cost_review_required"
+  booked<-balances c
+  require (all (\asset->M.findWithDefault 0 (asset,SourceDeficit) booked==0) [Native,Wrapped,Sol]) "source_shortfall_requires_review"
+  forM_ [Native,Sol] $ \asset->do
+    held<-operatingHolds c asset
+    require (M.findWithDefault 0 (asset,Operating) booked>=held) "operating_allocation_requires_funding"
+  _<-O.runUpdate c O.Update {O.uTable=S.deployment,
+    O.uUpdateWith= \row->row {S.paused=O.sqlInt8 0,S.pauseReason=O.sqlStrictText "ready"},
+    O.uWhere= \row->S.singleton row O..== O.sqlInt8 1,O.uReturning=O.rCount}
+  intakeReady c identity now
+  audit c "resume" "checks_complete"

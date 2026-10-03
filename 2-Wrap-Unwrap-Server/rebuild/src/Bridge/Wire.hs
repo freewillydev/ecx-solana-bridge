@@ -144,3 +144,8 @@ data PaymentCosts = PaymentCosts { networkFee :: Amount, accountRent :: Amount }
 data PaymentSource = PaymentSource
   { sourceDeposit :: Deposit, sourceRequest :: OrderRequest
   , sourcePolicy :: PolicySnapshot, sourceInstruction :: Text } deriving (Eq,Show)
+
+-- Private operator status; no wallet credentials or RPC response is exposed.
+data ServiceStatus = ServiceStatus
+  { paused :: !Bool, pauseReason :: !Text, criticalSequence :: !Int64, backupSequence :: !Int64 }
+  deriving stock (Eq,Show,Generic) deriving anyclass (ToJSON,FromJSON)

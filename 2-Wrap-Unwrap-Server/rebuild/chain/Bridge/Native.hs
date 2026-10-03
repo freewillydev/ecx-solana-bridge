@@ -1,13 +1,13 @@
 module Bridge.Native
   ( NativeSettings(..), validateNativeSettings, nativeCall, nativeIdentity, nativeIdentityWith
-  , validateNativeRecipientWith, nativeWalletInfoWith, nativeWalletReadyWith
+  , verifyNativeBoundaryWith, validateNativeRecipientWith, nativeWalletInfoWith, nativeWalletReadyWith
   , recoverNativeAddressWith, nativeHistory, nativeAmount, nativeNumber, signetChallenge ) where
 
 import Bridge.Wire (Profile(..))
 import Bridge.RPC
 import Bridge.Error
 import Bridge.Domain
-import Control.Exception (catch,throwIO)
+import Control.Exception (catch,throwIO,try)
 import Data.Aeson
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
@@ -149,3 +149,15 @@ nativeAmount n
  where e=base10Exponent n+8
 nativeNumber :: Amount -> Value
 nativeNumber a = Number (fromIntegral (units a) / 100000000)
+
+-- Empty arguments cannot authorize a financial action; anything other than the
+-- node's explicit forbidden-method result fails the worker credential boundary.
+verifyNativeBoundaryWith :: (Bool -> Text -> [Value] -> IO Value) -> IO ()
+verifyNativeBoundaryWith call = mapM_ denied
+  ["walletprocesspsbt","signrawtransactionwithwallet","signmessage","dumpprivkey",
+   "dumpwallet","gethdkeys","listdescriptors","walletpassphrase","walletpassphrasechange",
+   "encryptwallet","importprivkey","importwallet","backupwallet"]
+ where
+  denied method = do
+    result<-try (call True method []) :: IO (Either BridgeError Value)
+    require (case result of Left(BridgeError "rpc_method_forbidden")->True; _->False) "native_signing_authority_not_separated"

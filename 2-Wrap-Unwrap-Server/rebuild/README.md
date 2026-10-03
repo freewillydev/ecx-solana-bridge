@@ -29,7 +29,7 @@ Handlers return `Plan caller a` containing `Request caller severity a`; the oper
 converts it to the DSL only at the interpreter boundary. Safe and critical
 evaluators are separate. Critical signer ClientM access is private. Customers
 cannot import the runtime or construct operator authority. The customer API already has a separate Cabal component that hides the internal
-grammar and has no database, runtime or signer dependency. The grammar also contains initial signer and worker operations; operator and
+grammar and has no database, runtime or signer dependency. The grammar also contains signer, worker and operator status/pause/resume operations;
 remaining recovery operations must be added with their concrete workflows.
 
 No generic SQL/IO operation, alternative database, synthetic receipt/order for
@@ -587,12 +587,54 @@ lock release after process termination. WAI tests cover fixed asset paths,
 missing-asset refusal, traversal/hidden-file rejection and browser security headers.
 This is executable/startup acceptance, not a funded bridge or browser-wallet test.
 
+## Private operator checkpoint
+
+`cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- operator CONFIG`
+reads one bounded JSON command from stdin. Supported commands are
+`{"operation":"status"}`, `{"operation":"pause","reason":"maintenance"}` and
+`{"operation":"resume"}`. Unknown operations and fields are refused. The local
+control socket is `operator.sock` inside the host-fence directory: owner-only
+permissions are required, and unsafe pre-existing paths are never removed.
+This is operator control; signer communication remains authenticated Servant HTTPS.
+
+The parsed command hides its concrete result in `ControlPlan`, retains `ToJSON`,
+and carries `Plan Operator a`. Only the evaluated result is serialized. Status
+uses the SELECT-only evaluator; pause/resume enter the same critical gate as all
+worker effects. Observation mode permits status/pause but refuses resume before
+network or ledger mutation. No customer route grants operator authority.
+
+Resume requires explicit native RPC signing/export denial, a recovery pass, refreshed
+pending sources and a fresh custody check. One Opaleye transaction then compares the
+exact pending attempts, rejects unresolved unsigned intents, reviewed obligations,
+missing historical cost policy, per-asset source deficits and insufficient operating
+allocations, and only then unpauses with an audit entry. Custody review checks are
+reused rather than copied. The shared recovery pass does not swallow errors for
+explicit resume; only the background scheduler may defer a custody check.
+
+Verified locally: Cabal/QuickCheck protocol tests (including each of the thirteen
+forbidden native methods), PostgreSQL positive resume and refusal/rollback for
+stale scans, legacy costs and reviewed obligations, safe operator reads, observation
+mode rejection, actual executable CLI/status/pause, unknown-field and permission
+refusal, unchanged balances and temporary process/fence cleanup. The HTTP startup
+check allows twenty seconds for local startup instead of five and includes the
+child log on timeout. These disposable-state checks do not prove funded-chain resume.
+
+Scoped counts: private transport **105 lines / 1 baseline file → 102 / 1 rebuild
+file**, excluding the old shared listener. The new transport handles three commands;
+the baseline handles more, so this is not equivalent feature parity. It adds strict
+field parsing and owner/type/mode checks directly. Runtime **302 → 323 lines / one
+file**, executable **79 → 87 / one file**, and Store **+57 net lines** for atomic
+resume plus shared operating holds. The grammar and wire records gain operator
+capabilities/status; no second financial evaluator or recovery module was added.
+Smaller source is not a security certification; positive funded resume, pending-family
+recovery and full operator-command parity still require acceptance.
+
 Scoped physical-line comparisons (not whole-product reduction claims):
 
 | Piece | Baseline | Rebuild | Scope limit |
 | --- | ---: | ---: | --- |
 | Deployment configuration | 133 / 1 file | 136 / 1 file | Adds six typed settings builders and required history anchors; baseline identity preserved |
-| Executable startup/CLI | 91 / 1 file, plus baseline Runtime startup | 79 / 1 file | HTTP/worker lifetime and signer wired; operator/backup/init command parity unfinished |
+| Executable startup/CLI | 91 / 1 file, plus baseline Runtime startup | 87 / 1 file | HTTP/worker/control lifetime and signer wired; backup/init and other operator command parity unfinished |
 | Web boundary | 84 / 1 file | 71 / 1 file (previous checkpoint 53) | Shared customer/signer limits and fixed browser assets; no customer Unix listener |
 | Host fence | 132 / 1 file | 128 / 1 file + 7-line Store constructor | Same durable protocol; explicit directory replaces environment lookup |
 | Customer order workflow | 78 / 1 file | 63 / 1 file | Closed reads replace raw row/ledger access; funded HTTP acceptance pending |
@@ -602,7 +644,7 @@ Scoped physical-line comparisons (not whole-product reduction claims):
 | Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
 | Signer module | 144 / 1 file | 117 / 1 file | Now includes startup key validation and shared file permissions; replacement parity pending |
 | Signer transport | 103 / 1 file plus shared web boundary | 69 / 1 file + shared 71-line Web module | Shared module also serves customer API; initial signer route only |
-| Customer/worker runtime | Part of broader Runtime | 302 / 1 file (previous checkpoint 294) | Adds native lock reconstruction before scans; retains one critical dispatch |
+| Customer/worker runtime | Part of broader Runtime | 323 / 1 file (previous checkpoint 302) | Adds operator authority and guarded resume; retains one critical dispatch |
 | Focused source validation | 63-line mixed validation/storage/recovery function | 67-line dedicated module | Covered-source recovery is still separate unfinished work |
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |
@@ -626,7 +668,7 @@ all journal rows. Terminal attempts are still checked individually, so long-hist
 performance remains to be measured. Source eligibility checking is shared with signing.
 
 Still required: successful TLS worker/signer integration and deployed OS/native-RPC
-authority separation; private operator/recovery/resume integration and actual browser-wallet acceptance;
+authority separation; remaining private recovery commands and funded resume/browser-wallet acceptance;
 integrated positive submission/reconciliation acceptance; retry, cancellation,
 replacement/winner changes and covered-source approvals generalized to earned
 funding; complete custody acceptance and Haskell backup/restore integration; actual populated-ledger migration and funded
@@ -638,4 +680,5 @@ Startup integration finding: the retained baseline remote-backup adapter still
 invokes a Python uploader. It cannot be adopted as the final Haskell rebuild;
 replace that operational path before claiming complete backup/restore support.
 The executable uses the host-fenced writer, but does not initialize a database,
-initialize/adopt a fence, resume payment or provide remote backup.
+initialize/adopt a fence or provide remote backup. Guarded private resume is now
+wired; real-chain acceptance of that workflow remains outstanding.

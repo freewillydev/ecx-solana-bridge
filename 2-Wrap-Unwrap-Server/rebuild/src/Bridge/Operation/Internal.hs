@@ -8,7 +8,7 @@ import Data.Text (Text)
 import Data.Int (Int64)
 
 data Severity = Safe | Critical
-data Caller = Customer | Signer | Worker
+data Caller = Customer | Signer | Worker | Operator
 
 -- Caller and severity belong to the operation, not to the caller's choice.
 class Operation (caller :: Caller) (severity :: Severity) (op :: Type -> Type)
@@ -22,6 +22,13 @@ data CustomerRead a where
 
 data CustomerWrite a where
   CreateOrder :: Text -> OrderRequest -> CustomerWrite OrderView
+
+data OperatorRead a where
+  ServiceState :: OperatorRead ServiceStatus
+
+data OperatorWrite a where
+  PauseService :: Text -> OperatorWrite ()
+  ResumeService :: OperatorWrite ()
 
 -- Initial signing is tied to a durable decision, never caller-supplied bytes.
 data SigningOperation a where
@@ -39,11 +46,15 @@ data WorkerOperation a where
   BroadcastPayment :: Text -> WorkerOperation ()
 
 data DSL (caller :: Caller) (severity :: Severity) a where
+  ReadOperator :: OperatorRead a -> DSL 'Operator 'Safe a
+  OperatorDSL :: OperatorWrite a -> DSL 'Operator 'Critical a
   WorkerDSL :: WorkerOperation a -> DSL 'Worker 'Critical a
   SigningDSL :: SigningOperation a -> DSL 'Signer 'Critical a
   ReadCustomer :: CustomerRead a -> DSL 'Customer 'Safe a
   WriteCustomer :: CustomerWrite a -> DSL 'Customer 'Critical a
 
+instance Operation 'Operator 'Safe OperatorRead where command = ReadOperator
+instance Operation 'Operator 'Critical OperatorWrite where command = OperatorDSL
 instance Operation 'Worker 'Critical WorkerOperation where command = WorkerDSL
 instance Operation 'Signer 'Critical SigningOperation where command = SigningDSL
 instance Operation 'Customer 'Safe CustomerRead where command = ReadCustomer
@@ -67,3 +78,8 @@ safe :: CustomerRead a -> Plan 'Customer a
 safe = SafePlan . Request
 customer :: CustomerWrite a -> Plan 'Customer a
 customer = CriticalPlan . Request
+
+operator :: OperatorWrite a -> Plan 'Operator a
+operator=CriticalPlan . Request
+operatorRead :: OperatorRead a -> Plan 'Operator a
+operatorRead=SafePlan . Request

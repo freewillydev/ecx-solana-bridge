@@ -17,6 +17,7 @@ import Bridge.Domain
 import Bridge.Wire (PaymentTerms(..),CostLimits(..),PolicySnapshot(..))
 import Bridge.Store
 import Bridge.Signer
+import qualified Bridge.Control as Control
 import Bridge.Critical
 import Bridge.Web (customerApplication)
 import qualified Bridge.Operation.Internal as Op
@@ -143,6 +144,20 @@ ledgerMain = do
           expectStore "ledger_connection_fenced" (evalWrite writer $ Pause "must stay fenced")
       rolledBackAgain<-evalRead reader (ReadWithdrawal $ T.replicate 64 "c")
       check (rolledBackAgain==Nothing)
+      fixture fixtures SeedIntake
+      let origins=[("Native","scan-origin"),("Solana","sol-origin"),("SolanaOperating","opening-signature")]
+      expectStore "custody_scan_origin_mismatch" (evalRead reader $ ReadCustodySnapshot 100 origins False)
+      fixture fixtures SeedCustodyHeads
+      withWriter settings (store policy limits) (const $ pure ()) $ \writer->do
+        fixture fixtures RefreshCustody
+        beforeResume<-evalRead reader ReadBalances
+        evalWrite writer (ResumeLedger 100 origins [])
+        evalRead reader ReadState >>= check . not . ledgerPaused
+        expectStore "pause_before_operator_action" (evalWrite writer $ ResumeLedger 100 origins [])
+        evalWrite writer (Pause "resume contract")
+        expectStore "scanners_not_fresh" (evalWrite writer $ ResumeLedger 161 origins [])
+        evalRead reader ReadState >>= check . ledgerPaused
+        evalRead reader ReadBalances >>= check . (==beforeResume)
       fixture fixtures SeedOrders
       let auth="Bearer "<>T.replicate 64 "0"
       hidden <- evalRead reader (ReadOrder auth "hidden")
@@ -156,13 +171,17 @@ ledgerMain = do
       fixture fixtures CoverBackup
       visible <- evalRead reader (ReadOrder auth "visible")
       check (W.depositInstruction visible==Just "instruction-visible" && W.status visible=="AwaitingDeposit")
+      withWriter settings (store policy limits) (const $ pure ()) $ \writer->do
+        fixture fixtures RefreshCustody
+        expectStore "legacy_order_cost_review_required" (evalWrite writer $ ResumeLedger 100 origins [])
+        evalRead reader ReadState >>= check . ledgerPaused
       fixture fixtures SeedReview
       reviewed <- evalRead reader (ReadOrder auth "visible")
       check (W.status reviewed=="NeedsReview")
-      fixture fixtures SeedIntake
-      let origins=[("Native","scan-origin"),("Solana","sol-origin"),("SolanaOperating","opening-signature")]
-      expectStore "custody_scan_origin_mismatch" (evalRead reader $ ReadCustodySnapshot 100 origins False)
-      fixture fixtures SeedCustodyHeads
+      withWriter settings (store policy limits) (const $ pure ()) $ \writer->do
+        fixture fixtures RefreshCustody
+        expectStore "obligations_require_review" (evalWrite writer $ ResumeLedger 100 origins [])
+        evalRead reader ReadState >>= check . ledgerPaused
       snapshot<-evalRead reader (ReadCustodySnapshot 100 origins False)
       check (custodyTotals snapshot==M.fromList [(Native,2100),(Wrapped,1000),(Sol,100)]
         && custodySlot snapshot==42 && null(custodyPending snapshot))
@@ -419,7 +438,7 @@ ledgerMain = do
             expectStore "signer_profile_mismatch" (interpret $ Request $ SignPrepared "other" intent 0)
             expectStore "invalid_signing_decision" (interpret $ Request $ SignPrepared "contract" intent 8)
             expectStore "signing_backup_required" (interpret $ Request $ SignPrepared "contract" intent 0)
-          withRuntime manager (ObserverSettings native solana 2 "sol-origin" "opening-signature") (signingPolicy signing) Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret _customer -> do
+          withRuntime manager (ObserverSettings native solana 2 "sol-origin" "opening-signature") (signingPolicy signing) Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret _customer _operator -> do
             expectStore "invalid_saved_payment" (interpret $ Request $ SignPreparedPayment intent)
             expectStore "intake_paused" (interpret $ Request $ PrepareOutgoing intent)
           pausedAfterRefusal<-evalRead reader ReadState
@@ -511,7 +530,7 @@ ledgerMain = do
         evalRead reader PendingAttempts >>= check . (notElem nativeTx)
         evalRead reader PaymentCandidates >>= check . (notElem ("fee:"<>withdrawalKey))
         bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "terminal payment must not call RPC"}) closeManager $ \manager ->
-          withRuntime manager (ObserverSettings native solana 2 "sol-origin" "opening-signature") (signingPolicy signing) Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret _customer ->
+          withRuntime manager (ObserverSettings native solana 2 "sol-origin" "opening-signature") (signingPolicy signing) Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret _customer _operator ->
             interpret (Request $ ReconcilePayment nativeTx)
         evalRead reader ReadBalances >>= check . (==afterSettlement)
         fixture fixtures (SeedReceipt "unknown-source" Nothing Native 10 2 True 100)
@@ -740,7 +759,7 @@ ledgerMain = do
         beforeCycle<-evalRead reader ReadBalances
         pendingBeforeCycle<-evalRead reader PendingAttempts
         bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> reject "offline_cycle_rpc"}) closeManager $ \manager ->
-          withRuntime manager (ObserverSettings cycleNative cycleSolana 2 "sol-origin" "opening-signature") cyclePolicy Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret _customer ->
+          withRuntime manager (ObserverSettings cycleNative cycleSolana 2 "sol-origin" "opening-signature") cyclePolicy Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret _customer _operator ->
             void (try (interpret $ Request RunWorkerCycle) :: IO (Either BridgeError ()))
         evalRead reader ReadBalances >>= check . (==beforeCycle)
         evalRead reader ReadState >>= check . ledgerPaused
@@ -1219,7 +1238,14 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       customerSettings=CustomerSettings public storePolicy "/unused/sdk" backup
       endpoint=SigningEndpoint 9443 "/unused/auth"
   bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "runtime replay/read reached network"}) closeManager $ \manager->do
-    withRuntime manager chainSettings config (Just customerSettings) endpoint reader writer $ \worker customer->do
+    withRuntime manager chainSettings config (Just customerSettings) endpoint reader writer $ \worker customer operatorControl->do
+      service<-operatorControl (Op.operatorRead Op.ServiceState)
+      ledgerBefore<-evalRead reader ReadState
+      check (W.paused service==ledgerPaused ledgerBefore)
+      expectStore "observation_only" (operatorControl $ Op.operator Op.ResumeService)
+      operatorControl (Op.operator $ Op.PauseService "operator contract")
+      serviceAfter<-operatorControl (Op.operatorRead Op.ServiceState)
+      check (W.paused serviceAfter && W.pauseReason serviceAfter=="operator contract")
       publicView<-customer (Op.safe Op.PublicConfig)
       check (W.pubAvailability publicView==W.Availability False "observation_only")
       saved<-customer (Op.safe $ Op.OrderStatus header wrapId)
@@ -1233,11 +1259,11 @@ orderWorkflowContract fixtures reader writer storePolicy = do
         ((WaiTest.setPath Wai.defaultRequest ("/api/v1/orders/"<>TE.encodeUtf8 wrapId))
           {Wai.requestHeaders=[("Authorization",TE.encodeUtf8 header)]}) "") app
       check (statusCode(WaiTest.simpleStatus response)==200 && eitherDecodeStrict' (BL.toStrict $ WaiTest.simpleBody response)==Right recovered)
-    withRuntime manager chainSettings config (Just customerSettings {publicConfiguration=public {W.pubIntakeEnabled=True}}) endpoint reader writer $ \_ customer->do
+    withRuntime manager chainSettings config (Just customerSettings {publicConfiguration=public {W.pubIntakeEnabled=True}}) endpoint reader writer $ \_ customer _operator->do
       saved<-customer (Op.customer $ Op.CreateOrder header wrapping)
       check (W.depositInstruction saved==W.depositInstruction recovered && W.quote saved==W.quote recovered)
     expectStore "customer_configuration_mismatch" $ withRuntime manager chainSettings config
-      (Just customerSettings {publicConfiguration=public {W.pubMint="wrong"}}) endpoint reader writer (\_ _->pure ())
+      (Just customerSettings {publicConfiguration=public {W.pubMint="wrong"}}) endpoint reader writer (\_ _ _->pure ())
 
 -- Same schema and closed ledger operations, with a real fsynced host watermark.
 fenceMain :: IO ()
@@ -1339,13 +1365,13 @@ serverMain = do
           Process.withCreateProcess (Process.proc binary ["observe",filename])
             {Process.env=Just childEnv,Process.std_out=Process.UseHandle logFile,Process.std_err=Process.UseHandle logFile} $ \_ _ _ process->do
               let get path=HTTP.parseRequest ("http://127.0.0.1:"<>show port<>path) >>= \request->HTTP.httpLbs request manager
-                  wait 0=fail "server did not bind"
+                  wait 0=readFile (directory<>"server.log") >>= fail . ("server did not bind: "<>)
                   wait n=do
                     alive<-Process.getProcessExitCode process
                     check (alive==Nothing)
                     result<-try (get "/api/v1/config") :: IO (Either HTTP.HttpException (HTTP.Response BL.ByteString))
                     case result of Right reply->pure reply; Left _->threadDelay 50000 >> wait (n-1::Int)
-              public<-wait 100
+              public<-wait 400
               check (statusCode(HTTP.responseStatus public)==200)
               decoded<-either fail pure (eitherDecodeStrict' $ BL.toStrict $ HTTP.responseBody public)
               check (W.pubDeployment decoded==Config.deploymentId config && not(W.pubIntakeEnabled decoded)
@@ -1357,7 +1383,23 @@ serverMain = do
               check (all ((==200).statusCode.HTTP.responseStatus) [page,script,style]
                 && "A direct bridge." `T.isInfixOf` TE.decodeUtf8 (BL.toStrict $ HTTP.responseBody page)
                 && BL.length(HTTP.responseBody script)>1000 && statusCode(HTTP.responseStatus removed)==404)
+              let control value=Control.callControl (Config.fenceDirectory config) value
+              setFileMode (Config.fenceDirectory config<>"/operator.sock") 0o666
+              expectStore "unsafe_operator_permissions" (control $ object ["operation" .= ("status"::T.Text)])
+              setFileMode (Config.fenceDirectory config<>"/operator.sock") 0o600
+              status<-control (object ["operation" .= ("status"::T.Text)])
+              service<-either fail pure (eitherDecodeStrict' $ BL.toStrict $ encode status)
+              check (W.paused service)
+              refused<-control (object ["operation" .= ("resume"::T.Text)])
+              check (refused==object ["error" .= ("observation_only"::T.Text)])
+              expectStore "invalid_operator_operation" (control $ object ["operation" .= ("resume"::T.Text),"bypass" .= True])
+              _<-control (object ["operation" .= ("pause"::T.Text),"reason" .= ("operator process contract"::T.Text)])
               evalRead reader ReadState >>= check . ledgerPaused
+              (exit,out,_)<-Process.readCreateProcessWithExitCode (Process.proc binary ["operator",filename])
+                ("{\"operation\":\"status\"}")
+              check (show exit=="ExitSuccess")
+              cliStatus<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ T.pack out)
+              check (W.paused cliStatus)
               evalRead reader ReadBalances >>= check . (==before)
       -- withCreateProcess terminated/reaped HTTP and worker together, releasing
       -- the real host fence; no daemon or worker is left behind by this check.
