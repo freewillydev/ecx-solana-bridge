@@ -37,8 +37,7 @@ import qualified Bridge.Postgres.Settlement as Settlement
 import qualified Bridge.Ledger.Model as Domain
 import qualified Bridge.Reconciliation as CustodyWorkflow
 import Bridge.Settlement (realPaymentTransport,settleAttemptWith,paymentPass,reconcilePaymentsWith,PaymentTransport(..),approveSolanaRetryWith,readSavedPayment,readSavedNativeFamily,recheckSourceWith)
-import qualified Bridge.Postgres.Startup as Startup
-import Bridge.Recovery (cancelPreparationWith,reconcileNativeLocksWith,approveSourceRecoveryWith,prepareNativeReplacementUsing,signNativeReplacementUsing,coverSourceLossWith)
+import Bridge.Recovery (resumeAfterReview,cancelPreparationWith,reconcileNativeLocksWith,approveSourceRecoveryWith,prepareNativeReplacementUsing,signNativeReplacementUsing,coverSourceLossWith)
 import Bridge.Native (nativeIdentity)
 import Bridge.Payment (prepareNativeWithSigner,prepareSolanaWithSigner)
 import Bridge.Solana (solanaIdentity)
@@ -165,7 +164,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
     CancelPreparation intent generation reason->cancelPreparationWith epochSeconds transport cfg ledger intent generation reason
     Resume->do
       verifyNativeBoundary
-      Startup.resumeAfterReview epochSeconds transport cfg ledger
+      resumeAfterReview epochSeconds transport cfg ledger
       readiness ledger
     ApproveSolanaRetry txid reason->do
       approveSolanaRetryWith transport cfg ledger txid reason
@@ -219,7 +218,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
     lockError <- reconcileNativeLocksWith transport {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg ledger
     maybe (pure ()) reject lockError
     now <- epochSeconds
-    Startup.resumeAfterChecks cfg ledger now
+    Order.resumeChecked cfg ledger now Nothing
   WorkerDSL AdvancePayments->do
     state <- readiness ledger
     when (available state) $ do

@@ -1,11 +1,13 @@
 module Bridge.Postgres.Order
-  ( recoveryPayments, recoverySources, accountedLosses, checkIntakeReadyC, exposeOrderC, readSavedOrder, findSavedOrder, bindInstruction, instructionBackup, createOrder, checkIntakeReady, exposeOrder, readOrderC, claimNativeAllocation, recordNativeInstruction, issueInstruction, expireQuotes ) where
+  ( resumeChecked, recoveryPayments, recoverySources, accountedLosses, checkIntakeReadyC, exposeOrderC, readSavedOrder, findSavedOrder, bindInstruction, instructionBackup, createOrder, checkIntakeReady, exposeOrder, readOrderC, claimNativeAllocation, recordNativeInstruction, issueInstruction, expireQuotes ) where
 
 import Bridge.Config
 import qualified Bridge.Postgres.Ledger as Ledger
 import Control.Monad (when, forM_)
-import Data.List (nub, sortOn)
+import Data.List (nub, sort, sortOn)
 import Bridge.Ledger.Model (encodeRecord, decodeRecord)
+import qualified Bridge.Ledger.Model as Domain
+import qualified Bridge.Postgres.Custody as Custody
 import Bridge.Types
 import qualified Bridge.Types as Types
 import Bridge.Postgres.Schema
@@ -322,3 +324,56 @@ expireQuotes ledger now = ledgerAction ledger $ \connection->do
             (ordersStatus row O..== O.sqlStrictText "Provisioning" O..|| ordersStatus row O..== O.sqlStrictText "AwaitingDeposit")
         , O.uReturning=O.rCount }
       pure ()
+
+-- Startup supplies no reviewed attempts; explicit recovery supplies the exact
+-- saved set it checked. Revalidate that set and custody before enabling intake.
+resumeChecked :: Config -> Ledger -> Int64 -> Maybe [Domain.Attempt] -> IO ()
+resumeChecked cfg ledger now reviewed = do
+  snapshot <- Custody.readSnapshot cfg ledger now False
+  ledgerAction ledger $ \c->do
+    checks <- O.runSelect c (O.selectTable custodycheckTable) :: IO [CustodyCheck]
+    require (case checks of
+      [row]->custodycheckRevision row==Domain.viewRevision snapshot && custodycheckCheckedRevision row==Just(custodycheckRevision row) && custodycheckLastError row==Nothing && maybe False (\at->at>=0 && at<=now && now-at<=60) (custodycheckCheckedAt row)
+      _->False) "custody_not_reconciled"
+    intents <- O.runSelect c (O.selectTable intentsTable) :: IO [Intents]
+    case reviewed of
+      Nothing->require (all ((==1).intentsResolved) intents) "unresolved_intents_require_review"
+      Just expected->do
+        attempts <- O.runSelect c (O.selectTable attemptsTable) :: IO [Attempts]
+        expiries <- O.runSelect c (O.selectTable solanaexpiriesTable) :: IO [SolanaExpiries]
+        let unresolved=[intentsId i | i<-intents,intentsResolved i==0]
+            pending=[a | a<-attempts,attemptsIntentId a `elem` unresolved,
+              attemptsTxid a `notElem` map solanaexpiriesTxid expiries]
+            actual=sort [(attemptsTxid a,attemptsIntentId a,attemptsState a,attemptsCriticalSequence a) | a<-pending]
+            checked=sort [(Domain.attemptId a,Domain.attemptIntent a,Domain.attemptState a,Domain.attemptSequence a) | a<-expected]
+        require (actual==checked && all (\intent->any ((==intent).attemptsIntentId) pending) unresolved) "resume_payment_changed"
+    events <- O.runSelect c $ do
+      row <- O.selectTable chaineventsTable
+      O.where_ (chaineventsNeedsReview row O..== O.sqlInt8 1)
+      pure (chaineventsEventId row)
+      :: IO [Text]
+    require (null events) "chain_observations_require_review"
+    nativeReviews <- O.runSelect c recoveryPayments :: IO [(Text,Text)]
+    require (all ((=="reconfirmed").snd) nativeReviews) "native_settlement_requires_review"
+    covered <- O.runSelect c accountedLosses :: IO [Text]
+    deposits <- O.runSelect c (O.selectTable depositsTable) :: IO [Deposits]
+    require (all (\row->depositsAllocated row/=1 || depositsEligible row==1 || depositsId row `elem` covered) deposits) "source_reorg_requires_review"
+    sourceReviews <- O.runSelect c recoverySources :: IO [(Text,Text)]
+    require (all (\(did,state)->state=="restored" || did `elem` covered) sourceReviews) "source_recovery_requires_review"
+    obligations <- O.runSelect c (O.selectTable obligationsTable) :: IO [Obligations]
+    require (all ((/="review").obligationsStatus) obligations) "obligations_require_review"
+    deficits <- O.runSelect c $ do
+      row <- O.selectTable postingsTable
+      O.where_(postingsAccount row O..== O.sqlStrictText "source_deficit")
+      pure(postingsDelta row)
+      :: IO [Int64]
+    require (sum(map toInteger deficits)==0) "source_shortfall_requires_review"
+    orders <- O.runSelect c (O.selectTable ordersTable) :: IO [Orders]
+    limits <- O.runSelect c (O.selectTable ordercostlimitsTable) :: IO [OrderCostLimits]
+    require (all (\row->any ((==ordersId row).ordercostlimitsOrderId) limits ||
+      ordersStatus row `elem` ["Paid","Refunded","ExpiredUnfunded"] && all (\ob->obligationsOrderId ob/=ordersId row || obligationsStatus ob `elem` ["paid","cancelled"]) obligations) orders) "legacy_order_cost_review_required"
+    forM_ ["Native","Sol"] $ \asset->Ledger.freeOperating c asset >>= \free->require (free>=0) "operating_allocation_requires_funding"
+    _ <- O.runUpdate c O.Update {O.uTable=deploymentTable,O.uUpdateWith= \row->row {deploymentPaused=O.sqlInt8 0,deploymentPauseReason=O.sqlStrictText "ready"},O.uWhere= \row->deploymentSingleton row O..== O.sqlInt8 1,O.uReturning=O.rCount}
+    checkIntakeReadyC c now
+    _ <- O.runInsert c O.Insert {O.iTable=auditTable,O.iRows=[Audit Nothing (O.sqlStrictText "resume") (O.sqlStrictText "checks_complete")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+    pure ()

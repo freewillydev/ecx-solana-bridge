@@ -1,10 +1,11 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Bridge.Recovery
-  ( reconcileNativeLocksWith
+  ( resumeAfterReview, reconcileNativeLocksWith
   , cancelPreparationWith, approveSourceRecoveryWith
   , coverSourceLossWith, prepareNativeReplacementUsing
   , signNativeReplacementUsing ) where
 
+import qualified Bridge.Postgres.Order as PgOrder
 import qualified Bridge.Postgres.Custody as PgCustody
 import qualified Bridge.Postgres.Ledger as PgLedger
 import qualified Bridge.Postgres.Settlement as PgSettlement
@@ -25,7 +26,7 @@ import Bridge.SolanaPayment
 import Bridge.Types
 import Bridge.Postgres.Ledger (Ledger)
 import Control.Exception (IOException,catch,try)
-import Control.Monad (when,void)
+import Control.Monad (forM_,when,void)
 import Data.Aeson
 import Data.Int (Int64)
 import Data.Text (Text)
@@ -313,3 +314,22 @@ cleanupLocks call expected=do
     require ok "native_input_unlock_failed"
   after <- call True "listlockunspent" [] >>= parseValue parseJSON :: IO [Outpoint]
   require (null after) "native_preparation_locks_require_review"
+
+-- Explicit operator authority to continue existing exact saved work. Startup
+-- never invokes this path. RPC evidence is checked outside ledger transactions;
+-- the final transaction fences every still-pending attempt before resuming.
+resumeAfterReview :: IO Int64 -> PaymentTransport -> Config -> Ledger -> IO ()
+resumeAfterReview clock transport cfg ledger = do
+  state <- PgLedger.readiness ledger
+  require (not $ available state) "pause_before_operator_action"
+  failures <- reconcilePaymentsWith transport cfg ledger
+  require (null failures) "resume_payment_requires_review"
+  saved <- PgSettlement.pendingAttempts ledger
+  require (length saved<=1000) "resume_payment_backlog"
+  forM_ saved $ \attempt->do
+    require (attemptState attempt `elem` ["signed","broadcast_intent"]) "resume_payment_requires_review"
+    (obligation,_) <- readSavedPayment transport cfg ledger attempt
+    recheckSourceWith transport cfg ledger obligation
+  reconcileCustodyWith clock transport cfg ledger
+  now <- clock
+  PgOrder.resumeChecked cfg ledger now (Just saved)
