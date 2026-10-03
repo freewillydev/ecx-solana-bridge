@@ -422,7 +422,7 @@ fn prepare_liquidity(r:LiquidityRequest)->Result<serde_json::Value,&'static str>
     let collect=r.verb=="collect";
     if r.protocol!=1 || !owner.is_on_curve() || a>=b || liquidity.to_string()!=r.liquidity
         || amount_a.to_string()!=r.amount_a || amount_b.to_string()!=r.amount_b
-        || (collect && (liquidity!=0 || amount_a!=0 || amount_b!=0))
+        || (collect && (amount_a!=0 || amount_b!=0))
         || (!collect && (liquidity==0 || (r.verb!="deposit" && r.verb!="withdraw"))) { return Err("invalid_liquidity_request"); }
     let program=key("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc")?; let token=spl_token_interface::id();
     let position=Pubkey::find_program_address(&[b"position",mint.as_ref()],&program).0;
@@ -431,7 +431,7 @@ fn prepare_liquidity(r:LiquidityRequest)->Result<serde_json::Value,&'static str>
     let arrays=[-2894848i32,0].map(|start|Pubkey::find_program_address(&[b"tick_array",pool.as_ref(),start.to_string().as_bytes()],&program).0);
     let mut instructions=Vec::new();
     if collect {
-        instructions.push(Instruction {program_id:program,accounts:vec![A::new(pool,false),A::new(position,false),A::new_readonly(arrays[0],false),A::new_readonly(arrays[1],false)],data:vec![154,230,250,13,236,209,75,223]});
+        if liquidity>0 { instructions.push(Instruction {program_id:program,accounts:vec![A::new(pool,false),A::new(position,false),A::new_readonly(arrays[0],false),A::new_readonly(arrays[1],false)],data:vec![154,230,250,13,236,209,75,223]}); }
         instructions.push(Instruction {program_id:program,accounts:vec![A::new_readonly(pool,false),A::new_readonly(owner,true),A::new(position,false),A::new_readonly(nft,false),A::new(oa,false),A::new(va,false),A::new(ob,false),A::new(vb,false),A::new_readonly(token,false)],data:vec![164,152,207,99,30,186,19,182]});
     } else {
         let accounts=vec![A::new(pool,false),A::new_readonly(token,false),A::new_readonly(owner,true),A::new(position,false),A::new_readonly(nft,false),A::new(oa,false),A::new(ob,false),A::new(va,false),A::new(vb,false),A::new(arrays[0],false),A::new(arrays[1],false)];
@@ -441,7 +441,7 @@ fn prepare_liquidity(r:LiquidityRequest)->Result<serde_json::Value,&'static str>
     }
     let hash=Hash::from_str(&r.blockhash).map_err(|_| "invalid_blockhash")?;
     let message=Message::new_with_blockhash(&instructions,Some(&owner),&hash);
-    if message.account_keys.len()!=12 || message.header.num_required_signatures!=1 { return Err("liquidity_account_collision"); }
+    if message.account_keys.len()!=(if collect && liquidity==0 {10} else {12}) || message.header.num_required_signatures!=1 { return Err("liquidity_account_collision"); }
     let bytes=bincode::serialize(&Transaction::new_unsigned(message)).map_err(|_| "serialization_failed")?;
     if bytes.len()>1232 { return Err("transaction_too_large"); }
     Ok(serde_json::json!({"position":position.to_string(),"positionToken":nft.to_string(),"ownerA":oa.to_string(),"ownerB":ob.to_string(),

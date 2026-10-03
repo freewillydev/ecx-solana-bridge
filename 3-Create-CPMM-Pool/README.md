@@ -4,8 +4,8 @@ Liquidity uses separate operator capital and keys, outside bridge custody. The
 root-Cabal `ecx-pool` CLI derives canonical addresses and verifies existing
 full-range pools, creates classic Splash pools and prepares full-range positions.
 Position signing/submission is verified on Devnet. Unsigned liquidity deposit,
-withdrawal and fee-collection preparation is implemented; its preflight and funded
-execution remain unfinished.
+withdrawal and fee-collection preparation and preflight are implemented; funded
+execution remains unfinished.
 
 ```sh
 cabal run -v0 ecx-pool -- prepare devnet REQUEST.json > prepared.json
@@ -18,6 +18,7 @@ cabal run -v0 ecx-pool -- prepare-position devnet POSITION_REQUEST.json > positi
 cabal run -v0 ecx-pool -- check-position HTTPS_RPC MAX_FEE MAX_COST position.json
 cabal run -v0 ecx-pool -- sign-position HTTPS_RPC MAX_FEE MAX_COST position.json PAYER_KEY POSITION_MINT_KEY NEW_ATTEMPT.json
 cabal run -v0 ecx-pool -- prepare-liquidity devnet LIQUIDITY_REQUEST.json > liquidity.json
+cabal run -v0 ecx-pool -- check-liquidity HTTPS_RPC MAX_FEE MAX_COST liquidity.json
 cabal test ecx-pool:pool-test --offline -j1 --test-show-details=direct
 ```
 
@@ -134,23 +135,45 @@ finalized. An empty position does not establish funded liquidity or trading.
 `limitA`, and `limitB`. The last three values are canonical unsigned decimal
 strings. Liquidity is Orca's integer liquidity quantity, not a human token amount.
 For deposits, limits cap token spending; for withdrawals, they specify minimum
-receipts. Both are in each mint's raw base units. Fee collection requires all
-three amount fields to be zero and refreshes accrued fees before collecting.
+receipts. Both are in each mint's raw base units. For fee collection, `liquidity` must equal the position's currently observed
+liquidity, while both token limits must be zero. Nonempty positions refresh accrued
+fees before collecting; empty positions collect already-recorded fees directly
+because Orca rejects fee refresh at zero liquidity.
 
 The SDK derives the position/ownership/token-account/boundary-array addresses.
 Haskell independently checks the exact account roles, instruction sequence,
 blockhash, integer payload and sole zero signature. Deposit/withdrawal each use
-one classic SPL Orca instruction; collection uses update-fees followed by collect.
+one classic SPL Orca instruction; collection conditionally uses update-fees followed by collect.
 The custody decoder's account limits are unchanged. No new SDK dependencies were
 added. Protocol tests cover all three operations, byte mutations, changed accounts
 and blockhash, malformed decimals and u128 overflow.
 
-This command only prepares unsigned bytes. It does not prove ownership, available
-balances, pool/vault correspondence, current fees or transaction success. Before
-signing can be enabled, the liquidity evaluator must verify the actual accounts,
-simulate exact token/liquidity deltas within saved cost limits and reuse durable
-signing/submission. Funded deposit/withdrawal and fee collection have not passed
-real-chain acceptance yet.
+`check-liquidity` rederives the preparation and verifies genesis, canonical pool,
+its two mints/vaults, the full-range position and its sole payer-owned NFT. Both
+owner token accounts must already exist, with correct mints and no delegate or
+close authority. It simulates zero-signature bytes without replacing the blockhash.
+Position/pool liquidity changes must match the request, and token movements must
+balance exactly between owner accounts and vaults while respecting spend/receipt
+limits. Price, tick and NFT ownership cannot change. Collection must clear the
+position's fee debts. SOL debit plus a conservative extra fee must fit `MAX_COST`.
+
+Simulation requests all mutable balances and ownership accounts within the RPC's
+account limit; config and pool-asset mint facts are retained from preflight because
+the validated instructions cannot modify them. Results report signed raw-unit
+`spentA`/`spentB` (negative means received), liquidity delta and maximum SOL debit.
+Empty-position collection passed actual Devnet simulation with zero token movement
+and a 10,000-lamport conservative cost bound. Its captured before/after facts test
+cost, ownership, liquidity and token-conservation refusals. This is not evidence of
+funded deposit/withdrawal or nonzero earned fees. Signing/submission remains disabled
+for these liquidity operations until that integration is completed.
+
+The separate admin payer's Devnet USDC and test-ECX ATAs were created through
+`ecx-token`, with finalized transactions
+`3XuypwYj5XcWRFjKYvc5b9yganU38ckbrbd7CqugCZWsSn9gtogHwxPU3BY3xk1of4ZHMeAVnjghf7ptZb7jE5CE`
+and `aHSsU7auhryY2KuymGupifAe5Rkhoj56yux3vCjZ8dYkVeXMvYWrSLRWcebYrVNRAS25nY3FmV7HY3QknyCF8Zj`.
+ATA provisioning supports classic mints with other decimal counts (USDC has six);
+the token mint/burn policy remains eight decimals. Both accounts still need test
+capital for the funded liquidity run.
 
 ## Verified checkpoint
 
@@ -199,8 +222,8 @@ The closed signer supports independent vault signatures in addition to the payer
 keeping the bridge's one-signature custody protocol unchanged. Full-range position
 and boundary-array preparation/preflight, signing/submission and finalized ownership readback now pass Devnet
 acceptance. Liquidity deposit/withdrawal and fee-collection wire preparation is
-implemented; complete actual-account/effect preflight, saved signing/submission
-and funded Devnet acceptance. Adaptive-tier initialization can have additional authority
+implemented and actual-account/effect preflight passes empty-position collection
+simulation. Complete saved signing/submission and funded Devnet acceptance. Adaptive-tier initialization can have additional authority
 requirements; do not assume the published tier is permissionless.
 
 LP ownership/lock, fee reinvestment, issuer approval, reserve backing, deployed

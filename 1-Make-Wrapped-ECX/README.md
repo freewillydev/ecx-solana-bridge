@@ -200,3 +200,10 @@ and [burning](https://solana.com/docs/tokens/basics/burn-tokens).
 Remaining: automatic bounded expiry recovery and canonical administration acceptance.
 Canonical issuance additionally requires actual issuer authority and reserve records;
 see the [token operations guide](../2-Wrap-Unwrap-Server/docs/TOKEN-OPERATIONS.md).
+
+ATA provisioning accepts initialized classic SPL mints with any valid decimal
+count and no freeze authority, including six-decimal Orca Devnet USDC. Mint/burn
+and bridge-token metadata operations retain their eight-decimal policy. Devnet
+USDC ATA creation and saved-attempt replay have passed; a six-decimal mint request
+is still refused by account-schema validation. See the pool README for transaction
+identifiers and the separately funded liquidity workflow.

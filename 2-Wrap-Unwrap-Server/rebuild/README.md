@@ -321,8 +321,10 @@ Private keys/attempts/ledger remain outside Git.
    preflight, saved signing/submission and finalized ownership validation now pass
    Devnet acceptance (position `7gadbytE2t3vQs9skcq2EYXkjBGYcGboGeeCHfUavLRT`).
    Liquidity deposit/withdrawal and fee-collection unsigned wire preparation now
-   pass strict codec tests. Their balance/effect preflight, saved signing/submission
-   and funded acceptance remain unfinished.
+   pass strict codec tests. Balance/effect preflight now validates ownership, token
+   conservation, liquidity changes and cost limits; empty-position collection
+   passes Devnet simulation. Six-decimal USDC ATA provisioning also finalized.
+   Saved signing/submission and funded liquidity acceptance remain unfinished.
    Retire remaining legacy Rust/Python tools after their required behavior is covered.
    Confirm canonical token authority, backing, liquidity and actual route availability.
 5. Finish the current installer/upgrade path last, test clean Linux installation and

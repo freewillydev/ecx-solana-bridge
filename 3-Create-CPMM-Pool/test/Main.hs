@@ -11,7 +11,7 @@ import Data.Bits (xor)
 import Bridge.SDKBuild (sdkLibraryPath)
 import Paths_ecx_pool (getDataFileName)
 import Data.Aeson
-import Data.Aeson.Types (parseEither)
+import Data.Aeson.Types (parseEither,Parser)
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Base64 as B64
@@ -36,6 +36,13 @@ main=do
   (positionRequest,positionPrepared,positionAccounts)<-either fail pure $ parseEither (withObject "fixture" $ \o->do
     o .: "simulatedPosition" >>= withObject "simulation" (\v->(,,) <$> v .: "request" <*> v .: "prepared" <*> v .: "accounts")) fixture
   positionBytes<-either fail pure $ B64.decode $ TE.encodeUtf8 $ P.transaction positionPrepared
+  (collectRequest,collectBefore,collectAfter)<-either fail pure $ parseEither (withObject "fixture" $ \o->do
+    o .: "simulatedCollection" >>= withObject "collection" (\v->do
+      r<-v .: "request"
+      before<-v .: "before" >>= withObject "snapshot" (\b->Snapshot <$> b .: "slot" <*> b .: "accounts")
+      afterSlot<-v .: "afterSlot"; changes<-v .: "afterChanges" :: Parser [(Int,Value)]
+      let after=Snapshot afterSlot [maybe original id (lookup index changes) | (index,original)<-zip [0..] (accounts before)]
+      pure(r,before,after))) fixture
   let request=Create "3psSKHRPopKXPcBajcm2crjoKzrUtWyfsqeprTRMxAqZ" (expectedA expected) (expectedB expected)
         "HcctYHWCfLGrE5WigGKHg5hR6Q1P1Gntb5PYQWSQFHXg" "AzNd4srpctGzR5Q7LqkQh6aUwwqNEveTcCTNX8uHixDC"
         (2^(64::Int)) (pool expected)
@@ -63,12 +70,19 @@ main=do
   openingFirst<-case openingSignatures of first:_->pure first; _->fail "position signature"
   let openingBytes=B.singleton 2<>B.concat openingSignatures<>openingMessage
       openingSaved=S.Saved Devnet (S.Opening openingRequest openingPrepared) 20000 20000000 (base58 openingFirst) (TE.decodeUtf8 $ B64.encode openingBytes)
-  let liquidityRequests=[Q.Request action positionRequest (if action==Q.Collect then 0 else 1000)
+  let liquidityRequests=[Q.Request action positionRequest quantity
         (if action==Q.Collect then 0 else 1000) (if action==Q.Collect then 0 else 1000)
-        (createVaultA creation) (createVaultB creation) | action<-[Q.Deposit,Q.Withdraw,Q.Collect]]
+        (createVaultA creation) (createVaultB creation) | (action,quantity)<-[(Q.Deposit,1000),(Q.Withdraw,1000),(Q.Collect,0),(Q.Collect,1000)]]
   liquidityPreparations<-mapM (Q.evalSafe . Q.Prepare sdkLibraryPath) liquidityRequests
   results<-sequence
-    [ quickCheckResult $ once $ property $ and
+    [ quickCheckResult $ once $ property $
+        Q.validateEffects Devnet collectRequest 5000 10000 collectBefore collectAfter==Right(Q.Effect 0 0 0 10000)
+        && isLeft(Q.validateEffects Devnet collectRequest 5000 9999 collectBefore collectAfter)
+        && isLeft(Q.validateEffects Mainnet collectRequest 5000 10000 collectBefore collectAfter)
+        && isLeft(Q.validateEffects Devnet collectRequest {Q.liquidity=1} 5000 10000 collectBefore collectAfter)
+        && all (\after->isLeft $ Q.validateEffects Devnet collectRequest 5000 10000 collectBefore after)
+          [mutateByte collectAfter 9 64,mutateByte collectAfter 4 64,mutateByte collectAfter 6 72,mutateByte collectAfter 8 32]
+    , quickCheckResult $ once $ property $ and
         [not(isLeft $ Q.validate r p) && (eitherDecode (encode r) :: Either String Q.Request)==Right r
           && isLeft(Q.validate r {Q.vaultA=Q.vaultB r} p)
           && isLeft(Q.validate r {Q.positionRequest=(Q.positionRequest r) {P.blockhash=P.pool positionRequest}} p)
@@ -158,3 +172,17 @@ main=do
           ,corrupt 4 72 1,corrupt 5 108 2,corrupt 5 129 1]
     ]
   if all isSuccess results then pure () else exitFailure
+
+-- Change one byte of a captured account without inventing another chain response.
+mutateByte :: Snapshot -> Int -> Int -> Snapshot
+mutateByte snapshot accountIndex offset=snapshot {accounts=[if index==accountIndex then change value else value | (index,value)<-zip [0..] (accounts snapshot)]}
+ where
+  change (Object fields)=case KM.lookup "data" fields of
+    Just value->case fromJSON value :: Result [Text] of
+      Success [encoded,"base64"]->case B64.decode(TE.encodeUtf8 encoded) of
+        Right bytes | offset<B.length bytes->Object(KM.insert "data" (toJSON [TE.decodeUtf8 $ B64.encode $
+          B.take offset bytes<>B.singleton((B.index bytes offset) `xor` 1)<>B.drop (offset+1) bytes,"base64"]) fields)
+        _->Null
+      _->Null
+    _->Null
+  change _=Null

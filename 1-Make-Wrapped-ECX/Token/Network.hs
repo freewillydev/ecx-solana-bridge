@@ -45,7 +45,7 @@ evalSafe (Check network endpoint feeLimit request unsigned)=do
         require (minimumRent>0 && minimumRent==toInteger(rent request)) "mint_rent_mismatch"
         pure minimumRent
       Associated{owner=recipient}->do
-        _<-accountInfo (mint request) >>= parseValue inspectMint
+        _<-accountInfo (mint request) >>= parseValue (inspectMint Nothing)
         minimumRent<-call "getMinimumBalanceForRentExemption" [toJSON (165::Int),object ["commitment" .= ("finalized"::Text)]] >>= parseValue parseJSON :: IO Integer
         require (minimumRent>0 && minimumRent==toInteger(rent request)) "account_rent_mismatch"
         existing<-accountInfo (account request)
@@ -54,7 +54,7 @@ evalSafe (Check network endpoint feeLimit request unsigned)=do
           require (actualOwner==recipient && actualMint==mint request) "associated_account_identity_mismatch"
           pure 0
       Metadata{metadata=terms}->do
-        (issuer,_)<-accountInfo (mint request) >>= parseValue inspectMint
+        (issuer,_)<-accountInfo (mint request) >>= parseValue (inspectMint (Just 8))
         existing<-accountInfo (M.address terms)
         if M.create terms then require (issuer==Just(authority request) && existing==Null) "metadata_creation_authority_or_exists"
         else do
@@ -62,7 +62,7 @@ evalSafe (Check network endpoint feeLimit request unsigned)=do
           pure ()
         pure 0
       Request{}->do
-        mintInfo<-accountInfo (mint request) >>= parseValue inspectMint
+        mintInfo<-accountInfo (mint request) >>= parseValue (inspectMint (Just 8))
         tokenInfo<-accountInfo (account request) >>= parseValue inspectAccount
         let (mintAuthority,supply)=mintInfo
             (owner,balance,token)=tokenInfo
@@ -167,13 +167,13 @@ evalCritical (Submit network endpoint feeLimit path)=do
 
 -- Strict classic SPL policies: no extensions, frozen/delegated/native accounts,
 -- or hidden close/freeze authority. JSON amounts are canonical unsigned integers.
-inspectMint :: Value -> Parser (Maybe Text,Word64)
-inspectMint value=do
+inspectMint :: Maybe Int -> Value -> Parser (Maybe Text,Word64)
+inspectMint expectedDecimals value=do
   info<-accountFields 82 "mint" value
   initialized<-field "isInitialized" info
   decimals<-field "decimals" info :: Parser Int
   freeze<-field "freezeAuthority" info :: Parser (Maybe Text)
-  unless (initialized && decimals==8 && freeze==Nothing) (fail "unsupported mint")
+  unless (initialized && decimals>=0 && decimals<=255 && maybe True (==decimals) expectedDecimals && freeze==Nothing) (fail "unsupported mint")
   authority<-field "mintAuthority" info
   supply<-field "supply" info >>= units
   pure (authority,supply)
