@@ -310,7 +310,9 @@ Private keys/attempts/ledger remain outside Git.
    Token-account provisioning and a new-mint issuance/burn round trip also pass;
    the standalone Rust setup example is retired. Administration expiry recovery remains.
    The pool CLI now verifies real mainnet/Devnet full-range pools and canonical
-   addresses, including distinct adaptive fee-tier indexes. Pool creation, position
+   addresses, including distinct adaptive fee-tier indexes. Unsigned ordinary Splash
+   creation now uses a bounded SDK encoder and independent three-signature message
+   validation; custody remains restricted to one signer. Creation preflight/sign/send, position
    funding and fee management remain unimplemented.
    Retire remaining legacy Rust/Python tools after their required behavior is covered.
    Confirm canonical token authority, backing, liquidity and actual route availability.

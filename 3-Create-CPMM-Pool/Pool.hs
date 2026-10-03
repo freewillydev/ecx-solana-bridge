@@ -1,10 +1,10 @@
 {-# LANGUAGE GADTs, ForeignFunctionInterface #-}
 -- Closed, read-only liquidity operations. No signing key, ledger or custody access.
-module Pool (Network(..),Safe(..),Expected(..),Snapshot(..),Report(..),Whirlpool(..),evalSafe,validate,decodePool,program,configuration) where
+module Pool (Network(..),Safe(..),Create(..),Prepared(..),validatePrepared,Expected(..),Snapshot(..),Report(..),Whirlpool(..),evalSafe,validate,decodePool,program,configuration) where
 import Bridge.Error (require,reject)
 import Bridge.RPC
 import Bridge.Solana (tokenProgram)
-import Bridge.SolanaMessage (publicKey,base58)
+import Bridge.SolanaMessage (publicKey,base58,decodePoolTransaction,Transaction(..),Message(..),Instruction(..))
 import Control.Exception (bracket)
 import Control.Monad (unless)
 import Data.Aeson
@@ -13,7 +13,9 @@ import Data.Binary.Get
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Lazy as L
-import Data.List (nub)
+import Data.List (nub,sort)
+import qualified Data.Aeson.KeyMap as KM
+import Text.Read (readMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
@@ -43,15 +45,65 @@ instance ToJSON Report where
     ,"protocolFeeTenThousandths" .= protocolFee p,"liquidity" .= show(liquidity p)
     ,"sqrtPriceX64" .= show(sqrtPrice p),"currentTick" .= tick p,"tokens" .= detail]
 
+-- A separate liquidity payer and two new vault identities; no custody capability.
+data Create = Create {payer :: Text,createMintA :: Text,createMintB :: Text,createVaultA :: Text,createVaultB :: Text
+  ,initialPrice :: Integer,recentBlockhash :: Text} deriving (Eq,Show)
+instance FromJSON Create where
+  parseJSON=withObject "pool creation" $ \o->do
+    unless (KM.size o==7) (fail "unexpected pool request fields")
+    price<-o .: "sqrtPriceX64"
+    n<-case readMaybe price of
+      Just value | show (value::Integer)==price->pure value
+      _->fail "noncanonical pool price"
+    Create <$> o .: "payer" <*> o .: "mintA" <*> o .: "mintB" <*> o .: "vaultA" <*> o .: "vaultB" <*> pure n <*> o .: "blockhash"
+instance ToJSON Create where
+  toJSON r=object ["payer" .= payer r,"mintA" .= createMintA r,"mintB" .= createMintB r
+    ,"vaultA" .= createVaultA r,"vaultB" .= createVaultB r,"sqrtPriceX64" .= show(initialPrice r),"blockhash" .= recentBlockhash r]
+data Prepared = Prepared {createdPool :: Text,feeTier :: Text,poolBump :: Word8,unsignedTransaction :: Text} deriving (Eq,Show)
+instance FromJSON Prepared where
+  parseJSON=withObject "prepared pool" $ \o->do
+    unless (KM.size o==4) (fail "unexpected prepared fields")
+    Prepared <$> o .: "pool" <*> o .: "feeTier" <*> o .: "bump" <*> o .: "transaction"
+instance ToJSON Prepared where
+  toJSON p=object ["pool" .= createdPool p,"feeTier" .= feeTier p,"bump" .= poolBump p,"transaction" .= unsignedTransaction p]
+
+validatePrepared :: Network -> Create -> Prepared -> Either Text Transaction
+validatePrepared network r p=do
+  unless (initialPrice r>=4295048016 && initialPrice r<=79226673515401279992447579055) (Left "invalid_pool_price")
+  expected<-mapM publicKey [configuration network,createMintA r,createMintB r,payer r,createdPool p
+    ,createVaultA r,createVaultB r,feeTier p,tokenProgram,"11111111111111111111111111111111"
+    ,"SysvarRent111111111111111111111111111111111"]
+  prog<-publicKey program; hash<-publicKey(recentBlockhash r)
+  a<-publicKey(createMintA r); b<-publicKey(createMintB r)
+  owner<-publicKey(payer r); va<-publicKey(createVaultA r); vb<-publicKey(createVaultB r); address<-publicKey(createdPool p)
+  tx@(Transaction signatures (Message n rs ru keys recent instructions) _)<-decodePoolTransaction(unsignedTransaction p)
+  let payload=B.pack ([95,180,10,172,84,174,232,40,poolBump p,128,128]
+        <>[fromInteger(initialPrice r `div` (256^i)) | i<-[0..15::Int]])
+      semantic (Instruction ix indices bytes)=(keys !! fromIntegral ix,map ((keys !!) . fromIntegral) indices,bytes)
+  unless (a<b && length(nub(prog:expected))==12 && sort keys==sort(prog:expected)
+    && n==3 && rs==0 && ru==8 && take 1 keys==[owner] && sort(take 3 keys)==sort[owner,va,vb]
+    && sort(take 4 keys)==sort[owner,va,vb,address] && recent==hash
+    && map semantic instructions==[(prog,expected,payload)] && all (B.all (==0)) signatures)
+    (Left "pool_transaction_mismatch")
+  pure tx
+
 data Safe a where
+  Prepare :: FilePath -> Network -> Create -> Safe Prepared
   Address :: FilePath -> Network -> Text -> Text -> Word16 -> Safe Text
   Inspect :: FilePath -> Network -> String -> Expected -> Safe Report
 
 evalSafe :: Safe a -> IO a
+evalSafe (Prepare library network r)=do
+  require (initialPrice r>=4295048016 && initialPrice r<=79226673515401279992447579055) "invalid_pool_price"
+  reply<-invoke "ecx_pool_prepare_v1" library $ object
+    ["protocol" .= (1::Int),"config" .= configuration network,"payer" .= payer r,"mint_a" .= createMintA r,"mint_b" .= createMintB r
+    ,"vault_a" .= createVaultA r,"vault_b" .= createVaultB r,"sqrt_price" .= show(initialPrice r),"blockhash" .= recentBlockhash r]
+  prepared<-either (const $ reject "invalid_pool_prepare_reply") pure (eitherDecodeStrict' reply)
+  either reject (const $ pure prepared) (validatePrepared network r prepared)
 evalSafe (Address library network a b index)=do
   keys<-mapM (either reject pure . publicKey) [a,b]
   require (case keys of [x,y]->x<y; _->False) "pool_mints_not_ordered"
-  reply<-invoke library $ object ["protocol" .= (1::Int),"config" .= configuration network,"mint_a" .= a,"mint_b" .= b,"fee_tier_index" .= index]
+  reply<-invoke "ecx_pool_address_v1" library $ object ["protocol" .= (1::Int),"config" .= configuration network,"mint_a" .= a,"mint_b" .= b,"fee_tier_index" .= index]
   address<-either (const $ reject "invalid_pool_address_reply") pure (eitherDecodeStrict' reply)
   either reject (const $ pure address) (publicKey address)
 evalSafe (Inspect library network endpoint expected)=do
@@ -153,12 +205,12 @@ accountData owner size value=do
 -- Pure PDA derivation through the existing Solana SDK; caller-owned bounded buffers.
 type DeriveFn = Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr Word8 -> CSize -> Ptr CSize -> IO CInt
 foreign import ccall safe "dynamic" callDerive :: FunPtr DeriveFn -> DeriveFn
-invoke :: FilePath -> Value -> IO B.ByteString
-invoke library value=do
+invoke :: String -> FilePath -> Value -> IO B.ByteString
+invoke symbol library value=do
   let request=L.toStrict(encode value)
   require (B.length request<=8192) "pool_request_too_large"
   bracket (dlopen library [RTLD_NOW,RTLD_LOCAL]) dlclose $ \handle->do
-    derive<-callDerive <$> dlsym handle "ecx_pool_address_v1"
+    derive<-callDerive <$> dlsym handle symbol
     B.useAsCString "{}" $ \config->B.useAsCStringLen request $ \(input,size)->
       allocaBytes 8192 $ \output->alloca $ \lengthPtr->do
         poke lengthPtr 0

@@ -1,7 +1,7 @@
 module Main (main) where
 import Pool
 import Bridge.SDKBuild (sdkLibraryPath)
-import Data.Aeson (encode)
+import Data.Aeson (encode,eitherDecode,object,(.=))
 import qualified Data.ByteString.Lazy.Char8 as L
 import qualified Data.Text as T
 import System.Environment (getArgs)
@@ -10,6 +10,11 @@ import Data.Word (Word16)
 import System.Exit (die)
 main :: IO ()
 main=getArgs >>= \args->case args of
+  ["prepare",network,path]->do
+    selected<-choose network
+    request<-L.readFile path >>= either die pure . eitherDecode
+    prepared<-evalSafe (Prepare sdkLibraryPath selected request)
+    L.putStrLn $ encode $ object ["network" .= network,"request" .= request,"prepared" .= prepared]
   ["address",network,a,b,index]->do
     selected<-choose network
     tier<-case readMaybe index :: Maybe Integer of
@@ -17,7 +22,7 @@ main=getArgs >>= \args->case args of
       _->die "Invalid fee-tier index"
     evalSafe (Address sdkLibraryPath selected (T.pack a) (T.pack b) tier) >>= L.putStrLn . encode
   ["inspect",network,endpoint,pool,a,b]->choose network >>= \selected->evalSafe (Inspect sdkLibraryPath selected endpoint (Expected (T.pack pool) (T.pack a) (T.pack b))) >>= L.putStrLn . encode
-  _->die "Usage: ecx-pool address devnet|mainnet MINT_A MINT_B FEE_TIER_INDEX | inspect devnet|mainnet HTTPS_RPC POOL MINT_A MINT_B (mints in byte order; read-only)"
+  _->die "Usage: ecx-pool prepare devnet|mainnet REQUEST.json | address devnet|mainnet MINT_A MINT_B FEE_TIER_INDEX | inspect devnet|mainnet HTTPS_RPC POOL MINT_A MINT_B (mints in byte order; read-only)"
 choose :: String -> IO Network
 choose "devnet"=pure Devnet
 choose "mainnet"=pure Mainnet

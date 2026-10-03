@@ -2,10 +2,12 @@
 
 Liquidity uses separate operator capital and keys, outside bridge custody. The
 root-Cabal `ecx-pool` CLI currently derives canonical addresses and verifies existing
-full-range pools. Pool creation, position ownership/funding and fee collection are
+full-range pools and prepares unsigned classic Splash-pool creation. Signing and
+submission, position ownership/funding and fee collection are
 still unfinished; inspection is not a substitute for those operations.
 
 ```sh
+cabal run -v0 ecx-pool -- prepare devnet REQUEST.json
 cabal run -v0 ecx-pool -- address devnet MINT_A MINT_B FEE_TIER_INDEX
 cabal run -v0 ecx-pool -- inspect devnet HTTPS_RPC POOL MINT_A MINT_B
 cabal test ecx-pool:pool-test --offline -j1 --test-show-details=direct
@@ -18,7 +20,7 @@ independently derives its PDA through the existing Solana SDK and verifies it.
 
 `Pool.hs` owns a closed safe DSL. It has no signer, private-key, database, broadcast
 or custody capability. It uses the shared bounded HTTPS RPC adapter and a narrow
-read-only FFI entry point for PDA derivation. No additional SDK dependencies are
+read-only FFI entry points for PDA derivation and unsigned instruction construction. No additional SDK dependencies are
 introduced. Inspection verifies:
 
 - Network genesis, fixed official Orca program and the network's config address.
@@ -42,6 +44,27 @@ Full-range-only means tick spacing at least 32768, per the pinned
 The current verifier covers classic SPL assets and the original mutable Orca
 program. It does not support Token-2022 assets or the separate immutable deployment.
 
+## Creation request
+
+`prepare` takes exactly `payer`, `mintA`, `mintB`, `vaultA`, `vaultB`,
+`sqrtPriceX64` and `blockhash`. All are strings; the price is a canonical integer
+representing the square root of the raw-unit B/A price, multiplied by 2^64.
+Mint decimal differences must therefore be accounted for before choosing it.
+The vaults are two new, distinct keypair public keys. Use separate liquidity capital.
+The command does not open private keys or access a network.
+
+The current creation path fixes the ordinary Splash tier and tick spacing to 32896.
+It derives the pool and fee-tier PDAs through the SDK, builds classic InitializePool,
+and independently checks its complete message in Haskell: three zero signatures,
+all account identities and permissions, one instruction, exact price and blockhash.
+This does not initialize tick arrays or deposit liquidity. The published adaptive
+1034 tier remains supported for inspection, not creation.
+
+Preparation does not prove a blockhash is live, accounts are available, or funds
+cover rent/fees. Chain preflight, protected signing and saved-byte submission are
+still required before any transaction may be sent. Persisted preparations must
+also have their derived addresses rechecked before signing.
+
 ## Verified checkpoint
 
 Live read-only acceptance passed for:
@@ -61,7 +84,10 @@ The public finalized mainnet fixture records its slot and source. QuickCheck use
 that real account data to verify PDA derivation and refusal of wrong network,
 identity, owner, executable flag, layouts, disabled mints, invalid vault authority,
 frozen/delegated/closable vaults and excessive protocol liabilities. Token and bridge
-regressions remain in their existing Cabal suites.
+regressions remain in their existing Cabal suites. Creation checks also reject
+wrong-network/request changes and a one-bit mutation at every transaction byte;
+the custody decoder rejects the three-signature transaction. These are offline
+wire-contract tests, not evidence of a finalized pool creation.
 
 ## Remaining implementation
 

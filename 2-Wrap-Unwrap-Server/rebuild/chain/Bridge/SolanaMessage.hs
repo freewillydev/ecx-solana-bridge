@@ -1,7 +1,7 @@
 {-# LANGUAGE RecordWildCards #-}
 module Bridge.SolanaMessage
   ( Instruction(..), Message(..), Transaction(..), Expected(..), publicKey
-  , signatureBytes, base58, decodeTransaction, validateTransaction ) where
+  , signatureBytes, base58, decodeTransaction, decodePoolTransaction, validateTransaction ) where
 
 import Bridge.Domain (Amount, units)
 import Bridge.Identity (publicKey)
@@ -41,7 +41,13 @@ short = do
 bounded :: Int -> Get Int
 bounded maxN = short >>= \n -> if n<=maxN then pure n else fail "vector_too_large"
 decodeTransaction :: Text -> Either Text Transaction
-decodeTransaction encoded = do
+decodeTransaction = decodeLegacy 1 3 8
+-- Pool initialization has three writable signers and exactly one instruction.
+-- This does not widen the custody decoder above.
+decodePoolTransaction :: Text -> Either Text Transaction
+decodePoolTransaction = decodeLegacy 3 1 11
+decodeLegacy :: Int -> Int -> Int -> Text -> Either Text Transaction
+decodeLegacy signerCount instructionLimit accountLimit encoded = do
   unless (T.length encoded<=1644) (Left "transaction_too_large")
   bytes <- either (const $ Left "invalid_base64") Right (B64.decode (TE.encodeUtf8 encoded))
   unless (BS.length bytes<=1232) (Left "transaction_too_large")
@@ -51,21 +57,21 @@ decodeTransaction encoded = do
     _ -> Left "trailing_transaction_bytes"
  where
   parser bytes = do
-    count <- bounded 1
-    unless (count==1) (fail "one_signer_required")
+    count <- bounded signerCount
+    unless (count==signerCount) (fail "unexpected_signer_count")
     signatures <- replicateM count (getByteString 64)
     start <- bytesRead
     n <- getWord8; rs <- getWord8; ru <- getWord8
-    unless (n==1 && rs==0) (fail "unexpected_header")
+    unless (fromIntegral n==signerCount && rs==0) (fail "unexpected_header")
     keyCount <- bounded 16
-    unless (keyCount>0 && fromIntegral ru<keyCount) (fail "invalid_account_flags")
+    unless (keyCount>=signerCount && fromIntegral ru<=keyCount-signerCount) (fail "invalid_account_flags")
     keys <- replicateM keyCount (getByteString 32)
     unless (length (nub keys)==length keys) (fail "duplicate_account")
     blockhash <- getByteString 32
-    instructionCount <- bounded 3
+    instructionCount <- bounded instructionLimit
     instructions <- replicateM instructionCount $ do
       program <- getWord8
-      accountCount <- bounded 8
+      accountCount <- bounded accountLimit
       accounts <- replicateM accountCount getWord8
       dataSize <- bounded 512 -- Metaplex strings can exceed 256; full transaction stays <=1232
       payload <- getByteString dataSize

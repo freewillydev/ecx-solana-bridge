@@ -1,5 +1,7 @@
 module Main (main) where
 import Pool
+import Bridge.SolanaMessage (decodeTransaction)
+import Data.Bits (xor)
 import Bridge.SDKBuild (sdkLibraryPath)
 import Paths_ecx_pool (getDataFileName)
 import Data.Aeson
@@ -19,8 +21,23 @@ main=do
     expected<-Expected <$> o .: "pool" <*> o .: "mintA" <*> o .: "mintB"
     snapshot<-Snapshot <$> o .: "slot" <*> o .: "accounts"
     pure (expected,snapshot)) fixture
+  let request=Create "3psSKHRPopKXPcBajcm2crjoKzrUtWyfsqeprTRMxAqZ" (expectedA expected) (expectedB expected)
+        "HcctYHWCfLGrE5WigGKHg5hR6Q1P1Gntb5PYQWSQFHXg" "AzNd4srpctGzR5Q7LqkQh6aUwwqNEveTcCTNX8uHixDC"
+        (2^(64::Int)) (pool expected)
+  prepared<-evalSafe (Prepare sdkLibraryPath Devnet request)
+  bytes<-either fail pure $ B64.decode $ TE.encodeUtf8 $ unsignedTransaction prepared
   results<-sequence
-    [ quickCheckResult $ once $ ioProperty $ do
+    [ quickCheckResult $ once $ property $
+        not(isLeft $ validatePrepared Devnet request prepared)
+        && isLeft(decodeTransaction $ unsignedTransaction prepared)
+        && isLeft(validatePrepared Mainnet request prepared)
+        && all (\r->isLeft $ validatePrepared Devnet r prepared)
+          [request {initialPrice=initialPrice request+1},request {recentBlockhash=payer request}
+          ,request {payer=createVaultA request},request {createVaultA=createVaultB request}
+          ,request {createMintA=createMintB request}]
+        && all (\index->let changed=B.take index bytes<>B.singleton((B.index bytes index) `xor` 1)<>B.drop (index+1) bytes
+           in isLeft $ validatePrepared Devnet request prepared {unsignedTransaction=TE.decodeUtf8 $ B64.encode changed}) [0..B.length bytes-1]
+    , quickCheckResult $ once $ ioProperty $ do
         derived<-evalSafe (Address sdkLibraryPath Mainnet (expectedA expected) (expectedB expected) 1034)
         devnet<-evalSafe (Address sdkLibraryPath Devnet (expectedA expected) (expectedB expected) 1034)
         pure (derived==pool expected && devnet/=derived && not(isLeft $ validate Mainnet expected snapshot))

@@ -330,6 +330,46 @@ pub unsafe extern "C" fn ecx_pool_address_v1(
 ) -> i32 {
     unsafe { prepare_ffi(2, config, config_len, request, request_len, output, capacity, output_len) }
 }
+// Unsigned classic Orca InitializePool, pinned client f4b99e79. No keys or RPC.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PoolCreateRequest {
+    protocol:u8, config:String, payer:String, mint_a:String, mint_b:String,
+    vault_a:String, vault_b:String, sqrt_price:String, blockhash:String,
+}
+fn prepare_pool(r:PoolCreateRequest)->Result<serde_json::Value,&'static str> {
+    use solana_instruction::{AccountMeta as A,Instruction};
+    let config=key(&r.config)?; let payer=key(&r.payer)?;
+    let a=key(&r.mint_a)?; let b=key(&r.mint_b)?;
+    let va=key(&r.vault_a)?; let vb=key(&r.vault_b)?;
+    let price=r.sqrt_price.parse::<u128>().map_err(|_| "invalid_pool_price")?;
+    if r.protocol!=1 || a>=b || price.to_string()!=r.sqrt_price
+        || !(4295048016..=79226673515401279992447579055).contains(&price)
+        || ![payer,va,vb].iter().all(Pubkey::is_on_curve) { return Err("invalid_pool_request"); }
+    let program=key("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc")?;
+    let spacing=32896u16.to_le_bytes();
+    let (pool,bump)=Pubkey::find_program_address(&[b"whirlpool",config.as_ref(),a.as_ref(),b.as_ref(),&spacing],&program);
+    let tier=Pubkey::find_program_address(&[b"fee_tier",config.as_ref(),&spacing],&program).0;
+    let accounts=vec![A::new_readonly(config,false),A::new_readonly(a,false),A::new_readonly(b,false),
+        A::new(payer,true),A::new(pool,false),A::new(va,true),A::new(vb,true),A::new_readonly(tier,false),
+        A::new_readonly(spl_token_interface::id(),false),A::new_readonly(Pubkey::default(),false),
+        A::new_readonly(key("SysvarRent111111111111111111111111111111111")?,false)];
+    let mut identities=accounts.iter().map(|a|a.pubkey).collect::<Vec<_>>(); identities.push(program);
+    identities.sort(); identities.dedup();
+    if identities.len()!=12 { return Err("duplicate_pool_account"); }
+    let mut data=vec![95,180,10,172,84,174,232,40,bump];
+    data.extend_from_slice(&spacing); data.extend_from_slice(&price.to_le_bytes());
+    let hash=Hash::from_str(&r.blockhash).map_err(|_| "invalid_blockhash")?;
+    let message=Message::new_with_blockhash(&[Instruction{program_id:program,accounts,data}],Some(&payer),&hash);
+    let bytes=bincode::serialize(&Transaction::new_unsigned(message)).map_err(|_| "serialization_failed")?;
+    if bytes.len()>1232 { return Err("transaction_too_large"); }
+    Ok(serde_json::json!({"pool":pool.to_string(),"feeTier":tier.to_string(),"bump":bump,"transaction":STANDARD.encode(bytes)}))
+}
+#[no_mangle]
+pub unsafe extern "C" fn ecx_pool_prepare_v1(
+    config:*const u8,config_len:usize,request:*const u8,request_len:usize,
+    output:*mut u8,capacity:usize,output_len:*mut usize,
+)->i32 { unsafe { prepare_ffi(3,config,config_len,request,request_len,output,capacity,output_len) } }
 unsafe fn prepare_ffi(
     mode: u8, config: *const u8, config_len: usize, request: *const u8, request_len: usize,
     output: *mut u8, capacity: usize, output_len: *mut usize,
@@ -350,6 +390,11 @@ unsafe fn prepare_ffi(
         return 2;
     }
     let result = std::panic::catch_unwind(|| {
+        if mode == 3 {
+            if unsafe { std::slice::from_raw_parts(config,config_len) } != b"{}" { return Err("invalid_pool_config"); }
+            let r=serde_json::from_slice(unsafe { std::slice::from_raw_parts(request,request_len) }).map_err(|_| "invalid_pool_request")?;
+            return serde_json::to_vec(&prepare_pool(r)?).map_err(|_| "serialization_failed");
+        }
         if mode == 2 {
             if unsafe { std::slice::from_raw_parts(config, config_len) } != b"{}" { return Err("invalid_pool_config"); }
             let r: PoolAddressRequest=serde_json::from_slice(unsafe { std::slice::from_raw_parts(request,request_len) })
