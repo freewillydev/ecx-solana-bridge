@@ -111,6 +111,7 @@ data StoreRead a where
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
+  AllocateTreasury :: Int64 -> Text -> [(Text,Amount)] -> Text -> StoreWrite Int64
   RecordSolanaExpiry :: RecordedAttempt -> Text -> StoreWrite ()
   ApproveSolanaRetry :: Int64 -> RecordedAttempt -> Text -> Text -> StoreWrite ()
   BeginCancellation :: PreparedPayment -> Int64 -> Text -> Text -> StoreWrite ()
@@ -332,6 +333,7 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
     _ <- O.runInsert c O.Insert {O.iTable=S.audit,
       O.iRows=[(Nothing,O.sqlStrictText "pause",O.sqlStrictText explanation)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
     pure ()
+  AllocateTreasury now receipt split reason -> allocateTreasury c policy now receipt split reason
   ReserveFees now key currency n destination explanation -> do
     validReason explanation
     require (now>=0 && T.length key==64 && T.all (`elem` ("0123456789abcdef"::String)) key && n<=orderMaximum limit) "invalid_fee_withdrawal"
@@ -2264,3 +2266,76 @@ setCustomerPaymentState c outgoing obligationState orderState = do
     _<-O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \r->r {S.obligationStatus=text obligationState},O.uWhere= \r->S.obligationId r O..== text(paymentId outgoing),O.uReturning=O.rCount}
     _<-O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text status},O.uWhere= \r->S.orderId r O..== text oid O..&& S.status r O../= text "Paid",O.uReturning=O.rCount}
     pure ()
+
+-- Only verified unbound receipts may become operator capital. The attestation
+-- establishes ownership; it cannot supply amounts, chain effects or eligibility.
+allocateTreasury :: PG.Connection -> PaymentTerms -> Int64 -> Text -> [(Text,Amount)] -> Text -> IO Int64
+allocateTreasury c policy now receipt split reason = do
+  validReason reason
+  let entries=sortOn fst split; names=map fst entries; encoded=encodeSaved entries
+      text=O.sqlStrictText; num=O.sqlInt8
+  require (not(null entries) && length entries<=4 && length(nub names)==length names
+    && all (`elem` ["float","backing","operating","lp"]) names && all ((>0).units.snd) entries) "invalid_treasury_allocation"
+  old<-O.runSelect c $ do
+    (key,allocation,proof,sequenceNo)<-O.selectTable S.treasuryAllocations
+    O.where_ (key O..== text receipt)
+    pure (allocation,proof,sequenceNo)
+    :: IO [(Text,Text,Int64)]
+  case old of
+    [(allocation,proof,sequenceNo)]->do
+      attestation<-decodeSaved proof >>= field "ownershipAttestation"
+      require (allocation==encoded && attestation==reason) "treasury_allocation_conflict"
+      pure sequenceNo
+    []->do
+      state<-metadata c (deploymentFingerprint $ paymentPolicy policy)
+      require (S.paused state==1) "treasury_allocation_requires_pause"
+      fresh c now
+      source<-readSource c receipt
+      require (S.depositOrder source==Nothing && S.depositEligible source==1 && S.depositAllocated source==0) "receipt_not_available_for_treasury"
+      currency<-parseAsset (S.depositAsset source)
+      let quantity=S.depositAmount source
+          (chain,prefix,key)=case currency of
+            Native->("Native","native:",T.takeWhile (/=':') $ T.drop 7 receipt)
+            Wrapped->("Solana","solana:",T.drop 7 receipt)
+            Sol->("SolanaOperating","sol-operating:",T.drop 14 receipt)
+      require (prefix `T.isPrefixOf` receipt && not(T.null key)) "invalid_treasury_receipt_id"
+      require (currency/=Native || S.depositDepth source>=fromIntegral(nativeDepth $ paymentPolicy policy)) "treasury_receipt_underconfirmed"
+      require (sum(map (toInteger.units.snd) entries)==toInteger quantity) "treasury_allocation_amount_mismatch"
+      require (currency/=Sol || names==["operating"]) "sol_reserved_for_operating"
+      linked<-O.runSelect c $ do
+        row<-O.selectTable S.obligations
+        O.where_ (S.obligationDeposit row O..== text receipt)
+        pure (S.obligationId row)
+        :: IO [Text]
+      require (null linked) "receipt_has_customer_obligation"
+      (kind,anchor,proof)<-custodyEvent c chain key
+      require (anchor==S.depositAnchor source && (kind=="unmatched_incoming" || currency==Native && kind=="incoming")) "verified_treasury_receipt_required"
+      case currency of
+        Native->do
+          receipts<-field "receipts" proof :: IO [Value]
+          matching<-forM receipts $ \value->do
+            identifier<-field "id" value
+            n<-field "amount" value :: IO Amount
+            order<-field "order" value :: IO (Maybe Text)
+            eligible<-field "eligible" value
+            pure (identifier==receipt && units n==quantity && order==Nothing && eligible)
+          require (length(filter id matching)==1) "verified_treasury_receipt_required"
+        _->do
+          delta<-field "delta" proof :: IO Text
+          require (delta==T.pack(show quantity)) "verified_treasury_receipt_required"
+          when (currency==Sol) $ field "failed" proof >>= \failed->require (not failed) "verified_treasury_receipt_required"
+      let envelope=object ["chain" .= chain,"id" .= key,"anchor" .= anchor,"kind" .= kind,"proof" .= proof]
+          evidence=encodeSaved $ object ["ownershipAttestation" .= reason,"observation" .= envelope]
+      require (T.length evidence<=8192) "treasury_proof_too_large"
+      sequenceNo<-nextSequence c
+      postings<-forM entries $ \(name,n)->case lookup name accounts of
+        Just account->pure (Posting currency account $ toInteger $ units n)
+        Nothing->reject "invalid_treasury_allocation"
+      post c ("treasury:"<>receipt) "operator allocation of verified treasury receipt"
+        (Posting currency Unallocated (negate $ toInteger quantity):postings)
+      inserted<-O.runInsert c O.Insert {O.iTable=S.treasuryAllocations,O.iRows=[(text receipt,text encoded,text evidence,num sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      updated<-O.runUpdate c O.Update {O.uTable=S.deposits,O.uUpdateWith= \row->row {S.depositAllocated=num 1,S.depositState=text "treasury"},O.uWhere= \row->S.depositId row O..== text receipt,O.uReturning=O.rCount}
+      require (inserted==1 && updated==1) "treasury_allocation_changed"
+      pure sequenceNo
+    _->reject "duplicate_treasury_allocation"
+ where field key value=either (const $ reject "invalid_treasury_evidence") pure (parseEither (withObject "treasury evidence" (.: key)) value)

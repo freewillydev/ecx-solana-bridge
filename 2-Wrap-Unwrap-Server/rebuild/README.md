@@ -717,6 +717,41 @@ runtime lines; **no new production file or refund-specific payout engine**.
 This checkpoint increases source size to complete required behavior; it is not
 presented as a reduction or a claim of perfect security.
 
+## Verified treasury allocation
+
+The private operator DSL accepts:
+
+```json
+{"operation":"allocate-treasury","deposit":"<observed receipt ID>","split":[["float","700"],["operating","300"]],"reason":"I attest these are operator-owned funds"}
+```
+
+The result is the durable decision sequence. New allocation requires paused
+operation and a fresh custody reconciliation from the worker. It takes only an
+eligible, unallocated, unbound receipt with current matching chain evidence and
+no customer obligation. Native receipts must meet configured confirmation depth.
+Native evidence must contain exactly one matching unbound receipt; token/SOL
+balance changes must equal the saved amount, and failed SOL effects are refused.
+The ownership attestation is immutable. It asserts ownership, not arbitrary money:
+positive, unique splits must equal the observed receipt exactly. Only `float`,
+`operating`, `backing` and `lp` are allowed; SOL can fund only `operating`.
+A balanced journal entry, allocation proof, receipt state and fenced sequence
+commit together. Exact replay, including reordered splits, returns the original
+sequence without changing money or requiring another custody check. Changed
+splits/attestation conflict. No allocation command signs or sends coins.
+
+The allocation function is **70 lines versus 83** in retained `Postgres/Treasury.hs`
+(signature through last statement, excluding imports/shared helpers on both sides).
+It reuses current evidence decoding and ledger helpers, adds the explicit native
+depth check and verifies affected row counts. Integration adds 15 lines outside
+that function, with **zero new files or migrations**. The retained baseline is
+still present until migration and real-chain parity; this is not a repo-wide cut.
+Disposable PostgreSQL contracts exercise all three assets, protected accounts,
+exact replay, conflict, pause/freshness, amount mismatch, failed SOL, mismatched
+anchors, reviewed evidence, shallow/ineligible receipts and customer-fund refusal.
+Cabal/QuickCheck and actual operator transport checks pass. These fixtures do not
+prove funded-chain acceptance. Observed treasury-spend classification remains to
+be ported before claiming complete treasury parity.
+
 ## Earned-fee operator integration
 
 The private operator interface now accepts:
@@ -748,7 +783,7 @@ closed operator constructors retain the single authorized critical dispatch.
 Cabal build/QuickCheck, disposable PostgreSQL replay/conflict/cancellation contracts
 and executable operator transport checks pass. Captured/offline preview tests are
 not proof of a funded withdrawal; live two-process withdrawal acceptance remains.
-Treasury allocation and observed operator-spend classification still need porting.
+Observed operator-spend classification still needs porting.
 
 ## Private operator checkpoint
 
@@ -807,7 +842,7 @@ Scoped physical-line comparisons (not whole-product reduction claims):
 | Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
 | Signer module | 144 / 1 file | 117 / 1 file | Now includes startup key validation and shared file permissions; replacement parity pending |
 | Signer transport | 103 / 1 file plus shared web boundary | 69 / 1 file + shared 71-line Web module | Shared module also serves customer API; initial signer route only |
-| Customer/worker runtime | Part of broader Runtime | 409 / 1 file (previous checkpoint 380) | Adds earned-fee operator integration; single critical dispatch retained |
+| Customer/worker runtime | Part of broader Runtime | 412 / 1 file (previous checkpoint 409) | Adds verified treasury allocation; single critical dispatch retained |
 | Focused source validation | 63-line mixed validation/storage/recovery function | 67-line dedicated module | Covered-source recovery is still separate unfinished work |
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |

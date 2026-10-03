@@ -184,6 +184,9 @@ replacementCancellations = O.selectTable $ O.table "native_replacement_cancellat
 winnerHistory :: O.Select (TextField,TextField)
 winnerHistory = O.selectTable $ O.table "native_winner_changes" $ p2
   (O.requiredTableField "previous_txid",O.requiredTableField "previous_observation")
+treasuryAllocations :: O.Table (TextField,TextField,TextField,IntField) (TextField,TextField,TextField,IntField)
+treasuryAllocations = O.table "treasury_allocations" $ p4
+  (O.requiredTableField "deposit_id",O.requiredTableField "allocation_json",O.requiredTableField "proof_json",O.requiredTableField "critical_sequence")
 treasurySpendEffects :: O.Select (TextField,TextField,TextField,TextField)
 treasurySpendEffects = O.selectTable $ O.table "treasury_spends" $ p4
   (O.requiredTableField "chain",O.requiredTableField "event_id",O.requiredTableField "anchor",O.requiredTableField "economic_json")

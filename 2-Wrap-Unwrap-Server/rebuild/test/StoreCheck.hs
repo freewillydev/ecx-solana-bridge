@@ -754,6 +754,7 @@ ledgerMain = do
         refundContract fixtures reader writer
         cancellationContract fixtures reader writer
         expiryContract fixtures reader writer
+        treasuryContract fixtures reader writer
         -- Actual runtime cycle with unavailable RPC: retain all money, stay
         -- paused, record scanner failures, and never reach signer credentials.
         let cycleKey=T.replicate 32 "1"
@@ -793,6 +794,7 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  SeedTreasuryEvidence :: T.Text -> T.Text -> T.Text -> T.Text -> Int64 -> Value -> Fixture ()
   LockRestoreAudits :: Fixture [T.Text]
   OrderWorkflowFunds :: Fixture ()
   CustodyHeadReview :: Int64 -> Fixture ()
@@ -1010,6 +1012,12 @@ fixture c (HistoricalHolds oid) = PG.withTransaction c $ do
   void $ O.runInsert c O.Insert {O.iTable=S.operatingReservations,
     O.iRows=[(text oid,text kind,text asset,num n,text "quote") | (kind,asset,n)<-[("conversion","Sol",20),("refund","Native",10)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
 
+fixture c (SeedTreasuryEvidence chain key anchor kind review proof) = PG.withTransaction c $ do
+  let text=O.sqlStrictText; num=O.sqlInt8
+      raw=TE.decodeUtf8 $ BL.toStrict $ encode $ object ["chain" .= chain,"id" .= key,"anchor" .= anchor,"kind" .= kind,"proof" .= proof]
+      hash=digest (TE.encodeUtf8 raw)
+  void $ O.runInsert c O.Insert {O.iTable=S.observationEvidence,O.iRows=[(text hash,text chain,text key,text raw)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.chainEvents,O.iRows=[S.ChainEvent (text chain) (text key) (text kind) (text anchor) (text hash) (num 110) (num 110) (num review)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
 fixture c (SeedSourceEvidence tx hash) = PG.withTransaction c $ do
   let text=O.sqlStrictText; num=O.sqlInt8
       heads=O.table "chain_events" $ p8 (O.requiredTableField "chain",O.requiredTableField "event_id",O.requiredTableField "kind",O.requiredTableField "anchor",O.requiredTableField "evidence_hash",O.requiredTableField "first_seen",O.requiredTableField "last_seen",O.requiredTableField "needs_review")
@@ -1276,6 +1284,7 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       ledgerBefore<-evalRead reader ReadState
       check (W.paused service==ledgerPaused ledgerBefore)
       expectStore "observation_only" (operatorControl $ Op.operator Op.ResumeService)
+      expectStore "observation_only" (operatorControl $ Op.operator $ Op.AllocateReceipt "missing" [("float",money 1)] "owned")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.WithdrawFees (T.replicate 64 "a") Native (money 1) "recipient" "test")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.CancelFeeWithdrawal "missing" "test")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.RefundDeposit "missing")
@@ -1443,6 +1452,8 @@ serverMain = do
                 object ["operation" .= ("cancel-fees"::T.Text),"id" .= ("missing"::T.Text),"reason" .= ("test"::T.Text)]] $ \command->do
                   result<-control command
                   check (result==object ["error" .= ("observation_only"::T.Text)])
+              allocationRefused<-control (object ["operation" .= ("allocate-treasury"::T.Text),"deposit" .= ("missing"::T.Text),"split" .= [("float"::T.Text,money 1)],"reason" .= ("owned"::T.Text)])
+              check (allocationRefused==object ["error" .= ("observation_only"::T.Text)])
               refundRefused<-control (object ["operation" .= ("refund"::T.Text),"deposit" .= ("missing"::T.Text)])
               check (refundRefused==object ["error" .= ("observation_only"::T.Text)])
               retryRefused<-control (object ["operation" .= ("retry-solana"::T.Text),"transaction" .= ("missing"::T.Text),"reason" .= ("test"::T.Text)])
@@ -1732,3 +1743,69 @@ expiryContract fixtures reader writer=do
   earnedNext<-prepare earnedId
   check (preparedGeneration earnedNext==1 && savedPayment(preparedView earnedNext)==savedPayment(preparedView earned))
   evalRead reader ReadBalances >>= check . (==earnedBefore)
+
+-- Offline observed-receipt fixtures, never an assertion of live-chain funding.
+treasuryContract :: PG.Connection -> Reader -> Writer -> IO ()
+treasuryContract fixtures reader writer=do
+  let check ok=unless ok (fail $ "treasury contract failed\n"<>prettyCallStack callStack)
+      ready=evalWrite writer (Pause "treasury contract") >> fixture fixtures RefreshCustody
+      allocate did split reason=evalWrite writer (AllocateTreasury 110 did split reason)
+      seed did asset=fixture fixtures (SeedReceipt did Nothing asset 10 2 True 110)
+      proof did=object ["receipts" .= [object ["id" .= did,"amount" .= money 10,"order" .= (Nothing::Maybe T.Text),"eligible" .= True]]]
+      evidence chain key value=fixture fixtures (SeedTreasuryEvidence chain key "fixture-anchor" "unmatched_incoming" 0 value)
+      native="native:treasury-ok:0"
+      split=[("float",money 4),("operating",money 3),("backing",money 2),("lp",money 1)]
+  seed native Native
+  evidence "Native" "treasury-ok" (proof native)
+  fixture fixtures ReadyIntake
+  expectStore "treasury_allocation_requires_pause" (allocate native split "owned treasury")
+  ready
+  before<-evalRead reader ReadBalances
+  first<-allocate native split "owned treasury"
+  after<-evalRead reader ReadBalances
+  check (M.findWithDefault 0 (Native,Unallocated) after==M.findWithDefault 0 (Native,Unallocated) before-10)
+  forM_ [(Float,4),(Operating,3),(Backing,2),(Liquidity,1)] $ \(account,n)->
+    check (M.findWithDefault 0 (Native,account) after==M.findWithDefault 0 (Native,account) before+n)
+  replay<-allocate native (reverse split) "owned treasury"
+  check (replay==first)
+  evalRead reader ReadBalances >>= check . (==after)
+  expectStore "treasury_allocation_conflict" (allocate native [("float",money 10)] "owned treasury")
+  expectStore "treasury_allocation_conflict" (allocate native split "changed owner")
+  forM_ [[("principal",money 10)],[("float",money 5),("float",money 5)],[("operating",money 0)],[]] $ \bad->
+    expectStore "invalid_treasury_allocation" (allocate native bad "owned")
+  let wrapped="solana:treasury-wrapped"; sol="sol-operating:treasury-sol"
+  seed wrapped Wrapped
+  evidence "Solana" "treasury-wrapped" (object ["delta" .= ("10"::T.Text)])
+  expectStore "custody_not_reconciled" (allocate wrapped [("float",money 10)] "owned")
+  ready
+  expectStore "treasury_allocation_amount_mismatch" (allocate wrapped [("float",money 9)] "owned")
+  void $ allocate wrapped [("float",money 10)] "owned"
+  seed sol Sol
+  evidence "SolanaOperating" "treasury-sol" (object ["delta" .= ("10"::T.Text),"failed" .= False])
+  ready
+  expectStore "sol_reserved_for_operating" (allocate sol [("float",money 10)] "owned")
+  void $ allocate sol [("operating",money 10)] "owned"
+  forM_ [("bad-delta",object ["delta" .= ("9"::T.Text),"failed" .= False]),
+         ("failed",object ["delta" .= ("10"::T.Text),"failed" .= True])] $ \(key,value)->do
+    let did="sol-operating:"<>key
+    seed did Sol
+    evidence "SolanaOperating" key value
+    ready
+    beforeFailure<-evalRead reader ReadBalances
+    expectStore "verified_treasury_receipt_required" (allocate did [("operating",money 10)] "owned")
+    evalRead reader ReadBalances >>= check . (==beforeFailure)
+  forM_ [("mismatched", "different-anchor",0,"verified_treasury_receipt_required"),
+         ("reviewed","fixture-anchor",1,"custody_history_not_current")] $ \(key,anchor,review,code)->do
+    let did="native:"<>key<>":0"
+    seed did Native
+    fixture fixtures (SeedTreasuryEvidence "Native" key anchor "unmatched_incoming" review (proof did))
+    ready
+    expectStore code (allocate did [("float",money 10)] "owned")
+  fixture fixtures (SeedReceipt "native:shallow:0" Nothing Native 10 1 True 110)
+  ready
+  expectStore "treasury_receipt_underconfirmed" (allocate "native:shallow:0" [("float",money 10)] "owned")
+  fixture fixtures (SourceEligibility "native:shallow:0" False)
+  ready
+  expectStore "receipt_not_available_for_treasury" (allocate "native:shallow:0" [("float",money 10)] "owned")
+  ready
+  expectStore "receipt_not_available_for_treasury" (allocate "expiry-source" [("float",money 10)] "not mine")

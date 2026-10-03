@@ -120,6 +120,9 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
       evalCritical (WriteCustomer (Bridge.Operation.Internal.CreateOrder header request))=do
         c<-customer
         createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (coverBackup c) reader writer header request
+      evalCritical (OperatorDSL (AllocateReceipt receipt split reason))=do
+        now<-floor <$> getPOSIXTime
+        evalWrite writer (AllocateTreasury now receipt split reason)
       evalCritical (OperatorDSL (WithdrawFees key asset quantity recipient reason))=guarded $ do
         c<-customer
         require (T.length key==64 && T.all (`elem` ("0123456789abcdef"::String)) key
