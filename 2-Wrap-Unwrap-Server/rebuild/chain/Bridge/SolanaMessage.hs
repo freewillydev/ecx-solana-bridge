@@ -1,7 +1,7 @@
 {-# LANGUAGE RecordWildCards #-}
 module Bridge.SolanaMessage
   ( Instruction(..), Message(..), Transaction(..), Expected(..), publicKey
-  , signatureBytes, base58, decodeTransaction, decodePoolTransaction, decodePositionTransaction, validateTransaction ) where
+  , signatureBytes, base58, decodeTransaction, decodePoolTransaction, decodePositionTransaction, decodeLiquidityTransaction, validateTransaction ) where
 
 import Bridge.Domain (Amount, units)
 import Bridge.Identity (publicKey)
@@ -48,6 +48,8 @@ decodePoolTransaction :: Text -> Either Text Transaction
 decodePoolTransaction = decodeLegacy 3 1 11
 decodePositionTransaction :: Text -> Either Text Transaction
 decodePositionTransaction = decodeLegacy 2 3 10
+decodeLiquidityTransaction :: Text -> Either Text Transaction
+decodeLiquidityTransaction = decodeLegacy 1 2 11
 decodeLegacy :: Int -> Int -> Int -> Text -> Either Text Transaction
 decodeLegacy signerCount instructionLimit accountLimit encoded = do
   unless (T.length encoded<=1644) (Left "transaction_too_large")

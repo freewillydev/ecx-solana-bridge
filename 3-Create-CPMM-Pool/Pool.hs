@@ -112,12 +112,14 @@ validateCreated network r p expectedFee snapshot=do
 
 data Safe a where
   Check :: FilePath -> Network -> String -> Word64 -> Word64 -> Create -> Prepared -> Safe Costs
+  LiquidityBytes :: FilePath -> Value -> Safe B.ByteString
   PositionBytes :: FilePath -> Text -> Text -> Text -> Text -> Safe B.ByteString
   Prepare :: FilePath -> Network -> Create -> Safe Prepared
   Address :: FilePath -> Network -> Text -> Text -> Word16 -> Safe Text
   Inspect :: FilePath -> Network -> String -> Expected -> Safe Report
 
 evalSafe :: Safe a -> IO a
+evalSafe (LiquidityBytes library request)=invoke "ecx_liquidity_prepare_v1" library request
 evalSafe (PositionBytes library payerKey poolKey mintKey hash)=invoke "ecx_position_prepare_v1" library $ object
   ["protocol" .= (1::Int),"payer" .= payerKey,"pool" .= poolKey,"position_mint" .= mintKey,"blockhash" .= hash]
 evalSafe (Prepare library network r)=do

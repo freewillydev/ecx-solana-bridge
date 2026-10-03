@@ -2,6 +2,7 @@ module Main (main) where
 import Pool
 import qualified Pool.Signing as S
 import qualified Pool.Position as P
+import qualified Pool.Liquidity as Q
 import qualified Crypto.PubKey.Ed25519 as Ed
 import Crypto.Error (CryptoFailable(..))
 import qualified Data.ByteArray as BA
@@ -62,8 +63,27 @@ main=do
   openingFirst<-case openingSignatures of first:_->pure first; _->fail "position signature"
   let openingBytes=B.singleton 2<>B.concat openingSignatures<>openingMessage
       openingSaved=S.Saved Devnet (S.Opening openingRequest openingPrepared) 20000 20000000 (base58 openingFirst) (TE.decodeUtf8 $ B64.encode openingBytes)
+  let liquidityRequests=[Q.Request action positionRequest (if action==Q.Collect then 0 else 1000)
+        (if action==Q.Collect then 0 else 1000) (if action==Q.Collect then 0 else 1000)
+        (createVaultA creation) (createVaultB creation) | action<-[Q.Deposit,Q.Withdraw,Q.Collect]]
+  liquidityPreparations<-mapM (Q.evalSafe . Q.Prepare sdkLibraryPath) liquidityRequests
   results<-sequence
-    [ quickCheckResult $ once $ property $
+    [ quickCheckResult $ once $ property $ and
+        [not(isLeft $ Q.validate r p) && (eitherDecode (encode r) :: Either String Q.Request)==Right r
+          && isLeft(Q.validate r {Q.vaultA=Q.vaultB r} p)
+          && isLeft(Q.validate r {Q.positionRequest=(Q.positionRequest r) {P.blockhash=P.pool positionRequest}} p)
+          && isLeft(decodeTransaction $ Q.transaction p)
+          && case B64.decode(TE.encodeUtf8 $ Q.transaction p) of
+            Left _->False
+            Right wire->all (\index->isLeft $ Q.validate r p {Q.transaction=TE.decodeUtf8 $ B64.encode $
+              B.take index wire<>B.singleton((B.index wire index) `xor` 1)<>B.drop (index+1) wire}) [0..B.length wire-1]
+        | (r,p)<-zip liquidityRequests liquidityPreparations]
+    , quickCheckResult $ once $ property $ and
+        [case toJSON r of
+          Object fields->all (\bad->case fromJSON(Object(KM.insert "liquidity" (String bad) fields)) :: Result Q.Request of Error _->True; _->False)
+            ["-1","00","1.0","340282366920938463463374607431768211456"]
+          _->False | r<-liquidityRequests]
+    , quickCheckResult $ once $ property $
         not(isLeft $ S.validateSaved openingSaved)
         && (eitherDecode (encode openingSaved) :: Either String S.Saved)==Right openingSaved
         && isLeft(S.validateSaved openingSaved {S.action=S.action saved})

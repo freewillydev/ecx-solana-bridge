@@ -409,6 +409,49 @@ pub unsafe extern "C" fn ecx_position_prepare_v1(
     config:*const u8,config_len:usize,request:*const u8,request_len:usize,
     output:*mut u8,capacity:usize,output_len:*mut usize,
 )->i32 { unsafe { prepare_ffi(4,config,config_len,request,request_len,output,capacity,output_len) } }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LiquidityRequest {protocol:u8,verb:String,owner:String,pool:String,position_mint:String,
+    mint_a:String,mint_b:String,vault_a:String,vault_b:String,liquidity:String,amount_a:String,amount_b:String,blockhash:String}
+fn prepare_liquidity(r:LiquidityRequest)->Result<serde_json::Value,&'static str> {
+    use solana_instruction::{AccountMeta as A,Instruction};
+    let owner=key(&r.owner)?; let pool=key(&r.pool)?; let mint=key(&r.position_mint)?;
+    let a=key(&r.mint_a)?; let b=key(&r.mint_b)?; let va=key(&r.vault_a)?; let vb=key(&r.vault_b)?;
+    let liquidity=r.liquidity.parse::<u128>().map_err(|_| "invalid_liquidity")?;
+    let amount_a=r.amount_a.parse::<u64>().map_err(|_| "invalid_limit")?; let amount_b=r.amount_b.parse::<u64>().map_err(|_| "invalid_limit")?;
+    let collect=r.verb=="collect";
+    if r.protocol!=1 || !owner.is_on_curve() || a>=b || liquidity.to_string()!=r.liquidity
+        || amount_a.to_string()!=r.amount_a || amount_b.to_string()!=r.amount_b
+        || (collect && (liquidity!=0 || amount_a!=0 || amount_b!=0))
+        || (!collect && (liquidity==0 || (r.verb!="deposit" && r.verb!="withdraw"))) { return Err("invalid_liquidity_request"); }
+    let program=key("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc")?; let token=spl_token_interface::id();
+    let position=Pubkey::find_program_address(&[b"position",mint.as_ref()],&program).0;
+    let nft=get_associated_token_address_with_program_id(&owner,&mint,&token);
+    let oa=get_associated_token_address_with_program_id(&owner,&a,&token); let ob=get_associated_token_address_with_program_id(&owner,&b,&token);
+    let arrays=[-2894848i32,0].map(|start|Pubkey::find_program_address(&[b"tick_array",pool.as_ref(),start.to_string().as_bytes()],&program).0);
+    let mut instructions=Vec::new();
+    if collect {
+        instructions.push(Instruction {program_id:program,accounts:vec![A::new(pool,false),A::new(position,false),A::new_readonly(arrays[0],false),A::new_readonly(arrays[1],false)],data:vec![154,230,250,13,236,209,75,223]});
+        instructions.push(Instruction {program_id:program,accounts:vec![A::new_readonly(pool,false),A::new_readonly(owner,true),A::new(position,false),A::new_readonly(nft,false),A::new(oa,false),A::new(va,false),A::new(ob,false),A::new(vb,false),A::new_readonly(token,false)],data:vec![164,152,207,99,30,186,19,182]});
+    } else {
+        let accounts=vec![A::new(pool,false),A::new_readonly(token,false),A::new_readonly(owner,true),A::new(position,false),A::new_readonly(nft,false),A::new(oa,false),A::new(ob,false),A::new(va,false),A::new(vb,false),A::new(arrays[0],false),A::new(arrays[1],false)];
+        let mut data=if r.verb=="deposit" {vec![46,156,243,118,13,205,251,178]} else {vec![160,38,208,111,104,91,44,1]};
+        data.extend_from_slice(&liquidity.to_le_bytes()); data.extend_from_slice(&amount_a.to_le_bytes()); data.extend_from_slice(&amount_b.to_le_bytes());
+        instructions.push(Instruction {program_id:program,accounts,data});
+    }
+    let hash=Hash::from_str(&r.blockhash).map_err(|_| "invalid_blockhash")?;
+    let message=Message::new_with_blockhash(&instructions,Some(&owner),&hash);
+    if message.account_keys.len()!=12 || message.header.num_required_signatures!=1 { return Err("liquidity_account_collision"); }
+    let bytes=bincode::serialize(&Transaction::new_unsigned(message)).map_err(|_| "serialization_failed")?;
+    if bytes.len()>1232 { return Err("transaction_too_large"); }
+    Ok(serde_json::json!({"position":position.to_string(),"positionToken":nft.to_string(),"ownerA":oa.to_string(),"ownerB":ob.to_string(),
+        "lowerArray":arrays[0].to_string(),"upperArray":arrays[1].to_string(),"transaction":STANDARD.encode(bytes)}))
+}
+#[no_mangle]
+pub unsafe extern "C" fn ecx_liquidity_prepare_v1(
+    config:*const u8,config_len:usize,request:*const u8,request_len:usize,
+    output:*mut u8,capacity:usize,output_len:*mut usize,
+)->i32 { unsafe { prepare_ffi(5,config,config_len,request,request_len,output,capacity,output_len) } }
 unsafe fn prepare_ffi(
     mode: u8, config: *const u8, config_len: usize, request: *const u8, request_len: usize,
     output: *mut u8, capacity: usize, output_len: *mut usize,
@@ -429,6 +472,11 @@ unsafe fn prepare_ffi(
         return 2;
     }
     let result = std::panic::catch_unwind(|| {
+        if mode == 5 {
+            if unsafe { std::slice::from_raw_parts(config,config_len) } != b"{}" { return Err("invalid_liquidity_config"); }
+            let r=serde_json::from_slice(unsafe { std::slice::from_raw_parts(request,request_len) }).map_err(|_| "invalid_liquidity_request")?;
+            return serde_json::to_vec(&prepare_liquidity(r)?).map_err(|_| "serialization_failed");
+        }
         if mode == 4 {
             if unsafe { std::slice::from_raw_parts(config,config_len) } != b"{}" { return Err("invalid_position_config"); }
             let r=serde_json::from_slice(unsafe { std::slice::from_raw_parts(request,request_len) }).map_err(|_| "invalid_position_request")?;

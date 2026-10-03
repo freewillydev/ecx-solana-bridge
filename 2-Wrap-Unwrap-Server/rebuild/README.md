@@ -320,7 +320,9 @@ Private keys/attempts/ledger remain outside Git.
    share `Bridge.AdminKey`. Full-range position/boundary-array preparation and
    preflight, saved signing/submission and finalized ownership validation now pass
    Devnet acceptance (position `7gadbytE2t3vQs9skcq2EYXkjBGYcGboGeeCHfUavLRT`).
-   Liquidity funding, withdrawal and fee management remain unimplemented.
+   Liquidity deposit/withdrawal and fee-collection unsigned wire preparation now
+   pass strict codec tests. Their balance/effect preflight, saved signing/submission
+   and funded acceptance remain unfinished.
    Retire remaining legacy Rust/Python tools after their required behavior is covered.
    Confirm canonical token authority, backing, liquidity and actual route availability.
 5. Finish the current installer/upgrade path last, test clean Linux installation and
