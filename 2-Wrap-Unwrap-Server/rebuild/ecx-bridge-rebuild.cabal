@@ -30,10 +30,10 @@ library store
   import: settings
   visibility: private
   hs-source-dirs: runtime
-  exposed-modules: Bridge.Store
+  exposed-modules: Bridge.Store, Bridge.Fence
   other-modules: Bridge.Store.Schema, Bridge.Store.Catalog
   build-depends: base, ecx-bridge-rebuild, aeson, bytestring, text, containers,
-    crypton, time, scientific, opaleye ==0.10.8.0, postgresql-simple >=0.7 && <0.8,
+    crypton, time, directory, filepath, unix, scientific, opaleye ==0.10.8.0, postgresql-simple >=0.7 && <0.8,
     product-profunctors >=0.11 && <0.12
 
 library chain
@@ -70,8 +70,8 @@ executable rebuild-store-check
   import: settings
   hs-source-dirs: test, runtime, workflow
   main-is: StoreCheck.hs
-  other-modules: Bridge.Store, Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.SigningTransport, Bridge.Critical, Bridge.Reconciliation, Bridge.Admission, Bridge.Order, Bridge.Web
+  other-modules: Bridge.Fence, Bridge.Store, Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.SigningTransport, Bridge.Critical, Bridge.Reconciliation, Bridge.Admission, Bridge.Order, Bridge.Web
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:customer-api, ecx-bridge-rebuild:chain, http-client, servant, servant-server, aeson, bytestring,
-    containers, text, crypton, time, scientific, opaleye, postgresql-simple, product-profunctors, QuickCheck,
+    containers, text, crypton, time, directory, scientific, opaleye, postgresql-simple, product-profunctors, QuickCheck,
     transformers, stm, ram, crypton-pem, crypton-x509, http-types, wai, wai-extra, warp, warp-tls, filepath, unix,
     servant-client, http-client-tls, crypton-connection, tls, crypton-x509-store

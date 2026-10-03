@@ -435,8 +435,13 @@ Current evidence:
   refresh tests verify snapshot/immutable-binding refusal and unchanged money/cursor;
   earned withdrawals return no customer source.
 - Only operation-origin policy refusals permit connection reuse after rollback.
-  IO and typed checkpoint failures fence the writer; actual host-fence integration
-  is still pending.
+  IO and typed checkpoint failures fence the writer. `withFencedWriter` now holds
+  the host lock for the complete writer lifetime and fsyncs its monotonic sequence
+  before commit. The real filesystem/PostgreSQL contract preserves an advanced
+  watermark across an injected rollback and refuses the stale ledger on restart;
+  balances remain unchanged. Filesystem contracts cover competing processes,
+  same-process ownership, permissions, symlinks, identity, reinitialization and
+  retirement. This does not revoke copied keys on another host.
 
 Custody storage now has closed revision/snapshot/evidence reads and a revision-bound
 report write. It reuses the aggregated balance read and scanner freshness check,
@@ -494,6 +499,7 @@ Scoped physical-line comparisons (not whole-product reduction claims):
 
 | Piece | Baseline | Rebuild | Scope limit |
 | --- | ---: | ---: | --- |
+| Host fence | 132 / 1 file | 128 / 1 file + 7-line Store constructor | Same durable protocol; explicit directory replaces environment lookup |
 | Customer order workflow | 78 / 1 file | 63 / 1 file | Closed reads replace raw row/ledger access; funded HTTP acceptance pending |
 | Admission/previews | 106 / 1 file | 86-line module + 20 lines in existing native adapter | Same total; customer runtime wired, funded acceptance pending |
 | Custody chain workflow | 202 / 1 file | 188 / 1 file | Replacement-family and source-loss wrapper parity pending; not equivalent full-feature reduction |
@@ -517,7 +523,13 @@ Still required: successful TLS worker/signer integration and private-key startup
 checks; executable/configuration/scheduler/browser integration;
 integrated positive submission/reconciliation acceptance; retry, cancellation,
 replacement/winner changes and covered-source approvals generalized to earned
-funding; complete custody acceptance/host fencing/backup; actual populated-ledger migration and funded
+funding; complete custody acceptance and Haskell backup/restore integration; actual populated-ledger migration and funded
 Signet/Devnet flows. Supported-wallet signing, off-host restore, canonical activation
 and independent review remain release gates. Retain the baseline until parity and
 real-chain acceptance permit deletion. Key seeds alone do not restore ledger history.
+
+Startup integration finding: the retained baseline remote-backup adapter still
+invokes a Python uploader. It cannot be adopted as the final Haskell rebuild;
+replace that operational path before claiming complete backup/restore support.
+The host-fenced writer is ready for the executable, but does not itself initialize
+a database, configure a server, resume payment or provide remote backup.

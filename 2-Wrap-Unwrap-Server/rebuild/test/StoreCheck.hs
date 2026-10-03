@@ -17,6 +17,10 @@ import qualified Network.Wai as Wai
 import qualified Network.Wai.Test as WaiTest
 import Network.HTTP.Types (statusCode)
 import Bridge.Order
+import qualified Bridge.Fence as Fence
+import System.Directory (createDirectory,removeDirectoryRecursive,removeFile)
+import System.IO (openTempFile,hClose)
+import System.Posix.Files (setFileMode)
 import Bridge.Error (reject)
 import Bridge.Observer (ObserverSettings(..))
 import Bridge.Reconciliation (inspectCustodyWith,nativeBalance)
@@ -39,10 +43,13 @@ import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Opaleye as O
-import System.Environment (getEnv)
+import System.Environment (getEnv,lookupEnv)
 
 main :: IO ()
-main = do
+main = lookupEnv "ECX_REBUILD_FENCE_ONLY" >>= \mode->if mode==Just "1" then fenceMain else ledgerMain
+
+ledgerMain :: IO ()
+ledgerMain = do
   database <- getEnv "ECX_REBUILD_CONTRACT_DATABASE"
   unless ("ecx_rebuild_contract_" `T.isPrefixOf` T.pack database) (fail "disposable database required")
   user <- getEnv "USER"
@@ -726,6 +733,7 @@ data Fixture a where
   SeedReceipt :: T.Text -> Maybe T.Text -> Asset -> Int64 -> Int64 -> Bool -> Int64 -> Fixture ()
   CheckPromotion :: T.Text -> T.Text -> Asset -> Int64 -> T.Text -> Fixture Bool
   Initialize :: Fixture ()
+  InitializeIdentity :: T.Text -> Fixture ()
   RefreshCustody :: Fixture ()
   SeedOrders :: Fixture ()
   CoverBackup :: Fixture ()
@@ -739,8 +747,9 @@ data Fixture a where
   ProtectHolds :: T.Text -> Fixture ()
   CheckPhases :: T.Text -> T.Text -> Fixture Bool
 fixture :: PG.Connection -> Fixture a -> IO a
-fixture c Initialize = PG.withTransaction c $ do
-  void $ O.runInsert c O.Insert {O.iTable=S.deployment,O.iRows=[S.Deployment (O.sqlInt8 1) (O.sqlInt8 19) (O.sqlStrictText "contract") (O.sqlInt8 0) (O.sqlInt8 0) (O.sqlInt8 1) (O.sqlStrictText "test")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+fixture c Initialize = fixture c (InitializeIdentity "contract")
+fixture c (InitializeIdentity identity) = PG.withTransaction c $ do
+  void $ O.runInsert c O.Insert {O.iTable=S.deployment,O.iRows=[S.Deployment (O.sqlInt8 1) (O.sqlInt8 19) (O.sqlStrictText identity) (O.sqlInt8 0) (O.sqlInt8 0) (O.sqlInt8 1) (O.sqlStrictText "test")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.custody,O.iRows=[(O.sqlInt8 1,O.sqlInt8 0,O.null,O.null,O.null)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(O.sqlStrictText "fixture",O.sqlStrictText "contract balances")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.postings,O.iRows=[(Nothing,O.sqlStrictText "fixture",O.sqlStrictText "Native",O.sqlStrictText account,O.sqlInt8 delta)| (account,delta)<-[("external",-1000),("earned",1000)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
@@ -1168,3 +1177,49 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       check (W.depositInstruction saved==W.depositInstruction recovered && W.quote saved==W.quote recovered)
     expectStore "customer_configuration_mismatch" $ withRuntime manager chainSettings config
       (Just customerSettings {publicConfiguration=public {W.pubMint="wrong"}}) endpoint reader writer (\_ _->pure ())
+
+-- Same schema and closed ledger operations, with a real fsynced host watermark.
+fenceMain :: IO ()
+fenceMain = do
+  database<-getEnv "ECX_REBUILD_CONTRACT_DATABASE"
+  unless ("ecx_rebuild_contract_" `T.isPrefixOf` T.pack database) (fail "disposable database required")
+  user<-getEnv "USER"; role<-getEnv "ECX_REBUILD_CONTRACT_READER"
+  let identity=T.replicate 64 "a"
+      settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
+      terms=PaymentTerms (PolicySnapshot 2 "finalized" identity) (CostLimits (money 10) (money 10) (money 10))
+      limits=OrderLimits (money 2) (money 1000) 100 100 100 (money 100000) (money 100000)
+      policy=StorePolicy terms limits "fence-test" True
+      key=T.replicate 64 "b"
+      temporary=do
+        (path,handle)<-openTempFile "/tmp" "ecx-fence-store"
+        hClose handle
+        removeFile path
+        createDirectory path
+        setFileMode path 0o700
+        pure path
+  bracket temporary removeDirectoryRecursive $ \directory->do
+    bracket (PG.connect settings) PG.close (\c->fixture c $ InitializeIdentity identity)
+    withReader settings {PG.connectUser=role} identity True $ \reader->do
+      Fence.initializeFence directory identity 0
+      withFencedWriter settings policy directory $ \writer->do
+        expectStore "worker_fence_locked" (withFencedWriter settings policy directory $ const $ pure ())
+        saved<-evalWrite writer (ReserveFees 100 key Native (money 100) "recipient" "fence test")
+        unless (withdrawalSequence saved==1) (fail "unexpected fence sequence")
+      before<-evalRead reader ReadState
+      unless (ledgerSequence before==1) (fail "missing committed sequence")
+      Fence.withFence directory identity $ \advance->do
+        let uncertain n=advance n >> when (n==2) (reject "injected_uncertain_commit")
+        withWriter settings policy uncertain $ \writer->do
+          expectStore "injected_uncertain_commit" (evalWrite writer $ CancelFees key "fence cancel")
+          expectStore "ledger_connection_fenced" (evalWrite writer $ Pause "must remain fenced")
+      after<-evalRead reader ReadState
+      unless (ledgerSequence after==1) (fail "uncertain commit changed ledger")
+      expectStore "stale_ledger_below_worker_fence" (withFencedWriter settings policy directory $ const $ pure ())
+      withdrawal<-evalRead reader (ReadWithdrawal key)
+      unless (fmap withdrawalCancellation withdrawal==Just Nothing) (fail "uncertain commit changed money")
+      Fence.withFence directory identity $ \advance->do
+        expectStore "stale_ledger_below_worker_fence" (advance 1)
+        advance 2
+      Fence.retireFence directory identity 2
+      expectStore "worker_fence_retired" (withFencedWriter settings policy directory $ const $ pure ())
+  putStrLn "PASS: real host fence, exclusive writer, durable uncertain-commit watermark, rollback, stale restart refusal and retirement"

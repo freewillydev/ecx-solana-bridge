@@ -3,6 +3,10 @@
 -- No signing keys, chain RPC, native listener or funds are used here.
 module SigningTransportCheck (checks) where
 import Bridge.SigningTransport
+import qualified Bridge.Fence as Fence
+import qualified Data.Text as T
+import System.Posix.Process (forkProcess,getProcessStatus,exitImmediately,ProcessStatus(..))
+import System.Exit (ExitCode(..))
 import Bridge.Web (customerApplication)
 import qualified Bridge.Wire as W
 import qualified Bridge.Domain as D
@@ -20,7 +24,7 @@ import Network.HTTP.Types
 import Network.Wai (defaultRequest,requestMethod,requestHeaders)
 import Network.Wai.Test
 import Servant.API (BasicAuthData(..))
-import System.Directory (removeFile,createDirectory,removeDirectoryRecursive)
+import System.Directory (removeFile,createDirectory,removeDirectoryRecursive,renameFile)
 import System.FilePath ((</>))
 import System.IO (openTempFile,hClose)
 import System.Posix.Files (setFileMode,createSymbolicLink)
@@ -28,7 +32,45 @@ import Test.QuickCheck
 
 checks :: IO [Result]
 checks=sequence
-  [ check "customer Servant routes resolve all four existential requests and reject invalid bodies" $ once $ ioProperty $ do
+  [ check "host fence persists monotonic ownership and refuses competing or retired workers" $ once $ ioProperty $
+      bracket temporary removeDirectoryRecursive $ \directory->do
+        let identity=T.replicate 64 "a"; file=directory</>"sequence.json"
+        missing<-refuses (Fence.withFence directory identity $ const $ pure ())
+        Fence.initializeFence directory identity 7
+        original<-BS.readFile file
+        reset<-refuses (Fence.initializeFence directory identity 0)
+        before<-BS.readFile file
+        locked<-Fence.withFence directory identity $ \advance->do
+          sameProcess<-refuses (Fence.withFence directory identity $ const $ pure ())
+          child<-forkProcess $ do
+            result<-try (Fence.withFence directory identity $ const $ pure ())
+            exitImmediately $ case result of Left (BridgeError "worker_fence_locked")->ExitSuccess; _->ExitFailure 1
+          childResult<-getProcessStatus True False child
+          advance 8
+          persisted<-BS.readFile file
+          stale<-refuses (advance 7)
+          pure (sameProcess && childResult==Just (Exited ExitSuccess) && persisted/=original && stale)
+        latest<-BS.readFile file
+        Fence.withFence directory identity ($ 8)
+        unchanged<-BS.readFile file
+        wrong<-refuses (Fence.withFence directory (T.replicate 64 "b") $ const $ pure ())
+        setFileMode file 0o644
+        public<-refuses (Fence.withFence directory identity $ const $ pure ())
+        setFileMode file 0o600
+        renameFile file (directory</>"saved.json")
+        createSymbolicLink (directory</>"saved.json") file
+        linked<-refuses (Fence.withFence directory identity $ const $ pure ())
+        removeFile file
+        renameFile (directory</>"saved.json") file
+        setFileMode directory 0o770
+        writable<-refuses (Fence.withFence directory identity $ const $ pure ())
+        setFileMode directory 0o700
+        Fence.retireFence directory identity 8
+        retired<-refuses (Fence.withFence directory identity $ const $ pure ())
+        Fence.retireFence directory identity 8
+        reactivate<-refuses (Fence.initializeFence directory identity 8)
+        pure (missing && reset && before==original && locked && unchanged==latest && wrong && public && linked && writable && retired && reactivate)
+  , check "customer Servant routes resolve all four existential requests and reject invalid bodies" $ once $ ioProperty $ do
       calls<-newIORef ([]::[Text])
       let amount=either (error . show) id (D.amount 100)
           quote=either (error . show) id (D.quote amount)

@@ -3,9 +3,10 @@
 -- escape this module; the runtime will interpret its customer/operator DSL here.
 module Bridge.Store
   ( Reader, Writer, BridgeError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), StorePolicy(..), AllocationClaim(..), LedgerState(..), WithdrawalView(..), PaymentView(..), PaymentStatus(..), PreparedPayment(..), SignedAttempt(..), RecordedAttempt(..), CustodySnapshot(..)
-  , withReader, withWriter, evalRead, evalWrite ) where
+  , withReader, withWriter, withFencedWriter, evalRead, evalWrite ) where
 
 import Bridge.Error
+import Bridge.Fence (withFence)
 import Bridge.Identity (bearerHash,digest,payInstruction)
 import Text.Read (readMaybe)
 import qualified Bridge.Wire as W
@@ -124,6 +125,13 @@ data StoreWrite a where
 -- Reader has no writer connection, checkpoint or writable credentials.
 data Reader = Reader PG.ConnectInfo Text Bool
 data Writer = Writer (MVar (Maybe PG.Connection)) StorePolicy (Int64 -> IO ())
+
+-- Production ownership: hold the host lock for the complete writer lifetime,
+-- and fsync its monotonic watermark before each database commit.
+withFencedWriter :: PG.ConnectInfo -> StorePolicy -> FilePath -> (Writer -> IO a) -> IO a
+withFencedWriter settings config directory action =
+  withFence directory (deploymentFingerprint $ paymentPolicy $ executionTerms config) $ \checkpoint->
+    withWriter settings config checkpoint action
 
 withReader :: PG.ConnectInfo -> Text -> Bool -> (Reader -> IO a) -> IO a
 withReader settings identity remote action = do
