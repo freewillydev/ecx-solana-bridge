@@ -77,6 +77,7 @@ executable ecx-bridge-rebuild
 -- Explicitly invoked against a disposable migrated database, never live custody.
 executable rebuild-store-check
   import: settings
+  ghc-options: -threaded -rtsopts -with-rtsopts=-N1
   hs-source-dirs: test, runtime, workflow
   main-is: StoreCheck.hs
   other-modules: Bridge.Fence, Bridge.Store, Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.SigningTransport, Bridge.Critical, Bridge.Reconciliation, Bridge.Admission, Bridge.Order, Bridge.Web, Bridge.Config, Bridge.Control, Paths_ecx_bridge_rebuild

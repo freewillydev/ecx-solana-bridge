@@ -6,8 +6,8 @@ import qualified Network.HTTP.Client as HTTP
 import qualified Network.Socket as NS
 import qualified System.Process as Process
 import System.FilePath (takeDirectory)
-import Control.Concurrent (threadDelay)
-import Bridge.Identity (capabilityHash,payInstruction,digest)
+import Control.Concurrent (threadDelay,forkIO,killThread)
+import Bridge.Identity (capabilityHash,payInstruction,digest,publicKey)
 import qualified Bridge.Wire as W
 import Data.Aeson (encode,object,(.=),toJSON,Value(..),eitherDecodeStrict')
 import Data.Profunctor.Product (p5,p6,p8,p9)
@@ -17,13 +17,14 @@ import Bridge.Domain
 import Bridge.Wire (PaymentTerms(..),CostLimits(..),PolicySnapshot(..))
 import Bridge.Store
 import Bridge.Signer
+import Bridge.Payment (payoutReference)
 import qualified Bridge.Control as Control
 import Bridge.Critical
 import Bridge.Web (customerApplication)
 import qualified Bridge.Operation.Internal as Op
 import qualified Network.Wai as Wai
 import qualified Network.Wai.Test as WaiTest
-import Network.HTTP.Types (statusCode)
+import Network.HTTP.Types (statusCode,status200)
 import Bridge.Order
 import qualified Bridge.Fence as Fence
 import System.Directory (createDirectory,removeDirectoryRecursive,removeFile)
@@ -33,7 +34,11 @@ import Bridge.Error (reject)
 import Bridge.Observer (ObserverSettings(..))
 import Bridge.Reconciliation (inspectCustodyWith,nativeBalance)
 import Bridge.RPC (fieldValue)
-import Bridge.SigningTransport (SigningEndpoint(..))
+import Bridge.SigningTransport (SigningEndpoint(..),runSigningServer)
+import qualified Bridge.SolanaPayment as SP
+import qualified Network.Wai.Handler.Warp as Warp
+import qualified Data.ByteString as BS
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import Bridge.Operation.Internal (Request(..),SigningOperation(..),WorkerOperation(..))
 import qualified Bridge.Native as N
 import qualified Bridge.Solana as Solana
@@ -57,7 +62,8 @@ main :: IO ()
 main = do
   fence<-lookupEnv "ECX_REBUILD_FENCE_ONLY"
   server<-lookupEnv "ECX_REBUILD_SERVER_ONLY"
-  if fence==Just "1" then fenceMain else if server==Just "1" then serverMain else ledgerMain
+  tls<-lookupEnv "ECX_REBUILD_TLS_ONLY"
+  if tls==Just "1" then tlsMain else if fence==Just "1" then fenceMain else if server==Just "1" then serverMain else ledgerMain
 
 ledgerMain :: IO ()
 ledgerMain = do
@@ -794,6 +800,8 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  TLSFunds :: Fixture ()
+  FreshAt :: Int64 -> Fixture ()
   ChangeTreasuryAnchor :: T.Text -> T.Text -> Fixture ()
   SeedTreasuryEvidence :: T.Text -> T.Text -> T.Text -> T.Text -> Int64 -> Value -> Fixture ()
   LockRestoreAudits :: Fixture [T.Text]
@@ -837,6 +845,13 @@ data Fixture a where
   ProtectHolds :: T.Text -> Fixture ()
   CheckPhases :: T.Text -> T.Text -> Fixture Bool
 fixture :: PG.Connection -> Fixture a -> IO a
+fixture c TLSFunds = PG.withTransaction c $ do
+  let text=O.sqlStrictText
+  void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(text "tls-funds",text "offline signing contract funds")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.postings,O.iRows=[(Nothing,text "tls-funds",text asset,text account,O.sqlInt8 n) | (asset,account,n)<-[("Wrapped","earned",10),("Wrapped","external",-10),("Sol","operating",10000000),("Sol","external",-10000000)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+fixture c (FreshAt now) = do
+  void $ O.runUpdate c O.Update {O.uTable=S.scanHealth,O.uUpdateWith= \(chain,_,_,_)->(chain,O.toNullable $ O.sqlInt8 now,O.null,O.sqlInt8 now),O.uWhere=const $ O.sqlBool True,O.uReturning=O.rCount}
+  void $ O.runUpdate c O.Update {O.uTable=S.custody,O.uUpdateWith= \(key,revision,_,_,_)->(key,revision,O.toNullable revision,O.toNullable $ O.sqlInt8 now,O.null),O.uWhere=const $ O.sqlBool True,O.uReturning=O.rCount}
 fixture c LockRestoreAudits = O.runSelect c $ do
   (_,kind,subject)<-O.selectTable S.audit
   O.where_ (kind O..== O.sqlStrictText "native_locks_restored")
@@ -1858,3 +1873,116 @@ treasuryContract fixtures reader writer=do
   outgoing "SolanaOperating" "protected-operating" (object ["delta" .= T.pack(show $ negate $ M.findWithDefault 0 (Sol,Operating) protected),"feeUnits" .= money 1])
   expectStore "treasury_spend_exceeds_free_allocation" (classify "SolanaOperating" "protected-operating" "cannot consume fee holds")
   evalRead reader ReadBalances >>= check . (==protected)
+
+-- Real TLS, both production evaluators and SDK signatures over public offline
+-- vectors. Only the Solana RPC responses and ledger funding are fixtures.
+tlsMain :: IO ()
+tlsMain=do
+  database<-getEnv "ECX_REBUILD_CONTRACT_DATABASE"
+  unless ("ecx_rebuild_contract_" `T.isPrefixOf` T.pack database) (fail "disposable database required")
+  user<-getEnv "USER"; role<-getEnv "ECX_REBUILD_CONTRACT_READER"; sdk<-getEnv "ECX_REBUILD_TEST_SDK"
+  vector<-getDataFileName "test/fixtures/signed-three-units.json" >>= BS.readFile >>= either fail pure . eitherDecodeStrict'
+  workflow<-getDataFileName "test/fixtures/signed-payment-workflow.json" >>= BS.readFile >>= either fail pure . eitherDecodeStrict'
+  owner<-fieldValue "owner" vector; recipient<-fieldValue "recipient" vector; mint<-fieldValue "mint" vector; hash<-fieldValue "blockhash" vector
+  reply<-fieldValue "reply" workflow :: IO H.HelperReply
+  identifier<-fieldValue "paymentId" workflow
+  let identity="offline-policy"; encoded value=TE.decodeUtf8 (BL.toStrict $ encode value)
+      settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
+      policy=PaymentTerms (PolicySnapshot 1 "finalized" identity) (CostLimits (money 1) (money 10000) (money 2100000))
+      store=StorePolicy policy (OrderLimits (money 2) (money 1000) 100 100 100 (money 10000000) (money 10000000)) "codec-fixture" True
+      config=H.SolanaPolicy "codec-fixture" identity mint owner (H.replySource reply) (money 10000) (money 2100000)
+      plan=SP.SolanaPlan identity recipient (money 3) (payoutReference identity identifier) (SP.RecentBlockhash hash 1000 100) (money 10000) (money 2100000)
+      native=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:1" "/unused" "ecx-bridge-test" 16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47"
+      solana=Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing mint owner (H.replySource reply)
+      check ok=unless ok (fail "TLS signing contract failed")
+      context value=object ["context" .= object ["slot" .= (100::Int)],"value" .= value]
+      token=object ["owner" .= Solana.tokenProgram,"executable" .= False,"data" .= object ["space" .= (165::Int),"parsed" .= object ["type" .= ("account"::T.Text),"info" .= object
+        ["mint" .= mint,"owner" .= owner,"state" .= ("initialized"::T.Text),"isNative" .= False,"tokenAmount" .= object ["amount" .= ("10000000"::T.Text),"decimals" .= (8::Int)]]]]]
+      mintAccount=object ["owner" .= Solana.tokenProgram,"data" .= object ["parsed" .= object ["type" .= ("mint"::T.Text),"info" .= object ["decimals" .= (8::Int),"isInitialized" .= True,"freezeAuthority" .= Null]]]]
+      payer=object ["owner" .= ("11111111111111111111111111111111"::T.Text),"executable" .= False,"data" .= ["","base64"::T.Text],"lamports" .= (10000000::Int)]
+  calls<-newIORef ([]::[T.Text])
+  let rpcApplication request respond=do
+        raw<-Wai.strictRequestBody request
+        value<-either fail pure (eitherDecodeStrict' $ BL.toStrict raw)
+        method<-fieldValue "method" value; params<-fieldValue "params" value :: IO [Value]; requestId<-fieldValue "id" value :: IO Value
+        modifyIORef' calls (<>[method])
+        result<-case method of
+          "getGenesisHash"->pure $ toJSON (Solana.solanaGenesis W.L2LSignetDevnet)
+          "getAccountInfo"->pure $ context $ if take 1 params==[toJSON mint] then mintAccount else token
+          "getBlockHeight"->pure $ Number 900
+          "getMultipleAccounts"->pure $ context $ toJSON [token,Null,payer]
+          "getMinimumBalanceForRentExemption"->pure $ Number 1488440
+          "getFeeForMessage"->pure $ context $ Number 5000
+          "simulateTransaction"->pure $ context $ object ["err" .= Null]
+          _->fail ("unexpected fixture RPC: "<>T.unpack method)
+        respond $ Wai.responseLBS status200 [("Content-Type","application/json")] (encode $ object ["jsonrpc" .= ("2.0"::T.Text),"id" .= requestId,"result" .= result])
+  bracket (PG.connect settings) PG.close $ \fixtures->do
+    fixture fixtures (InitializeIdentity identity); fixture fixtures SeedIntake; fixture fixtures TLSFunds
+    withReader settings {PG.connectUser=role} identity True $ \reader->
+      withWriter settings store (const $ pure ()) $ \writer->do
+        fixture fixtures RefreshCustody
+        void $ evalWrite writer (ReserveFees 100 (T.drop 4 identifier) Wrapped (money 3) recipient "TLS contract")
+        fixture fixtures ReadyIntake
+        _<-evalWrite writer (PreparePayment 100 identifier (money 2110000) (encoded plan))
+        evalWrite writer (SaveDraft identifier 0 (encoded $ SP.solanaPayoutRequest config plan))
+        fixture fixtures CoverBackup
+        fixture fixtures ReadyIntake
+        now<-floor <$> getPOSIXTime
+        fixture fixtures (FreshAt now)
+        withTestSigningKey $ \keyFile->do
+          public<-either reject pure (publicKey owner)
+          BL.writeFile keyFile (encode $ replicate 32 (1::Int)<>map fromIntegral (BS.unpack public))
+          let directory=takeDirectory keyFile; auth=directory<>"/auth"; endpoint port=SigningEndpoint port auth
+          writeFile auth (replicate 64 'a'); setFileMode auth 0o600
+          let makeCertificate file=do
+                (exit,_,err)<-Process.readProcessWithExitCode "openssl" ["req","-x509","-newkey","rsa:2048","-nodes","-keyout",file<>".key","-out",file<>".pem","-days","1","-subj","/CN=127.0.0.1","-addext","subjectAltName=IP:127.0.0.1"] ""
+                unless (show exit=="ExitSuccess") (fail err)
+                setFileMode (file<>".key") 0o600
+          makeCertificate auth
+          makeCertificate (directory<>"/untrusted")
+          certificate<-BS.readFile (auth<>".pem")
+          untrusted<-BS.readFile (directory<>"/untrusted.pem")
+          port<-bracket (NS.socket NS.AF_INET NS.Stream NS.defaultProtocol) NS.close $ \socket->do
+            NS.bind socket (NS.SockAddrInet 0 (NS.tupleToHostAddress (127,0,0,1)))
+            address<-NS.getSocketName socket
+            case address of NS.SockAddrInet p _->pure (fromIntegral p); _->fail "unexpected listener"
+          Warp.testWithApplication (pure rpcApplication) $ \rpcPort->
+            bracket (newManager defaultManagerSettings {managerModifyRequest= \request->pure request {HTTP.secure=False,HTTP.host="127.0.0.1",HTTP.port=rpcPort}}) closeManager $ \manager->
+              withSigner manager reader (SignerSettings native solana config sdk keyFile) $ \signer->
+                bracket (forkIO $ runSigningServer (endpoint port) signer) killThread $ \_thread->do
+                  let wait 0=fail "TLS signer did not bind"
+                      wait n=do
+                        result<-try $ bracket (NS.socket NS.AF_INET NS.Stream NS.defaultProtocol) NS.close $ \socket->NS.connect socket (NS.SockAddrInet (fromIntegral port) (NS.tupleToHostAddress (127,0,0,1)))
+                        case (result::Either IOException ()) of Right ()->pure (); Left _->threadDelay 50000 >> wait (n-1::Int)
+                  wait 200
+                  withRuntime manager (ObserverSettings native solana 1 "origin" "origin") config Nothing (endpoint port) reader writer $ \worker _ _->do
+                    writeFile auth (replicate 64 'b')
+                    expectStore "signer_outcome_unknown" (worker $ Request $ SignPreparedPayment identifier)
+                    readIORef calls >>= check . null
+                    evalRead reader PendingAttempts >>= check . null
+                    writeFile auth (replicate 64 'a')
+                    BS.writeFile (auth<>".pem") untrusted
+                    fixture fixtures ReadyIntake
+                    clock<-floor <$> getPOSIXTime
+                    fixture fixtures (FreshAt clock)
+                    expectStore "signer_outcome_unknown" (worker $ Request $ SignPreparedPayment identifier)
+                    readIORef calls >>= check . null
+                    evalRead reader PendingAttempts >>= check . null
+                    BS.writeFile (auth<>".pem") certificate
+                    fixture fixtures ReadyIntake
+                    later<-floor <$> getPOSIXTime
+                    fixture fixtures (FreshAt later)
+                    before<-evalRead reader ReadBalances
+                    signed<-worker (Request $ SignPreparedPayment identifier)
+                    check (Just signed==H.replySignature reply)
+                    saved<-evalRead reader (ReadAttempt signed)
+                    check (signedBytes(recordedSigned saved)==H.replyTransaction reply && recordedState saved=="signed")
+                    count<-length <$> readIORef calls
+                    removeFile auth
+                    replay<-worker (Request $ SignPreparedPayment identifier)
+                    check (replay==signed)
+                    readIORef calls >>= check . (==count) . length
+                    evalRead reader ReadBalances >>= check . (==before)
+                    methods<-readIORef calls
+                    check ("simulateTransaction" `elem` methods && "sendTransaction" `notElem` methods)
+  putStrLn "PASS: actual HTTPS worker/signer evaluators, auth/certificate refusal, SDK signature, exact persisted bytes and network-free replay; offline RPC vectors only"

@@ -400,7 +400,8 @@ the private ClientM with pinned trust, no proxy/redirect/retry, a 60-second time
 and a 512-KiB response bound. Uncertain signing outcomes retain the preparation and
 pause. Existing recorded attempts are verified without another signer request.
 The executable wires signer and public-worker modes separately; successful
-worker-to-signer TLS signing acceptance is still pending.
+offline worker-to-signer TLS/SDK integration now passes (see below); funded and
+separate-OS-user signing acceptance remains pending.
 
 Closed MarkBroadcast and AuthorizeSend operations require current intake/custody,
 saved paying work, source eligibility and the current native replacement member.
@@ -717,6 +718,43 @@ runtime lines; **no new production file or refund-specific payout engine**.
 This checkpoint increases source size to complete required behavior; it is not
 presented as a reduction or a claim of perfect security.
 
+## HTTPS worker/signer integration
+
+The existing `rebuild-store-check` executable has an opt-in TLS contract:
+
+```sh
+ECX_REBUILD_TLS_ONLY=1 ECX_REBUILD_TEST_SDK=/absolute/path/libecx_solana_sdk.dylib \
+  cabal run ecx-bridge-rebuild:rebuild-store-check --offline
+```
+
+Like its other modes, supply `ECX_REBUILD_CONTRACT_DATABASE` and
+`ECX_REBUILD_CONTRACT_READER` for a disposable, migrated PostgreSQL database
+(prefixed `ecx_rebuild_contract_`), using the existing local test PostgreSQL port.
+It requires `openssl` for temporary certificates. Direct binary execution also
+needs `ecx_bridge_rebuild_datadir` pointing at this directory; Cabal run supplies it.
+It never connects to a live chain. The Solana HTTP responses are explicit offline
+protocol fixtures; the public seed is the existing unfunded SDK test vector.
+
+This contract runs the production critical evaluator, its private generated
+Servant HTTPS client, the production signer server/evaluator with a SELECT-only
+reader, and the actual Solana SDK FFI. The SDK-generated signature/bytes must match
+the preserved fixture exactly. Incorrect authentication and an untrusted TLS
+certificate both fail before signer chain calls and leave no recorded attempt.
+After valid signing, the worker independently validates and persists the exact
+reply; balances do not change. Removing its credential file then replaying the
+same payment succeeds without further RPC/signing. No broadcast method is allowed
+by the fixture server. Temporary listeners, keys and certificates are scoped to
+the test lifetime. The contract executable uses one threaded RTS capability.
+
+Build, TLS/SDK contract and the standard PostgreSQL contracts pass. This closes
+the previously untested successful HTTPS integration, not deployed process
+isolation: both evaluators run in separate threads of one test process. Separate
+OS users/native RPC restrictions, real chain responses, lost-reply recovery and
+funded end-to-end payments remain acceptance requirements.
+No production source changed and no files or Haskell dependencies were added. The existing
+contract file grows by 128 net lines, plus one Cabal runtime-options line. This
+adds integration evidence, not a source-size reduction or full release acceptance.
+
 ## Observed treasury spending
 
 The private operator command is:
@@ -904,7 +942,7 @@ reads avoid loading the complete evidence table; aggregate balances avoid loadin
 all journal rows. Terminal attempts are still checked individually, so long-history
 performance remains to be measured. Source eligibility checking is shared with signing.
 
-Still required: successful TLS worker/signer integration and deployed OS/native-RPC
+Still required: funded TLS worker/signer integration and deployed OS/native-RPC
 authority separation; remaining private recovery commands and funded resume/browser-wallet acceptance;
 integrated positive submission/reconciliation and funded Solana expiry/retry acceptance;
 native replacement/winner changes and covered-source approvals generalized to earned
