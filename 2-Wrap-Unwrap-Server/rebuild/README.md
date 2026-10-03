@@ -469,13 +469,21 @@ account/fee/rent/unsigned-simulation preflight. Its adapter, fingerprint, depth 
 fee settings must agree with the saved ledger policy. Captured native vectors and
 offline unsigned Solana message contracts verify preview behavior, no signing or
 sending, absent native funding, signed-preview refusal and simulation failure.
-Admission is not yet invoked by a complete customer order runtime; provisioning,
-backup acknowledgment and Servant interpretation still need integration.
+The customer order workflow now invokes admission for new orders only, commits
+provisioning claims/instructions, requests backup and verifies recorded coverage
+before exposure. Closed `FindOrder` and `ReadProvisioning` reads preserve the
+capability/request binding and hide unissued instructions from ordinary reads.
+PostgreSQL workflow tests cover backup callbacks without acknowledgment, replay
+while paused without repeat admission/identity calls, changed-request refusal,
+capability isolation and recovery after a lost native allocation reply with only
+one address allocation. These are offline RPC contracts, not funded acceptance.
+The customer Servant interpreter and unified customer/worker gate still need wiring.
 
 Scoped physical-line comparisons (not whole-product reduction claims):
 
 | Piece | Baseline | Rebuild | Scope limit |
 | --- | ---: | ---: | --- |
+| Customer order workflow | 78 / 1 file | 63 / 1 file | Closed reads replace raw row/ledger access; HTTP integration pending |
 | Admission/previews | 106 / 1 file | 86-line module + 20 lines in existing native adapter | Same total; customer runtime integration pending |
 | Custody chain workflow | 202 / 1 file | 188 / 1 file | Replacement-family and source-loss wrapper parity pending; not equivalent full-feature reduction |
 | Custody snapshot function | 79 / existing custody file | 71 / existing Store file | Reuses freshness/balance helpers; chain workflow pending |

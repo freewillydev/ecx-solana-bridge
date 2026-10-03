@@ -11,6 +11,8 @@ import Bridge.Wire (PaymentTerms(..),CostLimits(..),PolicySnapshot(..))
 import Bridge.Store
 import Bridge.Signer
 import Bridge.Critical
+import Bridge.Order
+import Bridge.Error (reject)
 import Bridge.Observer (ObserverSettings(..))
 import Bridge.Reconciliation (inspectCustodyWith,nativeBalance)
 import Bridge.RPC (fieldValue)
@@ -675,6 +677,9 @@ main = do
         commit (W.ScanBatch "SolanaOperating" "opening-signature" Nothing "opening-signature" 110 [funding] [])
         afterSol<-evalRead reader ReadBalances
         check (M.findWithDefault 0 (Sol,Unallocated) afterSol==M.findWithDefault 0 (Sol,Unallocated) beforeSol+3)
+      withWriter settings (store policy limits) (const $ pure ()) $ \writer->do
+        fixture fixtures OrderWorkflowFunds
+        orderWorkflowContract fixtures reader writer
       beforeLarge<-evalRead reader ReadBalances
       fixture fixtures LargeBalances
       huge <- evalRead reader ReadBalances
@@ -694,6 +699,7 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  OrderWorkflowFunds :: Fixture ()
   CustodyHeadReview :: Int64 -> Fixture ()
   SeedCustodyHeads :: Fixture ()
   ReadCustodyCheck :: Fixture (Maybe Int64,Maybe Int64,Maybe T.Text)
@@ -995,6 +1001,16 @@ fixture c (CustodyHeadReview flag) = void $ O.runUpdate c O.Update {O.uTable=S.c
   O.uUpdateWith= \r->r {S.eventReview=O.sqlInt8 flag},O.uWhere= \r->S.eventChain r O..== O.sqlStrictText "Solana"
     O..&& S.eventId r O..== O.sqlStrictText (T.replicate 64 "1"),O.uReturning=O.rCount}
 
+fixture c OrderWorkflowFunds = PG.withTransaction c $ do
+  let text=O.sqlStrictText; num=O.sqlInt8
+  void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(text "workflow-funds",text "offline order workflow funds")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.postings,O.iRows=[(Nothing,text "workflow-funds",text asset,text account,num quantity) |
+    (asset,account,quantity)<-[("Native","external",-20000),("Native","float",10000),("Native","operating",10000),
+      ("Wrapped","external",-10000),("Wrapped","float",10000),("Sol","external",-10000),("Sol","operating",10000)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runUpdate c O.Update {O.uTable=S.scanHealth,O.uUpdateWith= \(chain,_,_,_)->(chain,O.toNullable $ num 110,O.null,num 110),O.uWhere=const $ O.sqlBool True,O.uReturning=O.rCount}
+  void $ O.runUpdate c O.Update {O.uTable=S.deployment,O.uUpdateWith= \r->r {S.paused=num 0},O.uWhere=const $ O.sqlBool True,O.uReturning=O.rCount}
+  fixture c RefreshCustody
+
 -- Offline RPC contracts over an actual PostgreSQL snapshot. No live-chain claim.
 custodyContract :: PG.Connection -> Reader -> IO ()
 custodyContract fixtures reader = do
@@ -1059,3 +1075,58 @@ custodyContract fixtures reader = do
   expectStore "custody_ledger_changed" (inspect (pure 100) (pure ()) changed good Nothing settings)
   expectStore "native_reused_balance_requires_review" (nativeBalance $ \_ _ _->pure $ object
     ["mine" .= object ["trusted" .= (0::Int),"untrusted_pending" .= (0::Int),"immature" .= (0::Int),"used" .= (1::Int)]])
+
+orderWorkflowContract :: PG.Connection -> Reader -> Writer -> IO ()
+orderWorkflowContract fixtures reader writer = do
+  admissions<-newIORef (0::Int); identities<-newIORef (0::Int); allocations<-newIORef (0::Int)
+  label<-newIORef Nothing; loseReply<-newIORef True
+  let native=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:29432" "/unused" "workflow" 1 (T.replicate 64 "0")
+      header="Bearer "<>T.replicate 64 "e"
+      unwrap=W.OrderRequest WrappedToNative (money 10) "native-recipient" "" Nothing "workflow-unwrap"
+      call _ method params=case (method,params) of
+        ("getwalletinfo",[])->pure $ object ["walletname" .= ("workflow"::T.Text),"descriptors" .= True,
+          "scanning" .= False,"private_keys_enabled" .= True,"external_signer" .= False]
+        ("getaddressesbylabel",[String requested])->do
+          saved<-readIORef label
+          if saved==Just requested then pure $ object ["offline-order-address" .= object ["purpose" .= ("receive"::T.Text)]] else reject "rpc_error_-11"
+        ("getnewaddress",[String requested,String "bech32"])->do
+          modifyIORef' allocations (+1)
+          writeIORef label (Just requested)
+          lose<-atomicModifyIORef' loseReply (\old->(False,old))
+          if lose then reject "rpc_transport_unknown_outcome" else pure $ String "offline-order-address"
+        ("getaddressinfo",[String address])->do
+          saved<-readIORef label
+          pure $ object ["address" .= address,"ismine" .= True,"solvable" .= True,"ischange" .= False,
+            "labels" .= maybe [] pure saved,"scriptPubKey" .= ("0014"<>T.replicate 40 "a")]
+        _->fail "unexpected provisioning RPC"
+      backup n=evalWrite writer (AcknowledgeBackup "contract" n $ T.replicate 64 "d")
+      transport=OrderTransport (pure 110) (const $ modifyIORef' admissions (+1)) (modifyIORef' identities (+1)) call backup
+      create=createCustomerOrderWith transport native True reader writer header
+      check ok=unless ok (fail "customer workflow contract failed")
+  expectStore "invalid_idempotency_key" (create unwrap {W.idempotencyKey=""})
+  missing<-evalRead reader (FindOrder header unwrap)
+  check (missing==Nothing)
+  -- Returning from a backup callback cannot itself authorize exposure.
+  expectStore "backup_pending" (createCustomerOrderWith transport {orderBackup=const $ pure ()} native True reader writer header unwrap)
+  Just oid<-evalRead reader (FindOrder header unwrap)
+  hidden<-evalRead reader (ReadOrder header oid)
+  check (W.depositInstruction hidden==Nothing)
+  issued<-create unwrap
+  check (W.orderId issued==oid && W.status issued=="AwaitingDeposit" && W.depositInstruction issued/=Nothing)
+  counts<- (,) <$> readIORef admissions <*> readIORef identities
+  fixture fixtures (CustodyHeadReview 0)
+  evalWrite writer (Pause "test replay while paused")
+  replay<-create unwrap
+  afterCounts<-(,) <$> readIORef admissions <*> readIORef identities
+  check (replay==issued && counts==afterCounts && fst counts==1)
+  expectStore "idempotency_conflict" (create unwrap {W.input=money 11})
+  expectStore "order_not_found" (evalRead reader $ ReadProvisioning ("Bearer "<>T.replicate 64 "f") oid)
+  fixture fixtures ReadyIntake
+  let wrapping=unwrap {W.direction=NativeToWrapped,W.recipient="solana-recipient",W.refund="native-refund",W.idempotencyKey="workflow-wrap"}
+  expectStore "rpc_transport_unknown_outcome" (create wrapping)
+  Just wrapId<-evalRead reader (FindOrder header wrapping)
+  recovered<-create wrapping
+  allocated<-readIORef allocations
+  check (W.orderId recovered==wrapId && W.depositInstruction recovered==Just "offline-order-address" && allocated==1)
+  _<-create wrapping
+  readIORef allocations >>= check . (==1)

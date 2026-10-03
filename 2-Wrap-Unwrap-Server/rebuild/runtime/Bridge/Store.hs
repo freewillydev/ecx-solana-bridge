@@ -69,6 +69,8 @@ data CustodySnapshot = CustodySnapshot
   { custodyRevision :: Int64, custodyTotals :: M.Map Asset Integer
   , custodyHeads :: [(Text,Text)], custodySlot :: Int64, custodyPending :: [RecordedAttempt] } deriving (Eq,Show)
 data StoreRead a where
+  FindOrder :: Text -> W.OrderRequest -> StoreRead (Maybe Text)
+  ReadProvisioning :: Text -> Text -> StoreRead (W.OrderView,Maybe Int64)
   CheckIntake :: Int64 -> StoreRead ()
   ReadCustodyRevision :: StoreRead Int64
   ReadCustodySnapshot :: Int64 -> [(Text,Text)] -> Bool -> StoreRead CustodySnapshot
@@ -153,6 +155,12 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
     verifyReadRole c >>= flip require "unsafe_read_database_role"
     row <- metadata c identity
     case operation of
+      FindOrder header request -> findOrder c identity header request
+      ReadProvisioning header identifier -> do
+        row<-authorizedOrder c identity header identifier
+        cap<-checked (bearerHash header)
+        view<-readOrder c identity Nothing cap identifier
+        pure (view,S.instructionSequence row)
       CheckIntake now -> intakeReady c identity now
       ReadCustodyRevision -> readCustodyRevision c
       ReadCustodySnapshot now origins losses -> custodySnapshot c now origins losses
@@ -485,23 +493,34 @@ readOrder c identity coverage cap identifier = do
 decodeSaved :: FromJSON a => Text -> IO a
 decodeSaved=either (const $ reject "corrupt_ledger_json") pure . eitherDecodeStrict' . TE.encodeUtf8
 
--- Chain-specific admission happens before this closed operation. It does not
--- allocate an address or issue instructions: it atomically saves an order and
--- both its payout inventory and conversion/refund operating allowances.
+-- Bind replay to the original capability, request and deployment.
+findOrder :: PG.Connection -> Text -> Text -> W.OrderRequest -> IO (Maybe Text)
+findOrder c identity header request = do
+  cap<-checked (bearerHash header)
+  let key=W.idempotencyKey request
+  require (not(T.null key) && T.length key<=64 && T.all (\x->x `elem` ("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_"::String)) key) "invalid_idempotency_key"
+  rows<-O.runSelect c $ do
+    row<-O.selectTable S.orders
+    O.where_ (S.capabilityHash row O..== O.sqlStrictText cap O..&& S.idempotencyKey row O..== O.sqlStrictText(W.idempotencyKey request))
+    pure (S.orderId row,S.requestHash row)
+    :: IO [(Text,Text)]
+  case rows of
+    []->pure Nothing
+    [(identifier,saved)]->do
+      require (saved==digest(TE.encodeUtf8 $ identity<>encodeSaved request)) "idempotency_conflict"
+      pure (Just identifier)
+    _->reject "duplicate_idempotency"
+
+-- Admission precedes this atomic reservation of inventory and operating costs.
 createOrder :: PG.Connection -> PaymentTerms -> OrderLimits -> Int64 -> Text -> W.OrderRequest -> IO Text
 createOrder c terms limits now header request = do
   cap <- checked (bearerHash header)
   let key=W.idempotencyKey request; identity=deploymentFingerprint (paymentPolicy terms)
       encoded=encodeSaved request; requestDigest=digest (TE.encodeUtf8 $ identity<>encoded)
-  require (not(T.null key) && T.length key<=64 && T.all (\x->x `elem` ("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_"::String)) key) "invalid_idempotency_key"
-  previous <- O.runSelect c $ do
-    row <- O.selectTable S.orders
-    O.where_ (S.capabilityHash row O..== O.sqlStrictText cap O..&& S.idempotencyKey row O..== O.sqlStrictText key)
-    pure (S.orderId row,S.requestHash row)
-    :: IO [(Text,Text)]
+  previous<-findOrder c identity header request
   case previous of
-    [(identifier,saved)] -> require (saved==requestDigest) "idempotency_conflict" >> pure identifier
-    [] -> do
+    Just identifier->pure identifier
+    Nothing -> do
       intakeReady c identity now
       require (W.input request>=orderMinimum limits && W.input request<=orderMaximum limits) "amount_outside_limits"
       require (W.sourceOwner request==Nothing && (W.direction request/=WrappedToNative || T.null(W.refund request))) "invalid_connection_free_order"
@@ -538,7 +557,6 @@ createOrder c terms limits now header request = do
       _ <- O.runInsert c O.Insert {O.iTable=S.reservations,O.iRows=[(text identifier,text name,num $ units $ net termsQuote,text "quote")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
       reserveOrderCosts c limits (paymentLimits terms) booked identifier (W.direction request)
       pure identifier
-    _ -> reject "duplicate_idempotency"
 
 intakeReady :: PG.Connection -> Text -> Int64 -> IO ()
 intakeReady c identity now = do
