@@ -276,6 +276,17 @@ wrapped earned 1,300. Native/wrapped float returned to its pre-test levels;
 operating balances paid the actual costs. Final sequence is 98, paused. Both test
 services and the acceptance runner are stopped; shared chain/PostgreSQL services
 remain. Never restore the pre-cutover ledger over newer on-chain activity.
+
+A fresh complete custody export at sequence 98 passed integrity/identity inspection,
+including the funded native wallet archive and Solana key. Its ledger restored into
+a separate restricted schema-21 database: all 24 Opaleye financial/history projections
+matched, sequence and pause were preserved, and custody certification was cleared.
+The actual observer then reconciled both real test chains with fresh matching custody,
+unchanged financial projections, disabled intake and no signer. Minimum sequence 99
+correctly refused this snapshot. The observer and disposable database were removed;
+the private bundle/evidence remain. This proves same-host funded ledger restoration
+and reconciliation, not off-host durability, native-wallet activation on a clean node,
+interrupted-payment restoration or exclusion of signing authority on a lost host.
 Any future refund/recovery needing missing historical terms still requires explicit
 policy treatment; migration does not invent those terms.
 
@@ -394,7 +405,8 @@ after acceptance; keys, ledger, exact attempts and private evidence remain saved
    Consolidate stale repository-wide architecture/operating documents around the
    accepted rebuild; their earlier checkpoints are not current release certification.
 3. Verify replacement/reorg/winner-change/rebroadcast and covered-source flows with
-   real effects, including funded restore. Complete cross-UID signer isolation,
+   real effects, including in-flight restore and clean-host wallet activation. Same-host
+   funded ledger restoration/reconciliation now passes. Complete cross-UID signer isolation,
    encrypted-wallet unlock handling and off-host HTTPS/cross-host recovery.
 4. Complete required Haskell/FFI token administration and selected real pool workflow;
    token mint/burn now has a Cabal CLI, separate critical signing/submission, and
