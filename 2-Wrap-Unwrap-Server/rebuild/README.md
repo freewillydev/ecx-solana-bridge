@@ -226,7 +226,26 @@ signature matched the exact public codec-key fixture. The temporary public test-
 file was removed and the REPL exited. This is offline SDK execution, not new funded
 Devnet acceptance or a new clean-build SDK test.
 
+Deposit proof validation is consolidated: one module supports historical memo
+orders and connection-free Solana Pay, classifies token/SOL custody effects, and
+checks historical owners and exact balance changes. Shared account parsing now
+rejects duplicate/malformed keys for every proof path. Instruction count/account
+lists and order-reference decoding are bounded. Unmatched receipts still expose
+their custody effect without granting payout authority. Existing order-to-reference
+encoding is unchanged. Anchored, bounded signature pagination is extracted into
+the existing Solana adapter; provider gaps/repeated pages cannot advance a cursor.
+
+The baseline deposit/Pay modules total 338 lines in two files versus 297 lines in
+one replacement file, plus three added lines in the existing Identity module.
+History definitions retain the original 32 lines, moved from Observer into Solana
+with their imports/exports. QuickCheck covers the captured Devnet memo deposit,
+Solana Pay and loaded-account JSON rewrites, historical ownership/amount/memo,
+malformed instructions/accounts, exact URI amounts, bounded pagination and captured
+SOL fee/rent effects. Pay/v0 rewrites are offline parser contracts, not captured
+wallet flows. The complete rebuild suite passes; no funded transaction was sent.
+
 Connecting those adapters to the high-level safe/critical runtime, actual host fence,
-dedicated signer and durable payment execution remains unfinished. Chain observation,
-recovery and SDK build integration also remain. Passing these checks is not end-to-end
-payment, migration or real-chain acceptance.
+dedicated signer and durable payment execution remains unfinished. Native observation,
+atomic scan commits/promotion, observer orchestration, recovery and SDK build integration
+also remain. Passing these checks is not end-to-end payment, migration or real-chain
+acceptance.

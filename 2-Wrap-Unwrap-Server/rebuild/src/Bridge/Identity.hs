@@ -1,5 +1,5 @@
 -- Exact baseline capability hashing; raw tokens never become persisted IDs.
-module Bridge.Identity (digest, capabilityHash, bearerHash,payInstruction,publicKey) where
+module Bridge.Identity (digest, capabilityHash, bearerHash,payInstruction,payReference,publicKey) where
 import Crypto.Hash (Digest,SHA256,hash)
 import qualified Data.ByteArray.Encoding as BA
 import Data.ByteString (ByteString)
@@ -22,10 +22,13 @@ bearerHash header=maybe (Left "authorization_required") capabilityHash (T.stripP
 
 -- Same order-derived Solana Pay reference as the original bridge.
 payInstruction :: Text -> Either Text Text
-payInstruction identifier = do
+payInstruction identifier=("solana-pay:"<>) <$> payReference identifier
+payReference :: Text -> Either Text Text
+payReference identifier = do
+  if T.length identifier/=64 then Left "invalid_order_reference" else pure ()
   raw <- either (const $ Left "invalid_order_reference") Right (Hex.decode $ TE.encodeUtf8 identifier)
   if BS.length raw/=32 then Left "invalid_order_reference" else
-    Right ("solana-pay:"<>TE.decodeUtf8 (B58.encodeBase58 B58.bitcoinAlphabet raw))
+    Right (TE.decodeUtf8 (B58.encodeBase58 B58.bitcoinAlphabet raw))
 
 publicKey :: Text -> Either Text BS.ByteString
 publicKey value

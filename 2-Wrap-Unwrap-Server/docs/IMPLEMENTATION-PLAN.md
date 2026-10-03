@@ -30,8 +30,10 @@ checks, with protocol tests and a real Devnet genesis read. Native payment prepa
 and signing checks now pass captured-transaction and offline RPC contracts.
 Solana message/SDK/payment validation now passes captured Devnet proofs and offline
 contracts; the actual cached SDK FFI matches its public-key codec vector.
-Adapter/workflow integration, high-level evaluators, chain observation, SDK build
-integration and durable execution remain unfinished.
+Solana deposit/Pay proof validation and anchored signature pagination now pass
+captured-effect and offline protocol tests. Adapter/workflow integration, high-level
+evaluators, native observation, atomic scan commits/promotion, observer orchestration,
+SDK build integration and durable execution remain unfinished.
 No existing custody state has been moved. See the rebuild README for scoped counts
 and evidence; do not compare this subset against the entire old storage layer.
 

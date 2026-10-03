@@ -1,13 +1,16 @@
 module Bridge.Solana
   ( SolanaSettings(..),validateSolanaSettings,solanaCall,solanaIdentity,tokenAccount
   , inspectTokenAccount,finalizedTransaction,solanaHistory,solanaAddressHistory
-  , tokenProgram,solanaGenesis ) where
+  , SignatureInfo(..), collectSignatures, tokenProgram,solanaGenesis ) where
 
 import Bridge.Wire (Profile(..))
 import Bridge.RPC
 import Bridge.Error
 import Bridge.Domain
 import Bridge.Identity (publicKey)
+import Bridge.SolanaMessage (signatureBytes)
+import Data.Int (Int64)
+import qualified Data.Set as Set
 import Control.Monad (unless)
 import Data.Aeson
 import Data.Aeson.Types (Parser,parseEither)
@@ -106,3 +109,36 @@ solanaHistory manager c = solanaAddressHistory manager c (custodyAta c)
 solanaAddressHistory :: Manager -> SolanaSettings -> Text -> Maybe Text -> Maybe Text -> IO Value
 solanaAddressHistory manager c address before untilSig = solanaCall manager c "getSignaturesForAddress"
   [toJSON address,object $ ["commitment" .= ("finalized"::Text),"limit" .= (100::Int)] <> maybe [] (\t->["before" .= t]) before <> maybe [] (\t->["until" .= t]) untilSig]
+
+data SignatureInfo = SignatureInfo
+  { historySignature :: !Text, historySlot :: !Int64, historyFailed :: !Bool
+  } deriving (Eq,Show)
+instance FromJSON SignatureInfo where
+  parseJSON = withObject "signature history" $ \o -> do
+    sig <- o .: "signature"
+    _ <- either (fail . T.unpack) pure (signatureBytes sig)
+    slot <- o .: "slot"
+    finality <- o .: "confirmationStatus" :: Parser Text
+    err <- o .: "err" :: Parser Value
+    if slot<0 || finality/="finalized" then fail "history is not finalized"
+      else pure (SignatureInfo sig slot (err/=Null))
+
+-- Fetch newest-first pages through an explicit, known anchor. A short/empty
+-- response is never accepted as proof of complete history. Return oldest first,
+-- including the previous cursor as a one-transaction finality overlap.
+collectSignatures :: Text -> Maybe Text -> (Maybe Text -> IO [SignatureInfo]) -> IO [SignatureInfo]
+collectSignatures origin previous fetch = go Nothing [] Set.empty 0
+ where
+  target=maybe origin id previous
+  go before accumulated seen pages = do
+    require (pages<10) "solana_history_batch_too_large"
+    page <- fetch before
+    require (not (null page) && length page<=100) "solana_history_gap"
+    let ids=map historySignature page
+    require (length ids==Set.size (Set.fromList ids) && all (`Set.notMember` seen) ids) "solana_history_repeated_page"
+    let combined=accumulated<>page
+        slots=map historySlot combined
+    require (and (zipWith (>=) slots (drop 1 slots))) "solana_history_order_invalid"
+    case break ((==target) . historySignature) page of
+      (prefix,anchor:_) -> pure (reverse $ accumulated<>prefix<>[anchor])
+      (_,[]) -> go (Just $ last ids) combined (Set.union seen $ Set.fromList ids) (pages+1::Int)
