@@ -410,8 +410,10 @@ subsequent loss covered by operator capital, idempotent covered approval, preser
 of the exact signed attempt, and refusal to send until backup covers the new approval.
 Settlement still posts principal/fees once and source return restores capital once.
 The full ledger/real-restic contract passes; chain effects in this case are explicit
-offline fixtures, not a funded reorg claim. Legacy source tests remain pending review
-of multi-payment failure traversal and customer winner-link parity.
+offline fixtures, not a funded reorg claim. The same replacement contract now runs for earned-fee withdrawals and customer
+conversions, checking winner-link updates and preservation of an unrelated primary
+payout link while only network-fee deltas change balances. Legacy source tests
+remain pending review of multi-payment failure traversal.
 
 ## Remaining release work, in order
 

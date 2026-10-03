@@ -1273,6 +1273,7 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  PrimaryLink :: T.Text -> T.Text -> Fixture ()
   HistoricalRefundView :: T.Text -> T.Text -> Fixture ()
   LiveScanHealth :: Fixture [(T.Text,Maybe Int64,Maybe T.Text)]
   SetupResidue :: Fixture ()
@@ -1474,6 +1475,9 @@ fixture c (CheckHolds identifier direction quantity) = do
   pure (inventory==[(T.pack $ show $ destinationAsset direction,quantity,"quote")] &&
     sort costs==sort [(nativeKind,"Native",10,"quote"),(solanaKind,"Sol",20,"quote")])
 
+fixture c (PrimaryLink order transaction) = void $ O.runUpdate c O.Update
+  {O.uTable=S.orders,O.uUpdateWith= \r->r {S.payoutTx=O.toNullable $ O.sqlStrictText transaction},
+   O.uWhere= \r->S.orderId r O..== O.sqlStrictText order,O.uReturning=O.rCount}
 fixture c (HistoricalRefundView order transaction) = void $ O.runUpdate c O.Update
   {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=O.sqlStrictText "Refunded",S.payoutTx=O.toNullable $ O.sqlStrictText transaction},
    O.uWhere= \r->S.orderId r O..== O.sqlStrictText order,O.uReturning=O.rCount}
@@ -2954,24 +2958,36 @@ restorationContract fixtures reader writer=do
 -- Deliberately synthetic ledger records: protocol bytes are validated separately
 -- against captured Signet fixtures in NativePaymentCheck.
 nativeReplacementContract :: PG.Connection -> Reader -> Writer -> IO ()
-nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fail $ "native replacement ledger contract: "<>T.unpack code) $ do
+nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fail $ "native replacement ledger contract: "<>T.unpack code) $ forM_ [False,True] $ \customer->do
   captured<-getDataFileName "test/fixtures/native-signet-payment.json" >>= BS.readFile >>= either fail pure . eitherDecodeStrict'
   originalPlan<-fieldValue "plan" captured
   originalTx<-fieldValue "decoded" captured >>= either reject pure . NP.decodeNativeTx
   let check ok=unless ok (fail "native replacement ledger contract")
-      key=T.replicate 64 "6"; identifier="fee:"<>key
+      key=T.replicate 64 (if customer then "4" else "6")
+      header="Bearer "<>T.replicate 64 "6"
       plan=originalPlan {NP.planAmount=money 10,NP.planDepth=2,NP.planFeeLimit=money 5}
       point=NP.nativeOutpoint $ head $ NP.nativeInputs originalTx
       prevouts=[NP.NativePrevout point (money 100) (NP.planChangeScript plan) 2 False]
       outputs n=[NP.NativeOutput (NP.planChangeScript plan) (money n),NP.NativeOutput (NP.planRecipientScript plan) (money 10)]
-      tx=originalTx {NP.nativeTxid=T.replicate 64 "6",NP.nativeOutputs=outputs 89}
+      tx=originalTx {NP.nativeTxid=key,NP.nativeOutputs=outputs 89}
       signed=NP.NativeSigned "00" tx plan prevouts (money 1)
       wire=SignedAttempt (NP.nativeTxid tx) "00" (encodeText signed) (Just $ NP.outpointTxid point<>":"<>T.pack(show $ NP.outpointVout point))
-      draft=NP.NativeDraft "offline-replacement" tx {NP.nativeTxid=T.replicate 64 "7",NP.nativeOutputs=outputs 88} prevouts (money 2)
+      draft=NP.NativeDraft "offline-replacement" tx {NP.nativeTxid=T.replicate 64 (if customer then "5" else "7"),NP.nativeOutputs=outputs 88} prevouts (money 2)
       ready=fixture fixtures ReadyIntake
       paused=evalWrite writer (Pause "replacement ledger contract") >> fixture fixtures RefreshCustody
-  paused
-  void $ evalWrite writer (ReserveFees 110 key Native (money 10) (NP.planRecipient plan) "replacement earnings")
+  order<-if customer then do
+    ready
+    oid<-evalWrite writer (CreateOrder 110 header $ W.OrderRequest WrappedToNative (money 11) (NP.planRecipient plan) "" Nothing "replacement-customer")
+    void $ evalWrite writer (BindSolana 110 header oid)
+    fixture fixtures (SeedReceipt "replacement-customer-source" (Just oid) Wrapped 11 2 True 110)
+    evalWrite writer (PromoteDeposit 110 "replacement-customer-source") >>= check
+    pure (Just oid)
+  else do
+    paused
+    void $ evalWrite writer (ReserveFees 110 key Native (money 10) (NP.planRecipient plan) "replacement earnings")
+    pure Nothing
+  let identifier=maybe ("fee:"<>key) ("convert:"<>) order
+      link expected=forM_ order $ \oid->evalRead reader (ReadOrder header oid) >>= check . (==Just expected) . W.payoutTx
   ready
   void $ evalWrite writer (PreparePayment 110 identifier (money 5) $ encodeText plan)
   evalWrite writer (SaveDraft identifier 0 $ encodeText $ NP.NativeDraft "offline-original" tx prevouts (money 1))
@@ -3057,6 +3073,7 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   -- remains paid while either family member becomes the canonical winner.
   settled<-evalRead reader (ReadAttempt $ signedId $ recordedSigned child)
   settledBalances<-evalRead reader ReadBalances
+  link (signedId $ recordedSigned child)
   let record saved result=evalWrite writer (RecordNativeSettlement saved result)
       sequenceNo=ledgerSequence <$> evalRead reader ReadState
       scanned saved block depth fee=fixture fixtures $ SeedTreasuryEvidence "Native" (signedId $ recordedSigned saved) block "outgoing" 0
@@ -3090,15 +3107,20 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   expectStore "native_recovery_policy_changed" (record reconfirmed $ NativeWinnerChanged familyNow (signedId wire) (costs 2) $ proof parent c)
   record reconfirmed (NativeWinnerChanged familyNow (signedId wire) (costs 1) $ proof parent c)
   changed<-evalRead reader (ReadAttempt $ signedId wire)
+  link (signedId wire)
   let lowerFee=M.insertWith (+) (Native,Operating) 1 $ M.insertWith (+) (Native,External) (-1) settledBalances
   evalRead reader ReadBalances >>= check . (==lowerFee)
   evalRead reader (ReadPayment identifier) >>= check . (==PaymentPaid) . savedStatus
   expectStore "native_settlement_changed" (record reconfirmed $ NativeWinnerChanged familyNow (signedId wire) (costs 1) $ proof parent c)
   candidate changed >>= check . not
   updatedFamily<-map fst <$> evalRead reader (ReadNativeFamily identifier)
+  -- An extra refund's winner must never replace an unrelated primary payout link.
+  forM_ order $ \oid->fixture fixtures (PrimaryLink oid "unrelated-primary")
   scanned child d 2 2
   record changed (NativeWinnerChanged updatedFamily (signedId $ recordedSigned child) (costs 2) $ proof child d)
   restoredWinner<-evalRead reader (ReadAttempt $ signedId $ recordedSigned child)
+  link "unrelated-primary"
+  forM_ order $ \oid->fixture fixtures (PrimaryLink oid $ signedId $ recordedSigned child)
   candidate restoredWinner >>= check . not
   evalRead reader ReadBalances >>= check . (==settledBalances)
   evalRead reader PendingAttempts >>= check . all (`notElem` [signedId wire,signedId(recordedSigned child)])
