@@ -431,6 +431,15 @@ the sequence and leaves no withdrawal. The full disposable PostgreSQL/restic run
 passed after transfer. Fixed fault-injection DDL is test infrastructure; row access
 continues through closed Opaleye fixture operations.
 
+The archive contract additionally pins a real read-only PostgreSQL snapshot,
+commits a separate writer's sequence change before production `pg_dump`, and
+restores the archive to verify it contains the earlier records. The fixture resets
+only its disposable ledger afterward. The duplicate 102-line Python
+`PostgresEncryptedBackupCheck.py` is retired: real restic upload/download, restricted
+PostgreSQL restoration and wrong-password/integrity checks already run here.
+The older snapshot checker remains until its separate row-content checks are
+accounted for; this does not establish off-host recovery or encrypted-wallet unlock.
+
 ## Remaining release work, in order
 
 1. Extend funded tests to remaining interruption boundaries on the actual test

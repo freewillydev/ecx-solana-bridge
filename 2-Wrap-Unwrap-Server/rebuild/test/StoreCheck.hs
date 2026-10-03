@@ -9,6 +9,8 @@ import System.FilePath (takeDirectory,isAbsolute,(</>))
 import qualified System.Posix.Directory as PD
 import System.IO.Error (isDoesNotExistError)
 import qualified Bridge.Store.Backup as Backup
+import Bridge.Store.Catalog (exportSnapshot)
+import qualified Database.PostgreSQL.Simple.Transaction as Tx
 import Crypto.Random (getRandomBytes)
 import Control.Concurrent (threadDelay,forkIO,killThread)
 import Control.Concurrent.Async (withAsync,wait,cancel)
@@ -1328,6 +1330,8 @@ data Fixture a where
   MigrationRecords :: Fixture [String]
   MigratedIntents :: Fixture [S.Intent]
   MigrationLegacyPayments :: Fixture [(T.Text,Bool)]
+  ExportArchiveSnapshot :: Fixture T.Text
+  SetArchiveSequence :: Int64 -> Fixture ()
   ArchiveRecords :: Fixture ([S.Deployment],[S.Attempt],[(Int64,T.Text,T.Text,T.Text,Int64)])
   SourceRecipient :: T.Text -> T.Text -> Fixture ()
   TLSFunds :: Fixture ()
@@ -1432,6 +1436,12 @@ fixture c MigrationRecords = sequence
  where
   rows :: Show a => IO [a] -> IO String
   rows action=show . sort . map show <$> action
+fixture c ExportArchiveSnapshot = do
+  snapshots<-O.runSelect c (pure exportSnapshot)
+  case snapshots of [snapshot]->pure snapshot; _->fail "invalid fixture snapshot"
+fixture c (SetArchiveSequence n) = void $ O.runUpdate c O.Update
+  {O.uTable=S.deployment,O.uUpdateWith= \row->row {S.criticalSequence=O.sqlInt8 n}
+  ,O.uWhere= \row->S.singleton row O..== O.sqlInt8 1,O.uReturning=O.rCount}
 fixture c ArchiveRecords = (,,)
   <$> O.runSelect c (O.selectTable S.deployment)
   <*> O.runSelect c (O.orderBy (O.asc S.attemptId) $ O.selectTable S.attempts)
@@ -3323,6 +3333,25 @@ archiveContract settings fixtures reader = do
     expectStore "backup_identity_mismatch" (evalRestore settings $ RestoreLedger (manifestPath archive) "wrong" 0)
     expectStore "backup_snapshot_too_old" (evalRestore settings $ RestoreLedger (manifestPath archive) "contract" (archiveSequence archive+1))
     restore (manifestPath archive)
+    -- Pin the real read-only snapshot, then commit a separate writer before
+    -- production pg_dump starts. Omitting --snapshot would capture the new
+    -- sequence and fail the actual restored-ledger comparison below.
+    let snapshotSettings=settings {PG.connectUser=role}
+        originalSequence=ledgerSequence before
+    snapshotArchive<-bracket (PG.connect snapshotSettings) PG.close $ \connection->
+      Tx.withTransactionMode (Tx.TransactionMode Tx.RepeatableRead Tx.ReadOnly) connection $ do
+        original<-fixture connection ArchiveRecords
+        check (original==records)
+        snapshot<-fixture connection ExportArchiveSnapshot
+        bracket_ (fixture fixtures $ SetArchiveSequence $ originalSequence+1)
+          (fixture fixtures $ SetArchiveSequence originalSequence) $ do
+            evalRead reader ReadState >>= check . (==(originalSequence+1)) . ledgerSequence
+            fixture connection ArchiveRecords >>= check . (==records)
+            let (rows,_,_)=records
+            row<-case rows of [value]->pure value; _->fail "deployment row missing"
+            Backup.archiveLedger snapshotSettings directory "contract" (S.schemaVersion row) originalSequence snapshot
+    restore (manifestPath snapshotArchive)
+    evalRead reader ReadState >>= check . (==before)
     let tampered=directory</>"tampered.json"
         change key value=case manifest of
           Object fields->BL.writeFile tampered (encode $ Object $ KM.insert key value fields) >> setFileMode tampered 0o600
@@ -3380,4 +3409,4 @@ archiveContract settings fixtures reader = do
     (sort <$> listDirectory directory) >>= check . (==filesBefore)
     evalRead reader ReadState >>= check . (==before)
     fixture fixtures ArchiveRecords >>= check . (==records)
-    putStrLn "PASS: authenticated download, restricted paused restore, stale/identity/schema/hash refusal, failed-stage cleanup, private snapshot, real restic encryption/readback/restore, repository/permission/integrity/password refusal, unchanged coverage, exact signed attempts and every ledger posting"
+    putStrLn "PASS: committed concurrent write excluded by exported snapshot, authenticated download, restricted paused restore, stale/identity/schema/hash refusal, failed-stage cleanup, private snapshot, real restic encryption/readback/restore, repository/permission/integrity/password refusal, unchanged coverage, exact signed attempts and every ledger posting"
