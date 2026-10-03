@@ -3,7 +3,7 @@
 -- escape this module; the runtime will interpret its customer/operator DSL here.
 module Bridge.Store
   ( Reader, Writer, BridgeError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), StorePolicy(..), AllocationClaim(..), LedgerState(..), WithdrawalView(..), PaymentView(..), PaymentStatus(..), PreparedPayment(..), SignedAttempt(..), RecordedAttempt(..), NativeLockWork(..), NativeSettlementCheck(..), CustodySnapshot(..)
-  , StoreBackup(..), LedgerArchive(..), BackupReceipt(..), evalBackup
+  , StoreBackup(..), LedgerArchive(..), BackupReceipt(..), evalBackup, StoreRestore(..), evalRestore
   , withReader, withWriter, withFencedWriter, evalRead, evalWrite ) where
 
 import qualified Bridge.NativePayment as N
@@ -16,7 +16,7 @@ import Bridge.Domain
 import Bridge.Wire (PaymentTerms(..),PolicySnapshot(..),CostLimits(..),SignedAttempt(..))
 import qualified Bridge.Store.Schema as S
 import Bridge.Store.Catalog (claimWorker,verifyReadRole,exportSnapshot)
-import Bridge.Store.Backup (LedgerArchive(..),archiveLedger,BackupReceipt(..),loadRemoteBackup,uploadRemoteArchive)
+import Bridge.Store.Backup (LedgerArchive(..),archiveLedger,BackupReceipt(..),loadRemoteBackup,uploadRemoteArchive,loadLedgerArchive,restoreLedger,discardRestore)
 import Crypto.Random (getRandomBytes)
 import qualified Data.ByteString as BS
 import Data.List (nub,sortOn)
@@ -81,6 +81,29 @@ data CustodySnapshot = CustodySnapshot
 data NativeSettlementCheck = NativeConfirming | NativeUnavailable Text
   | NativeReconfirmed W.PaymentCosts Text
   | NativeWinnerChanged [RecordedAttempt] Text W.PaymentCosts Text deriving (Eq,Show)
+
+-- Offline restoration requires database-creation authority, not a Reader or
+-- paying Writer. No online handler receives this capability or chooses a target.
+data StoreRestore a where
+  RestoreLedger :: FilePath -> Text -> Int64 -> StoreRestore (Text,Int64)
+
+evalRestore :: PG.ConnectInfo -> StoreRestore a -> IO a
+evalRestore settings (RestoreLedger manifest identity minimumSequence) = do
+  archive<-loadLedgerArchive identity minimumSequence manifest
+  bracketOnError (restoreLedger settings archive) discardRestore $ \target->
+   bracket (PG.connect target) PG.close $ \c->Tx.withTransaction c $ do
+    claimWorker c >>= flip require "worker_already_running"
+    row<-metadata c identity
+    require (S.criticalSequence row==archiveSequence archive) "restored_sequence_mismatch"
+    _<-O.runUpdate c O.Update {O.uTable=S.deployment,
+      O.uUpdateWith= \r->r {S.paused=O.sqlInt8 1,S.pauseReason=O.sqlStrictText "restored_requires_reconciliation"},
+      O.uWhere= \r->S.singleton r O..== O.sqlInt8 1,O.uReturning=O.rCount}
+    count<-O.runUpdate c O.Update {O.uTable=S.custody,
+      O.uUpdateWith= \(n,revision,_,_,_)->(n,revision,O.null,O.null,O.toNullable $ O.sqlStrictText "restored_requires_reconciliation"),
+      O.uWhere= \(n,_,_,_,_)->n O..== O.sqlInt8 1,O.uReturning=O.rCount}
+    require (count==1) "corrupt_custody_state"
+    audit c "ledger_restored" (archiveHash archive)
+    pure (T.pack $ PG.connectDatabase target,S.criticalSequence row)
 
 -- Privileged local archive operation, deliberately absent from StoreRead and
 -- customer/signer capabilities. It never acknowledges off-host durability.

@@ -11,6 +11,7 @@ import Crypto.Random (getRandomBytes)
 import Control.Concurrent (threadDelay,forkIO,killThread)
 import Bridge.Identity (capabilityHash,payInstruction,digest,publicKey)
 import qualified Bridge.Wire as W
+import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson (encode,object,(.=),toJSON,Value(..),eitherDecodeStrict')
 import Data.Profunctor.Product (p5,p6,p8,p9)
 import qualified Data.ByteString.Lazy as BL
@@ -845,6 +846,7 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  RestoreDatabases :: Fixture [T.Text]
   ArchiveRecords :: Fixture ([S.Deployment],[S.Attempt],[(Int64,T.Text,T.Text,T.Text,Int64)])
   SourceRecipient :: T.Text -> T.Text -> Fixture ()
   TLSFunds :: Fixture ()
@@ -891,6 +893,10 @@ data Fixture a where
   ProtectHolds :: T.Text -> Fixture ()
   CheckPhases :: T.Text -> T.Text -> Fixture Bool
 fixture :: PG.Connection -> Fixture a -> IO a
+fixture c RestoreDatabases = O.runSelect c $ O.orderBy (O.asc id) $ do
+  name<-O.selectTable $ O.tableWithSchema "pg_catalog" "pg_database" (O.requiredTableField "datname")
+  O.where_ (O.like name $ O.sqlStrictText "ecx_restore_%")
+  pure name
 fixture c ArchiveRecords = (,,)
   <$> O.runSelect c (O.selectTable S.deployment)
   <*> O.runSelect c (O.orderBy (O.asc S.attemptId) $ O.selectTable S.attempts)
@@ -1489,6 +1495,22 @@ serverMain = do
     Fence.initializeFence (Config.fenceDirectory config) identity 0
     withReader settings {PG.connectUser=role} identity False $ \reader->do
       before<-evalRead reader ReadBalances
+      archive<-evalBackup reader (ExportLedger directory)
+      let runRestore minimumSequence=Process.readCreateProcessWithExitCode
+            (Process.proc binary ["restore-ledger",filename,manifestPath archive,show (minimumSequence::Int)]) {Process.env=Just childEnv} ""
+          acquire=do
+            (code,out,_)<-runRestore 0
+            check (code==ExitSuccess)
+            value<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ T.pack out)
+            fieldValue "paused" value >>= check . (==True)
+            fieldValue "criticalSequence" value >>= check . (==(0::Int))
+            fieldValue "database" value
+      bracket acquire (\name->Backup.discardRestore settings {PG.connectDatabase=T.unpack name}) $ \name->do
+        bracket (PG.connect settings {PG.connectDatabase=T.unpack name}) PG.close $ \connection->do
+          (rows,_,_)<-fixture connection ArchiveRecords
+          check (case rows of [row]->S.fingerprint row==identity && S.paused row==1; _->False)
+      (refused,_,err)<-runRestore 1
+      check (refused/=ExitSuccess && "backup_snapshot_too_old" `T.isInfixOf` T.pack err)
       bracket (HTTP.newManager HTTP.defaultManagerSettings {HTTP.managerResponseTimeout=HTTP.responseTimeoutMicro 1000000}) HTTP.closeManager $ \manager->
         withFile (directory<>"server.log") WriteMode $ \logFile->
           Process.withCreateProcess (Process.proc binary ["observe",filename])
@@ -2460,8 +2482,6 @@ archiveContract settings fixtures reader = do
         createDirectory path
         setFileMode path 0o700
         pure path
-      restored=PG.connectDatabase settings<>"_restored"
-      endpoint=["--host="<>PG.connectHost settings,"--port="<>show(PG.connectPort settings),"--username="<>PG.connectUser settings]
   bracket temporary removeDirectoryRecursive $ \directory->do
     before<-evalRead reader ReadState
     records<-fixture fixtures ArchiveRecords
@@ -2484,13 +2504,34 @@ archiveContract settings fixtures reader = do
     again<-evalBackup reader (ExportLedger directory)
     check (archivePath again/=archivePath archive && manifestPath again/=manifestPath archive)
     evalRead reader ReadState >>= check . (==before)
-    let restore path=bracket_ (Process.callProcess "createdb" $ endpoint<>[restored])
-          (Process.callProcess "dropdb" $ endpoint<>["--force",restored]) $ do
-            Process.callProcess "pg_restore" (endpoint<>["--exit-on-error","--no-owner","--no-privileges","--dbname="<>restored,path])
-            bracket (PG.connect settings {PG.connectDatabase=restored}) PG.close $ \connection->do
-              recovered<-fixture connection ArchiveRecords
-              check (records==recovered)
-    restore (archivePath archive)
+    role<-getEnv "ECX_REBUILD_CONTRACT_READER"
+    let restore manifestFile=bracket (evalRestore settings $ RestoreLedger manifestFile "contract" (archiveSequence archive))
+          (\(database,_)->Backup.discardRestore settings {PG.connectDatabase=T.unpack database}) $ \(database,n)->do
+            check (n==archiveSequence archive && database/=T.pack(PG.connectDatabase settings))
+            let target=settings {PG.connectDatabase=T.unpack database}
+                (rows,attempts,postings)=records
+                paused=[row {S.paused=1,S.pauseReason="restored_requires_reconciliation"} | row<-rows]
+            bracket (PG.connect target) PG.close $ \connection->do
+              fixture connection ArchiveRecords >>= check . (==(paused,attempts,postings))
+              fixture connection ReadCustodyCheck >>= check . (==(Nothing,Nothing,Just "restored_requires_reconciliation"))
+            denied<-try (bracket (PG.connect target {PG.connectUser=role}) PG.close (const $ pure ())) :: IO (Either SomeException ())
+            check (case denied of Left err->"permission denied for database" `T.isInfixOf` T.pack(show err); Right ()->False)
+    databasesBefore<-fixture fixtures RestoreDatabases
+    expectStore "invalid_restore_policy" (evalRestore settings $ RestoreLedger (manifestPath archive) "contract" (-1))
+    expectStore "backup_identity_mismatch" (evalRestore settings $ RestoreLedger (manifestPath archive) "wrong" 0)
+    expectStore "backup_snapshot_too_old" (evalRestore settings $ RestoreLedger (manifestPath archive) "contract" (archiveSequence archive+1))
+    restore (manifestPath archive)
+    let tampered=directory</>"tampered.json"
+        change key value=case manifest of
+          Object fields->BL.writeFile tampered (encode $ Object $ KM.insert key value fields) >> setFileMode tampered 0o600
+          _->fail "manifest object required"
+    change "criticalSequence" (toJSON $ archiveSequence archive+1)
+    expectStore "restored_sequence_mismatch" (evalRestore settings $ RestoreLedger tampered "contract" 0)
+    change "schemaVersion" (toJSON (18::Int))
+    expectStore "invalid_backup_manifest" (evalRestore settings $ RestoreLedger tampered "contract" 0)
+    change "sha256" (toJSON $ T.replicate 64 "0")
+    expectStore "backup_archive_mismatch" (evalRestore settings $ RestoreLedger tampered "contract" 0)
+    fixture fixtures RestoreDatabases >>= check . (==databasesBefore)
     program<-findExecutable "restic" >>= maybe (fail "restic required for encrypted archive contract") pure
     let repository=directory</>"repository"
         password=directory</>"password"
@@ -2528,8 +2569,17 @@ archiveContract settings fixtures reader = do
         {Process.std_out=Process.UseHandle output} $ \_ _ _ process->
           Process.waitForProcess process >>= check . (==ExitSuccess)
     BS.readFile downloaded >>= check . (==bytes)
-    restore downloaded
+    setFileMode downloaded 0o600
+    -- Preserve the verified manifest fields while binding the downloaded local filename.
+    let recoveredManifest=directory</>"recovered.json"
+    manifestBytes<-case manifest of
+      Object fields->pure $ encode $ Object $ KM.insert "archive" (toJSON ("download.dump"::T.Text)) fields
+      _->fail "manifest object required"
+    protected recoveredManifest (BL.toStrict manifestBytes)
+    restore recoveredManifest
+    fixture fixtures RestoreDatabases >>= check . (==databasesBefore)
     protected password "wrong-passphrase"
     expectStore "backup_process_failed" (upload archive)
     evalRead reader ReadState >>= check . (==before)
-    putStrLn "PASS: private snapshot, real restic encryption/readback/restore, repository/permission/integrity/password refusal, unchanged coverage, exact signed attempts and every ledger posting"
+    fixture fixtures ArchiveRecords >>= check . (==records)
+    putStrLn "PASS: restricted paused restore, stale/identity/schema/hash refusal, failed-stage cleanup, private snapshot, real restic encryption/readback/restore, repository/permission/integrity/password refusal, unchanged coverage, exact signed attempts and every ledger posting"

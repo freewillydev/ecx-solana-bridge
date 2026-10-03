@@ -9,7 +9,7 @@ import Bridge.Error
 import Bridge.RPC (newRpcManager)
 import Bridge.Signer
 import Bridge.SigningTransport
-import Bridge.Store (withReader,withFencedWriter)
+import Bridge.Store (withReader,withFencedWriter,StoreRestore(..),evalRestore)
 import Bridge.Web (publicApplication)
 import Bridge.Wire (Profile(..))
 import Control.Concurrent.Async (concurrently_)
@@ -34,6 +34,12 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
  where
   command ["check-config",path]=C.loadConfig path >>= LBS.putStrLn . encode . object . pure . ("fingerprint" .=) . C.fingerprint
   command ["check-signer",path,key]=C.loadConfig path >>= \c->verifySigningKey (C.custodyOwner c) key >> putStrLn "Custody signer valid"
+  command ["restore-ledger",path,manifest,minimumText]=do
+    c<-C.loadConfig path
+    minimumSequence<-maybe (reject "invalid_restore_policy") pure (readMaybe minimumText)
+    database<-databaseSettings
+    (restored,sequenceNo)<-evalRestore database (RestoreLedger manifest (C.fingerprint c) minimumSequence)
+    LBS.putStrLn $ encode $ object ["database" .= restored,"criticalSequence" .= sequenceNo,"paused" .= True]
   command ["operator",path]=do
     c<-C.loadConfig path
     bytes<-BS.hGet stdin 4097
@@ -71,7 +77,7 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
             concurrently_
               (runSettings (setHost "127.0.0.1" $ setPort (C.serverPort c) $ setTimeout 65 defaultSettings) app)
               (concurrently_ (runWorkerLoop worker) (runControl (C.fenceDirectory c) operatorControl))
-  command _=die "Usage: ecx-bridge-rebuild check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
+  command _=die "Usage: ecx-bridge-rebuild restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE (offline database owner) | check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
 
 databaseSettings :: IO PG.ConnectInfo
 databaseSettings = do

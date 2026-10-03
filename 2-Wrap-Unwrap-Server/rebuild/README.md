@@ -78,9 +78,10 @@ the service environment; public modes also require a distinct SELECT-only
 `PGREADUSER` and optional `PGREADPASSWORD`. Signer mode uses its own SELECT-only
 `PGUSER`, native signing credential and private custody key. `ECX_INTERFACE_CONFIG`
 and `ECX_ASSETS` are optional overrides; assets default to Cabal-generated output.
-The existing schema-19 ledger and matching initialized host fence are prerequisites.
-`serve` enables the customer/payment mode but still starts paused and currently has
-no rebuilt resume command. `observe` refuses customer creation and outgoing sends.
+The existing schema-21 ledger and matching initialized host fence are prerequisites.
+`serve` enables the customer/payment mode but starts paused; explicit operator resume
+requires successful recovery, reconciliation and readiness checks. `observe` refuses
+customer creation and outgoing sends.
 Neither command is public-release or canonical-custody approval.
 
 The process contract uses the existing disposable-database runner with
@@ -1324,8 +1325,51 @@ readback, reusing the archive operation and one bounded subprocess path. It remo
 neither the retained baseline nor any required custody protections. Root Cabal build,
 QuickCheck and real PostgreSQL/restic acceptance pass.
 
-Still required: key/wallet recovery material, verified restore/fence adoption,
-acknowledgment and runtime integration, then acceptance using independent off-host
-storage. The `backupRequired` startup refusal remains until those guarantees are
-implemented; neither a local archive nor an upload-only receipt permits signing or
-sending.
+The existing executable now provides offline ledger restoration:
+
+```sh
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE
+```
+
+Run this with a separate local database owner authorized to create databases. Use a
+trusted, private archive/manifest in an owned 0700 directory and an independently
+known minimum sequence (including any surviving fence/receipts); do not guess zero
+to bypass stale-backup refusal. This restores the ledger only, not signing keys,
+service roles, a host fence or a running bridge.
+
+The closed `StoreRestore` operation shares the uploader's strict manifest/digest
+validation, then creates a randomly named `ecx_restore_...` database from template0
+with connections initially disabled. It revokes PUBLIC access before enabling
+connections and invokes `pg_restore` as one transaction without old ownership or
+privilege grants. It does not overwrite a caller-selected or existing database.
+These fixed, identifier-quoted DDL operations and pg_restore are offline schema
+infrastructure; all restored-row validation and changes use Opaleye inside the
+closed operation. No handler receives database-creation authority.
+
+After restore, it compares the actual ledger identity/schema/sequence, marks it
+paused, invalidates the old custody certification and appends an archive-hash audit.
+It preserves principal, balances, attempts and critical/backup sequences. It returns
+the staging database name; it never initializes/adopts a fence, grants service
+access, changes deployment configuration, resumes service, signs or sends. Failed
+verification drops only its new staging database, without FORCE; unexpected live
+connections require inspection. Interruptions during an uncertain CREATE DATABASE
+may leave an inaccessible staging database to inspect, never an activated worker.
+The source ledger and surviving host fence remain untouched.
+
+Latest checkpoint versus `a622bb2`: **94 added production lines across the same
+three files** (Backup 208 → 273, Store 3,249 → 3,272, Main 87 → 93), no new files or
+executables. Shared manifest validation and bounded PostgreSQL process handling
+replace duplicate upload-only logic. The existing PostgreSQL contract grows
+2,535 → 2,585 lines, while its handwritten test restore is replaced by the production
+operation. Actual local and encrypted-restic restoration preserve every signed
+attempt and posting; tests verify pause/custody reset, runtime-role connection
+refusal, wrong identity/schema/hash and stale snapshot refusal, false-sequence
+post-restore rejection and staging cleanup. The actual executable successfully
+runs the new command and rejects a stale snapshot. Root Cabal build, QuickCheck,
+PostgreSQL/restic and executable/HTTP contracts pass.
+
+Still required: key/wallet recovery material, authenticated download/restore orchestration,
+fence adoption, acknowledgment and runtime integration, then acceptance using
+independent off-host storage. The `backupRequired` startup refusal remains until
+those guarantees are implemented; neither a local archive, upload-only receipt nor
+staged restored database permits signing or sending.

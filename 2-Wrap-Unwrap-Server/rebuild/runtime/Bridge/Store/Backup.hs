@@ -1,11 +1,13 @@
 {-# LANGUAGE ScopedTypeVariables,DeriveGeneric #-}
 -- Private archive mechanics. Only Store's closed backup evaluator supplies the
 -- exported snapshot and metadata; no SQL or remote acknowledgment lives here.
-module Bridge.Store.Backup (LedgerArchive(..),archiveLedger,RemoteBackup,loadRemoteBackup,uploadRemoteArchive,BackupReceipt(..),uploadArchive) where
+module Bridge.Store.Backup (LedgerArchive(..),archiveLedger,RemoteBackup,loadRemoteBackup,uploadRemoteArchive,BackupReceipt(..),uploadArchive,loadLedgerArchive,restoreLedger,discardRestore) where
 
 import Bridge.Error
-import Control.Exception (IOException,bracket,bracketOnError,catch,onException)
-import Control.Monad (when)
+import Control.Exception (IOException,bracket,bracketOnError,catch,onException,mask)
+import Control.Monad (when,void)
+import Crypto.Random (getRandomBytes)
+import qualified Data.ByteString.Base16 as Hex
 import Crypto.Hash (Context,Digest,SHA256,hashInit,hashUpdate,hashFinalize)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
@@ -17,6 +19,7 @@ import Data.List (isPrefixOf,sort)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Database.PostgreSQL.Simple as PG
+import Database.PostgreSQL.Simple.Types (Identifier(..))
 import System.Directory (removeFile)
 import GHC.Generics (Generic)
 import qualified Network.HTTP.Client as HTTP
@@ -25,7 +28,7 @@ import qualified Data.Text.Encoding as TE
 import System.Posix.Signals (signalProcess,sigKILL)
 import System.Environment (getEnvironment)
 import System.Exit (ExitCode(..))
-import System.FilePath (isAbsolute,normalise,takeFileName)
+import System.FilePath (isAbsolute,normalise,takeFileName,takeDirectory,(</>))
 import System.IO
 import System.Posix.Files
 import System.Posix.IO
@@ -44,20 +47,9 @@ data LedgerArchive = LedgerArchive
 -- no paying-writer transaction or row lock is held during this operation.
 archiveLedger :: PG.ConnectInfo -> FilePath -> Text -> Int64 -> Int64 -> Text -> IO LedgerArchive
 archiveLedger settings directory identity version sequenceNo snapshot = do
-  require (isAbsolute directory && normalise directory==directory) "invalid_backup_directory"
-  status <- getSymbolicLinkStatus directory
-  uid <- getEffectiveUserID
-  require (isDirectory status && fileOwner status==uid && fileMode status .&. 0o077==0) "unsafe_backup_directory"
+  privateDirectory directory
   require (not(T.null snapshot) && T.length snapshot<=128 && T.all (`elem` ("0123456789abcdefABCDEF-"::String)) snapshot) "invalid_backup_snapshot"
-  inherited <- getEnvironment
-  let environment = [("PGHOST",PG.connectHost settings),("PGPORT",show $ PG.connectPort settings)
-                    ,("PGDATABASE",PG.connectDatabase settings),("PGUSER",PG.connectUser settings)
-                    ,("PGPASSWORD",PG.connectPassword settings),("PGCONNECT_TIMEOUT","10")]
-                    <> filter (not . isPrefixOf "PG" . fst) inherited
-      run program arguments output = withCreateProcess (proc program arguments)
-        {env=Just environment,std_in=NoStream,std_out=output,std_err=NoStream,close_fds=True} $ \_ _ _ process -> do
-          result <- timeout (300*1000000) (waitForProcess process)
-          require (result==Just ExitSuccess) (if program=="pg_dump" then "ledger_archive_dump_failed" else "ledger_archive_validation_failed")
+  let run=databaseTool settings
       cleanup (path,handle) = do
         hClose handle `catch` (\(_::IOException)->pure ())
         removeFile path
@@ -96,6 +88,13 @@ instance FromJSON RemoteBackup where
 data BackupReceipt = BackupReceipt
   { receiptIdentity :: Text, receiptSequence :: Int64, receiptSnapshot :: Text
   , receiptArchiveHash :: Text } deriving (Eq,Show)
+
+privateDirectory :: FilePath -> IO ()
+privateDirectory directory = do
+  require (isAbsolute directory && normalise directory==directory) "invalid_backup_directory"
+  status<-getSymbolicLinkStatus directory
+  uid<-getEffectiveUserID
+  require (isDirectory status && fileOwner status==uid && fileMode status .&. 0o077==0) "unsafe_backup_directory"
 
 privateFile :: FilePath -> IO ()
 privateFile path = do
@@ -148,18 +147,14 @@ uploadArchive program repository password archive = do
   require (isAbsolute program) "invalid_backup_configuration"
   privateFile repository
   privateFile password
-  privateFile (archivePath archive)
+  validated<-loadLedgerArchive (archiveIdentity archive) 0 (manifestPath archive)
+  require (validated==archive) "backup_archive_mismatch"
   manifest<-readPrivate (manifestPath archive)
-  checksum<-withBinaryFile (archivePath archive) ReadMode (hashChunks hashInit)
-  value<-either (const $ reject "invalid_backup_manifest") pure (eitherDecodeStrict' manifest)
   let identity=archiveIdentity archive; sequenceNo=archiveSequence archive
-      expected=object ["format" .= (2::Int),"archive" .= takeFileName(archivePath archive),"sha256" .= checksum
-        ,"fingerprint" .= identity,"schemaVersion" .= (21::Int),"criticalSequence" .= sequenceNo
-        ,"remoteDurabilityAcknowledged" .= False]
+      checksum=archiveHash archive
       tags=["ecx-bridge-critical","deployment:"<>identity,"sequence:"<>T.pack(show sequenceNo)]
       paths=[archivePath archive,manifestPath archive]
       run=resticJSON program repository password
-  require (value==expected && checksum==archiveHash archive && sequenceNo>=0) "backup_archive_mismatch"
   messages<-run (["backup","--json"]<>concatMap (\tag->["--tag",T.unpack tag]) tags<>paths)
   records<-mapM decode (filter (not . BS.null) $ BS.split 10 messages)
   let summaries=[record | record@(Object fields)<-records, parseEither (.: "message_type") fields==Right ("summary"::Text)]
@@ -206,3 +201,73 @@ resticJSON program repository password arguments = do
     let size=total+BS.length bytes
     require (size<=4*1024*1024) "backup_response_too_large"
     if BS.null bytes then pure(BS.concat $ reverse chunks) else readBounded handle size (bytes:chunks)
+
+-- Validate a trusted private manifest before any restore DDL. A checksum binds
+-- contents; provenance comes from protected local custody or authenticated restic.
+loadLedgerArchive :: Text -> Int64 -> FilePath -> IO LedgerArchive
+loadLedgerArchive identity minimumSequence manifest = do
+  require (minimumSequence>=0 && not(T.null identity)) "invalid_restore_policy"
+  privateDirectory (takeDirectory manifest)
+  bytes<-readPrivate manifest
+  value<-either (const $ reject "invalid_backup_manifest") pure (eitherDecodeStrict' bytes)
+  (version,name,checksum,saved,schema,sequenceNo,remote)<-
+    either (const $ reject "invalid_backup_manifest") pure $ parseEither
+      (withObject "ledger manifest" $ \o->(,,,,,,) <$> o .: "format" <*> o .: "archive" <*> o .: "sha256"
+        <*> o .: "fingerprint" <*> o .: "schemaVersion" <*> o .: "criticalSequence" <*> o .: "remoteDurabilityAcknowledged") value
+  require (version==(2::Int) && schema==(21::Int) && not remote && sequenceNo>=0
+    && name==takeFileName name && name `notElem` ["",".",".."])
+    "invalid_backup_manifest"
+  require (saved==identity) "backup_identity_mismatch"
+  require (sequenceNo>=minimumSequence) "backup_snapshot_too_old"
+  let path=takeDirectory manifest</>name
+      expected=object ["format" .= version,"archive" .= name,"sha256" .= (checksum::Text)
+        ,"fingerprint" .= (saved::Text),"schemaVersion" .= schema,"criticalSequence" .= (sequenceNo::Int64)
+        ,"remoteDurabilityAcknowledged" .= remote]
+  require (value==expected) "invalid_backup_manifest"
+  privateFile path
+  actual<-withBinaryFile path ReadMode (hashChunks hashInit)
+  require (checksum==actual) "backup_archive_mismatch"
+  pure (LedgerArchive path manifest checksum saved sequenceNo)
+
+-- Explicit offline schema infrastructure. Generated names, template0 and revoked
+-- PUBLIC access isolate staging; never restore into a caller-selected database.
+-- No financial row query/update lives here, and no existing database is dropped.
+restoreLedger :: PG.ConnectInfo -> LedgerArchive -> IO PG.ConnectInfo
+restoreLedger settings archive = mask $ \restore->do
+  suffix<-TE.decodeUtf8 . Hex.encode <$> (getRandomBytes 16 :: IO BS.ByteString)
+  let target=settings {PG.connectDatabase="ecx_restore_"<>T.unpack suffix}
+      name=PG.Only $ Identifier $ T.pack $ PG.connectDatabase target
+  bracket (PG.connect settings {PG.connectDatabase="postgres"}) PG.close $ \admin->do
+    void $ PG.execute admin "CREATE DATABASE ? WITH TEMPLATE template0 ALLOW_CONNECTIONS false" name
+    (restore $ do
+      void $ PG.execute admin "REVOKE ALL ON DATABASE ? FROM PUBLIC" name
+      void $ PG.execute admin "ALTER DATABASE ? ALLOW_CONNECTIONS true" name
+      withBinaryFile "/dev/null" WriteMode $ \sink->databaseTool target "pg_restore"
+        ["--exit-on-error","--single-transaction","--no-owner","--no-privileges","--no-password"
+        ,"--dbname="<>PG.connectDatabase target,archivePath archive] (UseHandle sink)
+      pure target) `onException` void (PG.execute admin "DROP DATABASE ?" name)
+
+-- Only the freshly generated staging identity may be discarded after a failed
+-- verification. No FORCE: unexpected connections require operator inspection.
+discardRestore :: PG.ConnectInfo -> IO ()
+discardRestore settings = do
+  let name=T.pack $ PG.connectDatabase settings
+  require (T.length name==44 && "ecx_restore_" `T.isPrefixOf` name
+    && T.all (`elem` ("0123456789abcdef"::String)) (T.drop 12 name)) "invalid_restore_database"
+  bracket (PG.connect settings {PG.connectDatabase="postgres"}) PG.close $ \admin->
+    void $ PG.execute admin "DROP DATABASE ?" (PG.Only $ Identifier name)
+
+databaseTool :: PG.ConnectInfo -> FilePath -> [String] -> StdStream -> IO ()
+databaseTool settings program arguments output = do
+  inherited<-getEnvironment
+  let environment=[("PGHOST",PG.connectHost settings),("PGPORT",show $ PG.connectPort settings)
+        ,("PGDATABASE",PG.connectDatabase settings),("PGUSER",PG.connectUser settings)
+        ,("PGPASSWORD",PG.connectPassword settings),("PGCONNECT_TIMEOUT","10")]
+        <>filter (not . isPrefixOf "PG" . fst) inherited
+  withCreateProcess (proc program arguments)
+    {env=Just environment,std_in=NoStream,std_out=output,std_err=NoStream,close_fds=True} $ \_ _ _ process->do
+      let kill=getProcessExitCode process >>= \state->when (state==Nothing) (getPid process >>= mapM_ (signalProcess sigKILL))
+      (do
+        result<-timeout (300*1000000) (waitForProcess process)
+        when (result==Nothing) kill
+        require (result==Just ExitSuccess) "ledger_archive_process_failed") `onException` kill
