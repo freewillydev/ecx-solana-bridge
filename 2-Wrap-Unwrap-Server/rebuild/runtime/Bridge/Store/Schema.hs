@@ -3,7 +3,7 @@
 module Bridge.Store.Schema where
 import Data.Int (Int64)
 import Data.Text (Text)
-import Data.Profunctor.Product (p2,p3,p4,p5)
+import Data.Profunctor.Product (p2,p3,p4,p5,p6)
 import Data.Profunctor.Product.TH (makeAdaptorAndInstance)
 import qualified Opaleye as O
 
@@ -139,3 +139,21 @@ checkpoints = O.table "checkpoints" $ p2 (O.requiredTableField "chain",O.require
 nativeAllocations :: O.Table (TextField,TextField,IntField) (TextField,TextField,IntField)
 nativeAllocations = O.table "native_allocations" $ p3
   (O.requiredTableField "order_id",O.requiredTableField "label",O.requiredTableField "critical_sequence")
+
+sourceChecks :: O.Table (Maybe IntField,TextField,TextField,IntField,TextField,IntField)
+                       (IntField,TextField,TextField,IntField,TextField,IntField)
+sourceChecks = O.table "source_recoveries" $ p6
+  (O.optionalTableField "id",O.requiredTableField "deposit_id",O.requiredTableField "state",
+   O.requiredTableField "shortfall",O.requiredTableField "evidence_json",O.requiredTableField "critical_sequence")
+sourceReturns :: O.Table (IntField,IntField) (IntField,IntField)
+sourceReturns = O.table "source_loss_returns" $ p2 (O.requiredTableField "cover_sequence",O.requiredTableField "recovery_sequence")
+activeSourceCovers :: O.Select (IntField,TextField,IntField,IntField,IntField)
+activeSourceCovers = O.selectTable $ O.table "active_source_loss_covers" $ p5
+  (O.requiredTableField "critical_sequence",O.requiredTableField "deposit_id",O.requiredTableField "amount",
+   O.requiredTableField "float_amount",O.requiredTableField "earned_amount")
+eventHeads :: O.Select (TextField,TextField,TextField,TextField,IntField)
+eventHeads = O.selectTable $ O.table "chain_events" $ p5
+  (O.requiredTableField "chain",O.requiredTableField "event_id",O.requiredTableField "kind",O.requiredTableField "evidence_hash",O.requiredTableField "needs_review")
+observationEvidence :: O.Table (TextField,TextField,TextField,TextField) (TextField,TextField,TextField,TextField)
+observationEvidence = O.table "observation_evidence" $ p4
+  (O.requiredTableField "hash",O.requiredTableField "chain",O.requiredTableField "event_id",O.requiredTableField "evidence_json")

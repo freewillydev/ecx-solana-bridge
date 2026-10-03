@@ -264,8 +264,26 @@ excluding shared dispatch/transaction code. Extra checks account for the larger
 functions; compact named records remove generated schema repetition. Review
 projections and test fixtures now reuse those mappings.
 
+Source-check persistence is implemented behind a closed write operation. It
+compares the complete saved receipt snapshot and, for conclusive checks, the current
+unreviewed native observation hash. It records pending/missing/restored/unavailable
+states without treating provider failure as proven loss. A proven deficit and its
+reversal are balanced and replay-safe; restoration returns any still-active loss
+cover's exact float/earned split once. Every changed recovery stays paused. The
+latest recovery is selected with a SQL limit and cover returns use the existing
+active-cover view instead of loading/filtering all cover history.
+
+Source persistence/evidence/return functions total 100→82 lines across one file
+each, including the new closed write branch and excluding shared helpers/schema.
+The existing private schema and wire modules gain fixed projections and typed
+receipt/check records; no new production file is added. PostgreSQL acceptance
+covers ordinary pending, missing-value replay, unavailable evidence preserving a
+known deficit, stale receipts/proof hashes, invalid evidence, restoration and exact
+covered-capital return/replay. All row fixtures use Opaleye. The test cover is seeded;
+operator cover authorization and actual native loss detection are not claimed done.
+
 Connecting those adapters to the high-level safe/critical runtime, actual host fence,
 dedicated signer and durable payment execution remains unfinished. Native observation,
-atomic scan commits with source/outflow recovery, observer orchestration, broader
-recovery and SDK build integration also remain. Passing these checks is not
-end-to-end payment, migration or real-chain acceptance.
+atomic scan commits, suspended-work/approval binding, operator loss-cover authorization,
+observer orchestration, broader recovery and SDK build integration also remain.
+Passing these checks is not end-to-end payment, migration or real-chain acceptance.

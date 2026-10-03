@@ -1,7 +1,7 @@
 {-# LANGUAGE DeriveAnyClass, DerivingStrategies #-}
 -- Existing customer wire contract; validated money comes only from Domain.
 module Bridge.Wire where
-import Bridge.Domain (Amount, Direction, Quote)
+import Bridge.Domain (Amount, Asset, Direction, Quote)
 import Data.Aeson
 import Data.Char (toLower)
 import Data.Int (Int64)
@@ -80,3 +80,11 @@ instance FromJSON PaymentTerms where
     policy <- o .: "policy"
     if identity/=deploymentFingerprint policy then fail "payment_profile_mismatch" else
       PaymentTerms policy <$> (CostLimits <$> o .: "nativeFee" <*> o .: "solanaFee" <*> o .: "solanaRent")
+
+-- Observation evidence is data, not permission to execute a chain or ledger action.
+data Deposit = Deposit
+  { depositId :: !Text, depositOrder :: !(Maybe Text), depositAsset :: !Asset
+  , depositAmount :: !Amount, depositAnchor :: !Text, depositConfirmations :: !Int
+  , depositEligible :: !Bool, depositSeenAt :: !Int64 } deriving (Eq,Show)
+data SourceCheck = SourcePending Value | SourceMissing Value | SourceRestored Value | SourceUnavailable Value
+  deriving (Eq,Show)

@@ -21,7 +21,8 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Control.Concurrent.MVar
 import Control.Exception
 import Control.Monad (unless,forM_,when)
-import Data.Aeson (FromJSON,ToJSON,encode,eitherDecodeStrict')
+import Data.Aeson (FromJSON,ToJSON,Value(Null),encode,eitherDecodeStrict',withObject,(.:))
+import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
 import qualified Data.Map.Strict as M
@@ -58,7 +59,10 @@ data StoreRead a where
   ReadWithdrawal :: Text -> StoreRead (Maybe WithdrawalView)
   ReadOrder :: Text -> Text -> StoreRead W.OrderView
   PromotionCandidates :: StoreRead [Text]
+  ReadSource :: Text -> StoreRead W.Deposit
+  ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
+  RecordSourceCheck :: W.Deposit -> W.SourceCheck -> StoreWrite ()
   PromoteDeposit :: Int64 -> Text -> StoreWrite Bool
   Pause :: Text -> StoreWrite ()
   CreateOrder :: Int64 -> Text -> W.OrderRequest -> StoreWrite Text
@@ -107,6 +111,8 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
     row <- metadata c identity
     case operation of
       ReadState -> pure (LedgerState (S.criticalSequence row) (S.backupSequence row) (S.paused row/=0) (S.pauseReason row))
+      ReadSource identifier -> readSource c identifier >>= asDeposit
+      ReadSourceEvidence txid -> sourceEvidence c txid
       PromotionCandidates -> promotionCandidates c
       ReadBalances -> balances c
       ReadWithdrawal key -> readWithdrawal c key
@@ -117,6 +123,19 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
 evalWrite :: Writer -> StoreWrite a -> IO a
 evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
  let policy=executionTerms config; limit=admissionLimits config in case operation of
+  RecordSourceCheck expected check -> do
+    current <- readSource c (W.depositId expected)
+    snapshot <- asDeposit current
+    require (snapshot==expected && W.depositAsset expected==Native) "source_recovery_changed"
+    case check of
+      W.SourceUnavailable _ -> pure ()
+      _ -> do
+        let proof=sourceProof check
+        hash <- either (const $ reject "invalid_source_observation_hash") pure $ parseEither (withObject "source proof" (.: "observationHash")) proof
+        txid <- case T.splitOn ":" (W.depositId expected) of ["native",tx,_]->pure tx; _->reject "invalid_native_deposit_id"
+        (saved,_) <- sourceEvidence c txid
+        require (hash==saved) "source_recovery_scan_not_current"
+    recordSourceCheck c current check
   PromoteDeposit now identifier -> promoteDeposit c policy now identifier
   CreateOrder now header request -> createOrder c policy limit now header request
   ClaimNative now header identifier -> do
@@ -668,3 +687,73 @@ promoteDeposit c terms now identifier = do
         _ <- O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=O.sqlStrictText "Ready"},
           O.uWhere= \r->S.orderId r O..== O.sqlStrictText oid,O.uReturning=O.rCount}
         pure True
+
+readSource :: PG.Connection -> Text -> IO S.Deposit
+readSource c identifier = do
+  rows <- O.runSelect c $ do
+    row <- O.selectTable S.deposits
+    O.where_ (S.depositId row O..== O.sqlStrictText identifier)
+    pure row
+  case rows of [row]->pure row; _->reject "source_deposit_missing"
+asDeposit :: S.Deposit -> IO W.Deposit
+asDeposit row = W.Deposit (S.depositId row) (S.depositOrder row) <$> parseAsset (S.depositAsset row)
+  <*> checked (amount $ toInteger $ S.depositAmount row) <*> pure (S.depositAnchor row)
+  <*> pure (fromIntegral $ S.depositDepth row) <*> pure (S.depositEligible row==1) <*> pure (S.depositSeen row)
+sourceEvidence :: PG.Connection -> Text -> IO (Text,Text)
+sourceEvidence c txid = do
+  rows <- O.runSelect c $ do
+    (chain,key,kind,hash,review) <- S.eventHeads
+    (proofHash,_,_,proof) <- O.selectTable S.observationEvidence
+    O.where_ (chain O..== O.sqlStrictText "Native" O..&& key O..== O.sqlStrictText txid O..&& review O..== O.sqlInt8 0
+      O..&& O.in_ (map O.sqlStrictText ["incoming","unmatched_incoming"]) kind O..&& hash O..== proofHash)
+    pure (hash,proof)
+  case rows of [saved]->pure saved; _->reject "source_recovery_scan_not_current"
+sourceProof :: W.SourceCheck -> Value
+sourceProof = \case W.SourcePending p->p; W.SourceMissing p->p; W.SourceRestored p->p; W.SourceUnavailable p->p
+
+-- Internal to source observation/recovery operations. Unavailable evidence never
+-- becomes a loss; replay cannot post value twice, and restoration never resumes.
+recordSourceCheck :: PG.Connection -> S.Deposit -> W.SourceCheck -> IO ()
+recordSourceCheck c source check = do
+  let did=S.depositId source
+      eligible=S.depositEligible source==1
+  asset <- parseAsset (S.depositAsset source)
+  history <- O.runSelect c $ O.limit 1 $ O.orderBy (O.desc (\(key,_,_,_,_,_)->key)) $ do
+    row@(_,deposit,_,_,_,_) <- O.selectTable S.sourceChecks
+    O.where_ (deposit O..== O.sqlStrictText did)
+    pure row
+    :: IO [(Int64,Text,Text,Int64,Text,Int64)]
+  let old=case history of [(_,_,state,loss,savedProof,_)]->Just(state,loss,savedProof); _->Nothing
+      previousLoss=maybe 0 (\(_,n,_)->n) old
+      proof=sourceProof check
+      evidence=encodeSaved proof
+  (state,loss) <- case check of
+    W.SourcePending _->require (not eligible && asset==Native) "source_recovery_scan_not_current" >> pure ("pending",0)
+    W.SourceMissing _->require (not eligible && asset==Native) "source_recovery_scan_not_current" >> pure ("missing",S.depositAmount source)
+    W.SourceRestored _->require eligible "source_recovery_scan_not_current" >> pure ("restored",0)
+    W.SourceUnavailable _->pure ("unavailable",previousLoss)
+  require (proof/=Null && T.length evidence<=16384) "invalid_source_recovery_evidence"
+  let ordinary=old==Nothing && S.depositAllocated source==0 && state=="pending"
+      unchanged=maybe False (\(s,n,p)->s==state && n==loss && (state/="unavailable" || p==evidence)) old
+  unless (ordinary || unchanged) $ do
+    sequenceNo <- nextSequence c
+    _ <- O.runInsert c O.Insert {O.iTable=S.sourceChecks,
+      O.iRows=[(Nothing,O.sqlStrictText did,O.sqlStrictText state,O.sqlInt8 loss,O.sqlStrictText evidence,O.sqlInt8 sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+    let delta=toInteger loss-toInteger previousLoss
+    when (delta/=0) $ post c ("source-recovery:"<>T.pack(show sequenceNo)) "change in verified missing source value"
+      [Posting asset SourceDeficit (negate delta),Posting asset External delta]
+    when (delta<0) $ do
+      covers <- O.runSelect c $ do
+        (key,deposit,n,capital,earned) <- S.activeSourceCovers
+        O.where_ (deposit O..== O.sqlStrictText did)
+        pure (key,n,capital,earned)
+        :: IO [(Int64,Int64,Int64,Int64)]
+      forM_ covers $ \(covered,n,capital,earned)->do
+        require (toInteger n==negate delta) "source_loss_return_mismatch"
+        _ <- O.runInsert c O.Insert {O.iTable=S.sourceReturns,O.iRows=[(O.sqlInt8 covered,O.sqlInt8 sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+        post c ("source-loss-return:"<>T.pack(show covered)) "restored source returns its operator loss allocation"
+          [Posting asset Float (toInteger capital),Posting asset Earned (toInteger earned),Posting asset SourceDeficit (negate $ toInteger n)]
+    _ <- O.runUpdate c O.Update {O.uTable=S.deployment,
+      O.uUpdateWith= \row->row {S.paused=O.sqlInt8 1,S.pauseReason=O.sqlStrictText "source_recovery_review"},
+      O.uWhere= \row->S.singleton row O..== O.sqlInt8 1,O.uReturning=O.rCount}
+    audit c "source_recovery" (did<>":"<>state)

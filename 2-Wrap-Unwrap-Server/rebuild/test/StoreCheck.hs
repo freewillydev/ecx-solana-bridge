@@ -2,7 +2,8 @@
 module Main (main) where
 import Bridge.Identity (capabilityHash,payInstruction)
 import qualified Bridge.Wire as W
-import Data.Aeson (encode)
+import Data.Aeson (encode,object,(.=),Value(Null))
+import Data.Profunctor.Product (p8)
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text.Encoding as TE
 import Bridge.Domain
@@ -270,6 +271,60 @@ main = do
         pure "promote-source"
       withWriter settings (store policy limits) (const $ pure ()) $ \writer ->
         evalWrite writer (PromoteDeposit 100 promoted) >>= check . not
+      withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
+        let tx=T.replicate 64 "d"; did="native:"<>tx<>":0"; hash=T.replicate 64 "e"
+            proof=object ["observationHash" .= hash]
+            record decision=do snapshot<-evalRead reader (ReadSource did); evalWrite writer (RecordSourceCheck snapshot decision)
+        fixture fixtures (SeedReceipt did Nothing Native 50 0 False 100)
+        fixture fixtures (SeedSourceEvidence tx hash)
+        (savedHash,_)<-evalRead reader (ReadSourceEvidence tx)
+        check (savedHash==hash)
+        before<-evalRead reader ReadBalances
+        initial<-evalRead reader ReadState
+        record (W.SourcePending proof)
+        ordinary<-evalRead reader ReadState
+        check (ledgerSequence ordinary==ledgerSequence initial)
+        snapshot<-evalRead reader (ReadSource did)
+        expectStore "source_recovery_changed" (evalWrite writer $ RecordSourceCheck snapshot {W.depositAmount=money 49} $ W.SourceMissing proof)
+        expectStore "source_recovery_scan_not_current" (record $ W.SourceMissing $ object ["observationHash" .= ("wrong"::T.Text)])
+        fixture fixtures ReadyIntake
+        record (W.SourceMissing proof)
+        missing<-evalRead reader ReadBalances
+        missingState<-evalRead reader ReadState
+        check (M.findWithDefault 0 (Native,SourceDeficit) missing == M.findWithDefault 0 (Native,SourceDeficit) before-50 && ledgerPaused missingState)
+        record (W.SourceMissing proof)
+        replay<-evalRead reader ReadState
+        check (ledgerSequence replay==ledgerSequence missingState)
+        record (W.SourceUnavailable $ object ["reason" .= ("offline"::T.Text)])
+        unavailable<-evalRead reader ReadBalances
+        check (missing==unavailable)
+        unavailableState<-evalRead reader ReadState
+        record (W.SourceUnavailable $ object ["reason" .= ("offline"::T.Text)])
+        repeated<-evalRead reader ReadState
+        check (ledgerSequence repeated==ledgerSequence unavailableState)
+        expectStore "invalid_source_recovery_evidence" (record $ W.SourceUnavailable Null)
+        expectStore "invalid_source_recovery_evidence" (record $ W.SourceUnavailable $ object ["reason" .= T.replicate 17000 "a"])
+        expectStore "source_recovery_scan_not_current" (record $ W.SourceRestored proof)
+        fixture fixtures (SourceEligibility did True)
+        expectStore "source_recovery_changed" (evalWrite writer $ RecordSourceCheck snapshot $ W.SourceRestored proof)
+        record (W.SourceRestored proof)
+        restored<-evalRead reader ReadBalances
+        check (M.filter (/=0) before==M.filter (/=0) restored)
+        restoredState<-evalRead reader ReadState
+        record (W.SourceRestored proof)
+        restoredReplay<-evalRead reader ReadState
+        check (ledgerPaused restoredReplay && ledgerSequence restoredReplay==ledgerSequence restoredState)
+        -- A covered loss returns the exact saved capital split only once.
+        fixture fixtures (SourceEligibility did False)
+        record (W.SourceMissing proof)
+        fixture fixtures (CoverSource did)
+        fixture fixtures (SourceEligibility did True)
+        record (W.SourceRestored proof)
+        returned<-evalRead reader ReadBalances
+        check (M.filter (/=0) before==M.filter (/=0) returned)
+        record (W.SourceRestored proof)
+        returnedAgain<-evalRead reader ReadBalances
+        check (returnedAgain==returned)
       fixture fixtures LargeBalances
       huge <- evalRead reader ReadBalances
       check (M.lookup (Wrapped,Float) huge==Just (1000+2*toInteger(maxBound::Int64)))
@@ -288,6 +343,9 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  SeedSourceEvidence :: T.Text -> T.Text -> Fixture ()
+  SourceEligibility :: T.Text -> Bool -> Fixture ()
+  CoverSource :: T.Text -> Fixture ()
   OperatingPhase :: T.Text -> T.Text -> Fixture ()
   HistoricalHolds :: T.Text -> Fixture ()
   PromotionFunds :: Fixture ()
@@ -455,3 +513,28 @@ fixture c (HistoricalHolds oid) = PG.withTransaction c $ do
   void $ O.runInsert c O.Insert {O.iTable=S.orderCosts,O.iRows=[(text oid,num 10,num 10,num 10)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.operatingReservations,
     O.iRows=[(text oid,text kind,text asset,num n,text "quote") | (kind,asset,n)<-[("conversion","Sol",20),("refund","Native",10)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+
+fixture c (SeedSourceEvidence tx hash) = PG.withTransaction c $ do
+  let text=O.sqlStrictText; num=O.sqlInt8
+      heads=O.table "chain_events" $ p8 (O.requiredTableField "chain",O.requiredTableField "event_id",O.requiredTableField "kind",O.requiredTableField "anchor",O.requiredTableField "evidence_hash",O.requiredTableField "first_seen",O.requiredTableField "last_seen",O.requiredTableField "needs_review")
+  void $ O.runInsert c O.Insert {O.iTable=S.observationEvidence,O.iRows=[(text hash,text "Native",text tx,text "{}")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=heads,O.iRows=[(text "Native",text tx,text "unmatched_incoming",text "fixture-anchor",text hash,num 100,num 100,num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+fixture c (SourceEligibility did eligible) = void $ O.runUpdate c O.Update {O.uTable=S.deposits,
+  O.uUpdateWith= \r->r {S.depositEligible=O.sqlInt8 $ if eligible then 1 else 0},
+  O.uWhere= \r->S.depositId r O..== O.sqlStrictText did,O.uReturning=O.rCount}
+fixture c (CoverSource did) = PG.withTransaction c $ do
+  recovery<-O.runSelect c $ O.limit 1 $ O.orderBy (O.desc id) $ do
+    (_,deposit,_,_,_,n)<-O.selectTable S.sourceChecks
+    O.where_ (deposit O..== O.sqlStrictText did)
+    pure n
+    :: IO [Int64]
+  sequences<-O.runUpdate c O.Update {O.uTable=S.deployment,
+    O.uUpdateWith= \r->r {S.criticalSequence=S.criticalSequence r+1},O.uWhere=const(O.sqlBool True),O.uReturning=O.rReturning S.criticalSequence}
+  (loss,n)<-case (recovery,sequences) of ([r],[s])->pure(r,s); _->fail "missing cover fixture state"
+  let text=O.sqlStrictText; num=O.sqlInt8
+      covers=O.table "source_loss_covers" $ p8 (O.requiredTableField "critical_sequence",O.requiredTableField "deposit_id",O.requiredTableField "recovery_sequence",O.requiredTableField "amount",O.requiredTableField "float_amount",O.requiredTableField "earned_amount",O.requiredTableField "reason",O.requiredTableField "proof_json")
+      event="cover-fixture:"<>T.pack(show n)
+  void $ O.runInsert c O.Insert {O.iTable=covers,O.iRows=[(num n,text did,num loss,num 50,num 30,num 20,text "test cover",text "{}")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(text event,text "test loss cover")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.postings,
+    O.iRows=[(Nothing,text event,text "Native",text account,num delta) | (account,delta)<-[("float",-30),("earned",-20),("source_deficit",50)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}

@@ -35,7 +35,10 @@ captured-effect and offline protocol tests. Adapter/workflow integration, high-l
 evaluators, native observation, atomic scan commits, observer orchestration,
 SDK build integration and durable execution remain unfinished. Closed deposit
 promotion now passes PostgreSQL acceptance for both directions, exact preserved
-holds, historical terms, rejection paths and restart replay.
+holds, historical terms, rejection paths and restart replay. Source-check persistence
+now passes PostgreSQL snapshot/proof binding, loss/restoration replay and covered
+capital-return checks; native detection and recovery approval/cover authorization
+still need integration.
 No existing custody state has been moved. See the rebuild README for scoped counts
 and evidence; do not compare this subset against the entire old storage layer.
 
