@@ -69,7 +69,10 @@ host fence, then runs the actual observation-only critical dispatcher twice.
 All three scanner health records must report success; repeat observation must leave
 accounting unchanged, with no pending signed attempts and intake still paused.
 Signing and broadcasting requests must be rejected before accessing nonexistent
-signer credentials. All application row assertions remain closed Opaleye fixtures.
+signer credentials. Before scanning, the production native authority check requires
+all 13 signing/key-export methods to return explicit forbidden-method responses.
+The supplied config must therefore use a restricted worker RPC credential, not the
+node cookie. All application row assertions remain closed Opaleye fixtures.
 The runner does not start a daemon, move funds or change the existing custody ledger.
 
 The current run passed against the real L2L Signet checkpoint 16000
@@ -83,6 +86,17 @@ certification, OS isolation or migration acceptance. Existing ledgers were untou
 temporary databases and fences were removed. Versus `48112a0`, this adds 53 lines
 to the existing acceptance runner (2,967 → 3,020), with no production change, new
 file, service or dependency.
+
+The subsequent restricted-credential run also passed on the real node. Its dedicated
+worker `rpcauth` identity has a fixed RPC allowlist for observation, unsigned
+preparation, saved-byte submission and input locks. The administrative cookie remains
+available to the signer/operator. The test node was gracefully restarted once and
+all three preexisting wallets reloaded; no funds moved. Credentials and the rollback
+config remain private and outside Git. The other local Bitcoin daemon was untouched.
+Versus `d46455f`, requiring the real authority check adds one line to the same
+acceptance runner (3,020 → 3,021), with no production change. This verifies node-level
+RPC separation, not separate OS identities: the current local user still has access
+to the administrative cookie. Deployed cross-UID custody isolation remains unproven.
 
 ## Fresh ledger setup
 

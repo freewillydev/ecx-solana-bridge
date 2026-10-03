@@ -106,7 +106,8 @@ liveObserverMain path=do
     _<-evalRestore settings (AdoptLedger (Config.fenceDirectory config) identity 0)
     withReader settings {PG.connectUser=role} identity (Config.backupRequired config) $ \reader->
       withFencedWriter settings policy (Config.fenceDirectory config) $ \writer->
-        bracket newRpcManager closeManager $ \manager->
+        bracket newRpcManager closeManager $ \manager->do
+          N.verifyNativeBoundaryWith (N.nativeCall manager $ Config.nativeSettings config)
           withRuntime manager (Config.observerSettings config) (Config.solanaPolicy config) (Just customer)
             (SigningEndpoint 1 "/unavailable-signer-credentials") reader writer $ \worker _ _->do
               let scan=do
@@ -124,7 +125,7 @@ liveObserverMain path=do
               evalRead reader ReadState >>= check . ledgerPaused
               expectStore "observation_only" (worker $ Request $ SignPreparedPayment "forbidden")
               expectStore "observation_only" (worker $ Request $ BroadcastPayment "forbidden")
-  putStrLn "PASS: real L2L Signet and Solana Devnet scans through rebuild DSL, persisted cursors, repeat accounting, paused ledger and signing/send refusal; no funds moved"
+  putStrLn "PASS: real L2L Signet restricted RPC authority and Solana Devnet scans through rebuild DSL, persisted cursors, repeat accounting, paused ledger and signing/send refusal; no funds moved"
 
 -- Production initialization on a fresh migrated database, with no seeded funds.
 setupMain :: IO ()
