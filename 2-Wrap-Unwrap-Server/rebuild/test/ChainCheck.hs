@@ -1,6 +1,13 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 -- Offline protocol contracts. They do not emulate a network or prove live flows.
 module ChainCheck (checks) where
+import qualified Bridge.Config as Config
+import qualified Bridge.Store as Store
+import qualified Bridge.SolanaHelper as Helper
+import qualified Bridge.Wire as W
+import Paths_ecx_bridge_rebuild (getDataFileName)
+import System.Directory (removeFile)
+import System.IO (openTempFile,hClose)
 import qualified ObservationCheck
 import qualified SolanaPaymentCheck
 import qualified NativePaymentCheck
@@ -11,7 +18,7 @@ import qualified Bridge.Solana as Solana
 import Bridge.Identity (publicKey)
 import Bridge.RPC
 import Bridge.Wire (Profile(..))
-import Control.Exception (try)
+import Control.Exception (try,bracket)
 import Data.Aeson hiding (Result)
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Aeson.Key as K
@@ -24,7 +31,7 @@ import qualified Data.Text as T
 import Test.QuickCheck hiding (label)
 
 checks :: IO [Result]
-checks = (\native solana observation common->native<>solana<>observation<>common) <$> NativePaymentCheck.checks <*> SolanaPaymentCheck.checks <*> ObservationCheck.checks <*> sequence
+checks = (\deployment native solana observation common->deployment<>native<>solana<>observation<>common) <$> deploymentChecks <*> NativePaymentCheck.checks <*> SolanaPaymentCheck.checks <*> ObservationCheck.checks <*> sequence
   [ check "Solana token account accepts only the saved mint/owner and supported layout" $ once $ property $
       let key=T.replicate 32 "1"
           info=object ["owner" .= key,"mint" .= key,"state" .= ("initialized"::Text),"isNative" .= False,
@@ -130,3 +137,63 @@ replace [] replacement _=replacement
 replace (key:rest) replacement (Object fields)=Object $ KM.insert key
   (replace rest replacement $ maybe Null id $ KM.lookup key fields) fields
 replace _ _ value=value
+
+-- Public configuration vector matches the retained executable's check-config
+-- output and captured Devnet payment identity. No RPC or keys are used here.
+deploymentChecks :: IO [Result]
+deploymentChecks = do
+  path<-getDataFileName "test/fixtures/deployment-config.json"
+  config<-Config.loadConfig path
+  let identity="027929d80f528c8da4766560c2597c3971960bd47b4fc7c9f7648c0eba5996f8"
+      money=either (error . T.unpack) id . amount
+      links=Config.defaultInterface (Config.profile config)
+      check description p=putStrLn description >> quickCheckWithResult stdArgs p
+      invalid value=isLeft (eitherDecode (encode value) :: Either String Config.Config)
+  sequence
+    [ check "configuration preserves the baseline deployment fingerprint across operational changes" $ once $
+        Config.fingerprint config==identity && all ((==identity).Config.fingerprint)
+          [config {Config.serverPort=8123,Config.signerPort=8124,Config.fenceDirectory="/new/fence"}
+          ,config {Config.nativeCookie="/new/auth",Config.solanaRpc="https://other.example",Config.maxNativeFee=money 2000}]
+        && all ((/=identity).Config.fingerprint)
+          [config {Config.deploymentId="another"},config {Config.nativeWallet="another"},config {Config.nativeCheckpointHeight=16001}]
+    , check "one config derives coherent ledger signer and public customer settings" $ once $
+        let store=Config.storePolicy config; solana=Config.solanaPolicy config
+            public=Config.publicConfiguration config links True
+            terms=Store.executionTerms store
+        in W.deploymentFingerprint(W.paymentPolicy terms)==identity && Helper.fingerprint solana==identity
+          && W.savedSolanaFee(W.paymentLimits terms)==Helper.maxSolFee solana
+          && Store.orderMinimum(Store.admissionLimits store)==W.pubMinInput public
+          && W.pubMint public==Helper.mint solana && W.pubCustodyOwner public==Helper.custodyOwner solana
+          && W.pubIntakeEnabled public && not(W.pubImplementationReady public)
+    , check "configuration rejects missing histories obsolete socket fields and unknown keys" $ once $
+        invalid (replace ["solanaHistoryStart"] Null $ toJSON config)
+        && invalid (replace ["customerSocket"] (String "/old.sock") $ toJSON config)
+        && invalid (replace ["unknown"] (Bool True) $ toJSON config)
+    , check "configuration catches impossible limits endpoints and history anchors before startup" $ once $ ioProperty $
+        and <$> mapM (\(code,value)->rejects code $ Config.validateConfig value)
+          [("invalid_server_endpoints",config {Config.serverPort=Config.signerPort config})
+          ,("invalid_server_endpoints",config {Config.signerPort=0})
+          ,("absolute_paths_required",config {Config.fenceDirectory="relative"})
+          ,("invalid_limits",config {Config.minInput=money 1})
+          ,("invalid_policy",config {Config.nativeConfirmations=1009})
+          ,("invalid_daily_budget",config {Config.maxNativeDailyCost=money 1})
+          ,("invalid_signature",config {Config.solanaOperatingHistoryStart=""})]
+    , check "real ECX profile checkpoint and canonical backup requirements are preserved" $ once $ ioProperty $ do
+        let beta=config {Config.profile=ECXBetanetDevnet,Config.nativeCheckpointHeight=967680,
+              Config.nativeCheckpointHash="00000000000000030101ba5cfea54b22becc79f95dc6040beb76e01dd9d04042"}
+            canonical=beta {Config.profile=CanonicalBeta,Config.mint="EVHqNdzjCupKi4rQkbuYw52sa1m8A7jeUAMP23S9AVVq",
+              Config.solanaRpc="https://api.mainnet-beta.solana.com",Config.solanaVerifierRpc=Just "https://independent.example"}
+        Config.validateConfig beta
+        refused<-rejects "canonical_backup_required" (Config.validateConfig canonical)
+        Config.validateConfig canonical {Config.backupRequired=True}
+        pure refused
+    , check "presentation rejects unsafe URLs and mainnet trading links on devnet" $ once $ ioProperty $ do
+        Config.validateInterface config links
+        script<-rejects "invalid_support_url" (Config.validateInterface config links {W.supportUrl=Just "javascript:alert(1)"})
+        trading<-rejects "trading_links_require_mainnet" (Config.validateInterface config links {W.jupiterUrl=Just "https://jup.ag/swap"})
+        pure (script && trading)
+    , check "configuration loader bounds bytes before parsing" $ once $ ioProperty $
+        bracket (do (file,h)<-openTempFile "/tmp" "ecx-config-contract"; hClose h; pure file) removeFile $ \file->do
+          BS.writeFile file (BS.replicate 32769 32)
+          rejects "config_too_large" (Config.loadConfig file)
+    ]

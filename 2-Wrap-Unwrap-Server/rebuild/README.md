@@ -492,13 +492,18 @@ missing authorization, malformed/oversized bodies, cross-site rejection and remo
 routes. An actual PostgreSQL-backed HTTP order read and runtime replay pass without
 network access; observation-only restrictions and configuration mismatch also pass.
 Signer and customer HTTP share one bounded-body/concurrency/no-cache middleware.
-The executable, deployment configuration, scheduler and browser assets remain
-unwired; this library checkpoint does not claim a running replacement service.
+Deployment configuration now derives adapter, observer, ledger, signer-policy and
+public settings from one validated record. The financial fingerprint matches the
+baseline executable and captured Devnet identity exactly; obsolete socket fields,
+missing history anchors, incompatible limits and unsafe public URLs are rejected.
+These are offline configuration checks, not live history-completeness proof.
+The executable, scheduler and browser assets remain unwired; this library checkpoint does not claim a running replacement service.
 
 Scoped physical-line comparisons (not whole-product reduction claims):
 
 | Piece | Baseline | Rebuild | Scope limit |
 | --- | ---: | ---: | --- |
+| Deployment configuration | 133 / 1 file | 136 / 1 file | Adds six typed settings builders and required history anchors; baseline identity preserved |
 | Host fence | 132 / 1 file | 128 / 1 file + 7-line Store constructor | Same durable protocol; explicit directory replaces environment lookup |
 | Customer order workflow | 78 / 1 file | 63 / 1 file | Closed reads replace raw row/ledger access; funded HTTP acceptance pending |
 | Admission/previews | 106 / 1 file | 86-line module + 20 lines in existing native adapter | Same total; customer runtime wired, funded acceptance pending |
@@ -520,7 +525,7 @@ all journal rows. Terminal attempts are still checked individually, so long-hist
 performance remains to be measured. Source eligibility checking is shared with signing.
 
 Still required: successful TLS worker/signer integration and private-key startup
-checks; executable/configuration/scheduler/browser integration;
+checks; executable/scheduler/browser integration;
 integrated positive submission/reconciliation acceptance; retry, cancellation,
 replacement/winner changes and covered-source approvals generalized to earned
 funding; complete custody acceptance and Haskell backup/restore integration; actual populated-ledger migration and funded

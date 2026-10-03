@@ -49,7 +49,7 @@ library workflow
   import: settings
   visibility: private
   hs-source-dirs: workflow
-  exposed-modules: Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.SigningTransport, Bridge.Critical, Bridge.Reconciliation, Bridge.Admission, Bridge.Order, Bridge.Web
+  exposed-modules: Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.SigningTransport, Bridge.Critical, Bridge.Reconciliation, Bridge.Admission, Bridge.Order, Bridge.Web, Bridge.Config
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:customer-api, ecx-bridge-rebuild:store,
     ecx-bridge-rebuild:chain, aeson, bytestring, text, time, containers, http-client, servant, servant-server,
     transformers, stm, ram, crypton-pem, crypton-x509, http-types, wai, warp, warp-tls, filepath, unix,
@@ -70,7 +70,7 @@ executable rebuild-store-check
   import: settings
   hs-source-dirs: test, runtime, workflow
   main-is: StoreCheck.hs
-  other-modules: Bridge.Fence, Bridge.Store, Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.SigningTransport, Bridge.Critical, Bridge.Reconciliation, Bridge.Admission, Bridge.Order, Bridge.Web
+  other-modules: Bridge.Fence, Bridge.Store, Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.SigningTransport, Bridge.Critical, Bridge.Reconciliation, Bridge.Admission, Bridge.Order, Bridge.Web, Bridge.Config
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:customer-api, ecx-bridge-rebuild:chain, http-client, servant, servant-server, aeson, bytestring,
     containers, text, crypton, time, directory, scientific, opaleye, postgresql-simple, product-profunctors, QuickCheck,
     transformers, stm, ram, crypton-pem, crypton-x509, http-types, wai, wai-extra, warp, warp-tls, filepath, unix,
