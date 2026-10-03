@@ -216,3 +216,26 @@ and bridge-token metadata operations retain their eight-decimal policy. Devnet
 USDC ATA creation and saved-attempt replay have passed; a six-decimal mint request
 is still refused by account-schema validation. See the pool README for transaction
 identifiers and the separately funded liquidity workflow.
+
+## Read-only token policy
+
+```sh
+cabal run ecx-token:exe:ecx-token -- inspect-policy devnet HTTPS_RPC INDEPENDENT_HTTPS_RPC MINT CUSTODY_OWNER CUSTODY_ATA EXPECTED_AUTHORITY
+```
+
+Use `mainnet` explicitly for a mainnet read, or `revoked` for an approved absent
+mint authority. This is a safe existential request resolved through the token DSL;
+it does not sign, submit or activate custody. It checks the actual genesis and
+finalized classic SPL mint/account layouts, eight decimals, initialization,
+freeze/delegation/close authority, expected identities and canonical integer units.
+Both provider responses must agree on supply and custody inventory; their finalized
+slots are reported separately. Distinct normalized HTTPS hostnames are mandatory;
+the operator must still choose independently operated providers.
+
+The old Python `check-token-policy` is removed. Account validation is shared with
+token preflight rather than implemented twice. The affected production files total
+370 → 318 lines across 3 → 2 files; tests use the existing QuickCheck module.
+A read-only Devnet check through Solana's public RPC and OnFinality passed for
+mint `Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM`: both reported supply
+200,000,000,000 and custody 100,000,050,634 base units at finalized slots
+507110525/507110544. This is not issuer approval, backing proof or canonical adoption.

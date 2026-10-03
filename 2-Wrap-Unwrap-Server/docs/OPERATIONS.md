@@ -213,10 +213,10 @@ retention, recovery receipts and physical host-loss restoration remain unproved.
 ## Read-only token adoption acceptance
 
 Before an issuer-approved deployment, compare the finalized mint and custody
-accounts through both configured HTTPS RPC providers:
+accounts through two independent HTTPS RPC providers. Run from the repository root:
 
 ```sh
-./scripts/check-token-policy /absolute/private/worker.json --expected-mint-authority ISSUER_APPROVED_PUBLIC_KEY --report /absolute/private/token-policy.json
+cabal run ecx-token:exe:ecx-token -- inspect-policy devnet HTTPS_RPC INDEPENDENT_HTTPS_RPC MINT CUSTODY_OWNER CUSTODY_ATA ISSUER_APPROVED_PUBLIC_KEY > /absolute/private/token-policy.json
 ```
 
 Use `revoked` instead of a public key only when the approved policy explicitly
@@ -232,7 +232,7 @@ Devnet acceptance passes for the dedicated test mint; see
 `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/token-policy-devnet.json`. This is not canonical-token acceptance or
 proof of global reserve backing. Issuer approval, native reserve locations,
 outstanding redemption obligations and issuance reconciliation must be reviewed
-separately; the report explicitly leaves those claims unverified.
+separately; this account-policy report does not verify those claims.
 
 ## Encrypted custody handoff escrow
 

@@ -1,5 +1,7 @@
 module Main (main) where
 import Token
+import qualified Token.Network as N
+import qualified Data.Aeson.KeyMap as KM
 import qualified Token.Operation as O
 import qualified Token.Metadata as M
 import Token.Signing
@@ -17,7 +19,7 @@ import System.FilePath ((</>))
 import qualified Bridge.SolanaHelper as H
 import Bridge.Domain (amount)
 import Data.Word (Word64)
-import Data.Aeson (encode,eitherDecode,object,(.=),withObject,(.:))
+import Data.Aeson (Value(..),encode,eitherDecode,object,(.=),withObject,(.:))
 import Data.Aeson.Types (parseEither)
 import Bridge.SDKBuild (sdkLibraryPath)
 import Bridge.SolanaMessage (Transaction(..),decodeTransaction,base58)
@@ -36,7 +38,13 @@ request operation n=Request operation "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaR
 main :: IO ()
 main=do
   results<-sequence
-    [ quickCheckWithResult stdArgs {maxSuccess=100} $ forAll (frequency [(1,elements [1,maxBound::Word64]),(4,choose (1,maxBound::Word64))]) $ \n->ioProperty $ do
+    [ quickCheckResult $ \n revoked->policyCheck n revoked
+    , quickCheckResult $ once $ ioProperty $ do
+        let original=request Mint 1
+            run a b=try (O.runSafe $ O.Request $ N.InspectPolicy N.Devnet a b (mint original) (authority original) (account original) Nothing) :: IO (Either SomeException [(Word64,Word64,Word64)])
+        and <$> mapM (\(a,b)->isLeft <$> run a b)
+          [("https://rpc.example.invalid","https://RPC.EXAMPLE.INVALID"),("https://rpc.example.invalid","https://rpc.example.invalid."),("http://one.invalid","https://two.invalid")]
+    , quickCheckWithResult stdArgs {maxSuccess=100} $ forAll (frequency [(1,elements [1,maxBound::Word64]),(4,choose (1,maxBound::Word64))]) $ \n->ioProperty $ do
         checks<-mapM (check n) [Mint,Burn]
         pure (and checks)
     , quickCheckResult $ once $ ioProperty $ do
@@ -191,3 +199,27 @@ signingCheck=bracket temporary removeDirectoryRecursive $ \directory->do
     (path,handle)<-openTempFile "/tmp" "ecx-token-sign"
     hClose handle; removeFile path; PD.createDirectory path 0o700
     pure path
+
+-- Actual classic SPL response shape; mutations are parser contracts, not a network.
+policyCheck :: Word64 -> Bool -> Bool
+policyCheck n revoked=
+  let original=request Mint 1; key=mint original; owner=authority original
+      issuer=if revoked then Nothing else Just owner
+      accountValue size kind info=object ["owner" .= ("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"::Text),"executable" .= False,
+        "data" .= object ["space" .= (size::Int),"parsed" .= object ["type" .= (kind::Text),"info" .= info]]]
+      mintInfo=object ["isInitialized" .= True,"decimals" .= (8::Int),"freezeAuthority" .= Null,"mintAuthority" .= issuer,"supply" .= show n]
+      tokenInfo=object ["mint" .= key,"owner" .= owner,"state" .= ("initialized"::Text),"isNative" .= False,
+        "tokenAmount" .= object ["decimals" .= (8::Int),"amount" .= show n]]
+      mintValue=accountValue 82 "mint" mintInfo; custodyValue=accountValue 165 "account" tokenInfo
+      response a b slot=object ["context" .= object ["slot" .= (slot::Int)],"value" .= [a,b]]
+      parse=parseEither (N.inspectPolicy key owner issuer)
+      set field value (Object o)=Object(KM.insert field value o)
+      set _ _ value=value
+      badMints=[accountValue 82 "mint" (set field value mintInfo) | (field,value)<-
+        [("isInitialized",Bool False),("decimals",Number 9),("freezeAuthority",String owner),("mintAuthority",String key),("supply",String "-1"),("supply",String "18446744073709551616")]]
+      badAccounts=[accountValue 165 "account" (set field value tokenInfo) | (field,value)<-
+        [("mint",String owner),("owner",String key),("state",String "frozen"),("delegate",String key),("closeAuthority",String key),("isNative",Bool True)]]
+  in parse(response mintValue custodyValue 1)==Right(1,n,n)
+    && all (isLeft . parse) ([response a custodyValue 1 | a<-badMints]<>[response mintValue a 1 | a<-badAccounts]
+      <>[response mintValue custodyValue 0,response (set "owner" (String owner) mintValue) custodyValue 1,
+         response mintValue (accountValue 166 "account" tokenInfo) 1])

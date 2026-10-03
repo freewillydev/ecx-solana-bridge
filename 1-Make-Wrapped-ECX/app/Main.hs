@@ -19,6 +19,12 @@ import System.IO (withBinaryFile,IOMode(ReadMode))
 
 main :: IO ()
 main=getArgs >>= \args->case args of
+  ["inspect-policy",network,primary,verifier,key,owner,custody,issuer]->do
+    selected<-choose network
+    let expected=if issuer=="revoked" then Nothing else Just(T.pack issuer)
+    readings<-(O.runSafe . O.Request) (Network.InspectPolicy selected primary verifier (T.pack key) (T.pack owner) (T.pack custody) expected)
+    L.putStrLn $ encode $ object ["network" .= network,"mint" .= key,"custodyOwner" .= owner,"custodyAta" .= custody,"mintAuthority" .= expected,
+      "readings" .= [object ["finalizedSlot" .= slot,"supplyBaseUnits" .= show supply,"custodyBaseUnits" .= show balance] | (slot,supply,balance)<-readings]]
   ["keygen",output]->(O.runCritical . O.Request) (GenerateKey output) >>= L.putStrLn . encode
   ["associated-address",recipient,key]->(O.runSafe . O.Request) (AssociatedAddress sdkLibraryPath (T.pack recipient) (T.pack key)) >>= L.putStrLn . encode
   ["metadata-address",key]->(O.runSafe . O.Request) (MetadataAddress sdkLibraryPath $ T.pack key) >>= L.putStrLn . encode
@@ -29,13 +35,13 @@ main=getArgs >>= \args->case args of
     transaction<-(O.runSafe . O.Request) (Prepare sdkLibraryPath request)
     L.putStrLn $ encode $ object ["request" .= request,"unsignedTransaction" .= transaction]
   ["check",network,endpoint,limit,prepared]->do
-    selected<-case network of "devnet"->pure Network.Devnet; "mainnet"->pure Network.Mainnet; _->die "Choose devnet or mainnet"
+    selected<-choose network
     feeLimit<-readFee limit
     (request,unsigned)<-readPrepared prepared
     fee<-(O.runSafe . O.Request) (Network.Check selected endpoint feeLimit request unsigned)
     L.putStrLn $ encode $ object ["feeLamports" .= fee,"simulationOnly" .= True]
   ["submit",network,endpoint,limit,attempt]->do
-    selected<-case network of "devnet"->pure Network.Devnet; "mainnet"->pure Network.Mainnet; _->die "Choose devnet or mainnet"
+    selected<-choose network
     feeLimit<-readFee limit
     result<-(O.runCritical . O.Request) (Network.Submit selected endpoint feeLimit attempt)
     L.putStrLn (encode result)
@@ -43,7 +49,7 @@ main=getArgs >>= \args->case args of
     (request,unsigned)<-readPrepared prepared
     identifier<-(O.runCritical . O.Request) (Sign keyfile output request unsigned)
     L.putStrLn $ encode $ object ["signature" .= identifier,"saved" .= output]
-  _->die "Usage: ecx-token keygen NEW_PRIVATE_KEY.json | associated-address OWNER MINT | metadata-address MINT | address AUTHORITY SEED | prepare REQUEST.json | check devnet|mainnet HTTPS_RPC MAX_FEE PREPARED.json | submit devnet|mainnet HTTPS_RPC MAX_FEE ATTEMPT.json | sign PREPARED.json AUTHORITY_KEY.json NEW_ATTEMPT.json (prepare/check/sign never broadcast; submit sends saved bytes)"
+  _->die "Usage: ecx-token inspect-policy devnet|mainnet HTTPS_RPC INDEPENDENT_HTTPS_RPC MINT CUSTODY_OWNER CUSTODY_ATA EXPECTED_AUTHORITY|revoked | keygen NEW_PRIVATE_KEY.json | associated-address OWNER MINT | metadata-address MINT | address AUTHORITY SEED | prepare REQUEST.json | check devnet|mainnet HTTPS_RPC MAX_FEE PREPARED.json | submit devnet|mainnet HTTPS_RPC MAX_FEE ATTEMPT.json | sign PREPARED.json AUTHORITY_KEY.json NEW_ATTEMPT.json (prepare/check/sign never broadcast; submit sends saved bytes)"
 
 readFee :: String -> IO Word64
 readFee raw=case readMaybe raw :: Maybe Integer of
@@ -62,3 +68,8 @@ readPrepared path=do
   either die pure $ parseEither (withObject "prepared token operation" $ \o->do
     unless (length o==2) (fail "Unexpected prepared-operation fields")
     (,) <$> o .: "request" <*> o .: "unsignedTransaction") value
+
+choose :: String -> IO Network.Network
+choose "devnet"=pure Network.Devnet
+choose "mainnet"=pure Network.Mainnet
+choose _=die "Choose devnet or mainnet"

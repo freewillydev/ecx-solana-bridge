@@ -1,6 +1,6 @@
 {-# LANGUAGE GADTs #-}
 -- Read-only preflight; simulation always contains zero signatures.
-module Token.Network (Network(..),Safe(..),Critical(..),evalSafe,evalCritical) where
+module Token.Network (Network(..),Safe(..),Critical(..),evalSafe,evalCritical,inspectPolicy) where
 import qualified Token.Metadata as M
 import Token.Signing (Saved(..),validateSaved)
 import qualified Data.ByteString as BS
@@ -19,14 +19,30 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Word (Word64)
-import Network.HTTP.Client (parseRequest,secure,closeManager)
+import Network.HTTP.Client (parseRequest,secure,host,closeManager)
+import qualified Data.ByteString.Char8 as B8
+import Data.Char (toLower)
 import Text.Read (readMaybe)
 
 data Network = Devnet | Mainnet deriving (Eq,Show)
 data Safe a where
   Check :: Network -> String -> Word64 -> Request -> Text -> Safe Word64
+  InspectPolicy :: Network -> String -> String -> Text -> Text -> Text -> Maybe Text -> Safe [(Word64,Word64,Word64)]
 
 evalSafe :: Safe a -> IO a
+evalSafe (InspectPolicy network primary verifier key owner custody issuer)=do
+  mapM_ (either reject (const $ pure ()) . publicKey) ([key,owner,custody]<>maybe [] pure issuer)
+  first<-parseRequest primary; second<-parseRequest verifier
+  require (secure first && secure second && B8.dropWhileEnd (=='.') (B8.map toLower $ host first)/=B8.dropWhileEnd (=='.') (B8.map toLower $ host second)) "independent_https_providers_required"
+  bracket newRpcManager closeManager $ \manager->do
+    readings<-mapM (\endpoint->do
+      let call=rpc manager endpoint Nothing
+      actual<-call "getGenesisHash" [] >>= parseValue parseJSON
+      require (actual==genesis network) "wrong_token_network"
+      call "getMultipleAccounts" [toJSON [key,custody],object ["encoding" .= ("jsonParsed"::Text),"commitment" .= ("finalized"::Text)]]
+        >>= parseValue (inspectPolicy key owner issuer)) [primary,verifier]
+    require (case readings of [(_,supply,balance),(_,otherSupply,otherBalance)]->supply==otherSupply && balance==otherBalance; _->False) "token_provider_policy_mismatch"
+    pure readings
 evalSafe (Check network endpoint feeLimit request unsigned)=do
   transport<-parseRequest endpoint
   require (secure transport && feeLimit>0) "invalid_token_rpc_policy"
@@ -35,8 +51,8 @@ evalSafe (Check network endpoint feeLimit request unsigned)=do
     let call=rpc manager endpoint Nothing
         options=object ["encoding" .= ("jsonParsed"::Text),"commitment" .= ("finalized"::Text)]
         accountInfo address=call "getAccountInfo" [toJSON address,options] >>= fieldValue "value"
-    genesis<-call "getGenesisHash" [] >>= parseValue parseJSON :: IO Text
-    require (genesis==case network of Devnet->"EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"; Mainnet->"5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d") "wrong_token_network"
+    actual<-call "getGenesisHash" [] >>= parseValue parseJSON :: IO Text
+    require (actual==genesis network) "wrong_token_network"
     rentCost<-case request of
       CreateMint{}->do
         existing<-accountInfo (mint request)
@@ -129,8 +145,8 @@ evalCritical (Submit network endpoint feeLimit path)=do
   bracket newRpcManager closeManager $ \manager->do
     let call=rpc manager endpoint Nothing
         identifier=savedId saved
-    genesis<-call "getGenesisHash" [] >>= parseValue parseJSON :: IO Text
-    require (genesis==case network of Devnet->"EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"; Mainnet->"5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d") "wrong_token_network"
+    actual<-call "getGenesisHash" [] >>= parseValue parseJSON :: IO Text
+    require (actual==genesis network) "wrong_token_network"
     statuses<-call "getSignatureStatuses" [toJSON [identifier],object ["searchTransactionHistory" .= True]] >>= fieldValue "value"
     status<-case statuses of [value]->pure value; _->reject "invalid_token_status"
     if status/=Null then do
@@ -208,3 +224,20 @@ units :: Text -> Parser Word64
 units text=case readMaybe (T.unpack text) :: Maybe Integer of
   Just n | n>=0 && n<=toInteger(maxBound::Word64) && T.pack(show n)==text->pure(fromInteger n)
   _->fail "invalid token units"
+
+genesis :: Network -> Text
+genesis Devnet="EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"
+genesis Mainnet="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
+
+-- Both accounts come from the same finalized response on each provider.
+inspectPolicy :: Text -> Text -> Maybe Text -> Value -> Parser (Word64,Word64,Word64)
+inspectPolicy key owner issuer value=do
+  slot<-field "context" value >>= field "slot"
+  accounts<-field "value" value
+  case accounts of
+    [mintValue,custodyValue]->do
+      (actualIssuer,supply)<-inspectMint (Just 8) mintValue
+      (actualOwner,balance,actualMint)<-inspectAccount custodyValue
+      unless (slot>0 && actualIssuer==issuer && actualOwner==owner && actualMint==key && balance<=supply) (fail "token policy mismatch")
+      pure (slot,supply,balance)
+    _->fail "expected mint and custody accounts"
