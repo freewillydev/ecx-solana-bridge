@@ -11,7 +11,7 @@ library
   ghc-options: -Wall -Wcompat
   hs-source-dirs: .
   exposed-modules: Token, Token.Signing, Token.Network, Token.Metadata, Token.Operation
-  build-depends: base >=4.20 && <4.23, ecx-bridge-rebuild, ecx-bridge-rebuild:chain,
+  build-depends: base >=4.20 && <4.23, ecx-bridge, ecx-bridge:chain,
     aeson, bytestring, text, binary, unix, filepath, crypton, ram, base64-bytestring, http-client
 
 test-suite token-test
@@ -21,7 +21,7 @@ test-suite token-test
   ghc-options: -Wall
   hs-source-dirs: test
   main-is: Main.hs
-  build-depends: base, ecx-token, ecx-build-assets, ecx-bridge-rebuild, ecx-bridge-rebuild:chain,
+  build-depends: base, ecx-token, ecx-build-assets, ecx-bridge, ecx-bridge:chain,
     QuickCheck, text, bytestring, aeson, crypton, ram, directory, filepath, unix
 
 executable ecx-token

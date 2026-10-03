@@ -5,7 +5,7 @@ import qualified Bridge.Config as Config
 import qualified Bridge.Store as Store
 import qualified Bridge.SolanaHelper as Helper
 import qualified Bridge.Wire as W
-import Paths_ecx_bridge_rebuild (getDataFileName)
+import Paths_ecx_bridge (getDataFileName)
 import System.Directory (removeFile,removeDirectoryRecursive)
 import qualified System.Posix.Directory as PD
 import System.Posix.Files (setFileMode)

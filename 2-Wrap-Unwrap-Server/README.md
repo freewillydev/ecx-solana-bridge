@@ -1,34 +1,14 @@
-# ECX wrap/unwrap bridge
+# ECX wrap/unwrap server
 
-A connection-free inventory bridge between real ECX-family native chains and a
-classic Solana SPL token. New orders charge **1% in each direction**; saved quotes
-retain their terms. The operator supplies inventory and pays network costs.
-Conversion transfers existing inventory; minting and liquidity management use
-separate tools and keys in the other two numbered folders.
+One Haskell Servant server and one dedicated signer convert existing native ECX
+and Solana SPL inventory. Customers receive deposit instructions; the website
+requires no wallet connection. New quotes charge **1% in each direction**, with
+network costs paid separately by the operator. Saved terms remain immutable.
 
-**Use the [rebuilt application](rebuild/README.md).** It has completed funded
-L2L Signet/Solana Devnet transfers, refunds and interrupted-operation checks.
-The original test ledger has also migrated with financial-history comparisons and
-completed both conversion directions. This is a test-network implementation,
-not a finished public release or proof of perfect security.
-
-## Architecture
-
-One Haskell Servant server serves four customer routes and the browser. Its
-handlers return caller/severity-indexed existential requests; typeclass methods
-resolve those requests into closed DSL operations. Separate safe and critical
-evaluators enforce authority. Concrete result records are serialized as JSON.
-
-PostgreSQL/Opaleye provides the durable ledger. Every application row read/write
-belongs to a specific closed operation. The worker saves preparation, authority
-and exact signed bytes before sending; verified chain effects settle accounting.
-Customer principal, inventory, earned fees and network-cost budgets stay separate.
-
-A dedicated Haskell signer independently verifies saved decisions and signs but
-never broadcasts. Only the critical evaluator calls its authenticated loopback
-HTTPS Servant API. OS credential isolation is a separate deployment requirement.
-The browser is Haskell compiled by GHC's JavaScript backend, with HTML/CSS and
-thin browser bindings. The pinned Rust Solana SDK is used through bounded FFI.
+This is the only server implementation in the repository. It has completed real
+L2L Signet/Solana Devnet conversions, refunds, earned-fee withdrawals and scoped
+recovery checks. It is not yet a public or valuable-fund release. See the precise
+[evidence and remaining gates](docs/RELEASE-REVIEW.md).
 
 ## Build and run
 
@@ -36,32 +16,62 @@ From the repository root:
 
 ```sh
 cabal build all -j1
-cabal test all -j1
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- check-config /absolute/private/config.json
-cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- observe /absolute/private/config.json
+cabal test all -j1 --test-show-details=direct
+cabal run exe:ecx-bridge -- check-config /absolute/private/config.json
+cabal run exe:ecx-bridge -- observe /absolute/private/config.json
 ```
 
-Configure actual nodes, PostgreSQL roles, an initialized/migrated ledger and its
-host fence first. Starting a worker does not initialize or erase custody state.
-For signing and paying mode, follow the [current startup commands](rebuild/README.md#build-and-run).
-Use the configuration's `serverPort`; there is no separate Python launcher.
+Startup requires a reviewed deployment configuration, migrated PostgreSQL ledger,
+distinct writer/reader roles, and an adopted host fence. `observe` cannot create
+orders or send payouts. `serve` permits paying workflows but starts paused; a
+separate signer and guarded operator resume are required. Follow [installation
+prerequisites](docs/INSTALL.md) and [operations](docs/OPERATIONS.md), not a test fixture.
+There is currently **no automated installer**. The incompatible old installer,
+server and deployment harnesses have been removed.
 
-The [development guide](docs/LOCAL-DEVELOPMENT.md) describes compiler/cache setup.
-The [rebuild guide](rebuild/README.md) owns the source map, operator commands,
-migration/recovery procedures, acceptance evidence and remaining release gates.
-The immutable [Main.hs reference](docs/reference/Main.hs) records the supplied DSL design.
+## Audit path
 
-## Remaining release work
+| Responsibility | Source |
+| --- | --- |
+| Amounts, quotes, funding and wire records | `src/Bridge/{Domain,Wire}.hs` |
+| Caller/severity GADTs and existential requests | `src/Bridge/Operation/Internal.hs` |
+| Four pure Servant handlers | `api/Bridge/API.hs` |
+| Authorization, safe/critical evaluation and workflows | `workflow/Bridge/Critical.hs` |
+| Admission, orders and payment validation | `workflow/Bridge/{Admission,Order,Payment}.hs` |
+| Observation and custody reconciliation | `workflow/Bridge/{Observer,Reconciliation}.hs` |
+| Closed Opaleye operations and transactions | `runtime/Bridge/Store.hs`, `Store/{Schema,Catalog}.hs` |
+| Native/Solana adapters and protocol codecs | `chain/Bridge/` |
+| Dedicated HTTPS signer and protected credentials | `workflow/Bridge/{Signer,Credentials}.hs` |
+| Local operator control and custody recovery | `workflow/Bridge/{Control,Recovery}.hs` |
+| Host fence and encrypted archives | `runtime/Bridge/{Fence,Store/Backup}.hs` |
+| Startup, configuration and browser serving | `app/Main.hs`, `workflow/Bridge/{Config,Web}.hs` |
+| Haskell browser and Cabal asset hooks | `web/`, `build/` |
+| QuickCheck and PostgreSQL contracts | `test/Main.hs`, `test/StoreCheck.hs` |
 
-Actual customer-wallet signing, broader funded recovery/reorg/restore acceptance,
-cross-user signer isolation, encrypted-wallet recovery, off-host backups and
-clean-host restoration remain outstanding. Canonical betanet/token activation,
-real trading-route acceptance and independent security review are separate gates.
-See the rebuild guide for the precise current checkpoint.
+Servant handlers package typed requests; `Operation.command` resolves them into
+closed DSL instructions. Separate evaluators enforce safe/critical authority.
+All application database access uses Opaleye inside specific closed operations.
+Only critical evaluation owns the signer client. The signer independently checks
+saved decisions and never broadcasts. [Architecture](docs/ARCHITECTURE.md)
+describes these boundaries, accounting invariants and the bounded TLA+ model.
 
-The baseline application, `deploy/` and older integration tools remain temporarily
-because installer/upgrade callers still depend on them. Historical installer
-packages and documentation describe that baseline, not the rebuilt process/config
-contract. Do not use those packages as certification of this rebuild. Replace and
-accept installation last, then remove the baseline implementation. No wipe or
-automatic custody reset is part of the local startup path.
+## Customer API
+
+| Route | Result |
+| --- | --- |
+| `GET /api/v1/config` | Identity, limits, fees, links and availability |
+| `POST /api/v1/orders` | Create/recover an immutable order |
+| `GET /api/v1/orders/:id` | Authorized order status |
+| `POST /api/v1/orders/:id/transaction` | Authorized Solana Pay instructions |
+
+Amounts are integer base-unit strings. A saved private capability authorizes order
+access; an order ID alone does not. Wrapping binds a Solana destination and native
+refund address. Unwrapping uses a Solana Pay reference and derives refund ownership
+from verified deposit effects. Only actual chain observations credit deposits.
+
+[Token administration](../1-Make-Wrapped-ECX/README.md) and
+[liquidity operations](../3-Create-CPMM-Pool/README.md) use separate keys outside
+customer custody. Trading links do not provide the native wrap/unwrap service.
+
+[Operations](docs/OPERATIONS.md) · [Development](docs/LOCAL-DEVELOPMENT.md) ·
+[Implementation plan](docs/IMPLEMENTATION-PLAN.md) · [Release review](docs/RELEASE-REVIEW.md)

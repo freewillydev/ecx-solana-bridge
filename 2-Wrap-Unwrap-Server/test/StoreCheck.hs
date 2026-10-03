@@ -2,7 +2,7 @@
 module Main (main) where
 import qualified Bridge.Config as Config
 import qualified Bridge.Credentials as Credentials
-import Paths_ecx_bridge_rebuild (getDataFileName)
+import Paths_ecx_bridge (getDataFileName)
 import qualified Network.HTTP.Client as HTTP
 import qualified Network.Socket as NS
 import qualified System.Process as Process
@@ -205,7 +205,7 @@ migrationMain=do
       [row] | S.schemaVersion row==18 -> pure row
       _->fail "populated schema-18 baseline required"
     check "signed financial history required" (not(null attempts) && not(null postings))
-    forM_ ["001.sql","002.sql","003.sql"] $ \name->do
+    forM_ ["006.sql","007.sql","008.sql"] $ \name->do
       path<-getDataFileName ("migrations/"<>name)
       (code,_,diagnostic)<-Process.readProcessWithExitCode "psql"
         ["-X","-h","/tmp/ecx-pg-seam","-p","29436","-U",user,"-d",database,"-v","ON_ERROR_STOP=1","-f",path] ""

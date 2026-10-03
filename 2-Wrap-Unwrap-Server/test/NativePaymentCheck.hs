@@ -24,7 +24,7 @@ import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Text (Text)
 import qualified Data.Text as T
-import Paths_ecx_bridge_rebuild (getDataFileName)
+import Paths_ecx_bridge (getDataFileName)
 import Test.QuickCheck hiding (Success)
 
 checks :: IO [Result]

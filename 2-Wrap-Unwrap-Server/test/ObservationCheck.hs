@@ -23,7 +23,7 @@ import Data.IORef
 import Data.List (elemIndex)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Paths_ecx_bridge_rebuild (getDataFileName)
+import Paths_ecx_bridge (getDataFileName)
 import Test.QuickCheck
 
 checks :: IO [Result]

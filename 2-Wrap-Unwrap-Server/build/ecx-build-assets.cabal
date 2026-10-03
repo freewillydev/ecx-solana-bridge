@@ -7,7 +7,7 @@ license-file: ../LICENSE
 build-type: Hooks
 extra-source-files: ../solana-helper/Cargo.toml, ../solana-helper/Cargo.lock,
   ../solana-helper/src/lib.rs, ../rust-toolchain.toml,
-  ../rebuild/src/Bridge/Domain.hs, ../rebuild/src/Bridge/Wire.hs,
+  ../src/Bridge/Domain.hs, ../src/Bridge/Wire.hs,
   ../web/*.hs, ../web/*.html, ../web/*.css, ../web/*.cabal, ../web/cabal.project*
 
 custom-setup

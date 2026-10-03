@@ -1,7 +1,4 @@
 {
-  "python": "/usr/bin/python3",
-  "uploader": "/opt/ecx-bridge/current/deploy/postgres-remote-backup.py",
-  "stage": "/var/lib/ecx-bridge/private/critical-backups",
   "restic": "/usr/bin/restic",
   "repositoryFile": "/etc/ecx-bridge/backup.repository",
   "passwordFile": "/etc/ecx-bridge/backup.password"

@@ -84,7 +84,7 @@ report = dict(buildPlanSha256=hashlib.sha256(args.plan.read_bytes()).hexdigest()
               allConfiguredSourcesScanned=not missing, reachabilityProven=False,
               vulnerabilityFindingWaived=False)
 if args.ghc_source:
-    pins = json.loads((Path(__file__).resolve().parents[1] / 'deploy/toolchains.json').read_text())
+    pins = json.loads((Path(__file__).resolve().parents[1] / 'build/toolchains.json').read_text())
     url, expected = pins['ghc-source']
     if plan['compiler-id'] not in url:
         raise ValueError('GHC source pin does not match compiler')

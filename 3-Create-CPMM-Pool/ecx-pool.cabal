@@ -12,7 +12,7 @@ library
   ghc-options: -Wall -Wcompat
   hs-source-dirs: .
   exposed-modules: Pool, Pool.Signing, Pool.Position, Pool.Liquidity, Pool.Operation
-  build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:chain,
+  build-depends: base, ecx-bridge, ecx-bridge:chain,
     aeson, binary, bytestring, text, unix, http-client, http-types, time, base64-bytestring, crypton, ram
 
 executable ecx-pool
@@ -32,4 +32,4 @@ test-suite pool-test
   main-is: Main.hs
   autogen-modules: Paths_ecx_pool
   other-modules: Paths_ecx_pool
-  build-depends: base, ecx-pool, ecx-bridge-rebuild:chain, ecx-build-assets, QuickCheck, aeson, bytestring, text, base64-bytestring, crypton, ram
+  build-depends: base, ecx-pool, ecx-bridge:chain, ecx-build-assets, QuickCheck, aeson, bytestring, text, base64-bytestring, crypton, ram

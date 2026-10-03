@@ -1,418 +1,242 @@
 # Architecture and financial contracts
 
-This guide describes the current source and the invariants reviewers must verify.
-It is not release certification. [RELEASE-REVIEW.md](RELEASE-REVIEW.md) separates
-historical real-chain evidence from outstanding acceptance; the
-[implementation plan](IMPLEMENTATION-PLAN.md) tracks unfinished simplification.
+The source map is in the [server README](../README.md). This guide defines the
+boundaries a reviewer must trace; [release review](RELEASE-REVIEW.md) records what
+is actually verified. There is one Servant HTTP/worker process and one dedicated
+signer. PostgreSQL, the native daemon, Solana RPC and restic are dependencies.
+The Haskell browser is compiled by GHC JavaScript; Rust is confined to SDK FFI.
 
-## Audit path
+## Requests, dictionaries and evaluators
 
-Paths below are relative to `2-Wrap-Unwrap-Server/rebuild/`, the review target.
-The old sibling application remains for installation/integration migration only.
-Current acceptance and remaining gates are in [rebuild/README.md](../rebuild/README.md).
-
-| Responsibility | Source |
-| --- | --- |
-| Amounts, funding, quotes, wire records | `src/Bridge/Domain.hs`, `Wire.hs` |
-| Closed operations and existential requests | `src/Bridge/Operation/Internal.hs`; customer facade `Operation.hs` |
-| Four customer routes and pure handlers | `api/Bridge/API.hs` |
-| Authorization, safe/critical evaluation, scheduling | `workflow/Bridge/Critical.hs` |
-| Admission and instruction provisioning | `workflow/Bridge/Admission.hs`, `Order.hs` |
-| Preparation, saved-byte send, settlement | `workflow/Bridge/Payment.hs`, `runtime/Bridge/Store.hs` |
-| Native/Solana protocol validation | `chain/Bridge/` |
-| Observation, reconciliation and recovery | `workflow/Bridge/Observer.hs`, `Reconciliation.hs`, `Recovery.hs`, `Critical.hs` |
-| Transactions, accounting, immutable records | `runtime/Bridge/Store.hs`, `Store/Schema.hs`, `migrations/` |
-| Dedicated signer and local operator control | `workflow/Bridge/Signer.hs`, `Control.hs` |
-| Host fence and backup | `runtime/Bridge/Fence.hs`, `Store/Backup.hs` |
-
-The deployment has one HTTP/API process and one dedicated signer process.
-The HTTP process serves HTML/CSS and the Haskell browser compiled by GHC's
-JavaScript backend. It evaluates customer requests directly; there is no HTTP
-proxy to a second worker. PostgreSQL, native daemon, Solana RPC and backup tooling
-remain external dependencies. Token administration and market liquidity have
-separate keys and live outside bridge custody in the other numbered folders.
-
-## Main.hs, existential requests and severity
-
-The exact user-supplied reference is [reference/Main.hs](reference/Main.hs), from
-“Add interactive environment prompts”, supplied 2026-10-02. Its SHA-256 is
-`f1d0777a8d2fddd62881aa5d85f518884c9d4efb451480f1520a677ab2319ea2`.
-Keep it unmodified, outside production builds, and read it before changing this boundary.
-
-The production core retains its typeclass/constrained-existential/GADT design:
+The user's exact [Main.hs](reference/Main.hs) is preserved outside production
+builds, SHA-256 `f1d0777a8d2fddd62881aa5d85f518884c9d4efb451480f1520a677ab2319ea2`.
+Read it before changing the operation boundary. The production grammar corrects
+its permissive/incomplete sketch types while retaining its constrained design:
 
 ```haskell
-class Operation (caller :: Caller) (severity :: Severity)
-    (op :: Severity -> Type -> Type) | caller -> op, op -> caller where
+class Operation caller severity op | caller -> op, op -> caller where
   command :: op severity a -> DSL caller severity a
   interpretOperation :: Handlers severity f -> op severity a -> f a
 
-data Request (caller :: Caller) (severity :: Severity) a where
-  Request :: Operation caller severity op => op severity a -> Request caller severity a
+data Request caller severity a where
+  Request :: Operation caller severity op
+          => op severity a -> Request caller severity a
 
-resolve :: Request caller severity a -> DSL caller severity a
 resolve (Request operation) = command operation
 ```
 
-`Request caller severity a` hides the operation type, retaining its dictionary,
-result, caller and severity. `Plan caller a` holds a safe or critical request.
-The four callers determine four closed, severity-indexed operation families through
-`caller -> op`; `op -> caller` prevents reassignment. Six concrete instances cover
-customer/operator safe and critical operations, and worker/signer critical operations.
-Concrete instance heads prevent overlapping specializations from replacing dispatch.
-Each DSL constructor carries its fully specified `Operation` context, which must
-unify with the existential request's caller, severity and family. `Instruction` is a
-matching-only pattern synonym exposing that dictionary from the closed DSL.
-Both evaluators delegate through `interpretOperation` to private, severity-indexed
-`Handlers`; instances only select a typed handler, with no Monad or IO capability.
-Safe handlers contain only reads. No runtime type comparison or cast grants authority.
-The grammar and both critical interpreters treat incomplete matches as build errors.
-A new signer instruction needs a closed grammar case and a corresponding private
-critical transport implementation; all signer access still passes the one dispatcher.
-Compile checks reject a new family, a duplicate concrete instance, wrong caller or
-severity, and a request resolved into a mismatched DSL context.
+Four closed caller families and six concrete instances cover customer/operator
+safe and critical work, and worker/signer critical work. Functional dependencies
+fix each caller's family; severity-indexed GADTs fix its executable instructions.
+Each DSL constructor stores its fully specified `Operation` context, matching the
+request's caller, severity and family. The matching-only `Instruction` pattern
+recovers that dictionary from the closed grammar. It cannot construct arbitrary
+instructions. No runtime type comparison or cast grants authority.
 
-Customer handlers have type `ServerT CustomerAPI (Plan 'Customer)`; they package
-operations, not IO or an already evaluated result. Servant's hoist resolves the
-dictionary to a DSL and evaluates it. Only the concrete result is serialized.
-The signer uses `ServerT SigningAPI (Request 'Signer 'Critical)` and resolves its
-own `SigningDSL` under separate authorization and serialization.
+`Plan caller a` contains a safe or critical existential request. Customer handlers
+have `ServerT CustomerAPI (Plan 'Customer)` and contain no effects. Servant's hoist
+resolves and evaluates the request; only its concrete result is serialized.
+Order creation being critical does not confer operator or signer authority.
+Cabal's customer-api component hides `Operation.Internal` and has no runtime,
+store or chain dependency. Review exports and component dependencies as well as types.
 
-Safe and critical evaluators remain separate. `Critical.hs` has one runtime
-`evalCritical` call in private `dispatch`. `evalCritical` itself checks external
-authority before acquiring the workflow gate. Its handlers and signer transport are
-local to that evaluator. Internal signer requests resolve their class dictionaries
-inside the already-locked evaluation, without reentering `evalCritical` or its gate. The private signing handler selected by that evaluator alone
-constructs the signer ClientM and independently refuses observation-only mode.
-The gate spans chain calls and individual database transactions, so scanning cannot
-change a payment's observed source midway through a workflow. Safe reads remain
-concurrent. The signer independently evaluates its restricted signing operations.
+`evalSafe` receives only the reader and public configuration. `evalCritical` owns
+authorization and the worker's process-local workflow gate. Its private handlers
+and signer client cannot escape. External requests reach its sole call site through
+`dispatch`; internal signer instructions call `Operation.command` and execute inside
+the already-held gate. They do not reacquire it. `Handlers` separates safe/critical
+capabilities; instances select handlers without a Monad or IO constraint.
+Incomplete grammar/interpreter matches are compilation errors. A new signer leaf
+requires a grammar case and private transport/server interpretation; all signer
+leaves share the explicitly critical signer-family context.
 
-Severity and caller permission are distinct: order creation is critical without
-allowing customers to sign or administer funds. Observer mode allows pause and
-recorded-effect reconciliation, but refuses order creation, resume, signatures and
-broadcasts. Closed operator commands cover pause/resume, refunds, treasury decisions,
-cancellation, source recovery, replacement and rebroadcast. No HTTP request can
-supply arbitrary SQL, IO, chain methods, signed bytes to authorize, or an evaluator.
+The signer independently authenticates requests and holds its own process-local
+gate across validation, signing and the second durable-decision read. These gates
+serialize workflows; types do not replace concurrency control. Safe reads remain
+concurrent. No database transaction spans RPC, signing or remote backup.
 
-Cabal separates domain/grammar, private `customer-api`, private `store`, public
-`chain` adapters and private `workflow` components. The customer API hides
-`Operation.Internal` through a module mixin and has no store, chain or workflow
-dependency. The separate `ecx-build-assets` package supplies SDK/browser build hooks,
-not a runtime service. Compile-failure checks guard forbidden customer imports and
-authority construction. Token/pool CLIs reuse the public protocol component and
-have separate severity-indexed existential requests and evaluators.
+Do not add arbitrary IO/SQL operations, severity casts, incoherent authorization
+instances or generic connection callbacks. The reference's weekly limit/multisig
+comments are design notes, not implemented guarantees.
 
-The reference sketch is not itself production-ready: remove its severity-to-operation
-functional dependency because one severity has many operations; never permit a safe
-evaluator to accept critical input or downgrade WrapEcx to SafeWrap. Its polymorphic
-RequiredOperation and unfinished runSafe are not escape hatches to implement.
-Do not introduce severity casts, incoherent authorization instances, MonadIO, arbitrary
-callbacks, generic RunQuery/RunSQL, or an unnecessary free-monad framework. Weekly
-supply limits and multisig in its comments are design notes, not current guarantees.
+## Signer authority and output identity
 
-## Signer result identity and formal model
+Only the critical interpreter constructs the generated Servant `ClientM`. The
+private API binds loopback HTTPS and authenticates with a protected token. The
+worker trusts the configured certificate with hostname validation; transport has
+bounded bodies/timeouts and no proxy, redirects or automatic retries. The signer
+uses SELECT-only ledger access, validates saved authorization and exact effects
+before/after signing, and never broadcasts.
 
-`Operation.Internal` declares `data family Result (severity :: Severity)
-(op :: Type -> Type)`. Data-family identity is injective in both arguments;
-`test/Main.hs` includes a polymorphic equality witness that GHC must typecheck
-without casts. Each signer input is a separate GADT whose result fixes both
-indices before the `SignerCommand` family packages that leaf. `Request caller severity a`
-hides the family while retaining its precise result. The `Operation.command` instance
-generates the closed `SigningDSL`.
-Both the server interpreter and critical client dispatch use that typeclass path.
-
-| Authenticated POST path | Operation type | Result constructor |
+| POST path | Leaf operation | Unique result constructor |
 | --- | --- | --- |
 | `/sign-preparation` | `SignPrepared` | `PreparedResult` |
 | `/sign-replacement` | `SignReplacement` | `ReplacementResult` |
 | `/draft-replacement` | `DraftReplacement` | `DraftResult` |
 | `/checkpoint-custody` | `CheckpointCustody` | `CheckpointResult` |
 
-The four data instances have disjoint JSON record fields and reject unknown fields.
-The actual Servant test checks all sixteen response/decoder combinations. Worker
-and signer must upgrade together: this deliberately changes the private signer
-response format. Customer responses and durable signed bytes are unchanged.
+`data family Result severity op` is injective in both indices. Leaf GADTs fix the
+result before the command family is hidden existentially. Four disjoint JSON fields
+and strict decoders preserve response identity. Retries may repeat the same saved
+result; uniqueness means non-interchangeable constructor paths, not fresh values.
 
-[SignerPaths.tla](../rebuild/test/formal/SignerPaths.tla) defines `OutputStates` as
-an explicit set and checks that each member has exactly one generating API path.
-It models request creation, paying-mode critical dispatch, authentication/routing,
-typeclass resolution, evaluation and refusal, with abstract saved-authorization and stability guards. `Alignment` binds
-every emitted constructor to its originating path; `OnlyEvaluatorCreates` checks
-that no other transition produces it. The supplied two-request model exhaustively
-checks interleavings, invalid paths, failed authorization and failed decision checks.
-It reached 54,289 distinct states with no violations using TLC 1.7.4. Deliberate
-wrong-output, authentication-bypass and reused-constructor mutations are rejected.
-Dispatch-bypass and observer-mode dispatch mutations are also rejected.
-The module contains the transition-by-transition inductive argument; there is no
-TLAPS-checked unbounded theorem or automatically verified Haskell refinement.
+[test/formal/SignerPaths.tla](../test/formal/SignerPaths.tla) defines an explicit
+`OutputStates` set and checks unique generating paths, route/output alignment,
+authentication/refusal and critical-dispatch requirements. The two-request TLC
+model reached 54,289 distinct states without violations; deliberate wrong-output,
+reused-constructor, auth/dispatch-bypass and observer-dispatch mutations were rejected.
+It includes an inductive argument, not a TLAPS-checked unbounded theorem or automatic
+Haskell refinement proof. It does not prove cryptography, custody or OS isolation.
+Ordinary constructors/JSON remain constructible by trusted code. A separate client
+with valid signer credentials can call HTTPS; it is still subject to signer checks.
 
-Run from `rebuild/test/formal/` with the official TLA+ 1.7.4 `tla2tools.jar`:
+Custody keys and full native credentials must be inaccessible to the worker through
+OS permissions and node RPC restrictions. Deny signing, key export, wallet unlock
+and wallet lock; `walletprocesspsbt` is signing-capable even when a caller requests
+an unsigned result. Replacement drafting therefore belongs at the signer. Process
+separation alone is insufficient while a full credential remains readable.
 
-```sh
-java -Xmx256m -XX:+UseParallelGC -cp /path/to/tla2tools.jar tlc2.TLC -workers 1 -metadir /tmp/ecx-tlc-states -config SignerPaths.cfg SignerPaths.tla
-```
+Optional `nativeUnlockFile` contains 1–1024 exact UTF-8 bytes, no NUL or line ending,
+in a protected mode-0600 regular file. Unlock/sign/relock occurs inside the signer
+gate; cleanup also follows an uncertain unlock reply. A 120-second daemon lease
+bounds exposure after process loss or failed relocking. The worker can allocate
+cached descriptor addresses while locked; keypool exhaustion remains a node refusal.
 
-The property concerns successful evaluator emissions through the production API.
-It does not make ordinary data constructors or JSON unforgeable: trusted Haskell
-code/tests can construct values, and JSON decoders necessarily construct them too.
-The production entry point uses `runSigner`. The real evaluator is local to
-`signerApplication`, which returns only an authenticated WAI application; callers
-never receive its evaluator as a callback. Transport helpers share `Signer.hs`.
-The worker holds its transport capability only inside the critical signer branch.
-The dispatch model covers this worker pipeline: another client possessing valid
-signer credentials can still call HTTPS directly, subject to the signer's own checks.
-TLS/authentication and independent saved-decision validation remain essential.
-Retries may repeat the same result through the same path. The model does not prove
-cryptography, chain/ledger validity, process isolation or all other critical DSLs.
+## Database and financial authority
 
-## Database and custody authority
+Every application row read/write, diagnostic, privilege check and test fixture
+uses Opaleye in a specific closed operation. Connections, transaction control and
+reviewed migration DDL are infrastructure. No handler gets a connection or generic
+query evaluator. Safe evaluation and the signer use distinct SELECT-only roles,
+including SELECT on sequences without USAGE/UPDATE. Startup checks inherited and
+catalog privileges, schema creation and elevated role flags.
 
-All application row access, diagnostics and test fixtures must use Opaleye, within
-implementations of specific closed operations. Connections and generic query
-callbacks stay outside handlers. libpq connection/transaction control and reviewed
-schema/role/fault-injection DDL are separate infrastructure. SQLite is retired.
+The writer owns a deployment advisory lock and an independent monotonic host fence.
+Ledger actions serialize on the deployment row. The fence advances before commit;
+stale/wrong-identity/retired state is refused. Unexpected database failures fence the
+connection; policy failures permit reuse only after successful rollback. Startup
+pauses intake. Schema-18 migration retains exact history through migrations 006–008;
+migrations 001–005 remain necessary baseline DDL. Fresh initialization expects the
+complete schema and refuses residual financial rows.
 
-Safe evaluation uses a distinct SELECT-only role and read-only transactions.
-Startup checks inherited privileges, schema creation, relation/column writes,
-sequence access and elevated role flags. Fixed catalog expressions do not accept
-caller-selected SQL or function names. The signer also uses a read-only ledger role.
-Offline installation/migration authority is not a customer or operator HTTP route.
+Amounts are canonical base-unit decimal strings. Both conversion assets have eight
+decimals; arithmetic uses Integer with bounded persisted values. New fee is
+`ceiling(gross * 100 / 10000)` and net is gross minus fee. Reject nonpositive net.
+Save quote, direction, destinations, deadlines, confirmation/finality, cost limits
+and deployment fingerprint immutably. Network fees/rent never reduce quoted net.
 
-Ledger actions serialize on the deployment row; session ownership excludes another
-paying worker. Host fencing persists a monotonic sequence before commit and rejects
-stale, wrong-identity or retired ledgers. SQL/IO errors or failed rollback fence the
-connection. Policy errors permit reuse only after successful rollback. Restart
-begins paused. No SQL transaction spans chain RPC, signing or remote backup.
+Each append-only event balances independently by asset. Principal protects customer
+receipts; float funds payouts; earned holds settled revenue; operating pays costs;
+unallocated, backing and LP balances remain protected. External is a counter-entry,
+not capital. Never infer spendable float from a wallet balance. Conversion, full
+refund and earned-fee withdrawal share a payment engine with explicit funding types;
+withdrawals never fabricate customer orders or deposits.
 
-Only the critical evaluator communicates with the signer through generated Servant
-ClientM calls. Its HTTPS API binds to 127.0.0.1 and exposes sign-preparation,
-draft-replacement, sign-replacement and checkpoint-custody, tied to saved decisions
-and the deployment identity. BasicAuth uses a
-256-bit protected token; the worker trusts only the protected configured certificate
-with hostname validation. No proxy, redirect, automatic retry or unbounded response
-is allowed. Token/certificate ownership and directory permissions are checked;
-the TLS key is signer-only. Local operator control remains a separate mode-0600
-framed Unix socket, not an operator HTTP API or a signer transport.
+Admission reserves conversion and alternate refund costs, including rent, within
+available allocations and rolling 86,400-second budgets. Immutable cost times and a
+monotonic durable clock prevent clock rollback from resetting budgets. Expiry
+releases only provisional holds. Funded/signed work retains its protection. Treasury
+allocation requires a finalized eligible unbound receipt, an exact split, paused
+service, ownership attestation and matching custody; SOL only funds operating.
 
-The signer checks deployment, saved authorization, transaction effects and limits
-before and after signing; it never broadcasts.
-For an encrypted native wallet, optional `nativeUnlockFile` supplies a signer-only
-0600 UTF-8 passphrase file (1–1024 bytes, no NUL or line endings). Unlock/sign/relock
-stays inside the signer gate, including cleanup after an uncertain unlock reply.
-The node enforces a 120-second unlock lease if the process dies or relocking fails.
-The worker can allocate cached descriptor addresses while locked, but its RPC
-credentials must deny both unlocking and locking. Unencrypted wallets keep their
-existing readiness path. The SDK Rust library is reached only
-through bounded Haskell FFI, with caller-owned buffers and no allocator/pointer
-ownership crossing the ABI. Unsigned construction supplies public identities and no
-key path; Haskell independently validates messages and signatures. Simulation uses
-zero signatures, never usable signed bytes. Separate OS users and restricted native
-RPC credentials must prevent bypass via a full wallet cookie. Deployment proof of
-that separation and real two-process acceptance remain release work.
+## Customer and payment lifecycle
 
-## Customer contract
+A random saved 32-byte capability and idempotency key precede order creation.
+`Authorization: Bearer <64 lowercase hex characters>` grants access; only a
+domain-separated hash is stored. Replaying identical immutable input recovers the
+order; changed input conflicts. Order IDs, QR codes, memos and payment links alone
+grant neither access nor deposit credit.
 
-| Route | Result |
-| --- | --- |
-| `GET /api/v1/config` | Profile, limits, fees, public links and availability |
-| `POST /api/v1/orders` | Create/recover an immutable order in authorized paying mode |
-| `GET /api/v1/orders/:id` | Authorized saved-order view |
-| `POST /api/v1/orders/:id/transaction` | Authorized payment instructions for the bound order |
+Wrapping binds an external Solana recipient and native refund address. Unwrapping
+binds a native recipient and Solana Pay reference, then verifies the actual sender
+for refunds. Native admission checks the real checkpoint/network, supported scripts,
+ownership, dust and fee policy. Solana admission checks genesis, classic SPL program,
+mint/ATA identity, decimals, ownership, balances and fee/rent limits. Unsupported
+extensions, delegates, close authorities and account forms are refused. Simulation
+success does not guarantee later execution.
 
-No wallet connection is required. Native wrapping supplies a Solana recipient and
-native refund address; redemption binds the native recipient and Solana Pay
-reference, then derives the refund owner from the verified deposit. The customer's
-wallet signs its own deposit. Copy/QR/payment links and saved-order recovery are
-presentation, not authority to credit a deposit.
-There are no public operator, health, readiness or deposit-hint endpoints.
+Native provisioning saves a unique claim before allocating an address. Only the
+claim creator allocates; retries recover the exact labeled owned, solvable,
+non-change P2WPKH address. Ambiguous allocation cannot silently allocate another.
+Instruction exposure requires unexpired, unpaused intake, retained holds, fresh
+custody/scans and required backup. Recovery never extends saved deadlines.
 
-Before creating an order, save a random 32-byte capability and idempotency key.
-Send `Authorization: Bearer <64 lowercase hex characters>`; the ledger stores a
-domain-separated hash. A public order ID is insufficient. An identical capability,
-key and request recovers the original order; changed immutable content conflicts.
-Bridge errors currently map to JSON errors with HTTP 409; parser/transport rejection
-is separate. Error categorization and funded wallet UX still require acceptance.
+1. Observe the exact qualifying deposit; preserve liabilities for partial, late,
+   additional, unknown or ambiguous receipts and route them to review/refund.
+2. Save a funded outgoing intent and exact preparation generation/draft. Native
+   locks may cover only saved inputs; independently check prevouts, change and fees.
+3. Obtain required backup coverage, sign the saved decision, independently validate
+   the result and persist its exact bytes. A lost signing reply grants no send authority.
+4. Record broadcast intent and sequence, cover it, then recheck source, readiness,
+   costs and Solana validity. Submit only saved authorized bytes.
+5. Independently observe actual confirmed/finalized effects and atomically settle
+   principal, fees, operating costs and reservations. A signature or submission
+   acknowledgement is not settlement. One economic payment has one settled winner.
 
-Both conversion assets use eight decimals. Amounts are base-unit decimal strings,
-not JSON numbers, exponent notation or signed/fractional text. Intermediate totals
-use Integer; persisted amounts obey signed-64-bit and lower configured bounds.
-For new orders, fee = ceiling(gross * 100 / 10000), net = gross - fee; reject net <= 0.
-Historical terms are immutable. Network fees and permitted ATA rent are operating
-costs and cannot reduce quoted net. Save direction, amounts, destinations, source
-binding, deadlines, confirmation/finality policy and deployment fingerprint.
-Only an exact qualifying deposit earns the conversion; ambiguous, partial, extra,
-late or unknown receipts retain their liabilities and enter review/refund handling.
+Solana preparations retain exact messages, references, blockhash/validity and cost
+limits; Haskell checks SDK bytes and Ed25519 signatures. Failed finalized transactions
+book only verified costs. Additional refunds never overwrite a completed conversion's
+payout link. Old unfinished records without saved executable policy require review.
 
-`Admission` owns both preflights, called once by the order workflow. It does not
-reserve funds or grant signing/send authority. Native admission verifies the real
-checkpoint/network and daemon-classified supported recipient/refund scripts, refusing owned/watch-only destinations. An unsigned funding
-probe applies actual daemon dust/fee policy to the exact amount, with no new address,
-lock or signature. It is conservative and is repeated at payment preparation.
-Wrapping admission on Solana validates real deployment, wallet owners, legacy ATAs, mint/program,
-decimals, authority/layout, balances, fees, rent and blockhash context. Missing payout
-ATAs may be created; prefunded empty accounts reduce rent, never below zero.
-Delegates, close authorities and unsupported owner/account types are refused.
-Redemption admission checks deployment identity; source ownership is established from
-the actual Solana Pay deposit, without a pre-bound customer wallet.
-Admission/simulation success is not a future execution guarantee.
+## Observation and recovery
 
-Native address provisioning commits a unique claim before getnewaddress. Only the
-claim creator may allocate; retries recover the exact label and owned, solvable,
-non-change P2WPKH address. Missing/ambiguous evidence cannot allocate again. Record
-the instruction and critical sequence before backup or exposure. First exposure
-requires unexpired, unpaused intake, retained holds, fresh scans/custody and applicable
-backup coverage. Already issued instructions remain historical data through expiry
-or pause. Recovery cannot renew deadlines or reopen released reservations.
+Observers atomically commit pages with their previous cursor. Native, custody-token
+and SOL histories retain immutable origins. Unknown outflows are quarantined;
+signed/unseen bytes do not explain spent funds. Errors preserve cursors. Custody
+compares actual balances with journal balances and only verified observed unbooked
+effects. A revision fences the snapshot; financial changes invalidate it. First
+intake/exposure requires scans/custody no older than 60 seconds. Checks never resume
+the service by themselves.
 
-## Accounting and payment lifecycle
+Paused recovery can record observed effects and recover owned input locks, but
+cannot prepare/broadcast new payments. Foreign locks stay untouched. Cancellation
+journals exact cleanup, excludes recorded signatures and retains liabilities;
+unknown cleanup stays pending. Never unlock an empty input list. Generation count
+is bounded at eight, and old-generation callbacks cannot change newer work.
 
-Each append-only event balances separately per asset. `external` is a counter-entry,
-not spendable capital. `principal` protects customer deposits; `unallocated` protects
-unknown receipts; `float` is payout inventory less reservations; `earned` is settled
-bridge revenue; `operating` pays network costs; `backing` and `lp` are protected
-allocations. Proven source loss uses `source_deficit` without erasing customer claims.
-Never infer available float from a wallet balance or expose arbitrary credit.
+Solana retry requires every configured provider to establish finalized height past
+saved validity, invalid blockhash, absent transaction/status and complete histories
+to immutable origins. Truncated/unavailable history is not proof. Preserve bytes and
+principal, then require a separate paused immutable approval for a new generation.
+Amount, recipient and reference remain fixed; costs are reserved again.
 
-For a new 100-unit conversion, settlement moves source principal -100, source float
-+99 and earned +1, then destination float -99 and external +99. A full refund returns
-principal without taking inventory a second time. Network fees and account rent are
-separate operating expenses; a finalized failed Solana transaction charges only its
-verified fee. No settlement is posted merely because bytes were signed or submitted.
+Native replacement retains inputs, sequence, version/locktime, recipient/amount,
+change address and fee ceiling; only change decreases to fund the added fee. Keep
+all bounded family members and immutable decisions observable. Foreign spenders,
+conflicting drafts and ambiguous winners require review. Observe the sole actual
+winner; a proven later winner change adjusts only costs, never principal again.
+Rebroadcast requires explicit saved approval, current source proof and backup and
+uses identical bytes. It does not grant replacement authority.
 
-Treasury allocation requires a verified eligible unbound receipt, paused operation,
-current custody and an immutable ownership attestation; splits equal the receipt,
-and SOL only funds operating. Classification of an already observed operator spend
-protects customer attempts and active holds, then records costs once. Changed evidence
-reopens review. Earned-fee withdrawal reserves explicit earned funding and uses the
-same durable preparation/signing/send/settlement workflow as customer payments.
-It never fabricates a customer order or source deposit. Cancellation and recovery
-preserve its reservations and saved attempts.
+Source loss retains obligations, holds and attempts. Corroborated native loss books
+a deficit; unavailable data is not loss. Return reverses it once and restores
+confirmation review. Separate source-restoration or covered-source approval binds
+the exact suspended work, latest decision, current custody and required coverage.
+Full loss coverage consumes only genuinely free native float/earned capital, never
+principal, operating, backing or LP. Return restores the original split once.
+Unresolved reviews, deficits or missing policy prevent resume.
 
-Quotes reserve conversion and alternate refund operating allowances, including rent.
-Admission requires allocation minus holds to cover costs, and the last 86,400 seconds
-of booked expenses plus holds/new costs to fit configured daily limits. Rejections
-commit no order/hold. Preparation transfers allowances once; expiry releases only
-provisional holds; funded or signed work retains its protection. Immutable cost
-booking times and a monotonic durable clock prevent backward time from resetting
-budgets. Old unfinished orders without saved cost policy require explicit review.
+Read-only RPC retries use a fixed bounded allowlist. Wallet mutations, sends and
+unknown outcomes are not automatically retried. Fixtures are not substitutes for
+real protocol/network acceptance.
 
-Trace the durable sequence:
+## Backup boundary
 
-1. Admit and bind the order, reserve inventory and both cost allowances.
-2. Observe an eligible deposit and create its conversion/refund obligation.
-3. Reserve one outgoing intent per chain and save a preparation generation/draft.
-4. Cover the required durable decision before signing; independently validate the
-   signature and persist exact bytes. A lost reply grants no send authority.
-5. Record BroadcastIntent and its critical sequence; obtain applicable backup
-   acknowledgment. Recheck source, pause/readiness, limits and Solana validity.
-6. Authorize and submit only those saved bytes. Uncertain responses retain all work.
-7. Independently observe the actual finalized economic effect and atomically settle
-   principal, fees, costs and reservations. A unique settled-winner constraint and
-   transaction checks prevent a second economic payout.
+Required instruction/sign/send coverage acknowledges the exact durable sequence.
+A checkpoint exports a consistent PostgreSQL snapshot plus native wallet, Solana
+key, configuration and manifests, uploads via restic and verifies the downloaded
+bundle before acknowledgement. Slow backups trigger fresh observation, not waived
+coverage or renewed quotes. No SQL transaction spans remote upload.
 
-Normal states are Provisioning, AwaitingDeposit, Ready, Preparing, Paying and Paid;
-review, expiry and refund states retain distinct liabilities. Native funding saves
-its exact template before locks/signatures; only its saved inputs may be locked.
-Validate confirmed owned prevouts, recipient/change, fee ceiling and replay fields.
-Solana preparation saves exact message/reference/blockhash/validity, fee/rent limits
-and request; locally validate SDK bytes and Ed25519 signature. Recorded attempts
-are immutable, including across restart. Broadcast acknowledgment is not settlement.
+Encrypted-wallet export requires configured unlock material even if already
+unlocked. Format-2 custody archives bind encrypted state, exact file set and secret;
+unencrypted archives retain format 1. Export validates the secret against the wallet
+before/after backup and checks source bytes/state. Keep passphrase administration
+quiescent. Offline inspection checks integrity without unlocking; restoration must
+point `nativeUnlockFile` at the recovered private file.
 
-## Recovery, observation and restart
-
-Scanner pages commit observations and next cursor atomically against the previous
-cursor. Keep immutable origins for native, custody-token and fee-payer-SOL histories.
-The SOL origin cannot omit earlier funding. Unknown bindings/outflows are quarantined;
-a merely signed attempt does not explain an on-chain outflow. Complete historical
-source ownership/reference/economic effects are required, not a copied memo or hint.
-Provider errors retain the cursor; repeated observations cannot duplicate value.
-
-Custody compares the journal with actual balances plus only verified, observed but
-unbooked outgoing effects. Signed/unseen bytes add no adjustment. Native wallet,
-active-block/history views must agree; contextual finalized Solana accounts/history
-must agree, including any required independent provider. A ledger revision fences
-RPC snapshots; financial changes invalidate prior certification. Intake and first
-instruction exposure require a matching check no older than 60 seconds. Unexplained
-balances/history fail closed; a successful check alone does not resume service.
-
-Paused recovery may book recorded effects and reconstruct owned native locks, but
-cannot prepare or broadcast new payments. Missing locks may be reapplied; foreign
-locks are not cleared. Pending cancellation cannot relock inputs. Recovery visits
-all pending families even after an individual observation failure, pauses and retains
-the work. Errors are typed internally; durable evidence/audit remains authoritative.
-
-Unsigned cancellation journals exact policy/draft cleanup before changing locks,
-requires pause, source and custody checks, and excludes any recorded signature in
-that generation. Never call lockunspent with an empty list. Lost replies leave
-cancellation pending; completion retains principal/inventory/unused fee allowance.
-Old-generation callbacks cannot affect newer work. Generation count is bounded at eight.
-
-Solana expiry requires every configured provider to prove finalized height beyond
-validity, invalid blockhash, absent historical status/transaction, and complete token
-and fee-payer histories through immutable origins. Missing/truncated evidence is not
-expiry. Retire only unused fee capacity, retaining bytes and principal/inventory.
-A separate paused, immutable operator approval is required for another generation;
-amount, recipient and reference remain unchanged, costs are reserved again.
-
-Native replacement retains inputs, sequences, version/locktime, recipient/amount,
-change address and fee ceiling; only change decreases as fees increase. Bound family
-size and draft/generation decisions; validate every saved member and two consistent
-chain/wallet views. Foreign spenders or ambiguous winners require review. Draft,
-cancellation and signed-member records are immutable; cancelled drafts cannot reactivate,
-unsigned decisions block conflicting sends, and ordinary sending selects the newest member.
-All family members remain observable. Settle the actual sole winner; a later proven
-winner change journals its fee adjustment and proof without paying principal again.
-Same-winner reconfirmation changes no money. Real winner-change acceptance remains a gate.
-
-Source eligibility loss retains obligations, holds, drafts and attempts. Native loss
-requires corroborated wallet conflict, absent mempool entry and spent/missing UTXO;
-unavailable data is not loss. A proven loss posts source_deficit against external.
-Return reverses that deficit once, with review until saved confirmation policy holds.
-Restoration approval checks the exact suspended-work hash, latest decision, source,
-custody revision and unchanged obligation; it does not sign or resume. Later send
-coverage must include the approval. A covered-source approval is a separate decision.
-
-Loss coverage consumes only genuinely free native float/earned capital for the full
-receipt, never principal, operating, backing or LP funds. Preserve source ineligibility
-and customer claims. Coverage/return postings and immutable decisions are atomic;
-return restores the original capital split once. Unavailable evidence cannot free it.
-Explicit rebroadcast of an evicted settled native payment preserves its exact bytes,
-review/approval sequence, current source proof and backup barrier. It never invents
-replacement authority. Unresolved/reviewed work, unexplained observations, deficits
-or missing legacy cost policies block resume; source restoration alone is insufficient.
-
-Read-only RPC retries use a fixed allowlist, bounded attempts and capped Retry-After.
-Wallet mutations, sends and unknown outcomes are not automatically retried. Chain
-protocol behavior comes from the real adapters and captured vectors, not a local
-invented network. Database fixtures and injected failures are not live-chain evidence.
-
-## Backup and release boundary
-
-Where configured, deposit exposure/signing/send gates require durable acknowledgment
-covering the exact required sequence; successful callback return alone is insufficient.
-Backups must preserve PostgreSQL financial records, exact signed attempts, native
-wallet/descriptors/keys, Solana key, private signer configuration and sequence/identity
-manifests. Key seeds alone cannot recover order/payment decisions or prevent duplicates.
-Encrypted native wallets require `nativeUnlockFile` for custody export, even if
-already unlocked. Format-2 custody bundles bind the exact copied secret, encrypted
-state and file set; unencrypted bundles retain the exact format-1 grammar. Export
-validates the copied secret against the live wallet before and after backup, and
-rechecks source bytes/state. Wallet encryption/passphrase administration must stay
-quiescent during export. Offline inspection verifies bindings and integrity without
-unlocking; a restore/sign test establishes that the archived secret opens the wallet.
-After relocation, set the signer's `nativeUnlockFile` to the restored private
-`native-unlock` file. The saved original path is not used by offline inspection.
-
-Restore into staging from authenticated off-host encrypted storage, verify identities,
-restore/adopt the sequence fence without lowering it, migrate forward, rescan/reconcile
-both chains and pending work, then explicitly resume. Retire the old worker and revoke
-its signing authority; a local marker cannot revoke copied keys on another host.
-Never overwrite the only surviving ledger/keys or initialize an empty ledger as recovery.
-
-Outstanding work includes legacy application retirement, remaining test/tool consolidation,
-actual Solana Pay wallet signing, deployed signer/native-RPC isolation, clean-host
-off-host restore, permanent-loss/winner-change acceptance, canonical authority/backing
-and funded flows, dependency/license review and independent security review. Linux
-ARM64/x86 packaging acceptance follows substantive runtime work. Passing local tests
-or historical artifacts does not close these gates or authorize public activation.
+Restore into new staging, verify identity/schema/minimum sequence, migrate forward,
+adopt a nondecreasing fence and reconcile both chains before explicit resume. A
+local retirement marker does not revoke copied keys elsewhere. Never replace a
+missing ledger with a new empty ledger for existing custody. See
+[OPERATIONS.md](OPERATIONS.md) for commands and old-host exclusion requirements.

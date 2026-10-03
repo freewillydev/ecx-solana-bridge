@@ -23,7 +23,7 @@ import Data.Bits (xor)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Paths_ecx_bridge_rebuild (getDataFileName)
+import Paths_ecx_bridge (getDataFileName)
 import Test.QuickCheck
 
 checks :: IO [Result]

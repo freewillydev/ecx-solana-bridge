@@ -11,8 +11,6 @@
   "mint": "REQUIRED_REAL_DEVNET_MINT",
   "custodyOwner": "REQUIRED_DEVNET_CUSTODY_OWNER",
   "custodyAta": "REQUIRED_DEVNET_CUSTODY_ATA",
-  "customerSocket": "/run/ecx-bridge/customer/api.sock",
-  "adminSocket": "/run/ecx-bridge/admin/api.sock",
   "signerPort": 8081,
   "signerAuthFile": "/etc/ecx-bridge/signing.auth",
   "solanaSdkLibrary": "/opt/ecx-bridge/current/lib/libecx_solana_sdk.so",
@@ -28,6 +26,9 @@
   "maxNativeDailyCost": "10000",
   "maxSolDailyCost": "10000000",
   "backupRequired": false,
-  "solanaHistoryStart": null,
-  "solanaOperatingHistoryStart": null
+  "solanaHistoryStart": "REQUIRED_EARLIEST_CUSTODY_TOKEN_HISTORY_SIGNATURE",
+  "solanaOperatingHistoryStart": "REQUIRED_EARLIEST_FEE_PAYER_SOL_HISTORY_SIGNATURE",
+  "serverPort": 8080,
+  "fenceDirectory": "/var/lib/ecx-bridge/fence",
+  "nativeUnlockFile": null
 }
