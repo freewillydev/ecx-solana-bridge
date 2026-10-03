@@ -178,13 +178,14 @@ verifyNativeBoundaryWith call = mapM_ denied
 data NativeRecovery a where
   BackupNativeWallet :: FilePath -> NativeRecovery FilePath
   RestoreNativeWallet :: FilePath -> NativeRecovery ()
+  InspectNativeWalletBackup :: FilePath -> NativeRecovery (Text,FilePath,Text)
 
 evalNativeRecoveryWith :: (Bool -> Text -> [Value] -> IO Value) -> NativeSettings -> NativeRecovery a -> IO a
 evalNativeRecoveryWith call c operation = do
   validateNativeSettings c
-  _<-nativeIdentityWith call c
   case operation of
     BackupNativeWallet destination -> do
+      _<-nativeIdentityWith call c
       privateParent destination
       let manifest=destination<>".json"
       absent destination
@@ -209,30 +210,8 @@ evalNativeRecoveryWith call c operation = do
       sync (takeDirectory destination)
       pure manifest
     RestoreNativeWallet manifest -> do
-      privateParent manifest
-      privateBackup manifest
-      bytes<-withBinaryFile manifest ReadMode (`BS.hGet` 1048577)
-      require (BS.length bytes<=1048576) "native_backup_manifest_too_large"
-      value<-either (const $ reject "invalid_native_backup_manifest") pure (eitherDecodeStrict' bytes)
-      version<-fieldValue "format" value :: IO Int
-      savedProfile<-fieldValue "profile" value
-      height<-fieldValue "checkpointHeight" value
-      checkpoint<-fieldValue "checkpointHash" value
-      wallet<-fieldValue "wallet" value
-      name<-fieldValue "archive" value
-      checksum<-fieldValue "sha256" value
-      expected<-fieldValue "descriptors" value
-      require (version==1 && value==manifestValue savedProfile height checkpoint wallet name checksum expected
-        && name==takeFileName name && name `notElem` ["",".",".."]
-        && T.length checksum==64 && T.all (`elem` ("0123456789abcdef"::String)) checksum
-        && not(null expected)) "invalid_native_backup_manifest"
-      require (savedProfile==profile c && height==nativeCheckpointHeight c
-        && checkpoint==nativeCheckpointHash c) "native_backup_network_mismatch"
-      validateNativeSettings c {nativeWallet=wallet}
-      let backup=takeDirectory manifest </> name
-      privateBackup backup
-      actual<-withBinaryFile backup ReadMode (hashChunks hashInit)
-      require (actual==checksum) "native_backup_hash_mismatch"
+      (_,backup,_,expected)<-load manifest
+      _<-nativeIdentityWith call c
       wallets<-call False "listwalletdir" [] >>= fieldValue "wallets" :: IO [Value]
       names<-mapM (fieldValue "name") wallets
       require (nativeWallet c `notElem` names) "native_restore_wallet_exists"
@@ -242,7 +221,36 @@ evalNativeRecoveryWith call c operation = do
       restored<-descriptors
       matching<-and <$> sequence (zipWith sameDescriptor expected restored)
       require (length restored==length expected && matching) "native_restore_descriptors_mismatch"
+    InspectNativeWalletBackup manifest -> do
+      (wallet,backup,checksum,_)<-load manifest
+      pure (wallet,backup,checksum)
  where
+  load manifest = do
+    privateParent manifest
+    privateBackup manifest
+    bytes<-withBinaryFile manifest ReadMode (`BS.hGet` 1048577)
+    require (BS.length bytes<=1048576) "native_backup_manifest_too_large"
+    value<-either (const $ reject "invalid_native_backup_manifest") pure (eitherDecodeStrict' bytes)
+    version<-fieldValue "format" value :: IO Int
+    savedProfile<-fieldValue "profile" value
+    height<-fieldValue "checkpointHeight" value
+    checkpoint<-fieldValue "checkpointHash" value
+    wallet<-fieldValue "wallet" value
+    name<-fieldValue "archive" value
+    checksum<-fieldValue "sha256" value
+    expected<-fieldValue "descriptors" value
+    require (version==1 && value==manifestValue savedProfile height checkpoint wallet name checksum expected
+      && name==takeFileName name && name `notElem` ["",".",".."]
+      && T.length checksum==64 && T.all (`elem` ("0123456789abcdef"::String)) checksum
+      && not(null expected)) "invalid_native_backup_manifest"
+    require (savedProfile==profile c && height==nativeCheckpointHeight c
+      && checkpoint==nativeCheckpointHash c) "native_backup_network_mismatch"
+    validateNativeSettings c {nativeWallet=wallet}
+    let backup=takeDirectory manifest </> name
+    privateBackup backup
+    actual<-withBinaryFile backup ReadMode (hashChunks hashInit)
+    require (actual==checksum) "native_backup_hash_mismatch"
+    pure (wallet,backup,checksum,expected)
   -- Only public descriptors and relative archive names enter the manifest;
   -- cookie paths and other local credentials are deliberately excluded.
   manifestValue savedProfile height checkpoint wallet name checksum values=object

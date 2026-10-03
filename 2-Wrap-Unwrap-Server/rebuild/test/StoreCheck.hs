@@ -22,6 +22,7 @@ import Bridge.Domain
 import Bridge.Wire (PaymentTerms(..),CostLimits(..),PolicySnapshot(..))
 import Bridge.Store
 import Bridge.Signer
+import Bridge.Recovery
 import Bridge.Payment (payoutReference)
 import qualified Bridge.Control as Control
 import Bridge.Critical
@@ -32,7 +33,7 @@ import qualified Network.Wai.Test as WaiTest
 import Network.HTTP.Types (statusCode,status200)
 import Bridge.Order
 import qualified Bridge.Fence as Fence
-import System.Directory (createDirectory,removeDirectoryRecursive,removeFile,findExecutable,listDirectory,renameFile)
+import System.Directory (createDirectory,removeDirectoryRecursive,removeFile,findExecutable,listDirectory,renameFile,renameDirectory)
 import System.IO (openTempFile,hClose,withFile,IOMode(WriteMode))
 import System.Posix.Files (setFileMode)
 import qualified System.Posix.Files as Posix
@@ -124,10 +125,13 @@ nativeRecoveryMain = do
         PD.createDirectory moved 0o700
         renameFile original (moved </> "wallet.bak.json")
         renameFile (directory </> "wallet.bak") (moved </> "wallet.bak")
+        bundled<-lookupEnv "ECX_REBUILD_CUSTODY_ONLY"
+        nativeManifest<-if bundled==Just "1" then custodyBundleContract binary manager sourceConfig directory
+          else pure (moved </> "wallet.bak.json")
         expectedNext<-allocate "next-label" "bech32"
         void $ call source False "unloadwallet" [toJSON sourceName,Bool False]
         bracket_ (pure ()) (cleanup targetName) $ do
-          result<-runCommand "restore-native-wallet" targetFile (moved </> "wallet.bak.json")
+          result<-runCommand "restore-native-wallet" targetFile nativeManifest
           fieldValue "wallet" result >>= check . (==targetName)
           recovered<-N.recoverNativeAddressWith (call target) target 0 False "recovery-label"
           check (recovered==address)
@@ -137,6 +141,96 @@ nativeRecoveryMain = do
           verified<-call target False "verifymessage" [String legacy,signature,String "ECX empty-wallet recovery acceptance"]
           check (verified==Bool True)
     putStrLn "Real L2L Signet wallet backup/restore in separate executable processes with relocated durable manifest: descriptor state, labels, next address and private-key signing PASS; test wallets removed."
+
+-- Real PostgreSQL and native node; the Solana key is a public, never-funded
+-- vector. No Solana RPC is needed to verify recovery of its private identity.
+custodyBundleContract :: FilePath -> HTTP.Manager -> Config.Config -> FilePath -> IO FilePath
+custodyBundleContract binary manager base directory=withTestSigningKey $ \key->do
+  database<-getEnv "ECX_REBUILD_CONTRACT_DATABASE"
+  unless ("ecx_rebuild_contract_" `T.isPrefixOf` T.pack database) (fail "disposable database required")
+  user<-getEnv "USER"
+  role<-getEnv "ECX_REBUILD_CONTRACT_READER"
+  environment<-getEnvironment
+  let settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
+      readerSettings=settings {PG.connectUser=role}
+      config=base {Config.custodyOwner="4zvwRjXUKGfvwnParsHAS3HuSVzV5cA4McphgmoCtajS",Config.fenceDirectory=directory </> "fence"}
+      identity=Config.fingerprint config
+      file=directory </> "custody-config.json"
+      offlineFile=directory </> "offline-config.json"
+      overrides=[("PGHOST","/tmp/ecx-pg-seam"),("PGPORT","29436"),("PGDATABASE",database),
+        ("PGUSER",user),("PGPASSWORD",""),("PGREADUSER",role),("PGREADPASSWORD","")]
+      noPG=filter (not . T.isPrefixOf "PG" . T.pack . fst) environment
+      check ok=unless ok (fail "custody bundle contract failed")
+      run env args=do
+        (code,out,_)<-Process.readCreateProcessWithExitCode (Process.proc binary args) {Process.env=Just env} ""
+        check (code==ExitSuccess)
+        either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ T.pack out)
+      export=evalCustodyRecovery manager config (ExportCustody settings readerSettings key directory)
+  Config.validateConfig config
+  BL.writeFile file (encode config)
+  BL.writeFile offlineFile (encode config {Config.nativeRpc="http://127.0.0.1:1",Config.nativeCookie="/unavailable-cookie"})
+  bracket (PG.connect settings) PG.close $ \fixtures->do
+    fixture fixtures (InitializeIdentity identity)
+    Fence.initializeFence (Config.fenceDirectory config) identity 0
+    beforeFiles<-listDirectory directory
+    withFencedWriter settings (Config.storePolicy config) (Config.fenceDirectory config) $ \_->
+      expectStore "worker_fence_locked" export
+    withWriter settings (Config.storePolicy config) (const $ pure ()) $ \_->
+      expectStore "worker_already_running" export
+    failedBackups<-newIORef (0::Int)
+    let interrupt request=case HTTP.requestBody request of
+          HTTP.RequestBodyLBS body | Right (Object value)<-eitherDecodeStrict' (BL.toStrict body)
+            , KM.lookup "method" value==Just (String "backupwallet")->
+                modifyIORef' failedBackups (+1) >> reject "injected_backup_failure"
+          _->pure request
+    bracket (newManager $ HTTP.managerSetProxy HTTP.noProxy defaultManagerSettings {managerModifyRequest=interrupt}) closeManager $ \faulty->
+      expectStore "injected_backup_failure" (evalCustodyRecovery faulty config $ ExportCustody settings readerSettings key directory)
+    readIORef failedBackups >>= check . (==1)
+    expectStore "custody_backup_database_mismatch" (evalCustodyRecovery manager config $
+      ExportCustody settings readerSettings {PG.connectDatabase="other"} key directory)
+    listDirectory directory >>= check . (==sort beforeFiles) . sort
+    output<-run (overrides<>noPG) ["backup-custody",file,key,directory]
+    original<-fieldValue "manifest" output
+    fieldValue "criticalSequence" output >>= check . (==(0::Int))
+    let relocated=directory </> "relocated-custody"
+        manifest=relocated </> "custody.json"
+    renameDirectory (takeDirectory original) relocated
+    -- Neither the original signing file nor a DB/RPC connection is available
+    -- to the next process. Only the relocated bundle remains for inspection.
+    removeFile key
+    inspected<-run noPG ["check-custody",offlineFile,manifest,"0"]
+    fieldValue "fingerprint" inspected >>= check . (==identity)
+    fieldValue "criticalSequence" inspected >>= check . (==(0::Int))
+    bracket (newManager defaultManagerSettings {managerModifyRequest= \_->fail "offline custody inspection reached network"}) closeManager $ \offline->do
+      let inspect=evalCustodyRecovery offline config
+      inspect (InspectCustody manifest 0) >>= check . (==0)
+      expectStore "backup_snapshot_too_old" (inspect $ InspectCustody manifest 1)
+      expectStore "invalid_restore_policy" (inspect $ InspectCustody manifest (-1))
+      expectStore "backup_identity_mismatch" (evalCustodyRecovery offline config {Config.deploymentId="wrong"} $ InspectCustody manifest 0)
+      saved<-BS.readFile (relocated </> "deployment.json")
+      BS.appendFile (relocated </> "deployment.json") " "
+      expectStore "custody_backup_hash_mismatch" (inspect $ InspectCustody manifest 0)
+      BS.writeFile (relocated </> "deployment.json") saved
+      setFileMode (relocated </> "solana-key.json") 0o644
+      expectStore "unsafe_custody_backup_file" (inspect $ InspectCustody manifest 0)
+      setFileMode (relocated </> "solana-key.json") 0o600
+      inspect (InspectCustody manifest 0) >>= check . (==0)
+    value<-BS.readFile manifest >>= either fail pure . eitherDecodeStrict'
+    ledger<-fieldValue "ledgerManifest" value
+    records<-fixture fixtures ArchiveRecords
+    let restore=do
+          result<-run (overrides<>noPG) ["restore-ledger",file,relocated </> ledger,"0"]
+          fieldValue "database" result
+    bracket restore (\name->Backup.discardRestore settings {PG.connectDatabase=T.unpack name}) $ \name->
+      bracket (PG.connect settings {PG.connectDatabase=T.unpack name}) PG.close $ \restored->do
+        (rows,attempts,postings)<-fixture restored ArchiveRecords
+        let (_,savedAttempts,savedPostings)=records
+        check (attempts==savedAttempts && postings==savedPostings && not(null postings)
+          && case rows of [row]->S.fingerprint row==identity && S.paused row==1 && S.criticalSequence row==0; _->False)
+    fixture fixtures ArchiveRecords >>= check . (==records)
+    verifySigningKey (Config.custodyOwner config) (relocated </> "solana-key.json")
+    putStrLn "PASS: exclusive custody export, six bound files, relocated offline inspection without original key/DB/RPC, integrity/minimum/identity/permissions refusal, exact journal restore and unchanged source ledger"
+    pure (relocated </> "native-wallet.json")
 
 ledgerMain :: IO ()
 ledgerMain = do

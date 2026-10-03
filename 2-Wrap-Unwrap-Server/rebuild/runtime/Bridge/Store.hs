@@ -88,12 +88,14 @@ data NativeSettlementCheck = NativeConfirming | NativeUnavailable Text
 -- Restoration needs database-creation authority; fence changes claim the paused
 -- ledger exclusively. No online handler receives these maintenance operations.
 data StoreRestore a where
+  InspectLedger :: FilePath -> Text -> Int64 -> StoreRestore LedgerArchive
   AdoptLedger :: FilePath -> Text -> Int64 -> StoreRestore (Text,Int64)
   RetireLedger :: FilePath -> Text -> Int64 -> StoreRestore (Text,Int64)
   RestoreLedger :: FilePath -> Text -> Int64 -> StoreRestore (Text,Int64)
   RecoverLedger :: FilePath -> Text -> FilePath -> Text -> Int64 -> StoreRestore (Text,Int64)
 
 evalRestore :: PG.ConnectInfo -> StoreRestore a -> IO a
+evalRestore _ (InspectLedger manifest identity minimumSequence) = loadLedgerArchive identity minimumSequence manifest
 evalRestore settings (AdoptLedger directory identity minimumSequence) =
   changeLedgerFence settings directory identity minimumSequence Fence.adoptFence
 evalRestore settings (RetireLedger directory identity minimumSequence) =

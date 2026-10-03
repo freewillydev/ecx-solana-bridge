@@ -1486,12 +1486,60 @@ application binary, `ECX_REBUILD_NATIVE_RECOVERY_COOKIE` and
 
 This does not grant the web worker backup/key access or change the signer API.
 Encrypted wallets still require separately retained unlock material. Populated and
-encrypted wallets, cross-UID deployment, and the coherent ledger/Solana-key/native
-wallet bundle still need integration and acceptance; a native-only backup cannot
+encrypted wallets and cross-UID deployment still need acceptance; a native-only backup cannot
 recover customer orders, signed attempts or Solana custody.
 
-Still required: durable key/wallet recovery material, backup acknowledgment and
-runtime integration, then independent off-host storage and real-custody acceptance.
+Local custody export and offline inspection now compose these existing pieces:
+
+```sh
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- backup-custody CONFIG KEYFILE DIRECTORY
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- check-custody CONFIG MANIFEST MINIMUM_SEQUENCE
+```
+
+`backup-custody` needs offline native/key authority, the existing host fence,
+writer `PG*` credentials and a distinct SELECT-only `PGREADUSER`/`PGREADPASSWORD`.
+The reader must address the same database. It holds both worker ownership locks,
+pauses the ledger, and creates a unique mode-0700 subdirectory under the existing
+private `DIRECTORY`. No SQL transaction spans native RPC. The six bound files are
+the ledger dump/manifest, native wallet/manifest, verified Solana key and deployment
+configuration. Source/copy public-key checks and an unchanged critical sequence
+bind the export; the completion manifest is written and synchronized last.
+Failure cleans only the newly created staging directory. The source remains paused.
+Encrypted native wallets are explicitly refused until their unlock material can be
+verified and included; same-UID node/key/staging access is currently required.
+
+`check-custody` requires neither database credentials nor network access. It checks
+private permissions, the exact file set, hashes, network/wallet/deployment identity,
+Solana key identity and the independently supplied minimum ledger sequence. Archive
+names are relative; a bundle can move as a unit. Large archives are hashed once by
+the existing native/ledger inspectors. Inspection does not install keys, restore a
+ledger, adopt a fence, acknowledge backup coverage or resume service. Restoring the
+ledger still performs its database-level validation and invalidates old custody
+certification. Private transport credentials must be provisioned on the new host;
+this bundle preserves custody keys/configuration, not old RPC cookies or TLS tokens.
+
+Versus `3ac1877`, this adds **195 production lines across four files**: one new
+167-line `workflow/Bridge/Recovery.hs`, Native 294 → 302, Store 3,307 → 3,309 and
+Main 108 → 126. The existing acceptance runner grows 2,709 → 2,803. No new process,
+executable, schema or external dependency was added; the workflow component now
+references the already-used PostgreSQL driver for offline connection settings.
+This is missing recovery functionality, not a claimed reduction of the baseline.
+
+Acceptance uses actual PostgreSQL, a fresh empty real L2L Signet wallet and a
+public never-funded Solana key vector. Independent CLI invocations export, relocate
+and inspect the bundle after deleting the original test key, with unavailable
+RPC/database credentials. Component restoration preserves every fixture journal
+entry, the native label/next address/private-key signing, and the Solana key identity.
+Both worker-lock conflicts, an injected mid-export failure, altered files, stale
+snapshots, wrong identities and exposed key permissions are rejected; staging,
+restored databases and test wallets are cleaned up. Run the existing native recovery
+contract with `ECX_REBUILD_CUSTODY_ONLY=1` plus disposable migrated PostgreSQL
+`ECX_REBUILD_CONTRACT_DATABASE`/`ECX_REBUILD_CONTRACT_READER`. These financial records
+are database fixtures, not evidence of funded Solana or cross-host recovery.
+
+Still required: encrypted upload/download of the complete custody bundle,
+backup acknowledgment/runtime integration, encrypted-wallet unlock material and
+cross-UID deployment, then independent off-host and funded recovery acceptance.
 The `backupRequired` startup refusal remains until those guarantees are implemented;
 an archive, upload-only receipt or adopted paused ledger does not automatically
 permit signing or sending.

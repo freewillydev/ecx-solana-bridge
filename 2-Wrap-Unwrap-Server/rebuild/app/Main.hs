@@ -8,6 +8,7 @@ import Bridge.Control (runControl,callControl)
 import Bridge.Error
 import Bridge.RPC (newRpcManager)
 import qualified Bridge.Native as N
+import Bridge.Recovery (CustodyRecovery(..),evalCustodyRecovery)
 import Bridge.Signer
 import Bridge.SigningTransport
 import Bridge.Store (withReader,withFencedWriter,StoreRestore(..),evalRestore)
@@ -44,6 +45,19 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
       if mode=="backup-native-wallet"
         then run (N.BackupNativeWallet file) >>= LBS.putStrLn . encode . object . pure . ("manifest" .=)
         else run (N.RestoreNativeWallet file) >> LBS.putStrLn (encode $ object ["wallet" .= C.nativeWallet c])
+  command ["backup-custody",path,key,directory]=do
+    c<-C.loadConfig path
+    database<-databaseSettings
+    reader<-readDatabaseSettings database
+    bracket newRpcManager closeManager $ \manager->do
+      (manifest,sequenceNo)<-evalCustodyRecovery manager c (ExportCustody database reader key directory)
+      LBS.putStrLn $ encode $ object ["manifest" .= manifest,"criticalSequence" .= sequenceNo]
+  command ["check-custody",path,manifest,minimumText]=do
+    c<-C.loadConfig path
+    minimumSequence<-maybe (reject "invalid_restore_policy") pure (readMaybe minimumText)
+    bracket newRpcManager closeManager $ \manager->do
+      sequenceNo<-evalCustodyRecovery manager c (InspectCustody manifest minimumSequence)
+      LBS.putStrLn $ encode $ object ["fingerprint" .= C.fingerprint c,"criticalSequence" .= sequenceNo]
   command ["restore-ledger",path,manifest,minimumText]=restoreCommand path minimumText (\c->RestoreLedger manifest (C.fingerprint c))
   command ["recover-ledger",path,backup,snapshot,directory,minimumText]=
     restoreCommand path minimumText (\c->RecoverLedger backup (T.pack snapshot) directory (C.fingerprint c))
@@ -68,13 +82,10 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
     -- Remote recovery integration is unfinished. Never silently bypass coverage.
     require (not $ C.backupRequired c) "remote_backup_integration_required"
     database<-databaseSettings
-    readUser<-lookupEnv "PGREADUSER" >>= maybe (reject "read_database_user_required") pure
-    require (not(null readUser) && readUser/=PG.connectUser database) "distinct_read_database_user_required"
-    readPassword<-fromMaybe "" <$> lookupEnv "PGREADPASSWORD"
+    readerSettings<-readDatabaseSettings database
     assets<-fromMaybe browserAssetsDirectory <$> lookupEnv "ECX_ASSETS"
     links<-lookupEnv "ECX_INTERFACE_CONFIG" >>= C.loadInterface c
-    let readerSettings=database {PG.connectUser=readUser,PG.connectPassword=readPassword}
-        policy=C.storePolicy c
+    let policy=C.storePolicy c
         customer=CustomerSettings (C.publicConfiguration c links (mode=="serve")) policy
           (C.solanaSdkLibrary c) (const $ reject "remote_backup_integration_required")
         endpoint=SigningEndpoint (C.signerPort c) (C.signerAuthFile c)
@@ -86,7 +97,7 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
             concurrently_
               (runSettings (setHost "127.0.0.1" $ setPort (C.serverPort c) $ setTimeout 65 defaultSettings) app)
               (concurrently_ (runWorkerLoop worker) (runControl (C.fenceDirectory c) operatorControl))
-  command _=die "Usage: ecx-bridge-rebuild backup-native-wallet CONFIG DESTINATION | restore-native-wallet CONFIG MANIFEST (offline custody authority; never overwrites a wallet) | adopt-ledger CONFIG MINIMUM_SEQUENCE | retire-ledger CONFIG MINIMUM_SEQUENCE | recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE | restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE (offline database owner) | check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
+  command _=die "Usage: ecx-bridge-rebuild backup-custody CONFIG KEYFILE DIRECTORY (offline custody authority, PG* and PGREADUSER) | check-custody CONFIG MANIFEST MINIMUM_SEQUENCE | backup-native-wallet CONFIG DESTINATION | restore-native-wallet CONFIG MANIFEST (offline custody authority; never overwrites a wallet) | adopt-ledger CONFIG MINIMUM_SEQUENCE | retire-ledger CONFIG MINIMUM_SEQUENCE | recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE | restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE (offline database owner) | check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
   restoreCommand path minimumText operation=do
     c<-C.loadConfig path
     minimumSequence<-maybe (reject "invalid_restore_policy") pure (readMaybe minimumText)
@@ -106,3 +117,10 @@ databaseSettings = do
   user<-fromMaybe localUser <$> lookupEnv "PGUSER"
   password<-fromMaybe "" <$> lookupEnv "PGPASSWORD"
   pure PG.defaultConnectInfo {PG.connectHost=host,PG.connectPort=fromIntegral port,PG.connectDatabase=database,PG.connectUser=user,PG.connectPassword=password}
+
+readDatabaseSettings :: PG.ConnectInfo -> IO PG.ConnectInfo
+readDatabaseSettings database=do
+  user<-lookupEnv "PGREADUSER" >>= maybe (reject "read_database_user_required") pure
+  require (not(null user) && user/=PG.connectUser database) "distinct_read_database_user_required"
+  password<-fromMaybe "" <$> lookupEnv "PGREADPASSWORD"
+  pure database {PG.connectUser=user,PG.connectPassword=password}
