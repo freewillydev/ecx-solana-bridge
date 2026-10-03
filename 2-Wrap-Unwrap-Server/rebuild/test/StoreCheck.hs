@@ -108,6 +108,8 @@ liveObserverMain path=do
       withFencedWriter settings policy (Config.fenceDirectory config) $ \writer->
         bracket newRpcManager closeManager $ \manager->do
           N.verifyNativeBoundaryWith (N.nativeCall manager $ Config.nativeSettings config)
+          decoded<-N.nativeCall manager (Config.nativeSettings config) False "decodescript" [String "00140000000000000000000000000000000000000000"]
+          fieldValue "type" decoded >>= check . (==("witness_v0_keyhash"::T.Text))
           withRuntime manager (Config.observerSettings config) (Config.solanaPolicy config) (Just customer)
             (SigningEndpoint 1 "/unavailable-signer-credentials") reader writer $ \worker _ _->do
               let scan=do

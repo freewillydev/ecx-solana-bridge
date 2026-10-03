@@ -1,10 +1,24 @@
 # Replacement bridge
 
 Baseline: `ba31b28`. This package is a replacement under construction, not a
-second deployed bridge. Root Cabal builds it alongside the baseline. Its executable has been tested against disposable state; it has not been
-activated against existing custody. Its storage contracts use a
-disposable PostgreSQL database, never the existing custody database. Existing state
+second production bridge. Root Cabal builds it alongside the baseline. Its executable now starts against a separately funded Signet/Devnet deployment;
+it has not been activated against the baseline's custody. Storage contracts use a
+disposable PostgreSQL database, never either custody database. Existing state
 must remain untouched until migration and real-chain acceptance pass.
+
+The isolated deployment `rebuild-live-20261003` uses a fresh native wallet, Solana
+key and persistent ledger. Both processes started, and restart preserved the ledger
+at sequence 3 with intake paused. Actual receipts allocated through the operator
+DSL: 1,500 native operating units, 25,000 wrapped inventory units and 100,000,000
+lamports. An additional 10,000 native inventory units were submitted in transaction
+`0e13f399038fab8415a602bae841ae0c75f710678fe3d781e3897dc624747ff5`;
+confirmation and allocation remain pending. Customer wrap/unwrap is not yet accepted.
+The node's worker allowlist must include read-only `decodescript` for admission,
+while signing/key methods remain forbidden. The operator socket needs a short
+private fence directory (macOS rejected the original 113-byte socket path).
+Keys, funding attempts, private configuration and the persistent ledger are retained
+outside Git; stopping test processes must not remove them. OS-user isolation,
+off-host backup and manual wallet signing remain separate acceptance gates.
 
 The required product remains connection-free native/wrapped conversion at 1% both
 ways, refunds, earned-fee withdrawal, durable recovery, the four customer routes,
@@ -71,11 +85,12 @@ accounting unchanged, with no pending signed attempts and intake still paused.
 Signing and broadcasting requests must be rejected before accessing nonexistent
 signer credentials. Before scanning, the production native authority check requires
 all 13 signing/key-export methods to return explicit forbidden-method responses.
+It also checks actual `decodescript` access, needed by customer admission.
 The supplied config must therefore use a restricted worker RPC credential, not the
 node cookie. All application row assertions remain closed Opaleye fixtures.
 The runner does not start a daemon, move funds or change the existing custody ledger.
 
-The current run passed against the real L2L Signet checkpoint 16000
+The original run passed against the real L2L Signet checkpoint 16000
 (`00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47`),
 the existing `ecx-bridge-fresh-treasury` test wallet and Solana Devnet mint
 `Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM`. The reused old config's checkpoint
