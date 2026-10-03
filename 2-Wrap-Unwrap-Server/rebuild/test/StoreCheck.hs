@@ -1348,6 +1348,9 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.RetrySolanaPayment "missing" "test")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.DraftNativeReplacement "missing" (money 1) "test")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.SignNativeReplacement 1)
+      expectStore "observation_only" (operatorControl $ Op.operator $ Op.RebroadcastNative "missing" 1 "test")
+      expectedReviews<-evalRead reader ReadNativeReviews
+      operatorControl (Op.operatorRead Op.NativeReviews) >>= check . (==expectedReviews)
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.CancelNativeReplacement 1 "test")
       operatorControl (Op.operator $ Op.PauseService "operator contract")
       serviceAfter<-operatorControl (Op.operatorRead Op.ServiceState)
@@ -1506,12 +1509,16 @@ serverMain = do
               status<-control (object ["operation" .= ("status"::T.Text)])
               service<-either fail pure (eitherDecodeStrict' $ BL.toStrict $ encode status)
               check (W.paused service)
+              reviews<-control (object ["operation" .= ("native-reviews"::T.Text)])
+              check (reviews==toJSON ([]::[(T.Text,T.Text,Int64)]))
+              expectStore "invalid_operator_operation" (control $ object ["operation" .= ("rebroadcast-native"::T.Text),"transaction" .= ("missing"::T.Text),"recovery" .= (1::Int),"reason" .= ("test"::T.Text),"bytes" .= ("attacker"::T.Text)])
               refused<-control (object ["operation" .= ("resume"::T.Text)])
               check (refused==object ["error" .= ("observation_only"::T.Text)])
               forM_ [object ["operation" .= ("withdraw-fees"::T.Text),"id" .= T.replicate 64 "a","asset" .= Native,"amount" .= money 1,"recipient" .= ("recipient"::T.Text),"reason" .= ("test"::T.Text)],
                 object ["operation" .= ("cancel-fees"::T.Text),"id" .= ("missing"::T.Text),"reason" .= ("test"::T.Text)],
                 object ["operation" .= ("draft-replacement"::T.Text),"parent" .= ("missing"::T.Text),"fee" .= money 2,"reason" .= ("test"::T.Text)],
                 object ["operation" .= ("sign-replacement"::T.Text),"decision" .= (1::Int)],
+                object ["operation" .= ("rebroadcast-native"::T.Text),"transaction" .= ("missing"::T.Text),"recovery" .= (1::Int),"reason" .= ("test"::T.Text)],
                 object ["operation" .= ("cancel-replacement"::T.Text),"decision" .= (1::Int),"reason" .= ("test"::T.Text)]] $ \command->do
                   result<-control command
                   check (result==object ["error" .= ("observation_only"::T.Text)])
@@ -2374,6 +2381,46 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   n4<-sequenceNo
   record restoredWinner (NativeReconfirmed (costs 2) $ proof restoredWinner d)
   sequenceNo >>= check . (==n4)
+  -- Rebroadcast decisions repair the original booked effect; no new signature,
+  -- payment, principal posting or fee reservation is produced by authorization.
+  let winnerId=signedId(recordedSigned restoredWinner)
+  expectStore "native_rebroadcast_review_missing" (evalRead reader $ ReadNativeRebroadcastContext winnerId)
+  record restoredWinner (NativeUnavailable "native_settled_payment_unseen")
+  (rebroadcast,family,anchorSequence)<-evalRead reader (ReadNativeRebroadcastContext winnerId)
+  operate (Op.operatorRead Op.NativeReviews) >>= check . elem (winnerId,"unavailable",anchorSequence)
+  let members=map fst family
+      reason="repair original settled effect"
+      rebroadcastProof bytesHash=object ["transaction" .= winnerId,"bytesHash" .= bytesHash,"nodeBlock" .= d
+        ,"family" .= map (signedId.recordedSigned) members,"noActiveFamilyPayment" .= True]
+      hash=digest(TE.encodeUtf8 $ signedBytes $ recordedSigned rebroadcast)
+      approve expected recovery why evidence=evalWrite writer (RecordNativeRebroadcast expected members recovery why evidence)
+      authorize n=evalWrite writer (AuthorizeNativeRebroadcast rebroadcast members n)
+  expectStore "native_rebroadcast_review_changed" (approve rebroadcast (anchorSequence-1) reason $ rebroadcastProof hash)
+  expectStore "native_rebroadcast_proof_mismatch" (approve rebroadcast anchorSequence reason $ rebroadcastProof "changed")
+  expectStore "native_rebroadcast_review_changed" (approve rebroadcast {recordedSigned=(recordedSigned rebroadcast) {signedBytes="different"}} anchorSequence reason $ rebroadcastProof hash)
+  approved<-approve rebroadcast anchorSequence reason (rebroadcastProof hash)
+  n5<-sequenceNo
+  approve rebroadcast anchorSequence reason (rebroadcastProof hash) >>= check . (==approved)
+  sequenceNo >>= check . (==n5)
+  expectStore "native_rebroadcast_conflict" (evalRead reader $ ReadNativeRebroadcastDecision winnerId anchorSequence "different")
+  expectStore "backup_pending" (authorize approved)
+  -- Repeated absence must retain the approved journal binding for lost replies.
+  record restoredWinner (NativeUnavailable "native_settled_payment_unseen")
+  evalRead reader (ReadNativeRebroadcastContext winnerId) >>= \(_,_,n)->check (n==approved)
+  fixture fixtures CoverBackup
+  authorize approved >>= check . (==rebroadcast)
+  authorize approved >>= check . (==rebroadcast)
+  fixture fixtures ReadyIntake
+  expectStore "pause_before_operator_action" (authorize approved)
+  evalWrite writer (Pause "rebroadcast remains paused")
+  record restoredWinner NativeConfirming
+  expectStore "native_rebroadcast_review_changed" (authorize approved)
+  expectStore "native_rebroadcast_review_changed" (operate $ Op.operator $ Op.RebroadcastNative winnerId anchorSequence reason)
+  record restoredWinner (NativeUnavailable "rpc_unavailable")
+  expectStore "native_rebroadcast_not_missing" (evalRead reader $ ReadNativeRebroadcastContext winnerId)
+  record restoredWinner (NativeReconfirmed (costs 2) $ proof restoredWinner d)
+  evalRead reader ReadBalances >>= check . (==settledBalances)
+  evalRead reader PendingAttempts >>= check . all (`notElem` [signedId wire,winnerId])
  where
   encodeText value=TE.decodeUtf8 (BL.toStrict $ encode value)
   -- These branches must replay/cancel from the ledger alone. Unavailable

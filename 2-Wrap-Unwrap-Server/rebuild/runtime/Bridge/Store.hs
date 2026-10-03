@@ -24,7 +24,7 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Control.Concurrent.MVar
 import Control.Exception
 import Control.Monad (unless,forM,forM_,when)
-import Data.Aeson (Key,FromJSON,ToJSON,Value(Null,Object),object,(.=),encode,eitherDecodeStrict',withObject,(.:),(.:?))
+import Data.Aeson (Key,FromJSON,ToJSON,Value(Null,Object),object,(.=),toJSON,encode,eitherDecodeStrict',withObject,(.:),(.:?))
 import Data.Aeson.Types (parseEither)
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
@@ -80,6 +80,9 @@ data NativeSettlementCheck = NativeConfirming | NativeUnavailable Text
   | NativeWinnerChanged [RecordedAttempt] Text W.PaymentCosts Text deriving (Eq,Show)
 
 data StoreRead a where
+  ReadNativeReviews :: StoreRead [(Text,Text,Int64)]
+  ReadNativeRebroadcastContext :: Text -> StoreRead (RecordedAttempt,[(RecordedAttempt,N.NativeSigned)],Int64)
+  ReadNativeRebroadcastDecision :: Text -> Int64 -> Text -> StoreRead (Maybe Int64)
   NativeSettlementCandidates :: StoreRead [RecordedAttempt]
   ReadReplacementDraftContext :: Int64 -> Text -> Amount -> StoreRead [(RecordedAttempt,N.NativeSigned)]
   ReadReplacementSigning :: Int64 -> Int64 -> StoreRead ([(RecordedAttempt,N.NativeSigned)],N.NativeDraft)
@@ -132,6 +135,8 @@ data StoreRead a where
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
+  RecordNativeRebroadcast :: RecordedAttempt -> [RecordedAttempt] -> Int64 -> Text -> Value -> StoreWrite Int64
+  AuthorizeNativeRebroadcast :: RecordedAttempt -> [RecordedAttempt] -> Int64 -> StoreWrite RecordedAttempt
   RecordNativeSettlement :: RecordedAttempt -> NativeSettlementCheck -> StoreWrite ()
   RecordReplacement :: Int64 -> Int64 -> [(RecordedAttempt,N.NativeSigned)] -> N.NativeSigned -> StoreWrite RecordedAttempt
   SaveReplacementDraft :: Int64 -> RecordedAttempt -> N.NativeDraft -> Text -> StoreWrite Int64
@@ -230,6 +235,17 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
           O.where_ (S.eventId event O..== O.sqlStrictText identifier O..&& O.in_ (map O.sqlStrictText $ if chain=="Solana" then ["Solana","SolanaOperating"] else [chain]) (S.eventChain event))
           pure (S.eventId event)
         pure (not $ null (rows :: [Text]))
+      ReadNativeReviews -> do
+        reviews<-O.runSelect c $ O.limit 1001 $ O.orderBy (O.desc $ \(_,_,n)->n) $ do
+          (tx,_,state,_,n)<-S.nativeRecoveryDetails
+          O.where_ (state O../= O.sqlStrictText "reconfirmed")
+          pure (tx,state,n)
+        require (length reviews<=1000) "native_settlement_recovery_backlog"
+        pure reviews
+      ReadNativeRebroadcastContext txid -> do
+        (saved,family,_,_,n)<-nativeRebroadcastContext c identity txid
+        pure (saved,family,n)
+      ReadNativeRebroadcastDecision txid recovery reason -> nativeRebroadcastDecision c txid recovery reason
       NativeSettlementCandidates -> nativeSettlementCandidates c
       ReadReplacementDraftContext now parent fee -> replacementDraftContext c identity now parent fee
       ReadReplacementSigning now decision -> replacementSigning c identity remote now decision
@@ -306,6 +322,17 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
   RecordCustody revision now problem report -> recordCustody c revision now problem report
   MarkBroadcast now txid -> markBroadcast c config now txid
   AuthorizeSend now txid -> authorizeSend c config now txid
+  RecordNativeRebroadcast expected family recovery reason proof -> recordNativeRebroadcast c (deploymentFingerprint $ paymentPolicy policy) expected family recovery reason proof
+  AuthorizeNativeRebroadcast expected family approved -> do
+    (saved,actual,_,proof,n)<-nativeRebroadcastContext c (deploymentFingerprint $ paymentPolicy policy) (signedId $ recordedSigned expected)
+    require (saved==expected && map fst actual==family && n==approved) "native_rebroadcast_review_changed"
+    anchor<-nativeProofField "rebroadcastRecovery" proof :: IO Int64
+    recorded<-nativeProofField "rebroadcastProof" proof
+    hash<-nativeProofField "bytesHash" recorded
+    require (anchor>0 && hash==digest(TE.encodeUtf8 $ signedBytes $ recordedSigned saved)) "native_rebroadcast_payment_changed"
+    state<-metadata c (deploymentFingerprint $ paymentPolicy policy)
+    when (requireBackup config) $ require (S.backupSequence state>=S.criticalSequence state) "backup_pending"
+    pure saved
   RecordNativeSettlement expected result -> recordNativeSettlement c (deploymentFingerprint $ paymentPolicy policy) expected result
   SettlePayment expected costs proof -> settlePayment c (deploymentFingerprint $ paymentPolicy policy) expected costs proof
   FailSolana expected fee proof -> failSolana c (deploymentFingerprint $ paymentPolicy policy) expected fee proof
@@ -3006,13 +3033,7 @@ recordNativeSettlement c identity expected result = do
   actual<-readAttempt c txid
   require (actual==expected && recordedChain actual=="Native" && recordedState actual=="settled"
     && maybe False (>0) (recordedSequence actual)) "native_settlement_changed"
-  context<-O.runSelect c $ do
-    intent<-O.selectTable S.intents
-    (key,asset,quantity,released)<-O.selectTable S.feeHolds
-    O.where_ (S.intentId intent O..== text identifier O..&& key O..== S.intentId intent)
-    pure (S.intentResolved intent,asset,quantity,released)
-    :: IO [(Int64,Text,Int64,Int64)]
-  require (context==[(1,"Native",units(recordedFee actual),1)]) "native_winner_context_changed"
+  nativeResolved c actual
   previous<-maybe (reject "native_settlement_missing") pure (recordedObservation actual)
   case result of
     NativeWinnerChanged expectedFamily winnerId costs proof->do
@@ -3113,3 +3134,86 @@ nativeSettlementProof c saved signed costs raw = do
 
 nativeProofField :: FromJSON a => Key -> Value -> IO a
 nativeProofField key value=either (const $ reject "invalid_native_settlement") pure (parseEither (withObject "native proof" (.: key)) value)
+
+nativeResolved :: PG.Connection -> RecordedAttempt -> IO ()
+nativeResolved c saved = do
+  context<-O.runSelect c $ do
+    intent<-O.selectTable S.intents
+    (key,asset,quantity,released)<-O.selectTable S.feeHolds
+    O.where_ (S.intentId intent O..== O.sqlStrictText(recordedPayment saved) O..&& key O..== S.intentId intent)
+    pure (S.intentResolved intent,asset,quantity,released)
+    :: IO [(Int64,Text,Int64,Int64)]
+  require (context==[(1,"Native",units(recordedFee saved),1)]) "native_winner_context_changed"
+
+-- A rebroadcast repairs one already-booked native effect. It cannot reopen
+-- principal, acquire new inputs or turn an unresolved intent into a payment.
+nativeRebroadcastContext :: PG.Connection -> Text -> Text -> IO (RecordedAttempt,[(RecordedAttempt,N.NativeSigned)],Text,Value,Int64)
+nativeRebroadcastContext c identity txid = do
+  state<-metadata c identity
+  require (S.paused state==1) "pause_before_operator_action"
+  saved<-readAttempt c txid
+  require (recordedChain saved=="Native" && recordedState saved=="settled"
+    && maybe False (>0) (recordedSequence saved)) "native_rebroadcast_payment_changed"
+  nativeResolved c saved
+  view<-readPayment c identity (recordedPayment saved)
+  require (savedStatus view==PaymentPaid) "native_rebroadcast_payment_changed"
+  paymentSource c (savedPayment view)
+  family<-nativeFamily c identity (recordedPayment saved)
+  require (saved `elem` map fst family) "native_replacement_family_changed"
+  reviews<-O.runSelect c $ do
+    (key,previous,status,proof,n)<-S.nativeRecoveryDetails
+    O.where_ (key O..== O.sqlStrictText txid)
+    pure (previous,status,proof,n)
+    :: IO [(Text,Text,Text,Int64)]
+  (previous,status,raw,n)<-case reviews of [row]->pure row; _->reject "native_rebroadcast_review_missing"
+  value<-decodeSaved raw
+  reason<-nativeProofField "reason" value :: IO Text
+  require (recordedObservation saved==Just previous
+    && (status=="confirming" && reason=="native_confirmation_policy_pending"
+      || status=="unavailable" && reason=="native_settled_payment_unseen")) "native_rebroadcast_not_missing"
+  pure (saved,family,status,value,n)
+
+nativeRebroadcastDecision :: PG.Connection -> Text -> Int64 -> Text -> IO (Maybe Int64)
+nativeRebroadcastDecision c txid anchor reason = do
+  require (anchor>0) "invalid_native_rebroadcast_approval"
+  validReason reason
+  rows<-O.runSelect c $ O.limit 2 $ do
+    (key,_,_,proof,n)<-O.selectTable S.nativeRecoveryRows
+    let value=O.toNullable (O.unsafeCast "jsonb" proof :: O.Field O.SqlJsonb)
+    O.where_ (key O..== O.sqlStrictText txid O..&& O.fromNullable (O.sqlStrictText "") (value O..->> O.sqlStrictText "rebroadcastRecovery") O..== O.sqlStrictText(T.pack $ show anchor))
+    pure (proof,n)
+    :: IO [(Text,Int64)]
+  case rows of
+    []->pure Nothing
+    [(proof,n)]->do
+      saved<-decodeSaved proof >>= nativeProofField "operatorReason"
+      require (saved==reason) "native_rebroadcast_conflict"
+      pure (Just n)
+    _->reject "duplicate_native_rebroadcast_decision"
+
+recordNativeRebroadcast :: PG.Connection -> Text -> RecordedAttempt -> [RecordedAttempt] -> Int64 -> Text -> Value -> IO Int64
+recordNativeRebroadcast c identity expected family anchor reason proof = do
+  let txid=signedId(recordedSigned expected); text=O.sqlStrictText; num=O.sqlInt8
+  old<-nativeRebroadcastDecision c txid anchor reason
+  case old of
+    Just n->pure n
+    Nothing->do
+      (saved,actual,status,review,n)<-nativeRebroadcastContext c identity txid
+      require (saved==expected && map fst actual==family && n==anchor) "native_rebroadcast_review_changed"
+      provedId<-nativeProofField "transaction" proof
+      bytesHash<-nativeProofField "bytesHash" proof
+      block<-nativeProofField "nodeBlock" proof
+      members<-nativeProofField "family" proof
+      absent<-nativeProofField "noActiveFamilyPayment" proof
+      require (provedId==txid && bytesHash==digest(TE.encodeUtf8 $ signedBytes $ recordedSigned saved)
+        && N.transactionId block && members==map (signedId.recordedSigned) family && absent) "native_rebroadcast_proof_mismatch"
+      fields<-case review of Object fields->pure fields; _->reject "invalid_native_settlement"
+      let encoded=encodeSaved $ Object $ KM.insert "rebroadcastRecovery" (toJSON anchor) $
+            KM.insert "operatorReason" (toJSON reason) $ KM.insert "rebroadcastProof" proof fields
+      validateSavedJson 32768 encoded
+      previous<-maybe (reject "native_settlement_missing") pure (recordedObservation saved)
+      sequenceNo<-nextSequence c
+      _<-O.runInsert c O.Insert {O.iTable=S.nativeRecoveryRows,
+        O.iRows=[(text txid,text previous,text status,text encoded,num sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      audit c "native_rebroadcast_approved" (txid<>":"<>T.pack(show sequenceNo))
+      pure sequenceNo

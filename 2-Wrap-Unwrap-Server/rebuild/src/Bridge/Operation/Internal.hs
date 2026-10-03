@@ -25,9 +25,11 @@ data CustomerWrite a where
   CreateOrder :: Text -> OrderRequest -> CustomerWrite OrderView
 
 data OperatorRead a where
+  NativeReviews :: OperatorRead [(Text,Text,Int64)]
   ServiceState :: OperatorRead ServiceStatus
 
 data OperatorWrite a where
+  RebroadcastNative :: Text -> Int64 -> Text -> OperatorWrite Text
   DraftNativeReplacement :: Text -> Amount -> Text -> OperatorWrite Int64
   SignNativeReplacement :: Int64 -> OperatorWrite Text
   CancelNativeReplacement :: Int64 -> Text -> OperatorWrite ()

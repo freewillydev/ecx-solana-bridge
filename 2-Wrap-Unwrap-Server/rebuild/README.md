@@ -1212,24 +1212,44 @@ operation supports customer and earned-fee payments; no synthetic order is intro
 Returning to a previous winner is supported, and old recovery rows cannot override a
 newer winner decision. Any new recovery decision leaves service paused for review.
 
-Latest checkpoint versus `7cec1a8`: **3,908 → 4,110 production lines across the same
-four files** (+202, no new files/migrations); existing PostgreSQL contract
-**2,327 → 2,391** lines. This adds recovery functionality rather than reducing total
-code. It reuses the family validator, payment model, fee journal and existing recovery
-tables, including their append-only/binding triggers, instead of another payment engine.
+Approved native rebroadcast now completes the code path for an evicted settled
+payment. Private `native-reviews` returns transaction/state/recovery-sequence triples
+through the safe interpreter. `rebroadcast-native` accepts only `transaction`,
+`recovery` and `reason`, through the operator critical DSL. Observation mode refuses
+rebroadcast; there is no new customer HTTP or signer route.
 
-Validation: root Cabal build and QuickCheck; actual PostgreSQL confirmation-loss,
-unavailable/reconfirmed replay, scanner-depth/cost refusal, stale-snapshot rejection,
-lower-fee winner, return to the higher-fee winner, unchanged principal and resolved
-work, and exact fee-only balance deltas. The existing worker-unavailable-RPC contract
-also exercises durable recovery without money changes. Candidate filtering explicitly
-guards its native inner JSON codec: SQL WHERE evaluation order cannot be relied upon
-to exclude unrelated Solana proof formats before decoding. Existing synthetic Solana
-proofs exercise that guard. Actual executable and HTTPS/SDK regression checks also pass.
-These fixtures establish ledger/runtime contracts, not a live reorg or a newly signed
-native replacement. Captured-template family RPC checks remain separate evidence.
+The closed ledger operations require pause, the exact settled attempt/family, a
+resolved intent and released fee reservation, paid funding with eligible or approved
+covered source, and a current confirmation-pending or proven-unseen review. The
+immutable approval binds the recovery sequence, exact byte hash, family and reason.
+Before sending, the runtime proves no family member is active, checks the source,
+backs up the decision, then repeats source/family/input checks and atomic authorization.
+Backup coverage must include every current critical decision. Only the original saved
+bytes are sent; there is no signing, new reservation, principal posting or automatic
+send retry. Normal custody readiness is intentionally not required for this repair:
+the already-booked payment is absent, and the checked original inputs must still be
+owned and unspent. It never authorizes a new economic payment.
 
-Still required: explicitly approved rebroadcast of an evicted settled native payment,
-full replacement/reorg workflow acceptance, funded real-chain tests, deployed signer
-isolation, off-host backup/restore and populated migration. The baseline remains until
-parity and live acceptance; valuable-fund release also requires independent review.
+A repeat absence check retains a rebroadcast approval for an explicit retry after a
+lost response. Changed recovery evidence invalidates that approval; an unrelated RPC
+error is not proof of absence. Reconfirmation/winner change also removes its authority.
+The shared settled-intent guard serves both finality recovery and rebroadcast.
+
+Latest checkpoint versus `942a658`: **3,955 → 4,091 production lines across the same
+four files** (+136, no new files/migrations); existing PostgreSQL contract
+**2,391 → 2,438** lines. This adds the missing controlled repair path using the existing
+recovery journal and family/source/backup checks, rather than another signing engine.
+
+Validation: root Cabal build and QuickCheck; PostgreSQL proof/byte/family/sequence
+binding, changed-reason refusal, immutable approval replay, backup and pause gates,
+preservation of approval through unchanged absence, stale-approval/RPC-error refusal,
+unchanged balances and resolved work. The critical interpreter's stale-approval path
+is checked with a network-rejecting manager. The actual executable tests private
+command parsing, read-only review output, observation-mode refusal, rejection of a
+caller-supplied byte field, and process/fence cleanup. These checks do not establish
+a live rebroadcast or a complete operator-to-native-node recovery acceptance run.
+
+Still required: full replacement/reorg/rebroadcast acceptance on real chains, funded
+customer flows and wallet testing, deployed signer isolation, Haskell off-host
+backup/restore and populated migration. The baseline remains until parity and live
+acceptance; valuable-fund release also requires independent review.

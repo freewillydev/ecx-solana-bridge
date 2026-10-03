@@ -3,7 +3,7 @@
 module Bridge.Critical (CustomerSettings(..),withRuntime,runWorkerLoop) where
 import Bridge.Operation.Internal
 import Bridge.Domain (Asset(..),gross,paymentAsset,paymentId,units)
-import Bridge.Identity (payURIFor)
+import Bridge.Identity (payURIFor,digest)
 import Bridge.Admission (checkSolanaPayoutWith)
 import Bridge.Order (createCustomerOrder)
 import Data.Int (Int64)
@@ -51,6 +51,7 @@ import qualified Servant.Client as SC
 -- It cannot access the writer, signer transport, backup callback or RPC manager.
 evalSafe :: Reader -> Maybe W.PublicConfiguration -> DSL caller 'Safe a -> IO a
 evalSafe reader public operation = case operation of
+  ReadOperator NativeReviews->evalRead reader ReadNativeReviews
   ReadOperator ServiceState->do
     state<-evalRead reader ReadState
     pure $ W.ServiceStatus (ledgerPaused state) (ledgerReason state) (ledgerSequence state) (ledgerBackup state)
@@ -124,6 +125,31 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
       evalCritical (WriteCustomer (Bridge.Operation.Internal.CreateOrder header request))=do
         c<-customer
         createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (coverBackup c) reader writer header request
+      evalCritical (OperatorDSL (RebroadcastNative txid anchor reason))=guarded $ do
+        require (NP.transactionId txid && anchor>0 && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_native_rebroadcast_approval"
+        (saved,family,current)<-evalRead reader (ReadNativeRebroadcastContext txid)
+        previous<-evalRead reader (ReadNativeRebroadcastDecision txid anchor reason)
+        require (current==maybe anchor id previous) "native_rebroadcast_review_changed"
+        let missing=do
+              (actual,view)<-readSavedNativeFamily (N.nativeCall rpc native) native config reader (recordedPayment saved)
+              require (actual==family) "native_replacement_family_changed"
+              require (NP.familyActive view==Nothing) "native_rebroadcast_payment_not_missing"
+              pure view
+        before<-missing
+        refreshSource (recordedPayment saved)
+        block<-RPC.fieldValue "hash" (NP.familyPosition before) :: IO Text
+        let proof=object ["transaction" .= txid,"bytesHash" .= digest(TE.encodeUtf8 $ signedBytes $ recordedSigned saved)
+              ,"nodeBlock" .= block,"family" .= map (signedId.recordedSigned.fst) family,"noActiveFamilyPayment" .= True]
+        approved<-maybe (evalWrite writer $ RecordNativeRebroadcast saved (map fst family) anchor reason proof) pure previous
+        backupDecisions
+        -- Backup may be slow. Recheck source and exact family immediately before
+        -- authorizing the saved bytes. An uncertain send never triggers a retry.
+        refreshSource (recordedPayment saved)
+        _<-missing
+        authorized<-evalWrite writer (AuthorizeNativeRebroadcast saved (map fst family) approved)
+        actual<-N.nativeCall rpc native True "sendrawtransaction" [toJSON $ signedBytes $ recordedSigned authorized] >>= parseValue parseJSON
+        require (actual==txid) "native_broadcast_identity_mismatch"
+        pure txid
       evalCritical (OperatorDSL (CoverLostSource receipt recovery capital earned reason))=guarded $ do
         require (recovery>0 && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_source_loss_cover"
         state<-evalRead reader ReadState

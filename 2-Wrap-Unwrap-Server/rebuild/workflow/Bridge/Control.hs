@@ -31,6 +31,10 @@ controlPlan=withObject "operator command" $ \o->do
   command<-o .: "operation" :: Parser Text
   let fields expected=if all (`elem` expected) (KM.keys o) then pure () else fail "unknown field"
   case command of
+    "native-reviews"->fields ["operation"] >> pure (ControlPlan $ operatorRead NativeReviews)
+    "rebroadcast-native"->do
+      fields ["operation","transaction","recovery","reason"]
+      ControlPlan . operator <$> (RebroadcastNative <$> o .: "transaction" <*> o .: "recovery" <*> o .: "reason")
     "status"->fields ["operation"] >> pure (ControlPlan $ operatorRead ServiceState)
     "pause"->fields ["operation","reason"] >> (ControlPlan . operator . PauseService <$> o .: "reason")
     "cover-source-loss"->do
