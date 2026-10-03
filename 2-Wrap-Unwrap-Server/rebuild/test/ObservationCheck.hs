@@ -2,6 +2,8 @@
 module ObservationCheck (checks) where
 import Bridge.Domain (Amount, Asset(..), Direction(..), amount, units)
 import qualified Bridge.Wire as W
+import Bridge.PaymentSource (verifyPaymentSource)
+import qualified Bridge.SolanaHelper as H
 import Bridge.Error
 import Bridge.RPC (fieldValue)
 import Bridge.Native (NativeSettings(..),signetChallenge)
@@ -45,9 +47,29 @@ checks=do
         replace ["transaction","message","instructions"] (toJSON [ix | (program,ix)<-transferred,program==tokenProgram]) proof
       pay=PayBinding (boundSignature expected) (boundMint expected) (boundCustody expected) (boundCustodyOwner expected) reference
       effect=custodyEffect (boundSignature expected) (boundMint expected) (boundCustody expected) (boundCustodyOwner expected)
+  slot<-fieldValue "slot" proof :: IO Int64
+  let sourcePolicy=H.SolanaPolicy "source-test" "profile" (boundMint expected) (boundCustodyOwner expected) (boundCustody expected) (amt 10) (amt 10)
+      sourceDeposit=W.Deposit ("solana:"<>boundSignature expected) (Just "order") Wrapped quantity (T.pack $ show slot) 1 True 100
+      sourceRequest=W.OrderRequest WrappedToNative quantity "destination" "" (Just $ boundOwner expected) "key"
+      sourceBinding instruction=W.PaymentSource sourceDeposit sourceRequest (W.PolicySnapshot 2 "finalized" "profile") instruction
+      sourceCall value method params=case (method,params) of
+        ("getTransaction",[String signature,options])->do
+          commitment<-fieldValue "commitment" options :: IO Text
+          require (signature==boundSignature expected && commitment=="finalized") "wrong_source_request"
+          pure value
+        _->fail "unexpected source RPC"
+      verifySource value verifier=verifyPaymentSource (\_ _ _->fail "unexpected native RPC") (sourceCall value) verifier W.L2LSignetDevnet sourcePolicy
   versioned<-versionZero (boundCustody expected) payProof
   local<-sequence
-    [ check "treasury outflows separate native fees token value and SOL debit" $ forAll (chooseInteger (1,1000000)) $ \n ->
+    [ check "focused Solana source checks bind legacy and Pay receipts and independent proofs" $ once $ ioProperty $ do
+        legacy<-verifySource proof (Just $ sourceCall proof) (sourceBinding $ boundMemo expected)
+        paySource<-verifySource payProof Nothing (sourceBinding $ "solana-pay:"<>reference)
+        changedAmount<-rejects "source_binding_mismatch" $ verifySource proof Nothing
+          (sourceBinding (boundMemo expected)) {W.sourceDeposit=sourceDeposit {W.depositAmount=amt 1}}
+        disagreement<-rejects "source_verifier_disagreement" $ verifySource proof
+          (Just $ sourceCall $ replace ["slot"] (toJSON $ slot+1) proof) (sourceBinding $ boundMemo expected)
+        pure (legacy==sourceDeposit && paySource==sourceDeposit && changedAmount && disagreement)
+    , check "treasury outflows separate native fees token value and SOL debit" $ forAll (chooseInteger (1,1000000)) $ \n ->
         let raw=T.pack(show $ negate n)
         in W.economicOutflow "Native" (object ["walletNetUnits" .= raw,"feeUnits" .= amt 1])==Right (Native,amt(n+1),amt 1) &&
           W.economicOutflow "Solana" (object ["delta" .= raw])==Right (Wrapped,amt n,amt 0) &&
@@ -192,7 +214,7 @@ nativeChecks=do
       settings=NativeSettings W.L2LSignetDevnet "http://127.0.0.1:8332" "/unused" "observer" 10 origin
       detail=object ["category" .= ("receive"::Text),"address" .= address,"vout" .= (1::Int),"amount" .= Number 0.001]
       transaction=object ["txid" .= tx,"confirmations" .= (3::Int),"blockhash" .= tip,
-        "amount" .= Number 0.001,"decoded" .= decoded,"details" .= [detail]]
+        "amount" .= Number 0.001,"decoded" .= decoded,"details" .= [detail],"walletconflicts" .= ([]::[Text])]
       request=W.OrderRequest NativeToWrapped (amt 100000) "destination" "refund" Nothing "idempotency"
       policy=W.PolicySnapshot 3 "finalized" "profile"
       binding a=if a==address then pure (Just ("order",request,policy)) else fail "unexpected address lookup"
@@ -203,6 +225,7 @@ nativeChecks=do
         ("getconnectioncount",[])->pure (Number 2)
         ("getwalletinfo",[])->pure $ object ["walletname" .= ("observer"::Text),"descriptors" .= True,"scanning" .= False,
           "birthtime" .= (100::Int),"lastprocessedblock" .= object ["height" .= (20::Int),"hash" .= tip]]
+        ("getblockheader",[String anchor]) | anchor==tip->pure $ object ["hash" .= tip,"height" .= (20::Int),"confirmations" .= (3::Int)]
         ("getblockheader",[String anchor]) | anchor==origin->pure $ object ["time" .= (100::Int)]
         ("listsinceblock",[String anchor,Number 3,Bool False,Bool True]) | anchor==origin->pure $ object
           ["lastblock" .= tip,"transactions" .= [object ["txid" .= tx]],"removed" .= [object ["txid" .= tx]]]
@@ -211,8 +234,18 @@ nativeChecks=do
         _->fail ("unexpected native observation RPC "<>T.unpack method)
       scan change previous lookupOrder=scanNativeWith (\_ method params->change method <$> response method params)
         settings 1 3 previous 200 lookupOrder
+  let deposit=W.Deposit ("native:"<>tx<>":1") (Just "order") Native (amt 100000) tip 3 True 200
+      recheck change=verifyPaymentSource (\_ method params->change method <$> response method params)
+        (\_ _->fail "unexpected Solana RPC") Nothing W.L2LSignetDevnet
+        (H.SolanaPolicy "source-test" "profile" "" "" "" (amt 1) (amt 0)) (W.PaymentSource deposit request policy address)
   sequence
-    [ check "native observer rereads re-added transactions once and binds saved depth" $ once $ ioProperty $ do
+    [ check "focused native source checks bind outpoint ownership depth and canonical block" $ once $ ioProperty $ do
+        unchanged<-recheck (const id)
+        shallow<-recheck (\method->if method=="gettransaction" then replace ["confirmations"] (Number 1) else id)
+        unowned<-rejects "source_binding_mismatch" $ recheck (\method->if method=="getaddressinfo" then replace ["ismine"] (Bool False) else id)
+        forked<-rejects "native_settlement_not_canonical" $ recheck (\method->if method=="getblockhash" then const(String origin) else id)
+        pure (unchanged==deposit && not(W.depositEligible shallow) && W.depositAnchor shallow=="unconfirmed" && unowned && forked)
+    , check "native observer rereads re-added transactions once and binds saved depth" $ once $ ioProperty $ do
         calls<-newIORef []
         batch<-scanNativeWith (\_ method params->modifyIORef' calls (<>[method]) >> response method params) settings 1 3 Nothing 200 binding
         seen<-readIORef calls

@@ -5,6 +5,7 @@ module Bridge.Operation.Internal where
 import Bridge.Wire
 import Data.Kind (Type)
 import Data.Text (Text)
+import Data.Int (Int64)
 
 data Severity = Safe | Critical
 data Caller = Customer | Signer | Worker
@@ -29,6 +30,8 @@ data SigningOperation a where
 data WorkerOperation a where
   SignPreparedPayment :: Text -> WorkerOperation Text
   ReconcilePayment :: Text -> WorkerOperation ()
+  QueuePayment :: Text -> WorkerOperation Int64
+  BroadcastPayment :: Text -> WorkerOperation ()
 
 data DSL (caller :: Caller) (severity :: Severity) a where
   WorkerDSL :: WorkerOperation a -> DSL 'Worker 'Critical a

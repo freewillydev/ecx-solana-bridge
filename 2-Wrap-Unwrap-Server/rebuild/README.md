@@ -392,11 +392,34 @@ Unseen/waiting effects leave accounting unchanged; unavailable or conflicting
 proofs pause processing. Terminal paid/failed records return without RPC. This is
 pending-attempt reconciliation, not post-settlement reorg/winner recovery.
 
+PaymentSource now binds a focused chain read to the immutable customer request,
+policy, instruction and saved receipt. Native checks cover exact outpoint/value,
+owned script, wallet conflicts and canonical confirmation depth; Solana checks
+legacy memo or Pay reference, exact value/slot and any configured independent
+provider. A closed snapshot-checked refresh preserves receipt identity, first-seen
+time, balances and scanner cursors. Unchanged snapshots avoid unnecessary writes;
+changed eligibility uses the same suspension logic as scanning. Earned funding has
+no synthetic source receipt. Signing, queueing and submission use this common check.
+
+QueuePayment records broadcast intent and returns its sequence for backup.
+BroadcastPayment independently revalidates the saved attempt, checks for already
+observed effects, refreshes its source, checks native mempool acceptance or the
+Solana validity window, and authorizes the exact saved record after backup coverage.
+Only then does it call the real chain's send method, once, and check the returned
+identifier. Submission does not settle. An exception retains durable work and
+pauses; there is no automatic send retry or transaction spanning backup/RPC.
+These branches compile but still need positive integrated submission acceptance.
+Source changes that invalidate custody require recertification before sending;
+full runtime scheduling and that recertification remain to be connected.
+
+
 Current evidence:
 
 - Cabal QuickCheck passes protocol vectors, independent native decoding, Solana
   signature/reference and typed reply mutations, and existential handler checks.
   The SDK workflow vector uses a public test seed, never funded or broadcast.
+  Focused source checks cover native ownership/depth/canonicality and both Solana
+  deposit forms, including independent-provider disagreement and changed amounts.
   Captured Signet/Devnet outcomes exercise the actual observer functions, including
   missing versus unavailable, insufficient depth, conflicting/noncanonical native
   effects, finalized commitment, missing finalized evidence and fee-only failed
@@ -408,7 +431,9 @@ Current evidence:
   restart reads, replay and source refusal. Settlement checks verify a 7% historical
   conversion, earned withdrawal without customer debit, finalized-failure fee-only
   accounting, changed-evidence/cost refusal and no duplicate postings. Proofs/bytes
-  in database fixtures are labelled offline data, not real-chain acceptance.
+  in database fixtures are labelled offline data, not real-chain acceptance. Source
+  refresh tests verify snapshot/immutable-binding refusal and unchanged money/cursor;
+  earned withdrawals return no customer source.
 - Only operation-origin policy refusals permit connection reuse after rollback.
   IO and typed checkpoint failures fence the writer; actual host-fence integration
   is still pending.
@@ -419,7 +444,8 @@ Scoped physical-line comparisons (not whole-product reduction claims):
 | --- | ---: | ---: | --- |
 | Signer module | 144 / 1 file | 73 / 1 file | Startup and replacement parity pending |
 | Signer transport | 103 / 1 file plus shared web boundary | 112 / 1 file | Includes local body/concurrency boundary; initial route only |
-| Worker critical signing/reconciliation | Part of broader Runtime | 111 / 1 file | Pending attempts; full runtime integration remains |
+| Worker signing/queue/send/reconciliation | Part of broader Runtime | 157 / 1 file (previous checkpoint 111) | Full runtime/submission acceptance remains |
+| Focused source validation | 63-line mixed validation/storage/recovery function | 67-line dedicated module | Covered-source recovery is still separate unfinished work |
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |
 
@@ -429,7 +455,7 @@ it is not a size reduction. Source eligibility checking is shared with signing.
 
 Still required: successful TLS worker/signer integration and private-key startup
 checks; a unified safe/critical runtime gate, configuration, app/browser integration;
-source refresh and actual sending, plus integrated positive reconciliation acceptance; retry, cancellation,
+integrated positive submission/reconciliation acceptance; retry, cancellation,
 replacement/winner changes and covered-source approvals generalized to earned
 funding; custody/host fencing/backup; actual populated-ledger migration and funded
 Signet/Devnet flows. Supported-wallet signing, off-host restore, canonical activation

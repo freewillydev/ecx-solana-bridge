@@ -2,18 +2,26 @@
 -- The signer ClientM is constructed only inside this critical evaluator.
 module Bridge.Critical (withPaymentWorker) where
 import Bridge.Operation.Internal
+import Bridge.Domain (Asset(..))
 import Bridge.Error
 import Bridge.Payment
+import Bridge.PaymentSource (verifyPaymentSource)
+import qualified Bridge.Wire as W
+import Control.Monad (forM_)
+import Bridge.NativePayment (NativeSigned,checkNativeAcceptance)
+import Bridge.SolanaPayment (SolanaSigned,signedSolanaPlan,solPlanRecent,checkBlockhashWindow)
+import Data.Text (Text)
 import Bridge.PaymentObservation
 import qualified Bridge.Solana as S
-import Data.Aeson (eitherDecodeStrict')
+import Data.Aeson (eitherDecodeStrict',FromJSON,toJSON,object,(.=),parseJSON)
 import qualified Data.Text.Encoding as TE
 import Bridge.Signer (signingAPI)
 import Bridge.SigningTransport
 import Bridge.Store
 import qualified Bridge.Native as N
 import qualified Bridge.SolanaHelper as H
-import Bridge.RPC (boundedBody)
+import Bridge.RPC (boundedBody,parseValue)
+import qualified Bridge.RPC as RPC
 import Control.Concurrent.MVar (newMVar,withMVar)
 import Control.Exception (bracket,onException)
 import Data.IORef (newIORef,atomicModifyIORef')
@@ -40,33 +48,35 @@ withPaymentWorker rpc native solana config endpoint reader writer action = do
   let interpret :: forall a. Request 'Worker 'Critical a -> IO a
       interpret request=withMVar gate $ \_ -> evalCritical (resolve request)
       evalCritical :: forall a. DSL 'Worker 'Critical a -> IO a
-      evalCritical (WorkerDSL (ReconcilePayment txid)) = reconcile `onException` evalWrite writer (Pause "payment_observation_requires_review")
-       where
-        reconcile = do
-          recorded<-evalRead reader (ReadAttempt txid)
-          case recordedState recorded of
-            "settled"->pure ()
-            "failed"->pure ()
-            _->do
-              require (recordedState recorded `elem` ["signed","broadcast_intent"]) "payment_requires_recovery"
-              prepared<-evalRead reader (ReadPreparation $ recordedPayment recorded)
-              require (preparedGeneration prepared==recordedGeneration recorded) "payment_requires_recovery"
-              let saved=recordedSigned recorded
-                  decode proof=either (const $ reject "invalid_saved_payment") pure (eitherDecodeStrict' $ TE.encodeUtf8 proof)
-              verifySignedAttempt (N.nativeCall rpc native) (N.profile native) config prepared saved
-              observed<-case recordedChain recorded of
-                "Native"->do
-                  _<-N.nativeIdentity rpc native
-                  decode (signedPolicy saved) >>= observeNativePayment (N.nativeCall rpc native)
-                "Solana"->do
-                  _<-S.solanaIdentity rpc solana
-                  decode (signedPolicy saved) >>= observeSolanaPayment (S.solanaCall rpc solana) config
-                _->reject "invalid_payout_asset"
-              case observed of
-                PaymentUnseen->pure ()
-                PaymentWaiting->pure ()
-                PaymentConfirmed costs proof->evalWrite writer (SettlePayment recorded costs proof)
-                PaymentFailed fee proof->evalWrite writer (FailSolana recorded fee proof)
+      evalCritical (WorkerDSL (QueuePayment txid)) = guarded $ do
+        (recorded,_)<-loadActive txid
+        refreshSource (recordedPayment recorded)
+        now<-floor <$> getPOSIXTime
+        evalWrite writer (MarkBroadcast now txid)
+      evalCritical (WorkerDSL (BroadcastPayment txid)) = guarded $ do
+        (recorded,reply)<-loadActive txid
+        require (recordedState recorded=="broadcast_intent") "broadcast_intent_required"
+        observed<-observe reply
+        case observed of
+          PaymentUnseen->do
+            refreshSource (recordedPayment recorded)
+            case reply of
+              NativeReply signed->checkNativeAcceptance (N.nativeCall rpc native) signed
+              SolanaReply signed->checkBlockhashWindow (S.solanaCall rpc solana) (solPlanRecent $ signedSolanaPlan signed)
+            now<-floor <$> getPOSIXTime
+            authorized<-evalWrite writer (AuthorizeSend now txid)
+            require (authorized==recorded) "saved_payment_changed"
+            actual<-case reply of
+              NativeReply _->N.nativeCall rpc native True "sendrawtransaction" [toJSON $ signedBytes $ recordedSigned authorized] >>= parseValue parseJSON
+              SolanaReply _->S.solanaCall rpc solana "sendTransaction" [toJSON $ signedBytes $ recordedSigned authorized,object
+                ["encoding" .= ("base64"::Text),"skipPreflight" .= False,"preflightCommitment" .= ("confirmed"::Text),"maxRetries" .= (0::Int)]] >>= parseValue parseJSON
+            require (actual==txid) "broadcast_identifier_mismatch"
+          _->recordOutcome recorded observed
+      evalCritical (WorkerDSL (ReconcilePayment txid)) = guarded $ do
+        recorded<-evalRead reader (ReadAttempt txid)
+        if recordedState recorded `elem` ["settled","failed"] then pure () else do
+          (current,reply)<-loadActive txid
+          observe reply >>= recordOutcome current
       evalCritical (WorkerDSL (SignPreparedPayment identifier)) = signing `onException` evalWrite writer (Pause "signing_requires_review")
        where
         signing = do
@@ -82,6 +92,7 @@ withPaymentWorker rpc native solana config endpoint reader writer action = do
             _->reject "payment_requires_recovery"
         issue prepared = do
           _<-resolveSigningPlan (N.profile native) config prepared
+          refreshSource identifier
           now<-floor <$> getPOSIXTime
           decision<-evalRead reader (ReadSigningDecision now identifier $ preparedGeneration prepared)
           require (decision==prepared) "preparation_changed"
@@ -108,4 +119,39 @@ withPaymentWorker rpc native solana config endpoint reader writer action = do
           verifySignedAttempt (N.nativeCall rpc native) (N.profile native) config prepared signed
           recorded<-evalWrite writer (RecordAttempt prepared signed)
           pure (signedId $ recordedSigned recorded)
+      guarded :: IO a -> IO a
+      guarded operation=operation `onException` evalWrite writer (Pause "payment_requires_reconciliation")
+      decode :: FromJSON a => Text -> IO a
+      decode proof=either (const $ reject "invalid_saved_payment") pure (eitherDecodeStrict' $ TE.encodeUtf8 proof)
+      loadActive txid = do
+        recorded<-evalRead reader (ReadAttempt txid)
+        require (recordedState recorded `elem` ["signed","broadcast_intent"]) "payment_requires_recovery"
+        prepared<-evalRead reader (ReadPreparation $ recordedPayment recorded)
+        require (preparedGeneration prepared==recordedGeneration recorded) "payment_requires_recovery"
+        let saved=recordedSigned recorded
+        verifySignedAttempt (N.nativeCall rpc native) (N.profile native) config prepared saved
+        reply<-case recordedChain recorded of
+          "Native"->NativeReply <$> (decode (signedPolicy saved) :: IO NativeSigned)
+          "Solana"->SolanaReply <$> (decode (signedPolicy saved) :: IO SolanaSigned)
+          _->reject "invalid_payout_asset"
+        pure (recorded,reply)
+      observe reply=case reply of
+        NativeReply signed->N.nativeIdentity rpc native >> observeNativePayment (N.nativeCall rpc native) signed
+        SolanaReply signed->S.solanaIdentity rpc solana >> observeSolanaPayment (S.solanaCall rpc solana) config signed
+      recordOutcome recorded observed=case observed of
+        PaymentUnseen->pure ()
+        PaymentWaiting->require (recordedState recorded=="broadcast_intent") "unrecorded_broadcast_observed"
+        PaymentConfirmed costs proof->evalWrite writer (SettlePayment recorded costs proof)
+        PaymentFailed fee proof->evalWrite writer (FailSolana recorded fee proof)
+      refreshSource identifier = do
+        source<-evalRead reader (ReadPaymentSource identifier)
+        forM_ source $ \binding->do
+          case W.depositAsset (W.sourceDeposit binding) of
+            Native->N.nativeIdentity rpc native >> pure ()
+            Wrapped->S.solanaIdentity rpc solana >> pure ()
+            Sol->reject "unsupported_source_asset"
+          observed<-verifyPaymentSource (N.nativeCall rpc native) (S.solanaCall rpc solana)
+            (fmap (\url->RPC.rpc rpc url Nothing) $ S.solanaVerifierRpc solana) (N.profile native) config binding
+          evalWrite writer (RefreshPaymentSource (W.sourceDeposit binding) observed)
+          require (W.depositEligible observed) "source_not_eligible"
   action interpret

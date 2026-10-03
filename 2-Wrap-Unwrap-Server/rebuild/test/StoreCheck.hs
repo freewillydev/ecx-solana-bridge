@@ -250,6 +250,14 @@ main = do
         fixture fixtures (CheckPromotion native "promote-source" Wrapped 9 "Ready") >>= check
         conversionView<-evalRead reader (ReadPayment $ "convert:"<>native)
         check (paymentAmount(savedPayment conversionView)==money 9 && savedStatus conversionView==PaymentReady)
+        bound<-evalRead reader (ReadPaymentSource $ "convert:"<>native)
+        source<-maybe (fail "missing payment source") (pure . W.sourceDeposit) bound
+        cursorBeforeRefresh<-evalRead reader (ReadCheckpoint "Native")
+        expectStore "source_binding_changed" (evalWrite writer $ RefreshPaymentSource source source {W.depositAmount=money 11})
+        evalWrite writer (RefreshPaymentSource source source {W.depositConfirmations=3})
+        expectStore "source_binding_changed" (evalWrite writer $ RefreshPaymentSource source source)
+        evalRead reader ReadBalances >>= check . (==after)
+        evalRead reader (ReadCheckpoint "Native") >>= check . (==cursorBeforeRefresh)
         fixture fixtures (CheckPhases native "obligation") >>= check
         candidatesAfter<-evalRead reader PromotionCandidates
         check ("promote-source" `notElem` candidatesAfter)
@@ -373,6 +381,7 @@ main = do
         fixture fixtures ReadyIntake
         earnedPrepared<-evalWrite writer (PreparePayment 100 ("fee:"<>withdrawalKey) (money 5) "{}")
         check (paymentAsset(savedPayment $ preparedView earnedPrepared)==Native && savedStatus(preparedView earnedPrepared)==PaymentPaying)
+        evalRead reader (ReadPaymentSource $ "fee:"<>withdrawalKey) >>= check . (==Nothing)
         expectStore "fee_withdrawal_payment_exists" (evalWrite writer $ CancelFees withdrawalKey "must retain")
         fixture fixtures (CheckFundingBinding ("fee:"<>withdrawalKey) withdrawalKey) >>= check
         evalWrite writer (SaveDraft ("fee:"<>withdrawalKey) 0 "{\"nativeDraft\":true}")

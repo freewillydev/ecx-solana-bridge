@@ -72,6 +72,7 @@ data StoreRead a where
   ReadAttempt :: Text -> StoreRead RecordedAttempt
   ReadPreparation :: Text -> StoreRead PreparedPayment
   ReadPayment :: Text -> StoreRead PaymentView
+  ReadPaymentSource :: Text -> StoreRead (Maybe W.PaymentSource)
   ReadWithdrawal :: Text -> StoreRead (Maybe WithdrawalView)
   ReadOrder :: Text -> Text -> StoreRead W.OrderView
   PromotionCandidates :: StoreRead [Text]
@@ -88,6 +89,7 @@ data StoreWrite a where
   AuthorizeSend :: Int64 -> Text -> StoreWrite RecordedAttempt
   SettlePayment :: RecordedAttempt -> W.PaymentCosts -> Text -> StoreWrite ()
   FailSolana :: RecordedAttempt -> Amount -> Text -> StoreWrite ()
+  RefreshPaymentSource :: W.Deposit -> W.Deposit -> StoreWrite ()
   RecordAttempt :: PreparedPayment -> SignedAttempt -> StoreWrite RecordedAttempt
   PreparePayment :: Int64 -> Text -> Amount -> Text -> StoreWrite PreparedPayment
   SaveDraft :: Text -> Int -> Text -> StoreWrite ()
@@ -147,6 +149,7 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
       ReadAttempt identifier -> readAttempt c identifier
       ReadPreparation identifier -> readPreparation c identity identifier
       ReadPayment identifier -> readPayment c identity identifier
+      ReadPaymentSource identifier -> readPaymentSource c identity identifier
       PendingVerification -> pendingVerification c
       LookupReferences keys -> lookupReferences c keys
       LookupInstruction instruction -> lookupInstruction c instruction
@@ -169,6 +172,11 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
   AuthorizeSend now txid -> authorizeSend c config now txid
   SettlePayment expected costs proof -> settlePayment c (deploymentFingerprint $ paymentPolicy policy) expected costs proof
   FailSolana expected fee proof -> failSolana c (deploymentFingerprint $ paymentPolicy policy) expected fee proof
+  RefreshPaymentSource expected observed -> do
+    saved<-readSource c (W.depositId expected) >>= asDeposit
+    require (saved==expected && observed {W.depositAnchor=W.depositAnchor expected,
+      W.depositConfirmations=W.depositConfirmations expected,W.depositEligible=W.depositEligible expected}==expected) "source_binding_changed"
+    when (observed/=expected) (observeDeposit c observed)
   RecordAttempt prepared signed -> recordAttempt c (deploymentFingerprint $ paymentPolicy policy) prepared signed
   PreparePayment now identifier allowance plan -> preparePayment c config now identifier allowance plan
   SaveDraft identifier generation draft -> saveDraft c (deploymentFingerprint $ paymentPolicy policy) identifier generation draft
@@ -1508,3 +1516,23 @@ resolvePayment c saved view state proof = do
       _<-O.runUpdate c O.Update {O.uTable=S.reservations,O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,text "released"),O.uWhere= \(key,_,_,_)->key O..== text order,O.uReturning=O.rCount}
       _<-O.runUpdate c O.Update {O.uTable=S.operatingReservations,O.uUpdateWith= \(key,kind,asset,n,_)->(key,kind,asset,n,text "released"),O.uWhere= \(key,_,_,_,phase)->key O..== text order O..&& O.in_ (map text ["quote","obligation"]) phase,O.uReturning=O.rCount}
       pure ()
+
+readPaymentSource :: PG.Connection -> Text -> Text -> IO (Maybe W.PaymentSource)
+readPaymentSource c identity identifier = do
+  view<-readPayment c identity identifier
+  let binding=case paymentFunding(savedPayment view) of
+        Conversion order receipt _ _->Just(order,receipt)
+        Refund order receipt _ _->Just(order,receipt)
+        EarnedFees{}->Nothing
+  forM binding $ \(order,receipt)->do
+    deposit<-readSource c receipt >>= asDeposit
+    rows<-O.runSelect c $ do
+      row<-O.selectTable S.orders
+      O.where_ (S.orderId row O..== O.sqlStrictText order)
+      pure (S.requestJson row,S.instruction row)
+      :: IO [(Text,Maybe Text)]
+    (request,instruction)<-case rows of
+      [(value,Just instruction)]->(,instruction) <$> decodeSaved value
+      _->reject "source_instruction_missing"
+    require (W.depositOrder deposit==Just order && W.depositAsset deposit==sourceAsset(W.direction request)) "source_binding_mismatch"
+    pure (W.PaymentSource deposit request (paymentPolicy $ savedTerms view) instruction)

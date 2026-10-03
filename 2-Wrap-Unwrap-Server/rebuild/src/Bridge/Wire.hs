@@ -139,3 +139,8 @@ instance FromJSON SignedAttempt where
 
 data PaymentCosts = PaymentCosts { networkFee :: Amount, accountRent :: Amount }
   deriving stock (Eq,Show,Generic) deriving anyclass (ToJSON,FromJSON)
+
+-- Immutable customer binding plus the latest saved receipt snapshot.
+data PaymentSource = PaymentSource
+  { sourceDeposit :: Deposit, sourceRequest :: OrderRequest
+  , sourcePolicy :: PolicySnapshot, sourceInstruction :: Text } deriving (Eq,Show)
