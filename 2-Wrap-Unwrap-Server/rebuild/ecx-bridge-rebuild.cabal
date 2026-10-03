@@ -33,7 +33,7 @@ library store
   exposed-modules: Bridge.Store, Bridge.Fence
   other-modules: Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Store.Backup
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:chain, aeson, bytestring, text, containers,
-    crypton, time, directory, filepath, unix, process, scientific, opaleye ==0.10.8.0, postgresql-simple >=0.7 && <0.8,
+    crypton, time, directory, filepath, unix, process, http-client, network, scientific, opaleye ==0.10.8.0, postgresql-simple >=0.7 && <0.8,
     product-profunctors >=0.11 && <0.12
 
 library chain

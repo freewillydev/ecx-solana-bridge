@@ -1254,9 +1254,9 @@ customer flows and wallet testing, deployed signer isolation, Haskell off-host
 backup/restore and populated migration. The baseline remains until parity and live
 acceptance; valuable-fund release also requires independent review.
 
-## Haskell ledger archive checkpoint
+## Haskell encrypted ledger backup checkpoint
 
-`StoreBackup` contains one closed `ExportLedger` operation. It is separate from
+`StoreBackup` contains closed `ExportLedger` and `UploadLedger` operations. It is separate from
 safe row reads because it writes private files; no customer or signer route exposes
 it. Its interpreter checks the SELECT-only role and schema/identity, exports a fixed
 PostgreSQL snapshot through Opaleye, and keeps that read-only repeatable-read
@@ -1288,7 +1288,44 @@ coverage. Root Cabal build and QuickCheck pass. Temporary databases, files and c
 processes are cleaned up. This is populated local archive restoration, not migration
 of existing custody or proof of an off-host/clean-host recovery procedure.
 
-Next: authenticated encrypted off-host upload/readback and acknowledgment, key/wallet
-recovery material, verified restore/fence adoption and runtime integration. The
-`backupRequired` startup refusal remains until those guarantees are implemented;
-there is no new promise that a local archive permits signing or sending.
+`UploadLedger` validates protected configuration, exports through the same operation,
+then uploads after the read-only database transaction has closed. The configuration
+contains only absolute `restic`, `repositoryFile` and `passwordFile` paths. It rejects
+unknown fields, oversized/unprotected/symlink files, local/plain-HTTP repositories,
+and loopback/unspecified resolved addresses, including IPv4-mapped IPv6. The supported
+backend is `rest:https://...`; credentials remain in files, not arguments or reports.
+DNS checks cannot prove physical host independence or prevent later DNS changes;
+that remains deployment acceptance.
+
+The private uploader verifies the exact manifest and archive digest, requires a
+successful restic backup, and validates its full snapshot ID, exact paths and required
+identity/sequence tags. It decrypts the manifest back from that snapshot and requires
+byte equality before returning a receipt. It uses no cache or ambient restic overrides,
+bounds output/time, limits Go parallelism, and kills a child on cancellation/failure.
+The upload operation removes its temporary local archive and manifest on success or
+failure. No automatic retry, pruning, repository initialization or ledger acknowledgment
+is performed by production upload. These use restic's documented
+[REST backend](https://github.com/restic/restic/blob/master/doc/030_preparing_a_new_repo.rst),
+[scripting output](https://github.com/restic/restic/blob/master/doc/075_scripting.rst)
+and [snapshot readback](https://github.com/restic/restic/blob/master/doc/design.rst).
+
+The encrypted-storage acceptance uses an actual disposable local restic repository,
+validates authenticated metadata/manifest, decrypts the archive, compares its bytes
+and repeats populated PostgreSQL restoration. Local/plain-HTTP/loopback repository,
+unprotected credentials, changed sequence/digest and wrong password all refuse.
+Coverage remains unchanged. This exercises the private storage seam; the production
+operation refuses local repositories. It is not evidence of external HTTPS access,
+physical off-host durability, or complete custody recovery.
+
+Latest change versus `084e700`: **139 added production lines in the same two files**
+(Backup 80 → 208; Store 3,238 → 3,249), no new files or executables. Existing PostgreSQL
+contract 2,490 → 2,535. This adds the missing encrypted upload and authenticated
+readback, reusing the archive operation and one bounded subprocess path. It removes
+neither the retained baseline nor any required custody protections. Root Cabal build,
+QuickCheck and real PostgreSQL/restic acceptance pass.
+
+Still required: key/wallet recovery material, verified restore/fence adoption,
+acknowledgment and runtime integration, then acceptance using independent off-host
+storage. The `backupRequired` startup refusal remains until those guarantees are
+implemented; neither a local archive nor an upload-only receipt permits signing or
+sending.

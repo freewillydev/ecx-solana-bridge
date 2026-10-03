@@ -3,7 +3,7 @@
 -- escape this module; the runtime will interpret its customer/operator DSL here.
 module Bridge.Store
   ( Reader, Writer, BridgeError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), StorePolicy(..), AllocationClaim(..), LedgerState(..), WithdrawalView(..), PaymentView(..), PaymentStatus(..), PreparedPayment(..), SignedAttempt(..), RecordedAttempt(..), NativeLockWork(..), NativeSettlementCheck(..), CustodySnapshot(..)
-  , StoreBackup(..), LedgerArchive(..), evalBackup
+  , StoreBackup(..), LedgerArchive(..), BackupReceipt(..), evalBackup
   , withReader, withWriter, withFencedWriter, evalRead, evalWrite ) where
 
 import qualified Bridge.NativePayment as N
@@ -16,7 +16,7 @@ import Bridge.Domain
 import Bridge.Wire (PaymentTerms(..),PolicySnapshot(..),CostLimits(..),SignedAttempt(..))
 import qualified Bridge.Store.Schema as S
 import Bridge.Store.Catalog (claimWorker,verifyReadRole,exportSnapshot)
-import Bridge.Store.Backup (LedgerArchive(..),archiveLedger)
+import Bridge.Store.Backup (LedgerArchive(..),archiveLedger,BackupReceipt(..),loadRemoteBackup,uploadRemoteArchive)
 import Crypto.Random (getRandomBytes)
 import qualified Data.ByteString as BS
 import Data.List (nub,sortOn)
@@ -38,6 +38,7 @@ import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Database.PostgreSQL.Simple.Transaction as Tx
+import System.Directory (removeFile)
 import qualified Opaleye as O
 import qualified Opaleye.Exists as Exists
 import qualified Opaleye.Internal.Locking as Locking
@@ -85,8 +86,18 @@ data NativeSettlementCheck = NativeConfirming | NativeUnavailable Text
 -- customer/signer capabilities. It never acknowledges off-host durability.
 data StoreBackup a where
   ExportLedger :: FilePath -> StoreBackup LedgerArchive
+  UploadLedger :: FilePath -> FilePath -> Int64 -> StoreBackup BackupReceipt
 
 evalBackup :: Reader -> StoreBackup a -> IO a
+evalBackup reader (UploadLedger configuration directory required) = do
+  require (required>=0) "invalid_backup_coverage"
+  remote<-loadRemoteBackup configuration
+  bracket (evalBackup reader $ ExportLedger directory)
+    (\archive->mapM_ removeFile [manifestPath archive,archivePath archive]) $ \archive->do
+      require (archiveSequence archive>=required) "backup_snapshot_too_old"
+      uploadRemoteArchive remote archive
+-- Only the local pg_dump spans this read-only transaction; upload runs after
+-- it has closed, and neither path holds a paying-writer transaction.
 evalBackup (Reader settings identity _) (ExportLedger directory) =
   bracket (PG.connect settings) PG.close $ \c ->
     Tx.withTransactionMode (Tx.TransactionMode Tx.RepeatableRead Tx.ReadOnly) c $ do

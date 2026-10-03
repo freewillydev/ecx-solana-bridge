@@ -5,7 +5,9 @@ import Paths_ecx_bridge_rebuild (getDataFileName)
 import qualified Network.HTTP.Client as HTTP
 import qualified Network.Socket as NS
 import qualified System.Process as Process
-import System.FilePath (takeDirectory)
+import System.FilePath (takeDirectory,(</>))
+import qualified Bridge.Store.Backup as Backup
+import Crypto.Random (getRandomBytes)
 import Control.Concurrent (threadDelay,forkIO,killThread)
 import Bridge.Identity (capabilityHash,payInstruction,digest,publicKey)
 import qualified Bridge.Wire as W
@@ -27,7 +29,7 @@ import qualified Network.Wai.Test as WaiTest
 import Network.HTTP.Types (statusCode,status200)
 import Bridge.Order
 import qualified Bridge.Fence as Fence
-import System.Directory (createDirectory,removeDirectoryRecursive,removeFile)
+import System.Directory (createDirectory,removeDirectoryRecursive,removeFile,findExecutable)
 import System.IO (openTempFile,hClose,withFile,IOMode(WriteMode))
 import System.Posix.Files (setFileMode)
 import qualified System.Posix.Files as Posix
@@ -59,6 +61,7 @@ import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Opaleye as O
+import System.Exit (ExitCode(..))
 import System.Environment (getEnv,lookupEnv,getEnvironment)
 
 main :: IO ()
@@ -2481,10 +2484,52 @@ archiveContract settings fixtures reader = do
     again<-evalBackup reader (ExportLedger directory)
     check (archivePath again/=archivePath archive && manifestPath again/=manifestPath archive)
     evalRead reader ReadState >>= check . (==before)
-    bracket_ (Process.callProcess "createdb" $ endpoint<>[restored])
-      (Process.callProcess "dropdb" $ endpoint<>["--force",restored]) $ do
-        Process.callProcess "pg_restore" (endpoint<>["--exit-on-error","--no-owner","--no-privileges","--dbname="<>restored,archivePath archive])
-        bracket (PG.connect settings {PG.connectDatabase=restored}) PG.close $ \connection->do
-          recovered<-fixture connection ArchiveRecords
-          check (records==recovered)
-    putStrLn "PASS: private snapshot archive, digest/manifest, unchanged coverage, populated restore of metadata, exact signed attempts and every ledger posting"
+    let restore path=bracket_ (Process.callProcess "createdb" $ endpoint<>[restored])
+          (Process.callProcess "dropdb" $ endpoint<>["--force",restored]) $ do
+            Process.callProcess "pg_restore" (endpoint<>["--exit-on-error","--no-owner","--no-privileges","--dbname="<>restored,path])
+            bracket (PG.connect settings {PG.connectDatabase=restored}) PG.close $ \connection->do
+              recovered<-fixture connection ArchiveRecords
+              check (records==recovered)
+    restore (archivePath archive)
+    program<-findExecutable "restic" >>= maybe (fail "restic required for encrypted archive contract") pure
+    let repository=directory</>"repository"
+        password=directory</>"password"
+        configuration=directory</>"backup.json"
+        downloaded=directory</>"download.dump"
+        protected path contents=BS.writeFile path contents >> setFileMode path 0o600
+        localRepository=TE.encodeUtf8 $ T.pack(directory</>"encrypted-repository")
+        upload=Backup.uploadArchive program repository password
+        common=["--no-cache","--repository-file",repository,"--password-file",password]
+    secret<-TE.encodeUtf8 . digest <$> (getRandomBytes 32 :: IO BS.ByteString)
+    protected password secret
+    protected repository localRepository
+    protected configuration $ BL.toStrict $ encode $ object ["restic" .= program,"repositoryFile" .= repository,"passwordFile" .= password]
+    expectStore "https_backup_repository_required" (evalBackup reader $ UploadLedger configuration directory 0)
+    expectStore "invalid_backup_coverage" (evalBackup reader $ UploadLedger configuration directory (-1))
+    forM_ ["rest:http://example.com/backup","/tmp/local"] $ \url->do
+      protected repository url
+      expectStore "https_backup_repository_required" (Backup.loadRemoteBackup configuration)
+    forM_ ["rest:https://localhost/backup","rest:https://127.0.0.1/backup","rest:https://[::1]/backup","rest:https://[::ffff:127.0.0.1]/backup"] $ \url->do
+      protected repository url
+      expectStore "off_host_backup_required" (Backup.loadRemoteBackup configuration)
+    protected repository localRepository
+    setFileMode repository 0o644
+    expectStore "unsafe_backup_file" (upload archive)
+    setFileMode repository 0o600
+    expectStore "backup_archive_mismatch" (upload archive {archiveSequence=archiveSequence archive+1})
+    expectStore "backup_archive_mismatch" (upload archive {archiveHash=T.replicate 64 "0"})
+    Process.callProcess program (common<>["init","--quiet"])
+    receipt<-upload archive
+    check (receiptIdentity receipt==archiveIdentity archive && receiptSequence receipt==archiveSequence archive && receiptArchiveHash receipt==archiveHash archive)
+    -- Real encrypted repository readback and database restoration, not a mock
+    -- restic receipt. A local repository never changes worker backup coverage.
+    withFile downloaded WriteMode $ \output->
+      Process.withCreateProcess (Process.proc program (common<>["dump",T.unpack $ receiptSnapshot receipt,archivePath archive]))
+        {Process.std_out=Process.UseHandle output} $ \_ _ _ process->
+          Process.waitForProcess process >>= check . (==ExitSuccess)
+    BS.readFile downloaded >>= check . (==bytes)
+    restore downloaded
+    protected password "wrong-passphrase"
+    expectStore "backup_process_failed" (upload archive)
+    evalRead reader ReadState >>= check . (==before)
+    putStrLn "PASS: private snapshot, real restic encryption/readback/restore, repository/permission/integrity/password refusal, unchanged coverage, exact signed attempts and every ledger posting"
