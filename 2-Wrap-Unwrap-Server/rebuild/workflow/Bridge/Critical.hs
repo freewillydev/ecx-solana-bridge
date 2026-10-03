@@ -147,8 +147,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
             evalRead reader (CheckCoveredSource key recovery)
             binding<-evalRead reader (ReadPaymentSource key) >>= maybe (reject "source_approval_not_expected") pure
             proof<-proveMissing (W.sourceDeposit binding)
-            pending<-evalRead reader PendingAttempts
-            mapM_ (evalWorker . ReconcilePayment) pending
+            reconcilePending >>= mapM_ (either throwIO pure)
             evalWorker ReconcileCustody
             now<-floor <$> getPOSIXTime
             evalWrite writer (ApproveCoveredSource now key recovery reason proof)
@@ -162,8 +161,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
           Nothing->do
             evalRead reader (CheckSourceRestoration key restoration)
             refreshSource key
-            pending<-evalRead reader PendingAttempts
-            mapM_ (evalWorker . ReconcilePayment) pending
+            reconcilePending >>= mapM_ (either throwIO pure)
             evalWorker ReconcileCustody
             now<-floor <$> getPOSIXTime
             evalWrite writer (ApproveSourceRestoration now key restoration reason)
@@ -327,7 +325,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         _<-N.nativeIdentity rpc native
         _<-N.nativeWalletInfoWith (N.nativeCall rpc native) native
         saved<-evalRead reader ReadNativeLockWork
-        restored<-restoreNativeWork (N.nativeCall rpc native) (N.profile native) config saved
+        restored<-restoreNativeWork (N.nativeCall rpc native) native config saved
         when (restored>0) $ forM_ saved $ \work->evalWrite writer (RecordNativeLockRestore work restored)
       evalWorker ObserveChains = observeOnce rpc settings reader writer
       evalWorker (PrepareOutgoing identifier) = guarded $ do
@@ -349,7 +347,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
       evalWorker (BroadcastPayment txid) = guarded $ do
         (recorded,reply)<-loadActive txid
         require (recordedState recorded=="broadcast_intent") "broadcast_intent_required"
-        observed<-observe reply
+        (observedAttempt,observed)<-observeAttempt recorded reply
         case observed of
           PaymentUnseen->do
             refreshSource (recordedPayment recorded)
@@ -364,13 +362,15 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
               SolanaReply _->S.solanaCall rpc solana "sendTransaction" [toJSON $ signedBytes $ recordedSigned authorized,object
                 ["encoding" .= ("base64"::Text),"skipPreflight" .= False,"preflightCommitment" .= ("confirmed"::Text),"maxRetries" .= (0::Int)]] >>= parseValue parseJSON
             require (actual==txid) "broadcast_identifier_mismatch"
-          _->recordOutcome recorded observed
+          _->recordOutcome observedAttempt observed
       evalWorker (ReconcilePayment txid) = guarded $ do
         recorded<-evalRead reader (ReadAttempt txid)
         retired<-evalRead reader (ReadSolanaExpiry txid)
-        if recordedState recorded `elem` ["settled","failed"] || retired/=Nothing then pure () else do
+        payment<-evalRead reader (ReadPayment $ recordedPayment recorded)
+        if savedStatus payment==PaymentPaid || recordedState recorded `elem` ["settled","failed"] || retired/=Nothing then pure () else do
           (current,reply)<-loadActive txid
-          observe reply >>= recordOutcome current
+          (winner,outcome)<-observeAttempt current reply
+          recordOutcome winner outcome
       evalWorker (SignPreparedPayment identifier) = signing `onException` evalWrite writer (Pause "signing_requires_review")
        where
         signing = do
@@ -412,7 +412,9 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
                   backupDecisions
                   evalWorker (SignPreparedPayment identifier)
                 [saved]->pure saved
-                _->reject "payment_requires_recovery"
+                _->do
+                  family<-evalRead reader (ReadNativeFamily identifier)
+                  pure (signedId $ recordedSigned $ fst $ last family)
               freshIntake
               _<-evalWorker (QueuePayment txid)
               backupDecisions
@@ -470,11 +472,15 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         sources<-tryBridge (evalWorker RecoverNativeSources)
         now<-floor <$> getPOSIXTime
         evalWrite writer (ExpireQuotes now)
-        pending<-evalRead reader PendingAttempts
-        -- A policy error on one attempt must not hide another finalized effect.
-        outcomes<-mapM (tryBridge . evalWorker . ReconcilePayment) pending
+        outcomes<-reconcilePending
         evalWorker ReconcileCustody
         mapM_ (either throwIO pure) (locks:scanned:sources:outcomes)
+      -- Inspect each economic payment once, including all replacement members.
+      -- A policy error on one family must not hide another finalized effect.
+      reconcilePending=do
+        pending<-evalRead reader PendingAttempts >>= mapM (evalRead reader . ReadAttempt)
+        let families=M.elems $ M.fromList [(recordedPayment saved,saved)|saved<-pending]
+        mapM (tryBridge . evalWorker . ReconcilePayment . signedId . recordedSigned) families
       tryBridge :: IO a -> IO (Either BridgeError a)
       tryBridge work=try (work `catch` (\(_::IOException)->reject "worker_io_unavailable"))
       guarded :: IO a -> IO a
@@ -487,15 +493,41 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         prepared<-evalRead reader (ReadPreparation $ recordedPayment recorded)
         require (preparedGeneration prepared==recordedGeneration recorded) "payment_requires_recovery"
         let saved=recordedSigned recorded
-        verifySignedAttempt (N.nativeCall rpc native) (N.profile native) config prepared saved
+        case recordedChain recorded of
+          "Native"->do
+            family<-evalRead reader (ReadNativeFamily $ recordedPayment recorded)
+            require (recorded `elem` map fst family) "native_replacement_family_changed"
+            case family of
+              [(first,_)]->verifySignedAttempt (N.nativeCall rpc native) (N.profile native) config prepared (recordedSigned first)
+              _->nativePreparationPlan (N.profile native) config prepared >> pure ()
+          _->verifySignedAttempt (N.nativeCall rpc native) (N.profile native) config prepared saved
         reply<-case recordedChain recorded of
           "Native"->NativeReply <$> (decode (signedPolicy saved) :: IO NativeSigned)
           "Solana"->SolanaReply <$> (decode (signedPolicy saved) :: IO SolanaSigned)
           _->reject "invalid_payout_asset"
         pure (recorded,reply)
-      observe reply=case reply of
-        NativeReply signed->N.nativeIdentity rpc native >> observeNativePayment (N.nativeCall rpc native) signed
-        SolanaReply signed->S.solanaIdentity rpc solana >> observeSolanaPayment (S.solanaCall rpc solana) config signed
+      observeAttempt recorded reply=case reply of
+        NativeReply signed->do
+          family<-evalRead reader (ReadNativeFamily $ recordedPayment recorded)
+          if length family==1 then do
+            _<-N.nativeIdentity rpc native
+            result<-observeNativePayment (N.nativeCall rpc native) signed
+            pure (recorded,result)
+          else do
+            (members,view)<-readSavedNativeFamily (N.nativeCall rpc native) native config reader (recordedPayment recorded)
+            require (recorded `elem` map fst members) "native_replacement_family_changed"
+            active<-activeNativeMember members view
+            case active of
+              Just (winner,payment,depth,value)->do
+                if depth>0 || winner==recorded then do
+                  result<-nativeConfirmation (N.nativeCall rpc native) payment depth value
+                  pure (winner,result)
+                else pure (recorded,if recorded==fst(last members) then PaymentUnseen else PaymentWaiting)
+              Nothing->pure (recorded,if recorded==fst(last members) then PaymentUnseen else PaymentWaiting)
+        SolanaReply signed->do
+          _<-S.solanaIdentity rpc solana
+          result<-observeSolanaPayment (S.solanaCall rpc solana) config signed
+          pure (recorded,result)
       recordOutcome recorded observed=case observed of
         PaymentUnseen->when (recordedChain recorded=="Solana") $ do
           signed<-decode (signedPolicy $ recordedSigned recorded)

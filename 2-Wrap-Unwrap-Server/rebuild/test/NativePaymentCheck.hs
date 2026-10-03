@@ -16,6 +16,7 @@ import Bridge.NativePayment
 import Bridge.RPC (fieldValue)
 import Bridge.Wire (Profile(..))
 import Control.Exception (try)
+import Control.Monad (forM)
 import Data.Aeson hiding (Result)
 import qualified Data.Aeson.Key as Key
 import qualified Data.Aeson.KeyMap as KM
@@ -36,7 +37,9 @@ checks = do
   raw <- fieldValue "raw" fixture
   decoded <- fieldValue "decoded" fixture
   tx <- either (fail . T.unpack) pure (decodeNativeTx decoded)
-  let validate p ps f t=validateNativeTx p ps f t
+  let recoverySettings=NativeSettings L2LSignetDevnet "http://127.0.0.1:1" "/unused" "offline-recovery" 16000
+        "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47"
+      validate p ps f t=validateNativeTx p ps f t
       valid=validate plan previous fee
       draft=NativeDraft "offline-psbt" tx previous fee
       alteredPlans=[plan {planAmount=amt 100001},plan {planRecipientScript="0014"<>T.replicate 40 "a"},
@@ -208,6 +211,69 @@ checks = do
           signatureRefused<-rejects "native_replacement_draft_changed" (signNativeReplacement signedInput c [original] expected)
           methods<-readIORef calls
           pure (foreignRefused && signatureRefused && all (\(method,args)->method/="walletprocesspsbt" || case args of _:Bool False:_->True; _->False) methods)
+    , check "family recovery selects one verified spender and restores absent inputs only once" $ once $ ioProperty $
+        withNativeReplacementContract $ \c original replacement call calls->do
+          firstWire<-verifySigningReply call L2LSignetDevnet config prepared (NativeReply original)
+          let child=original {signedNativeBytes="00",signedNativeTransaction=draftTransaction replacement,signedNativeFee=draftFee replacement}
+              childWire=firstWire {signedId=nativeTxid $ signedNativeTransaction child,signedBytes="00",signedPolicy=encoded child}
+              record wire=RecordedAttempt "refund:order" "Native" 0 (planFeeLimit plan) "broadcast_intent" (Just 1) Nothing wire
+              family=[record firstWire,record childWire]
+              points=map nativeOutpoint $ nativeInputs tx
+              tip=T.replicate 64 "b"; anchor=if planDepth plan==1 then tip else T.replicate 64 "c"
+              position=object ["hash" .= tip,"height" .= (16010::Int)]
+          locks<-newIORef []
+          mutations<-newIORef (0::Int)
+          let transport mode wallet method args=case (method,args) of
+                ("gettransaction",[String txid,Bool False,Bool True]) | txid `elem` map signedId [firstWire,childWire]->
+                  if mode==0 then reject "rpc_error_-5" else do
+                    let signed=if txid==signedId firstWire then original else child
+                        winner=if mode `elem` [1,4] then signedId firstWire else signedId childWire
+                        confirmations=if mode<3 then 0 else if txid==winner then planDepth plan else negate(planDepth plan)
+                    decodedTx<-call False "decoderawtransaction" [toJSON $ signedNativeBytes signed]
+                    pure $ object (["txid" .= txid,"hex" .= signedNativeBytes signed,"decoded" .= decodedTx
+                      ,"fee" .= Number (negate(fromIntegral $ units $ signedNativeFee signed)/100000000)
+                      ,"confirmations" .= confirmations,"lastprocessedblock" .= position
+                      ,"walletconflicts" .= (if confirmations<0 then [winner] else [])]
+                      <> if confirmations>0 then ["blockhash" .= anchor] else [])
+                ("gettxspendingprevout",_)->pure $ toJSON
+                  [object (["txid" .= outpointTxid point,"vout" .= outpointVout point]
+                    <> if mode `elem` [1,2] then ["spendingtxid" .= (if mode==1 then signedId firstWire else signedId childWire)] else [])|point<-points]
+                ("getblockheader",[String hash]) | hash==anchor->pure $ object
+                  ["hash" .= anchor,"height" .= (16011-planDepth plan),"confirmations" .= planDepth plan]
+                ("getblockhash",[height]) | mode>=3 && height==toJSON (16011-planDepth plan)->pure $ String anchor
+                ("gettxout",[txid,index,Bool True])->call wallet method [txid,index,Bool False]
+                ("listlockunspent",[])->toJSON <$> readIORef locks
+                ("lockunspent",[Bool False,requested])->do
+                  require (requested==toJSON points && not(null points)) "unexpected_family_locks"
+                  writeIORef locks points
+                  modifyIORef' mutations (+1)
+                  pure (Bool True)
+                _->call wallet method args
+          results<-forM [0..4::Int] $ \mode->do
+            writeIORef locks []
+            writeIORef mutations 0
+            let rpc=transport mode
+            (members,view)<-verifyNativeFamily rpc c config prepared family
+            selected<-activeNativeMember members view
+            first<-restoreNativeWork rpc c config (Just $ NativeLockWork prepared False family)
+            second<-restoreNativeWork rpc c config (Just $ NativeLockWork prepared False family)
+            count<-readIORef mutations
+            observation<-case selected of
+              Nothing->pure PaymentUnseen
+              Just (_,signed,depth,value)->nativeConfirmation rpc signed depth value
+            let expected=if mode==0 then Nothing else Just(if mode `elem` [1,4] then signedId firstWire else signedId childWire)
+                actual=fmap (\(saved,_,_,_)->signedId $ recordedSigned saved) selected
+                correctCost=case observation of
+                  PaymentConfirmed costs _->W.networkFee costs==(if mode==4 then signedNativeFee original else signedNativeFee child)
+                  PaymentUnseen->mode==0
+                  PaymentWaiting->mode `elem` [1,2]
+                  _->False
+            pure (actual==expected && correctCost && second==0
+              && if mode==0 then first==length points && count==1 else first==0 && count==0)
+          unauthorized<-rejects "unrecorded_broadcast_observed" (verifyNativeFamily (transport 2) c config prepared
+            [head family,(last family) {recordedState="signed",recordedSequence=Nothing}])
+          methods<-map fst <$> readIORef calls
+          pure (and results && unauthorized && all (`notElem` methods) ["walletprocesspsbt","sendrawtransaction","getnewaddress","getrawchangeaddress"])
     , check "replacement fees consume only change within the saved ceiling" $ forAll (chooseInteger (283,1000)) $ \nextFee ->
         case replacementOutputs boundSigned (amt nextFee) of
           Left _->False
@@ -265,21 +331,21 @@ checks = do
     , check "durable native lock recovery is idempotent and cannot sign send or allocate" $ once $ ioProperty $ do
         let work=Just $ NativeLockWork prepared False []
         ((first,second),methods)<-contract (\_ v->pure v) $ \call->do
-          first<-restoreNativeWork call L2LSignetDevnet config work
-          second<-restoreNativeWork call L2LSignetDevnet config work
+          first<-restoreNativeWork call recoverySettings config work
+          second<-restoreNativeWork call recoverySettings config work
           pure (first,second)
         earned<-either reject pure (earnedFees "revenue" Native $ planAmount plan)
         outgoingFee<-either reject pure (payment "fee:revenue" earned $ planRecipient plan)
-        (feeLocks,_)<-contract (\_ v->pure v) $ \call->restoreNativeWork call L2LSignetDevnet config
+        (feeLocks,_)<-contract (\_ v->pure v) $ \call->restoreNativeWork call recoverySettings config
           (Just $ NativeLockWork prepared {preparedView=PaymentView outgoingFee terms PaymentPaying} False [])
         pure (first==length(nativeInputs tx) && second==0 && feeLocks==first
           && length(filter (=="lockunspent") methods)==1
           && all (`notElem` methods) ["walletprocesspsbt","sendrawtransaction","getrawchangeaddress","getnewaddress"])
     , check "undrafted and cancelling native work verifies locks without restoring them" $ once $ ioProperty $ do
-        (empty,emptyCalls)<-contract (\_ v->pure v) $ \call->restoreNativeWork call L2LSignetDevnet config Nothing
-        (undrafted,undraftedCalls)<-contract (\_ v->pure v) $ \call->restoreNativeWork call L2LSignetDevnet config
+        (empty,emptyCalls)<-contract (\_ v->pure v) $ \call->restoreNativeWork call recoverySettings config Nothing
+        (undrafted,undraftedCalls)<-contract (\_ v->pure v) $ \call->restoreNativeWork call recoverySettings config
           (Just $ NativeLockWork prepared {preparedDraft=Nothing} False [])
-        (cancelled,cancelCalls)<-contract (\_ v->pure v) $ \call->restoreNativeWork call L2LSignetDevnet config
+        (cancelled,cancelCalls)<-contract (\_ v->pure v) $ \call->restoreNativeWork call recoverySettings config
           (Just $ NativeLockWork prepared True [])
         pure (empty==0 && undrafted==0 && cancelled==0 && emptyCalls==["listlockunspent"]
           && undraftedCalls==emptyCalls && cancelCalls==["decodepsbt","listlockunspent"])
@@ -290,21 +356,21 @@ checks = do
             missing method value=if method=="gettransaction" then reject "rpc_error_-5" else pure value
             mempool method (Object fields) | method=="gettransaction"=pure $ Object $ KM.insert "confirmations" (Number 0) fields
             mempool _ value=pure value
-        (unseen,unseenCalls)<-contract missing $ \call->restoreNativeWork call L2LSignetDevnet config (work recorded {recordedState="signed",recordedSequence=Nothing})
-        (confirmed,confirmedCalls)<-contract (\_ v->pure v) $ \call->restoreNativeWork call L2LSignetDevnet config (work recorded)
-        (pending,pendingCalls)<-contract mempool $ \call->restoreNativeWork call L2LSignetDevnet config (work recorded)
+        (unseen,unseenCalls)<-contract missing $ \call->restoreNativeWork call recoverySettings config (work recorded {recordedState="signed",recordedSequence=Nothing})
+        (confirmed,confirmedCalls)<-contract (\_ v->pure v) $ \call->restoreNativeWork call recoverySettings config (work recorded)
+        (pending,pendingCalls)<-contract mempool $ \call->restoreNativeWork call recoverySettings config (work recorded)
         (unauthorized,_)<-contract (\_ v->pure v) $ \call->rejects "unrecorded_broadcast_observed"
-          (restoreNativeWork call L2LSignetDevnet config $ work recorded {recordedState="signed",recordedSequence=Nothing})
+          (restoreNativeWork call recoverySettings config $ work recorded {recordedState="signed",recordedSequence=Nothing})
         (changed,_)<-contract (\_ v->pure v) $ \call->rejects "native_lock_work_changed"
-          (restoreNativeWork call L2LSignetDevnet config $ work recorded {recordedGeneration=1})
-        family<-rejects "native_lock_recovery_requires_family" (restoreNativeWork (\_ _ _->fail "family reached RPC") L2LSignetDevnet config (Just $ NativeLockWork prepared False [recorded,recorded]))
+          (restoreNativeWork call recoverySettings config $ work recorded {recordedGeneration=1})
+        family<-rejects "native_replacement_duplicate_member" (restoreNativeWork (\_ _ _->fail "family reached RPC") recoverySettings config (Just $ NativeLockWork prepared False [recorded,recorded]))
         pure (unseen==length(nativeInputs tx) && "lockunspent" `elem` unseenCalls && confirmed==0 && pending==0
           && all (`notElem` (confirmedCalls<>pendingCalls)) ["gettxout","lockunspent","walletprocesspsbt"]
           && "getmempoolentry" `elem` pendingCalls && unauthorized && changed && family)
     , check "native recovery rejects changed PSBT fees and owned prevouts before locking" $ once $ ioProperty $ do
         let altered key method (Object fields) | method==key=pure $ Object $ KM.insert (if key=="decodepsbt" then "fee" else "value") (nativeNumber $ amt 1) fields
             altered _ _ value=pure value
-            run change code=contract change $ \call->rejects code (restoreNativeWork call L2LSignetDevnet config (Just $ NativeLockWork prepared False []))
+            run change code=contract change $ \call->rejects code (restoreNativeWork call recoverySettings config (Just $ NativeLockWork prepared False []))
         (badFee,feeCalls)<-run (altered "decodepsbt") "native_psbt_changed"
         (badPrevious,previousCalls)<-run (altered "gettxout") "native_previous_output_changed"
         pure (badFee && badPrevious && all (`notElem` (feeCalls<>previousCalls)) ["lockunspent","walletprocesspsbt"])

@@ -1889,6 +1889,8 @@ pendingAttempts :: PG.Connection -> IO [Text]
 pendingAttempts c = do
   rows<-O.runSelect c $ O.limit 1001 $ O.orderBy (O.asc id) $ do
     row<-O.selectTable S.attempts
+    intent<-O.selectTable S.intents
+    O.where_ (S.attemptIntent row O..== S.intentId intent O..&& S.intentResolved intent O..== O.sqlInt8 0)
     O.where_ (O.in_ (map O.sqlStrictText ["signed","broadcast_intent"]) (S.attemptState row))
     pure (S.attemptId row)
   require (length rows<=1000) "pending_attempts_too_large"
@@ -1978,7 +1980,7 @@ nativeLockWork c identity = do
         O.where_ (S.attemptIntent row O..== O.sqlStrictText identifier)
         pure (S.attemptId row)
       require (length ids<=8) "native_replacement_family_bounds"
-      attempts<-mapM (readAttempt c) ids
+      attempts<-if length ids>1 then map fst <$> nativeFamily c identity identifier else mapM (readAttempt c) ids
       pure (Just $ NativeLockWork prepared cancelling attempts)
     _->reject "native_lock_recovery_bounds"
 
@@ -2735,6 +2737,11 @@ nativeFamily c identity identifier = do
   require (paymentAsset outgoing==Native && N.planAmount plan==paymentAmount outgoing
     && N.planRecipient plan==paymentRecipient outgoing && N.planDepth plan==nativeDepth(paymentPolicy terms)
     && N.planFeeLimit plan==preparedFee prepared) "saved_native_policy_mismatch"
+  originalDraft<-maybe (reject "preparation_draft_required") decodeSaved (preparedDraft prepared)
+  let original=head signed
+  require (N.sameNativeTemplate (N.draftTransaction originalDraft) (N.signedNativeTransaction original)
+    && N.draftFee originalDraft==N.signedNativeFee original
+    && N.sameNativePrevouts (N.draftPrevouts originalDraft) (N.signedNativePrevouts original)) "native_signed_template_changed"
   previousWinners<-O.runSelect c S.winnerHistory :: IO [(Text,Text)]
   forM_ ordered $ \(saved,member)->do
     let wire=recordedSigned saved; tx=N.signedNativeTransaction member

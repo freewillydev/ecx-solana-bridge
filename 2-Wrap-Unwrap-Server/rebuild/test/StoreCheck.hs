@@ -2297,6 +2297,7 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   expectStore "native_replacement_signature_conflict" (record family replacement {NP.signedNativeBytes="04"})
   expectStore "native_replacement_already_signed" (evalWrite writer $ CancelReplacementDraft second "too late")
   evalRead reader (ReadNativeFamily identifier) >>= check . (==[(parent,signed),(child,replacement)])
+  evalRead reader ReadNativeLockWork >>= check . (==Just [parent,child]) . fmap lockAttempts
   evalRead reader ReadBalances >>= check . (==before)
   ready
   expectStore "native_replacement_not_current" (evalWrite writer $ AuthorizeSend 110 $ signedId wire)
@@ -2305,16 +2306,22 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   ready
   authorized<-evalWrite writer (AuthorizeSend 110 $ signedId $ recordedSigned child)
   evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 2) (money 0)) "offline replacement winner")
+  evalRead reader PendingAttempts >>= check . all (`notElem` [signedId wire,signedId(recordedSigned child)])
+  evalRead reader ReadNativeLockWork >>= check . (==Nothing)
+  evaluateOffline (Left $ Request $ ReconcilePayment $ signedId wire)
+  evaluateOffline (Left $ Request $ ReconcilePayment $ signedId $ recordedSigned child)
  where
   encodeText value=TE.decodeUtf8 (BL.toStrict $ encode value)
   -- These branches must replay/cancel from the ledger alone. Unavailable
   -- credentials and a rejecting manager prove that neither RPC nor signing runs.
   operate :: Op.Plan 'Op.Operator a -> IO a
-  operate operation=do
+  operate=evaluateOffline . Right
+  evaluateOffline :: Either (Request 'Op.Worker 'Op.Critical a) (Op.Plan 'Op.Operator a) -> IO a
+  evaluateOffline operation=do
     let key=T.replicate 32 "1"
         native=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:29432" "/unused" "workflow" 1 (T.replicate 64 "0")
         solana=Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing key key key
         settings=ObserverSettings native solana 2 "sol-origin" "opening-signature"
         config=H.SolanaPolicy "contract" "contract" key key key (money 10) (money 10)
     bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "replacement replay reached network"}) closeManager $ \manager->
-      withRuntime manager settings config Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \_ _ operator->operator operation
+      withRuntime manager settings config Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \worker _ operator->either worker operator operation

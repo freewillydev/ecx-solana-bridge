@@ -1,5 +1,5 @@
 module Bridge.PaymentObservation
-  ( PaymentObservation(..), observeNativePayment, readNativePayment, activeNativeBlock
+  ( PaymentObservation(..), observeNativePayment, nativeConfirmation, readNativePayment, activeNativeBlock
   , observeSolanaPayment, solanaExpiryEvidence ) where
 import Bridge.Domain (Amount,amount)
 import Bridge.Error
@@ -27,15 +27,20 @@ observeNativePayment call signed = do
   found<-readNativePayment call signed
   case found of
     Nothing->pure PaymentUnseen
-    Just (confirmations,value)
-      | confirmations<planDepth(signedNativePlan signed)->pure PaymentWaiting
-      | otherwise->do
-          anchor<-fieldValue "blockhash" value
-          height<-activeNativeBlock call anchor (planDepth $ signedNativePlan signed)
-          zero<-either reject pure (amount 0)
-          pure $ PaymentConfirmed (PaymentCosts (signedNativeFee signed) zero) $ encoded $ object
-            ["txid" .= nativeTxid(signedNativeTransaction signed),"blockhash" .= anchor
-            ,"height" .= height,"requiredDepth" .= planDepth(signedNativePlan signed)]
+    Just (confirmations,value)->nativeConfirmation call signed confirmations value
+
+-- Both singleton and replacement-family readers first verify the transaction's
+-- actual effects. They share the same depth/canonical-block settlement proof.
+nativeConfirmation :: NativeRPC -> NativeSigned -> Int -> Value -> IO PaymentObservation
+nativeConfirmation call signed confirmations value
+  | confirmations<planDepth(signedNativePlan signed)=pure PaymentWaiting
+  | otherwise=do
+      anchor<-fieldValue "blockhash" value
+      height<-activeNativeBlock call anchor (planDepth $ signedNativePlan signed)
+      zero<-either reject pure (amount 0)
+      pure $ PaymentConfirmed (PaymentCosts (signedNativeFee signed) zero) $ encoded $ object
+        ["txid" .= nativeTxid(signedNativeTransaction signed),"blockhash" .= anchor
+        ,"height" .= height,"requiredDepth" .= planDepth(signedNativePlan signed)]
 
 -- Wallet effects must match the saved bytes, even before sufficient depth.
 -- Only the node's explicit missing-transaction result means unseen.

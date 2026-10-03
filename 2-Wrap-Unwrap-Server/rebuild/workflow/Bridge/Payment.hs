@@ -2,10 +2,12 @@
 -- signer transport; both ends use the same saved-plan checks below.
 module Bridge.Payment
   ( SigningPlan(..), SigningReply(..), prepareUnsigned, resolveSigningPlan, nativePreparationPlan
+  , readSavedNativeFamily, verifyNativeFamily, activeNativeMember
   , verifySigningReply, verifySignedAttempt, payoutReference, restoreNativeWork, cancellationPlan ) where
 import Bridge.Domain
 import Bridge.Error
 import Bridge.Identity (digest)
+import qualified Bridge.Native as N
 import Bridge.NativePayment
 import Bridge.PaymentObservation (readNativePayment,activeNativeBlock)
 import Bridge.RPC (fieldValue)
@@ -14,6 +16,7 @@ import qualified Bridge.SolanaHelper as H
 import Bridge.Store
 import Bridge.Wire (Profile,PaymentTerms(..),CostLimits(..),PolicySnapshot(..))
 import Control.Exception (onException,try)
+import Control.Monad (forM,forM_,when)
 import Data.Aeson (Value,FromJSON,ToJSON,encode,eitherDecodeStrict',toJSON,object,(.=))
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
@@ -145,9 +148,47 @@ encodeSaved=TE.decodeUtf8 . BL.toStrict . encode
 decodeSaved :: FromJSON a => Text -> IO a
 decodeSaved=either (const $ reject "invalid_saved_payment") pure . eitherDecodeStrict' . TE.encodeUtf8
 
+-- The closed Store read proves lineage. This shared boundary proves the saved
+-- preparation, actual bytes and one consistent chain view before any consumer
+-- treats a competing family member as a payment or a spent input.
+readSavedNativeFamily :: NativeRPC -> N.NativeSettings -> H.SolanaPolicy -> Reader -> Text
+  -> IO ([(RecordedAttempt,NativeSigned)],NativeFamilyView)
+readSavedNativeFamily call settings config reader identifier=do
+  family<-evalRead reader (ReadNativeFamily identifier)
+  first<-case family of (saved,_):_->pure saved; _->reject "native_replacement_family_bounds"
+  prepared<-evalRead reader (ReadRecordedPreparation $ signedId $ recordedSigned first)
+  verifyNativeFamily call settings config prepared (map fst family)
+
+verifyNativeFamily :: NativeRPC -> N.NativeSettings -> H.SolanaPolicy -> PreparedPayment -> [RecordedAttempt]
+  -> IO ([(RecordedAttempt,NativeSigned)],NativeFamilyView)
+verifyNativeFamily call settings config prepared attempts=do
+  family<-forM attempts $ \saved->(saved,) <$> decodeSaved (signedPolicy $ recordedSigned saved)
+  either reject pure (validateNativeFamily $ map snd family)
+  first<-case attempts of a:_->pure a; _->reject "native_replacement_family_bounds"
+  forM_ family $ \(saved,signed)->do
+    let wire=recordedSigned saved
+    require (recordedChain saved=="Native" && recordedPayment saved==paymentId(savedPayment $ preparedView prepared)
+      && recordedGeneration saved==preparedGeneration prepared && recordedFee saved==preparedFee prepared
+      && signedId wire==nativeTxid(signedNativeTransaction signed) && signedBytes wire==signedNativeBytes signed
+      && commonInput wire==commonInput(recordedSigned first)) "native_lock_work_changed"
+  verifySignedAttempt call (N.profile settings) config prepared (recordedSigned first)
+  view<-readNativeFamily call settings (map snd family)
+  forM_ (familyWallet view) $ \(txid,seen)->when (seen/=Nothing) $
+    require (any (\(saved,_)->signedId(recordedSigned saved)==txid
+      && recordedState saved `elem` ["broadcast_intent","settled","review"]
+      && maybe False (>0) (recordedSequence saved)) family) "unrecorded_broadcast_observed"
+  pure (family,view)
+
+activeNativeMember :: [(RecordedAttempt,NativeSigned)] -> NativeFamilyView -> IO (Maybe (RecordedAttempt,NativeSigned,Int,Value))
+activeNativeMember family view=case familyActive view of
+  Nothing->pure Nothing
+  Just (txid,depth,value)->case [(a,s)|(a,s)<-family,signedId(recordedSigned a)==txid] of
+    [(saved,signed)]->pure $ Just (saved,signed,depth,value)
+    _->reject "native_family_spender_unavailable"
+
 -- Paused recovery never signs, broadcasts, unlocks or releases ledger funds.
-restoreNativeWork :: NativeRPC -> Profile -> H.SolanaPolicy -> Maybe NativeLockWork -> IO Int
-restoreNativeWork call profile config work = case work of
+restoreNativeWork :: NativeRPC -> N.NativeSettings -> H.SolanaPolicy -> Maybe NativeLockWork -> IO Int
+restoreNativeWork call settings config work = case work of
   Nothing->verifyOnly []
   Just saved->do
     let prepared=lockPreparation saved
@@ -169,9 +210,16 @@ restoreNativeWork call profile config work = case work of
         spent<-recordedSpend attempt signed
         if spent then verifyOnly (points $ signedNativeTransaction signed)
           else restore plan (signedNativeTransaction signed) (signedNativePrevouts signed)
-      -- Replacement lineage needs its own verified winner view; never guess.
-      _->reject "native_lock_recovery_requires_family"
+      (Just _,attempts@(_:_:_))->do
+        require (not $ lockCancelling saved) "native_lock_work_changed"
+        (family,view)<-verifyNativeFamily call settings config prepared attempts
+        let signed=snd $ last family
+        case familyActive view of
+          Just _->verifyOnly (points $ signedNativeTransaction signed)
+          Nothing->restore plan (signedNativeTransaction signed) (signedNativePrevouts signed)
+      _->reject "native_lock_work_changed"
  where
+  profile=N.profile settings
   points=map nativeOutpoint . nativeInputs
   verifyOnly expected=ownedNativeLocks call expected >> pure 0
   restore plan tx previous=do

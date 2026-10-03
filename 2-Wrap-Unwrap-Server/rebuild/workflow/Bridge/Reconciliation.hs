@@ -18,6 +18,7 @@ import Control.Exception (IOException,catch,try)
 import Control.Monad (forM_,when)
 import Data.Aeson hiding (decode)
 import Data.Int (Int64)
+import Data.List (sortOn)
 import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -61,12 +62,8 @@ inspectCustodyWith clock identity native solana verifier settings config reader 
   view<-evalRead reader (ReadCustodySnapshot at origins inspectLosses)
   identity
   before<-nativeBalance native
-  -- Replacement families require their own winner proof. Never count competing
-  -- members as separate outgoing payments while that recovery port is pending.
-  let pending=custodyPending view
-      families=M.fromListWith (+) [(recordedPayment a,1::Int)|a<-pending]
-  require (all (==1) families) "custody_replacement_requires_recovery"
-  effects<-concat <$> mapM (pendingEffect native solana (N.profile n) config reader) pending
+  let groups=M.elems $ M.fromListWith (<>) [(recordedPayment a,[a])|a<-custodyPending view]
+  effects<-concat <$> mapM (pendingFamilyEffect native solana n config reader) groups
   (slot,wrapped,sol)<-solanaBalances solana config view (\chain txid->evalRead reader $ ReadCustodyEvent chain txid)
   case verifier of
     Nothing->require (N.profile n/=CanonicalBeta) "independent_rpc_required"
@@ -143,6 +140,34 @@ solanaBalances call config view evidence = do
     require (S.historySignature h==signature && T.pack(show $ S.historySlot h)==anchor && S.historySlot h<=slot) "custody_solana_history_advanced"
   pure (slot,toInteger $ units wrapped,toInteger $ units sol)
 
+-- One verified spender contributes one adjustment, irrespective of how many
+-- signed replacement alternatives share its inputs. The Store proves lineage.
+pendingFamilyEffect :: NativeRPC -> SolanaRPC -> N.NativeSettings -> H.SolanaPolicy -> Reader -> [RecordedAttempt] -> IO [(Text,Asset,Integer)]
+pendingFamilyEffect native solana settings config reader [saved]=pendingEffect native solana (N.profile settings) config reader saved
+pendingFamilyEffect native _ settings config reader attempts=do
+  first<-case attempts of a:_->pure a; _->reject "native_replacement_family_bounds"
+  (members,view)<-readSavedNativeFamily native settings config reader (recordedPayment first)
+  require (sortOn (signedId.recordedSigned) attempts==sortOn (signedId.recordedSigned) (map fst members)) "native_replacement_family_changed"
+  active<-activeNativeMember members view
+  case active of
+    Nothing->pure []
+    Just (saved,signed,depth,value)->nativeObservedEffect reader saved signed depth value
+
+nativeObservedEffect :: Reader -> RecordedAttempt -> NativeSigned -> Int -> Value -> IO [(Text,Asset,Integer)]
+nativeObservedEffect reader saved signed depth value=do
+  require (recordedState saved=="broadcast_intent") "unrecorded_broadcast_observed"
+  let txid=signedId(recordedSigned saved)
+  (kind,anchor,proof)<-evalRead reader (ReadCustodyEvent "Native" txid)
+  actualAnchor<-parseValue (withObject "transaction" (.:? "blockhash")) value
+  oldDepth<-fieldValue "confirmations" proof
+  net<-fieldValue "walletNetUnits" proof
+  fee<-fieldValue "feeUnits" proof
+  let n=toInteger $ units $ planAmount $ signedNativePlan signed
+      cost=toInteger $ units $ signedNativeFee signed
+  require (kind=="outgoing" && anchor==maybe "unconfirmed" id actualAnchor && oldDepth==depth
+    && net==T.pack(show $ negate n) && fee==signedNativeFee signed) "custody_payment_observation_mismatch"
+  pure [(txid,Native,negate $ n+cost)]
+
 pendingEffect :: NativeRPC -> SolanaRPC -> Profile -> H.SolanaPolicy -> Reader -> RecordedAttempt -> IO [(Text,Asset,Integer)]
 pendingEffect native solana profile config reader saved = do
   prepared<-evalRead reader (ReadPreparation $ recordedPayment saved)
@@ -168,16 +193,7 @@ pendingEffect native solana profile config reader saved = do
             mempool<-native False "getmempoolentry" [toJSON txid]
             size<-fieldValue "vsize" mempool :: IO Int
             require (size>0) "native_mempool_evidence_invalid"
-          (kind,anchor,proof)<-evalRead reader (ReadCustodyEvent "Native" txid)
-          actualAnchor<-parseValue (withObject "transaction" (.:? "blockhash")) value
-          oldDepth<-fieldValue "confirmations" proof
-          net<-fieldValue "walletNetUnits" proof
-          fee<-fieldValue "feeUnits" proof
-          let n=toInteger $ units $ planAmount $ signedNativePlan signed
-              cost=toInteger $ units $ signedNativeFee signed
-          require (kind=="outgoing" && anchor==maybe "unconfirmed" id actualAnchor && oldDepth==depth
-            && net==T.pack(show $ negate n) && fee==signedNativeFee signed) "custody_payment_observation_mismatch"
-          pure [(txid,Native,negate $ n+cost)]
+          nativeObservedEffect reader saved signed depth value
     "Solana"->do
       signed<-decode
       proof<-solana "getTransaction" [toJSON txid,object

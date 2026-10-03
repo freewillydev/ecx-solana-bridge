@@ -1182,21 +1182,39 @@ and cancellation decisions, and customer or earned funding. Pending drafts block
 signed members cannot be cancelled; send selection requires the latest member and
 backup coverage includes cancellations. Actual custody databases remain unmigrated.
 
-This checkpoint versus `78819d4`: **4,450 → 4,554 production lines across the same
-seven files** (+104, no new file/migration); existing tests **2,668 → 2,706** across
-three files. NativePayment alone **523 → 490** mostly reflects moving records to Wire
-(**156 → 190**), not deleting behavior. Shared draft guards and a single transport
-reduce duplicate policy; this is integration growth, not a whole-feature size reduction.
+The worker now uses replacement families for send selection, observation, input-lock
+recovery and custody. A shared verifier checks the original preparation, immutable
+member records and bytes, recorded broadcast authority, and two consistent native
+chain/wallet views. The current mempool spender or confirmed winner contributes one
+custody adjustment; competing signatures are not separate payouts. Observation can
+settle either the original or replacement. Only the latest member can proceed to send.
+Sending waits if any member is confirmed or the latest is already in the mempool.
+Absent families recover only their verified owned inputs; active spends are never
+relocked. Recovery groups work by payment to avoid repeating family RPC inspection.
 
-Validation: root Cabal build and QuickCheck; disposable PostgreSQL contracts for
-pause/fee/backup/freshness, draft conflicts, cancellation, immutable signatures,
-lineage, synthetic settlement, and network-free operator replay; actual executable
-operator parsing/observation-mode refusal and cleanup; actual HTTPS preparation signing
-with SDK signature, bad-token/certificate refusal and persisted-byte replay. The last
-check covers the shared client with offline Solana RPC responses, not native replacement
-end-to-end signing. Adapter tests use captured Signet templates and explicit offline RPC.
+Closed pending reads now exclude resolved intents. Once one member settles, later
+reconciliation of siblings returns without RPC; their exact history remains intact.
+The Store also binds the original family member to the saved initial draft, and lock
+work reads validate replacement lineage before returning a multi-member family.
+Settled-family reorg/reconfirmation is separate unfinished recovery work, not handled
+by treating every historical losing attempt as a new pending payment.
 
-Still required: family-aware worker send/observation/lock recovery, settled winner
-changes/reconfirmation, full replacement workflow acceptance, funded real-chain tests
-and deployed signer isolation. The new operator signing path is implemented but not yet
-accepted end to end on a live native node; the baseline remains until parity and migration.
+Latest checkpoint versus `b0ffcbb`: **4,043 → 4,151 production lines across the same
+five files** (+108, no new file/migration). Existing tests **2,752 → 2,825** across two
+files. This adds required integration; shared family verification, active-member
+selection and native confirmation/custody proofs avoid separate recovery engines.
+It does not claim a net whole-feature reduction or prove optimality from line counts.
+
+Validation: root Cabal build and QuickCheck; captured Signet templates with explicit
+offline RPC for absent, original-in-mempool, replacement-in-mempool and either-confirmed
+winner cases; idempotent lock recovery and rejection of an observed unsigned decision;
+disposable PostgreSQL contracts for lineage, original-draft binding, immutable decision
+and signature replay, synthetic settlement, pending-family closure and network-free
+sibling reconciliation. Actual executable/operator and HTTPS/SDK preparation-signing
+regressions also pass and clean up their processes. These checks do not constitute
+full native replacement operator-to-chain acceptance or live reorg evidence.
+
+Still required: settled winner changes/reconfirmation, full replacement workflow
+acceptance, funded real-chain tests and deployed signer isolation. The family workflow
+is implemented but not yet accepted end to end on a live native node; the baseline
+remains until parity and populated migration.
