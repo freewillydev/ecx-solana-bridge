@@ -1,9 +1,11 @@
 {-# LANGUAGE ScopedTypeVariables,DeriveGeneric #-}
 -- Private archive mechanics. Only Store's closed backup evaluator supplies the
 -- exported snapshot and metadata; no SQL or remote acknowledgment lives here.
-module Bridge.Store.Backup (LedgerArchive(..),archiveLedger,RemoteBackup,loadRemoteBackup,uploadRemoteArchive,BackupReceipt(..),uploadArchive,loadLedgerArchive,restoreLedger,discardRestore,downloadRemoteArchive,downloadArchive) where
+module Bridge.Store.Backup (LedgerArchive(..),archiveLedger,RemoteBackup,loadRemoteBackup,uploadRemoteArchive,BackupReceipt(..),uploadArchive,loadLedgerArchive,restoreLedger,discardRestore,downloadRemoteArchive,downloadArchive
+  , CustodyArchive(..),loadCustodyArchive,uploadRemoteCustody,uploadCustodyArchive,downloadRemoteCustody,downloadCustodyArchive) where
 
 import Bridge.Error
+import Bridge.Identity (digest)
 import Control.Exception (IOException,bracket,bracketOnError,catch,onException,mask)
 import Control.Monad (when,void)
 import Crypto.Random (getRandomBytes)
@@ -16,6 +18,7 @@ import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
 import Data.List (isPrefixOf,isSuffixOf,sort)
+import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Database.PostgreSQL.Simple as PG
@@ -152,10 +155,16 @@ uploadArchive program repository password archive = do
   require (validated==archive) "backup_archive_mismatch"
   manifest<-readPrivate (manifestPath archive)
   let identity=archiveIdentity archive; sequenceNo=archiveSequence archive
-      checksum=archiveHash archive
       tags=["ecx-bridge-critical","deployment:"<>identity,"sequence:"<>T.pack(show sequenceNo)]
-      paths=[archivePath archive,manifestPath archive]
-      run=resticJSON program repository password
+  snapshot<-uploadFiles program repository password tags [archivePath archive,manifestPath archive] (manifestPath archive) manifest
+  pure (BackupReceipt identity sequenceNo snapshot $ archiveHash archive)
+
+-- Private fixed-file transport shared by the two closed archive operations.
+-- Neither callers nor manifests can choose a restic command or extraction path.
+uploadFiles :: FilePath -> FilePath -> FilePath -> [Text] -> [FilePath] -> FilePath -> BS.ByteString -> IO Text
+uploadFiles program repository password tags paths manifestPath manifest = do
+  mapM_ privateFile paths
+  let run=resticJSON program repository password
   messages<-run (["backup","--json"]<>concatMap (\tag->["--tag",T.unpack tag]) tags<>paths)
   records<-mapM decodeReceipt (filter (not . BS.null) $ BS.split 10 messages)
   let summaries=[record | record@(Object fields)<-records, parseEither (.: "message_type") fields==Right ("summary"::Text)]
@@ -167,9 +176,9 @@ uploadArchive program repository password archive = do
   savedPaths<-receiptField "paths" metadata
   savedTags<-receiptField "tags" metadata
   require (sort savedPaths==sort paths && all (`elem` (savedTags::[Text])) tags) "backup_snapshot_mismatch"
-  downloaded<-run ["dump",T.unpack snapshot,manifestPath archive]
+  downloaded<-run ["dump",T.unpack snapshot,manifestPath]
   require (downloaded==manifest) "backup_manifest_readback_mismatch"
-  pure (BackupReceipt identity sequenceNo snapshot checksum)
+  pure snapshot
 
 decodeReceipt :: BS.ByteString -> IO Value
 decodeReceipt bytes=either (const $ reject "invalid_backup_receipt") pure (eitherDecodeStrict' bytes)
@@ -274,6 +283,97 @@ downloadArchive program repository password snapshot identity minimumSequence di
     writePrivate (archivePath archive) BS.empty
     _<-run ["dump",T.unpack snapshot,archiveSource,"--target",archivePath archive]
     loadLedgerArchive identity minimumSequence manifest
+
+-- Seven fixed files, with one shared manifest grammar for export/inspection and
+-- transport. Parsing establishes paths/identity, not semantic recovery authority.
+data CustodyArchive = CustodyArchive
+  { custodyManifest :: FilePath, custodyIdentity :: Text, custodySequence :: Int64
+  , custodyLedger :: FilePath, custodyFiles :: M.Map FilePath Text } deriving (Eq,Show)
+instance ToJSON CustodyArchive where
+  toJSON archive=object ["format" .= (1::Int),"fingerprint" .= custodyIdentity archive
+    ,"criticalSequence" .= custodySequence archive,"ledgerManifest" .= custodyLedger archive
+    ,"files" .= custodyFiles archive,"remoteDurabilityAcknowledged" .= False]
+
+loadCustodyArchive :: Text -> Int64 -> FilePath -> IO CustodyArchive
+loadCustodyArchive identity minimumSequence manifest = do
+  privateDirectory (takeDirectory manifest)
+  readPrivate manifest >>= custodyArchive identity minimumSequence manifest
+custodyArchive :: Text -> Int64 -> FilePath -> BS.ByteString -> IO CustodyArchive
+custodyArchive identity minimumSequence manifest bytes = do
+  require (minimumSequence>=0 && not(T.null identity)) "invalid_restore_policy"
+  require (BS.length bytes<=8192) "backup_file_too_large"
+  value<-either (const $ reject "invalid_custody_manifest") pure (eitherDecodeStrict' bytes)
+  (saved,n,ledger,files)<-either (const $ reject "invalid_custody_manifest") pure $
+    parseEither (withObject "custody manifest" $ \o->(,,,) <$> o .: "fingerprint" <*> o .: "criticalSequence"
+      <*> o .: "ledgerManifest" <*> o .: "files") value
+  let archive=CustodyArchive manifest saved n ledger files
+      basename name=name==takeFileName name && name `notElem` ["",".",".."]
+      checksum value=T.length value==64 && T.all (`elem` ("0123456789abcdef"::String)) value
+      dumps=filter (".dump-" `isSuffixOf`) (M.keys files)
+  require (takeFileName manifest=="custody.json" && value==toJSON archive && all basename (M.keys files) && all checksum (M.elems files)
+    && ".manifest-" `isSuffixOf` ledger && length dumps==1
+    && sort(M.keys files)==sort([ledger,"native-wallet","native-wallet.json","deployment.json","solana-key.json"]<>dumps))
+    "invalid_custody_manifest"
+  require (saved==identity) "backup_identity_mismatch"
+  require (n>=minimumSequence) "backup_snapshot_too_old"
+  pure archive
+
+uploadRemoteCustody :: RemoteBackup -> CustodyArchive -> IO BackupReceipt
+uploadRemoteCustody remote=uploadCustodyArchive (restic remote) (repositoryFile remote) (passwordFile remote)
+uploadCustodyArchive :: FilePath -> FilePath -> FilePath -> CustodyArchive -> IO BackupReceipt
+uploadCustodyArchive program repository password archive = do
+  require (isAbsolute program) "invalid_backup_configuration"
+  mapM_ privateFile [repository,password]
+  actual<-loadCustodyArchive (custodyIdentity archive) (custodySequence archive) (custodyManifest archive)
+  require (actual==archive) "custody_backup_binding_mismatch"
+  bytes<-readPrivate (custodyManifest archive)
+  let paths=custodyManifest archive:map (takeDirectory(custodyManifest archive)</>) (M.keys $ custodyFiles archive)
+  snapshot<-uploadFiles program repository password (custodyTags archive) paths (custodyManifest archive) bytes
+  pure (BackupReceipt (custodyIdentity archive) (custodySequence archive) snapshot $ digest bytes)
+
+custodyTags :: CustodyArchive -> [Text]
+custodyTags archive=["ecx-bridge-custody","deployment:"<>custodyIdentity archive,"sequence:"<>T.pack(show $ custodySequence archive)]
+downloadRemoteCustody :: RemoteBackup -> Text -> Text -> Int64 -> FilePath -> IO CustodyArchive
+downloadRemoteCustody remote=downloadCustodyArchive (restic remote) (repositoryFile remote) (passwordFile remote)
+downloadCustodyArchive :: FilePath -> FilePath -> FilePath -> Text -> Text -> Int64 -> FilePath -> IO CustodyArchive
+downloadCustodyArchive program repository password snapshot identity minimumSequence directory = do
+  require (isAbsolute program) "invalid_backup_configuration"
+  require (T.length snapshot==64 && T.all (`elem` ("0123456789abcdef"::String)) snapshot) "invalid_backup_snapshot"
+  require (minimumSequence>=0 && not(T.null identity)) "invalid_restore_policy"
+  privateDirectory directory
+  mapM_ privateFile [repository,password]
+  let run=resticJSON program repository password
+  metadata<-run ["cat","snapshot",T.unpack snapshot] >>= decodeReceipt
+  paths<-receiptField "paths" metadata
+  tags<-receiptField "tags" metadata
+  require (length paths==7 && all (\path->isAbsolute path && normalise path==path) paths) "backup_snapshot_mismatch"
+  source<-case filter ((=="custody.json").takeFileName) paths of
+    [manifest]->pure manifest
+    _->reject "backup_snapshot_mismatch"
+  bytes<-run ["dump",T.unpack snapshot,source]
+  suffix<-TE.decodeUtf8 . Hex.encode <$> (getRandomBytes 16 :: IO BS.ByteString)
+  let stage=directory</>"custody-recovery-"<>T.unpack suffix
+      manifest=stage</>"custody.json"
+      writePrivate path contents=bracket
+        (openFd path WriteOnly defaultFileFlags {creat=Just 0o600,exclusive=True,nofollow=True,cloexec=True} >>= fdToHandle)
+        hClose (\handle->BS.hPut handle contents)
+      sync path=bracket (openFd path ReadOnly defaultFileFlags {nofollow=True,cloexec=True}) closeFd fileSynchronise
+  archive<-custodyArchive identity minimumSequence manifest bytes
+  require (sort paths==sort(source:map (takeDirectory source</>) (M.keys $ custodyFiles archive))
+    && all (`elem` (tags::[Text])) (custodyTags archive)) "backup_snapshot_mismatch"
+  bracketOnError (PosixDirectory.createDirectory stage 0o700 >> pure stage) removeDirectoryRecursive $ \_->do
+    mapM_ (\name->do
+      let target=stage</>name
+      writePrivate target BS.empty
+      _<-run ["dump",T.unpack snapshot,takeDirectory source</>name,"--target",target]
+      privateFile target
+      sync target) (M.keys $ custodyFiles archive)
+    writePrivate manifest bytes
+    sync manifest
+    sync stage
+    sync directory
+    -- The custody evaluator validates every component before returning success.
+    pure archive
 
 -- Explicit offline schema infrastructure. Generated names, template0 and revoked
 -- PUBLIC access isolate staging; never restore into a caller-selected database.

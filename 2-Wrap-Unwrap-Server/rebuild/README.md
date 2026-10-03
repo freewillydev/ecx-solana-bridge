@@ -1537,9 +1537,51 @@ contract with `ECX_REBUILD_CUSTODY_ONLY=1` plus disposable migrated PostgreSQL
 `ECX_REBUILD_CONTRACT_DATABASE`/`ECX_REBUILD_CONTRACT_READER`. These financial records
 are database fixtures, not evidence of funded Solana or cross-host recovery.
 
-Still required: encrypted upload/download of the complete custody bundle,
-backup acknowledgment/runtime integration, encrypted-wallet unlock material and
-cross-UID deployment, then independent off-host and funded recovery acceptance.
+Encrypted custody transfer now uses the existing restic process boundary:
+
+```sh
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- upload-custody CONFIG BACKUP_CONFIG MANIFEST MINIMUM_SEQUENCE
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- recover-custody CONFIG BACKUP_CONFIG SNAPSHOT DIRECTORY MINIMUM_SEQUENCE
+```
+
+`BACKUP_CONFIG` has the existing protected `restic`, `repositoryFile` and
+`passwordFile` fields. Production requires HTTPS storage away from loopback;
+repository initialization, credentials and an independently retained password
+remain operator responsibilities. Upload performs full local inspection, snapshots
+exactly the seven bound files with custody/deployment/sequence tags, verifies its
+receipt, then downloads and inspects the entire encrypted snapshot before returning
+its ID and manifest hash. Readback staging is removed. This receipt does not update
+ledger coverage or grant send/sign authority.
+
+Recovery requires a full snapshot ID, the expected configured identity and an
+independently known minimum sequence. It checks the authenticated snapshot's exact
+paths/tags and shared manifest grammar before creating private staging. Fixed files
+stream to mode-0600 destinations; there is no directory/archive extraction. The
+completion manifest is written last. Full native/ledger/key/configuration inspection
+must pass before the command returns the retained staging manifest. Failed download
+or semantic validation removes only that new staging directory. Keys are never
+printed, and recovery does not install them, adopt a fence or resume a worker.
+
+Versus `d1fa0ef`: **120 added production lines across the same four files**:
+Backup 319 → 419, Store 3,309 → 3,316, Main 126 → 139; Recovery stays at 167 lines
+while gaining both operations. Ledger-only and custody transfer share one uploader
+and bounded process runner; custody manifests have one parser/encoding. The existing
+acceptance runner grows 2,803 → 2,853, sharing its restic repository setup. No new
+files, dependencies, executables, services or schema were added.
+
+Real local restic acceptance deletes the plaintext bundle, downloads seven private
+files, passes independent CLI inspection and restores the PostgreSQL fixture journal
+and actual L2L Signet wallet from that decrypted bundle. Ledger-only snapshots,
+`latest`, stale/wrong-identity snapshots and wrong passwords are refused; source
+coverage remains unchanged. The original ledger-only encryption/restore regression
+and root Cabal QuickCheck pass. These tests use the private local-repository transport
+seam plus the production semantic inspector; the production HTTPS workflow builds
+and rejects local repositories. They do not prove off-host HTTPS availability,
+remote durability or the production upload/readback composition against a server.
+
+Still required: backup acknowledgment/runtime integration, encrypted-wallet unlock
+material and cross-UID deployment, then independent off-host and funded recovery
+acceptance.
 The `backupRequired` startup refusal remains until those guarantees are implemented;
 an archive, upload-only receipt or adopted paused ledger does not automatically
 permit signing or sending.

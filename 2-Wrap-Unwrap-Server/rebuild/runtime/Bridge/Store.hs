@@ -3,7 +3,7 @@
 -- escape this module; the runtime will interpret its customer/operator DSL here.
 module Bridge.Store
   ( Reader, Writer, BridgeError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), StorePolicy(..), AllocationClaim(..), LedgerState(..), WithdrawalView(..), PaymentView(..), PaymentStatus(..), PreparedPayment(..), SignedAttempt(..), RecordedAttempt(..), NativeLockWork(..), NativeSettlementCheck(..), CustodySnapshot(..)
-  , StoreBackup(..), LedgerArchive(..), BackupReceipt(..), evalBackup, StoreRestore(..), evalRestore
+  , StoreBackup(..), LedgerArchive(..), BackupReceipt(..), evalBackup, StoreRestore(..), evalRestore, CustodyArchive(..)
   , withReader, withWriter, withFencedWriter, evalRead, evalWrite ) where
 
 import qualified Bridge.NativePayment as N
@@ -17,7 +17,7 @@ import Bridge.Domain
 import Bridge.Wire (PaymentTerms(..),PolicySnapshot(..),CostLimits(..),SignedAttempt(..))
 import qualified Bridge.Store.Schema as S
 import Bridge.Store.Catalog (claimWorker,verifyReadRole,exportSnapshot)
-import Bridge.Store.Backup (LedgerArchive(..),archiveLedger,BackupReceipt(..),loadRemoteBackup,uploadRemoteArchive,loadLedgerArchive,restoreLedger,discardRestore,downloadRemoteArchive)
+import Bridge.Store.Backup (LedgerArchive(..),archiveLedger,BackupReceipt(..),loadRemoteBackup,uploadRemoteArchive,loadLedgerArchive,restoreLedger,discardRestore,downloadRemoteArchive,CustodyArchive(..),loadCustodyArchive,uploadRemoteCustody,downloadRemoteCustody)
 import Crypto.Random (getRandomBytes)
 import qualified Data.ByteString as BS
 import Data.List (nub,sortOn)
@@ -88,6 +88,9 @@ data NativeSettlementCheck = NativeConfirming | NativeUnavailable Text
 -- Restoration needs database-creation authority; fence changes claim the paused
 -- ledger exclusively. No online handler receives these maintenance operations.
 data StoreRestore a where
+  InspectCustodyFiles :: FilePath -> Text -> Int64 -> StoreRestore CustodyArchive
+  UploadCustodyFiles :: FilePath -> CustodyArchive -> StoreRestore BackupReceipt
+  DownloadCustodyFiles :: FilePath -> Text -> Text -> Int64 -> FilePath -> StoreRestore CustodyArchive
   InspectLedger :: FilePath -> Text -> Int64 -> StoreRestore LedgerArchive
   AdoptLedger :: FilePath -> Text -> Int64 -> StoreRestore (Text,Int64)
   RetireLedger :: FilePath -> Text -> Int64 -> StoreRestore (Text,Int64)
@@ -95,6 +98,10 @@ data StoreRestore a where
   RecoverLedger :: FilePath -> Text -> FilePath -> Text -> Int64 -> StoreRestore (Text,Int64)
 
 evalRestore :: PG.ConnectInfo -> StoreRestore a -> IO a
+evalRestore _ (InspectCustodyFiles manifest identity minimumSequence) = loadCustodyArchive identity minimumSequence manifest
+evalRestore _ (UploadCustodyFiles configuration archive) = loadRemoteBackup configuration >>= \remote->uploadRemoteCustody remote archive
+evalRestore _ (DownloadCustodyFiles configuration snapshot identity minimumSequence directory) =
+  loadRemoteBackup configuration >>= \remote->downloadRemoteCustody remote snapshot identity minimumSequence directory
 evalRestore _ (InspectLedger manifest identity minimumSequence) = loadLedgerArchive identity minimumSequence manifest
 evalRestore settings (AdoptLedger directory identity minimumSequence) =
   changeLedgerFence settings directory identity minimumSequence Fence.adoptFence

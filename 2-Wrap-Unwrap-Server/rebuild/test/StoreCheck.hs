@@ -215,11 +215,13 @@ custodyBundleContract binary manager base directory=withTestSigningKey $ \key->d
       expectStore "unsafe_custody_backup_file" (inspect $ InspectCustody manifest 0)
       setFileMode (relocated </> "solana-key.json") 0o600
       inspect (InspectCustody manifest 0) >>= check . (==0)
-    value<-BS.readFile manifest >>= either fail pure . eitherDecodeStrict'
+    recoveredManifest<-encryptedCustodyContract binary manager config offlineFile noPG manifest directory
+    let recoveredDirectory=takeDirectory recoveredManifest
+    value<-BS.readFile recoveredManifest >>= either fail pure . eitherDecodeStrict'
     ledger<-fieldValue "ledgerManifest" value
     records<-fixture fixtures ArchiveRecords
     let restore=do
-          result<-run (overrides<>noPG) ["restore-ledger",file,relocated </> ledger,"0"]
+          result<-run (overrides<>noPG) ["restore-ledger",file,recoveredDirectory </> ledger,"0"]
           fieldValue "database" result
     bracket restore (\name->Backup.discardRestore settings {PG.connectDatabase=T.unpack name}) $ \name->
       bracket (PG.connect settings {PG.connectDatabase=T.unpack name}) PG.close $ \restored->do
@@ -228,9 +230,66 @@ custodyBundleContract binary manager base directory=withTestSigningKey $ \key->d
         check (attempts==savedAttempts && postings==savedPostings && not(null postings)
           && case rows of [row]->S.fingerprint row==identity && S.paused row==1 && S.criticalSequence row==0; _->False)
     fixture fixtures ArchiveRecords >>= check . (==records)
-    verifySigningKey (Config.custodyOwner config) (relocated </> "solana-key.json")
+    verifySigningKey (Config.custodyOwner config) (recoveredDirectory </> "solana-key.json")
     putStrLn "PASS: exclusive custody export, six bound files, relocated offline inspection without original key/DB/RPC, integrity/minimum/identity/permissions refusal, exact journal restore and unchanged source ledger"
-    pure (relocated </> "native-wallet.json")
+    pure (recoveredDirectory </> "native-wallet.json")
+
+-- Local encrypted-repository seam only. Production still requires off-host HTTPS;
+-- the same transfer code and full semantic inspector verify this downloaded set.
+encryptedCustodyContract :: FilePath -> HTTP.Manager -> Config.Config -> FilePath -> [(String,String)] -> FilePath -> FilePath -> IO FilePath
+encryptedCustodyContract binary manager config offlineFile environment manifest directory=do
+  (program,repository,password,configuration)<-testRepository directory
+  let identity=Config.fingerprint config
+      check ok=unless ok (fail "encrypted custody contract failed")
+      download snapshot expected minimumSequence=Backup.downloadCustodyArchive program repository password snapshot expected minimumSequence directory
+  archive<-evalRestore PG.defaultConnectInfo (InspectCustodyFiles manifest identity 0)
+  expected<-BS.readFile manifest
+  expectStore "https_backup_repository_required" (evalCustodyRecovery manager config $ UploadCustody configuration manifest 0)
+  receipt<-Backup.uploadCustodyArchive program repository password archive
+  let snapshot=receiptSnapshot receipt
+  check (receiptIdentity receipt==identity && receiptSequence receipt==0 && receiptArchiveHash receipt==digest expected)
+  expectStore "https_backup_repository_required" (evalCustodyRecovery manager config $ RecoverCustody configuration snapshot directory 0)
+  before<-sort <$> listDirectory directory
+  expectStore "invalid_backup_snapshot" (download "latest" identity 0)
+  expectStore "backup_identity_mismatch" (download snapshot "wrong" 0)
+  expectStore "backup_snapshot_too_old" (download snapshot identity 1)
+  -- A valid encrypted ledger-only snapshot cannot substitute for custody keys.
+  ledger<-evalRestore PG.defaultConnectInfo (InspectLedger (takeDirectory manifest </> custodyLedger archive) identity 0)
+  ledgerReceipt<-Backup.uploadArchive program repository password ledger
+  expectStore "backup_snapshot_mismatch" (download (receiptSnapshot ledgerReceipt) identity 0)
+  secret<-BS.readFile password
+  BS.writeFile password "wrong-passphrase"
+  expectStore "backup_process_failed" (download snapshot identity 0)
+  BS.writeFile password secret
+  (sort <$> listDirectory directory) >>= check . (==before)
+  -- No plaintext bundle remains. Restore all seven files from real restic.
+  removeDirectoryRecursive (takeDirectory manifest)
+  recovered<-download snapshot identity 0
+  let path=custodyManifest recovered
+  BS.readFile path >>= check . (==expected)
+  forM_ (path:map (takeDirectory path </>) (M.keys $ custodyFiles recovered)) $ \file->do
+    status<-Posix.getSymbolicLinkStatus file
+    check (Posix.isRegularFile status && Posix.fileMode status .&. 0o077==0)
+  evalCustodyRecovery manager config (InspectCustody path 0) >>= check . (==0)
+  (code,out,_)<-Process.readCreateProcessWithExitCode
+    (Process.proc binary ["check-custody",offlineFile,path,"0"]) {Process.env=Just environment} ""
+  check (code==ExitSuccess)
+  value<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ T.pack out)
+  fieldValue "fingerprint" value >>= check . (==identity)
+  putStrLn "PASS: real restic full-custody encryption/download after plaintext removal, seven private files, ledger-only/latest/stale/identity/password refusal, production HTTPS restriction and independent CLI inspection"
+  pure path
+
+testRepository :: FilePath -> IO (FilePath,FilePath,FilePath,FilePath)
+testRepository directory=do
+  program<-findExecutable "restic" >>= maybe (fail "restic required for encrypted archive contract") pure
+  let repository=directory</>"repository"; password=directory</>"password"; configuration=directory</>"backup.json"
+      protected path contents=BS.writeFile path contents >> setFileMode path 0o600
+  secret<-TE.encodeUtf8 . digest <$> (getRandomBytes 32 :: IO BS.ByteString)
+  protected password secret
+  protected repository (TE.encodeUtf8 $ T.pack(directory</>"encrypted-repository"))
+  protected configuration $ BL.toStrict $ encode $ object ["restic" .= program,"repositoryFile" .= repository,"passwordFile" .= password]
+  Process.callProcess program ["--no-cache","--repository-file",repository,"--password-file",password,"init","--quiet"]
+  pure (program,repository,password,configuration)
 
 ledgerMain :: IO ()
 ledgerMain = do
@@ -2745,18 +2804,10 @@ archiveContract settings fixtures reader = do
     change "sha256" (toJSON $ T.replicate 64 "0")
     expectStore "backup_archive_mismatch" (evalRestore settings $ RestoreLedger tampered "contract" 0)
     fixture fixtures RestoreDatabases >>= check . (==databasesBefore)
-    program<-findExecutable "restic" >>= maybe (fail "restic required for encrypted archive contract") pure
-    let repository=directory</>"repository"
-        password=directory</>"password"
-        configuration=directory</>"backup.json"
-        protected path contents=BS.writeFile path contents >> setFileMode path 0o600
+    (program,repository,password,configuration)<-testRepository directory
+    let protected path contents=BS.writeFile path contents >> setFileMode path 0o600
         localRepository=TE.encodeUtf8 $ T.pack(directory</>"encrypted-repository")
         upload=Backup.uploadArchive program repository password
-        common=["--no-cache","--repository-file",repository,"--password-file",password]
-    secret<-TE.encodeUtf8 . digest <$> (getRandomBytes 32 :: IO BS.ByteString)
-    protected password secret
-    protected repository localRepository
-    protected configuration $ BL.toStrict $ encode $ object ["restic" .= program,"repositoryFile" .= repository,"passwordFile" .= password]
     expectStore "https_backup_repository_required" (evalBackup reader $ UploadLedger configuration directory 0)
     expectStore "invalid_backup_coverage" (evalBackup reader $ UploadLedger configuration directory (-1))
     forM_ ["rest:http://example.com/backup","/tmp/local"] $ \url->do
@@ -2771,7 +2822,6 @@ archiveContract settings fixtures reader = do
     setFileMode repository 0o600
     expectStore "backup_archive_mismatch" (upload archive {archiveSequence=archiveSequence archive+1})
     expectStore "backup_archive_mismatch" (upload archive {archiveHash=T.replicate 64 "0"})
-    Process.callProcess program (common<>["init","--quiet"])
     receipt<-upload archive
     check (receiptIdentity receipt==archiveIdentity archive && receiptSequence receipt==archiveSequence archive && receiptArchiveHash receipt==archiveHash archive)
     let download identifier expected minimumSequence=Backup.downloadArchive program repository password identifier expected minimumSequence directory

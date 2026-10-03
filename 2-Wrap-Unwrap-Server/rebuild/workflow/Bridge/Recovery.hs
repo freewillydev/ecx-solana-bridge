@@ -1,5 +1,5 @@
 {-# LANGUAGE GADTs #-}
--- Offline custody bundle. No HTTP route, signing capability or backup receipt.
+-- Offline custody bundle. No HTTP route, signing capability or ledger acknowledgment.
 -- The writer session is held across export, but no DB transaction spans RPC.
 module Bridge.Recovery (CustodyRecovery(..),evalCustodyRecovery) where
 
@@ -7,7 +7,6 @@ import qualified Bridge.Config as C
 import Bridge.Error
 import Bridge.Identity (digest)
 import qualified Bridge.Native as N
-import Bridge.RPC (fieldValue)
 import Bridge.Signer (verifySigningKey)
 import Bridge.Store
 import Control.Exception (bracket,bracketOnError)
@@ -39,6 +38,8 @@ import System.Posix.User (getEffectiveUserID)
 data CustodyRecovery a where
   ExportCustody :: PG.ConnectInfo -> PG.ConnectInfo -> FilePath -> FilePath -> CustodyRecovery (FilePath,Int64)
   InspectCustody :: FilePath -> Int64 -> CustodyRecovery Int64
+  UploadCustody :: FilePath -> FilePath -> Int64 -> CustodyRecovery BackupReceipt
+  RecoverCustody :: FilePath -> Text -> FilePath -> Int64 -> CustodyRecovery (FilePath,Int64)
 
 evalCustodyRecovery :: Manager -> C.Config -> CustodyRecovery a -> IO a
 evalCustodyRecovery manager config operation = do
@@ -81,26 +82,14 @@ evalCustodyRecovery manager config operation = do
           require (currentKey==keyBytes) "custody_backup_key_changed"
           files<-M.fromList <$> forM (bundleFiles archive) (\name->(,) name <$> hashFile (directory </> name))
           let manifest=directory </> "custody.json"
-          writePrivate manifest (encode $ manifestValue identity (archiveSequence archive) (takeFileName $ manifestPath archive) files)
+          writePrivate manifest (encode $ CustodyArchive manifest identity (archiveSequence archive) (takeFileName $ manifestPath archive) files)
           sync directory
           sync parent
           pure (manifest,archiveSequence archive)
     InspectCustody manifest minimumSequence -> do
-      require (minimumSequence>=0) "invalid_restore_policy"
-      privateDirectory (takeDirectory manifest)
-      bytes<-readPrivate 8192 manifest
-      value<-either (const $ reject "invalid_custody_manifest") pure (eitherDecodeStrict' bytes)
-      version<-fieldValue "format" value :: IO Int
-      saved<-fieldValue "fingerprint" value
-      sequenceNo<-fieldValue "criticalSequence" value
-      ledger<-fieldValue "ledgerManifest" value
-      files<-fieldValue "files" value
-      require (version==1 && value==manifestValue saved sequenceNo ledger files
-        && M.size files==6 && all basename (ledger:M.keys files)
-        && all checksum (M.elems files)) "invalid_custody_manifest"
-      require (saved==identity) "backup_identity_mismatch"
-      require (sequenceNo>=minimumSequence) "backup_snapshot_too_old"
-      let directory=takeDirectory manifest
+      metadata<-evalRestore PG.defaultConnectInfo (InspectCustodyFiles manifest identity minimumSequence)
+      let sequenceNo=custodySequence metadata; ledger=custodyLedger metadata; files=custodyFiles metadata
+          directory=takeDirectory manifest
           verify name expected=require (M.lookup name files==Just expected) "custody_backup_hash_mismatch"
       -- Each large archive is hashed once by its existing closed inspector.
       archive<-evalRestore PG.defaultConnectInfo (InspectLedger (directory </> ledger) identity minimumSequence)
@@ -117,18 +106,29 @@ evalCustodyRecovery manager config operation = do
       require (C.fingerprint savedConfig==identity) "backup_identity_mismatch"
       verifySigningKey (C.custodyOwner config) (directory </> "solana-key.json")
       pure sequenceNo
+    UploadCustody configuration manifest minimumSequence -> do
+      sequenceNo<-evalCustodyRecovery manager config (InspectCustody manifest minimumSequence)
+      originalHash<-digest <$> readPrivate 8192 manifest
+      archive<-evalRestore PG.defaultConnectInfo (InspectCustodyFiles manifest identity sequenceNo)
+      receipt<-evalRestore PG.defaultConnectInfo (UploadCustodyFiles configuration archive)
+      require (receiptIdentity receipt==identity && receiptSequence receipt==sequenceNo
+        && receiptArchiveHash receipt==originalHash) "custody_backup_binding_mismatch"
+      -- Download and validate the complete encrypted snapshot before reporting
+      -- success. A manifest-only readback is not evidence of recoverable keys.
+      bracket (evalCustodyRecovery manager config $ RecoverCustody configuration (receiptSnapshot receipt) (takeDirectory manifest) sequenceNo)
+        (removeDirectoryRecursive . takeDirectory . fst) $ \(recovered,n)->do
+          actualHash<-digest <$> readPrivate 8192 recovered
+          require (n==sequenceNo && actualHash==originalHash) "custody_backup_binding_mismatch"
+      pure receipt
+    RecoverCustody configuration snapshot directory minimumSequence ->
+      bracketOnError (evalRestore PG.defaultConnectInfo $ DownloadCustodyFiles configuration snapshot identity minimumSequence directory)
+        (removeDirectoryRecursive . takeDirectory . custodyManifest) $ \archive->do
+          n<-evalCustodyRecovery manager config (InspectCustody (custodyManifest archive) minimumSequence)
+          pure (custodyManifest archive,n)
 
 bundleFiles :: LedgerArchive -> [FilePath]
 bundleFiles archive=[takeFileName $ archivePath archive,takeFileName $ manifestPath archive,
   "native-wallet","native-wallet.json","deployment.json","solana-key.json"]
-manifestValue :: Text -> Int64 -> FilePath -> M.Map FilePath Text -> Value
-manifestValue identity sequenceNo ledger files=object
-  ["format" .= (1::Int),"fingerprint" .= identity,"criticalSequence" .= sequenceNo
-  ,"ledgerManifest" .= ledger,"files" .= files,"remoteDurabilityAcknowledged" .= False]
-basename :: FilePath -> Bool
-basename name=name==takeFileName name && name `notElem` ["",".",".."]
-checksum :: Text -> Bool
-checksum value=T.length value==64 && T.all (`elem` ("0123456789abcdef"::String)) value
 
 privateDirectory :: FilePath -> IO ()
 privateDirectory path=do
