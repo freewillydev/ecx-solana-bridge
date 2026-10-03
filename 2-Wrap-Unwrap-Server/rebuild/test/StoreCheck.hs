@@ -11,6 +11,10 @@ import System.IO.Error (isDoesNotExistError)
 import qualified Bridge.Store.Backup as Backup
 import Crypto.Random (getRandomBytes)
 import Control.Concurrent (threadDelay,forkIO,killThread)
+import Control.Concurrent.Async (withAsync,wait,cancel)
+import Control.Concurrent.MVar (newEmptyMVar,putMVar,takeMVar)
+import System.Timeout (timeout)
+import qualified Opaleye.Internal.Locking as Locking
 import Bridge.Identity (capabilityHash,payInstruction,digest,publicKey)
 import qualified Bridge.Wire as W
 import qualified Data.Aeson.KeyMap as KM
@@ -522,7 +526,13 @@ ledgerMain = do
         evalRead reader PendingAttempts >>= check . null
         evalRead reader PaymentCandidates >>= check . null
         initial <- evalRead reader ReadBalances
-        first <- evalWrite writer reserve
+        PG.begin fixtures
+        fixture fixtures LockDeployment
+        first <- withAsync (evalWrite writer reserve) $ \pending->do
+          blocked<-timeout 200000 (wait pending)
+          check (blocked==Nothing)
+          PG.commit fixtures
+          timeout 2000000 (wait pending) >>= maybe (fail "deployment lock not released") pure
         replay <- evalWrite writer reserve
         check (first==replay && withdrawalSequence first==1)
         evalRead reader PaymentCandidates >>= check . (==["fee:"<>key])
@@ -581,6 +591,32 @@ ledgerMain = do
           expectStore "ledger_connection_fenced" (evalWrite writer $ Pause "must stay fenced")
       rolledBackAgain<-evalRead reader (ReadWithdrawal $ T.replicate 64 "c")
       check (rolledBackAgain==Nothing)
+      -- Interrupt after the financial body but before commit. Rollback must
+      -- retain the old state and permanently fence this writer connection.
+      interruptedBefore<-evalRead reader ReadBalances
+      interruptSequence<-ledgerSequence <$> evalRead reader ReadState
+      reached<-newEmptyMVar; hold<-newEmptyMVar
+      withWriter settings (store policy limits) (\n->when (n>interruptSequence) (putMVar reached () >> takeMVar hold)) $ \writer->do
+        withAsync (evalWrite writer $ ReserveFees 100 (T.replicate 64 "c") Native (money 100) "recipient" "interrupted transaction") $ \pending->do
+          timeout 2000000 (takeMVar reached) >>= check . (==Just ())
+          cancel pending
+        expectStore "ledger_connection_fenced" (evalWrite writer $ Pause "interrupted writer")
+      evalRead reader ReadBalances >>= check . (==interruptedBefore)
+      -- Fixed DDL injects a genuine deferred PostgreSQL commit failure.
+      -- It is test infrastructure, not an application SQL/row-access escape.
+      bracket_ (void $ PG.execute_ fixtures "CREATE FUNCTION ecx_contract_commit_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION USING ERRCODE='53100', MESSAGE='contract capacity failure'; END $$; CREATE CONSTRAINT TRIGGER ecx_contract_commit_failure AFTER INSERT ON fee_withdrawals DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ecx_contract_commit_failure()")
+        (void $ PG.execute_ fixtures "DROP TRIGGER ecx_contract_commit_failure ON fee_withdrawals; DROP FUNCTION ecx_contract_commit_failure()") $ do
+          bodyFinished<-newIORef False
+          unchanged<-evalRead reader ReadBalances
+          previous<-evalRead reader ReadState
+          withWriter settings (store policy limits) (\n->when (n>ledgerSequence previous) (writeIORef bodyFinished True)) $ \writer->do
+            failed<-try (evalWrite writer $ ReserveFees 100 (T.replicate 64 "c") Native (money 100) "recipient" "deferred failure") :: IO (Either PG.SqlError WithdrawalView)
+            check (case failed of Left problem->PG.sqlState problem=="53100"; _->False)
+            readIORef bodyFinished >>= check
+            expectStore "ledger_connection_fenced" (evalWrite writer $ Pause "commit failed")
+          evalRead reader ReadBalances >>= check . (==unchanged)
+          evalRead reader ReadState >>= check . (==ledgerSequence previous) . ledgerSequence
+          evalRead reader (ReadWithdrawal $ T.replicate 64 "c") >>= check . (==Nothing)
       fixture fixtures SeedIntake
       let origins=[("Native","scan-origin"),("Solana","sol-origin"),("SolanaOperating","opening-signature")]
       expectStore "custody_scan_origin_mismatch" (evalRead reader $ ReadCustodySnapshot 100 origins False)
@@ -1288,6 +1324,7 @@ data Fixture a where
   FreshAt :: Int64 -> Fixture ()
   ChangeTreasuryAnchor :: T.Text -> T.Text -> Fixture ()
   SeedTreasuryEvidence :: T.Text -> T.Text -> T.Text -> T.Text -> Int64 -> Value -> Fixture ()
+  LockDeployment :: Fixture ()
   RecoveryPauseCount :: Fixture Int
   LockRestoreAudits :: Fixture [T.Text]
   OrderWorkflowFunds :: Fixture ()
@@ -1399,6 +1436,9 @@ fixture c TLSFunds = PG.withTransaction c $ do
 fixture c (FreshAt now) = do
   void $ O.runUpdate c O.Update {O.uTable=S.scanHealth,O.uUpdateWith= \(chain,_,_,_)->(chain,O.toNullable $ O.sqlInt8 now,O.null,O.sqlInt8 now),O.uWhere=const $ O.sqlBool True,O.uReturning=O.rCount}
   void $ O.runUpdate c O.Update {O.uTable=S.custody,O.uUpdateWith= \(key,revision,_,_,_)->(key,revision,O.toNullable revision,O.toNullable $ O.sqlInt8 now,O.null),O.uWhere=const $ O.sqlBool True,O.uReturning=O.rCount}
+fixture c LockDeployment = do
+  rows<-O.runSelect c $ Locking.forUpdate $ fmap S.singleton $ O.selectTable S.deployment
+  unless (rows==[1::Int64]) (fail "deployment row missing")
 fixture c RecoveryPauseCount = length <$> (O.runSelect c (do
   (_,kind,reason)<-O.selectTable S.audit
   O.where_ (kind O..== O.sqlStrictText "pause" O..&& reason O..== O.sqlStrictText "payment_requires_reconciliation")

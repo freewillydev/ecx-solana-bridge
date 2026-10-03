@@ -84,7 +84,7 @@ executable rebuild-store-check
   main-is: StoreCheck.hs
   other-modules: Bridge.Fence, Bridge.Store, Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Store.Backup, Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.SigningTransport, Bridge.Critical, Bridge.Reconciliation, Bridge.Admission, Bridge.Order, Bridge.Web, Bridge.Config, Bridge.Control, Bridge.Recovery, Bridge.Credentials, Paths_ecx_bridge_rebuild
   autogen-modules: Paths_ecx_bridge_rebuild
-  build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:customer-api, ecx-bridge-rebuild:chain, http-client, servant, servant-server, aeson, bytestring,
+  build-depends: base, async, ecx-bridge-rebuild, ecx-bridge-rebuild:customer-api, ecx-bridge-rebuild:chain, http-client, servant, servant-server, aeson, bytestring,
     containers, text, crypton, base16-bytestring, time, directory, scientific, opaleye, postgresql-simple, product-profunctors, QuickCheck,
     transformers, stm, ram, crypton-pem, crypton-x509, http-types, wai, wai-extra, warp, warp-tls, filepath, unix,
     servant-client, http-client-tls, crypton-connection, tls, crypton-x509-store, process, network, binary

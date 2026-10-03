@@ -401,8 +401,7 @@ order refusal, private operator refusal and unchanged financial state run in ser
 mode. Both PostgreSQL modes passed against fresh disposable databases after the
 remaining assertions were transferred. The server test reaps its child, and the
 acceptance databases/role were removed. These local checks do not certify cross-UID
-signer isolation or cross-host recovery. The legacy runner now retains only its journal contract until its parity review
-is complete.
+signer isolation or cross-host recovery. The legacy database runner is now retired.
 
 Recovery parity now includes source loss after a payout has already been signed.
 The existing PostgreSQL restoration contract verifies return/approval to `paying`,
@@ -420,6 +419,17 @@ remain unchanged. It uses real PostgreSQL, HTTPS signer and SDK signatures with
 explicit offline RPC fixtures. The 686-line legacy `SourceApprovalCheck.hs` and its
 command are retired; the source, covered-capital, replacement, winner-change and
 rebroadcast assertions now live in the existing rebuild contracts.
+
+The final legacy database runner, `integration/JournalCheck.hs` (1,158 lines),
+is retired along with the `ecx-postgres-check` Cabal executable. Its relevant
+contracts are covered by the existing rebuild ledger, order-workflow, treasury,
+scanner, cancellation and archive tests. The remaining failure cases now exercise
+an actual production write blocked by a PostgreSQL row lock, asynchronous interruption
+after financial work, and a deferred database failure at commit. Both failure paths
+preserve balances and reject reuse of the writer; the deferred fault also preserves
+the sequence and leaves no withdrawal. The full disposable PostgreSQL/restic run
+passed after transfer. Fixed fault-injection DDL is test infrastructure; row access
+continues through closed Opaleye fixture operations.
 
 ## Remaining release work, in order
 

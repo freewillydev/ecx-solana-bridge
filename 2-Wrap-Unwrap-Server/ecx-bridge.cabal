@@ -72,12 +72,3 @@ executable ecx-bridge
   main-is: server.hs
   ghc-options: -threaded -rtsopts -with-rtsopts=-N2
   build-depends: base, ecx-bridge:bridge-types, ecx-bridge:customer-api, ecx-bridge:bridge-runtime, postgresql-simple, unix, aeson, bytestring, text
-
--- One database contract runner; every row operation uses a closed Opaleye fixture.
-executable ecx-postgres-check
-  import: settings
-  hs-source-dirs: integration
-  main-is: JournalCheck.hs
-  build-depends: base, ecx-bridge:bridge-types, ecx-bridge:bridge-runtime,
-    aeson, async, bytestring, containers, directory, filepath, opaleye,
-    postgresql-simple, process, QuickCheck, text, unix
