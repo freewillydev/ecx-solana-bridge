@@ -98,12 +98,18 @@ signingCheck=bracket temporary removeDirectoryRecursive $ \directory->do
   wrappedBytes<-refuse $ evalCritical (Sign keyfile (directory </> "other.json") original unsigned)
   L.writeFile keyfile (encode $ B.unpack $ seed<>B.replicate 32 0)
   wrongPublicHalf<-refuse $ evalCritical (Sign keyfile (directory </> "other.json") original unsigned)
+  validated<-case eitherDecode (L.fromStrict saved) of
+    Right record->pure $ validateSaved record==Right unsigned
+      && isLeft(validateSaved record {savedId="wrong"})
+      && isLeft(validateSaved record {savedRequest=original {quantity=8}})
+      && isLeft(validateSaved record {savedTransaction=unsigned})
+    Left _->pure False
   -- Decode only the transaction field; independently verify the actual signature.
   case eitherDecode (L.fromStrict saved) of
     Left _->pure False
     Right record->case parseEither (withObject "attempt" (.: "transaction")) record >>= either (Left . show) Right . decodeTransaction of
       Right (Transaction [bytes] _ body)->case Ed.signature bytes of
-        CryptoPassed signature->pure (all id [mismatch,duplicate,unchanged,symlink,permissions,wrongAuthority,wrappedBytes,wrongPublicHalf]
+        CryptoPassed signature->pure (all id [mismatch,duplicate,unchanged,symlink,permissions,wrongAuthority,wrappedBytes,wrongPublicHalf,validated]
           && base58 bytes==identifier && Ed.verify (Ed.toPublic secret) body signature)
         _->pure False
       _->pure False

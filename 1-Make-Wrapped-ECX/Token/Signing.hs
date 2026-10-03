@@ -1,14 +1,15 @@
 {-# LANGUAGE GADTs #-}
 -- Offline authority: only validated mint/burn messages, saved before returning.
-module Token.Signing (Critical(..),evalCritical) where
+module Token.Signing (Critical(..),evalCritical,Saved(..),validateSaved) where
 import Token
 import Bridge.Error (require,reject)
-import Bridge.SolanaMessage (Transaction(..),base58,publicKey)
+import Bridge.SolanaMessage (Transaction(..),base58,publicKey,decodeTransaction)
 import Control.Exception (bracket,bracketOnError)
 import Crypto.Error (CryptoFailable(..))
 import qualified Crypto.PubKey.Ed25519 as Ed
 import qualified Data.ByteArray as BA
-import Data.Aeson (encode,eitherDecodeStrict',object,(.=))
+import Data.Aeson
+import Control.Monad (unless)
 import Data.Bits ((.&.))
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Base64 as B64
@@ -22,6 +23,25 @@ import System.Posix.Files
 import System.Posix.IO
 import System.Posix.Unistd (fileSynchronise)
 import System.Posix.User (getEffectiveUserID)
+
+data Saved = Saved { savedRequest :: Request, savedId :: Text, savedTransaction :: Text } deriving (Eq,Show)
+instance FromJSON Saved where
+  parseJSON=withObject "signed token operation" $ \o->do
+    unless (length o==3) (fail "Unexpected saved-operation fields")
+    Saved <$> o .: "request" <*> o .: "signature" <*> o .: "transaction"
+
+-- Verify both the signature and its exact request before using an archived file.
+validateSaved :: Saved -> Either Text Text
+validateSaved (Saved request identifier encoded)=do
+  Transaction signatures _ message<-decodeTransaction encoded
+  let unsigned=T.decodeUtf8 $ B64.encode (B.singleton 1<>B.replicate 64 0<>message)
+  _<-validate request unsigned
+  owner<-publicKey (authority request)
+  case (signatures,Ed.publicKey owner) of
+    ([bytes],CryptoPassed key)->case Ed.signature bytes of
+      CryptoPassed signature | base58 bytes==identifier && Ed.verify key message signature -> pure unsigned
+      _->Left "invalid_token_signature"
+    _->Left "invalid_token_signature"
 
 data Critical a where
   Sign :: FilePath -> FilePath -> Request -> Text -> Critical Text
