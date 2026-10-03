@@ -44,7 +44,7 @@ data OperatorOperation a where
   RefundDeposit :: Text -> OperatorOperation Value
 
 data WorkerOperation a where
-  ScanAndReconcile :: WorkerOperation Value
+  ScanAndReconcile :: WorkerOperation ()
   StartPayments :: WorkerOperation ()
   AdvancePayments :: WorkerOperation ()
 

@@ -276,7 +276,7 @@ observeSolanaOperating manager c ledger = do
   Store.commitScan ledger (ScanBatch "SolanaOperating" origin previous (historySignature $ last history) now
     (concatMap fst observations) (map snd observations))
 
-observeOnce :: Manager -> Config -> Ledger -> IO Value
+observeOnce :: Manager -> Config -> Ledger -> IO ()
 observeOnce manager c ledger = do
   forM_ [("Native",observeNative manager c ledger),("Solana",observeSolana manager c ledger)
     ,("SolanaOperating",observeSolanaOperating manager c ledger)] $ \(chain,scan) -> do
@@ -285,7 +285,6 @@ observeOnce manager c ledger = do
       Right () -> pure ()
       Left (BridgeError code) -> epochSeconds >>= \now -> Store.recordScanFailure ledger chain now code
   promoteObserved ledger
-  Store.scannerHealth ledger
 
 promoteObserved :: Ledger -> IO ()
 promoteObserved ledger = do

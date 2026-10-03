@@ -1,5 +1,5 @@
 module Bridge.Postgres.Observation
-  ( refreshDeposit, recordScan, readCheckpoint, lookupInstruction, maximumNativeDepth, pendingVerification, lookupReferences, promotionCandidates, scannerHealth, commitScan, recordScanFailure, promoteDeposit ) where
+  ( refreshDeposit, recordScan, readCheckpoint, lookupInstruction, maximumNativeDepth, pendingVerification, lookupReferences, promotionCandidates, commitScan, recordScanFailure, promoteDeposit ) where
 
 import Bridge.Types
 import Bridge.Ledger.Model (encodeRecord, decodeRecord, Deposit(..), SourceCheck(..), ScanBatch(..), ChainEvent(..), economicOutflow)
@@ -359,17 +359,3 @@ promotionCandidates ledger = do
     pure (depositsFirstSeen deposit,depositsId deposit)
     :: IO [(Int64,Text)]
   pure (map snd (take 1000 (sortOn id candidates)))
-
-scannerHealth :: Ledger -> IO Value
-scannerHealth ledger = ledgerAction ledger $ \connection->do
-  health <- O.runSelect connection (O.selectTable scanhealthTable) :: IO [ScanHealth]
-  checkpoints <- O.runSelect connection (O.selectTable checkpointsTable) :: IO [Checkpoints]
-  reviews <- O.runSelect connection $ do
-    row <- O.selectTable chaineventsTable
-    O.where_ (chaineventsNeedsReview row O..== O.sqlInt8 1)
-    pure (chaineventsFirstSeen row,chaineventsChain row,chaineventsEventId row,chaineventsKind row)
-    :: IO [(Int64,Text,Text,Text)]
-  let cursor chain=lookup chain [(checkpointsChain row,checkpointsAnchor row) | row<-checkpoints]
-      scanners=[object ["chain" .= scanhealthChain row,"lastSuccess" .= scanhealthLastSuccess row,"lastError" .= scanhealthLastError row,"checkedAt" .= scanhealthCheckedAt row,"cursor" .= cursor (scanhealthChain row)] | row<-sortOn scanhealthChain health]
-      reviewed=[object ["chain" .= chain,"event" .= event,"kind" .= kind] | (_,chain,event,kind)<-take 100 (sortOn (\(time,_,_,_)->time) reviews)]
-  pure (object ["scanners" .= scanners,"review" .= reviewed])

@@ -35,7 +35,7 @@ resumeAfterReview clock transport cfg ledger = do
     require (Domain.attemptState attempt `elem` ["signed","broadcast_intent"]) "resume_payment_requires_review"
     (obligation,_) <- readSavedPayment transport cfg ledger attempt
     recheckSourceWith transport cfg ledger obligation
-  _ <- Payments.reconcileCustodyWith clock transport cfg ledger
+  Payments.reconcileCustodyWith clock transport cfg ledger
   now <- clock
   resumeChecked cfg ledger now (Just saved)
 

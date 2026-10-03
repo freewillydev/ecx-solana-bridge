@@ -191,7 +191,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
     CoverSourceLoss did recovery capital reason->
       coverSourceLossWith epochSeconds transport cfg ledger did recovery capital reason
     AllocateTreasury did split reason->do
-      _<-CustodyWorkflow.reconcileCustodyWith epochSeconds transport cfg ledger
+      CustodyWorkflow.reconcileCustodyWith epochSeconds transport cfg ledger
       now<-epochSeconds
       Treasury.allocate ledger now did split reason
     ClassifyTreasurySpend stream txid reason->Treasury.classifySpend ledger stream txid reason
@@ -203,7 +203,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
     _ <- reconcileNativeLocksWith
       transport
         {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg ledger
-    _ <- Observer.observeOnce manager cfg ledger
+    Observer.observeOnce manager cfg ledger
     reconcileNativeSourcesWith
       transport
         {paymentIdentity=nativeIdentity manager cfg >> pure ()} cfg ledger
@@ -303,7 +303,7 @@ evalCritical (CriticalContext manager cfg ledger _ backup) plan = case plan of
         paymentIdentity transport
         failures <- reconcilePaymentsWith transport cfg ledger
         require (null failures) "source_approval_payment_requires_review"
-        _ <- CustodyWorkflow.reconcileCustodyWith epochSeconds transport cfg ledger
+        CustodyWorkflow.reconcileCustodyWith epochSeconds transport cfg ledger
         candidates <- PgSource.candidates ledger
         require (length candidates<=1000) "source_recovery_backlog"
         source <- case filter ((==Domain.obligationDeposit ob).Domain.depositId) candidates of
@@ -440,7 +440,7 @@ runRuntime paying remote settings cfg = do
             Right ()->pure ()
             Left(BridgeError reason)->evaluate runtime (operator(Pause reason)) >> pure ()
     let bootstrap=checked $ do
-          _ <- evaluate runtime (worker ScanAndReconcile)
+          evaluate runtime (worker ScanAndReconcile)
           when paying (evaluate runtime (worker StartPayments))
     let customerAPIApp=serve customerAPI (hoistServer customerAPI (interpret runtime) API.customerServer)
     customerApp <- securityBoundary customerAPIApp
@@ -450,7 +450,7 @@ runRuntime paying remote settings cfg = do
           (concurrently_ (runUnix (customerSocket cfg) 0o660 customerApp) (runControl cfg (evaluate runtime)))
         loop=forever $ do
           result <- try ((do
-            _ <- evaluate runtime (worker ScanAndReconcile)
+            evaluate runtime (worker ScanAndReconcile)
             when paying(evaluate runtime (worker AdvancePayments))) `catch` (\(_::IOException)->reject "postgres_worker_io_unavailable")) :: IO(Either BridgeError ())
           case result of
             Right ()->pure ()

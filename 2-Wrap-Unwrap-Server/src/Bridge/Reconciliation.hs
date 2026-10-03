@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module Bridge.Reconciliation (View(..), reconcileCustodyWith, inspectCustodyWith, inspectSourceLossCustodyWith) where
+module Bridge.Reconciliation (reconcileCustodyWith, inspectSourceLossCustodyWith) where
 
 import qualified Bridge.Postgres.Custody as PgCustody
 import qualified Bridge.Postgres.Observation as PgObservation
@@ -190,15 +190,13 @@ pendingEffect transport c ledger attempt=do
 
 -- One custody inspection/recording path for scanning, cancellation, source
 -- recovery and replacement. Callers cannot inject a different recording action.
-reconcileCustodyWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> IO Value
+reconcileCustodyWith :: IO Int64 -> PaymentTransport -> Config -> Ledger -> IO ()
 reconcileCustodyWith clock transport cfg ledger = do
   expected <- PgCustody.readRevision ledger
   result <- try (inspectCustodyWith clock transport cfg ledger False `catch` (\(_::IOException)->reject "custody_rpc_unavailable")) :: IO (Either BridgeError (Int64,Int64,Bool,Value))
   case result of
-    Right (revision,at,matches,report)->do
+    Right (revision,at,matches,report)->
       PgCustody.recordCheck ledger revision at (if matches then Nothing else Just "custody_balance_mismatch") (Just report)
-      pure(object["matches" .= matches,"revision" .= revision,"report" .= report])
     Left (BridgeError code)->do
       at <- clock
       PgCustody.recordCheck ledger expected at (Just code) Nothing
-      pure(object["matches" .= False,"error" .= code])

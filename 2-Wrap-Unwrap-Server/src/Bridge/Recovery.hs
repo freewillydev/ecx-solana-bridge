@@ -53,7 +53,7 @@ approveSourceRecoveryWith clock transport c ledger intent restoration reason=do
       -- restored. Reconcile it first; the ledger snapshot then refuses revival.
       failures <- reconcilePaymentsWith transport c ledger
       require (null failures) "source_approval_payment_requires_review"
-      _ <- reconcileCustodyWith clock transport c ledger
+      reconcileCustodyWith clock transport c ledger
       now <- clock
       PgSource.recoveryRecord ledger intent restoration now reason
   pure $ object ["approvedSourceRecovery" .= intent,"restorationSequence" .= restoration
@@ -85,7 +85,7 @@ prepareNativeReplacementUsing clock transport drafter c ledger parent fee reason
       failures <- reconcilePaymentsWith transport c ledger
       require (null failures) "native_replacement_payment_requires_review"
       recheckSourceWith transport c ledger ob
-      _ <- reconcileCustodyWith clock transport c ledger
+      reconcileCustodyWith clock transport c ledger
       now <- clock
       sequenceNo <- PgReplacement.recordDraft ledger c expected draft reason now
       pure(sequenceNo,False)
@@ -117,7 +117,7 @@ signNativeReplacementUsing clock transport signer c ledger sequenceNo=do
   reconcile=do
     failures <- reconcilePaymentsWith transport c ledger
     require (null failures) "native_replacement_payment_requires_review"
-    _ <- reconcileCustodyWith clock transport c ledger
+    reconcileCustodyWith clock transport c ledger
     now <- clock
     PgCustody.checkFresh ledger now
 
@@ -233,7 +233,7 @@ cancelPreparationWith clock transport c ledger intent generation reason=do
       preparation <- case rows of [p]->pure p; _->reject "preparation_cancellation_not_expected"
       paymentIdentity transport
       recheckSourceWith transport c ledger (preparationObligation preparation)
-      _ <- reconcileCustodyWith clock transport c ledger
+      reconcileCustodyWith clock transport c ledger
       expected <- cleanupPlan (paymentNative transport) c ledger preparation
       -- Even a retry must match the same immutable policy/draft and pass the
       -- current custody check; a lost response is never evidence of cleanup.

@@ -322,6 +322,9 @@ The sequence below remains the broader refactor checklist, subject to that prior
    Payment reconciliation now returns typed error codes directly; recovery and
    resume checks no longer build/parse an unused JSON report or query its winner
    solely for formatting. Settlement retains its transactional uniqueness checks.
+   Worker scanning and custody reconciliation now return unit; discarded JSON
+   wrappers and the unused post-scan health query are removed. Durable custody
+   evidence, scanner health and operator diagnostics remain.
    Confine raw chain JSON to adapters. Put the operation vocabulary and permission
    table in one place. Preserve separate safe/critical evaluators and compile-time
    authority checks. Cabal now separates private types, customer API and runtime
