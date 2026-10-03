@@ -67,11 +67,13 @@ instance FromJSON Request where
           Request operation <$> o .: "authority" <*> o .: "mint" <*> o .: "account" <*> pure n <*> o .: "blockhash"
 
 data Safe a where
+  MintAddress :: Text -> Text -> Safe Text
   Prepare :: FilePath -> Request -> Safe Text
   MetadataAddress :: FilePath -> Text -> Safe Text
   AssociatedAddress :: FilePath -> Text -> Text -> Safe Text
 
 evalSafe :: Safe a -> IO a
+evalSafe (MintAddress owner label)=either reject pure (mintAddress owner label)
 evalSafe (AssociatedAddress library recipient key)=do
   mapM_ (either reject (const $ pure ()) . publicKey) [recipient,key]
   output<-invoke library (L.toStrict $ encode $ object ["protocol" .= (1::Int),"verb" .= ("associated_address"::Text),"mint" .= key,"owner" .= recipient])

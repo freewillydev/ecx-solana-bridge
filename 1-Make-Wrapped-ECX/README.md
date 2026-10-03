@@ -136,6 +136,15 @@ is not finality. An expired blockhash is not permission to regenerate an attempt
 expiry/absence review and a new approval are still manual. State is the immutable
 signed attempt plus the real chain, not a mutable local success flag.
 
+Every CLI operation enters [Token/Operation.hs](Token/Operation.hs) as a
+constrained existential `Request s a`. Its `Operation` dictionary resolves to a
+closed `DSL s a`, retaining the result type and safe/critical severity. Separate
+evaluators dispatch preparation/preflight versus key generation/signing/submission.
+The DSL constructors are hidden; no request supplies arbitrary IO or callbacks.
+This matches the bridge and pool request pattern without exposing administration
+over HTTP. Lower-level evaluators remain library exports for composition; this
+type boundary does not replace separate OS credentials.
+
 Trace [Token.hs](Token.hs): a closed `Safe` operation invokes the pinned SDK through
 `ecx_token_prepare_v1`, then Haskell independently validates the complete message.
 The safe FFI entry point accepts no keys or generic instructions.

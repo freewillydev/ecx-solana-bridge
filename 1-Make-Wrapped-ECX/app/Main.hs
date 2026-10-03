@@ -1,5 +1,6 @@
 module Main (main) where
 import Token
+import qualified Token.Operation as O
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Token.Network as Network
@@ -18,29 +19,29 @@ import System.IO (withBinaryFile,IOMode(ReadMode))
 
 main :: IO ()
 main=getArgs >>= \args->case args of
-  ["keygen",output]->evalCritical (GenerateKey output) >>= L.putStrLn . encode
-  ["associated-address",recipient,key]->evalSafe (AssociatedAddress sdkLibraryPath (T.pack recipient) (T.pack key)) >>= L.putStrLn . encode
-  ["metadata-address",key]->evalSafe (MetadataAddress sdkLibraryPath $ T.pack key) >>= L.putStrLn . encode
-  ["address",owner,label]->either (die . show) (L.putStrLn . encode) (mintAddress (T.pack owner) (T.pack label))
+  ["keygen",output]->(O.runCritical . O.Request) (GenerateKey output) >>= L.putStrLn . encode
+  ["associated-address",recipient,key]->(O.runSafe . O.Request) (AssociatedAddress sdkLibraryPath (T.pack recipient) (T.pack key)) >>= L.putStrLn . encode
+  ["metadata-address",key]->(O.runSafe . O.Request) (MetadataAddress sdkLibraryPath $ T.pack key) >>= L.putStrLn . encode
+  ["address",owner,label]->(O.runSafe . O.Request) (MintAddress (T.pack owner) (T.pack label)) >>= L.putStrLn . encode
   ["prepare",path]->do
     bytes<-readBounded path
     request<-either die pure (eitherDecodeStrict' bytes)
-    transaction<-evalSafe (Prepare sdkLibraryPath request)
+    transaction<-(O.runSafe . O.Request) (Prepare sdkLibraryPath request)
     L.putStrLn $ encode $ object ["request" .= request,"unsignedTransaction" .= transaction]
   ["check",network,endpoint,limit,prepared]->do
     selected<-case network of "devnet"->pure Network.Devnet; "mainnet"->pure Network.Mainnet; _->die "Choose devnet or mainnet"
     feeLimit<-readFee limit
     (request,unsigned)<-readPrepared prepared
-    fee<-Network.evalSafe (Network.Check selected endpoint feeLimit request unsigned)
+    fee<-(O.runSafe . O.Request) (Network.Check selected endpoint feeLimit request unsigned)
     L.putStrLn $ encode $ object ["feeLamports" .= fee,"simulationOnly" .= True]
   ["submit",network,endpoint,limit,attempt]->do
     selected<-case network of "devnet"->pure Network.Devnet; "mainnet"->pure Network.Mainnet; _->die "Choose devnet or mainnet"
     feeLimit<-readFee limit
-    result<-Network.evalCritical (Network.Submit selected endpoint feeLimit attempt)
+    result<-(O.runCritical . O.Request) (Network.Submit selected endpoint feeLimit attempt)
     L.putStrLn (encode result)
   ["sign",prepared,keyfile,output]->do
     (request,unsigned)<-readPrepared prepared
-    identifier<-evalCritical (Sign keyfile output request unsigned)
+    identifier<-(O.runCritical . O.Request) (Sign keyfile output request unsigned)
     L.putStrLn $ encode $ object ["signature" .= identifier,"saved" .= output]
   _->die "Usage: ecx-token keygen NEW_PRIVATE_KEY.json | associated-address OWNER MINT | metadata-address MINT | address AUTHORITY SEED | prepare REQUEST.json | check devnet|mainnet HTTPS_RPC MAX_FEE PREPARED.json | submit devnet|mainnet HTTPS_RPC MAX_FEE ATTEMPT.json | sign PREPARED.json AUTHORITY_KEY.json NEW_ATTEMPT.json (prepare/check/sign never broadcast; submit sends saved bytes)"
 

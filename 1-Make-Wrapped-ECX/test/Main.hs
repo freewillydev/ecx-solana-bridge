@@ -1,5 +1,6 @@
 module Main (main) where
 import Token
+import qualified Token.Operation as O
 import qualified Token.Metadata as M
 import Token.Signing
 import Crypto.Hash (hash,Digest,SHA256)
@@ -49,9 +50,9 @@ main=do
     , quickCheckWithResult stdArgs {maxSuccess=40} $ forAll (choose (1,32)) $ \size->ioProperty $ do
         let owner=authority(request Mint 1)
             label=T.replicate size "x"
-            derived=either (error . show) id (mintAddress owner label)
-            creation=CreateMint owner derived label 1461600 (blockhash $ request Mint 1)
-        transaction<-evalSafe (Prepare sdkLibraryPath creation)
+        derived<-(O.runSafe . O.Request) (MintAddress owner label)
+        let creation=CreateMint owner derived label 1461600 (blockhash $ request Mint 1)
+        transaction<-(O.runSafe . O.Request) (Prepare sdkLibraryPath creation)
         pure (eitherDecode(encode creation)==Right creation && not(isLeft $ validate creation transaction)
           && isLeft(validate creation {rent=1} transaction)
           && isLeft(validate creation {seed="different"} transaction)
@@ -59,11 +60,11 @@ main=do
           && isLeft(mintAddress owner (T.replicate 33 "x")))
     , quickCheckWithResult stdArgs {maxSuccess=40} $ forAll (choose (1,32)) $ \size->ioProperty $ do
         let original=request Mint 1
-        address<-evalSafe (MetadataAddress sdkLibraryPath $ mint original)
+        address<-(O.runSafe . O.Request) (MetadataAddress sdkLibraryPath $ mint original)
         checks<-mapM (\creation->do
           let terms=M.Terms creation address (T.replicate size "x") "TEST" "" 20000000
               operation=Metadata (authority original) (mint original) terms (blockhash original)
-          transaction<-evalSafe (Prepare sdkLibraryPath operation)
+          transaction<-(O.runSafe . O.Request) (Prepare sdkLibraryPath operation)
           pure $ eitherDecode(encode operation)==Right operation && not(isLeft $ validate operation transaction)
             && all (\changed->isLeft $ validate operation {metadata=changed} transaction)
                [terms {M.name="different"},terms {M.symbol="DIFF"},terms {M.uri="https://example.com/token.json"}
@@ -74,10 +75,10 @@ main=do
         pure (and checks)
     , quickCheckResult $ once $ ioProperty $ do
         let original=request Mint 1
-        address<-evalSafe (MetadataAddress sdkLibraryPath $ mint original)
+        address<-(O.runSafe . O.Request) (MetadataAddress sdkLibraryPath $ mint original)
         let terms=M.Terms True address (T.replicate 16 "é") "1234567890" ("https://"<>T.replicate 192 "x") 20000000
             operation=Metadata (authority original) (mint original) terms (blockhash original)
-        transaction<-evalSafe (Prepare sdkLibraryPath operation)
+        transaction<-(O.runSafe . O.Request) (Prepare sdkLibraryPath operation)
         pure (not(isLeft $ validate operation transaction)
           && all (isLeft . M.checkTerms) [terms {M.name=T.replicate 17 "é"},terms {M.symbol="12345678901"}
             ,terms {M.uri=T.replicate 201 "x"},terms {M.name="bad\0name"},terms {M.maxCost=0}])
@@ -85,19 +86,19 @@ main=do
     , quickCheckResult $ once $ ioProperty $ do
         let original=request Mint 1
             reference="H8pXsNTmVfo2RF7qQ39xGwzGyhNRhHvHhWny5FB7qA6h"
-        address<-evalSafe (MetadataAddress sdkLibraryPath $ mint original)
+        address<-(O.runSafe . O.Request) (MetadataAddress sdkLibraryPath $ mint original)
         hashes<-mapM (\creation->do
           let terms=M.Terms creation address "ECX Test" "TEST" "" 20000000
-          transaction<-evalSafe (Prepare sdkLibraryPath $ Metadata (authority original) (mint original) terms (blockhash original))
+          transaction<-(O.runSafe . O.Request) (Prepare sdkLibraryPath $ Metadata (authority original) (mint original) terms (blockhash original))
           pure (show (hash (TE.encodeUtf8 transaction) :: Digest SHA256))) [True,False]
         pure (address==reference && hashes==["0640af0794fb42396d44234c5cf720e05a2d13cf6cec79d42ead25656e1da0d1", "d90662feccbc56229eaca30a40ee94eef9a20f79257a67b877c5e10e56a69e71"])
     , quickCheckResult $ once $ ioProperty $ do
         let original=request Mint 1
-        captured<-evalSafe (AssociatedAddress sdkLibraryPath "HcctYHWCfLGrE5WigGKHg5hR6Q1P1Gntb5PYQWSQFHXg" "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM")
+        captured<-(O.runSafe . O.Request) (AssociatedAddress sdkLibraryPath "HcctYHWCfLGrE5WigGKHg5hR6Q1P1Gntb5PYQWSQFHXg" "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM")
         checks<-mapM (\recipient->do
-          address<-evalSafe (AssociatedAddress sdkLibraryPath recipient (mint original))
+          address<-(O.runSafe . O.Request) (AssociatedAddress sdkLibraryPath recipient (mint original))
           let operation=Associated (authority original) (mint original) address recipient 2039280 (blockhash original)
-          transaction<-evalSafe (Prepare sdkLibraryPath operation)
+          transaction<-(O.runSafe . O.Request) (Prepare sdkLibraryPath operation)
           pure (eitherDecode(encode operation)==Right operation && not(isLeft $ validate operation transaction)
             && isLeft(validate operation {account=mint original} transaction)
             && isLeft(validate operation {owner=mint original} transaction)
@@ -115,14 +116,14 @@ main=do
           ,"blockhash" .= blockhash (request Mint 1),"amount" .= (raw::Text)]) :: Either String Request))
           ["0","01","-1","+1","1.0","1e1","18446744073709551616"]
     , quickCheckResult $ once $ ioProperty $ do
-        refused<-try (evalSafe $ Prepare sdkLibraryPath $ request Mint 0) :: IO (Either SomeException Text)
+        refused<-try (O.runSafe $ O.Request $ Prepare sdkLibraryPath $ request Mint 0) :: IO (Either SomeException Text)
         pure (isLeft refused)
     ]
   if all isSuccess results then pure () else exitFailure
  where
   check n operation=do
     let original=request operation n
-    encoded<-evalSafe (Prepare sdkLibraryPath original)
+    encoded<-(O.runSafe . O.Request) (Prepare sdkLibraryPath original)
     pure $ case validate original encoded of
       Right (Transaction signatures _ _) -> signatures==[B.replicate 64 0] && and
         [ isLeft $ validate original {action=if operation==Mint then Burn else Mint} encoded
@@ -145,31 +146,31 @@ signingCheck=bracket temporary removeDirectoryRecursive $ \directory->do
   L.writeFile keyfile (encode $ B.unpack $ seed<>public)
   setFileMode keyfile 0o600
   let generatedPath=directory </> "generated.json"
-  generatedOwner<-evalCritical (GenerateKey generatedPath)
+  generatedOwner<-(O.runCritical . O.Request) (GenerateKey generatedPath)
   generatedBytes<-B.readFile generatedPath
-  generatedRefusal<-refuse $ evalCritical (GenerateKey generatedPath)
+  generatedRefusal<-refuse $ (O.runCritical . O.Request) (GenerateKey generatedPath)
   generatedUnchanged<-(==generatedBytes) <$> B.readFile generatedPath
   let generatedOperation=(request Mint 1) {authority=generatedOwner}
-  generatedUnsigned<-evalSafe (Prepare sdkLibraryPath generatedOperation)
-  _<-evalCritical (Sign generatedPath (directory </> "generated-attempt.json") generatedOperation generatedUnsigned)
-  unsigned<-evalSafe (Prepare sdkLibraryPath original)
-  mismatch<-refuse $ evalCritical (Sign keyfile output original {quantity=8} unsigned)
-  identifier<-evalCritical (Sign keyfile output original unsigned)
+  generatedUnsigned<-(O.runSafe . O.Request) (Prepare sdkLibraryPath generatedOperation)
+  _<-(O.runCritical . O.Request) (Sign generatedPath (directory </> "generated-attempt.json") generatedOperation generatedUnsigned)
+  unsigned<-(O.runSafe . O.Request) (Prepare sdkLibraryPath original)
+  mismatch<-refuse $ (O.runCritical . O.Request) (Sign keyfile output original {quantity=8} unsigned)
+  identifier<-(O.runCritical . O.Request) (Sign keyfile output original unsigned)
   saved<-B.readFile output
-  duplicate<-refuse $ evalCritical (Sign keyfile output original unsigned)
+  duplicate<-refuse $ (O.runCritical . O.Request) (Sign keyfile output original unsigned)
   unchanged<-(==saved) <$> B.readFile output
   createSymbolicLink keyfile (directory </> "linked.json")
-  symlink<-refuse $ evalCritical (Sign (directory </> "linked.json") (directory </> "other.json") original unsigned)
+  symlink<-refuse $ (O.runCritical . O.Request) (Sign (directory </> "linked.json") (directory </> "other.json") original unsigned)
   setFileMode keyfile 0o644
-  permissions<-refuse $ evalCritical (Sign keyfile (directory </> "other.json") original unsigned)
+  permissions<-refuse $ (O.runCritical . O.Request) (Sign keyfile (directory </> "other.json") original unsigned)
   setFileMode keyfile 0o600
   let wrong=(request Mint 7) {authority="9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu"}
-  altered<-evalSafe (Prepare sdkLibraryPath wrong)
-  wrongAuthority<-refuse $ evalCritical (Sign keyfile (directory </> "other.json") wrong altered)
+  altered<-(O.runSafe . O.Request) (Prepare sdkLibraryPath wrong)
+  wrongAuthority<-refuse $ (O.runCritical . O.Request) (Sign keyfile (directory </> "other.json") wrong altered)
   L.writeFile keyfile (encode $ replicate 64 (256::Integer))
-  wrappedBytes<-refuse $ evalCritical (Sign keyfile (directory </> "other.json") original unsigned)
+  wrappedBytes<-refuse $ (O.runCritical . O.Request) (Sign keyfile (directory </> "other.json") original unsigned)
   L.writeFile keyfile (encode $ B.unpack $ seed<>B.replicate 32 0)
-  wrongPublicHalf<-refuse $ evalCritical (Sign keyfile (directory </> "other.json") original unsigned)
+  wrongPublicHalf<-refuse $ (O.runCritical . O.Request) (Sign keyfile (directory </> "other.json") original unsigned)
   validated<-case eitherDecode (L.fromStrict saved) of
     Right record->pure $ validateSaved record==Right unsigned
       && isLeft(validateSaved record {savedId="wrong"})
