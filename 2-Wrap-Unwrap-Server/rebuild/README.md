@@ -59,6 +59,31 @@ quota substitutes for those requirements. Keep one build job and warm caches.
 Old installer artifacts do not certify this package. Off-host restoration,
 canonical activation and independent review remain explicit wider release gates.
 
+## Real-chain observer acceptance
+
+The shared acceptance runner accepts `ECX_REBUILD_LIVE_OBSERVER_CONFIG` pointing
+to a private, validated L2L Signet/Solana Devnet config. It requires the usual
+fresh disposable `ECX_REBUILD_CONTRACT_DATABASE` and SELECT-only
+`ECX_REBUILD_CONTRACT_READER`. It initializes its own empty ledger and temporary
+host fence, then runs the actual observation-only critical dispatcher twice.
+All three scanner health records must report success; repeat observation must leave
+accounting unchanged, with no pending signed attempts and intake still paused.
+Signing and broadcasting requests must be rejected before accessing nonexistent
+signer credentials. All application row assertions remain closed Opaleye fixtures.
+The runner does not start a daemon, move funds or change the existing custody ledger.
+
+The current run passed against the real L2L Signet checkpoint 16000
+(`00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47`),
+the existing `ecx-bridge-fresh-treasury` test wallet and Solana Devnet mint
+`Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM`. The reused old config's checkpoint
+16551 was correctly refused because it postdated that wallet's birth; only the
+private disposable-test config was moved to the verified earlier checkpoint.
+This is live observer/ledger integration, not funded wrap/unwrap, custody-balance
+certification, OS isolation or migration acceptance. Existing ledgers were untouched;
+temporary databases and fences were removed. Versus `48112a0`, this adds 53 lines
+to the existing acceptance runner (2,967 → 3,020), with no production change, new
+file, service or dependency.
+
 ## Fresh ledger setup
 
 For a genuinely new deployment, first apply the reviewed baseline PostgreSQL

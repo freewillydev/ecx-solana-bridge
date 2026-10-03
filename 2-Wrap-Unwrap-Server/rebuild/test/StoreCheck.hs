@@ -70,12 +70,61 @@ import System.Environment (getEnv,lookupEnv,getEnvironment)
 
 main :: IO ()
 main = do
+  live<-lookupEnv "ECX_REBUILD_LIVE_OBSERVER_CONFIG"
   setup<-lookupEnv "ECX_REBUILD_SETUP_ONLY"
   fence<-lookupEnv "ECX_REBUILD_FENCE_ONLY"
   server<-lookupEnv "ECX_REBUILD_SERVER_ONLY"
   tls<-lookupEnv "ECX_REBUILD_TLS_ONLY"
   native<-lookupEnv "ECX_REBUILD_NATIVE_RECOVERY_ONLY"
-  if setup==Just "1" then setupMain else if native==Just "1" then nativeRecoveryMain else if tls==Just "1" then tlsMain else if fence==Just "1" then fenceMain else if server==Just "1" then serverMain else ledgerMain
+  case live of
+    Just path->liveObserverMain path
+    Nothing->if setup==Just "1" then setupMain else if native==Just "1" then nativeRecoveryMain else if tls==Just "1" then tlsMain else if fence==Just "1" then fenceMain else if server==Just "1" then serverMain else ledgerMain
+
+-- Actual chain history, isolated ledger, and observation-only DSL authority.
+-- No signer, customer deposit or treasury transfer is invoked by this contract.
+liveObserverMain :: FilePath -> IO ()
+liveObserverMain path=do
+  supplied<-Config.loadConfig path
+  unless (Config.profile supplied==W.L2LSignetDevnet) (reject "live_test_profile_required")
+  database<-getEnv "ECX_REBUILD_CONTRACT_DATABASE"
+  unless ("ecx_rebuild_contract_" `T.isPrefixOf` T.pack database) (fail "disposable database required")
+  role<-getEnv "ECX_REBUILD_CONTRACT_READER"
+  user<-getEnv "USER"
+  let settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
+      check ok=unless ok (fail "live observer contract failed")
+      temporary=do
+        (directory,handle)<-openTempFile "/tmp" "ecx-live-observer"
+        hClose handle; removeFile directory; PD.createDirectory directory 0o700
+        pure directory
+  bracket temporary removeDirectoryRecursive $ \directory->do
+    let config=supplied {Config.fenceDirectory=directory </> "fence"}
+        identity=Config.fingerprint config
+        policy=Config.storePolicy config
+        public=Config.publicConfiguration config (Config.defaultInterface $ Config.profile config) False
+        customer=CustomerSettings public policy (Config.solanaSdkLibrary config)
+    evalSetup settings (InitializeLedger identity)
+    _<-evalRestore settings (AdoptLedger (Config.fenceDirectory config) identity 0)
+    withReader settings {PG.connectUser=role} identity (Config.backupRequired config) $ \reader->
+      withFencedWriter settings policy (Config.fenceDirectory config) $ \writer->
+        bracket newRpcManager closeManager $ \manager->
+          withRuntime manager (Config.observerSettings config) (Config.solanaPolicy config) (Just customer)
+            (SigningEndpoint 1 "/unavailable-signer-credentials") reader writer $ \worker _ _->do
+              let scan=do
+                    worker (Request ObserveChains)
+                    health<-bracket (PG.connect settings) PG.close (\c->fixture c LiveScanHealth)
+                    check (map (\(chain,_,_)->chain) health==["Native","Solana","SolanaOperating"])
+                    forM_ health $ \(_,at,problem)->do
+                      maybe (pure ()) reject problem
+                      check (at/=Nothing)
+              scan
+              balances<-evalRead reader ReadBalances
+              scan
+              evalRead reader ReadBalances >>= check . (==balances)
+              evalRead reader PendingAttempts >>= check . null
+              evalRead reader ReadState >>= check . ledgerPaused
+              expectStore "observation_only" (worker $ Request $ SignPreparedPayment "forbidden")
+              expectStore "observation_only" (worker $ Request $ BroadcastPayment "forbidden")
+  putStrLn "PASS: real L2L Signet and Solana Devnet scans through rebuild DSL, persisted cursors, repeat accounting, paused ledger and signing/send refusal; no funds moved"
 
 -- Production initialization on a fresh migrated database, with no seeded funds.
 setupMain :: IO ()
@@ -1122,6 +1171,7 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  LiveScanHealth :: Fixture [(T.Text,Maybe Int64,Maybe T.Text)]
   SetupResidue :: Fixture ()
   SetPause :: Bool -> Fixture ()
   RestoreDatabases :: Fixture [T.Text]
@@ -1178,6 +1228,9 @@ fixture c RestoreDatabases = O.runSelect c $ O.orderBy (O.asc id) $ do
   name<-O.selectTable $ O.tableWithSchema "pg_catalog" "pg_database" (O.requiredTableField "datname")
   O.where_ (O.like name $ O.sqlStrictText "ecx_restore_%")
   pure name
+fixture c LiveScanHealth = O.runSelect c $ O.orderBy (O.asc $ \(chain,_,_)->chain) $ do
+  (chain,at,problem,_)<-O.selectTable S.scanHealth
+  pure (chain,at,problem)
 fixture c SetupResidue = void $ O.runInsert c O.Insert {O.iTable=S.events,
   O.iRows=[(O.sqlStrictText "orphaned-ledger-event",O.sqlStrictText "initialization must refuse surviving history")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
 fixture c ArchiveRecords = (,,)
