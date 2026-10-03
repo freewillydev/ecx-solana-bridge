@@ -258,8 +258,8 @@ Following that check, the original test database was migrated from schema 18 to
 native wallet, custody key, configuration and consistent PostgreSQL dump were
 preserved privately. Dedicated writer/reader roles and fresh TLS/auth credentials
 were configured, and actual observation-only custody matched while paused.
-The migrated server and signer are now running a bounded test round trip: a new
-50,000-unit unwrap quotes 500 fee and 49,500 payout, and its saved Devnet deposit
+The migrated server and signer completed a bounded test round trip: a new
+50,000-unit unwrap quoted 500 fee and 49,500 payout; its saved Devnet deposit
 finalized and the unwrap paid native transaction
 `35cd02a112319cf73ccf8e7262e6fe5b0e0eaa9ffc2830220784517a114c4e12`.
 The 50,000-unit wrap-back deposit
@@ -267,7 +267,15 @@ The 50,000-unit wrap-back deposit
 confirmed and the wrap paid Solana transaction
 `5eWzmgGVNGZkKVET6kHAokYUttkNrX4bGLiQm6uRz1xMCtKnw73AiGwSUZYjNerzWV2WrmZn4GL9NsXzM87m5chg`.
 Both customer quotes retained the 500-unit fee and 49,500-unit payout. A separate
-500-unit native earned-fee withdrawal is authorized; its settlement remains pending. Never restore the pre-cutover ledger over newer on-chain activity.
+500-unit native earned-fee withdrawal also confirmed:
+`31a2c3bc8c6117225a11f1ed4a7767d682af6515ab46808287fc61a7129b6c8d`.
+The tester received all 500 units; the native node reported a separate 141-unit
+network fee. The ledger records one settled attempt, identical authorization replay,
+zero native/wrapped principal, zero fee-pending balance, native earned 140 and
+wrapped earned 1,300. Native/wrapped float returned to its pre-test levels;
+operating balances paid the actual costs. Final sequence is 98, paused. Both test
+services and the acceptance runner are stopped; shared chain/PostgreSQL services
+remain. Never restore the pre-cutover ledger over newer on-chain activity.
 Any future refund/recovery needing missing historical terms still requires explicit
 policy treatment; migration does not invent those terms.
 
@@ -375,13 +383,14 @@ after acceptance; keys, ledger, exact attempts and private evidence remain saved
 
 ## Remaining release work, in order
 
-1. Extend funded tests to native earned-fee withdrawals and remaining interruption
-   boundaries on the actual test networks. Finish actual Solana Pay wallet signing
+1. Extend funded tests to remaining interruption boundaries on the actual test
+   networks. Native and wrapped earned-fee withdrawals now pass. Finish actual Solana Pay wallet signing
    and the remaining browser cases; keep tester-client evidence distinct from wallet
    acceptance. Native refunds and restart of the broadcast refund now pass above.
-2. Complete migrated execution, legacy application retirement and remaining recovery parity,
-   then remove the superseded application and duplicate tooling. Populated migration
-   and live read-only custody parity pass on a copy as described above. Retain unique checks until covered.
+2. Complete legacy application retirement and remaining recovery parity, then remove
+   superseded application/tooling after replacing its installer/integration callers.
+   Original-ledger migration, both conversion directions and native earned-fee
+   withdrawal pass as described above; broader funded recovery is still outstanding.
    Consolidate stale repository-wide architecture/operating documents around the
    accepted rebuild; their earlier checkpoints are not current release certification.
 3. Verify replacement/reorg/winner-change/rebroadcast and covered-source flows with

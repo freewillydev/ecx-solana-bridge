@@ -1,176 +1,73 @@
 # Local development
 
-Follow [IMPLEMENTATION-PLAN.md](IMPLEMENTATION-PLAN.md) and read
-[ARCHITECTURE.md](ARCHITECTURE.md) plus the preserved Main.hs before changing
-handlers or interpreters. The old run diary and SQLite procedures are retained in
-[Git history](https://github.com/ekulkisnek/ecx-solana-bridge/blob/aa09e1e/docs/LOCAL-DEVELOPMENT.md);
-they are not current operating instructions.
+Use the [rebuild guide](../rebuild/README.md) for the current source map, private
+configuration, PostgreSQL contracts, startup, migration and recovery commands.
+Older deployment/integration tools still target the baseline; they are not an
+alternate way to initialize or run the rebuilt worker.
 
-## Build and tests
+## Build once, reuse caches
 
-From the repository root, use the pinned dependencies and one build job:
+Run from the repository root:
 
 ```sh
 cabal build all -j1 --offline
-cabal test ecx-bridge-rebuild:rebuild-test -j1 --offline --test-show-details=failures
+cabal test all -j1 --offline --test-show-details=direct
 ```
 
-Offline builds assume cached dependencies. Cabal builds the pinned Rust SDK FFI
-through its tracked hooks; Rust/Cargo remain prerequisites. SQLite and the legacy
-library are retired. Preserve shared caches and private state. Cabal also builds
-the browser with GHC JavaScript **9.12.2**, Emscripten **3.1.74** and its frozen
-`web/cabal.project.freeze` graph. Only thin browser API bindings use JavaScript FFI;
-application decisions and QR generation are Haskell. No npm step is required.
+Omit `--offline` only when dependencies must first be fetched. Native GHC, Cabal,
+Rust/Cargo, libpq and GHC JavaScript 9.12.2/Emscripten are prerequisites. OpenSSL
+is needed by certificate/release tests. Cabal hooks compile the bounded Rust SDK
+and Haskell browser; no separate Cargo or npm build is required. The rebuilt
+QuickCheck suite also runs the pinned SDK tests against its existing Cargo cache.
 
-The hook finds `javascript-unknown-ghcjs-ghc` on PATH, or defaults to
+The browser hook finds `javascript-unknown-ghcjs-ghc` on PATH or defaults to
 `~/.local/share/ecx-ghc-js-9.12.2/bin/javascript-unknown-ghcjs-ghc`.
-Set `ECX_GHC_JS` to another compiler path. If `emcc` is not on PATH, the hook uses
-`ECX_EMSDK` (default `~/.local/share/ecx-emsdk`). Set `ECX_BROWSER_BUILD_DIR` to reuse
-an external browser cache. The JavaScript backend uses asm.js for C inputs;
-it is not the GHC WebAssembly backend. Native and browser builds both use one job.
-Generated assets live under Cabal's library autogen directory; Runtime defaults
-to that directory. A deployed bundle overrides it with `ECX_ASSETS`.
+Set `ECX_GHC_JS` for a different compiler location. The matching package tool is
+selected with Cabal's `--with-hc-pkg`. If `emcc` is not on PATH, the hook uses
+`ECX_EMSDK` (default `~/.local/share/ecx-emsdk`). This is the JavaScript backend,
+not WebAssembly. Browser bindings, fee arithmetic, QR and order recovery are Haskell.
 
-The PostgreSQL journal runner covers postings, ownership/row locks, backup receipts,
-idempotent orders and saved policy, concurrent inventory reservations, duplicate/
-partial deposits, expiry, instruction backup gates, and SQL-error rollback/fencing.
-Fixtures and assertions use closed Opaleye operations. These are database contracts,
-not live-chain acceptance. Generated QuickCheck properties exercise balanced
-postings, failed-write atomicity, exact sequences, immutable quotes and ownership.
-The same runner generates earned-fee funding/cancellation contracts for Native
-and Wrapped assets: immutable terms, rejected replay conflicts, balanced holds,
-exact cancellation, asset/amount bounds and pause/freshness gates. These are
-funding-stage contracts; they do not prove fee signing or sending.
-The unsigned-cancellation contract checks pause/freshness gates, replay, retained
-fee holds, blocked signing and generation advancement before a new attempt.
+Reuse `ECX_BROWSER_BUILD_DIR`, `CARGO_HOME` and `CARGO_TARGET_DIR` when caches live
+on another disk. Build one job at a time. Generated SDK/browser paths come from
+`ecx-build-assets`; `ECX_ASSETS` may select a deployed asset bundle. Do not delete
+shared caches or run extra VMs/services to force a build.
 
-Use a fresh disposable database with all `migrations/postgresql/*.sql` applied in
-filename order. This host uses socket `/tmp/ecx-pg-seam`, port 29436 and the current
-OS user. Set `ECX_JOURNAL_CONTRACT_DATABASE` to a fresh `ecx_journal_contract_…`
-database, run the binary from `cabal list-bin exe:ecx-postgres-check` with the
-`journal` argument, then drop that specific database. Never target an existing
-custody ledger.
+## Run the actual application
 
-The same executable with the `source` argument also uses only closed Opaleye fixture operations and
-whole typed record comparisons. Set `ECX_SOURCE_CONTRACT_DATABASE` to a fresh
-`ecx_source_approval_contract_…` database with the same migrations. It preserves
-restoration, native finality/replacement, source-loss capital and exact-byte
-rebroadcast/coverage contracts without signing or contacting either chain.
-
-The `fence DATABASE_A DATABASE_B DIRECTORY` mode uses two distinct fresh databases
-whose names start with `ecx_fence_contract_`, with all migrations applied and no
-ledger rows. It initializes its fixture through Opaleye and creates its own fence
-directory. It checks cross-process/cross-database ownership, precommit durability,
-stale/identity/permission/symlink refusal, uncertain-commit fencing and retirement.
-Drop both disposable databases and remove that temporary directory after use.
-
-`fence runtime BRIDGE_BINARY CONFIG DATABASE DIRECTORY` checks the actual CLI
-startup refusals and aliases, using a fresh migrated `ecx_fence_contract_…` database
-and an unused temporary directory. Supply a valid public-test config with backups
-disabled and a separately provisioned SELECT-only `PGREADUSER`; the cluster must
-allow that reader to connect. The runner copies the config and uses Opaleye for
-its rollback fixture. It verifies missing/stale/wrong-identity/retired fences,
-unchanged journal/watermarks and unopened API sockets. No chain or signer is used.
-Drop the disposable database/reader role and remove the temporary directory afterward.
-
-`observer BRIDGE_BINARY CONFIG DATABASE DIRECTORY` uses the same disposable
-database/reader/config setup to start the actual observer and test its customer
-HTTP and private local-control interfaces. Set `ECX_PORT` to an unused local port.
-The runner replaces the native cookie path with an absent file, exercises public
-configuration/audit and financial-command refusals, and verifies no order, attempt
-or critical sequence was created. Its child server is stopped on success or error.
-It replaces the retired Python runner that targeted removed operator HTTP routes.
-
-Other `integration/` runners cover recovery, snapshot/restore and real chains.
-Read their restrictions before running them; some sign or transfer test funds.
-Historical acceptance applies only to its recorded source/configuration/network.
-Current release gaps are in [RELEASE-REVIEW.md](RELEASE-REVIEW.md).
-
-The same Cabal suite generates temporary certificate chains and checks permitted
-and excluded DNS constraints through the real X.509 validator. It needs OpenSSL
-on PATH; the separate Python fixture generator and TLS executable are retired.
-
-## Customer capability boundary
-
-`cabal repl lib:customer-api --offline` loads only customer handlers and their
-allowed dependencies. `:type customerServer` and `:type customer` succeed after
-`:module + Bridge.Operation`. Imports of `Bridge.Operation.Internal`,
-`Bridge.Postgres.Ledger`, `Bridge.Signer`, `Opaleye` and `Servant.Client` must fail.
-`operator`, `WorkerPlan` and `Request` must also be out of scope. These eight
-negative compiler checks were verified after the component split. The financial
-tests deliberately depend on the private runtime; their broader imports do not
-represent customer-handler authority.
-
-## Local runtime
-
-Use private configuration for real L2L Signet or ECX betanet with Solana Devnet.
-Keep keys, cookies, credentials, ledgers, signed bytes and backups outside Git.
-The root `cabal build all -j1` builds both server and frontend.
-With the configured native node running and private PostgreSQL environment loaded:
+With reviewed private configuration and PostgreSQL environment already set:
 
 ```sh
-scripts/start-local /absolute/private/config.json --binary /absolute/path/to/ecx-bridge
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- check-config /absolute/private/config.json
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- observe /absolute/private/config.json
 ```
 
-The launcher defaults to loopback port 61734; Ctrl-C stops its worker/web children.
-Verify executable/arguments before stopping a recorded PID. Run only one paying
-worker per custody identity. Respect persisted fences and retired sources; do not
-enable an old clone or remove an observation-only recovery override to progress an order.
+The configuration owns `serverPort`. The obsolete Python `start-local` wrapper
+is removed. Existing migrated ledger and host-fence state are required; startup
+never creates a replacement for missing custody history. Observe mode cannot
+create orders or send payouts. Paying mode starts paused and requires guarded
+operator resume plus its separate authenticated signer; see the rebuild guide.
 
-`PGREADUSER` must differ from `PGUSER`. Grant only schema usage, table SELECT. Startup rejects elevated roles, public-schema creation, table/
-column writes and sequence use, including inherited grants. Readers use
-`PGREADPASSWORD` only when supplied; safe operations use read-only transactions.
-Do not weaken these checks to start a misconfigured instance.
+Keep keys, capabilities, credentials, exact signed attempts and backups outside
+Git. Run only one paying worker per custody identity. A duplicate database does
+not create independent custody. Never lower a fence, erase attempts, change saved
+quotes or generate another deposit to force a stuck payment through.
 
-The dedicated signer uses `signerPort` (8081 in examples) on 127.0.0.1.
-`signerAuthFile` names a 64-character hexadecimal token generated from 32 random
-bytes, stored outside Git. Both services may read that file (0600, or root-owned
-0640 with a dedicated worker/signer group); nobody else may read or write it.
-Its containing directory must reject group/world writes. The adjacent `.pem`
-certificate is the worker's sole TLS trust anchor; the adjacent `.key` belongs
-only to the signer, mode 0600. Generate the certificate with an IP subjectAltName
-for 127.0.0.1 and maintain its expiry. Do not reuse a key or token from a fixture.
-Start `ecx-bridge signer CONFIG PRIVATE_SIGNER_CONFIG` under its separate
-SELECT-only PostgreSQL role before enabling the paying worker. The worker uses
-Servant ClientM, certificate validation and BasicAuth only from its critical DSL
-evaluator; it disables redirects, proxies and retries. Rotate token/certificate
-with the worker paused and restart the signer; preserve its custody keys and ledger.
-The `deploy/ecx-bridge-signer.service` unit defines the target signer process.
-It uses OS user `ecx-signer` and PostgreSQL role `ecx_read`; `pg_ident.conf`
-permits that mapping, but never maps the signer to `ecx_worker`. Its private
-configuration is `/etc/ecx-bridge/signing/private.json`, containing only
-`nativeSigningCookie` and `solanaSigningKey` absolute paths. The directory is
-root-owned mode 0750 with group `ecx-signer`; the private configuration and
-Solana key are signer-owned mode 0600. The adjacent TLS private key specified
-above is also signer-owned mode 0600. Shared configuration/token traversal uses
-the `ecx-worker` group; PostgreSQL peer authentication still denies this OS user
-writer access. The signer unit cannot access the worker's private/fence state.
+Use distinct SELECT-only reader/signer PostgreSQL identities, restricted native
+worker RPC credentials and separately protected signing keys. Local same-user
+acceptance does not prove cross-user isolation. Separate processes alone do not
+prevent access to a readable signing credential.
 
-The managed Signet installer now provisions the signer service, token/TLS identity,
-private signing configuration and a separate `ecx_worker` native RPC credential.
-The node's explicit method allowlist excludes signing and key export. The worker
-loses `ecx-node` group membership and its service hides node state and signing
-files; the signer uses the native cookie. Repeats preserve credentials. Upgrading
-an old managed deployment first stops both authorities and privately snapshots
-state, then changes only the worker credential path (outside the deployment
-fingerprint) and transfers the existing Solana key to the signer OS user.
+## Verification
 
-This implementation still needs Ubuntu installation/restart and funded acceptance.
-External-node signing setup remains manual until its restricted RPC configuration
-is supplied and reviewed; the installer refuses automatic paying setup for it.
-Do not interpret service definitions or local policy checks as OS isolation proof.
+The three Cabal suites cover bridge, token administration and liquidity tools.
+The rebuilt bridge suite owns monetary, wire, adapter, HTTP, signer, credential,
+TLS and SDK regressions; the duplicate baseline Hspec suite is retired.
+PostgreSQL contracts use closed Opaleye fixtures in `rebuild/test/StoreCheck.hs`,
+against explicitly disposable migrated databases only. Their commands and modes
+are in the rebuild guide. Never point a fixture runner at an existing custody ledger.
 
-New orders charge 1% both ways; saved quotes keep their terms. Check inventory,
-fee budgets, deadlines and exact network/token identities before real tests.
-Reuse saved orders and exact attempts after interruption. Never reset a ledger,
-delete an attempt or regenerate a capability to force a retry.
-
-Use at most one bounded task VM when needed and stop it afterwards. Packaging and
-cross-architecture installer builds follow runtime simplification. A Mac build is
-not Linux installation evidence.
-
-PostgreSQL migrations and the typed Opaleye records in `src/Bridge/Postgres/Schema.hs`
-are the maintained schema sources. The retired SQLite importer, translators and
-intermediate schema manifest remain at Git revision `6d293a3`. Do not regenerate
-the current schema from SQLite; change it with a reviewed forward migration and
-run the database contracts against the resulting schema.
+Compiler/protocol/database tests do not prove real-chain or wallet acceptance.
+Record funded results against actual identities, transactions and source revisions;
+resume interrupted work from its saved order and exact attempt. Inspect task-owned
+processes before stopping them, close temporary browser tabs, and preserve shared
+nodes/PostgreSQL. Packaging and clean Linux installation remain the final phase.
