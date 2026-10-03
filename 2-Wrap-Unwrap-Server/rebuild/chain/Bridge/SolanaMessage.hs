@@ -67,7 +67,7 @@ decodeTransaction encoded = do
       program <- getWord8
       accountCount <- bounded 8
       accounts <- replicateM accountCount getWord8
-      dataSize <- bounded 256
+      dataSize <- bounded 512 -- Metaplex strings can exceed 256; full transaction stays <=1232
       payload <- getByteString dataSize
       unless (all ((<keyCount) . fromIntegral) (program:accounts)) (fail "account_index_out_of_bounds")
       pure (Instruction program accounts payload)

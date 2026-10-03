@@ -1,7 +1,7 @@
 # Make Wrapped ECX
 
 Token administration stays outside bridge custody. The bridge transfers existing
-inventory; its signer API cannot mint or burn. This Cabal package creates classic SPL mints and prepares
+inventory; its signer API cannot mint or burn. This Cabal package creates classic SPL mints and creates/updates fungible Metaplex metadata. It prepares
 `MintToChecked` and `BurnChecked` transactions with eight decimals. Its separate offline signing command saves validated signed bytes using
 a dedicated authority key. `check` performs read-only chain preflight; `submit`
 broadcasts only a saved, validated attempt and reconciles it on repeat invocation.
@@ -43,6 +43,46 @@ signs. `prepare`, `check`, `sign` and `submit` use the same workflow as mint/bur
 Preflight refuses an existing account or changed rent rather than overwriting or
 refunding it. Haskell checks the address derivation and both exact instructions
 independently of the SDK.
+
+Metadata uses the same prepare/check/sign/submit sequence. Derive its standard
+Metaplex PDA with `cabal run -v0 ecx-token -- metadata-address MINT`. The request has
+exactly `protocol: 1`, `verb: "metadata"`, `authority`, `mint`, `blockhash` and:
+
+```json
+"metadata": {
+  "create": true,
+  "address": "THE_DERIVED_METADATA_PDA",
+  "name": "Wrapped ECX",
+  "symbol": "wECX",
+  "uri": "",
+  "max_cost": "20000000"
+}
+```
+
+Use `create: false` to update existing metadata. `name` and `symbol` are nonempty
+UTF-8 strings limited to 32 and 10 bytes; `uri` is at most 200 bytes and either empty,
+HTTPS or IPFS. An empty URI publishes no off-chain JSON or image. Supply a real,
+reviewed metadata URI for deployment; the tool does not host or fetch it.
+The authority is the fee payer and initial/update authority. Creation requires
+that it also controls mint issuance; updates verify the existing metadata authority
+and mint. Both retain zero royalties and no creators/collection/uses. Creation is
+mutable; updates preserve authority and mutability. Authority transfer, freezing and
+NFT metadata are deliberately outside this fungible-token operation.
+
+`max_cost` is a positive decimal lamport ceiling for the payer's total debit,
+including Metaplex charges and rent, separate from the CLI's network-fee ceiling.
+Preflight checks the simulated metadata fields and payer debit, conservatively
+adding the network fee even if simulation has already deducted it. Submission
+checks the actual finalized payer debit. These are preflight/reconciliation checks,
+not an on-chain spending-limit instruction; an upgrade to the external program or
+changed chain state between simulation and execution can still change its charges.
+
+The encoder uses our existing Solana SDK through bounded FFI and the published
+[Metaplex V3 creation](https://docs.rs/mpl-token-metadata/5.1.1/mpl_token_metadata/instructions/struct.CreateMetadataAccountV3.html)
+and [V2 update](https://docs.rs/mpl-token-metadata/5.1.1/mpl_token_metadata/instructions/struct.UpdateMetadataAccountV2.html)
+wire formats. Haskell independently checks all instruction bytes, account roles and
+message fields. Golden transaction hashes were generated using the official 5.1.1
+builders; no second Solana SDK or Metaplex runtime dependency is added.
 
 Output contains the request and `unsignedTransaction` as base64. A transaction
 preview does not prove account ownership, available funds, reserves or network
@@ -105,12 +145,23 @@ Readback verified eight decimals, expected authority, zero supply and no freeze
 authority. Exact replay succeeded; another creation preflight refused the existing
 mint. No bridge deployment was switched to this new test mint.
 
+Metadata creation and update also finalized on that new Devnet test mint, with
+exact saved-attempt replay and matching on-chain fields:
+
+- Create: `4ertJ4k76EGjegSSZsmo5ayHfgZcFe2Ti4nQNhm3Wwash97mGEcqzUYrfbHPS8DZW7LhiSKZMiRY4731gATKxhfQ`
+- Update: `5UoLMgvamWnxeydKHDAbAXLKHRiaDD1sTfdmqu6J1urV6h7FKTkx4tTNyzXciMaGeGC7LVdiLdUZgxWgrqMdiT8b`
+
+The test deliberately uses an empty URI. Existing-account creation, wrong mint,
+wrong update authority and insufficient total-cost ceiling were refused. QuickCheck
+covers official SDK golden messages, both operations, changed fields/roles,
+UTF-8 byte bounds and the full maximum-length instruction.
+
 Wrong-network, plain-HTTP and inadequate-fee-ceiling submissions were refused.
 No canonical administration acceptance is claimed.
 Protocol references: [Solana minting](https://solana.com/docs/tokens/basics/mint-tokens)
 and [burning](https://solana.com/docs/tokens/basics/burn-tokens).
 
-Remaining: metadata creation/update, automatic bounded
+Remaining: standalone token-account provisioning, automatic bounded
 expiry recovery and canonical administration acceptance. Keep the old Devnet setup example until those replacements pass.
 Canonical issuance additionally requires actual issuer authority and reserve records;
 see the [token operations guide](../2-Wrap-Unwrap-Server/docs/TOKEN-OPERATIONS.md).

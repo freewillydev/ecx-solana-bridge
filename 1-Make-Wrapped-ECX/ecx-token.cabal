@@ -10,7 +10,7 @@ library
   default-extensions: OverloadedStrings
   ghc-options: -Wall -Wcompat
   hs-source-dirs: .
-  exposed-modules: Token, Token.Signing, Token.Network
+  exposed-modules: Token, Token.Signing, Token.Network, Token.Metadata
   build-depends: base >=4.20 && <4.23, ecx-bridge-rebuild, ecx-bridge-rebuild:chain,
     aeson, bytestring, text, binary, unix, filepath, crypton, ram, base64-bytestring, http-client
 

@@ -1,6 +1,7 @@
 {-# LANGUAGE GADTs #-}
 -- Read-only preflight; simulation always contains zero signatures.
 module Token.Network (Network(..),Safe(..),Critical(..),evalSafe,evalCritical) where
+import qualified Token.Metadata as M
 import Token.Signing (Saved(..),validateSaved)
 import qualified Data.ByteString as BS
 import System.IO (withBinaryFile,IOMode(ReadMode))
@@ -43,6 +44,14 @@ evalSafe (Check network endpoint feeLimit request unsigned)=do
         minimumRent<-call "getMinimumBalanceForRentExemption" [toJSON (82::Int),object ["commitment" .= ("finalized"::Text)]] >>= parseValue parseJSON :: IO Integer
         require (minimumRent>0 && minimumRent==toInteger(rent request)) "mint_rent_mismatch"
         pure minimumRent
+      Metadata{metadata=terms}->do
+        (issuer,_)<-accountInfo (mint request) >>= parseValue inspectMint
+        existing<-accountInfo (M.address terms)
+        if M.create terms then require (issuer==Just(authority request) && existing==Null) "metadata_creation_authority_or_exists"
+        else do
+          _<-metadataState request existing
+          pure ()
+        pure 0
       Request{}->do
         mintInfo<-accountInfo (mint request) >>= parseValue inspectMint
         tokenInfo<-accountInfo (account request) >>= parseValue inspectAccount
@@ -64,11 +73,37 @@ evalSafe (Check network endpoint feeLimit request unsigned)=do
     fee<-fieldValue "value" feeValue :: IO (Maybe Integer)
     n<-case fee of Just n | n>0 && n<=toInteger feeLimit && n+rentCost<=lamports->pure(fromInteger n); _->reject "token_fee_unavailable_or_excessive"
     simulation<-call "simulateTransaction" [toJSON unsigned,object
-      ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text),"sigVerify" .= False,"replaceRecentBlockhash" .= False]]
+      (["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text),"sigVerify" .= False,"replaceRecentBlockhash" .= False]
+       <> case request of
+         Metadata{metadata=terms}->["accounts" .= object ["encoding" .= ("base64"::Text),"addresses" .= [authority request,M.address terms]]]
+         _->[]) ]
     result<-fieldValue "value" simulation
     failure<-fieldValue "err" result :: IO Value
     require (failure==Null) "token_simulation_failed"
+    case request of
+      Metadata{metadata=terms}->do
+        states<-fieldValue "accounts" result :: IO [Value]
+        (after,fields)<-case states of
+          [payerState,metadataAccount]->(,) <$> fieldValue "lamports" payerState <*> metadataState request metadataAccount
+          _->reject "metadata_simulation_accounts"
+        -- Include the fee conservatively even when the RPC already deducted it.
+        let debit=lamports-after+toInteger n
+        require (after<=lamports && debit<=toInteger(M.maxCost terms)
+          && fields==(M.name terms,M.symbol terms,M.uri terms)) "metadata_simulation_effect_or_cost"
+      _->pure ()
     pure n
+
+metadataState :: Request -> Value -> IO (Text,Text,Text)
+metadataState Metadata{authority=owner,mint=key} value=do
+  actualOwner<-fieldValue "owner" value
+  executable<-fieldValue "executable" value
+  encoded<-fieldValue "data" value :: IO [Text]
+  require (actualOwner==M.program && not executable) "invalid_metadata_account_owner"
+  raw<-case encoded of
+    [bytes,"base64"]->either (const $ reject "invalid_metadata_base64") pure (B64.decode $ TE.encodeUtf8 bytes)
+    _->reject "invalid_metadata_encoding"
+  either reject pure (M.inspect owner key raw)
+metadataState _ _=reject "metadata_operation_required"
 
 -- Submission has no signing capability: retries can only send the saved bytes.
 data Critical a where
@@ -100,6 +135,14 @@ evalCritical (Submit network endpoint feeLimit path)=do
         errorValue<-fieldValue "err" metadata :: IO Value
         fee<-fieldValue "fee" metadata :: IO Integer
         require (errorValue==failure && fee>=0 && fee<=toInteger feeLimit) "token_finalized_metadata_mismatch"
+        case savedRequest saved of
+          Metadata{metadata=terms}->do
+            before<-fieldValue "preBalances" metadata :: IO [Integer]
+            after<-fieldValue "postBalances" metadata :: IO [Integer]
+            require (case (before,after) of
+              (a:_,b:_)->a>=b && a-b>=fee && a-b<=toInteger(M.maxCost terms)
+              _->False) "metadata_finalized_cost_exceeded"
+          _->pure ()
         pure $ object ["signature" .= identifier,"status" .= (if failure==Null then "finalized" else "failed"::Text),"feeLamports" .= fee]
     else do
       _<-evalSafe (Check network endpoint feeLimit (savedRequest saved) unsigned)

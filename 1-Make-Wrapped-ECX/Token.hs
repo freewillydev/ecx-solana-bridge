@@ -1,6 +1,7 @@
 {-# LANGUAGE GADTs, ForeignFunctionInterface #-}
 -- Administration has no custody credential, database or generic instruction input.
 module Token (Action(..),Request(..),Safe(..),evalSafe,validate,mintAddress) where
+import qualified Token.Metadata as M
 import Bridge.Error (require,reject)
 import Bridge.Solana (tokenProgram)
 import Bridge.SolanaMessage
@@ -25,9 +26,13 @@ data Request = Request
   { action :: Action, authority :: Text, mint :: Text, account :: Text
   , quantity :: Word64, blockhash :: Text }
   | CreateMint {authority :: Text,mint :: Text,seed :: Text,rent :: Word64,blockhash :: Text}
+  | Metadata {authority :: Text,mint :: Text,metadata :: M.Terms,blockhash :: Text}
   deriving (Eq,Show)
 
 instance ToJSON Request where
+  toJSON Metadata{authority=owner,mint=key,metadata=terms,blockhash=recent}=object
+    ["protocol" .= (1::Int),"verb" .= ("metadata"::Text),"authority" .= owner,"mint" .= key
+    ,"metadata" .= terms,"blockhash" .= recent]
   toJSON CreateMint{authority=owner,mint=key,seed=label,rent=lamports,blockhash=recent}=object
     ["protocol" .= (1::Int),"verb" .= ("create"::Text),"authority" .= owner,"mint" .= key
     ,"seed" .= label,"rent" .= T.pack(show lamports),"blockhash" .= recent]
@@ -39,23 +44,35 @@ instance FromJSON Request where
   parseJSON=withObject "token preparation" $ \o->do
     protocol<-o .: "protocol"
     verb<-o .: "verb"
-    raw<-o .: (if verb==("create"::Text) then "rent" else "amount")
-    unless (length o==7 && protocol==(1::Int)) (fail "invalid_token_protocol")
-    n<-case readMaybe (T.unpack raw) :: Maybe Integer of
-      Just x | x>0 && x<=toInteger(maxBound::Word64) && T.pack(show x)==raw -> pure(fromInteger x)
-      _->fail "invalid_token_amount"
-    case (verb::Text) of
-      "create"->CreateMint <$> o .: "authority" <*> o .: "mint" <*> o .: "seed" <*> pure n <*> o .: "blockhash"
-      _->do
-        operation<-case verb of "mint"->pure Mint; "burn"->pure Burn; _->fail "invalid_token_operation"
-        Request operation <$> o .: "authority" <*> o .: "mint" <*> o .: "account" <*> pure n <*> o .: "blockhash"
+    unless (protocol==(1::Int)) (fail "invalid_token_protocol")
+    if verb==("metadata"::Text) then do
+      unless (length o==6) (fail "invalid_metadata_fields")
+      Metadata <$> o .: "authority" <*> o .: "mint" <*> o .: "metadata" <*> o .: "blockhash"
+    else do
+      raw<-o .: (if verb==("create"::Text) then "rent" else "amount")
+      unless (length o==7) (fail "invalid_token_fields")
+      n<-case readMaybe (T.unpack raw) :: Maybe Integer of
+        Just x | x>0 && x<=toInteger(maxBound::Word64) && T.pack(show x)==raw -> pure(fromInteger x)
+        _->fail "invalid_token_amount"
+      case (verb::Text) of
+        "create"->CreateMint <$> o .: "authority" <*> o .: "mint" <*> o .: "seed" <*> pure n <*> o .: "blockhash"
+        _->do
+          operation<-case verb of "mint"->pure Mint; "burn"->pure Burn; _->fail "invalid_token_operation"
+          Request operation <$> o .: "authority" <*> o .: "mint" <*> o .: "account" <*> pure n <*> o .: "blockhash"
 
 data Safe a where
   Prepare :: FilePath -> Request -> Safe Text
+  MetadataAddress :: FilePath -> Text -> Safe Text
 
 evalSafe :: Safe a -> IO a
+evalSafe (MetadataAddress library key)=do
+  _<-either reject pure (publicKey key)
+  output<-invoke library (L.toStrict $ encode $ object ["protocol" .= (1::Int),"verb" .= ("metadata_address"::Text),"mint" .= key])
+  address<-either (const $ reject "invalid_metadata_address_reply") pure (eitherDecodeStrict' output)
+  either reject (const $ pure address) (publicKey address)
 evalSafe (Prepare library request)=do
   either reject pure $ case request of
+    Metadata{metadata=terms}->M.checkTerms terms
     CreateMint{seed=label,rent=n}->do
       derived<-mintAddress (authority request) label
       unless (derived==mint request && n>0) (Left "invalid_mint_creation")
@@ -69,6 +86,7 @@ evalSafe (Prepare library request)=do
 -- Independently check the SDK's entire message: one zero signature, exact keys,
 -- writable roles, program, instruction, blockhash, integer amount and decimals.
 validate :: Request -> Text -> Either Text Transaction
+validate Metadata{authority=owner,mint=key,metadata=terms,blockhash=recent} encoded=M.validate owner key recent terms encoded
 validate request@CreateMint{} encoded=do
   owner<-publicKey (authority request)
   key<-publicKey (mint request)

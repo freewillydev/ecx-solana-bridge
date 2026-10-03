@@ -1,6 +1,9 @@
 module Main (main) where
 import Token
+import qualified Token.Metadata as M
 import Token.Signing
+import Crypto.Hash (hash,Digest,SHA256)
+import qualified Data.Text.Encoding as TE
 import Crypto.Error (CryptoFailable(..))
 import qualified Crypto.PubKey.Ed25519 as Ed
 import qualified Data.ByteArray as BA
@@ -54,6 +57,40 @@ main=do
           && isLeft(validate creation {seed="different"} transaction)
           && isLeft(validate creation {mint=mint(request Mint 1)} transaction)
           && isLeft(mintAddress owner (T.replicate 33 "x")))
+    , quickCheckWithResult stdArgs {maxSuccess=40} $ forAll (choose (1,32)) $ \size->ioProperty $ do
+        let original=request Mint 1
+        address<-evalSafe (MetadataAddress sdkLibraryPath $ mint original)
+        checks<-mapM (\creation->do
+          let terms=M.Terms creation address (T.replicate size "x") "TEST" "" 20000000
+              operation=Metadata (authority original) (mint original) terms (blockhash original)
+          transaction<-evalSafe (Prepare sdkLibraryPath operation)
+          pure $ eitherDecode(encode operation)==Right operation && not(isLeft $ validate operation transaction)
+            && all (\changed->isLeft $ validate operation {metadata=changed} transaction)
+               [terms {M.name="different"},terms {M.symbol="DIFF"},terms {M.uri="https://example.com/token.json"}
+               ,terms {M.create=not creation},terms {M.address=mint original}]
+            && isLeft(validate operation {authority=account original} transaction)
+            && isLeft(validate operation {blockhash=mint original} transaction)
+          ) [True,False]
+        pure (and checks)
+    , quickCheckResult $ once $ ioProperty $ do
+        let original=request Mint 1
+        address<-evalSafe (MetadataAddress sdkLibraryPath $ mint original)
+        let terms=M.Terms True address (T.replicate 16 "é") "1234567890" ("https://"<>T.replicate 192 "x") 20000000
+            operation=Metadata (authority original) (mint original) terms (blockhash original)
+        transaction<-evalSafe (Prepare sdkLibraryPath operation)
+        pure (not(isLeft $ validate operation transaction)
+          && all (isLeft . M.checkTerms) [terms {M.name=T.replicate 17 "é"},terms {M.symbol="12345678901"}
+            ,terms {M.uri=T.replicate 201 "x"},terms {M.name="bad\0name"},terms {M.maxCost=0}])
+    -- Exact legacy messages generated using the unmodified Metaplex 5.1.1 builders.
+    , quickCheckResult $ once $ ioProperty $ do
+        let original=request Mint 1
+            reference="H8pXsNTmVfo2RF7qQ39xGwzGyhNRhHvHhWny5FB7qA6h"
+        address<-evalSafe (MetadataAddress sdkLibraryPath $ mint original)
+        hashes<-mapM (\creation->do
+          let terms=M.Terms creation address "ECX Test" "TEST" "" 20000000
+          transaction<-evalSafe (Prepare sdkLibraryPath $ Metadata (authority original) (mint original) terms (blockhash original))
+          pure (show (hash (TE.encodeUtf8 transaction) :: Digest SHA256))) [True,False]
+        pure (address==reference && hashes==["0640af0794fb42396d44234c5cf720e05a2d13cf6cec79d42ead25656e1da0d1", "d90662feccbc56229eaca30a40ee94eef9a20f79257a67b877c5e10e56a69e71"])
     , quickCheckResult $ once $ ioProperty signingCheck
     , quickCheckResult $ once $ property $
         eitherDecode (encode $ request Mint maxBound)==Right(request Mint maxBound)

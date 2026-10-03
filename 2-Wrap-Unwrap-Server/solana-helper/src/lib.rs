@@ -166,6 +166,14 @@ fn prepare(c: &Config, r: &Request) -> Result<Reply, &'static str> {
 }
 // Separate administration preview: no key paths, signatures, RPC or custody API.
 #[derive(Deserialize)]
+#[serde(untagged)]
+enum AdminRequest { Token(TokenRequest), Address(MetadataAddressRequest) }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetadataAddressRequest { protocol:u8, verb:AddressVerb, mint:String }
+#[derive(Deserialize)]
+enum AddressVerb { #[serde(rename="metadata_address")] MetadataAddress }
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TokenRequest {
     protocol: u8,
@@ -174,19 +182,65 @@ struct TokenRequest {
     mint: String,
     account: Option<String>,
     amount: Option<String>,
+    metadata: Option<MetadataRequest>,
     seed: Option<String>,
     rent: Option<String>,
     blockhash: String,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum TokenVerb { Mint, Burn, Create }
+enum TokenVerb { Mint, Burn, Create, Metadata }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MetadataRequest {
+    create: bool, address: String, name: String, symbol: String, uri: String, max_cost: String,
+}
+fn metadata_instruction(r: &TokenRequest) -> Result<solana_instruction::Instruction, &'static str> {
+    use solana_instruction::{Instruction,AccountMeta};
+    let m = r.metadata.as_ref().ok_or("missing_metadata")?;
+    if r.account.is_some() || r.amount.is_some() || r.seed.is_some() || r.rent.is_some()
+        || m.name.is_empty() || m.name.len()>32 || m.symbol.is_empty() || m.symbol.len()>10 || m.uri.len()>200 {
+        return Err("invalid_metadata_fields");
+    }
+    raw_amount(&m.max_cost)?;
+    let mint=key(&r.mint)?;
+    let authority=key(&r.authority)?;
+    let program=key("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s")?;
+    let metadata=metadata_address(&mint, &program);
+    if metadata.to_string()!=m.address { return Err("metadata_address_mismatch"); }
+    // Metaplex CreateMetadataAccountV3 / UpdateMetadataAccountV2 Borsh wire format.
+    // Golden messages come from the official mpl-token-metadata 5.1.1 builders.
+    let mut data=if m.create { vec![33] } else { vec![15,1] };
+    for text in [&m.name,&m.symbol,&m.uri] {
+        data.extend_from_slice(&(text.len() as u32).to_le_bytes());
+        data.extend_from_slice(text.as_bytes());
+    }
+    data.extend_from_slice(&[0;5]); // zero royalty; no creators, collection, uses
+    data.extend_from_slice(if m.create { &[1,0][..] } else { &[0,0,0][..] });
+    let accounts=if m.create { vec![AccountMeta::new(metadata,false),AccountMeta::new_readonly(mint,false),
+        AccountMeta::new_readonly(authority,true),AccountMeta::new(authority,true),
+        AccountMeta::new_readonly(authority,true),AccountMeta::new_readonly(Pubkey::default(),false)] }
+        else { vec![AccountMeta::new(metadata,false),AccountMeta::new_readonly(authority,true)] };
+    Ok(Instruction { program_id:program,accounts,data })
+}
+fn metadata_address(mint: &Pubkey, program: &Pubkey) -> Pubkey {
+    Pubkey::find_program_address(&[b"metadata",program.as_ref(),mint.as_ref()],program).0
+}
+
 fn prepare_token(r: &TokenRequest) -> Result<String, &'static str> {
     if r.protocol != 1 { return Err("invalid_protocol"); }
     let authority = key(&r.authority)?;
     let mint = key(&r.mint)?;
     let program = spl_token_interface::id();
     let blockhash = Hash::from_str(&r.blockhash).map_err(|_| "invalid_blockhash")?;
+    if matches!(r.verb, TokenVerb::Metadata) {
+        if !authority.is_on_curve() { return Err("invalid_metadata_authority"); }
+        let instruction=metadata_instruction(r)?;
+        let message=Message::new_with_blockhash(&[instruction],Some(&authority),&blockhash);
+        return bincode::serialize(&Transaction::new_unsigned(message)).map(|bytes| STANDARD.encode(bytes))
+            .map_err(|_| "serialization_failed");
+    }
+    if r.metadata.is_some() { return Err("unexpected_metadata"); }
     if matches!(r.verb, TokenVerb::Create) {
         let seed = r.seed.as_deref().ok_or("missing_mint_seed")?;
         let rent = raw_amount(r.rent.as_deref().ok_or("missing_mint_rent")?)?;
@@ -215,7 +269,7 @@ fn prepare_token(r: &TokenRequest) -> Result<String, &'static str> {
             &program, &mint, &account, &authority, &[], amount, 8),
         TokenVerb::Burn => spl_token_interface::instruction::burn_checked(
             &program, &account, &mint, &authority, &[], amount, 8),
-        TokenVerb::Create => return Err("invalid_admin_instruction"),
+        TokenVerb::Create | TokenVerb::Metadata => return Err("invalid_admin_instruction"),
     }.map_err(|_| "invalid_admin_instruction")?;
     let blockhash = Hash::from_str(&r.blockhash).map_err(|_| "invalid_blockhash")?;
     let message = Message::new_with_blockhash(&[instruction], Some(&authority), &blockhash);
@@ -273,9 +327,18 @@ unsafe fn prepare_ffi(
             if unsafe { std::slice::from_raw_parts(config, config_len) } != b"{}" {
                 return Err("invalid_admin_config");
             }
-            let request: TokenRequest = serde_json::from_slice(unsafe { std::slice::from_raw_parts(request, request_len) })
+            let request: AdminRequest = serde_json::from_slice(unsafe { std::slice::from_raw_parts(request, request_len) })
                 .map_err(|_| "invalid_admin_request")?;
-            return serde_json::to_vec(&prepare_token(&request)?).map_err(|_| "serialization_failed");
+            let reply=match request {
+                AdminRequest::Token(r)=>prepare_token(&r)?,
+                AdminRequest::Address(MetadataAddressRequest {protocol,verb:AddressVerb::MetadataAddress,mint})=>{
+                    if protocol!=1 { return Err("invalid_protocol"); }
+                    let mint=key(&mint)?;
+                    let program=key("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s")?;
+                    metadata_address(&mint,&program).to_string()
+                }
+            };
+            return serde_json::to_vec(&reply).map_err(|_| "serialization_failed");
         }
         let config: Config =
             serde_json::from_slice(unsafe { std::slice::from_raw_parts(config, config_len) })

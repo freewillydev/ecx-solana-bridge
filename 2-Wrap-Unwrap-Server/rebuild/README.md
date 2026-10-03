@@ -305,9 +305,10 @@ Private keys/attempts/ledger remain outside Git.
 4. Complete required Haskell/FFI token administration and selected real pool workflow;
    token mint/burn now has a Cabal CLI, separate critical signing/submission, and
    finalized Devnet round-trip/replay acceptance. Mint creation reuses the same
-   workflow and has finalized Devnet acceptance. Metadata and
-   administration expiry recovery remain unfinished.
-   retire standalone legacy Rust/Python tools after their required behavior is covered.
+   workflow and has finalized Devnet acceptance. Metadata creation/update also pass
+   real Devnet readback and saved-attempt replay, with no new SDK dependencies.
+   Standalone token-account provisioning and administration expiry recovery remain.
+   Retire standalone legacy Rust/Python tools after their required behavior is covered.
    Confirm canonical token authority, backing, liquidity and actual route availability.
 5. Finish the current installer/upgrade path last, test clean Linux installation and
    restoration on both architectures, review dependencies, and obtain independent
