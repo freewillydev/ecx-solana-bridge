@@ -1,6 +1,6 @@
 module Bridge.Solana
-  ( SolanaSettings(..),validateSolanaSettings,solanaCall,solanaIdentity,tokenAccount
-  , inspectTokenAccount,finalizedTransaction,solanaHistory,solanaAddressHistory
+  ( SolanaSettings(..),validateSolanaSettings,solanaCall,solanaIdentity,solanaIdentityWith,tokenAccount
+  , inspectTokenAccount,finalizedTransaction,finalizedTransactionWith,solanaHistory,solanaAddressHistory,solanaAddressHistoryWith
   , SignatureInfo(..), collectSignatures, tokenProgram,solanaGenesis ) where
 
 import Bridge.Wire (Profile(..))
@@ -43,11 +43,16 @@ validateSolanaSettings c = do
 solanaCall :: Manager -> SolanaSettings -> Text -> [Value] -> IO Value
 solanaCall manager c method params = validateSolanaSettings c >> rpc manager (solanaRpc c) Nothing method params
 solanaIdentity :: Manager -> SolanaSettings -> IO Value
-solanaIdentity manager c = do
-  genesis <- solanaCall manager c "getGenesisHash" [] >>= parseValue parseJSON
+solanaIdentity manager c = solanaIdentityWith (solanaCall manager c)
+  (fmap (\url->rpc manager url Nothing) $ solanaVerifierRpc c) c
+solanaIdentityWith :: (Text -> [Value] -> IO Value) -> Maybe (Text -> [Value] -> IO Value) -> SolanaSettings -> IO Value
+solanaIdentityWith call verifier c = do
+  validateSolanaSettings c
+  require (maybe False (const True) verifier==maybe False (const True) (solanaVerifierRpc c)) "verifier_configuration_mismatch"
+  genesis <- call "getGenesisHash" [] >>= parseValue parseJSON
   require (genesis==solanaGenesis (solanaProfile c)) "wrong_solana_genesis"
   let opts=object ["commitment" .= ("finalized"::Text),"encoding" .= ("jsonParsed"::Text)]
-  response <- solanaCall manager c "getAccountInfo" [toJSON (mint c),opts]
+  response <- call "getAccountInfo" [toJSON (mint c),opts]
   account <- fieldValue "value" response
   require (account/=Null) "mint_not_found"
   program <- fieldValue "owner" account
@@ -60,18 +65,20 @@ solanaIdentity manager c = do
   initialized <- fieldValue "isInitialized" info :: IO Bool
   freeze <- fieldValue "freezeAuthority" info :: IO (Maybe Text)
   require (kind=="mint" && decimals==8 && initialized && freeze==Nothing) "unsupported_mint_policy"
-  _ <- tokenAccount manager c (custodyAta c) (custodyOwner c)
-  case solanaVerifierRpc c of
-    Just verifier -> do
-      independent <- rpc manager verifier Nothing "getGenesisHash" [] >>= parseValue parseJSON
+  _ <- tokenAccountWith call c (custodyAta c) (custodyOwner c)
+  case verifier of
+    Just verify -> do
+      independent <- verify "getGenesisHash" [] >>= parseValue parseJSON
       require (independent==genesis) "verifier_wrong_genesis"
     Nothing -> require (solanaProfile c/=CanonicalBeta) "verifier_required"
   pure info
 
 tokenAccount :: Manager -> SolanaSettings -> Text -> Text -> IO Value
-tokenAccount manager c address expectedOwner = do
+tokenAccount manager c = tokenAccountWith (solanaCall manager c) c
+tokenAccountWith :: (Text -> [Value] -> IO Value) -> SolanaSettings -> Text -> Text -> IO Value
+tokenAccountWith call c address expectedOwner = do
   _ <- either reject pure (publicKey address)
-  response <- solanaCall manager c "getAccountInfo" [toJSON address,object ["commitment" .= ("finalized"::Text),"encoding" .= ("jsonParsed"::Text)]]
+  response <- call "getAccountInfo" [toJSON address,object ["commitment" .= ("finalized"::Text),"encoding" .= ("jsonParsed"::Text)]]
   v <- fieldValue "value" response
   require (v/=Null) "token_account_missing"
   _ <- either reject pure (inspectTokenAccount (mint c) expectedOwner v)
@@ -102,12 +109,16 @@ inspectTokenAccount expectedMint expectedOwner = either (const $ Left "token_acc
       && delegate==Nothing && closeAuthority==Nothing && decimals==8) (fail "unsupported token account")
     field "amount" balance >>= either (fail . T.unpack) pure . parseUnits
 finalizedTransaction :: Manager -> SolanaSettings -> Text -> IO Value
-finalizedTransaction manager c signature = solanaCall manager c "getTransaction"
+finalizedTransaction manager c = finalizedTransactionWith (solanaCall manager c)
+finalizedTransactionWith :: (Text -> [Value] -> IO Value) -> Text -> IO Value
+finalizedTransactionWith call signature = call "getTransaction"
   [toJSON signature,object ["commitment" .= ("finalized"::Text),"encoding" .= ("json"::Text),"maxSupportedTransactionVersion" .= (0::Int)]]
 solanaHistory :: Manager -> SolanaSettings -> Maybe Text -> Maybe Text -> IO Value
 solanaHistory manager c = solanaAddressHistory manager c (custodyAta c)
 solanaAddressHistory :: Manager -> SolanaSettings -> Text -> Maybe Text -> Maybe Text -> IO Value
-solanaAddressHistory manager c address before untilSig = solanaCall manager c "getSignaturesForAddress"
+solanaAddressHistory manager c = solanaAddressHistoryWith (solanaCall manager c)
+solanaAddressHistoryWith :: (Text -> [Value] -> IO Value) -> Text -> Maybe Text -> Maybe Text -> IO Value
+solanaAddressHistoryWith call address before untilSig = call "getSignaturesForAddress"
   [toJSON address,object $ ["commitment" .= ("finalized"::Text),"limit" .= (100::Int)] <> maybe [] (\t->["before" .= t]) before <> maybe [] (\t->["until" .= t]) untilSig]
 
 data SignatureInfo = SignatureInfo

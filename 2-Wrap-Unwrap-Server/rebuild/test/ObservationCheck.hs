@@ -7,6 +7,8 @@ import Bridge.RPC (fieldValue)
 import Bridge.Native (NativeSettings(..),signetChallenge)
 import Bridge.NativeObservation (scanNativeWith)
 import Bridge.Solana (SignatureInfo(..),collectSignatures,tokenProgram)
+import qualified Bridge.Solana as S
+import Bridge.SolanaObservation (scanSolanaWith,scanSolanaOperatingWith)
 import Bridge.SolanaDeposit
 import Bridge.SolanaMessage (base58)
 import Control.Exception (try)
@@ -117,7 +119,8 @@ checks=do
     ]
   effects<-mapM capturedEffect ["new","existing"]
   native<-nativeChecks
-  pure (local<>effects<>native)
+  scans<-solanaScanChecks expected proof payProof reference
+  pure (local<>effects<>native<>scans)
 
 capturedEffect :: String -> IO Result
 capturedEffect kind=do
@@ -235,3 +238,91 @@ nativeChecks=do
         failures<-mapM (\(target,path,value,code)->rejects code $ scan (\method->if method==target then replace path value else id) Nothing binding) faults
         pure (depthRefused && and failures)
     ]
+
+solanaScanChecks :: DepositBinding -> Value -> Value -> Text -> IO [Result]
+solanaScanChecks bound proof payProof reference=do
+  slot<-fieldValue "slot" proof :: IO Int64
+  let sig=boundSignature bound
+      c=S.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing (boundMint bound) (boundCustodyOwner bound) (boundCustody bound)
+      order=W.OrderRequest WrappedToNative (amt 10000) "native" "refund" (Just $ boundOwner bound) "key"
+      policy=W.PolicySnapshot 2 "finalized" "profile"
+      legacy memo=pure $ if memo==boundMemo bound then Just ("order",order,policy) else Nothing
+      noReference _=pure Nothing
+      history=toJSON [object ["signature" .= sig,"slot" .= slot,"err" .= Null,"confirmationStatus" .= ("finalized"::Text)]]
+      call value method params=case method of
+        "getSignaturesForAddress"->pure history
+        "getTransaction"->if take 1 params==[toJSON sig] then pure value else fail "unexpected signature"
+        _->solanaIdentityReply c method params
+      run settings verifierCall value pending lookupMemo lookupPay=scanSolanaWith (call value) verifierCall settings sig Nothing 500 pending lookupMemo lookupPay
+      verified settings verifierCall value=run settings verifierCall value [sig] legacy noReference
+      withVerifier=c {S.solanaVerifierRpc=Just "https://verifier.example"}
+      secondary value method params=if method=="getTransaction" then pure value else solanaIdentityReply c method params
+      status batch=map W.chainEventKind (W.scanEvents batch)
+      eligible batch=map W.depositEligible (W.scanDeposits batch)
+  operating<-fixture "solana-devnet-existing-payment.json" >>= fieldValue "transaction"
+  operatingSlot<-fieldValue "slot" operating :: IO Int64
+  operatingSignatures<-fieldValue "transaction" operating >>= fieldValue "signatures" :: IO [Text]
+  operatingSig<-case operatingSignatures of [s]->pure s; _->fail "expected one signature"
+  let operatingConfig=c {S.custodyOwner="RWjpjjkpABkEGomLbZYyN53pA3FVdPXp9izJ25wErGX"}
+      operatingCall method params=case method of
+        "getSignaturesForAddress"->pure $ toJSON [object ["signature" .= operatingSig,"slot" .= operatingSlot,"err" .= Null,"confirmationStatus" .= ("finalized"::Text)]]
+        "getTransaction"->pure operating
+        _->solanaIdentityReply operatingConfig method params
+  sequence
+    [ check "Solana scan binds captured memo deposit and deduplicates pending overlap" $ once $ ioProperty $ do
+        batch<-verified c Nothing proof
+        pure (status batch==["incoming"] && eligible batch==[True] && map W.depositOrder (W.scanDeposits batch)==[Just "order"] &&
+          W.scanNext batch==sig && W.scanTime batch==500)
+    , check "Solana Pay scan derives refund owner while ambiguous bindings stay unallocated" $ once $ ioProperty $ do
+        let payLookup _=pure $ Just ("pay-order",order {W.sourceOwner=Nothing},policy,reference)
+        payBatch<-run c Nothing payProof [] (const $ pure Nothing) payLookup
+        ambiguous<-run c Nothing proof [] legacy payLookup
+        owners<-mapM (fieldValue "verifiedOwner" . W.chainEventEvidence) (W.scanEvents payBatch) :: IO [Text]
+        pure (status payBatch==["incoming"] && owners==[boundOwner bound] && status ambiguous==["unmatched_incoming"] &&
+          map W.depositOrder (W.scanDeposits ambiguous)==[Nothing])
+    , check "independent proof agreement failure and disagreement remain distinct" $ once $ ioProperty $ do
+        agreed<-verified withVerifier (Just $ secondary proof) proof
+        unavailable<-verified withVerifier (Just $ secondary Null) proof
+        disputed<-verified withVerifier (Just $ secondary $ replace ["slot"] (toJSON $ slot+1) proof) proof
+        absent<-rejects "verifier_configuration_mismatch" (verified withVerifier Nothing proof)
+        pure (status agreed==["incoming"] && eligible agreed==[True] && status unavailable==["awaiting_verifier"] &&
+          eligible unavailable==[False] && status disputed==["disputed"] && eligible disputed==[False] && absent)
+    , check "Solana scans refuse missing transactions wrong slots and incomplete history" $ once $ ioProperty $ do
+        absent<-rejects "solana_history_transaction_unavailable" (verified c Nothing Null)
+        wrongSlot<-rejects "solana_history_slot_mismatch" (verified c Nothing $ replace ["slot"] (toJSON $ slot+1) proof)
+        gap<-rejects "solana_history_gap" $ scanSolanaWith (\method params->if method=="getSignaturesForAddress" then pure (toJSON ([]::[Value])) else call proof method params)
+          Nothing c sig Nothing 500 [] legacy noReference
+        pure (absent && wrongSlot && gap)
+    , check "pending verifier work is revisited after the history cursor moves" $ once $ ioProperty $ do
+        let newer=base58 (BS.replicate 64 7)
+            pendingCall method params=case method of
+              "getSignaturesForAddress"->pure $ toJSON [object ["signature" .= newer,"slot" .= (slot+1),"err" .= Null,"confirmationStatus" .= ("finalized"::Text)]]
+              "getTransaction" | take 1 params==[toJSON newer]->pure $ replace ["slot"] (toJSON $ slot+1) $
+                replace ["transaction","signatures"] (toJSON [newer]) proof
+              _->call proof method params
+        batch<-scanSolanaWith pendingCall Nothing c sig (Just newer) 500 [sig] legacy noReference
+        pure (map W.chainEventId (W.scanEvents batch)==[newer,sig] && W.scanNext batch==newer && eligible batch==[True,True])
+    , check "unsupported transaction versions are quarantined without a receipt" $ once $ ioProperty $ do
+        let unsupported method params=if method=="getTransaction" then reject "rpc_error_-32015" else call proof method params
+        batch<-scanSolanaWith unsupported Nothing c sig Nothing 500 [] legacy noReference
+        pure (status batch==["unsupported"] && null(W.scanDeposits batch))
+    , check "operating scan preserves captured fee outflow and refuses truncated opening history" $ once $ ioProperty $ do
+        batch<-scanSolanaOperatingWith operatingCall Nothing operatingConfig operatingSig (Just operatingSig) 500
+        opening<-rejects "solana_operating_opening_balance_requires_history" $
+          scanSolanaOperatingWith operatingCall Nothing operatingConfig operatingSig Nothing 500
+        flow<-case W.scanEvents batch of [event]->pure (W.economicOutflow "SolanaOperating" $ W.chainEventEvidence event); _->fail "one event expected"
+        pure (status batch==["outgoing"] && null(W.scanDeposits batch) && flow==Right(Sol,amt 5000,amt 5000) && opening)
+    ]
+
+-- Only account/identity RPC fixtures shared by the scanner protocol checks.
+solanaIdentityReply :: S.SolanaSettings -> Text -> [Value] -> IO Value
+solanaIdentityReply c method params=case (method,params) of
+  ("getGenesisHash",[])->pure $ toJSON (S.solanaGenesis $ S.solanaProfile c)
+  ("getAccountInfo",String address:_) | address==S.mint c->pure $ object ["value" .= object
+    ["owner" .= tokenProgram,"data" .= object ["parsed" .= object ["type" .= ("mint"::Text),"info" .= object
+      ["decimals" .= (8::Int),"isInitialized" .= True,"freezeAuthority" .= Null]]]]]
+  ("getAccountInfo",String address:_) | address==S.custodyAta c->pure $ object ["value" .= object
+    ["owner" .= tokenProgram,"executable" .= False,"data" .= object ["space" .= (165::Int),"parsed" .= object
+      ["type" .= ("account"::Text),"info" .= object ["owner" .= S.custodyOwner c,"mint" .= S.mint c,"state" .= ("initialized"::Text),
+        "isNative" .= False,"tokenAmount" .= object ["decimals" .= (8::Int),"amount" .= ("1000000"::Text)]]]]]]
+  _->fail ("unexpected Solana identity RPC "<>T.unpack method)

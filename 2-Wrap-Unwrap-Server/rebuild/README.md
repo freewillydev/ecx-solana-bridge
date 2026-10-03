@@ -323,8 +323,34 @@ origin, script/amount and duplicate-output refusals. Full QuickCheck/protocol an
 disposable PostgreSQL suites pass; closed lookup reads are verified in PostgreSQL.
 No live wallet was scanned, and no funds were sent.
 
+Solana token and fee-payer observation now return the same atomic scan batch.
+They retain anchored history, pending verifier rechecks, legacy memo/Pay binding,
+historical refund owner, independent proof comparison and actual token/SOL effects.
+Unsupported/disputed evidence is quarantined; missing evidence cannot become an
+eligible bound receipt. Operating history must include the zero opening balance.
+Shared RPC encoders stay in Solana; identity checks use explicit primary/verifier
+read capabilities and refuse a missing configured verifier. Closed Opaleye reads
+select pending verification with SQL ordering/limit and match at most two reference
+orders, rejecting ambiguity without loading all matching records.
+
+The two Solana scan functions and cursor guard total 116→119 lines; their two store
+lookup functions are 22→18. Combined: 138→137 across two production files in each
+version, excluding imports and dispatch. The dedicated SolanaObservation module is
+138 lines. Shared adapter extraction adds 11 lines in Solana. A 50-line Observer
+workflow now constructs the real adapters, gathers/commits each stream, records
+failures and promotes candidates through closed store operations. It replaces the
+previous observer's intertwined adapter/store setup, but is not a total-module
+reduction claim while construction retains the baseline.
+
+Full QuickCheck/protocol checks pass captured memo effects, offline Pay rewrites,
+independent verification agreement/unavailability/dispute, pending work outside the
+current history window, missing/unsupported transactions and captured SOL costs.
+PostgreSQL contracts pass reference matching/bounds and pending-proof clearing.
+The workflow builds through root Cabal; it has not yet run against live nodes or
+been connected to the final critical runtime. No live custody state was changed.
+
 Connecting those adapters to the high-level safe/critical runtime, actual host fence,
 dedicated signer and durable payment execution remains unfinished. Native source-loss detection,
 restoration approval binding, operator loss-cover authorization,
-observer orchestration, broader recovery and SDK build integration also remain.
+live observer integration, broader recovery and SDK build integration also remain.
 Passing these checks is not end-to-end payment, migration or real-chain acceptance.

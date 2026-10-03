@@ -59,6 +59,8 @@ data StoreRead a where
   ReadWithdrawal :: Text -> StoreRead (Maybe WithdrawalView)
   ReadOrder :: Text -> Text -> StoreRead W.OrderView
   PromotionCandidates :: StoreRead [Text]
+  PendingVerification :: StoreRead [Text]
+  LookupReferences :: [Text] -> StoreRead (Maybe (Text,W.OrderRequest,W.PolicySnapshot,Text))
   LookupInstruction :: Text -> StoreRead (Maybe (Text,W.OrderRequest,W.PolicySnapshot))
   MaximumNativeDepth :: Int -> StoreRead Int
   ReadSourceWorkHash :: Text -> StoreRead Text
@@ -117,6 +119,8 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
     row <- metadata c identity
     case operation of
       ReadState -> pure (LedgerState (S.criticalSequence row) (S.backupSequence row) (S.paused row/=0) (S.pauseReason row))
+      PendingVerification -> pendingVerification c
+      LookupReferences keys -> lookupReferences c keys
       LookupInstruction instruction -> lookupInstruction c instruction
       MaximumNativeDepth minimumDepth -> maximumNativeDepth c minimumDepth
       ReadSourceWorkHash identifier -> sourceWorkHash c identifier
@@ -1026,3 +1030,22 @@ maximumNativeDepth connection minimumDepth = do
   rows <- O.runSelect connection $ O.distinct $ fmap S.policyJson (O.selectTable S.orders) :: IO [Text]
   policies <- mapM decodeSaved rows
   pure (maximum (minimumDepth:1:map W.nativeDepth policies))
+
+pendingVerification :: PG.Connection -> IO [Text]
+pendingVerification c = O.runSelect c $ fmap snd $ O.limit 1000 $ O.orderBy (O.asc fst <> O.asc snd) $ do
+  row <- O.selectTable S.chainEvents
+  O.where_ (S.eventChain row O..== O.sqlStrictText "Solana" O..&& S.eventKind row O..== O.sqlStrictText "awaiting_verifier")
+  pure (S.eventFirstSeen row,S.eventId row)
+
+lookupReferences :: PG.Connection -> [Text] -> IO (Maybe (Text,W.OrderRequest,W.PolicySnapshot,Text))
+lookupReferences c keys = do
+  require (length keys<=256) "too_many_reference_keys"
+  rows <- O.runSelect c $ O.limit 2 $ do
+    row <- O.selectTable S.orders
+    O.where_ (O.matchNullable (O.sqlBool False) (O.in_ $ map (O.sqlStrictText . ("solana-pay:"<>)) keys) (S.instruction row))
+    pure (S.orderId row,S.requestJson row,S.policyJson row,S.instruction row)
+    :: IO [(Text,Text,Text,Maybe Text)]
+  case rows of
+    [(oid,request,policy,Just instruction)] | Just reference<-T.stripPrefix "solana-pay:" instruction ->
+      Just <$> ((,,,) oid <$> decodeSaved request <*> decodeSaved policy <*> pure reference)
+    _->pure Nothing

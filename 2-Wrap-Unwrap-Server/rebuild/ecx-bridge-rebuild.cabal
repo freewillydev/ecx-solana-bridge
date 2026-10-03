@@ -40,10 +40,18 @@ library chain
   import: settings
   visibility: private
   hs-source-dirs: chain
-  exposed-modules: Bridge.RPC, Bridge.Native, Bridge.NativeObservation, Bridge.NativePayment, Bridge.Solana, Bridge.SolanaMessage, Bridge.SolanaHelper, Bridge.SolanaPayment, Bridge.SolanaDeposit
+  exposed-modules: Bridge.RPC, Bridge.Native, Bridge.NativeObservation, Bridge.NativePayment, Bridge.Solana, Bridge.SolanaObservation, Bridge.SolanaMessage, Bridge.SolanaHelper, Bridge.SolanaPayment, Bridge.SolanaDeposit
   build-depends: base, ecx-bridge-rebuild, aeson, bytestring, text, scientific,
     filepath, http-client, http-client-tls, http-types, binary, containers, base58-bytestring,
     base64-bytestring, crypton, unix
+
+library workflow
+  import: settings
+  visibility: private
+  hs-source-dirs: workflow
+  exposed-modules: Bridge.Observer
+  build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:store,
+    ecx-bridge-rebuild:chain, text, time, http-client
 
 test-suite rebuild-test
   import: settings

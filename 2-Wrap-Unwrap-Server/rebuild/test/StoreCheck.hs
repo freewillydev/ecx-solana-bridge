@@ -183,6 +183,12 @@ main = do
         nativeView <- evalWrite writer (IssueInstruction 100 auth native)
         solanaView <- evalWrite writer (IssueInstruction 100 auth solana)
         check (W.depositInstruction nativeView==Just address && Right (W.depositInstruction solanaView)==(Just <$> payInstruction solana))
+        let reference=either (error . T.unpack) id (payInstruction solana)
+            bare=T.drop (T.length "solana-pay:") reference
+        matched<-evalRead reader (LookupReferences [bare,"unused-key"])
+        missing<-evalRead reader (LookupReferences [])
+        expectStore "too_many_reference_keys" (evalRead reader $ LookupReferences $ replicate 257 bare)
+        check (fmap (\(identifier,_,_,ref)->(identifier,ref)) matched==Just(solana,bare) && missing==Nothing)
         fixture fixtures (ProtectHolds solana)
         evalWrite writer (ExpireQuotes 301)
         lateSequence <- evalWrite writer (RecordNative auth late (allocationLabel lateClaim) "late-native-address-fixture")
@@ -413,9 +419,14 @@ main = do
         solCursor<-evalRead reader (ReadCheckpoint "Solana")
         let solBatch prior next deposit=W.ScanBatch "Solana" "sol-origin" prior next 110 [deposit] []
         expectStore "scan_asset_mismatch" (commit $ solBatch solCursor "wrong-asset" receipt)
-        commit (solBatch solCursor "sol-1" wrapped {W.depositEligible=False})
+        let waiting=W.ChainEvent "waiting-proof" "awaiting_verifier" "slot" (object [])
+        commit ((solBatch solCursor "sol-1" wrapped {W.depositEligible=False}) {W.scanEvents=[waiting]})
+        pending<-evalRead reader PendingVerification
+        check (pending==["waiting-proof"])
         fixture fixtures (LatestSourceState "wrapped-source") >>= check . (=="unavailable")
-        commit (solBatch (Just "sol-1") "sol-2" wrapped)
+        commit ((solBatch (Just "sol-1") "sol-2" wrapped) {W.scanEvents=[waiting {W.chainEventKind="incoming"}]})
+        cleared<-evalRead reader PendingVerification
+        check (null cleared)
         fixture fixtures (LatestSourceState "wrapped-source") >>= check . (=="restored")
         case W.depositOrder wrapped of
           Just order->do view<-evalRead reader (ReadOrder auth order); check (W.status view=="NeedsReview")
