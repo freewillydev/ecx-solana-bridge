@@ -234,8 +234,8 @@ The comparison includes cancellation, expiry/retry, replacement/winner and sourc
 recovery records. Two older archives also contain three completed historical payments without full
 saved order cost policies. Such records retain their immutable history but cannot
 be read as executable payment terms. The migration contract now distinguishes this
-settled archival case from unfinished work; it never fills in missing limits. The original
-ledgers were untouched. The in-flight copy also passed real-node reconciliation
+settled archival case from unfinished work; it never fills in missing limits. Those copy tests left their source
+ledgers untouched. The in-flight copy also passed real-node reconciliation
 through the critical evaluator: its signed native transaction remained unseen and
 pending, exact bytes/ledger history stayed unchanged, and repeated reconciliation
 was idempotent. No signer or broadcast was enabled. This proves retained-work recovery,
@@ -252,9 +252,18 @@ intents resolved, and exactly one settled winner has recorded evidence. Reading
 these as executable payment work still fails. Reopening one copied obligation to
 review was tested and correctly rejected migration. Real native/Solana scans and
 custody balance checks passed with no signer, preparation, broadcast or resume.
-The original database and consistent private dump are untouched; actual deployment
-adoption/retirement is still separate. Any future refund/recovery needing missing
-historical terms requires explicit policy treatment; this check does not invent it.
+Following that check, the original test database was migrated from schema 18 to
+21 and adopted under a new host fence at sequence 82. Before enabling execution,
+24 Opaleye-derived financial/history digests matched across migration; the original
+native wallet, custody key, configuration and consistent PostgreSQL dump were
+preserved privately. Dedicated writer/reader roles and fresh TLS/auth credentials
+were configured, and actual observation-only custody matched while paused.
+The migrated server and signer are now running a bounded test round trip: a new
+50,000-unit unwrap quotes 500 fee and 49,500 payout, and its saved Devnet deposit
+was submitted. Completion, wrap-back and native earned-fee withdrawal remain
+pending. Never restore the pre-cutover ledger over newer on-chain activity.
+Any future refund/recovery needing missing historical terms still requires explicit
+policy treatment; migration does not invent those terms.
 
 Prior root Cabal, QuickCheck, PostgreSQL, TLS and local-restic runs passed their
 recorded scopes. Protocol mutations, receipt fixtures and local-restic transport
@@ -334,7 +343,7 @@ after acceptance; keys, ledger, exact attempts and private evidence remain saved
    boundaries on the actual test networks. Finish actual Solana Pay wallet signing
    and the remaining browser cases; keep tester-client evidence distinct from wallet
    acceptance. Native refunds and restart of the broadcast refund now pass above.
-2. Complete original-deployment adoption/retirement and remaining recovery parity,
+2. Complete migrated execution, legacy application retirement and remaining recovery parity,
    then remove the superseded application and duplicate tooling. Populated migration
    and live read-only custody parity pass on a copy as described above. Retain unique checks until covered.
    Consolidate stale repository-wide architecture/operating documents around the
