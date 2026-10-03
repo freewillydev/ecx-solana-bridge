@@ -289,6 +289,8 @@ main = do
         check (paymentAmount(savedPayment historicalView)==money 93)
         fixture fixtures ReadyIntake
         let intent="convert:"<>historical
+        (readyWork,noPreparation,noAttempts)<-evalRead reader (ReadPaymentWork intent)
+        check (savedStatus readyWork==PaymentReady && noPreparation==Nothing && null noAttempts)
         prepared<-evalWrite writer (PreparePayment 100 intent (money 10) "{}")
         sequenceBefore<-evalRead reader ReadState
         replayPrepared<-evalWrite writer (PreparePayment 100 intent (money 10) "{}")
@@ -303,6 +305,8 @@ main = do
         expectStore "payment_not_prepared" (evalRead reader $ ReadSigningDecision 100 intent 0)
         evalWrite writer (SaveDraft intent 0 "{\"draft\":1}")
         savedDraft<-evalRead reader (ReadPreparation intent)
+        (activeWork,activePreparation,unsignedHistory)<-evalRead reader (ReadPaymentWork intent)
+        check (activeWork==preparedView savedDraft && activePreparation==Just savedDraft && null unsignedHistory)
         draftSequence<-evalRead reader ReadState
         evalWrite writer (SaveDraft intent 0 "{\"draft\":1}")
         replaySequence<-evalRead reader ReadState
@@ -360,6 +364,8 @@ main = do
         pure "promote-source"
       withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
         evalWrite writer (PromoteDeposit 100 promoted) >>= check . not
+        (_,restartedPreparation,restartedHistory)<-evalRead reader (ReadPaymentWork "convert:historical-promotion")
+        check (restartedPreparation/=Nothing && restartedHistory==["fixture-signed-solana"])
         persisted<-evalRead reader (ReadAttempt "fixture-signed-solana")
         check (signedBytes(recordedSigned persisted)=="exact-fixture-bytes" && recordedState persisted=="signed")
       withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do

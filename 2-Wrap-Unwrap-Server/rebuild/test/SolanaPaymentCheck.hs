@@ -1,6 +1,10 @@
 -- Captured finalized Devnet proofs and offline SDK/RPC contracts, never sends.
 module SolanaPaymentCheck (checks) where
-import Bridge.Domain (Amount, amount, units)
+import Bridge.Domain (Amount, Asset(..), amount, units, earnedFees, payment)
+import Bridge.Payment
+import Bridge.Store
+import qualified Bridge.Wire as W
+import qualified Data.ByteString.Lazy as BL
 import Bridge.Error
 import Bridge.RPC (fieldValue)
 import Bridge.Solana (tokenProgram)
@@ -41,9 +45,31 @@ checks=do
         "simulateTransaction"->pure $ context $ object ["err" .= Null]
         _->fail ("unexpected RPC: "<>T.unpack method)
       prepare p rpcCall=prepareSolanaSigned rpcCall (const $ pure reply) config p
+  workflowFixture <- readFixture "signed-payment-workflow.json"
+  workflowReply <- fieldValue "reply" workflowFixture
+  identifier <- fieldValue "paymentId" workflowFixture
+  funding <- either reject pure (earnedFees (T.drop 4 identifier) Wrapped $ amt 3)
+  outgoing <- either reject pure (payment identifier funding recipient)
+  let encoded value=TE.decodeUtf8 (BL.toStrict $ encode value)
+      boundPlan=plan {solPlanReference=payoutReference (fingerprint config) identifier}
+      boundRequest=solanaPayoutRequest config boundPlan
+      terms=W.PaymentTerms (W.PolicySnapshot 1 "finalized" $ fingerprint config)
+        (W.CostLimits (amt 1) (maxSolFee config) (maxSolAccountRent config))
+      prepared=PreparedPayment (PaymentView outgoing terms PaymentPaying) 0 (encoded boundPlan)
+        (Just $ encoded boundRequest) (amt 2110000)
+      signed=SolanaSigned boundPlan workflowReply (amt 5000) (amt 1488440)
+      verify=verifySigningReply (\_ _ _->fail "Solana validation must not call native RPC") W.L2LSignetDevnet config
   proofResults <- mapM captured ["new","existing"]
   local <- sequence
-    [ check "Solana signed SDK vector binds identity message and signature" $ once $
+    [ check "payment workflow verifies SDK bytes bound to earned funding and saved reference" $ once $ ioProperty $ do
+        attempt<-verify prepared (SolanaReply signed)
+        wrongReference<-rejects "saved_solana_policy_mismatch" $ resolveSigningPlan W.L2LSignetDevnet config
+          prepared {preparedPolicy=encoded boundPlan {solPlanReference="order-1"}}
+        wrongFee<-rejects "invalid_saved_payment" $ verify prepared (SolanaReply signed {signedSolanaFeeEstimate=amt 10001})
+        wrongSignature<-rejectsAny $ verify prepared (SolanaReply signed {signedSolanaReply=workflowReply {replyTransaction=replyTransaction reply}})
+        pure (Just (signedId attempt)==replySignature workflowReply && signedBytes attempt==replyTransaction workflowReply
+          && commonInput attempt==Nothing && wrongReference && wrongFee && wrongSignature)
+    , check "Solana signed SDK vector binds identity message and signature" $ once $
         isRight (validateHelperReply config request reply) &&
         all (isLeft . validateHelperReply config request)
           [reply {replyProtocol=2},reply {replyMemo="wrong"},reply {replySignature=Nothing},
@@ -142,3 +168,8 @@ replace :: [Key] -> Value -> Value -> Value
 replace [] replacement _=replacement
 replace (key:rest) replacement (Object fields)=Object $ KM.insert key (replace rest replacement $ maybe Null id $ KM.lookup key fields) fields
 replace _ _ value=value
+
+rejectsAny :: IO a -> IO Bool
+rejectsAny action = do
+  result <- try (action >> pure ())
+  pure $ case result of Left (BridgeError _)->True; Right _->False

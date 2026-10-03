@@ -2,7 +2,13 @@
 -- The spent fixture input is not a spendable wallet or live acceptance evidence.
 module NativePaymentCheck (checks) where
 
-import Bridge.Domain (amount, units)
+import Bridge.Domain (Asset(..),amount, units,refund,payment)
+import Bridge.Payment
+import Bridge.Store
+import qualified Bridge.Wire as W
+import qualified Bridge.SolanaHelper as H
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.Text.Encoding as TE
 import Bridge.Error
 import Bridge.Native (nativeNumber)
 import Bridge.NativePayment
@@ -68,8 +74,25 @@ checks = do
         result<-action call
         methods<-readIORef calls
         pure (result,methods)
+  funding<-either reject pure (refund "order" "receipt" Native $ planAmount plan)
+  outgoing<-either reject pure (payment "refund:order" funding $ planRecipient plan)
+  let encoded value=TE.decodeUtf8 (BL.toStrict $ encode value)
+      config=H.SolanaPolicy "unused-native-test" "workflow" "" "" "" (amt 1) (amt 0)
+      terms=W.PaymentTerms (W.PolicySnapshot (planDepth plan) "finalized" "workflow") (W.CostLimits (planFeeLimit plan) (amt 1) (amt 0))
+      prepared=PreparedPayment (PaymentView outgoing terms PaymentPaying) 0 (encoded plan) (Just $ encoded draft) (planFeeLimit plan)
+      signed=NativeSigned raw tx plan previous fee
   sequence
-    [ check "native preparation and signing retain captured template and bytes without sending" $ once $ ioProperty $ do
+    [ check "worker independently decodes returned native bytes against the durable draft" $ once $ ioProperty $ do
+        (attempt,methods)<-contract (\_ v->pure v) $ \call->verifySigningReply call L2LSignetDevnet config prepared (NativeReply signed)
+        (refused,_)<-contract (\method value->pure $ if method=="decoderawtransaction" then changedVersion value else value) $ \call->
+          rejects "native_signed_bytes_mismatch" (verifySigningReply call L2LSignetDevnet config prepared $ NativeReply signed)
+        pure (signedBytes attempt==raw && signedId attempt==nativeTxid tx && methods==["decoderawtransaction"] && refused)
+    , check "signing boundary rejects mismatched profile reserved fee and returned fee" $ once $ ioProperty $ do
+        wrongProfile<-rejects "saved_native_policy_mismatch" (resolveSigningPlan ECXBetanetDevnet config prepared)
+        wrongFee<-rejects "saved_native_policy_mismatch" (resolveSigningPlan L2LSignetDevnet config prepared {preparedFee=amt 1})
+        wrongTemplate<-rejects "native_signed_template_changed" $ verifySigningReply (\_ _ _->fail "unexpected RPC") L2LSignetDevnet config prepared (NativeReply signed {signedNativeFee=amt 1})
+        pure (wrongProfile && wrongFee && wrongTemplate)
+    , check "native preparation and signing retain captured template and bytes without sending" $ once $ ioProperty $ do
         (signed,methods)<-contract (\_ v->pure v) $ \call->do
           funded<-fundNativeDraft call plan
           signNativeDraft call plan funded

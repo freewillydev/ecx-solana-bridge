@@ -49,9 +49,9 @@ library workflow
   import: settings
   visibility: private
   hs-source-dirs: workflow
-  exposed-modules: Bridge.Observer
+  exposed-modules: Bridge.Observer, Bridge.Payment
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:store,
-    ecx-bridge-rebuild:chain, text, time, http-client
+    ecx-bridge-rebuild:chain, aeson, bytestring, text, time, http-client
 
 test-suite rebuild-test
   import: settings
@@ -60,7 +60,7 @@ test-suite rebuild-test
   main-is: Main.hs
   other-modules: ChainCheck, NativePaymentCheck, SolanaPaymentCheck, ObservationCheck, Paths_ecx_bridge_rebuild
   autogen-modules: Paths_ecx_bridge_rebuild
-  build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:customer-api, ecx-bridge-rebuild:chain, servant, aeson, text, containers,
+  build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:customer-api, ecx-bridge-rebuild:chain, ecx-bridge-rebuild:store, ecx-bridge-rebuild:workflow, servant, aeson, text, containers,
     QuickCheck >=2.15 && <2.19, bytestring, scientific, http-client, base64-bytestring
 
 -- Explicitly invoked against a disposable migrated database, never live custody.

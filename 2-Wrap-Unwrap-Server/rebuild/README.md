@@ -415,3 +415,29 @@ dedicated signer and durable payment execution remains unfinished. Native source
 restoration approval binding, operator loss-cover authorization,
 live observer integration, broader recovery and SDK build integration also remain.
 Passing these checks is not end-to-end payment, migration or real-chain acceptance.
+
+The shared payment workflow now prepares native or wrapped payouts from the same
+explicit funding view, persists an unsigned plan/draft, and validates signer replies.
+It has no signer transport or broadcast function. Both signer and worker can use
+one saved-plan validator; native replies are decoded independently through the node
+and checked against the saved draft, while Solana replies undergo local message and
+Ed25519 validation against the payment-derived reference. Saved cost terms remain
+authoritative, including for earned withdrawals. Signed history prevents another
+initial preparation; recovery must handle retries explicitly.
+
+This checkpoint adds one 124-line production Payment module, compared with the
+baseline's one 153-line Payment module, plus 19 lines in the existing Store module
+for a closed, snapshot-consistent payment-work read. This is a partial replacement,
+not a completed 29-line reduction: signer invocation, recorded-attempt replay and
+runtime dispatch remain to be connected. The clearer boundary is the improvement:
+unsigned preparation, reply verification and durable attempt storage have distinct
+responsibilities, shared across customer and earned funding. The baseline remains
+until equivalent integrated behavior is accepted.
+
+QuickCheck checks the native returned-byte mismatch and saved-policy refusal,
+and a deterministic actual-SDK Solana signature tied to earned funding, including
+reference, cost and signature mismatch refusal. The vector uses a public test seed,
+never sends funds and is not Devnet acceptance. PostgreSQL contracts check the
+payment-work snapshot before preparation, after draft persistence and after restart
+with signed history. Complete unsigned-workflow execution against the database,
+critical/signing dispatch and funded end-to-end execution remain integration work.

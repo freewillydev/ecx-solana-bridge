@@ -71,6 +71,7 @@ data AllocationClaim = AllocationClaim { allocationLabel :: Text, mayAllocate ::
 data StoreRead a where
   ReadState :: StoreRead LedgerState
   ReadBalances :: StoreRead (M.Map (Asset,Account) Integer)
+  ReadPaymentWork :: Text -> StoreRead (PaymentView,Maybe PreparedPayment,[Text])
   ReadSigningDecision :: Int64 -> Text -> Int -> StoreRead PreparedPayment
   ReadAttempt :: Text -> StoreRead RecordedAttempt
   ReadPreparation :: Text -> StoreRead PreparedPayment
@@ -141,6 +142,7 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
     row <- metadata c identity
     case operation of
       ReadState -> pure (LedgerState (S.criticalSequence row) (S.backupSequence row) (S.paused row/=0) (S.pauseReason row))
+      ReadPaymentWork identifier -> paymentWork c identity identifier
       ReadSigningDecision now identifier generation -> signingDecision c identity remote now identifier generation
       ReadAttempt identifier -> readAttempt c identifier
       ReadPreparation identifier -> readPreparation c identity identifier
@@ -1343,3 +1345,20 @@ recordAttempt c identity expected signed = do
         pure ()
       readAttempt c (signedId signed)
     _ -> reject "duplicate_attempt"
+
+paymentWork :: PG.Connection -> Text -> Text -> IO (PaymentView,Maybe PreparedPayment,[Text])
+paymentWork c identity identifier = do
+  view <- readPayment c identity identifier
+  active <- O.runSelect c $ do
+    row <- O.selectTable S.intents
+    O.where_ (S.intentId row O..== O.sqlStrictText identifier O..&& S.intentResolved row O..== O.sqlInt8 0)
+    pure (S.intentId row)
+    :: IO [Text]
+  prepared <- case active of []->pure Nothing; [_]->Just <$> readPreparation c identity identifier; _->reject "duplicate_payment_intent"
+  attempts <- O.runSelect c $ O.limit 1001 $ O.orderBy (O.asc id) $ do
+    row <- O.selectTable S.attempts
+    O.where_ (S.attemptIntent row O..== O.sqlStrictText identifier)
+    pure (S.attemptId row)
+    :: IO [Text]
+  require (length attempts<=1000) "payment_history_too_large"
+  pure (view,prepared,attempts)
