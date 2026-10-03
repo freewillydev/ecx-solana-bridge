@@ -7,18 +7,32 @@ disposable PostgreSQL database, never either custody database. Existing state
 must remain untouched until migration and real-chain acceptance pass.
 
 The isolated deployment `rebuild-live-20261003` uses a fresh native wallet, Solana
-key and persistent ledger. Both processes started, and restart preserved the ledger
-at sequence 3 with intake paused. Actual receipts allocated through the operator
+key and persistent ledger. Actual receipts allocated through the operator
 DSL: 1,500 native operating units, 25,000 wrapped inventory units and 100,000,000
-lamports. An additional 10,000 native inventory units were submitted in transaction
+lamports, plus 10,000 confirmed native inventory units in transaction
 `0e13f399038fab8415a602bae841ae0c75f710678fe3d781e3897dc624747ff5`;
-confirmation and allocation remain pending. Customer wrap/unwrap is not yet accepted.
+allocation advanced the critical sequence to 4.
 The node's worker allowlist must include read-only `decodescript` for admission,
 while signing/key methods remain forbidden. The operator socket needs a short
 private fence directory (macOS rejected the original 113-byte socket path).
 Keys, funding attempts, private configuration and the persistent ledger are retained
 outside Git; stopping test processes must not remove them. OS-user isolation,
 off-host backup and manual wallet signing remain separate acceptance gates.
+
+At source `c17e52d`, a dedicated Haskell tester used the SDK's validated unsigned
+token-transfer template with the order's readonly Solana Pay reference, signed with
+its own key, simulated, and saved exact bytes before submitting 10,000 wrapped units:
+`34xGfjKRoLb6MsWkgYtTCByoZpVSBWFmStZYkToHBPQTL6UdrXwna9QQPv7sS2zap3kMncJoNcFAmx9kVDaG7KP6`.
+The bridge accepted the deposit and its dedicated signer authorized the 9,900-unit
+native payout `c816a2f9f3eda53ab93cbf8687a9b5286cad69133b34d3b5ad774f56c6de2c1f`.
+The native node reports a separate 208-unit network fee. The order remains `Paying`
+while that payout awaits confirmation; final settlement is not yet accepted.
+Saved-order reload and identical create replay return the same order; a wrong
+capability is refused. Restart starts paused at sequence 9, preserves the order,
+and leaves exactly one native outgoing transaction. This proves neither arbitrary
+crash recovery nor real-wallet UX. Both directions, refunds, fee withdrawal and
+confirmed settlement still need funded acceptance. No production code, dependency
+or service was added for this exercise; the tester and private evidence stay outside Git.
 
 The required product remains connection-free native/wrapped conversion at 1% both
 ways, refunds, earned-fee withdrawal, durable recovery, the four customer routes,
