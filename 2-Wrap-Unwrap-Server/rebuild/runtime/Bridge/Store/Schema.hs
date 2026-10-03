@@ -187,9 +187,11 @@ winnerHistory = O.selectTable $ O.table "native_winner_changes" $ p2
 treasuryAllocations :: O.Table (TextField,TextField,TextField,IntField) (TextField,TextField,TextField,IntField)
 treasuryAllocations = O.table "treasury_allocations" $ p4
   (O.requiredTableField "deposit_id",O.requiredTableField "allocation_json",O.requiredTableField "proof_json",O.requiredTableField "critical_sequence")
+treasurySpends :: O.Table (TextField,TextField,TextField,TextField,TextField,IntField) (TextField,TextField,TextField,TextField,TextField,IntField)
+treasurySpends = O.table "treasury_spends" $ p6
+  (O.requiredTableField "chain",O.requiredTableField "event_id",O.requiredTableField "anchor",O.requiredTableField "economic_json",O.requiredTableField "proof_json",O.requiredTableField "critical_sequence")
 treasurySpendEffects :: O.Select (TextField,TextField,TextField,TextField)
-treasurySpendEffects = O.selectTable $ O.table "treasury_spends" $ p4
-  (O.requiredTableField "chain",O.requiredTableField "event_id",O.requiredTableField "anchor",O.requiredTableField "economic_json")
+treasurySpendEffects = fmap (\(chain,key,anchor,economic,_,_)->(chain,key,anchor,economic)) (O.selectTable treasurySpends)
 scanOrigins :: O.Table (TextField,TextField) (TextField,TextField)
 scanOrigins = O.table "scan_origins" $ p2 (O.requiredTableField "chain",O.requiredTableField "anchor")
 

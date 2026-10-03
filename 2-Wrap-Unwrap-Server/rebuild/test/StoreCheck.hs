@@ -794,6 +794,7 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  ChangeTreasuryAnchor :: T.Text -> T.Text -> Fixture ()
   SeedTreasuryEvidence :: T.Text -> T.Text -> T.Text -> T.Text -> Int64 -> Value -> Fixture ()
   LockRestoreAudits :: Fixture [T.Text]
   OrderWorkflowFunds :: Fixture ()
@@ -1012,6 +1013,9 @@ fixture c (HistoricalHolds oid) = PG.withTransaction c $ do
   void $ O.runInsert c O.Insert {O.iTable=S.operatingReservations,
     O.iRows=[(text oid,text kind,text asset,num n,text "quote") | (kind,asset,n)<-[("conversion","Sol",20),("refund","Native",10)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
 
+fixture c (ChangeTreasuryAnchor chain key) = void $ O.runUpdate c O.Update {O.uTable=S.chainEvents,
+  O.uUpdateWith= \row->row {S.eventAnchor=O.sqlStrictText "changed-anchor",S.eventReview=O.sqlInt8 1},
+  O.uWhere= \row->S.eventChain row O..== O.sqlStrictText chain O..&& S.eventId row O..== O.sqlStrictText key,O.uReturning=O.rCount}
 fixture c (SeedTreasuryEvidence chain key anchor kind review proof) = PG.withTransaction c $ do
   let text=O.sqlStrictText; num=O.sqlInt8
       raw=TE.decodeUtf8 $ BL.toStrict $ encode $ object ["chain" .= chain,"id" .= key,"anchor" .= anchor,"kind" .= kind,"proof" .= proof]
@@ -1284,6 +1288,7 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       ledgerBefore<-evalRead reader ReadState
       check (W.paused service==ledgerPaused ledgerBefore)
       expectStore "observation_only" (operatorControl $ Op.operator Op.ResumeService)
+      expectStore "observation_only" (operatorControl $ Op.operator $ Op.ClassifySpend "Native" "missing" "owned")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.AllocateReceipt "missing" [("float",money 1)] "owned")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.WithdrawFees (T.replicate 64 "a") Native (money 1) "recipient" "test")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.CancelFeeWithdrawal "missing" "test")
@@ -1452,6 +1457,8 @@ serverMain = do
                 object ["operation" .= ("cancel-fees"::T.Text),"id" .= ("missing"::T.Text),"reason" .= ("test"::T.Text)]] $ \command->do
                   result<-control command
                   check (result==object ["error" .= ("observation_only"::T.Text)])
+              spendRefused<-control (object ["operation" .= ("classify-spend"::T.Text),"chain" .= ("Native"::T.Text),"transaction" .= ("missing"::T.Text),"reason" .= ("owned"::T.Text)])
+              check (spendRefused==object ["error" .= ("observation_only"::T.Text)])
               allocationRefused<-control (object ["operation" .= ("allocate-treasury"::T.Text),"deposit" .= ("missing"::T.Text),"split" .= [("float"::T.Text,money 1)],"reason" .= ("owned"::T.Text)])
               check (allocationRefused==object ["error" .= ("observation_only"::T.Text)])
               refundRefused<-control (object ["operation" .= ("refund"::T.Text),"deposit" .= ("missing"::T.Text)])
@@ -1809,3 +1816,45 @@ treasuryContract fixtures reader writer=do
   expectStore "receipt_not_available_for_treasury" (allocate "native:shallow:0" [("float",money 10)] "owned")
   ready
   expectStore "receipt_not_available_for_treasury" (allocate "expiry-source" [("float",money 10)] "not mine")
+
+  let classify chain key reason=evalWrite writer (ClassifyTreasurySpend chain key reason)
+      outgoing chain key value=fixture fixtures (SeedTreasuryEvidence chain key "spend-anchor" "outgoing" 1 value)
+      tokenDelta n=object ["delta" .= T.pack(show (negate n::Integer))]
+  outgoing "Native" "treasury-native-out" (object ["walletNetUnits" .= ("-5"::T.Text),"feeUnits" .= money 1])
+  fixture fixtures ReadyIntake
+  expectStore "treasury_spend_requires_pause" (classify "Native" "treasury-native-out" "owned spend")
+  ready
+  nativeBefore<-evalRead reader ReadBalances
+  spent<-classify "Native" "treasury-native-out" "owned spend"
+  nativeAfter<-evalRead reader ReadBalances
+  check (nativeAfter==M.unionWith (+) nativeBefore (M.fromList [((Native,Float),-5),((Native,Operating),-1),((Native,External),6)]))
+  fixture fixtures (ReadEventReview "Native" "treasury-native-out") >>= check . (==0)
+  revision<-evalRead reader ReadCustodyRevision
+  again<-classify "Native" "treasury-native-out" "owned spend"
+  check (again==spent)
+  evalRead reader ReadCustodyRevision >>= check . (==revision)
+  evalRead reader ReadBalances >>= check . (==nativeAfter)
+  expectStore "treasury_spend_conflict" (classify "Native" "treasury-native-out" "different ownership")
+  fixture fixtures (ChangeTreasuryAnchor "Native" "treasury-native-out")
+  expectStore "treasury_spend_conflict" (classify "Native" "treasury-native-out" "owned spend")
+  fixture fixtures (ReadEventReview "Native" "treasury-native-out") >>= check . (==1)
+  forM_ [("Solana",Wrapped,Float,tokenDelta 3,3),
+         ("SolanaOperating",Sol,Operating,object ["delta" .= ("-4"::T.Text),"feeUnits" .= money 1],4)] $ \(chain,asset,account,value,n)->do
+    let key="treasury-out-"<>chain
+    outgoing chain key value
+    beforeSpend<-evalRead reader ReadBalances
+    void $ classify chain key "owned spend"
+    afterSpend<-evalRead reader ReadBalances
+    check (afterSpend==M.unionWith (+) beforeSpend (M.fromList [((asset,account),-n),((asset,External),n)]))
+  outgoing "Solana" "expiry-signed-0" (tokenDelta 3)
+  expectStore "customer_attempt_cannot_be_treasury_spend" (classify "Solana" "expiry-signed-0" "not operator work")
+  outgoing "Solana" "earned-expiry-signature" (tokenDelta 3)
+  expectStore "customer_attempt_cannot_be_treasury_spend" (classify "Solana" "earned-expiry-signature" "not an external spend")
+  expectStore "treasury_spend_not_observed" (classify "Native" "unseen-spend" "owned")
+  protected<-evalRead reader ReadBalances
+  -- The existing expiry contract retains customer inventory and fee holds.
+  outgoing "Solana" "protected-float" (tokenDelta $ M.findWithDefault 0 (Wrapped,Float) protected)
+  expectStore "treasury_spend_exceeds_free_allocation" (classify "Solana" "protected-float" "cannot consume customer holds")
+  outgoing "SolanaOperating" "protected-operating" (object ["delta" .= T.pack(show $ negate $ M.findWithDefault 0 (Sol,Operating) protected),"feeUnits" .= money 1])
+  expectStore "treasury_spend_exceeds_free_allocation" (classify "SolanaOperating" "protected-operating" "cannot consume fee holds")
+  evalRead reader ReadBalances >>= check . (==protected)

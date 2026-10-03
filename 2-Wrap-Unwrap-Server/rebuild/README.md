@@ -717,6 +717,45 @@ runtime lines; **no new production file or refund-specific payout engine**.
 This checkpoint increases source size to complete required behavior; it is not
 presented as a reduction or a claim of perfect security.
 
+## Observed treasury spending
+
+The private operator command is:
+
+```json
+{"operation":"classify-spend","chain":"Native","transaction":"<observed transaction>","reason":"I attest this was an operator treasury spend"}
+```
+
+Supported streams are `Native`, `Solana` (wrapped tokens) and `SolanaOperating`
+(SOL). It returns the recorded critical sequence. It never signs or submits a
+transaction. While paused, an operator may classify a scanner-recorded outgoing
+effect with immutable ownership attestation. Amounts/fees come exclusively from
+saved chain evidence. Any recorded bridge attempt, including earned withdrawals
+and expired signatures, is excluded. Native principal outflow consumes free float
+and its network fee consumes operating allocation; token outflow consumes free
+float, and SOL outflow consumes operating allocation. Customer inventory holds
+and both order/payment fee holds remain protected. Principal, backing, LP and
+unallocated receipts are not sources of spendable capital.
+
+The balanced journal, immutable approval and sequence commit atomically. Only the
+matching event's review flag is cleared; no global review reset or automatic
+resume occurs. Exact replay makes no additional posting and preserves custody
+revision. A changed anchor, economic effect or attestation conflicts, retaining
+review. Unlike new funding allocation, this operation cannot require a successful
+prior custody reconciliation: the unexplained outgoing effect is what must first
+be booked. Reconciliation and explicit resume still follow it.
+
+The function is **60 lines versus 57** in retained `Postgres/Treasury.hs`, with
+shared typed evidence and balance helpers excluded on both sides. This is a small
+increase, not a reduction; it adds an affected-row check and uses the rebuild's
+closed operation boundary. There are **zero new files or migrations**. PostgreSQL
+contracts verify native/token/SOL postings, pause, replay/revision stability,
+changed-anchor/ownership rejection, missing evidence, customer/earned-attempt
+exclusion and protection of active inventory/operating reservations. Cabal build,
+QuickCheck and executable operator checks pass. Real-chain operator spending and
+custody reconciliation remain acceptance work. The executable smoke test passed
+on rerun after one startup timeout with no server error output; its cause has not
+been established, so that first-run startup behavior remains an acceptance concern.
+
 ## Verified treasury allocation
 
 The private operator DSL accepts:
@@ -749,8 +788,8 @@ Disposable PostgreSQL contracts exercise all three assets, protected accounts,
 exact replay, conflict, pause/freshness, amount mismatch, failed SOL, mismatched
 anchors, reviewed evidence, shallow/ineligible receipts and customer-fund refusal.
 Cabal/QuickCheck and actual operator transport checks pass. These fixtures do not
-prove funded-chain acceptance. Observed treasury-spend classification remains to
-be ported before claiming complete treasury parity.
+prove funded-chain acceptance. Observed treasury-spend classification is implemented below the same closed
+operator boundary; real-chain treasury acceptance remains outstanding.
 
 ## Earned-fee operator integration
 
@@ -783,7 +822,7 @@ closed operator constructors retain the single authorized critical dispatch.
 Cabal build/QuickCheck, disposable PostgreSQL replay/conflict/cancellation contracts
 and executable operator transport checks pass. Captured/offline preview tests are
 not proof of a funded withdrawal; live two-process withdrawal acceptance remains.
-Observed operator-spend classification still needs porting.
+Observed operator-spend classification is now implemented; live treasury acceptance remains outstanding.
 
 ## Private operator checkpoint
 
@@ -842,7 +881,7 @@ Scoped physical-line comparisons (not whole-product reduction claims):
 | Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
 | Signer module | 144 / 1 file | 117 / 1 file | Now includes startup key validation and shared file permissions; replacement parity pending |
 | Signer transport | 103 / 1 file plus shared web boundary | 69 / 1 file + shared 71-line Web module | Shared module also serves customer API; initial signer route only |
-| Customer/worker runtime | Part of broader Runtime | 412 / 1 file (previous checkpoint 409) | Adds verified treasury allocation; single critical dispatch retained |
+| Customer/worker runtime | Part of broader Runtime | 413 / 1 file (previous checkpoint 412) | Adds observed treasury-spend classification; single critical dispatch retained |
 | Focused source validation | 63-line mixed validation/storage/recovery function | 67-line dedicated module | Covered-source recovery is still separate unfinished work |
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |

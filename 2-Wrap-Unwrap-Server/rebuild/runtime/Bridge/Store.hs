@@ -111,6 +111,7 @@ data StoreRead a where
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
+  ClassifyTreasurySpend :: Text -> Text -> Text -> StoreWrite Int64
   AllocateTreasury :: Int64 -> Text -> [(Text,Amount)] -> Text -> StoreWrite Int64
   RecordSolanaExpiry :: RecordedAttempt -> Text -> StoreWrite ()
   ApproveSolanaRetry :: Int64 -> RecordedAttempt -> Text -> Text -> StoreWrite ()
@@ -333,6 +334,7 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
     _ <- O.runInsert c O.Insert {O.iTable=S.audit,
       O.iRows=[(Nothing,O.sqlStrictText "pause",O.sqlStrictText explanation)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
     pure ()
+  ClassifyTreasurySpend chain key reason -> classifyTreasurySpend c policy chain key reason
   AllocateTreasury now receipt split reason -> allocateTreasury c policy now receipt split reason
   ReserveFees now key currency n destination explanation -> do
     validReason explanation
@@ -2339,3 +2341,65 @@ allocateTreasury c policy now receipt split reason = do
       pure sequenceNo
     _->reject "duplicate_treasury_allocation"
  where field key value=either (const $ reject "invalid_treasury_evidence") pure (parseEither (withObject "treasury evidence" (.: key)) value)
+
+-- Book an observed outflow once; never create signing or broadcast authority.
+classifyTreasurySpend :: PG.Connection -> PaymentTerms -> Text -> Text -> Text -> IO Int64
+classifyTreasurySpend c policy chain key reason = do
+  validReason reason
+  let text=O.sqlStrictText; num=O.sqlInt8
+  state<-metadata c (deploymentFingerprint $ paymentPolicy policy)
+  require (S.paused state==1) "treasury_spend_requires_pause"
+  rows<-O.runSelect c $ do
+    event<-O.selectTable S.chainEvents
+    (hash,stream,identifier,proof)<-O.selectTable S.observationEvidence
+    O.where_ (S.eventChain event O..== text chain O..&& S.eventId event O..== text key
+      O..&& S.eventKind event O..== text "outgoing" O..&& S.eventHash event O..== hash
+      O..&& stream O..== text chain O..&& identifier O..== text key)
+    pure (S.eventAnchor event,proof)
+    :: IO [(Text,Text)]
+  (anchor,raw)<-case rows of [row]->pure row; _->reject "treasury_spend_not_observed"
+  observation<-decodeSaved raw
+  proof<-field "proof" observation
+  economic@(currency,outflow,fee)<-checked (W.economicOutflow chain proof)
+  attempts<-O.runSelect c $ do
+    (tx,_,_,_,_,_)<-S.workAttempts
+    O.where_ (tx O..== text key)
+    pure tx
+    :: IO [Text]
+  require (null attempts) "customer_attempt_cannot_be_treasury_spend"
+  old<-O.runSelect c $ do
+    (stream,identifier,savedAnchor,effects,evidence,sequenceNo)<-O.selectTable S.treasurySpends
+    O.where_ (stream O..== text chain O..&& identifier O..== text key)
+    pure (savedAnchor,effects,evidence,sequenceNo)
+    :: IO [(Text,Text,Text,Int64)]
+  sequenceNo<-case old of
+    [(savedAnchor,effects,evidence,n)]->do
+      attestation<-decodeSaved evidence >>= field "ownershipAttestation"
+      require (savedAnchor==anchor && effects==encodeSaved economic && attestation==reason) "treasury_spend_conflict"
+      pure n
+    []->do
+      let total=toInteger(units outflow); charge=toInteger(units fee)
+          costs=case currency of Native->[(Float,total-charge),(Operating,charge)]; Wrapped->[(Float,total)]; Sol->[(Operating,total)]
+      booked<-balances c
+      inventory<-O.runSelect c $ do
+        (_,asset,n,phase)<-O.selectTable S.reservations
+        O.where_ (asset O..== text(T.pack $ show currency) O..&& phase O../= text "released")
+        pure n
+        :: IO [Int64]
+      operating<-operatingHolds c currency
+      forM_ costs $ \(account,cost)->do
+        let held=if account==Float then sum(map toInteger inventory) else operating
+        require (cost>=0 && M.findWithDefault 0 (currency,account) booked-held>=cost) "treasury_spend_exceeds_free_allocation"
+      n<-nextSequence c
+      post c ("treasury-spend:"<>chain<>":"<>key) "verified operator spend and network costs"
+        ([Posting currency account (-cost) | (account,cost)<-costs]<>[Posting currency External total])
+      let evidence=encodeSaved $ object ["ownershipAttestation" .= reason,"observation" .= observation]
+      count<-O.runInsert c O.Insert {O.iTable=S.treasurySpends,O.iRows=[(text chain,text key,text anchor,text $ encodeSaved economic,text evidence,num n)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      require (count==1) "treasury_spend_changed"
+      pure n
+    _->reject "duplicate_treasury_spend"
+  -- Avoid changing custody revision on exact replay; clear only this event.
+  _<-O.runUpdate c O.Update {O.uTable=S.chainEvents,O.uUpdateWith= \row->row {S.eventReview=num 0},
+    O.uWhere= \row->S.eventChain row O..== text chain O..&& S.eventId row O..== text key O..&& S.eventReview row O../= num 0,O.uReturning=O.rCount}
+  pure sequenceNo
+ where field name value=either (const $ reject "invalid_treasury_evidence") pure (parseEither (withObject "treasury evidence" (.: name)) value)
