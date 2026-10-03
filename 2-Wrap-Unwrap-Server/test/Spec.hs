@@ -1228,6 +1228,15 @@ main=hspec $ do
       verifiedOwner <$> Pay.verifyPay expected proof `shouldBe` Right owner
       Pay.verifyPay expected{Pay.payOrderReference="11111111111111111111111111111111"} proof `shouldSatisfy` either (const True) (const False)
       Pay.verifyPay expected (setPath ["transaction","message","header","numReadonlyUnsignedAccounts"] (Number 0) proof) `shouldSatisfy` either (const True) (const False)
+    it "requires a unique historical token balance with the exact owner, mint and precision" $
+      property $ forAll (chooseInteger (0,toInteger (maxBound::Int64))) $ \n->
+        let entry=object ["accountIndex" .= (2::Int),"mint" .= ("expected-mint"::Text),"owner" .= ("expected-owner"::Text)
+              ,"uiTokenAmount" .= object ["decimals" .= (8::Int),"amount" .= T.pack(show n)]]
+            parse rows=parseEither (historicalTokenBalance "expected-mint" 2 "expected-owner") rows
+            wrong=map (\(path,value)->[setPath path value entry])
+              [(["owner"],String "other-owner"),(["mint"],String "other-mint")
+              ,(["uiTokenAmount","decimals"],Number 9),(["uiTokenAmount","amount"],String "-1")]
+        in conjoin [parse [entry]===Right n,property $ all (either (const True) (const False) . parse) ([]:[entry,entry]:wrong)]
     it "validates the captured real Devnet order deposit without current account lookups" $ do
       captured<-BS.readFile "test/fixtures/solana-devnet-order-deposit.json" >>= either fail pure . eitherDecodeStrict'
       binding<-fieldValue "binding" captured
@@ -1251,6 +1260,11 @@ main=hspec $ do
     it "resolves a version-zero custody address loaded from historical metadata" $ do
       (binding,proof)<-depositFixture
       versioned<-versionZeroFixture (boundCustody binding) proof
+      keys<-either (fail . T.unpack) pure (Pay.transactionKeys versioned)
+      last keys `shouldBe` boundCustody binding
+      forM_ [[],keys<>take 1 keys,[T.replicate 45 "1"]] $ \invalid->
+        Pay.transactionKeys (setPath ["transaction","message","accountKeys"] (toJSON invalid) proof)
+          `shouldBe` Left "invalid_pay_accounts"
       verifiedAmount <$> verifyDeposit binding versioned `shouldBe` Right (amt 3)
       effectDelta <$> custodyEffect (boundSignature binding) (boundMint binding) (boundCustody binding) (boundCustodyOwner binding) versioned `shouldBe` Right 3
     it "rejects copied memos, wrong historical owners and wrong custody" $ do

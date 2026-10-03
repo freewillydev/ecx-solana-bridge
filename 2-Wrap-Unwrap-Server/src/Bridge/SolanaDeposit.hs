@@ -2,7 +2,7 @@
 -- An unclassified result must remain a liability and must not authorize a payout.
 module Bridge.SolanaDeposit
   ( DepositBinding(..), SolanaDeposit(..), verifyDeposit
-  , CustodyEffect(..), custodyEffect, LamportEffect(..), lamportEffect, transactionMemo
+  , CustodyEffect(..), custodyEffect, LamportEffect(..), lamportEffect, transactionMemo, transactionAccounts, historicalTokenBalance
   ) where
 
 import Bridge.Config (tokenProgram)
@@ -166,12 +166,8 @@ verify DepositBinding{..} value = do
   required <- get "numRequiredSignatures" header :: Parser Int
   keys <- get "accountKeys" message :: Parser [Text]
   ensure (required==1 && take 1 keys==[boundOwner]) "bound owner must be the payer and sole signer"
-  loaded <- optional "loadedAddresses" meta
-  writable <- maybe (pure []) (get "writable") loaded
-  readonly <- maybe (pure []) (get "readonly") loaded
-  let accounts=keys<>writable<>readonly
-      account i = if i>=0 && i<length accounts then pure (accounts!!i) else fail "bad account index"
-  ensure (length accounts<=256) "too many accounts"
+  accounts <- transactionAccounts message meta
+  let account i = if i>=0 && i<length accounts then pure (accounts!!i) else fail "bad account index"
   instructions <- get "instructions" message :: Parser [Value]
   ensure (length instructions>=2 && length instructions<=4) "unsupported instructions"
   decoded <- mapM (\v -> do
@@ -209,19 +205,19 @@ verify DepositBinding{..} value = do
   ensure (custodyAfter-custodyBefore==toInteger (units rawAmount) && sourceBefore-sourceAfter==toInteger (units rawAmount)) "inconsistent historical token balances"
   pure $ SolanaDeposit boundSignature slot source boundOwner boundMint boundCustody rawAmount boundMemo
  where
-  balance :: Int -> Text -> [Value] -> Parser Integer
-  balance idx owner entries = do
-    indexes <- mapM (get "accountIndex") entries :: Parser [Int]
-    let matches=[entry | (index,entry)<-zip indexes entries,index==idx]
-    case matches of
-      [v] -> do
-        actualOwner<-get "owner" v
-        actualMint<-get "mint" v
-        ensure (actualOwner==owner && actualMint==boundMint) "historical owner or mint mismatch"
-        tokenAmount<-get "uiTokenAmount" v
-        decimals<-get "decimals" tokenAmount :: Parser Int
-        ensure (decimals==8) "wrong decimals"
-        raw<-get "amount" tokenAmount
-        a<-either (fail . T.unpack) pure (parseUnits raw)
-        pure (toInteger $ units a)
-      _ -> fail "missing or duplicated historical balance"
+  balance = historicalTokenBalance boundMint
+
+-- Require one historical entry with the expected owner, mint and precision.
+historicalTokenBalance :: Text -> Int -> Text -> [Value] -> Parser Integer
+historicalTokenBalance mint index owner entries = do
+  matches <- mapM (\entry->do i <- get "accountIndex" entry; pure(i::Int,entry)) entries
+  case [entry | (i,entry)<-matches,i==index] of
+    [entry]->do
+      actualMint <- get "mint" entry; actualOwner <- get "owner" entry
+      ensure (actualMint==mint && actualOwner==owner) "wrong historical identity"
+      tokens <- get "uiTokenAmount" entry
+      decimals <- get "decimals" tokens :: Parser Int
+      ensure (decimals==8) "wrong decimals"
+      raw <- get "amount" tokens
+      toInteger . units <$> either (fail . T.unpack) pure(parseUnits raw)
+    _->fail "missing historical balance"

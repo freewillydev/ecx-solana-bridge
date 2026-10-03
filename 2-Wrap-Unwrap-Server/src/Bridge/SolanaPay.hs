@@ -3,7 +3,7 @@ module Bridge.SolanaPay
   ( PayBinding(..), payInstruction, payReference, payURIFor, transactionKeys, verifyPay ) where
 import Bridge.Config (tokenProgram)
 import Bridge.Types
-import Bridge.SolanaDeposit (SolanaDeposit(..))
+import Bridge.SolanaDeposit (SolanaDeposit(..),transactionAccounts,historicalTokenBalance)
 import Bridge.SolanaMessage (publicKey)
 import Control.Monad (unless,when)
 import Data.Aeson
@@ -45,12 +45,8 @@ ensure :: Bool -> String -> Parser ()
 ensure ok message=unless ok(fail message)
 accounts :: Value -> Value -> Parser [Text]
 accounts message meta = do
-  keys <- get "accountKeys" message
-  loaded <- optional "loadedAddresses" meta
-  writable <- maybe (pure []) (get "writable") loaded
-  readonly <- maybe (pure []) (get "readonly") loaded
-  let allKeys=keys<>writable<>readonly
-  ensure (length allKeys<=256 && length(nub allKeys)==length allKeys) "duplicate/oversized keys"
+  allKeys <- transactionAccounts message meta
+  ensure (length(nub allKeys)==length allKeys) "duplicate/oversized keys"
   mapM_ (either (fail . T.unpack) (const $ pure ()) . publicKey) allKeys
   pure allKeys
 transactionKeys :: Value -> Either Text [Text]
@@ -113,24 +109,11 @@ verify PayBinding{..} value = do
   mapM_ (\group->get "instructions" group >>= \rows->ensure (null(rows::[Value])) "unexpected CPI") (maybe [] id inner)
   pre <- get "preTokenBalances" meta
   post <- get "postTokenBalances" meta
-  beforeSource <- balance payMint sourceIndex owner pre
-  afterSource <- balance payMint sourceIndex owner post
-  beforeCustody <- balance payMint destinationIndex payCustodyOwner pre
-  afterCustody <- balance payMint destinationIndex payCustodyOwner post
+  beforeSource <- historicalTokenBalance payMint sourceIndex owner pre
+  afterSource <- historicalTokenBalance payMint sourceIndex owner post
+  beforeCustody <- historicalTokenBalance payMint destinationIndex payCustodyOwner pre
+  afterCustody <- historicalTokenBalance payMint destinationIndex payCustodyOwner post
   ensure (beforeSource-afterSource==toInteger(units n) && afterCustody-beforeCustody==toInteger(units n)) "historical balance mismatch"
   pure(SolanaDeposit paySignature slot source owner payMint payCustody n ("solana-pay:"<>payOrderReference))
  where
   forMDecoded rows budget = mapM_ (\(p,indices,_,bytes)->when (p==budget) $ ensure (null indices && (BS.take 1 bytes==BS.singleton 2 && BS.length bytes==5 || BS.take 1 bytes==BS.singleton 3 && BS.length bytes==9)) "unsupported budget") rows
-balance :: Text -> Int -> Text -> [Value] -> Parser Integer
-balance mint index owner entries = do
-  matches <- mapM (\entry->do i <- get "accountIndex" entry; pure(i::Int,entry)) entries
-  case [entry | (i,entry)<-matches,i==index] of
-    [entry]->do
-      actualMint <- get "mint" entry; actualOwner <- get "owner" entry
-      ensure (actualMint==mint && actualOwner==owner) "wrong historical identity"
-      tokens <- get "uiTokenAmount" entry
-      decimals <- get "decimals" tokens :: Parser Int
-      ensure (decimals==8) "wrong decimals"
-      raw <- get "amount" tokens
-      toInteger . units <$> either (fail . T.unpack) pure(parseUnits raw)
-    _->fail "missing historical balance"
