@@ -314,7 +314,10 @@ Private keys/attempts/ledger remain outside Git.
    creation now uses a bounded SDK encoder and independent three-signature message
    validation; custody remains restricted to one signer. Actual Devnet preflight now
    validates fee tier, rent, balance and simulated pool/vault effects with explicit
-   cost limits. Creation sign/send, position
+   cost limits. Protected three-key signing and exact saved-byte submission created
+   Devnet pool `FDL7cuLgL3Yog4B5MJY51eLA9fWqjqm9XFX1vnwdLs9Y`; finalized
+   readback and repeated submission passed. Token/pool key-file protections now
+   share `Bridge.AdminKey`. Tick-array/position
    funding and fee management remain unimplemented.
    Retire remaining legacy Rust/Python tools after their required behavior is covered.
    Confirm canonical token authority, backing, liquidity and actual route availability.

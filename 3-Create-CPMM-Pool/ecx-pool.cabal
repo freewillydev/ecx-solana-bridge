@@ -11,9 +11,9 @@ library
   default-extensions: OverloadedStrings
   ghc-options: -Wall -Wcompat
   hs-source-dirs: .
-  exposed-modules: Pool
+  exposed-modules: Pool, Pool.Signing
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:chain,
-    aeson, binary, bytestring, text, unix, http-client, base64-bytestring
+    aeson, binary, bytestring, text, unix, http-client, base64-bytestring, crypton, ram
 
 executable ecx-pool
   default-language: GHC2021
@@ -32,4 +32,4 @@ test-suite pool-test
   main-is: Main.hs
   autogen-modules: Paths_ecx_pool
   other-modules: Paths_ecx_pool
-  build-depends: base, ecx-pool, ecx-bridge-rebuild:chain, ecx-build-assets, QuickCheck, aeson, bytestring, text, base64-bytestring
+  build-depends: base, ecx-pool, ecx-bridge-rebuild:chain, ecx-build-assets, QuickCheck, aeson, bytestring, text, base64-bytestring, crypton, ram

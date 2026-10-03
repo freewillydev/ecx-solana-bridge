@@ -1,6 +1,10 @@
 module Main (main) where
 import Pool
-import Bridge.SolanaMessage (decodeTransaction)
+import qualified Pool.Signing as S
+import qualified Crypto.PubKey.Ed25519 as Ed
+import Crypto.Error (CryptoFailable(..))
+import qualified Data.ByteArray as BA
+import Bridge.SolanaMessage (decodeTransaction,decodePoolTransaction,Transaction(..),Message(..),base58)
 import Data.Bits (xor)
 import Bridge.SDKBuild (sdkLibraryPath)
 import Paths_ecx_pool (getDataFileName)
@@ -32,8 +36,28 @@ main=do
         (2^(64::Int)) (pool expected)
   prepared<-evalSafe (Prepare sdkLibraryPath Devnet request)
   bytes<-either fail pure $ B64.decode $ TE.encodeUtf8 $ unsignedTransaction prepared
+  secrets<-mapM (\n->case Ed.secretKey (B.replicate 32 n) of CryptoPassed key->pure key; _->fail "test key") [1,2,3]
+  let publics=map (base58 . BA.convert . Ed.toPublic) secrets
+  signingRequest<-case publics of
+    [owner,a,b]->pure request {payer=owner,createVaultA=a,createVaultB=b}
+    _->fail "test keys"
+  signingPrepared<-evalSafe (Prepare sdkLibraryPath Devnet signingRequest)
+  Transaction _ (Message _ _ _ signingKeys _ _) message<-either (fail . show) pure $ decodePoolTransaction(unsignedTransaction signingPrepared)
+  signatures<-mapM (\key->case lookup (base58 key) (zip publics secrets) of
+    Just secret->pure (BA.convert (Ed.sign secret (Ed.toPublic secret) message) :: B.ByteString)
+    Nothing->fail "test signer") (take 3 signingKeys)
+  first<-case signatures of sig:_->pure sig; _->fail "test signature"
+  let signedBytes=B.singleton 3<>B.concat signatures<>message
+      saved=S.Saved Devnet signingRequest signingPrepared 20000 20000000 (base58 first) (TE.decodeUtf8 $ B64.encode signedBytes)
   results<-sequence
     [ quickCheckResult $ once $ property $
+        not(isLeft $ S.validateSaved saved)
+        && (eitherDecode (encode saved) :: Either String S.Saved)==Right saved
+        && isLeft(S.validateSaved saved {S.identifier=payer signingRequest})
+        && isLeft(S.validateSaved saved {S.network=Mainnet})
+        && all (\index->isLeft $ S.validateSaved saved {S.transaction=TE.decodeUtf8 $ B64.encode $
+             B.take index signedBytes<>B.singleton((B.index signedBytes index) `xor` 1)<>B.drop (index+1) signedBytes}) [1..192]
+    , quickCheckResult $ once $ property $
         let check r p rate=validateCreated Devnet r p rate creationSnapshot
         in not(isLeft(check creation creationPrepared 10000))
           && isLeft(check creation {initialPrice=initialPrice creation+1} creationPrepared 10000)

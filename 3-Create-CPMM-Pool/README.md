@@ -2,13 +2,14 @@
 
 Liquidity uses separate operator capital and keys, outside bridge custody. The
 root-Cabal `ecx-pool` CLI derives canonical addresses and verifies existing
-full-range pools and prepares unsigned classic Splash-pool creation. Signing and
-submission, position ownership/funding and fee collection are
+full-range pools and prepares unsigned classic Splash-pool creation. Position ownership/funding and fee collection are
 still unfinished; inspection is not a substitute for those operations.
 
 ```sh
 cabal run -v0 ecx-pool -- prepare devnet REQUEST.json > prepared.json
 cabal run -v0 ecx-pool -- check HTTPS_RPC MAX_FEE MAX_COST prepared.json
+cabal run -v0 ecx-pool -- sign HTTPS_RPC MAX_FEE MAX_COST prepared.json PAYER_KEY VAULT_A_KEY VAULT_B_KEY NEW_ATTEMPT.json
+cabal run -v0 ecx-pool -- submit HTTPS_RPC ATTEMPT.json
 cabal run -v0 ecx-pool -- address devnet MINT_A MINT_B FEE_TIER_INDEX
 cabal run -v0 ecx-pool -- inspect devnet HTTPS_RPC POOL MINT_A MINT_B
 cabal test ecx-pool:pool-test --offline -j1 --test-show-details=direct
@@ -68,7 +69,21 @@ without replacing its blockhash. Resulting pool identity, empty vaults, initial
 price, fee settings and debit must match. `MAX_FEE` and `MAX_COST` are positive
 integer lamports. The reported maximum debit conservatively adds the network fee
 even if simulation already deducted it. Quote/simulation success is not a future
-execution guarantee. Protected signing and saved-byte submission remain unfinished.
+execution guarantee.
+
+`Pool.Signing` owns two closed critical operations. Signing repeats preflight,
+checks each protected key against its message signer, verifies all three signatures,
+and exclusively saves a mode-0600 attempt with file/directory fsync before returning.
+Key and output directories must be private and paths absolute. Token and pool
+administration share these file protections through `Bridge.AdminKey`; neither
+gets bridge custody authority. New vault keys can be generated with `ecx-token keygen`.
+
+Submission verifies the saved message/signatures and rederives its PDAs. It checks
+historical status before any send, repeats preflight only for an unseen attempt,
+and sends exactly the archived bytes. A finalized result must match those exact
+bytes and the saved fee/total-debit limits. A timeout retains the attempt; run
+`submit` again. No command refreshes its blockhash, overwrites an attempt, or
+silently signs a replacement. Expired/unresolved attempts require review.
 
 ## Verified checkpoint
 
@@ -96,14 +111,26 @@ wire-contract tests, not evidence of a finalized pool creation. The same fixture
 also retains an actual Devnet unsigned creation simulation for the separately
 created test mint / Orca devUSDC pair. Preflight passed with 6,944,360 lamports rent,
 15,000 fee and conservative maximum debit 6,974,360. Real checks refused a fee
-limit of 1 and a total-cost limit of 20,000. No creation was signed or submitted.
+limit of 1 and a total-cost limit of 20,000. That simulation preceded the finalized creation below.
+
+The closed signing/submission path then created Devnet pool
+`FDL7cuLgL3Yog4B5MJY51eLA9fWqjqm9XFX1vnwdLs9Y`, using the separate test mint
+`EGiiQQYXtQLing36xCFnNCHwBfuP2ddSkRTo6TDRQFHT` and Orca devUSDC, with transaction
+`tdbzmJadcw3nxqsAKg87aE5no5Jfr68WmrBR2LYeh1uMxaqQQUtunremFGxHyuAqjZsLa31MmXK28TrExKGDF4S`.
+Finalized readback at slot 507072063 verified both vaults, zero token balances,
+zero liquidity and the requested Q64.64 price 18446744073709551616. Repeating
+submission returned the same finalized result. Wrong vault keys were refused;
+the signed attempt remained mode 0600 and could not be overwritten. A prior
+never-submitted test attempt was preserved after finalized blockhash expiry and
+absent transaction/history checks; the CLI did not replace it automatically.
+This proves creation only, not funded liquidity or trading.
 
 ## Remaining implementation
 
 Creation preflight now binds the real ordinary tier and explicit price/cost limits.
-Orca requires independent vault signatures in addition to the payer: implement a
-closed pool signing operation, keeping the bridge's one-signature custody protocol
-unchanged. Then add tick-array initialization, full-range position creation,
+The closed signer supports independent vault signatures in addition to the payer,
+keeping the bridge's one-signature custody protocol unchanged. Add tick-array
+initialization, full-range position creation,
 liquidity deposit/withdrawal and fee collection with saved-attempt recovery and
 real Devnet acceptance. Adaptive-tier initialization can have additional authority
 requirements; do not assume the published tier is permissionless.

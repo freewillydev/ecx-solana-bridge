@@ -1,6 +1,6 @@
 {-# LANGUAGE GADTs, ForeignFunctionInterface #-}
 -- Closed, read-only liquidity operations. No signing key, ledger or custody access.
-module Pool (Network(..),Safe(..),Create(..),Prepared(..),Costs(..),validatePrepared,validateCreated,Expected(..),Snapshot(..),Report(..),Whirlpool(..),evalSafe,validate,decodePool,program,configuration) where
+module Pool (Network(..),Safe(..),Create(..),Prepared(..),Costs(..),validatePrepared,validateCreated,Expected(..),Snapshot(..),Report(..),Whirlpool(..),evalSafe,validate,decodePool,program,configuration,networkGenesis) where
 import Bridge.Error (require,reject)
 import Bridge.RPC
 import Bridge.Solana (tokenProgram)
