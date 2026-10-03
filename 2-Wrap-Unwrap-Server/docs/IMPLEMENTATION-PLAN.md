@@ -28,8 +28,10 @@ exposure and expiry preserving obligation holds. The private chain component now
 has HTTP RPC plus native identity/wallet/allocation and Solana identity/account
 checks, with protocol tests and a real Devnet genesis read. Native payment preparation
 and signing checks now pass captured-transaction and offline RPC contracts.
-Adapter/workflow integration, high-level evaluators, Solana payments, chain observation
-and durable execution remain unfinished.
+Solana message/SDK/payment validation now passes captured Devnet proofs and offline
+contracts; the actual cached SDK FFI matches its public-key codec vector.
+Adapter/workflow integration, high-level evaluators, chain observation, SDK build
+integration and durable execution remain unfinished.
 No existing custody state has been moved. See the rebuild README for scoped counts
 and evidence; do not compare this subset against the entire old storage layer.
 

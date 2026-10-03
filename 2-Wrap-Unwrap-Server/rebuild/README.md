@@ -204,7 +204,29 @@ post-signing template/fee rejection, corrupt saved drafts, output/fee mutations,
 coinbase maturity, replay policy and idempotent lock recovery. The complete rebuild
 pure/protocol suite passes. Offline fixture replay is not a new funded chain test.
 
+Solana message validation, the bounded SDK FFI and payment preparation/outcome
+verification are now extracted into the private chain component. A small public
+payment policy replaces the old application-wide Config; SDK library and signer
+key paths are explicit invocation inputs. Signed and unsigned SDK calls share
+encoding/invocation/reply validation, while the unsigned entry point supplies no
+key path. Bounded public-key parsing is shared with Identity. Transaction/message
+base64 text is size-checked before decoding; the Haskell validator still checks the
+exact instructions, account flags, message, mint, amount, memo and Ed25519 signature.
+
+The three production files total 477 lines versus 465 previously: message
+115→117, helper/FFI 149→154, payment 201→206. Added policy declarations, explicit
+exports and bounds outweigh removed duplicate invocation/key parsing. This is a
+boundary improvement, not a total size reduction. The 144-line QuickCheck/protocol
+module reuses four unchanged fixtures. It checks signed/unsigned SDK vectors,
+signature/amount mutation, unsigned simulation, rent top-ups, fee/rent/context/hash
+limits and captured finalized Devnet outcomes for both new and existing ATAs.
+The complete rebuild suite passes. A separate root-Cabal REPL smoke check invoked
+the cached actual SDK dylib through the new FFI: preview message and deterministic
+signature matched the exact public codec-key fixture. The temporary public test-key
+file was removed and the REPL exited. This is offline SDK execution, not new funded
+Devnet acceptance or a new clean-build SDK test.
+
 Connecting those adapters to the high-level safe/critical runtime, actual host fence,
-dedicated signer and durable payment execution remains unfinished. Solana payment
-construction/validation, chain observation and recovery integration also remain.
-Passing these checks is not payment, migration or real-chain acceptance.
+dedicated signer and durable payment execution remains unfinished. Chain observation,
+recovery and SDK build integration also remain. Passing these checks is not end-to-end
+payment, migration or real-chain acceptance.

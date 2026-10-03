@@ -4,7 +4,7 @@ version: 0.1.0.0
 synopsis: Replacement ECX bridge with explicit payment funding
 license: MIT
 build-type: Simple
-data-files: test/fixtures/native-signet-payment.json
+data-files: test/fixtures/*.json
 
 common settings
   default-language: GHC2021
@@ -40,19 +40,20 @@ library chain
   import: settings
   visibility: private
   hs-source-dirs: chain
-  exposed-modules: Bridge.RPC, Bridge.Native, Bridge.NativePayment, Bridge.Solana
+  exposed-modules: Bridge.RPC, Bridge.Native, Bridge.NativePayment, Bridge.Solana, Bridge.SolanaMessage, Bridge.SolanaHelper, Bridge.SolanaPayment
   build-depends: base, ecx-bridge-rebuild, aeson, bytestring, text, scientific,
-    filepath, http-client, http-client-tls, http-types
+    filepath, http-client, http-client-tls, http-types, binary, base58-bytestring,
+    base64-bytestring, crypton, unix
 
 test-suite rebuild-test
   import: settings
   type: exitcode-stdio-1.0
   hs-source-dirs: test
   main-is: Main.hs
-  other-modules: ChainCheck, NativePaymentCheck, Paths_ecx_bridge_rebuild
+  other-modules: ChainCheck, NativePaymentCheck, SolanaPaymentCheck, Paths_ecx_bridge_rebuild
   autogen-modules: Paths_ecx_bridge_rebuild
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:customer-api, ecx-bridge-rebuild:chain, servant, aeson, text, containers,
-    QuickCheck >=2.15 && <2.19, bytestring, scientific, http-client
+    QuickCheck >=2.15 && <2.19, bytestring, scientific, http-client, base64-bytestring
 
 -- Explicitly invoked against a disposable migrated database, never live custody.
 executable rebuild-store-check
