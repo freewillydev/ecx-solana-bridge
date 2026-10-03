@@ -214,7 +214,7 @@ never point contract fixtures at custody. Direct binary invocation needs Cabal's
 | Mode | Additional environment / scope |
 | --- | --- |
 | Default | Financial/ledger contracts and local encrypted restic restoration |
-| `ECX_REBUILD_MIGRATION_ONLY=1` | Disposable restored, paused, populated schema-18 ledger with baseline DDL through 005; applies rebuild 001–003 and checks preserved history |
+| `ECX_REBUILD_MIGRATION_ONLY=1` | Disposable restored, offline, populated schema-18 ledger with baseline DDL through 005; applies rebuild 001–003 and checks preserved history |
 | `ECX_REBUILD_SETUP_ONLY=1` | `ECX_REBUILD_EXECUTABLE`; optional `ECX_REBUILD_SETUP_RESIDUE=1` |
 | `ECX_REBUILD_SERVER_ONLY=1` | `ECX_REBUILD_EXECUTABLE`; process/HTTP/private control |
 | `ECX_REBUILD_TLS_ONLY=1` | `ECX_REBUILD_TEST_SDK`; actual TLS and saved signing decisions |
@@ -228,9 +228,15 @@ two paid orders, two exact signed attempts and 31 postings were preserved, toget
 with deposits, obligations, customer intent bindings, preparations and reservations.
 The rebuild's read-only evaluator decoded each migrated payment and its balances.
 Identity and sequence stayed unchanged; schema advanced from 18 to 21 while paused.
-The original ledger was untouched. This is settled-history compatibility, not yet
-in-flight/recovery parity or authorization to retire the baseline. Its schema-18
-backup lacked baseline DDL 005: verify installed DDL, not only the version number.
+An archived in-flight host-restore ledger also passed: three signed attempts and
+33 postings survived, and its one pending attempt remained discoverable and readable.
+The comparison includes cancellation, expiry/retry, replacement/winner and source
+recovery records. Two older archives preserved their records but failed cutover
+acceptance: each contains three payments without saved order cost policies; the
+rebuild refuses those payments rather than inventing historical limits. The original
+ledgers were untouched. These checks do not execute migrated payments or establish
+funded recovery parity. The schema-18 backups lacked baseline DDL 005: verify installed
+DDL, not only the version number.
 
 Prior root Cabal, QuickCheck, PostgreSQL, TLS and local-restic runs passed their
 recorded scopes. Protocol mutations, receipt fixtures and local-restic transport

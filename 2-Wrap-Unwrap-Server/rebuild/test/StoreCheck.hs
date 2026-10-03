@@ -81,7 +81,7 @@ main = do
     Just path->liveObserverMain path
     Nothing->if setup==Just "1" then setupMain else if native==Just "1" then nativeRecoveryMain else if tls==Just "1" then tlsMain else if fence==Just "1" then fenceMain else if server==Just "1" then serverMain else ledgerMain
 
--- Restore an idle schema-18 backup into a disposable database and apply any
+-- Restore an offline schema-18 backup into a disposable database and apply any
 -- missing baseline migrations through 005 before invoking this mode.
 -- This mode never connects to the original ledger, a chain or a signer.
 migrationMain :: IO ()
@@ -96,8 +96,8 @@ migrationMain=do
     (before,attempts,postings)<-fixture connection ArchiveRecords
     history<-fixture connection MigrationRecords
     original<-case before of
-      [row] | S.schemaVersion row==18 && S.paused row==1 -> pure row
-      _->fail "paused populated schema-18 baseline required"
+      [row] | S.schemaVersion row==18 -> pure row
+      _->fail "populated schema-18 baseline required"
     check "signed financial history required" (not(null attempts) && not(null postings))
     forM_ ["001.sql","002.sql","003.sql"] $ \name->do
       path<-getDataFileName ("migrations/"<>name)
@@ -111,11 +111,24 @@ migrationMain=do
       (after==[original {S.schemaVersion=21,S.paused=1,S.pauseReason="payment_funding_migration"}])
     intents<-fixture connection MigratedIntents
     check "migration changed customer funding" (all (\row->S.intentWithdrawal row==Nothing && S.intentObligation row==Just(S.intentId row)) intents)
+    legacy<-fixture connection MigrationLegacyPayments
     withReader (settings {PG.connectUser=role}) (S.fingerprint original) False $ \reader->do
       state<-evalRead reader ReadState
       check "rebuild cannot read migrated sequence" (ledgerSequence state==S.criticalSequence original && ledgerPaused state)
-      forM_ intents $ \row->void $ evalRead reader (ReadPaymentWork $ S.intentId row)
+      forM_ intents $ \row->if S.intentId row `elem` legacy
+        then expectStore "payment_funding_missing" (evalRead reader $ ReadPaymentWork $ S.intentId row)
+        else void $ evalRead reader (ReadPaymentWork $ S.intentId row)
+      pending<-evalRead reader PendingAttempts
+      let expected=sort [S.attemptId attempt | attempt<-attempts,
+            S.attemptState attempt `elem` ["signed","broadcast_intent"],
+            any (\intent->S.intentId intent==S.attemptIntent attempt && S.intentResolved intent==0) intents]
+      check "migration lost pending attempts" (pending==expected)
+      forM_ pending $ \identifier->void $ evalRead reader (ReadAttempt identifier)
+      void $ evalRead reader PaymentCandidates
       void $ evalRead reader ReadBalances
+      putStrLn ("Pending migrated attempts: "<>show(length pending))
+    putStrLn ("Legacy payments missing saved cost policy: "<>show(length legacy))
+    check "migration requires explicit legacy cost-policy review; history preserved but cutover not accepted" (null legacy)
     putStrLn ("Populated migration PASS: "<>show(length attempts)<>" signed attempts; "<>show(length postings)<>" postings preserved; migrated payments readable")
 
 -- Actual chain history, isolated ledger, and observation-only DSL authority.
@@ -1220,6 +1233,7 @@ data Fixture a where
   RestoreDatabases :: Fixture [T.Text]
   MigrationRecords :: Fixture [String]
   MigratedIntents :: Fixture [S.Intent]
+  MigrationLegacyPayments :: Fixture [T.Text]
   ArchiveRecords :: Fixture ([S.Deployment],[S.Attempt],[(Int64,T.Text,T.Text,T.Text,Int64)])
   SourceRecipient :: T.Text -> T.Text -> Fixture ()
   TLSFunds :: Fixture ()
@@ -1278,6 +1292,10 @@ fixture c LiveScanHealth = O.runSelect c $ O.orderBy (O.asc $ \(chain,_,_)->chai
   pure (chain,at,problem)
 fixture c SetupResidue = void $ O.runInsert c O.Insert {O.iTable=S.events,
   O.iRows=[(O.sqlStrictText "orphaned-ledger-event",O.sqlStrictText "initialization must refuse surviving history")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+fixture c MigrationLegacyPayments = do
+  obligations<-O.runSelect c (O.selectTable S.obligations) :: IO [S.Obligation]
+  costs<-O.runSelect c (O.selectTable S.orderCosts) :: IO [(T.Text,Int64,Int64,Int64)]
+  pure [S.obligationId row | row<-obligations, S.obligationOrder row `notElem` [key | (key,_,_,_)<-costs]]
 fixture c MigratedIntents = O.runSelect c (O.selectTable S.intents)
 fixture c MigrationRecords = sequence
   [ rows (O.runSelect c (O.selectTable S.orders) :: IO [S.Order])
@@ -1288,7 +1306,20 @@ fixture c MigrationRecords = sequence
   , rows (O.runSelect c (O.selectTable S.preparations) :: IO [(T.Text,Int64,T.Text,Maybe T.Text,Maybe T.Text,Int64)])
   , rows (O.runSelect c (O.selectTable S.reservations) :: IO [(T.Text,T.Text,Int64,T.Text)])
   , rows (O.runSelect c (O.selectTable S.operatingReservations) :: IO [(T.Text,T.Text,T.Text,Int64,T.Text)])
+  , rows (O.runSelect c (O.selectTable S.orderCosts) :: IO [(T.Text,Int64,Int64,Int64)])
   , rows (O.runSelect c (O.selectTable S.feeHolds) :: IO [(T.Text,T.Text,Int64,Int64)])
+  , rows (O.runSelect c (O.selectTable S.preparationCancellations) :: IO [(T.Text,Int64,T.Text,T.Text,Int64,Int64)])
+  , rows (O.runSelect c (O.selectTable S.solanaExpiries) :: IO [(T.Text,T.Text,Int64)])
+  , rows (O.runSelect c (O.selectTable S.solanaRetryApprovals) :: IO [(T.Text,T.Text,T.Text,Int64)])
+  , rows (O.runSelect c (O.selectTable S.replacementDecisions) :: IO [(Int64,T.Text,Int64,T.Text,T.Text,T.Text,T.Text)])
+  , rows (O.runSelect c (O.selectTable S.replacementCancellationRows) :: IO [(Int64,T.Text,Int64)])
+  , rows (O.runSelect c (O.selectTable S.replacementMemberRows) :: IO [(Int64,T.Text,Int64)])
+  , rows (O.runSelect c (O.selectTable S.nativeRecoveryRows) :: IO [(T.Text,T.Text,T.Text,T.Text,Int64)])
+  , rows (O.runSelect c (O.selectTable S.nativeWinnerChanges) :: IO [(Int64,T.Text,T.Text,T.Text,T.Text,T.Text,Int64)])
+  , rows (O.runSelect c (O.selectTable S.sourceChecks) :: IO [(Int64,T.Text,T.Text,Int64,T.Text,Int64)])
+  , rows (O.runSelect c (O.selectTable S.sourceRecoveryDecisions) :: IO [(T.Text,Int64,Int64,T.Text,T.Text,T.Text,T.Text,Int64)])
+  , rows (O.runSelect c (O.selectTable S.sourceLossCovers) :: IO [(Int64,T.Text,Int64,Int64,Int64,Int64,T.Text,T.Text)])
+  , rows (O.runSelect c (O.selectTable S.sourceReturns) :: IO [(Int64,Int64)])
   ]
  where
   rows :: Show a => IO [a] -> IO String
