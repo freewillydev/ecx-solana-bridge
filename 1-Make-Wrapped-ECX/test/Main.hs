@@ -1,5 +1,6 @@
 module Main (main) where
 import Token
+import qualified Bridge.AdminStatus as Status
 import qualified Token.Network as N
 import qualified Data.Aeson.KeyMap as KM
 import qualified Token.Operation as O
@@ -38,7 +39,8 @@ request operation n=Request operation "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaR
 main :: IO ()
 main=do
   results<-sequence
-    [ quickCheckResult $ \n revoked->policyCheck n revoked
+    [ quickCheckResult $ statusContract
+    , quickCheckResult $ \n revoked->policyCheck n revoked
     , quickCheckResult $ once $ ioProperty $ do
         let original=request Mint 1
             run a b=try (O.runSafe $ O.Request $ N.InspectPolicy N.Devnet a b (mint original) (authority original) (account original) Nothing) :: IO (Either SomeException [(Word64,Word64,Word64)])
@@ -223,3 +225,22 @@ policyCheck n revoked=
     && all (isLeft . parse) ([response a custodyValue 1 | a<-badMints]<>[response mintValue a 1 | a<-badAccounts]
       <>[response mintValue custodyValue 0,response (set "owner" (String owner) mintValue) custodyValue 1,
          response mintValue (accountValue 166 "account" tokenInfo) 1])
+
+statusContract :: Bool -> Bool -> Bool
+statusContract failed valid=
+  let failure=if failed then object ["InstructionError" .= ([Number 0,String "Custom"]::[Value])] else Null
+      status commitment=object ["confirmationStatus" .= (commitment::Text),"err" .= failure]
+      transaction bytes err=object ["transaction" .= ([bytes,"base64"]::[Text]),"meta" .= object ["err" .= err]]
+      classify=Status.classifyStatus "saved-bytes"
+      rejected result=case result of Left _->True; _->False
+  in classify Null Null valid==Right(if valid then Status.Unseen else Status.ExpiredUnseen)
+    && classify (status "confirmed") Null valid==Right Status.Pending
+    && classify (status "processed") Null valid==Right Status.Pending
+    && classify (status "finalized") (transaction "saved-bytes" failure) valid==Right(if failed then Status.Failed else Status.Finalized)
+    && all rejected
+      [classify Null (transaction "saved-bytes" failure) valid
+      ,classify (status "confirmed") (transaction "saved-bytes" failure) valid
+      ,classify (status "finalized") Null valid
+      ,classify (status "finalized") (transaction "different-bytes" failure) valid
+      ,classify (status "finalized") (transaction "saved-bytes" $ if failed then Null else Number 1) valid
+      ,classify (status "unknown") Null valid]

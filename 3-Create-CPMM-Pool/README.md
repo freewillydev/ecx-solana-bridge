@@ -115,6 +115,13 @@ bytes and the saved fee/total-debit limits. A timeout retains the attempt; run
 `submit` again. No command refreshes its blockhash, overwrites an attempt, or
 silently signs a replacement. Expired/unresolved attempts require review.
 
+`cabal run -v0 ecx-pool -- status HTTPS_RPC ATTEMPT.json` inspects through the safe
+DSL without signing or sending. It validates the saved action/signatures and
+network and reports `pending`, `finalized`, `failed`, `unseen` or `expired-unseen`.
+Finalized evidence must match the archived bytes. Absence can reflect unavailable
+history: `expired-unseen` does not authorize a replacement. Fee/debit limits and
+PDA rederivation remain submission checks, not guarantees of this status report.
+
 ## Full-range position preparation
 
 `POSITION_REQUEST.json` has exactly six string fields: `payer`, `pool`, `mintA`,

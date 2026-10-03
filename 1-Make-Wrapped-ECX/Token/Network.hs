@@ -1,6 +1,7 @@
 {-# LANGUAGE GADTs #-}
 -- Read-only preflight; simulation always contains zero signatures.
 module Token.Network (Network(..),Safe(..),Critical(..),evalSafe,evalCritical,inspectPolicy) where
+import Bridge.AdminStatus (Status,inspectStatus)
 import qualified Token.Metadata as M
 import Token.Signing (Saved(..),validateSaved)
 import qualified Data.ByteString as BS
@@ -26,10 +27,17 @@ import Text.Read (readMaybe)
 
 data Network = Devnet | Mainnet deriving (Eq,Show)
 data Safe a where
+  InspectSaved :: Network -> String -> FilePath -> Safe Status
   Check :: Network -> String -> Word64 -> Request -> Text -> Safe Word64
   InspectPolicy :: Network -> String -> String -> Text -> Text -> Text -> Maybe Text -> Safe [(Word64,Word64,Word64)]
 
 evalSafe :: Safe a -> IO a
+evalSafe (InspectSaved network endpoint path)=do
+  bytes<-withBinaryFile path ReadMode (`BS.hGet` 8193)
+  require (BS.length bytes<=8192) "token_attempt_too_large"
+  saved<-either (const $ reject "invalid_token_attempt") pure (eitherDecodeStrict' bytes)
+  _<-either reject pure (validateSaved saved)
+  inspectStatus (genesis network) endpoint (savedId saved) (savedTransaction saved) (blockhash $ savedRequest saved)
 evalSafe (InspectPolicy network primary verifier key owner custody issuer)=do
   mapM_ (either reject (const $ pure ()) . publicKey) ([key,owner,custody]<>maybe [] pure issuer)
   first<-parseRequest primary; second<-parseRequest verifier

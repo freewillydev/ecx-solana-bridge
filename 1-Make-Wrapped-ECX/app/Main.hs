@@ -19,6 +19,7 @@ import System.IO (withBinaryFile,IOMode(ReadMode))
 
 main :: IO ()
 main=getArgs >>= \args->case args of
+  ["status",network,endpoint,path]->choose network >>= \selected->(O.runSafe . O.Request) (Network.InspectSaved selected endpoint path) >>= L.putStrLn . encode
   ["inspect-policy",network,primary,verifier,key,owner,custody,issuer]->do
     selected<-choose network
     let expected=if issuer=="revoked" then Nothing else Just(T.pack issuer)
@@ -49,7 +50,7 @@ main=getArgs >>= \args->case args of
     (request,unsigned)<-readPrepared prepared
     identifier<-(O.runCritical . O.Request) (Sign keyfile output request unsigned)
     L.putStrLn $ encode $ object ["signature" .= identifier,"saved" .= output]
-  _->die "Usage: ecx-token inspect-policy devnet|mainnet HTTPS_RPC INDEPENDENT_HTTPS_RPC MINT CUSTODY_OWNER CUSTODY_ATA EXPECTED_AUTHORITY|revoked | keygen NEW_PRIVATE_KEY.json | associated-address OWNER MINT | metadata-address MINT | address AUTHORITY SEED | prepare REQUEST.json | check devnet|mainnet HTTPS_RPC MAX_FEE PREPARED.json | submit devnet|mainnet HTTPS_RPC MAX_FEE ATTEMPT.json | sign PREPARED.json AUTHORITY_KEY.json NEW_ATTEMPT.json (prepare/check/sign never broadcast; submit sends saved bytes)"
+  _->die "Usage: ecx-token status devnet|mainnet HTTPS_RPC ATTEMPT.json | inspect-policy devnet|mainnet HTTPS_RPC INDEPENDENT_HTTPS_RPC MINT CUSTODY_OWNER CUSTODY_ATA EXPECTED_AUTHORITY|revoked | keygen NEW_PRIVATE_KEY.json | associated-address OWNER MINT | metadata-address MINT | address AUTHORITY SEED | prepare REQUEST.json | check devnet|mainnet HTTPS_RPC MAX_FEE PREPARED.json | submit devnet|mainnet HTTPS_RPC MAX_FEE ATTEMPT.json | sign PREPARED.json AUTHORITY_KEY.json NEW_ATTEMPT.json (prepare/check/sign never broadcast; submit sends saved bytes)"
 
 readFee :: String -> IO Word64
 readFee raw=case readMaybe raw :: Maybe Integer of

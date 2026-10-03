@@ -136,6 +136,14 @@ is not finality. An expired blockhash is not permission to regenerate an attempt
 expiry/absence review and a new approval are still manual. State is the immutable
 signed attempt plus the real chain, not a mutable local success flag.
 
+For inspection without any possibility of sending, use
+`cabal run -v0 ecx-token -- status devnet HTTPS_RPC ATTEMPT.json`.
+The safe DSL verifies the archived signature/request and network, then reports
+`pending`, `finalized`, `failed`, `unseen` or `expired-unseen`. Finalized results
+must match the archived bytes. Missing history, even with an expired blockhash,
+does not prove nonexecution or authorize a replacement. Fee limits remain
+submission checks; neither command certifies reserve backing.
+
 Every CLI operation enters [Token/Operation.hs](Token/Operation.hs) as a
 constrained existential `Request s a`. Its `Operation` dictionary resolves to a
 closed `DSL s a`, retaining the result type and safe/critical severity. Separate

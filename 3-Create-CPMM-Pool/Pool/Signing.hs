@@ -1,7 +1,9 @@
 {-# LANGUAGE GADTs #-}
 -- Only these closed operations read LP keys or submit a saved creation.
-module Pool.Signing (Action(..),Critical(..),evalCritical,Saved(..),validateSaved) where
-import Pool
+module Pool.Signing (Action(..),Safe(..),evalSafe,Critical(..),evalCritical,Saved(..),validateSaved) where
+import Pool hiding (Safe,evalSafe)
+import qualified Pool
+import Bridge.AdminStatus (Status,inspectStatus)
 import qualified Pool.Position as P
 import qualified Pool.Liquidity as Q
 import Bridge.AdminKey (readKey,savePrivate,newPrivatePath)
@@ -75,16 +77,28 @@ decodeAction Opening{}=decodePositionTransaction
 decodeAction Liquidity{}=decodeLiquidityTransaction
 checkAction :: FilePath -> Network -> String -> Word64 -> Word64 -> Action -> IO ()
 checkAction library selected endpoint fee cost operation=case operation of
-  Creation r p->evalSafe (Check library selected endpoint fee cost r p) >> pure ()
+  Creation r p->Pool.evalSafe (Check library selected endpoint fee cost r p) >> pure ()
   Opening r p->P.evalSafe (P.Check library selected endpoint fee cost r p) >> pure ()
   Liquidity r p->Q.evalSafe (Q.Check library selected endpoint fee cost r p) >> pure ()
 checkDerivation :: FilePath -> Network -> Action -> IO ()
 checkDerivation library selected operation=do
   matches<-case operation of
-    Creation r p->(==p) <$> evalSafe (Prepare library selected r)
+    Creation r p->(==p) <$> Pool.evalSafe (Prepare library selected r)
     Opening r p->(==p) <$> P.evalSafe (P.Prepare library r)
     Liquidity r p->(==p) <$> Q.evalSafe (Q.Prepare library r)
   require matches "pool_saved_derivation_mismatch"
+
+data Safe a where
+  InspectSaved :: String -> FilePath -> Safe Status
+
+evalSafe :: Safe a -> IO a
+evalSafe (InspectSaved endpoint path)=do
+  bytes<-withBinaryFile path ReadMode (`B.hGet` 8193)
+  require (B.length bytes<=8192) "pool_attempt_too_large"
+  saved<-either (const $ reject "invalid_pool_attempt") pure (eitherDecodeStrict' bytes)
+  either reject pure (validateSaved saved)
+  Transaction _ (Message _ _ _ _ recent _) _<-either reject pure (decodeAction (action saved) $ transaction saved)
+  inspectStatus (networkGenesis $ network saved) endpoint (identifier saved) (transaction saved) (base58 recent)
 
 data Critical a where
   Sign :: FilePath -> Network -> String -> Word64 -> Word64 -> Action -> [FilePath] -> FilePath -> Critical Text

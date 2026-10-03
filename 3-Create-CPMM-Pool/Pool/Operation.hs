@@ -15,11 +15,13 @@ data Request (s :: Severity) a where
   Request :: Operation s op => op a -> Request s a
 
 data DSL (s :: Severity) a where
+  SubmissionRead :: Signing.Safe a -> DSL 'Safe a
   PoolRead :: Pool.Safe a -> DSL 'Safe a
   PositionRead :: Position.Safe a -> DSL 'Safe a
   LiquidityRead :: Liquidity.Safe a -> DSL 'Safe a
   SignedAction :: Signing.Critical a -> DSL 'Critical a
 
+instance Operation 'Safe Signing.Safe where command = SubmissionRead
 instance Operation 'Safe Pool.Safe where command = PoolRead
 instance Operation 'Safe Position.Safe where command = PositionRead
 instance Operation 'Safe Liquidity.Safe where command = LiquidityRead
@@ -35,6 +37,7 @@ runCritical :: Request 'Critical a -> IO a
 runCritical request = evalCritical (resolve request)
 
 evalSafe :: DSL 'Safe a -> IO a
+evalSafe (SubmissionRead operation) = Signing.evalSafe operation
 evalSafe (PoolRead operation) = Pool.evalSafe operation
 evalSafe (PositionRead operation) = Position.evalSafe operation
 evalSafe (LiquidityRead operation) = Liquidity.evalSafe operation
