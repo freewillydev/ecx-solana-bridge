@@ -100,7 +100,7 @@ Keep that directory short enough for the host's Unix-socket path limit.
 [Control.hs](workflow/Bridge/Control.hs) defines exact accepted fields and rejects
 unknown fields. Commands include:
 
-- `status`, `native-reviews`, `pause`, `resume`;
+- `status`, `native-reviews`, `pause`, `resume`, `repair-completed-order`;
 - `allocate-treasury`, `classify-spend`, `withdraw-fees`, `cancel-fees`, `refund`;
 - `cancel-preparation`, `retry-solana`;
 - `cover-source-loss`, `approve-covered-source`, `approve-source-recovery`;
@@ -258,19 +258,23 @@ Exact decisions replay; a changed withdrawal amount is refused.
 The extra refund exposed an order-view bug: preparation/signature recording changed
 the completed conversion's status, letting refund settlement overwrite its payout
 link. Both updates now preserve `Paid`, matching authorization/settlement guards.
-The PostgreSQL regression failed before the fix and now passes authorization through
-settlement/replay, checking the original view throughout. The full PostgreSQL contract,
-root Cabal build and QuickCheck pass. Store stays at 3,354 lines in one file; the existing
-contract runner grows 3,023 → 3,057 lines, with no new files or operations. The older
-test deployment's affected order view remains preserved as evidence and needs a
-verified repair; its distinct financial payments settled correctly. Native refunds/
-fee withdrawals, arbitrary crash recovery and real-wallet UX remain unproven.
+The PostgreSQL regression checks the original view from authorization through
+settlement and replay. For already affected rows, private
+`{"operation":"repair-completed-order","order":"ORDER_ID"}` requires paused,
+reconciled custody and derives the payout from a unique settled conversion. It
+changes only the proven historical `Refunded` view whose link points to a settled
+refund for that order; arbitrary status/payout input is forbidden. Repair advances
+the fenced critical sequence and records both payout links in the audit. Exact
+replay changes nothing. The actual test ledger was repaired at sequence 26 with
+unchanged balances/refund and the original full customer response restored.
+The full PostgreSQL contract, Cabal build and QuickCheck pass. Native refunds/fee withdrawals,
+arbitrary crash recovery and real-wallet UX remain unproven.
 Private keys/attempts/ledger remain outside Git.
 
 ## Remaining release work, in order
 
-1. Complete funded wrap/unwrap settlement, refund, earned withdrawal, restart and
-   interrupted-attempt acceptance on the actual test networks. Finish real wallet
+1. Extend the funded tests to native refunds/fee withdrawals and remaining
+   interrupted-attempt recovery on the actual test networks. Finish real wallet
    signing and browser/reload/error acceptance; keep tester-client evidence distinct.
 2. Prove populated baseline migration and financial/recovery parity, then remove the
    superseded application and duplicate tooling. Retain unique checks until covered.

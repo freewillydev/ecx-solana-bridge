@@ -1175,6 +1175,7 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  HistoricalRefundView :: T.Text -> T.Text -> Fixture ()
   LiveScanHealth :: Fixture [(T.Text,Maybe Int64,Maybe T.Text)]
   SetupResidue :: Fixture ()
   SetPause :: Bool -> Fixture ()
@@ -1327,6 +1328,10 @@ fixture c (CheckHolds identifier direction quantity) = do
       solanaKind=if direction==NativeToWrapped then "conversion" else "refund"
   pure (inventory==[(T.pack $ show $ destinationAsset direction,quantity,"quote")] &&
     sort costs==sort [(nativeKind,"Native",10,"quote"),(solanaKind,"Sol",20,"quote")])
+
+fixture c (HistoricalRefundView order transaction) = void $ O.runUpdate c O.Update
+  {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=O.sqlStrictText "Refunded",S.payoutTx=O.toNullable $ O.sqlStrictText transaction},
+   O.uWhere= \r->S.orderId r O..== O.sqlStrictText order,O.uReturning=O.rCount}
 
 fixture c LargeBalances = PG.withTransaction c $ do
   let text=O.sqlStrictText
@@ -2042,6 +2047,22 @@ paidRefundContract fixtures reader writer=do
   evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 1) (money 0)) "{\"offlineExtraRefund\":true}")
   evalRead reader ReadBalances >>= check . (==afterRefund)
   unchanged
+  expectStore "pause_before_operator_action" (evalWrite writer $ RepairCompletedOrderView 110 paidOrder)
+  evalWrite writer (Pause "repair historical refund view")
+  expectStore "custody_not_reconciled" (evalWrite writer $ RepairCompletedOrderView 110 paidOrder)
+  fixture fixtures RefreshCustody
+  fixture fixtures (HistoricalRefundView paidOrder "unrelated-transaction")
+  expectStore "completed_order_repair_not_proven" (evalWrite writer $ RepairCompletedOrderView 110 paidOrder)
+  fixture fixtures (HistoricalRefundView paidOrder $ signedId signed)
+  beforeRepair<-evalRead reader ReadState
+  evalWrite writer (RepairCompletedOrderView 110 paidOrder)
+  unchanged
+  evalRead reader ReadBalances >>= check . (==afterRefund)
+  afterRepair<-evalRead reader ReadState
+  check (ledgerPaused afterRepair && ledgerSequence afterRepair==ledgerSequence beforeRepair+1)
+  evalWrite writer (RepairCompletedOrderView 110 paidOrder)
+  evalRead reader ReadState >>= check . (==afterRepair)
+  expectStore "completed_order_repair_not_proven" (evalWrite writer $ RepairCompletedOrderView 110 "unknown-order")
 
 refundContract :: PG.Connection -> Reader -> Writer -> IO ()
 refundContract fixtures reader writer=do

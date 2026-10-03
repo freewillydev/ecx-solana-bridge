@@ -321,6 +321,9 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
       evalCritical (OperatorDSL (RefundDeposit receipt))=do
         now<-floor <$> getPOSIXTime
         evalWrite writer (AuthorizeRefund now receipt)
+      evalCritical (OperatorDSL (RepairCompletedOrder order))=do
+        now<-floor <$> getPOSIXTime
+        evalWrite writer (RepairCompletedOrderView now order)
       evalCritical (OperatorDSL (PauseService reason))=evalWrite writer (Pause reason)
       evalCritical (OperatorDSL ResumeService)=guarded $ do
         state<-evalRead reader ReadState

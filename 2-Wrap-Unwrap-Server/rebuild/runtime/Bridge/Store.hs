@@ -270,6 +270,7 @@ data StoreRead a where
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
+  RepairCompletedOrderView :: Int64 -> Text -> StoreWrite ()
   RecordNativeRebroadcast :: RecordedAttempt -> [RecordedAttempt] -> Int64 -> Text -> Value -> StoreWrite Int64
   AuthorizeNativeRebroadcast :: RecordedAttempt -> [RecordedAttempt] -> Int64 -> StoreWrite RecordedAttempt
   RecordNativeSettlement :: RecordedAttempt -> NativeSettlementCheck -> StoreWrite ()
@@ -554,6 +555,7 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
   ApproveSourceRestoration now key restoration reason -> approveSourceRecovery c policy Nothing now key restoration reason
   ClassifyTreasurySpend chain key reason -> classifyTreasurySpend c policy chain key reason
   AllocateTreasury now receipt split reason -> allocateTreasury c policy now receipt split reason
+  RepairCompletedOrderView now identifier -> repairCompletedOrderView c policy now identifier
   ReserveFees now key currency n destination explanation -> do
     validReason explanation
     require (now>=0 && T.length key==64 && T.all (`elem` ("0123456789abcdef"::String)) key && n<=orderMaximum limit) "invalid_fee_withdrawal"
@@ -1916,6 +1918,45 @@ resolvePayment c saved view state proof = do
       _<-O.runUpdate c O.Update {O.uTable=S.reservations,O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,text "released"),O.uWhere= \(key,_,_,_)->key O..== text order,O.uReturning=O.rCount}
       _<-O.runUpdate c O.Update {O.uTable=S.operatingReservations,O.uUpdateWith= \(key,kind,asset,n,_)->(key,kind,asset,n,text "released"),O.uWhere= \(key,_,_,_,phase)->key O..== text order O..&& O.in_ (map text ["quote","obligation"]) phase,O.uReturning=O.rCount}
       pure ()
+
+-- Repair only the historical extra-refund projection bug. Both economic payments
+-- must already be settled; the caller supplies neither status nor payout identity.
+repairCompletedOrderView :: PG.Connection -> PaymentTerms -> Int64 -> Text -> IO ()
+repairCompletedOrderView c policy now identifier = do
+  let text=O.sqlStrictText; identity=deploymentFingerprint $ paymentPolicy policy
+      completed kind=do
+        ob<-O.selectTable S.obligations
+        intent<-O.selectTable S.intents
+        attempt<-O.selectTable S.attempts
+        O.where_ (S.obligationOrder ob O..== text identifier O..&& S.obligationKind ob O..== text kind
+          O..&& S.obligationStatus ob O..== text "paid" O..&& S.intentResolved intent O..== O.sqlInt8 1
+          O..&& O.matchNullable (O.sqlBool False) (O..== S.obligationId ob) (S.intentObligation intent)
+          O..&& S.attemptIntent attempt O..== S.intentId intent O..&& S.attemptState attempt O..== text "settled")
+        pure (S.obligationId ob,S.attemptId attempt)
+  state<-metadata c identity
+  require (S.paused state==1) "pause_before_operator_action"
+  fresh c now
+  orders<-O.runSelect c $ do row<-O.selectTable S.orders; O.where_ (S.orderId row O..== text identifier); pure row
+    :: IO [S.Order]
+  order<-case orders of [row]->pure row; _->reject "completed_order_repair_not_proven"
+  conversions<-O.runSelect c (O.limit 2 $ completed "conversion") :: IO [(Text,Text)]
+  (payment,transaction)<-case conversions of [row]->pure row; _->reject "completed_order_repair_not_proven"
+  view<-readPayment c identity payment
+  require (savedStatus view==PaymentPaid) "completed_order_repair_not_proven"
+  unless (S.status order=="Paid" && S.payoutTx order==Just transaction) $ do
+    require (S.status order=="Refunded") "completed_order_repair_not_proven"
+    previous<-maybe (reject "completed_order_repair_not_proven") pure (S.payoutTx order)
+    refunds<-O.runSelect c $ O.limit 2 $ do
+      row@(_,tx)<-completed "refund"
+      O.where_ (tx O..== text previous)
+      pure row
+      :: IO [(Text,Text)]
+    refundView<-case refunds of [(key,_)]->readPayment c identity key; _->reject "completed_order_repair_not_proven"
+    require (savedStatus refundView==PaymentPaid) "completed_order_repair_not_proven"
+    _<-nextSequence c
+    _<-O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text "Paid",S.payoutTx=O.toNullable $ text transaction},
+      O.uWhere= \r->S.orderId r O..== text identifier,O.uReturning=O.rCount}
+    audit c "completed_order_view_repaired" (encodeSaved $ object ["order" .= identifier,"previousPayout" .= S.payoutTx order,"payout" .= transaction])
 
 readPaymentSource :: PG.Connection -> Text -> Text -> IO (Maybe W.PaymentSource)
 readPaymentSource c identity identifier = do

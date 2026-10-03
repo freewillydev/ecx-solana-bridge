@@ -29,6 +29,7 @@ data OperatorRead a where
   ServiceState :: OperatorRead ServiceStatus
 
 data OperatorWrite a where
+  RepairCompletedOrder :: Text -> OperatorWrite ()
   RebroadcastNative :: Text -> Int64 -> Text -> OperatorWrite Text
   DraftNativeReplacement :: Text -> Amount -> Text -> OperatorWrite Int64
   SignNativeReplacement :: Int64 -> OperatorWrite Text
