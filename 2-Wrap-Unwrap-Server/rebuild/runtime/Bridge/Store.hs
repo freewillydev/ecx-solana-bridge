@@ -1540,7 +1540,8 @@ paymentSource c outgoing = case paymentFunding outgoing of
  where eligible receipt=sourceAuthorized c (paymentId outgoing) receipt >>= \authorized->require authorized "source_not_eligible"
 
 -- Physical eligibility or one still-active capital cover approved for this exact
--- obligation. An approval for a returned cover cannot authorize a later loss.
+-- obligation. This checks backing, not execution state: each payment operation
+-- enforces its own state (including reviewed expiry). Returned covers cannot be reused.
 sourceAuthorized :: PG.Connection -> Text -> Text -> IO Bool
 sourceAuthorized c identifier receipt = do
   source<-readSource c receipt
@@ -1551,7 +1552,6 @@ sourceAuthorized c identifier receipt = do
       (cover,key,quantity,_,_)<-S.activeSourceCovers
       O.where_ (S.obligationId obligation O..== O.sqlStrictText identifier
         O..&& S.obligationDeposit obligation O..== O.sqlStrictText receipt
-        O..&& O.in_ (map O.sqlStrictText ["ready","paying"]) (S.obligationStatus obligation)
         O..&& accounted O..== O.sqlStrictText receipt O..&& key O..== accounted
         O..&& quantity O..== O.sqlInt8(S.depositAmount source))
       pure cover

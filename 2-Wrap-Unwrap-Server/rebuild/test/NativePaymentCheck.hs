@@ -148,6 +148,36 @@ checks = do
     , check "captured native payment preserves exact transaction and fee" $ once $
         valid tx==Right () && fee==amt 282 &&
         nativeTxid tx=="b2278e8dd0be7be001a5630545ddb73c83423ee1ee7dbd0327675e27f1642bd3"
+    , check "replacement fees consume only change within the saved ceiling" $ forAll (chooseInteger (283,1000)) $ \nextFee ->
+        case replacementOutputs boundSigned (amt nextFee) of
+          Left _->False
+          Right outputs->
+            let nextTx=tx {nativeTxid=T.replicate 64 "a",nativeOutputs=outputs}
+                next=boundSigned {signedNativeTransaction=nextTx,signedNativeFee=amt nextFee}
+                nextDraft=draft {draftTransaction=nextTx,draftFee=amt nextFee}
+                recipients=filter ((==planRecipientScript plan).nativeOutputScript)
+            in validateNativeFamily [boundSigned,next]==Right ()
+              && validateNativeReplacementDraft [boundSigned] (amt nextFee) nextDraft==Right ()
+              && recipients outputs==recipients(nativeOutputs tx)
+              && sum(map (toInteger.units.nativeOutputAmount) outputs)+nextFee
+                ==sum(map (toInteger.units.nativeOutputAmount) (nativeOutputs tx))+toInteger(units fee)
+    , check "replacement rejects equal or excessive fees and duplicate families" $ once $
+        replacementOutputs boundSigned fee==Left "native_replacement_fee_bounds"
+        && replacementOutputs boundSigned (amt 1001)==Left "native_replacement_fee_bounds"
+        && validateNativeFamily []==Left "native_replacement_family_bounds"
+        && validateNativeFamily [boundSigned,boundSigned]==Left "native_replacement_duplicate_member"
+        && validateNativeFamily (replicate 9 boundSigned)==Left "native_replacement_family_bounds"
+    , check "replacement never changes input sequence recipient or replay policy" $ once $
+        case replacementOutputs boundSigned (amt 300) of
+          Left _->False
+          Right outputs->
+            let nextTx=tx {nativeTxid=T.replicate 64 "a",nativeOutputs=outputs}
+                bad=[nextTx {nativeLocktime=1},nextTx {nativeVersion=1},
+                  nextTx {nativeInputs=map (\i->i {nativeSequence=0}) (nativeInputs tx)},
+                  nextTx {nativeOutputs=reverse outputs}]
+                validate changed=validateNativeReplacementDraft [boundSigned] (amt 300)
+                  draft {draftTransaction=changed,draftFee=amt 300}
+            in all (either (const True) (const False).validate) bad
     , check "native recipient and change mutations are rejected" $ forAll (elements alteredPlans) $ \p ->
         validate p previous fee tx==Left "native_output_mismatch"
     , check "native fee is recomputed from actual prevouts" $ forAll (chooseInteger (1,100000)) $ \delta ->

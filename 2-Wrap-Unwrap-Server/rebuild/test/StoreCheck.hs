@@ -2142,7 +2142,38 @@ restorationContract fixtures reader writer=do
   expectStore "source_not_eligible" (evalWrite writer $ RecordAttempt decision attempt)
   evalWrite writer (RecordSourceCheck source $ W.SourceMissing proof)
   ready
-  signed<-evalWrite writer (RecordAttempt decision attempt)
+  expiredAttempt<-evalWrite writer (RecordAttempt decision attempt {signedId="covered-expiry"})
+  let expiryProof="{\"expiry\":\"offline covered-source expiry\"}"
+  evalWrite writer (RecordSolanaExpiry expiredAttempt expiryProof)
+  expired<-evalRead reader (ReadAttempt "covered-expiry")
+  evalRead reader (CheckPaymentSource key)
+  evalRead reader (ReadPayment key) >>= check . (==PaymentReview) . savedStatus
+  ready
+  expectStore "preparation_retry_not_authorized" (evalWrite writer $ PreparePayment 110 key (money 10) "{}")
+  evidenceUnavailable
+  fixture fixtures RefreshCustody
+  expectStore "source_not_eligible" (evalWrite writer $ ApproveSolanaRetry 110 expired "covered retry" expiryProof)
+  evalWrite writer (RecordSourceCheck source $ W.SourceMissing proof)
+  fixture fixtures RefreshCustody
+  evalWrite writer (ApproveSolanaRetry 110 expired "covered retry" expiryProof)
+  ready
+  second<-evalWrite writer (PreparePayment 110 key (money 10) "{}")
+  check (preparedGeneration second==1)
+  evalWrite writer (SaveDraft key 1 "{}")
+  unsigned<-evalRead reader (ReadUnsignedPreparation key)
+  evalWrite writer (Pause "cancel covered retry")
+  fixture fixtures RefreshCustody
+  evalWrite writer (BeginCancellation unsigned 110 "covered cancellation" "{}")
+  evalWrite writer (FinishCancellation unsigned "covered cancellation" "{}")
+  evalRead reader (ReadPayment key) >>= check . (==PaymentReady) . savedStatus
+  ready
+  third<-evalWrite writer (PreparePayment 110 key (money 10) "{}")
+  check (preparedGeneration third==2)
+  evalWrite writer (SaveDraft key 2 "{}")
+  ready
+  finalDecision<-evalRead reader (ReadSigningDecision 110 key 2)
+  check (savedPayment(preparedView finalDecision)==savedPayment(preparedView decision))
+  signed<-evalWrite writer (RecordAttempt finalDecision attempt)
   fixture fixtures ReadyIntake
   void $ evalWrite writer (MarkBroadcast 110 $ signedId $ recordedSigned signed)
   fixture fixtures CoverBackup

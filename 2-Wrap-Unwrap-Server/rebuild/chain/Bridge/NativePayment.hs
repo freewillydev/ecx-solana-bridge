@@ -3,6 +3,7 @@ module Bridge.NativePayment
   ( NativeRPC, Outpoint(..), NativeInput(..), NativeOutput(..), NativeTx(..)
   , NativePrevout(..), NativePlan(..), NativeDraft(..), NativeSigned(..)
   , transactionId, ownedScript, decodeNativeTx, validateNativeTx, sameNativeTemplate, sameNativePrevouts
+  , replacementOutputs, validateNativeFamily, validateNativeReplacementDraft
   , previewNativePayment, newNativePlan, fundNativeDraft, checkNativeDraft, signNativeDraft
   , readNativePrevoutsWith, ownedNativeLocks, releaseNativeInputLocks, restoreNativeInputLocks, checkNativeAcceptance
   ) where
@@ -10,9 +11,9 @@ module Bridge.NativePayment
 import Bridge.Wire (Profile(..))
 import Bridge.Native
 import Bridge.RPC
-import Bridge.Domain (Amount, units)
+import Bridge.Domain (Amount, amount, units)
 import Bridge.Error
-import Control.Monad (forM, unless, when)
+import Control.Monad (forM, forM_, unless, when)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
 import qualified Data.Aeson.Key as Key
@@ -291,3 +292,52 @@ checkNativeAcceptance call signed = do
       fee <- fieldValue "base" fees >>= either reject pure . nativeAmount
       require (fee==signedNativeFee signed) "native_fee_mismatch"
     _ -> reject "invalid_native_acceptance_response"
+
+-- The first replacement policy keeps ALL original inputs. The common input
+-- therefore persists through every member, even if an earlier member returns.
+-- Increasing the fee never changes the customer output or the saved ceiling.
+replacementOutputs :: NativeSigned -> Amount -> Either Text [NativeOutput]
+replacementOutputs previous fee = do
+  let plan=signedNativePlan previous
+      tx=signedNativeTransaction previous
+  validateNativeTx plan (signedNativePrevouts previous) (signedNativeFee previous) tx
+  unless (fee>signedNativeFee previous && fee<=planFeeLimit plan) (Left "native_replacement_fee_bounds")
+  let delta=toInteger (units fee)-toInteger (units $ signedNativeFee previous)
+      outputs=nativeOutputs tx
+  unless (length [o | o<-outputs,nativeOutputScript o==planChangeScript plan]==1) (Left "native_replacement_change_unavailable")
+  forM outputs $ \output->if nativeOutputScript output/=planChangeScript plan then pure output else do
+    unless (toInteger (units $ nativeOutputAmount output)>delta) (Left "native_replacement_change_unavailable")
+    remaining <- amount (toInteger (units $ nativeOutputAmount output)-delta)
+    pure output{nativeOutputAmount=remaining}
+
+validateNativeFamily :: [NativeSigned] -> Either Text ()
+validateNativeFamily [] = Left "native_replacement_family_bounds"
+validateNativeFamily family@(first:_) = do
+  unless (length family<=8) (Left "native_replacement_family_bounds")
+  let identifiers=map (nativeTxid.signedNativeTransaction) family
+  unless (length identifiers==length (nub identifiers)) (Left "native_replacement_duplicate_member")
+  forM_ family $ \member->do
+    let tx=signedNativeTransaction member
+    unless (transactionId (nativeTxid tx) && hexText (signedNativeBytes member)
+      && T.length (signedNativeBytes member)<=200000) (Left "invalid_native_signed_bytes")
+    validateNativeTx (signedNativePlan member) (signedNativePrevouts member) (signedNativeFee member) tx
+    unless (signedNativePlan member==signedNativePlan first
+      && nativeInputs tx==nativeInputs (signedNativeTransaction first)
+      && sameNativePrevouts (signedNativePrevouts member) (signedNativePrevouts first)) (Left "native_replacement_family_changed")
+  forM_ (zip family $ drop 1 family) $ \(older,newer)->do
+    expected <- replacementOutputs older (signedNativeFee newer)
+    unless (nativeOutputs (signedNativeTransaction newer)==expected) (Left "native_replacement_outputs_changed")
+
+validateNativeReplacementDraft :: [NativeSigned] -> Amount -> NativeDraft -> Either Text ()
+validateNativeReplacementDraft family fee draft = do
+  validateNativeFamily family
+  unless (length family<8) (Left "native_replacement_family_bounds")
+  previous <- case reverse family of p:_->Right p; _->Left "native_replacement_family_bounds"
+  let tx=draftTransaction draft
+      plan=signedNativePlan previous
+  expected <- replacementOutputs previous fee
+  validateNativeTx plan (draftPrevouts draft) fee tx
+  unless (transactionId (nativeTxid tx) && draftFee draft==fee && nativeInputs tx==nativeInputs (signedNativeTransaction previous)
+    && sameNativePrevouts (draftPrevouts draft) (signedNativePrevouts previous)
+    && nativeOutputs tx==expected && nativeTxid tx `notElem` map (nativeTxid.signedNativeTransaction) family)
+    (Left "native_replacement_draft_changed")

@@ -1115,5 +1115,34 @@ runtime **478 → 484**: **+41 production lines across two existing files**. The
 contract file grows **2,122 → 2,170**. No new files, schema, services or evaluators.
 This adds missing behavior through one predicate instead of copying a separate
 covered-payment engine. Root Cabal build, QuickCheck and PostgreSQL contracts pass.
-Funded-chain execution, covered-source expiry/retry combinations and native replacement
-families still require further work/acceptance; these checks do not close release gates.
+Funded-chain execution and native replacement families still require further
+work/acceptance; these checks do not close release gates.
+
+## Covered retry and native-family rules
+
+Covered-source authorization checks backing independently of payment execution state.
+Each closed payment operation still enforces its own state, so verified Solana expiry
+can enter operator review without losing a valid capital cover. Retry still requires
+an explicit paused approval, current source proof, fresh custody and verified expiry;
+review alone cannot prepare or send. The PostgreSQL contract now exercises a covered
+payment through expiry, refused unapproved retry, refused retry with unavailable source
+evidence, approved retry, unsigned cancellation, another generation and settlement.
+Saved payout terms remain identical. This fixes the duplicate state restriction with
+**no net production-line increase** in Store (**2,675 → 2,675**); the existing contract
+grows **2,170 → 2,201** lines. No new operation, table or file is needed.
+
+Native replacement's pure rules are now in the existing native adapter. The baseline's
+**48-line** `replacementOutputs`/family/draft validation block is retained unchanged,
+plus its exports/imports: adapter **293 → 343 lines**, one existing file. This is a
+validated extraction, not a claim of algorithmic improvement or whole-feature reduction.
+Keeping the rules beside the shared transaction validator avoids another module and
+keeps the immutable-input/payout/fee constraints visible together. QuickCheck checks
+bounded increasing fees, unchanged recipient, conservation of value, duplicate/oversized
+families and input/output/replay-policy mutations against the captured Signet template;
+test module **269 → 299** lines. Synthetic mutations are not valid newly signed chain
+transactions. Native replacement RPC drafting, signing, durable decisions, family
+observation and winner recovery remain to be integrated before this feature is usable.
+
+Validation: Cabal executable/contract build, QuickCheck suite and the full disposable
+PostgreSQL contract passed. No existing custody state was migrated or chain transaction
+submitted by these tests. The baseline remains required until parity and live acceptance.
