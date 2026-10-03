@@ -318,8 +318,9 @@ Private keys/attempts/ledger remain outside Git.
    Devnet pool `FDL7cuLgL3Yog4B5MJY51eLA9fWqjqm9XFX1vnwdLs9Y`; finalized
    readback and repeated submission passed. Token/pool key-file protections now
    share `Bridge.AdminKey`. Full-range position/boundary-array preparation and
-   preflight now pass actual Devnet simulation and ownership validation; position
-   signing/submission, liquidity funding and fee management remain unimplemented.
+   preflight, saved signing/submission and finalized ownership validation now pass
+   Devnet acceptance (position `7gadbytE2t3vQs9skcq2EYXkjBGYcGboGeeCHfUavLRT`).
+   Liquidity funding, withdrawal and fee management remain unimplemented.
    Retire remaining legacy Rust/Python tools after their required behavior is covered.
    Confirm canonical token authority, backing, liquidity and actual route availability.
 5. Finish the current installer/upgrade path last, test clean Linux installation and

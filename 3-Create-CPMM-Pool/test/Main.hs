@@ -5,7 +5,7 @@ import qualified Pool.Position as P
 import qualified Crypto.PubKey.Ed25519 as Ed
 import Crypto.Error (CryptoFailable(..))
 import qualified Data.ByteArray as BA
-import Bridge.SolanaMessage (decodeTransaction,decodePoolTransaction,Transaction(..),Message(..),base58)
+import Bridge.SolanaMessage (decodeTransaction,decodePoolTransaction,decodePositionTransaction,Transaction(..),Message(..),base58)
 import Data.Bits (xor)
 import Bridge.SDKBuild (sdkLibraryPath)
 import Paths_ecx_pool (getDataFileName)
@@ -52,9 +52,25 @@ main=do
     Nothing->fail "test signer") (take 3 signingKeys)
   first<-case signatures of sig:_->pure sig; _->fail "test signature"
   let signedBytes=B.singleton 3<>B.concat signatures<>message
-      saved=S.Saved Devnet signingRequest signingPrepared 20000 20000000 (base58 first) (TE.decodeUtf8 $ B64.encode signedBytes)
+      saved=S.Saved Devnet (S.Creation signingRequest signingPrepared) 20000 20000000 (base58 first) (TE.decodeUtf8 $ B64.encode signedBytes)
+  openingRequest<-case publics of
+    owner:mint:_->pure positionRequest {P.payer=owner,P.positionMint=mint}
+    _->fail "position test keys"
+  openingPrepared<-P.evalSafe(P.Prepare sdkLibraryPath openingRequest)
+  Transaction _ _ openingMessage<-either (fail . show) pure $ decodePositionTransaction(P.transaction openingPrepared)
+  let openingSignatures=[BA.convert(Ed.sign secret (Ed.toPublic secret) openingMessage) :: B.ByteString | secret<-take 2 secrets]
+  openingFirst<-case openingSignatures of first:_->pure first; _->fail "position signature"
+  let openingBytes=B.singleton 2<>B.concat openingSignatures<>openingMessage
+      openingSaved=S.Saved Devnet (S.Opening openingRequest openingPrepared) 20000 20000000 (base58 openingFirst) (TE.decodeUtf8 $ B64.encode openingBytes)
   results<-sequence
     [ quickCheckResult $ once $ property $
+        not(isLeft $ S.validateSaved openingSaved)
+        && (eitherDecode (encode openingSaved) :: Either String S.Saved)==Right openingSaved
+        && isLeft(S.validateSaved openingSaved {S.action=S.action saved})
+        && isLeft(S.validateSaved saved {S.action=S.action openingSaved})
+        && all (\index->isLeft $ S.validateSaved openingSaved {S.transaction=TE.decodeUtf8 $ B64.encode $
+          B.take index openingBytes<>B.singleton((B.index openingBytes index) `xor` 1)<>B.drop (index+1) openingBytes}) [1..128]
+    , quickCheckResult $ once $ property $
         not(isLeft $ P.validate positionRequest positionPrepared)
         && not(isLeft $ P.validateOpened positionRequest positionAccounts)
         && isLeft(P.validateOpened positionRequest {P.payer=P.positionMint positionRequest} positionAccounts)

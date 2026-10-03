@@ -3,7 +3,7 @@
 Liquidity uses separate operator capital and keys, outside bridge custody. The
 root-Cabal `ecx-pool` CLI derives canonical addresses and verifies existing
 full-range pools, creates classic Splash pools and prepares full-range positions.
-Position signing/funding and fee collection remain unfinished.
+Position signing/submission is verified on Devnet; liquidity funding and fee collection remain unfinished.
 
 ```sh
 cabal run -v0 ecx-pool -- prepare devnet REQUEST.json > prepared.json
@@ -14,6 +14,7 @@ cabal run -v0 ecx-pool -- address devnet MINT_A MINT_B FEE_TIER_INDEX
 cabal run -v0 ecx-pool -- inspect devnet HTTPS_RPC POOL MINT_A MINT_B
 cabal run -v0 ecx-pool -- prepare-position devnet POSITION_REQUEST.json > position.json
 cabal run -v0 ecx-pool -- check-position HTTPS_RPC MAX_FEE MAX_COST position.json
+cabal run -v0 ecx-pool -- sign-position HTTPS_RPC MAX_FEE MAX_COST position.json PAYER_KEY POSITION_MINT_KEY NEW_ATTEMPT.json
 cabal test ecx-pool:pool-test --offline -j1 --test-show-details=direct
 ```
 
@@ -74,7 +75,7 @@ even if simulation already deducted it. Quote/simulation success is not a future
 execution guarantee.
 
 `Pool.Signing` owns two closed critical operations. Signing repeats preflight,
-checks each protected key against its message signer, verifies all three signatures,
+checks each protected key against its message signer, verifies every signature,
 and exclusively saves a mode-0600 attempt with file/directory fsync before returning.
 Key and output directories must be private and paths absolute. Token and pool
 administration share these file protections through `Bridge.AdminKey`; neither
@@ -102,12 +103,26 @@ account roles, blockhash and tick bounds. Preflight verifies the real pool and
 network, absent position accounts, system payer and fee limit. Exact simulation
 must create an empty full-range position and one payer-owned NFT, with no mint or
 freeze authority and no token-account delegate/close authority. The conservative
-simulated debit must fit `MAX_COST`. These checks do not yet authorize signing.
+simulated debit must fit `MAX_COST`. `sign-position` repeats those checks and then
+uses the same protected signing, exclusive durable save and exact-byte submission
+path as pool creation. The closed action distinguishes the two-signature position
+transaction from the three-signature pool transaction. Existing pool-attempt files
+retain their original format; position attempts carry an explicit operation tag.
 
 Actual Devnet simulation at slot 507074039 passed with conservative debit 8,264,840
 lamports; fee limit 1 and cost limit 20,000 were refused. The public simulation is
 retained in the existing fixture, with ownership/request/byte-mutation regression
-checks. No position creation has yet been signed or submitted.
+checks. The position was then created and finalized on Devnet:
+
+- Position: `7gadbytE2t3vQs9skcq2EYXkjBGYcGboGeeCHfUavLRT`.
+- Transaction: `zPBoKHBhLkurqhuDbwKBXNMifav5wSRDGCuEigB2kaMjPfv4NPBehDTjpAngqGAqUyvz9Z8SVaFz3CDCAV4Jf3c`.
+- Readback slot: 507076115; fee 10,000 lamports; total debit 8,254,840 lamports.
+
+Readback verified zero liquidity, both full-range tick bounds, both initialized
+boundary arrays, and the payer-owned NFT with removed mint authority. Wrong mint
+keys and attempt overwrites were refused. Repeat submission returned the same
+finalized result; the previously saved pool creation also remained readable and
+finalized. An empty position does not establish funded liquidity or trading.
 
 ## Verified checkpoint
 
@@ -154,8 +169,8 @@ This proves creation only, not funded liquidity or trading.
 Creation preflight now binds the real ordinary tier and explicit price/cost limits.
 The closed signer supports independent vault signatures in addition to the payer,
 keeping the bridge's one-signature custody protocol unchanged. Full-range position
-and boundary-array preparation/preflight now pass real Devnet simulation. Connect
-that operation to saved signing/submission, then add
+and boundary-array preparation/preflight, signing/submission and finalized ownership readback now pass Devnet
+acceptance. Add
 liquidity deposit/withdrawal and fee collection with saved-attempt recovery and
 real Devnet acceptance. Adaptive-tier initialization can have additional authority
 requirements; do not assume the published tier is permissionless.

@@ -1,11 +1,12 @@
 {-# LANGUAGE GADTs #-}
 -- Only these closed operations read LP keys or submit a saved creation.
-module Pool.Signing (Critical(..),evalCritical,Saved(..),validateSaved) where
+module Pool.Signing (Action(..),Critical(..),evalCritical,Saved(..),validateSaved) where
 import Pool
+import qualified Pool.Position as P
 import Bridge.AdminKey (readKey,savePrivate,privateParent)
 import Bridge.Error (require,reject)
 import Bridge.RPC
-import Bridge.SolanaMessage (Transaction(..),Message(..),decodePoolTransaction,base58)
+import Bridge.SolanaMessage (Transaction(..),Message(..),decodePoolTransaction,decodePositionTransaction,base58)
 import Control.Exception (bracket)
 import Control.Monad (unless,zipWithM)
 import Crypto.Error (CryptoFailable(..))
@@ -23,19 +24,27 @@ import Network.HTTP.Client (parseRequest,secure,closeManager)
 import System.IO (withBinaryFile,IOMode(ReadMode))
 import Text.Read (readMaybe)
 
-data Saved = Saved {network :: Network,request :: Create,prepared :: Prepared,feeLimit :: Word64,costLimit :: Word64
+-- Closed alternatives share execution without a sign-arbitrary-message operation.
+data Action = Creation Create Prepared | Opening P.Request P.Prepared deriving (Eq,Show)
+data Saved = Saved {network :: Network,action :: Action,feeLimit :: Word64,costLimit :: Word64
   ,identifier :: Text,transaction :: Text} deriving (Eq,Show)
 instance ToJSON Saved where
-  toJSON s=object ["network" .= (case network s of Devnet->"devnet"; Mainnet->"mainnet"::Text)
-    ,"request" .= request s,"prepared" .= prepared s,"feeLimit" .= show(feeLimit s),"costLimit" .= show(costLimit s)
-    ,"signature" .= identifier s,"transaction" .= transaction s]
+  toJSON s=object $ ["network" .= (case network s of Devnet->"devnet"; Mainnet->"mainnet"::Text)
+    ,"feeLimit" .= show(feeLimit s),"costLimit" .= show(costLimit s),"signature" .= identifier s,"transaction" .= transaction s]
+    <> case action s of
+      Creation r p->["request" .= r,"prepared" .= p]
+      Opening r p->["operation" .= ("open-position"::Text),"request" .= r,"prepared" .= p]
 instance FromJSON Saved where
   parseJSON=withObject "saved pool creation" $ \o->do
-    unless (length o==7) (fail "unexpected saved pool fields")
+    kind<-o .:? "operation" :: Parser (Maybe Text)
+    operation<-case kind of
+      Nothing | length o==7->Creation <$> o .: "request" <*> o .: "prepared"
+      Just "open-position" | length o==8->Opening <$> o .: "request" <*> o .: "prepared"
+      _->fail "unexpected saved operation fields"
     name<-o .: "network" :: Parser Text
     selected<-case name of "devnet"->pure Devnet; "mainnet"->pure Mainnet; _->fail "unknown network"
     fee<-o .: "feeLimit" >>= amount; cost<-o .: "costLimit" >>= amount
-    Saved selected <$> o .: "request" <*> o .: "prepared" <*> pure fee <*> pure cost <*> o .: "signature" <*> o .: "transaction"
+    Saved selected operation fee cost <$> o .: "signature" <*> o .: "transaction"
    where
     amount text=case readMaybe text :: Maybe Integer of
       Just n | n>0 && n<=toInteger(maxBound::Word64) && show n==text->pure(fromInteger n)
@@ -43,33 +52,52 @@ instance FromJSON Saved where
 
 validateSaved :: Saved -> Either Text ()
 validateSaved s=do
-  Transaction _ _ expected<-validatePrepared (network s) (request s) (prepared s)
-  Transaction signatures (Message _ _ _ keys _ _) message<-decodePoolTransaction(transaction s)
+  Transaction _ _ expected<-validateAction (network s) (action s)
+  Transaction signatures (Message _ _ _ keys _ _) message<-decodeAction (action s) (transaction s)
   unless (expected==message && feeLimit s>0 && costLimit s>=feeLimit s) (Left "pool_saved_message_or_policy_mismatch")
-  valid<-zipWithM (verify message) (take 3 keys) signatures
+  valid<-zipWithM (verify message) (take (length signatures) keys) signatures
   unless (and valid && case signatures of first:_->base58 first==identifier s; _->False) (Left "invalid_pool_signatures")
  where
   verify message key bytes=case (Ed.publicKey key,Ed.signature bytes) of
     (CryptoPassed public,CryptoPassed signature)->pure(Ed.verify public message signature)
     _->Left "invalid_pool_signature_encoding"
 
+validateAction :: Network -> Action -> Either Text Transaction
+validateAction selected (Creation r p)=validatePrepared selected r p
+validateAction _ (Opening r p)=P.validate r p
+decodeAction :: Action -> Text -> Either Text Transaction
+decodeAction Creation{}=decodePoolTransaction
+decodeAction Opening{}=decodePositionTransaction
+checkAction :: FilePath -> Network -> String -> Word64 -> Word64 -> Action -> IO ()
+checkAction library selected endpoint fee cost operation=case operation of
+  Creation r p->evalSafe (Check library selected endpoint fee cost r p) >> pure ()
+  Opening r p->P.evalSafe (P.Check library selected endpoint fee cost r p) >> pure ()
+checkDerivation :: FilePath -> Network -> Action -> IO ()
+checkDerivation library selected operation=do
+  matches<-case operation of
+    Creation r p->(==p) <$> evalSafe (Prepare library selected r)
+    Opening r p->(==p) <$> P.evalSafe (P.Prepare library r)
+  require matches "pool_saved_derivation_mismatch"
+
 data Critical a where
-  Sign :: FilePath -> Network -> String -> Word64 -> Word64 -> Create -> Prepared -> FilePath -> FilePath -> FilePath -> FilePath -> Critical Text
+  Sign :: FilePath -> Network -> String -> Word64 -> Word64 -> Action -> [FilePath] -> FilePath -> Critical Text
   Submit :: FilePath -> String -> FilePath -> Critical Value
 
 evalCritical :: Critical a -> IO a
-evalCritical (Sign library selected endpoint fee cost r p payerKey vaultKeyA vaultKeyB output)=do
+evalCritical (Sign library selected endpoint fee cost operation keyfiles output)=do
   privateParent output
-  _<-evalSafe (Check library selected endpoint fee cost r p)
-  Transaction _ (Message _ _ _ keys _ _) message<-either reject pure (validatePrepared selected r p)
-  let sources=[(payer r,payerKey),(createVaultA r,vaultKeyA),(createVaultB r,vaultKeyB)]
+  checkAction library selected endpoint fee cost operation
+  Transaction _ (Message _ _ _ keys _ _) message<-either reject pure (validateAction selected operation)
+  let owners=case operation of Creation r _->[payer r,createVaultA r,createVaultB r]; Opening r _->[P.payer r,P.positionMint r]
+      sources=zip owners keyfiles
+  require (length keyfiles==length owners) "pool_signer_count_mismatch"
   signatures<-mapM (\key->do
     path<-maybe (reject "pool_signer_mismatch") pure (lookup (base58 key) sources)
     secret<-readKey (base58 key) path
-    pure (BA.convert (Ed.sign secret (Ed.toPublic secret) message) :: B.ByteString)) (take 3 keys)
+    pure (BA.convert (Ed.sign secret (Ed.toPublic secret) message) :: B.ByteString)) (take (length owners) keys)
   first<-case signatures of a:_->pure a; _->reject "missing_pool_signature"
-  let encoded=TE.decodeUtf8 $ B64.encode (B.singleton 3<>B.concat signatures<>message)
-      saved=Saved selected r p fee cost (base58 first) encoded
+  let encoded=TE.decodeUtf8 $ B64.encode (B.singleton (fromIntegral $ length signatures)<>B.concat signatures<>message)
+      saved=Saved selected operation fee cost (base58 first) encoded
   either reject pure (validateSaved saved)
   savePrivate output (L.toStrict $ encode saved)
   pure(identifier saved)
@@ -78,8 +106,7 @@ evalCritical (Submit library endpoint path)=do
   require (B.length bytes<=8192) "pool_attempt_too_large"
   saved<-either (const $ reject "invalid_pool_attempt") pure (eitherDecodeStrict' bytes)
   either reject pure (validateSaved saved)
-  canonical<-evalSafe (Prepare library (network saved) (request saved))
-  require (canonical==prepared saved) "pool_saved_derivation_mismatch"
+  checkDerivation library (network saved) (action saved)
   transport<-parseRequest endpoint
   require (secure transport) "pool_requires_https"
   bracket newRpcManager closeManager $ \manager->do
@@ -91,7 +118,7 @@ evalCritical (Submit library endpoint path)=do
     values<-call "getSignatureStatuses" [toJSON [name],object ["searchTransactionHistory" .= True]] >>= fieldValue "value" :: IO [Value]
     status<-case values of [value]->pure value; _->reject "invalid_pool_status"
     if status==Null then do
-      _<-evalSafe (Check library (network saved) endpoint (feeLimit saved) (costLimit saved) (request saved) (prepared saved))
+      checkAction library (network saved) endpoint (feeLimit saved) (costLimit saved) (action saved)
       returned<-call "sendTransaction" [toJSON(transaction saved),object
         ["encoding" .= ("base64"::Text),"skipPreflight" .= False,"preflightCommitment" .= ("finalized"::Text),"maxRetries" .= (0::Int)]] >>= parseValue parseJSON
       require (returned==name) "pool_submission_identifier_mismatch"
