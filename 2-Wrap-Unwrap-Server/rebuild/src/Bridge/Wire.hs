@@ -1,5 +1,5 @@
 {-# LANGUAGE DeriveAnyClass, DerivingStrategies #-}
--- Existing customer wire contract; validated money comes only from Domain.
+-- Shared wire records; validated money comes only from Domain.
 module Bridge.Wire where
 import Bridge.Domain (Amount, Asset(..), Direction, Quote, amount, units)
 import Data.Aeson
@@ -154,3 +154,37 @@ data ServiceStatus = ServiceStatus
 data RefundAuthorization = RefundAuthorization
   { refundPayment :: !Text, refundRecipient :: !Text, refundAmount :: !Amount }
   deriving stock (Eq,Show,Generic) deriving anyclass (ToJSON,FromJSON)
+
+-- Native signer records live below the chain adapter so closed DSL requests
+-- can return typed drafts without importing RPC capabilities. Codecs are unchanged.
+data Outpoint = Outpoint { outpointTxid :: !Text, outpointVout :: !Int }
+  deriving (Eq,Ord,Show,Generic)
+instance ToJSON Outpoint where toJSON (Outpoint txid vout) = object ["txid" .= txid,"vout" .= vout]
+instance FromJSON Outpoint where parseJSON = withObject "outpoint" $ \o -> Outpoint <$> o .: "txid" <*> o .: "vout"
+
+data NativeInput = NativeInput { nativeOutpoint :: !Outpoint, nativeSequence :: !Int64 }
+  deriving (Eq,Show,Generic,ToJSON,FromJSON)
+data NativeOutput = NativeOutput { nativeOutputScript :: !Text, nativeOutputAmount :: !Amount }
+  deriving (Eq,Show,Generic,ToJSON,FromJSON)
+data NativeTx = NativeTx
+  { nativeTxid :: !Text, nativeVersion :: !Int, nativeLocktime :: !Int64
+  , nativeInputs :: ![NativeInput], nativeOutputs :: ![NativeOutput]
+  } deriving (Eq,Show,Generic,ToJSON,FromJSON)
+data NativePrevout = NativePrevout
+  { prevout :: !Outpoint, prevoutAmount :: !Amount, prevoutScript :: !Text
+  , prevoutDepth :: !Int, prevoutCoinbase :: !Bool
+  } deriving (Eq,Show,Generic,ToJSON,FromJSON)
+data NativePlan = NativePlan
+  { planProfile :: !Profile, planRecipient :: !Text, planRecipientScript :: !Text
+  , planChange :: !Text, planChangeScript :: !Text, planAmount :: !Amount
+  , planDepth :: !Int, planFeeLimit :: !Amount
+  } deriving (Eq,Show,Generic,ToJSON,FromJSON)
+data NativeDraft = NativeDraft
+  { draftPsbt :: !Text, draftTransaction :: !NativeTx
+  , draftPrevouts :: ![NativePrevout], draftFee :: !Amount
+  } deriving (Eq,Show,Generic,ToJSON,FromJSON)
+data NativeSigned = NativeSigned
+  { signedNativeBytes :: !Text, signedNativeTransaction :: !NativeTx
+  , signedNativePlan :: !NativePlan, signedNativePrevouts :: ![NativePrevout]
+  , signedNativeFee :: !Amount
+  } deriving (Eq,Show,Generic,ToJSON,FromJSON)

@@ -1,4 +1,4 @@
-{-# LANGUAGE DeriveAnyClass, RecordWildCards #-}
+{-# LANGUAGE RecordWildCards #-}
 module Bridge.NativePayment
   ( NativeRPC, Outpoint(..), NativeInput(..), NativeOutput(..), NativeTx(..)
   , NativePrevout(..), NativePlan(..), NativeDraft(..), NativeSigned(..)
@@ -9,7 +9,7 @@ module Bridge.NativePayment
   , readNativePrevoutsWith, ownedNativeLocks, releaseNativeInputLocks, restoreNativeInputLocks, checkNativeAcceptance
   ) where
 
-import Bridge.Wire (Profile(..))
+import Bridge.Wire (Profile(..),Outpoint(..),NativeInput(..),NativeOutput(..),NativeTx(..),NativePrevout(..),NativePlan(..),NativeDraft(..),NativeSigned(..))
 import Bridge.Native
 import Bridge.RPC
 import Bridge.Domain (Amount, amount, units)
@@ -24,43 +24,10 @@ import Data.Int (Int64)
 import Data.List (nub)
 import Data.Text (Text)
 import qualified Data.Text as T
-import GHC.Generics (Generic)
 
 -- Only this dedicated wallet's RPC is supplied. Tests can exercise the same
 -- method contract without selecting a substitute network in the application.
 type NativeRPC = Bool -> Text -> [Value] -> IO Value
-
-data Outpoint = Outpoint { outpointTxid :: !Text, outpointVout :: !Int }
-  deriving (Eq,Ord,Show,Generic)
-instance ToJSON Outpoint where toJSON (Outpoint txid vout) = object ["txid" .= txid,"vout" .= vout]
-instance FromJSON Outpoint where parseJSON = withObject "outpoint" $ \o -> Outpoint <$> o .: "txid" <*> o .: "vout"
-
-data NativeInput = NativeInput { nativeOutpoint :: !Outpoint, nativeSequence :: !Int64 }
-  deriving (Eq,Show,Generic,ToJSON,FromJSON)
-data NativeOutput = NativeOutput { nativeOutputScript :: !Text, nativeOutputAmount :: !Amount }
-  deriving (Eq,Show,Generic,ToJSON,FromJSON)
-data NativeTx = NativeTx
-  { nativeTxid :: !Text, nativeVersion :: !Int, nativeLocktime :: !Int64
-  , nativeInputs :: ![NativeInput], nativeOutputs :: ![NativeOutput]
-  } deriving (Eq,Show,Generic,ToJSON,FromJSON)
-data NativePrevout = NativePrevout
-  { prevout :: !Outpoint, prevoutAmount :: !Amount, prevoutScript :: !Text
-  , prevoutDepth :: !Int, prevoutCoinbase :: !Bool
-  } deriving (Eq,Show,Generic,ToJSON,FromJSON)
-data NativePlan = NativePlan
-  { planProfile :: !Profile, planRecipient :: !Text, planRecipientScript :: !Text
-  , planChange :: !Text, planChangeScript :: !Text, planAmount :: !Amount
-  , planDepth :: !Int, planFeeLimit :: !Amount
-  } deriving (Eq,Show,Generic,ToJSON,FromJSON)
-data NativeDraft = NativeDraft
-  { draftPsbt :: !Text, draftTransaction :: !NativeTx
-  , draftPrevouts :: ![NativePrevout], draftFee :: !Amount
-  } deriving (Eq,Show,Generic,ToJSON,FromJSON)
-data NativeSigned = NativeSigned
-  { signedNativeBytes :: !Text, signedNativeTransaction :: !NativeTx
-  , signedNativePlan :: !NativePlan, signedNativePrevouts :: ![NativePrevout]
-  , signedNativeFee :: !Amount
-  } deriving (Eq,Show,Generic,ToJSON,FromJSON)
 
 hexText :: Text -> Bool
 hexText t = not (T.null t) && even (T.length t) && T.all (`elem` ("0123456789abcdef"::String)) t

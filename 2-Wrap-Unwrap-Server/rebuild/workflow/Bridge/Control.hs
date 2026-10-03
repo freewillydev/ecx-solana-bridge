@@ -54,6 +54,15 @@ controlPlan=withObject "operator command" $ \o->do
     "cancel-fees"->do
       fields ["operation","id","reason"]
       ControlPlan . operator <$> (CancelFeeWithdrawal <$> o .: "id" <*> o .: "reason")
+    "draft-replacement"->do
+      fields ["operation","parent","fee","reason"]
+      ControlPlan . operator <$> (DraftNativeReplacement <$> o .: "parent" <*> o .: "fee" <*> o .: "reason")
+    "sign-replacement"->do
+      fields ["operation","decision"]
+      ControlPlan . operator . SignNativeReplacement <$> o .: "decision"
+    "cancel-replacement"->do
+      fields ["operation","decision","reason"]
+      ControlPlan . operator <$> (CancelNativeReplacement <$> o .: "decision" <*> o .: "reason")
     "retry-solana"->do
       fields ["operation","transaction","reason"]
       ControlPlan . operator <$> (RetrySolanaPayment <$> o .: "transaction" <*> o .: "reason")

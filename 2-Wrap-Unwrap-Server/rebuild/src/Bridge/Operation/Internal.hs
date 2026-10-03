@@ -28,6 +28,9 @@ data OperatorRead a where
   ServiceState :: OperatorRead ServiceStatus
 
 data OperatorWrite a where
+  DraftNativeReplacement :: Text -> Amount -> Text -> OperatorWrite Int64
+  SignNativeReplacement :: Int64 -> OperatorWrite Text
+  CancelNativeReplacement :: Int64 -> Text -> OperatorWrite ()
   CoverLostSource :: Text -> Int64 -> Amount -> Amount -> Text -> OperatorWrite ()
   ApproveCovered :: Text -> Int64 -> Text -> OperatorWrite ()
   RestoreSource :: Text -> Int64 -> Text -> OperatorWrite ()
@@ -43,6 +46,7 @@ data OperatorWrite a where
 
 -- Initial signing is tied to a durable decision, never caller-supplied bytes.
 data SigningOperation a where
+  DraftReplacement :: Text -> Text -> Amount -> SigningOperation NativeDraft
   SignReplacement :: Text -> Int64 -> SigningOperation SignedAttempt
   SignPrepared :: Text -> Text -> Int -> SigningOperation SignedAttempt
 

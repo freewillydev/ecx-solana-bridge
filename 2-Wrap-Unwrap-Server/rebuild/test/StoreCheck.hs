@@ -1,4 +1,4 @@
-{-# LANGUAGE GADTs, ScopedTypeVariables #-}
+{-# LANGUAGE DataKinds, GADTs, ScopedTypeVariables #-}
 module Main (main) where
 import qualified Bridge.Config as Config
 import Paths_ecx_bridge_rebuild (getDataFileName)
@@ -1338,6 +1338,9 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.RefundDeposit "missing")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.CancelPreparation "missing" 0 "test")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.RetrySolanaPayment "missing" "test")
+      expectStore "observation_only" (operatorControl $ Op.operator $ Op.DraftNativeReplacement "missing" (money 1) "test")
+      expectStore "observation_only" (operatorControl $ Op.operator $ Op.SignNativeReplacement 1)
+      expectStore "observation_only" (operatorControl $ Op.operator $ Op.CancelNativeReplacement 1 "test")
       operatorControl (Op.operator $ Op.PauseService "operator contract")
       serviceAfter<-operatorControl (Op.operatorRead Op.ServiceState)
       check (W.paused serviceAfter && W.pauseReason serviceAfter=="operator contract")
@@ -1498,7 +1501,10 @@ serverMain = do
               refused<-control (object ["operation" .= ("resume"::T.Text)])
               check (refused==object ["error" .= ("observation_only"::T.Text)])
               forM_ [object ["operation" .= ("withdraw-fees"::T.Text),"id" .= T.replicate 64 "a","asset" .= Native,"amount" .= money 1,"recipient" .= ("recipient"::T.Text),"reason" .= ("test"::T.Text)],
-                object ["operation" .= ("cancel-fees"::T.Text),"id" .= ("missing"::T.Text),"reason" .= ("test"::T.Text)]] $ \command->do
+                object ["operation" .= ("cancel-fees"::T.Text),"id" .= ("missing"::T.Text),"reason" .= ("test"::T.Text)],
+                object ["operation" .= ("draft-replacement"::T.Text),"parent" .= ("missing"::T.Text),"fee" .= money 2,"reason" .= ("test"::T.Text)],
+                object ["operation" .= ("sign-replacement"::T.Text),"decision" .= (1::Int)],
+                object ["operation" .= ("cancel-replacement"::T.Text),"decision" .= (1::Int),"reason" .= ("test"::T.Text)]] $ \command->do
                   result<-control command
                   check (result==object ["error" .= ("observation_only"::T.Text)])
               coverRefused<-control (object ["operation" .= ("cover-source-loss"::T.Text),"deposit" .= ("missing"::T.Text),"recovery" .= (1::Int),"float" .= money 1,"earned" .= money 0,"reason" .= ("cover"::T.Text)])
@@ -1513,6 +1519,8 @@ serverMain = do
               check (refundRefused==object ["error" .= ("observation_only"::T.Text)])
               retryRefused<-control (object ["operation" .= ("retry-solana"::T.Text),"transaction" .= ("missing"::T.Text),"reason" .= ("test"::T.Text)])
               check (retryRefused==object ["error" .= ("observation_only"::T.Text)])
+              expectStore "invalid_operator_operation" (control $ object ["operation" .= ("sign-replacement"::T.Text),"decision" .= (1::Int),"bytes" .= ("attacker"::T.Text)])
+              expectStore "invalid_operator_operation" (control $ object ["operation" .= ("draft-replacement"::T.Text),"parent" .= ("missing"::T.Text),"fee" .= (2::Int),"reason" .= ("test"::T.Text)])
               expectStore "invalid_operator_operation" (control $ object ["operation" .= ("refund"::T.Text),"deposit" .= ("missing"::T.Text),"recipient" .= ("attacker"::T.Text)])
               expectStore "invalid_operator_operation" (control $ object ["operation" .= ("resume"::T.Text),"bypass" .= True])
               _<-control (object ["operation" .= ("pause"::T.Text),"reason" .= ("operator process contract"::T.Text)])
@@ -2234,24 +2242,32 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   evalRead reader (ReadNativeFamily identifier) >>= check . (==[(parent,signed)])
   let save reason=evalWrite writer (SaveReplacementDraft 110 parent draft reason)
   expectStore "pause_before_operator_action" (save "increase fee")
+  expectStore "pause_before_operator_action" (evalRead reader $ ReadReplacementDraftContext 110 (signedId wire) (money 2))
   paused
+  evalRead reader (ReadReplacementDraftContext 110 (signedId wire) (money 2)) >>= check . (==[(parent,signed)])
+  badFee<-try (evalRead reader $ ReadReplacementDraftContext 110 (signedId wire) (money 1)) :: IO (Either BridgeError [(RecordedAttempt,NP.NativeSigned)])
+  check (case badFee of Left _->True; Right _->False)
   before<-evalRead reader ReadBalances
   decision<-save "increase fee"
   evalRead reader (ReadReplacementDecision (signedId wire) (money 2) "increase fee") >>= check . (==Just(decision,False))
   n<-ledgerSequence <$> evalRead reader ReadState
   save "increase fee" >>= check . (==decision)
+  operate (Op.operator $ Op.DraftNativeReplacement (signedId wire) (money 2) "increase fee") >>= check . (==decision)
   evalRead reader ReadState >>= check . (==n) . ledgerSequence
   expectStore "native_replacement_draft_conflict" (evalWrite writer $ SaveReplacementDraft 110 parent draft {NP.draftPsbt="changed"} "increase fee")
   expectStore "native_replacement_draft_pending" (save "another decision")
+  evalRead reader (ReadReplacementPayment decision) >>= check . (==identifier)
+  expectStore "native_replacement_draft_pending" (evalRead reader $ ReadReplacementDraftContext 110 (signedId wire) (money 3))
   fixture fixtures CoverBackup
   ready
   expectStore "native_replacement_draft_pending" (evalWrite writer $ AuthorizeSend 110 $ signedId wire)
   paused
-  evalWrite writer (CancelReplacementDraft decision "abandon unsigned draft")
-  evalWrite writer (CancelReplacementDraft decision "abandon unsigned draft")
+  operate (Op.operator $ Op.CancelNativeReplacement decision "abandon unsigned draft")
+  operate (Op.operator $ Op.CancelNativeReplacement decision "abandon unsigned draft")
   expectStore "native_replacement_cancellation_conflict" (evalWrite writer $ CancelReplacementDraft decision "different")
   evalRead reader (ReadReplacementDecision (signedId wire) (money 2) "increase fee") >>= check . (==Just(decision,True))
   save "increase fee" >>= check . (==decision)
+  expectStore "native_replacement_cancelled" (operate $ Op.operator $ Op.DraftNativeReplacement (signedId wire) (money 2) "increase fee")
   ready
   expectStore "backup_pending" (evalWrite writer $ AuthorizeSend 110 $ signedId wire)
   fixture fixtures CoverBackup
@@ -2275,6 +2291,7 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   child<-record family replacement
   sequenceNo<-ledgerSequence <$> evalRead reader ReadState
   record family replacement >>= check . (==child)
+  operate (Op.operator $ Op.SignNativeReplacement second) >>= check . (==signedId(recordedSigned child))
   evalRead reader ReadState >>= check . (==sequenceNo) . ledgerSequence
   evalRead reader (ReadReplacementMember second) >>= check . (==Just child)
   expectStore "native_replacement_signature_conflict" (record family replacement {NP.signedNativeBytes="04"})
@@ -2288,4 +2305,16 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   ready
   authorized<-evalWrite writer (AuthorizeSend 110 $ signedId $ recordedSigned child)
   evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 2) (money 0)) "offline replacement winner")
- where encodeText value=TE.decodeUtf8 (BL.toStrict $ encode value)
+ where
+  encodeText value=TE.decodeUtf8 (BL.toStrict $ encode value)
+  -- These branches must replay/cancel from the ledger alone. Unavailable
+  -- credentials and a rejecting manager prove that neither RPC nor signing runs.
+  operate :: Op.Plan 'Op.Operator a -> IO a
+  operate operation=do
+    let key=T.replicate 32 "1"
+        native=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:29432" "/unused" "workflow" 1 (T.replicate 64 "0")
+        solana=Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing key key key
+        settings=ObserverSettings native solana 2 "sol-origin" "opening-signature"
+        config=H.SolanaPolicy "contract" "contract" key key key (money 10) (money 10)
+    bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "replacement replay reached network"}) closeManager $ \manager->
+      withRuntime manager settings config Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \_ _ operator->operator operation

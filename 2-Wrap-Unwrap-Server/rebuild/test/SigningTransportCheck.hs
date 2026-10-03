@@ -147,8 +147,13 @@ checks=sequence
       let token=BS.replicate 64 97
           credentials=BasicAuthData "worker" token
           result=SignedAttempt "fixture-id" "fixture-bytes" "fixture-proof" Nothing
+          quantity=either (error . T.unpack) id (D.amount 2)
+          unsigned=W.NativeDraft "fixture-psbt" (W.NativeTx "fixture-id" 2 0 [] []) [] quantity
           evaluate :: forall a. Request 'Signer 'Critical a -> IO a
           evaluate request=case resolve request of
+            SigningDSL (DraftReplacement identity parent fee)->do
+              modifyIORef' calls (<>[(identity,parent,fromIntegral $ D.units fee)])
+              pure unsigned
             SigningDSL (SignReplacement identity decision)->do
               modifyIORef' calls (<>[(identity,"replacement",fromIntegral decision)])
               pure result
@@ -172,10 +177,14 @@ checks=sequence
         ,send "/broadcast" auth (body "payment")
         ,send "/sign-replacement" [] (encode ("deployment"::Text,7::Int))
         ,send "/sign-replacement" auth (encode ("deployment"::Text,7::Int))
-        ,send "/sign-replacement" auth (body "wrong-shape")]) app
+        ,send "/sign-replacement" auth (body "wrong-shape")
+        ,send "/draft-replacement" [] (encode ("deployment"::Text,"parent"::Text,quantity))
+        ,send "/draft-replacement" auth (encode ("deployment"::Text,"parent"::Text,quantity))
+        ,send "/draft-replacement" auth (body "numeric-fee-forbidden")]) app
       observed<-readIORef calls
-      pure $ counterexample (show (map (statusCode . simpleStatus) responses,observed,map simpleBody responses)) $ map (statusCode . simpleStatus) responses==[401,403,200,409,400,413,403,404,401,200,400]
-        && observed==[("deployment","payment",0),("deployment","refused",0),("deployment","replacement",7)]
+      pure $ counterexample (show (map (statusCode . simpleStatus) responses,observed,map simpleBody responses)) $ map (statusCode . simpleStatus) responses==[401,403,200,409,400,413,403,404,401,200,400,401,200,400]
+        && observed==[("deployment","payment",0),("deployment","refused",0),("deployment","replacement",7),("deployment","parent",2)]
+        && eitherDecode (simpleBody $ responses!!12)==Right unsigned
         && case drop 2 responses of
           accepted:_->eitherDecode (simpleBody accepted)==Right result
             && lookup "Cache-Control" (simpleHeaders accepted)==Just "no-store"

@@ -33,10 +33,10 @@ main = do
             ,all (isLeft . bearerHash) ["", "bearer "<>T.replicate 64 "0", "Bearer "<>T.replicate 64 "A", "Bearer "<>T.replicate 64 "0"<>" "]]
     , check "customer handlers preserve request, result type and severity" $ once $ property handlerContract
     , check "signer handler resolves an existential to a signer-only critical operation" $ once $ property $
-        let prepared :<|> replacement=signingServer ()
-        in case (resolve $ prepared ("deployment","payment",3),resolve $ replacement ("deployment",7)) of
-          (SigningDSL (SignPrepared identity identifier generation),SigningDSL (SignReplacement other decision))->
-            identity=="deployment" && identifier=="payment" && generation==3 && other==identity && decision==7
+        let prepared :<|> replacement :<|> draft=signingServer ()
+        in case (resolve $ prepared ("deployment","payment",3),resolve $ replacement ("deployment",7),resolve $ draft ("deployment","parent",good $ amount 2)) of
+          (SigningDSL (SignPrepared identity identifier generation),SigningDSL (SignReplacement other decision),SigningDSL (DraftReplacement third parent fee))->
+            identity=="deployment" && identifier=="payment" && generation==3 && other==identity && decision==7 && third==identity && parent=="parent" && units fee==2
           _->False
     , check "typed signer result preserves all evidence through JSON" $ once $ property $
         let result=W.SignedAttempt "id" "bytes" "proof" (Just "outpoint")

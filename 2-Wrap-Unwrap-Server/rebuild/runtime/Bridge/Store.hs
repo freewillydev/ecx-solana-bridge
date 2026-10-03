@@ -75,7 +75,9 @@ data CustodySnapshot = CustodySnapshot
   { custodyRevision :: Int64, custodyTotals :: M.Map Asset Integer
   , custodyHeads :: [(Text,Text)], custodySlot :: Int64, custodyPending :: [RecordedAttempt] } deriving (Eq,Show)
 data StoreRead a where
+  ReadReplacementDraftContext :: Int64 -> Text -> Amount -> StoreRead [(RecordedAttempt,N.NativeSigned)]
   ReadReplacementSigning :: Int64 -> Int64 -> StoreRead ([(RecordedAttempt,N.NativeSigned)],N.NativeDraft)
+  ReadReplacementPayment :: Int64 -> StoreRead Text
   ReadReplacementMember :: Int64 -> StoreRead (Maybe RecordedAttempt)
   ReadNativeFamily :: Text -> StoreRead [(RecordedAttempt,N.NativeSigned)]
   ReadReplacementDecision :: Text -> Amount -> Text -> StoreRead (Maybe (Int64,Bool))
@@ -221,7 +223,15 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
           O.where_ (S.eventId event O..== O.sqlStrictText identifier O..&& O.in_ (map O.sqlStrictText $ if chain=="Solana" then ["Solana","SolanaOperating"] else [chain]) (S.eventChain event))
           pure (S.eventId event)
         pure (not $ null (rows :: [Text]))
+      ReadReplacementDraftContext now parent fee -> replacementDraftContext c identity now parent fee
       ReadReplacementSigning now decision -> replacementSigning c identity remote now decision
+      ReadReplacementPayment decision -> do
+        parents<-O.runSelect c $ do
+          (n,parent,_,_,_,_)<-S.replacementDrafts
+          O.where_ (n O..== O.sqlInt8 decision)
+          pure parent
+          :: IO [Text]
+        case parents of [parent]->recordedPayment <$> readAttempt c parent; _->reject "native_replacement_draft_missing"
       ReadReplacementMember decision -> replacementMember c decision
       ReadNativeFamily identifier -> nativeFamily c identity identifier
       ReadReplacementDecision parent fee reason -> replacementDecision c parent fee reason
@@ -2769,6 +2779,26 @@ replacementDecision c parent fee reason = do
       :: IO [Int64]
     pure (n,not $ null cancelled)
 
+-- Shared read-only preflight and atomic write guard. The signer can build only
+-- a bounded replacement of the current, already broadcast family member.
+replacementDraftContext :: PG.Connection -> Text -> Int64 -> Text -> Amount -> IO [(RecordedAttempt,N.NativeSigned)]
+replacementDraftContext c identity now txid fee = do
+  metadata c identity >>= \state->require (S.paused state==1) "pause_before_operator_action"
+  current<-sendContext c identity txid
+  require (recordedChain current=="Native" && recordedState current=="broadcast_intent"
+    && maybe False (>0) (recordedSequence current)) "native_replacement_not_expected"
+  family<-nativeFamily c identity (recordedPayment current)
+  require (fst(last family)==current && length family<8) "native_replacement_not_current"
+  _<-checked (N.replacementOutputs (snd $ last family) fee)
+  drafts<-O.runSelect c $ do
+    (n,parent,_,_,_,_)<-S.replacementDrafts
+    O.where_ (O.in_ (map (O.sqlStrictText.signedId.recordedSigned.fst) family) parent)
+    pure n
+    :: IO [Int64]
+  require (length drafts<7) "native_replacement_draft_limit"
+  fresh c now
+  pure family
+
 saveReplacementDraft :: PG.Connection -> PaymentTerms -> Int64 -> RecordedAttempt -> N.NativeDraft -> Text -> IO Int64
 saveReplacementDraft c policy now expected draft reason = do
   validReason reason
@@ -2787,19 +2817,10 @@ saveReplacementDraft c policy now expected draft reason = do
       require (rows==[encodeSaved draft]) "native_replacement_draft_conflict"
       pure n
     Nothing->do
-      current<-sendContext c identity txid
-      require (current==expected && recordedChain current=="Native" && recordedState current=="broadcast_intent"
-        && maybe False (>0) (recordedSequence current)) "native_replacement_not_expected"
-      family<-nativeFamily c identity identifier
-      require (fst(last family)==current) "native_replacement_not_current"
+      family<-replacementDraftContext c identity now txid (N.draftFee draft)
+      let current=fst(last family)
+      require (current==expected) "native_replacement_not_expected"
       checked (N.validateNativeReplacementDraft (map snd family) (N.draftFee draft) draft)
-      drafts<-O.runSelect c $ do
-        (n,parent,_,_,_,_)<-S.replacementDrafts
-        O.where_ (O.in_ (map (text.signedId.recordedSigned.fst) family) parent)
-        pure n
-        :: IO [Int64]
-      require (length drafts<7) "native_replacement_draft_limit"
-      fresh c now
       hash<-paymentWorkHash c identifier
       custody<-O.runSelect c $ do
         (_,revision,_,at,_)<-O.selectTable S.custody

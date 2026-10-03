@@ -1140,111 +1140,63 @@ keeps the immutable-input/payout/fee constraints visible together. QuickCheck ch
 bounded increasing fees, unchanged recipient, conservation of value, duplicate/oversized
 families and input/output/replay-policy mutations against the captured Signet template;
 test module **269 → 299** lines. Synthetic mutations are not valid newly signed chain
-transactions. Native replacement RPC drafting, signing, durable decisions, family
-observation and winner recovery remain to be integrated before this feature is usable.
+transactions. The current replacement integration and remaining acceptance gates are described below.
 
 Validation: Cabal executable/contract build, QuickCheck suite and the full disposable
 PostgreSQL contract passed. No existing custody state was migrated or chain transaction
 submitted by these tests. The baseline remains required until parity and live acceptance.
 
-## Native replacement adapter checkpoint
+## Native replacement: current integration
 
-The existing native adapter now supplies unsigned replacement construction, exact-draft
-signing and a shared family reader. The reader independently verifies saved bytes,
-wallet/node synchronization, canonical winners, mempool spenders, confirmed owned
-prevouts and two consistent chain views. Drafting refuses confirmed winners and only
-builds the validated higher-fee template; signing rechecks the draft and family before
-and after the existing template signer. Neither adapter broadcasts. The returned
-family view retains the tip position, so callers can detect a change across construction
-even when every member is absent from wallet history.
+Operator commands now pass through the constrained existential, critical DSL and
+one private typed Servant client:
 
-The corresponding baseline adapter functions occupy **228 physical lines**; their
-rebuild versions occupy **176**, excluding imports/exports and the previously extracted
-pure rules on both sides. Shared inspection replaces the separate drafting inspector.
-Existing `NativePayment.hs` grows **343 → 523 lines** including imports/exports;
-**no new production file**. Existing test module **299 → 432**, with **one copied
-captured PSBT fixture**. The fixture's provenance explicitly records unsigned construction
-from an already-confirmed public Signet input; it is not a live replacement proof.
+- `draft-replacement` accepts `parent`, base-unit string `fee`, and `reason`.
+  It checks pause, source and custody, requests a typed unsigned draft from the
+  signer, validates the family/template and atomically saves the decision.
+- `sign-replacement` accepts only the durable `decision` sequence. It refreshes
+  source, backup and custody, requests signing, independently decodes the returned
+  bytes and checks the saved family/template, then atomically records the member.
+- `cancel-replacement` accepts `decision` and `reason`; only unsigned work can be
+  cancelled. Repeating a cancelled draft request cannot reactivate it. Exact saved
+  draft/signature replay and cancellation require no RPC or signing credentials.
 
-Root Cabal build and QuickCheck pass. Offline contracts reproduce the captured PSBT,
-exercise absent/pending families, simulated signing response effects, refusal of a
-confirmed winner, foreign spenders and signature-bearing PSBTs, and discard construction
-when the tip changes. The simulated signing reply is not a newly verified real signature.
-Durable replacement decisions, signer routes, worker/family settlement and winner-change
-recovery remain integration work; funded replacement/reorg acceptance remains a gate.
+All three operator commands are forbidden in observation mode. Customers cannot
+construct them. Signer HTTP handlers package typed operations; only their evaluator
+performs RPC. `draft-replacement` belongs at the signer because unsigned construction
+uses `walletprocesspsbt`, which the worker's restricted credentials must not allow.
+The draft route accepts deployment, parent and fee, never arbitrary RPC or PSBT input.
+It rechecks the same closed Opaleye preflight before and after construction. The
+signing route accepts deployment and decision, independently checks immutable terms
+and authorization before/after signing, and never writes the ledger or broadcasts.
 
-## Durable native replacement decisions
+One client dispatch now owns TLS certificate pinning, protected authentication,
+loopback/no-proxy/no-redirect policy, bounded responses and no automatic retries for
+preparation signing, replacement drafting and replacement signing. Native wire records
+moved unchanged into the existing wire module so the grammar can name `NativeDraft`
+without depending on RPC. No second codec or new module was introduced.
 
-Closed Opaleye operations now read a bounded native family, find/replay an immutable
-draft decision, save a draft and cancel unsigned replacement work. Family reads validate
-the saved payment, generation, fee ceiling, exact bytes/policy, common input, increasing
-fees and draft/member lineage. Saving requires pause, fresh custody, the current
-broadcast parent, unchanged payment/source authorization and no pending draft. A draft
-blocks ordinary sends. Cancellation preserves the decision and money; the parent
-becomes sendable only after backup covers the cancellation sequence. Replay cannot
-reactivate a cancelled draft or rewrite its bytes/reason.
+Store reads and atomic writes share parent/family/source/fee/custody checks. Schema
+21's existing migration preserves active fee reservations, lineage, append-only draft
+and cancellation decisions, and customer or earned funding. Pending drafts block sends;
+signed members cannot be cancelled; send selection requires the latest member and
+backup coverage includes cancellations. Actual custody databases remain unmigrated.
 
-Schema **21** adds forward migration `003.sql`, preserving the existing tables while
-updating the replacement-binding trigger for the shared customer/earned funding engine.
-It retains live native fee reservations, parent broadcast/sequence binding and one
-pending draft, and checks either customer source eligibility/approved cover or a valid
-uncancelled native earned withdrawal. Existing custody databases have not been migrated.
-The private store component reuses the chain component's pure native validators; its
-closed operations gain no caller-supplied RPC, query or IO capability.
+This checkpoint versus `78819d4`: **4,450 → 4,554 production lines across the same
+seven files** (+104, no new file/migration); existing tests **2,668 → 2,706** across
+three files. NativePayment alone **523 → 490** mostly reflects moving records to Wire
+(**156 → 190**), not deleting behavior. Shared draft guards and a single transport
+reduce duplicate policy; this is integration growth, not a whole-feature size reduction.
 
-Verification uses actual disposable PostgreSQL and synthetic ledger transactions:
-family binding, paused creation, exact replay, changed-byte conflicts, competing drafts,
-blocked sends, immutable cancellation, backup-before-resend and unchanged balances,
-then ordinary settlement of the original. Pure chain fixtures remain separately tested.
-The scenario runs before the scan fixture that intentionally leaves an incomplete intent.
-No concurrency guard was weakened to accommodate test setup.
+Validation: root Cabal build and QuickCheck; disposable PostgreSQL contracts for
+pause/fee/backup/freshness, draft conflicts, cancellation, immutable signatures,
+lineage, synthetic settlement, and network-free operator replay; actual executable
+operator parsing/observation-mode refusal and cleanup; actual HTTPS preparation signing
+with SDK signature, bad-token/certificate refusal and persisted-byte replay. The last
+check covers the shared client with offline Solana RPC responses, not native replacement
+end-to-end signing. Adapter tests use captured Signet templates and explicit offline RPC.
 
-This completes persistence/cancellation primitives, not the operator replacement flow.
-Dedicated signer routes, durable replacement signatures, worker integration, family
-settlement and winner/reconfirmation recovery remain pending. No replacement signature
-or broadcast is enabled by these new Store operations alone.
-
-Scoped size: Store **2,675 → 2,840**, schema projections **272 → 279**, existing
-PostgreSQL contract **2,201 → 2,263**; one **37-line forward migration**, no new
-Haskell modules or executables. This adds missing behavior rather than reducing total
-lines. It reuses the payment/source checks and native validators instead of adding
-another customer-only replacement engine. Root Cabal build, QuickCheck and migrated
-PostgreSQL contracts pass; populated migration and live replacement remain unverified.
-
-## Replacement signing checkpoint
-
-`POST /sign-replacement` is a private authenticated signer route accepting only
-`[deploymentFingerprint, draftSequence]`. Its Servant handler packages the
-`SignReplacement` existential operation; the signing evaluator reads the exact
-saved family/draft, validates profile and native wallet state, signs through the
-shared adapter, and rereads the decision before returning a typed `SignedAttempt`.
-It cannot broadcast or write to the ledger. The original generated preparation
-client now selects its route from the combined API inside the critical evaluator.
-
-Closed Opaleye signing reads require pause, fresh custody, backup coverage, an
-uncancelled unsigned draft, the current broadcast parent, active preparation and
-source authorization, exact work hash and validated family/template. Recording a
-replacement atomically saves immutable bytes and the family link; exact replay
-returns the saved attempt, conflicting bytes are refused, and signed decisions
-cannot be cancelled. Once recorded, ordinary send selection accepts only the newest
-family member. Tests take that member through send authorization and settlement.
-
-Scoped counts: Store **2,840 → 2,922**, schema projections **279 → 283**, grammar
-**97 → 98**, signer **117 → 136**, critical runtime **484 → 485**: **+107 production
-lines in five existing files**, no new files or migration. Existing tests add **37
-net lines** across three files. This is added integration, not a net reduction; it
-reuses the same validators, signing gate, payment engine and authenticated transport.
-
-Cabal/QuickCheck verifies both signer handlers' existential resolution and private
-HTTP authentication/request shape. PostgreSQL contracts verify backup/freshness gates,
-cancelled drafts, changed families/fees, replay/conflicts, lineage, refusal to cancel
-signed work, newest-member selection, unchanged balances before settlement and ordinary
-replacement settlement using explicitly synthetic ledger records. The replacement
-operator/client workflow, family-aware observation/restart and winner changes remain
-unfinished. New-route live signing and funded-chain acceptance are not established
-by these isolated checks.
-
-The actual HTTPS worker/signer regression also passes with the combined API: invalid
-credentials/certificates are refused, the existing Solana SDK signature is persisted
-exactly, and replay makes no network call. This exercises the preparation route with
-offline RPC responses; it is not native replacement workflow acceptance.
+Still required: family-aware worker send/observation/lock recovery, settled winner
+changes/reconfirmation, full replacement workflow acceptance, funded real-chain tests
+and deployed signer isolation. The new operator signing path is implemented but not yet
+accepted end to end on a live native node; the baseline remains until parity and migration.

@@ -16,6 +16,7 @@ import Bridge.Reconciliation (reconcileCustody,inspectLossCustody)
 import Bridge.PaymentSource (verifyPaymentSource,inspectNativeSource)
 import qualified Bridge.Wire as W
 import Control.Monad (forM,forM_,when,forever)
+import qualified Bridge.NativePayment as NP
 import Bridge.NativePayment (NativeSigned,previewNativePayment,checkNativeAcceptance,releaseNativeInputLocks)
 import Bridge.SolanaPayment (SolanaSigned,signedSolanaPlan,solPlanRecent,checkBlockhashWindow)
 import Data.Text (Text)
@@ -198,6 +199,54 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         state<-evalRead reader ReadState
         require (ledgerPaused state) "pause_before_operator_action"
         paymentId . withdrawalPayment <$> evalWrite writer (CancelFees key reason)
+      evalCritical (OperatorDSL (DraftNativeReplacement parent fee reason))=guarded $ do
+        require (NP.transactionId parent && units fee>0 && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_native_replacement_decision"
+        state<-evalRead reader ReadState
+        require (ledgerPaused state) "pause_before_operator_action"
+        previous<-evalRead reader (ReadReplacementDecision parent fee reason)
+        case previous of
+          Just (decision,cancelled)->require (not cancelled) "native_replacement_cancelled" >> pure decision
+          Nothing->do
+            saved<-evalRead reader (ReadAttempt parent)
+            require (recordedChain saved=="Native") "native_replacement_not_expected"
+            refreshSource (recordedPayment saved)
+            evalWorker ReconcileCustody
+            now<-floor <$> getPOSIXTime
+            family<-evalRead reader (ReadReplacementDraftContext now parent fee)
+            draft<-callSigner (DraftReplacement (H.fingerprint config) parent fee)
+            either reject pure (NP.validateNativeReplacementDraft (map snd family) fee draft)
+            later<-floor <$> getPOSIXTime
+            evalWrite writer (SaveReplacementDraft later saved draft reason)
+      evalCritical (OperatorDSL (SignNativeReplacement decision))=guarded $ do
+        require (decision>0) "invalid_native_replacement_decision"
+        state<-evalRead reader ReadState
+        require (ledgerPaused state) "pause_before_operator_action"
+        previous<-evalRead reader (ReadReplacementMember decision)
+        case previous of
+          Just saved->pure (signedId $ recordedSigned saved)
+          Nothing->do
+            identifier<-evalRead reader (ReadReplacementPayment decision)
+            refreshSource identifier
+            backupDecisions
+            evalWorker ReconcileCustody
+            now<-floor <$> getPOSIXTime
+            (family,draft)<-evalRead reader (ReadReplacementSigning now decision)
+            wire<-callSigner (SignReplacement (H.fingerprint config) decision)
+            signed<-decode (signedPolicy wire)
+            require (signedId wire==NP.nativeTxid(NP.signedNativeTransaction signed)
+              && signedBytes wire==NP.signedNativeBytes signed
+              && commonInput wire==commonInput(recordedSigned $ fst $ last family)) "native_replacement_signature_conflict"
+            either reject pure (NP.validateNativeFamily $ map snd family<>[signed])
+            require (NP.sameNativeTemplate (NP.draftTransaction draft) (NP.signedNativeTransaction signed)
+              && NP.draftFee draft==NP.signedNativeFee signed
+              && NP.sameNativePrevouts (NP.draftPrevouts draft) (NP.signedNativePrevouts signed)) "native_replacement_signed_template_changed"
+            actual<-N.nativeCall rpc native False "decoderawtransaction" [toJSON $ signedBytes wire] >>= either reject pure . NP.decodeNativeTx
+            require (actual==NP.signedNativeTransaction signed) "native_signed_bytes_mismatch"
+            later<-floor <$> getPOSIXTime
+            saved<-evalWrite writer (RecordReplacement later decision family signed)
+            pure (signedId $ recordedSigned saved)
+      evalCritical (OperatorDSL (CancelNativeReplacement decision reason))=
+        evalWrite writer (CancelReplacementDraft decision reason)
       evalCritical (OperatorDSL (RetrySolanaPayment txid reason))=guarded $ do
         require (not(T.null $ T.strip reason) && T.length reason<=512) "invalid_retry_approval"
         previous<-evalRead reader (ReadRetryApproval txid)
@@ -341,26 +390,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
           now<-floor <$> getPOSIXTime
           decision<-evalRead reader (ReadSigningDecision now identifier $ preparedGeneration prepared)
           require (decision==prepared) "preparation_changed"
-          credentials<-signerCredentials endpoint
-          certificate<-signerCertificate endpoint
-          let base=TLS.defaultParamsClient "127.0.0.1" BS.empty
-              tls=base {TLS.clientShared=(TLS.clientShared base) {TLS.sharedCAStore=makeCertificateStore [certificate]}
-                ,TLS.clientSupported=(TLS.clientSupported base) {TLS.supportedCiphers=ciphersuite_default}}
-              settings=managerSetProxy noProxy (mkManagerSettings (NC.TLSSettings tls) Nothing)
-                {managerRetryableException=const False,managerIdleConnectionCount=0
-                ,managerResponseTimeout=responseTimeoutMicro 60000000
-                ,managerModifyRequest= \request->pure request {redirectCount=0}
-                ,managerModifyResponse= \response->do
-                  bytes<-boundedBody 524288 (responseBody response)
-                  body<-newIORef bytes
-                  pure response {responseBody=atomicModifyIORef' body $ \chunk->(BS.empty,chunk)}}
-          signed<-bracket (newManager settings) closeManager $ \local->do
-            let call :<|> _=SC.client signingAPI credentials
-                environment=SC.mkClientEnv local (SC.BaseUrl SC.Https "127.0.0.1" (signerPort endpoint) "")
-            result<-SC.runClientM (call (H.fingerprint config,identifier,preparedGeneration prepared)) environment
-            -- Even an HTTP failure may follow signing. Retain the preparation;
-            -- never automatically retry or pretend the outcome is known.
-            either (const $ reject "signer_outcome_unknown") pure result
+          signed<-callSigner (SignPrepared (H.fingerprint config) identifier $ preparedGeneration prepared)
           verifySignedAttempt (N.nativeCall rpc native) (N.profile native) config prepared signed
           recorded<-evalWrite writer (RecordAttempt prepared signed)
           pure (signedId $ recordedSigned recorded)
@@ -397,14 +427,40 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
               later<-floor <$> getPOSIXTime
               evalRead reader (CheckIntake later)
             _->either throwIO pure result
-        backupDecisions=do
-          c<-customer
-          when (requireBackup $ customerPolicy c) $ do
-            before<-evalRead reader ReadState
-            when (ledgerBackup before<ledgerSequence before) $ do
-              coverBackup c (ledgerSequence before)
-              after<-evalRead reader ReadState
-              require (ledgerBackup after>=ledgerSequence before) "backup_pending"
+      backupDecisions=do
+        c<-customer
+        when (requireBackup $ customerPolicy c) $ do
+          before<-evalRead reader ReadState
+          when (ledgerBackup before<ledgerSequence before) $ do
+            coverBackup c (ledgerSequence before)
+            after<-evalRead reader ReadState
+            require (ledgerBackup after>=ledgerSequence before) "backup_pending"
+      callSigner :: SigningOperation a -> IO a
+      callSigner operation=do
+        credentials<-signerCredentials endpoint
+        certificate<-signerCertificate endpoint
+        let base=TLS.defaultParamsClient "127.0.0.1" BS.empty
+            tls=base {TLS.clientShared=(TLS.clientShared base) {TLS.sharedCAStore=makeCertificateStore [certificate]}
+              ,TLS.clientSupported=(TLS.clientSupported base) {TLS.supportedCiphers=ciphersuite_default}}
+            settings=managerSetProxy noProxy (mkManagerSettings (NC.TLSSettings tls) Nothing)
+              {managerRetryableException=const False,managerIdleConnectionCount=0
+              ,managerResponseTimeout=responseTimeoutMicro 60000000
+              ,managerModifyRequest= \request->pure request {redirectCount=0}
+              ,managerModifyResponse= \response->do
+                bytes<-boundedBody 524288 (responseBody response)
+                body<-newIORef bytes
+                pure response {responseBody=atomicModifyIORef' body $ \chunk->(BS.empty,chunk)}}
+        bracket (newManager settings) closeManager $ \local->do
+          let prepared :<|> replacement :<|> draft=SC.client signingAPI credentials
+              environment=SC.mkClientEnv local (SC.BaseUrl SC.Https "127.0.0.1" (signerPort endpoint) "")
+              call=case operation of
+                SignPrepared identity identifier generation->prepared (identity,identifier,generation)
+                SignReplacement identity decision->replacement (identity,decision)
+                DraftReplacement identity parent fee->draft (identity,parent,fee)
+          result<-SC.runClientM call environment
+          -- Even an HTTP failure may follow signing. Retain the preparation;
+          -- never automatically retry or pretend the outcome is known.
+          either (const $ reject "signer_outcome_unknown") pure result
       -- Explicit resume must retain every recovery error; the scheduler alone
       -- may defer a custody check while waiting for the next observation cycle.
       recoverPending :: IO ()
