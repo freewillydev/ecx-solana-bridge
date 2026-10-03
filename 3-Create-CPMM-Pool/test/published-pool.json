@@ -72,5 +72,101 @@
       "rentEpoch": 18446744073709551615,
       "space": 165
     }
-  ]
+  ],
+  "simulatedCreation": {
+    "network": "devnet",
+    "prepared": {
+      "bump": 252,
+      "feeTier": "8EHtyN3DBseSZzHYkxXuT2GDoPmqmKEtbbaNrabFZhdL",
+      "pool": "FDL7cuLgL3Yog4B5MJY51eLA9fWqjqm9XFX1vnwdLs9Y",
+      "transaction": "AwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMACAwp+rNZA9K9NV2MCI4CD8bpgNQrR/9U+iFNx0WVH6YyHFTqNWtHznTMVvLCHFeByLGzJscQiPBUXQplsJY5OUncnlr5Ff+FYuAc4RHZ+HfgecfLgXJ69xgZFYgimFZDUC/TLDL3HL1cl3r02rNzGbV8mXbeQmVsHpq5OkVk3HfDrwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABqfVFxksXFEhjMlMPUrxf1ja7gibof1E49vZigAAAAAG3fbh12Whk9nL4UbO63msHLSF7V9bN5E6jPWFfv8AqQ4DaF+OkJBT5FgSHGb1p2rtx3BqoRyC+KqVKo8reHmpa2l2pEUyGP9lPyvXHE8+nPafd2kmLWYW3hdjptJJWLua6zfhtPWLWP828vzsg6mACOsWdfkA06arkIr4uNhQh8UuzuUoE1JW/oCwR9YDAuHVsm6mtNHtE1Xx4nLHPCNK2TNqPfSPNh5XBuacPLa22Rd05Hk1yFJt5aD1nyFaI2oBwnw9MSEX0/rUA57j+Me+w1IQtU6mK0hLxyfZE80zpQEHCwsJCgADAgEIBgQFG1+0CqxUrugo/ICAAAAAAAAAAAABAAAAAAAAAA=="
+    },
+    "request": {
+      "blockhash": "7sQsFmxKPHdaQLqywREzvAne2JkRVUPasqDJ8H2KTSt",
+      "mintA": "BRjpCHtyQLNCo8gqRUr8jtdAj5AjPYQaoqbvcZiHok1k",
+      "mintB": "EGiiQQYXtQLing36xCFnNCHwBfuP2ddSkRTo6TDRQFHT",
+      "payer": "3psSKHRPopKXPcBajcm2crjoKzrUtWyfsqeprTRMxAqZ",
+      "sqrtPriceX64": "18446744073709551616",
+      "vaultA": "Bf9seWzegFAqf7aAPzLUnozYZCDbbrSgaendXqS1vdYr",
+      "vaultB": "6iUP9s8iyv4445wYfqSgfGgohnwnYzVeAadWNapoTWb5"
+    },
+    "costs": {
+      "maximumDebit": "6974360",
+      "networkFee": "15000",
+      "rentMinimum": "6944360"
+    },
+    "snapshot": {
+      "slot": 507069639,
+      "accounts": [
+        {
+          "data": [
+            "P5XRDOGAYwnZM2o99I82HlcG5pw8trbZF3TkeTXIUm3loPWfIVojavyAgICAECcsAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACa6zfhtPWLWP828vzsg6mACOsWdfkA06arkIr4uNhQh55a+RX/hWLgHOER2fh34HnHy4FyevcYGRWIIphWQ1AvAAAAAAAAAAAAAAAAAAAAAMUuzuUoE1JW/oCwR9YDAuHVsm6mtNHtE1Xx4nLHPCNKVOo1a0fOdMxW8sIcV4HIsbMmxxCI8FRdCmWwljk5SdwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAKboR0TFZFZgFE0Kz1W1HVIj8nNIJ0iC4dYxTHU3u0BoAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
+            "base64"
+          ],
+          "executable": false,
+          "lamports": 3967480,
+          "owner": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+          "rentEpoch": 18446744073709551615,
+          "space": 653
+        },
+        {
+          "data": [
+            "nRQx4NlXwf4puhHRMVkVmAUTQrPVbUdUiPyc0gnSILh1jFMdTe7QGim6EdExWRWYBRNCs9VtR1SI/JzSCdIguHWMUx1N7tAaKboR0TFZFZgFE0Kz1W1HVIj8nNIJ0iC4dYxTHU3u0BosAQEA",
+            "base64"
+          ],
+          "executable": false,
+          "lamports": 511642560,
+          "owner": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+          "rentEpoch": 18446744073709551615,
+          "space": 108
+        },
+        {
+          "data": [
+            "AQAAACm6EdExWRWYBRNCs9VtR1SI/JzSCdIguHWMUx1N7tAaXINBlbwSAAAGAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "base64"
+          ],
+          "executable": false,
+          "lamports": 8211461600,
+          "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "rentEpoch": 18446744073709551615,
+          "space": 82
+        },
+        {
+          "data": [
+            "AQAAACn6s1kD0r01XYwIjgIPxumA1CtH/1T6IU3HRZUfpjIcAAAAAAAAAAAIAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+            "base64"
+          ],
+          "executable": false,
+          "lamports": 1066800,
+          "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "rentEpoch": 18446744073709551615,
+          "space": 82
+        },
+        {
+          "data": [
+            "mus34bT1i1j/NvL87IOpgAjrFnX5ANOmq5CK+LjYUIfTLDL3HL1cl3r02rNzGbV8mXbeQmVsHpq5OkVk3HfDrwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "base64"
+          ],
+          "executable": false,
+          "lamports": 1488440,
+          "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "rentEpoch": 18446744073709551615,
+          "space": 165
+        },
+        {
+          "data": [
+            "xS7O5SgTUlb+gLBH1gMC4dWybqa00e0TVfHicsc8I0rTLDL3HL1cl3r02rNzGbV8mXbeQmVsHpq5OkVk3HfDrwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+            "base64"
+          ],
+          "executable": false,
+          "lamports": 1488440,
+          "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+          "rentEpoch": 18446744073709551615,
+          "space": 165
+        }
+      ]
+    },
+    "source": "https://api.devnet.solana.com",
+    "kind": "unsigned simulation; no transaction submitted"
+  }
 }

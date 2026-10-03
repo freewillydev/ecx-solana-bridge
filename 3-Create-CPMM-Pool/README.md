@@ -1,13 +1,14 @@
 # Orca full-range liquidity
 
 Liquidity uses separate operator capital and keys, outside bridge custody. The
-root-Cabal `ecx-pool` CLI currently derives canonical addresses and verifies existing
+root-Cabal `ecx-pool` CLI derives canonical addresses and verifies existing
 full-range pools and prepares unsigned classic Splash-pool creation. Signing and
 submission, position ownership/funding and fee collection are
 still unfinished; inspection is not a substitute for those operations.
 
 ```sh
-cabal run -v0 ecx-pool -- prepare devnet REQUEST.json
+cabal run -v0 ecx-pool -- prepare devnet REQUEST.json > prepared.json
+cabal run -v0 ecx-pool -- check HTTPS_RPC MAX_FEE MAX_COST prepared.json
 cabal run -v0 ecx-pool -- address devnet MINT_A MINT_B FEE_TIER_INDEX
 cabal run -v0 ecx-pool -- inspect devnet HTTPS_RPC POOL MINT_A MINT_B
 cabal test ecx-pool:pool-test --offline -j1 --test-show-details=direct
@@ -60,10 +61,14 @@ all account identities and permissions, one instruction, exact price and blockha
 This does not initialize tick arrays or deposit liquidity. The published adaptive
 1034 tier remains supported for inspection, not creation.
 
-Preparation does not prove a blockhash is live, accounts are available, or funds
-cover rent/fees. Chain preflight, protected signing and saved-byte submission are
-still required before any transaction may be sent. Persisted preparations must
-also have their derived addresses rechecked before signing.
+`check` rederives the complete preparation and verifies HTTPS/genesis, the real
+fee tier, initialized classic mints, absent pool/vaults and system-owned payer.
+It reads rent and fee quotes, then simulates the exact zero-signature transaction
+without replacing its blockhash. Resulting pool identity, empty vaults, initial
+price, fee settings and debit must match. `MAX_FEE` and `MAX_COST` are positive
+integer lamports. The reported maximum debit conservatively adds the network fee
+even if simulation already deducted it. Quote/simulation success is not a future
+execution guarantee. Protected signing and saved-byte submission remain unfinished.
 
 ## Verified checkpoint
 
@@ -87,11 +92,15 @@ frozen/delegated/closable vaults and excessive protocol liabilities. Token and b
 regressions remain in their existing Cabal suites. Creation checks also reject
 wrong-network/request changes and a one-bit mutation at every transaction byte;
 the custody decoder rejects the three-signature transaction. These are offline
-wire-contract tests, not evidence of a finalized pool creation.
+wire-contract tests, not evidence of a finalized pool creation. The same fixture
+also retains an actual Devnet unsigned creation simulation for the separately
+created test mint / Orca devUSDC pair. Preflight passed with 6,944,360 lamports rent,
+15,000 fee and conservative maximum debit 6,974,360. Real checks refused a fee
+limit of 1 and a total-cost limit of 20,000. No creation was signed or submitted.
 
 ## Remaining implementation
 
-Creation must bind the selected real fee tier and enforce explicit price/cost limits.
+Creation preflight now binds the real ordinary tier and explicit price/cost limits.
 Orca requires independent vault signatures in addition to the payer: implement a
 closed pool signing operation, keeping the bridge's one-signature custody protocol
 unchanged. Then add tick-array initialization, full-range position creation,

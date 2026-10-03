@@ -1,12 +1,12 @@
 {-# LANGUAGE GADTs, ForeignFunctionInterface #-}
 -- Closed, read-only liquidity operations. No signing key, ledger or custody access.
-module Pool (Network(..),Safe(..),Create(..),Prepared(..),validatePrepared,Expected(..),Snapshot(..),Report(..),Whirlpool(..),evalSafe,validate,decodePool,program,configuration) where
+module Pool (Network(..),Safe(..),Create(..),Prepared(..),Costs(..),validatePrepared,validateCreated,Expected(..),Snapshot(..),Report(..),Whirlpool(..),evalSafe,validate,decodePool,program,configuration) where
 import Bridge.Error (require,reject)
 import Bridge.RPC
 import Bridge.Solana (tokenProgram)
 import Bridge.SolanaMessage (publicKey,base58,decodePoolTransaction,Transaction(..),Message(..),Instruction(..))
 import Control.Exception (bracket)
-import Control.Monad (unless)
+import Control.Monad (unless,(>=>))
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
 import Data.Binary.Get
@@ -22,7 +22,7 @@ import qualified Data.Text.Encoding as TE
 import Foreign
 import Foreign.C.Types
 import Network.HTTP.Client (parseRequest,secure,closeManager)
-import System.Posix.DynamicLinker
+import System.Posix.DynamicLinker hiding (Null)
 
 data Network = Devnet | Mainnet deriving (Eq,Show)
 program :: Text
@@ -31,6 +31,10 @@ configuration :: Network -> Text
 configuration network=base58 $ B.pack $ case network of
   Mainnet->[19,228,65,248,57,19,202,104,176,99,79,176,37,253,234,168,135,55,232,65,16,209,37,94,53,123,51,119,221,238,28,205]
   Devnet->[217,51,106,61,244,143,54,30,87,6,230,156,60,182,182,217,23,116,228,121,53,200,82,109,229,160,245,159,33,90,35,106]
+
+networkGenesis :: Network -> Text
+networkGenesis Devnet="EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"
+networkGenesis Mainnet="5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"
 
 data Expected = Expected {pool :: Text,expectedA :: Text,expectedB :: Text} deriving (Eq,Show)
 data Whirlpool = Whirlpool
@@ -87,7 +91,27 @@ validatePrepared network r p=do
     (Left "pool_transaction_mismatch")
   pure tx
 
+data Costs = Costs {networkFee :: Word64,rentMinimum :: Word64,maximumDebit :: Word64} deriving (Eq,Show)
+instance ToJSON Costs where
+  toJSON c=object ["networkFee" .= show(networkFee c),"rentMinimum" .= show(rentMinimum c),"maximumDebit" .= show(maximumDebit c)]
+
+-- The simulation must create an empty pool with exactly the requested price/vaults.
+validateCreated :: Network -> Create -> Prepared -> Word16 -> Snapshot -> Either Text Report
+validateCreated network r p expectedFee snapshot=do
+  report@(Report _ _ actual _)<-validate network (Expected (createdPool p) (createMintA r) (createMintB r)) snapshot
+  unless (spacing actual==32896 && tier actual==32896 && fee actual==expectedFee
+    && sqrtPrice actual==initialPrice r && liquidity actual==0 && owedA actual==0 && owedB actual==0
+    && vaultA actual==createVaultA r && vaultB actual==createVaultB r) (Left "pool_creation_effect_mismatch")
+  case drop 4 (accounts snapshot) of
+    [a,b]->do
+      x<-accountData tokenProgram 165 a >>= parse (vaultParser (createMintA r) (createdPool p))
+      y<-accountData tokenProgram 165 b >>= parse (vaultParser (createMintB r) (createdPool p))
+      unless (x==0 && y==0) (Left "new_pool_vault_not_empty")
+    _->Left "pool_creation_account_count"
+  pure report
+
 data Safe a where
+  Check :: FilePath -> Network -> String -> Word64 -> Word64 -> Create -> Prepared -> Safe Costs
   Prepare :: FilePath -> Network -> Create -> Safe Prepared
   Address :: FilePath -> Network -> Text -> Text -> Word16 -> Safe Text
   Inspect :: FilePath -> Network -> String -> Expected -> Safe Report
@@ -100,6 +124,66 @@ evalSafe (Prepare library network r)=do
     ,"vault_a" .= createVaultA r,"vault_b" .= createVaultB r,"sqrt_price" .= show(initialPrice r),"blockhash" .= recentBlockhash r]
   prepared<-either (const $ reject "invalid_pool_prepare_reply") pure (eitherDecodeStrict' reply)
   either reject (const $ pure prepared) (validatePrepared network r prepared)
+evalSafe (Check library network endpoint feeLimit costLimit r p)=do
+  canonical<-evalSafe (Prepare library network r)
+  require (canonical==p && feeLimit>0 && costLimit>=feeLimit) "pool_preparation_or_limits_mismatch"
+  Transaction _ _ message<-either reject pure (validatePrepared network r p)
+  transport<-parseRequest endpoint
+  require (secure transport) "pool_requires_https"
+  bracket newRpcManager closeManager $ \manager->do
+    let call=rpc manager endpoint Nothing
+        options=object ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text)]
+        identities=[createdPool p,configuration network,createMintA r,createMintB r,createVaultA r,createVaultB r,payer r,feeTier p]
+    genesis<-call "getGenesisHash" [] >>= parseValue parseJSON :: IO Text
+    require (genesis==networkGenesis network) "wrong_pool_network"
+    before<-call "getMultipleAccounts" [toJSON identities,options]
+    context<-fieldValue "context" before
+    height<-fieldValue "slot" context :: IO Integer
+    values<-fieldValue "value" before :: IO [Value]
+    (balance,baseFee)<-case values of
+      [poolInfo,settings,a,b,va,vb,payerInfo,feeInfo]->do
+        require (poolInfo==Null && va==Null && vb==Null) "pool_or_vault_already_exists"
+        rawSettings<-either reject pure (accountData program 108 settings)
+        require (B.take 8 rawSettings==B.pack [157,20,49,224,217,87,193,254]) "invalid_pool_config"
+        mapM_ (either reject (const $ pure ()) . (accountData tokenProgram 82 >=> parse mintParser)) [a,b]
+        tierBytes<-either reject pure (accountData program 44 feeInfo)
+        rate<-either reject pure $ parse (do
+          discriminator<-getByteString 8; configKey<-key; spacingValue<-getWord16le; rate<-getWord16le
+          unless (discriminator==B.pack [56,75,159,76,142,68,190,105] && configKey==configuration network && spacingValue==32896)
+            (fail "wrong fee tier")
+          pure rate) tierBytes
+        owner<-fieldValue "owner" payerInfo :: IO Text
+        executable<-fieldValue "executable" payerInfo
+        balance<-fieldValue "lamports" payerInfo :: IO Integer
+        require (owner=="11111111111111111111111111111111" && not executable && balance>=0) "invalid_pool_payer"
+        pure (balance,rate)
+      _->reject "pool_preflight_account_count"
+    rents<-mapM (\size->call "getMinimumBalanceForRentExemption" [toJSON size,object ["commitment" .= ("finalized"::Text)]] >>= parseValue parseJSON) [653,165::Int] :: IO [Integer]
+    rent<-case rents of [a,b] | a>0 && b>0->pure(a+2*b); _->reject "invalid_pool_rent"
+    quoted<-call "getFeeForMessage" [toJSON $ TE.decodeUtf8 $ B64.encode message,object ["commitment" .= ("finalized"::Text),"minContextSlot" .= height]] >>= fieldValue "value" :: IO (Maybe Integer)
+    fee<-case quoted of Just n | n>0 && n<=toInteger feeLimit->pure n; _->reject "pool_fee_unavailable_or_excessive"
+    require (rent+fee<=balance && rent+fee<=toInteger costLimit) "pool_cost_or_balance_limit"
+    simulation<-call "simulateTransaction" [toJSON(unsignedTransaction p),object
+      ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text),"minContextSlot" .= height
+      ,"sigVerify" .= False,"replaceRecentBlockhash" .= False
+      ,"accounts" .= object ["encoding" .= ("base64"::Text),"addresses" .= identities]]]
+    result<-fieldValue "value" simulation
+    failure<-fieldValue "err" result :: IO Value
+    require (failure==Null) "pool_simulation_failed"
+    simulated<-fieldValue "accounts" result :: IO [Value]
+    simulationContext<-fieldValue "context" simulation
+    simulationSlot<-fieldValue "slot" simulationContext
+    require (simulationSlot>=height) "stale_pool_simulation"
+    case simulated of
+      [poolInfo,settings,a,b,va,vb,payerInfo,feeInfo]->do
+        _<-either reject pure (validateCreated network r p baseFee (Snapshot simulationSlot [poolInfo,settings,a,b,va,vb]))
+        require (take 3 (drop 1 values)==[settings,a,b] && last values==feeInfo) "pool_settings_changed"
+        after<-fieldValue "lamports" payerInfo :: IO Integer
+        -- Include the fee conservatively if the provider already deducted it.
+        let debit=balance-after+fee
+        require (after>=0 && after<=balance && debit>=rent && debit<=toInteger costLimit) "pool_simulation_cost_limit"
+        pure (Costs (fromInteger fee) (fromInteger rent) (fromInteger debit))
+      _->reject "pool_simulation_account_count"
 evalSafe (Address library network a b index)=do
   keys<-mapM (either reject pure . publicKey) [a,b]
   require (case keys of [x,y]->x<y; _->False) "pool_mints_not_ordered"
@@ -114,7 +198,7 @@ evalSafe (Inspect library network endpoint expected)=do
     let call=rpc manager endpoint Nothing
         options=object ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text)]
     genesis<-call "getGenesisHash" [] >>= parseValue parseJSON :: IO Text
-    require (genesis==case network of Devnet->"EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"; Mainnet->"5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d") "wrong_pool_network"
+    require (genesis==networkGenesis network) "wrong_pool_network"
     initial<-call "getAccountInfo" [toJSON (pool expected),options] >>= fieldValue "value"
     p<-either reject pure (accountData program 653 initial >>= decodePool)
     canonical<-evalSafe (Address library network (expectedA expected) (expectedB expected) (tier p))

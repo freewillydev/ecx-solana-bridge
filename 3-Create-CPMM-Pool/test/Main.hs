@@ -21,6 +21,12 @@ main=do
     expected<-Expected <$> o .: "pool" <*> o .: "mintA" <*> o .: "mintB"
     snapshot<-Snapshot <$> o .: "slot" <*> o .: "accounts"
     pure (expected,snapshot)) fixture
+  (creation,creationPrepared,creationSnapshot)<-either fail pure $ parseEither (withObject "fixture" $ \o->do
+    value<-o .: "simulatedCreation"
+    withObject "simulation" (\c->do
+      request<-c .: "request"; prepared<-c .: "prepared"
+      snapshot<-c .: "snapshot" >>= withObject "snapshot" (\x->Snapshot <$> x .: "slot" <*> x .: "accounts")
+      pure(request,prepared,snapshot)) value) fixture
   let request=Create "3psSKHRPopKXPcBajcm2crjoKzrUtWyfsqeprTRMxAqZ" (expectedA expected) (expectedB expected)
         "HcctYHWCfLGrE5WigGKHg5hR6Q1P1Gntb5PYQWSQFHXg" "AzNd4srpctGzR5Q7LqkQh6aUwwqNEveTcCTNX8uHixDC"
         (2^(64::Int)) (pool expected)
@@ -28,6 +34,14 @@ main=do
   bytes<-either fail pure $ B64.decode $ TE.encodeUtf8 $ unsignedTransaction prepared
   results<-sequence
     [ quickCheckResult $ once $ property $
+        let check r p rate=validateCreated Devnet r p rate creationSnapshot
+        in not(isLeft(check creation creationPrepared 10000))
+          && isLeft(check creation {initialPrice=initialPrice creation+1} creationPrepared 10000)
+          && isLeft(check creation {createVaultA=createVaultB creation} creationPrepared 10000)
+          && isLeft(check creation creationPrepared 10001)
+          && isLeft(validateCreated Mainnet creation creationPrepared 10000 creationSnapshot)
+          && not(isLeft(validatePrepared Devnet creation creationPrepared))
+    , quickCheckResult $ once $ property $
         not(isLeft $ validatePrepared Devnet request prepared)
         && isLeft(decodeTransaction $ unsignedTransaction prepared)
         && isLeft(validatePrepared Mainnet request prepared)
