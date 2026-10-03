@@ -214,6 +214,7 @@ never point contract fixtures at custody. Direct binary invocation needs Cabal's
 | Mode | Additional environment / scope |
 | --- | --- |
 | Default | Financial/ledger contracts and local encrypted restic restoration |
+| `ECX_REBUILD_MIGRATION_ONLY=1` | Disposable restored, paused, populated schema-18 ledger with baseline DDL through 005; applies rebuild 001–003 and checks preserved history |
 | `ECX_REBUILD_SETUP_ONLY=1` | `ECX_REBUILD_EXECUTABLE`; optional `ECX_REBUILD_SETUP_RESIDUE=1` |
 | `ECX_REBUILD_SERVER_ONLY=1` | `ECX_REBUILD_EXECUTABLE`; process/HTTP/private control |
 | `ECX_REBUILD_TLS_ONLY=1` | `ECX_REBUILD_TEST_SDK`; actual TLS and saved signing decisions |
@@ -221,6 +222,15 @@ never point contract fixtures at custody. Direct binary invocation needs Cabal's
 | `ECX_REBUILD_NATIVE_RECOVERY_ONLY=1` | Executable, `ECX_REBUILD_NATIVE_RECOVERY_COOKIE`, `ECX_REBUILD_NATIVE_WALLET_DIRECTORY`; fresh real-node test wallet |
 | `ECX_REBUILD_CUSTODY_ONLY=1` | With native recovery mode and disposable DB; complete bundle restoration |
 | `ECX_REBUILD_LIVE_OBSERVER_CONFIG=CONFIG` | Real-chain scans through observation-only DSL; restricted native credentials |
+
+Populated migration passed on a disposable copy of `ecx_fresh_treasury_acceptance`:
+two paid orders, two exact signed attempts and 31 postings were preserved, together
+with deposits, obligations, customer intent bindings, preparations and reservations.
+The rebuild's read-only evaluator decoded each migrated payment and its balances.
+Identity and sequence stayed unchanged; schema advanced from 18 to 21 while paused.
+The original ledger was untouched. This is settled-history compatibility, not yet
+in-flight/recovery parity or authorization to retire the baseline. Its schema-18
+backup lacked baseline DDL 005: verify installed DDL, not only the version number.
 
 Prior root Cabal, QuickCheck, PostgreSQL, TLS and local-restic runs passed their
 recorded scopes. Protocol mutations, receipt fixtures and local-restic transport

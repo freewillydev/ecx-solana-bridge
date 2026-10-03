@@ -70,15 +70,53 @@ import System.Environment (getEnv,lookupEnv,getEnvironment)
 
 main :: IO ()
 main = do
+  migration<-lookupEnv "ECX_REBUILD_MIGRATION_ONLY"
   live<-lookupEnv "ECX_REBUILD_LIVE_OBSERVER_CONFIG"
   setup<-lookupEnv "ECX_REBUILD_SETUP_ONLY"
   fence<-lookupEnv "ECX_REBUILD_FENCE_ONLY"
   server<-lookupEnv "ECX_REBUILD_SERVER_ONLY"
   tls<-lookupEnv "ECX_REBUILD_TLS_ONLY"
   native<-lookupEnv "ECX_REBUILD_NATIVE_RECOVERY_ONLY"
-  case live of
+  if migration==Just "1" then migrationMain else case live of
     Just path->liveObserverMain path
     Nothing->if setup==Just "1" then setupMain else if native==Just "1" then nativeRecoveryMain else if tls==Just "1" then tlsMain else if fence==Just "1" then fenceMain else if server==Just "1" then serverMain else ledgerMain
+
+-- Restore an idle schema-18 backup into a disposable database and apply any
+-- missing baseline migrations through 005 before invoking this mode.
+-- This mode never connects to the original ledger, a chain or a signer.
+migrationMain :: IO ()
+migrationMain=do
+  database<-getEnv "ECX_REBUILD_CONTRACT_DATABASE"
+  unless ("ecx_rebuild_contract_" `T.isPrefixOf` T.pack database) (fail "disposable database required")
+  role<-getEnv "ECX_REBUILD_CONTRACT_READER"
+  user<-getEnv "USER"
+  let settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
+      check message ok=unless ok (fail message)
+  bracket (PG.connect settings) PG.close $ \connection->do
+    (before,attempts,postings)<-fixture connection ArchiveRecords
+    history<-fixture connection MigrationRecords
+    original<-case before of
+      [row] | S.schemaVersion row==18 && S.paused row==1 -> pure row
+      _->fail "paused populated schema-18 baseline required"
+    check "signed financial history required" (not(null attempts) && not(null postings))
+    forM_ ["001.sql","002.sql","003.sql"] $ \name->do
+      path<-getDataFileName ("migrations/"<>name)
+      (code,_,diagnostic)<-Process.readProcessWithExitCode "psql"
+        ["-X","-h","/tmp/ecx-pg-seam","-p","29436","-U",user,"-d",database,"-v","ON_ERROR_STOP=1","-f",path] ""
+      check ("migration failed: "<>name<>"\n"<>diagnostic) (code==ExitSuccess)
+    (after,savedAttempts,savedPostings)<-fixture connection ArchiveRecords
+    savedHistory<-fixture connection MigrationRecords
+    check "migration changed financial history" (attempts==savedAttempts && postings==savedPostings && history==savedHistory)
+    check "migration changed identity, sequence or pause contract"
+      (after==[original {S.schemaVersion=21,S.paused=1,S.pauseReason="payment_funding_migration"}])
+    intents<-fixture connection MigratedIntents
+    check "migration changed customer funding" (all (\row->S.intentWithdrawal row==Nothing && S.intentObligation row==Just(S.intentId row)) intents)
+    withReader (settings {PG.connectUser=role}) (S.fingerprint original) False $ \reader->do
+      state<-evalRead reader ReadState
+      check "rebuild cannot read migrated sequence" (ledgerSequence state==S.criticalSequence original && ledgerPaused state)
+      forM_ intents $ \row->void $ evalRead reader (ReadPaymentWork $ S.intentId row)
+      void $ evalRead reader ReadBalances
+    putStrLn ("Populated migration PASS: "<>show(length attempts)<>" signed attempts; "<>show(length postings)<>" postings preserved; migrated payments readable")
 
 -- Actual chain history, isolated ledger, and observation-only DSL authority.
 -- No signer, customer deposit or treasury transfer is invoked by this contract.
@@ -1180,6 +1218,8 @@ data Fixture a where
   SetupResidue :: Fixture ()
   SetPause :: Bool -> Fixture ()
   RestoreDatabases :: Fixture [T.Text]
+  MigrationRecords :: Fixture [String]
+  MigratedIntents :: Fixture [S.Intent]
   ArchiveRecords :: Fixture ([S.Deployment],[S.Attempt],[(Int64,T.Text,T.Text,T.Text,Int64)])
   SourceRecipient :: T.Text -> T.Text -> Fixture ()
   TLSFunds :: Fixture ()
@@ -1238,6 +1278,21 @@ fixture c LiveScanHealth = O.runSelect c $ O.orderBy (O.asc $ \(chain,_,_)->chai
   pure (chain,at,problem)
 fixture c SetupResidue = void $ O.runInsert c O.Insert {O.iTable=S.events,
   O.iRows=[(O.sqlStrictText "orphaned-ledger-event",O.sqlStrictText "initialization must refuse surviving history")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+fixture c MigratedIntents = O.runSelect c (O.selectTable S.intents)
+fixture c MigrationRecords = sequence
+  [ rows (O.runSelect c (O.selectTable S.orders) :: IO [S.Order])
+  , rows (O.runSelect c (O.selectTable S.deposits) :: IO [S.Deposit])
+  , rows (O.runSelect c (O.selectTable S.obligations) :: IO [S.Obligation])
+  , rows (O.runSelect c S.intentObligations :: IO [(T.Text,Maybe T.Text)])
+  , rows (O.runSelect c S.workIntents :: IO [(T.Text,T.Text,Int64,Maybe T.Text)])
+  , rows (O.runSelect c (O.selectTable S.preparations) :: IO [(T.Text,Int64,T.Text,Maybe T.Text,Maybe T.Text,Int64)])
+  , rows (O.runSelect c (O.selectTable S.reservations) :: IO [(T.Text,T.Text,Int64,T.Text)])
+  , rows (O.runSelect c (O.selectTable S.operatingReservations) :: IO [(T.Text,T.Text,T.Text,Int64,T.Text)])
+  , rows (O.runSelect c (O.selectTable S.feeHolds) :: IO [(T.Text,T.Text,Int64,Int64)])
+  ]
+ where
+  rows :: Show a => IO [a] -> IO String
+  rows action=show . sort . map show <$> action
 fixture c ArchiveRecords = (,,)
   <$> O.runSelect c (O.selectTable S.deployment)
   <*> O.runSelect c (O.orderBy (O.asc S.attemptId) $ O.selectTable S.attempts)
