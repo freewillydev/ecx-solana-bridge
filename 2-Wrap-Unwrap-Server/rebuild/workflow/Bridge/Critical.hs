@@ -119,6 +119,25 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
       evalCritical (WriteCustomer (Bridge.Operation.Internal.CreateOrder header request))=do
         c<-customer
         createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (coverBackup c) reader writer header request
+      evalCritical (OperatorDSL (RetrySolanaPayment txid reason))=guarded $ do
+        require (not(T.null $ T.strip reason) && T.length reason<=512) "invalid_retry_approval"
+        previous<-evalRead reader (ReadRetryApproval txid)
+        case previous of
+          Just old->require (old==reason) "retry_approval_conflict"
+          Nothing->do
+            state<-evalRead reader ReadState
+            require (ledgerPaused state) "pause_before_operator_action"
+            saved<-evalRead reader (ReadAttempt txid)
+            expired<-evalRead reader (ReadSolanaExpiry txid)
+            require (recordedChain saved=="Solana" && recordedState saved=="review" && expired/=Nothing) "solana_retry_not_expected"
+            prepared<-evalRead reader (ReadRecordedPreparation txid)
+            verifySignedAttempt (N.nativeCall rpc native) (N.profile native) config prepared (recordedSigned saved)
+            signed<-decode (signedPolicy $ recordedSigned saved)
+            refreshSource (recordedPayment saved)
+            proof<-expiry signed >>= maybe (reject "solana_expiry_not_proven") pure
+            evalWorker ReconcileCustody
+            now<-floor <$> getPOSIXTime
+            evalWrite writer (ApproveSolanaRetry now saved reason proof)
       evalCritical (OperatorDSL (CancelPreparation identifier generation reason))=guarded $ do
         require (generation>=0 && generation<8 && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_preparation_cancellation"
         state<-evalRead reader ReadState
@@ -206,7 +225,8 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
           _->recordOutcome recorded observed
       evalWorker (ReconcilePayment txid) = guarded $ do
         recorded<-evalRead reader (ReadAttempt txid)
-        if recordedState recorded `elem` ["settled","failed"] then pure () else do
+        retired<-evalRead reader (ReadSolanaExpiry txid)
+        if recordedState recorded `elem` ["settled","failed"] || retired/=Nothing then pure () else do
           (current,reply)<-loadActive txid
           observe reply >>= recordOutcome current
       evalWorker (SignPreparedPayment identifier) = signing `onException` evalWrite writer (Pause "signing_requires_review")
@@ -327,10 +347,18 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         NativeReply signed->N.nativeIdentity rpc native >> observeNativePayment (N.nativeCall rpc native) signed
         SolanaReply signed->S.solanaIdentity rpc solana >> observeSolanaPayment (S.solanaCall rpc solana) config signed
       recordOutcome recorded observed=case observed of
-        PaymentUnseen->pure ()
+        PaymentUnseen->when (recordedChain recorded=="Solana") $ do
+          signed<-decode (signedPolicy $ recordedSigned recorded)
+          proof<-expiry signed
+          forM_ proof (evalWrite writer . RecordSolanaExpiry recorded)
         PaymentWaiting->require (recordedState recorded=="broadcast_intent") "unrecorded_broadcast_observed"
         PaymentConfirmed costs proof->evalWrite writer (SettlePayment recorded costs proof)
         PaymentFailed fee proof->evalWrite writer (FailSolana recorded fee proof)
+      expiry signed=do
+        let origins=(tokenOrigin settings,operatingOrigin settings)
+        evalRead reader (CheckExpiryOrigins origins)
+        solanaExpiryEvidence (S.solanaCall rpc solana)
+          (fmap (\url->RPC.rpc rpc url Nothing) $ S.solanaVerifierRpc solana) (N.profile native) config origins signed
       refreshSource identifier = do
         source<-evalRead reader (ReadPaymentSource identifier)
         forM_ source $ \binding->do

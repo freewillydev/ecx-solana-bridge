@@ -9,7 +9,7 @@ import qualified Bridge.Wire as W
 import qualified Data.ByteString.Lazy as BL
 import Bridge.Error
 import Bridge.RPC (fieldValue)
-import Bridge.Solana (tokenProgram)
+import Bridge.Solana (tokenProgram,solanaGenesis)
 import Bridge.SolanaHelper
 import Bridge.SolanaMessage
 import Bridge.SolanaPayment
@@ -63,7 +63,37 @@ checks=do
       verify=verifySigningReply (\_ _ _->fail "Solana validation must not call native RPC") W.L2LSignetDevnet config
   proofResults <- mapM captured ["new","existing"]
   local <- sequence
-    [ check "unsigned Solana cancellation validates saved policy without RPC or a draft" $ once $ ioProperty $ do
+    [ check "Solana expiry requires finalized absence on both anchored account histories and every provider" $ once $ ioProperty $ do
+        let origin=T.replicate 64 "1"
+            row sig failed=object ["signature" .= sig,"slot" .= (100::Int),"confirmationStatus" .= ("finalized"::Text),"err" .= (if failed then String "failed" else Null)]
+            response value=object ["context" .= object ["slot" .= (200::Int)],"value" .= value]
+            base profile method _=case method of
+              "getGenesisHash"->pure $ toJSON (solanaGenesis profile)
+              "getBlockHeight"->pure $ Number 1001
+              "getSlot"->pure $ Number 200
+              "isBlockhashValid"->pure $ response (Bool False)
+              "getSignaturesForAddress"->pure $ toJSON [row origin False]
+              "getTransaction"->pure Null
+              "getSignatureStatuses"->pure $ response (toJSON [Null])
+              _->fail "unexpected expiry RPC"
+            primary=base W.L2LSignetDevnet
+            prove a b profile=solanaExpiryEvidence a b profile config (origin,origin) boundSigned
+            changed method value name args=if name==method then pure value else primary name args
+        valid<-prove primary (Just primary) W.L2LSignetDevnet
+        waiting<-prove (changed "getBlockHeight" (Number 1000)) Nothing W.L2LSignetDevnet
+        absentVerifier<-rejects "independent_rpc_required" (prove (base W.CanonicalBeta) Nothing W.CanonicalBeta)
+        signature<-maybe (fail "missing fixture signature") pure (replySignature $ signedSolanaReply boundSigned)
+        failures<-mapM (\(method,value,code)->rejects code (prove primary (Just $ changed method value) W.L2LSignetDevnet))
+          [("getGenesisHash",String "wrong","expiry_wrong_genesis"),
+           ("getBlockHeight",Number 1000,"expiry_provider_behind"),
+           ("getSlot",Number 99,"expiry_provider_behind"),
+           ("isBlockhashValid",response $ Bool True,"blockhash_still_valid"),
+           ("getSignaturesForAddress",toJSON ([]::[Value]),"solana_history_gap"),
+           ("getSignaturesForAddress",toJSON [row signature True,row origin False],"expired_signature_in_history"),
+           ("getTransaction",object [],"expired_transaction_observed"),
+           ("getSignatureStatuses",response $ toJSON [object []],"expired_signature_observed")]
+        pure (valid/=Nothing && waiting==Nothing && absentVerifier && and failures)
+    , check "unsigned Solana cancellation validates saved policy without RPC or a draft" $ once $ ioProperty $ do
         let noRPC _ _ _=fail "Solana cancellation reached native RPC"
         (points,cleanup)<-cancellationPlan noRPC W.L2LSignetDevnet config prepared
         (empty,undrafted)<-cancellationPlan noRPC W.L2LSignetDevnet config prepared {preparedDraft=Nothing}

@@ -587,6 +587,50 @@ lock release after process termination. WAI tests cover fixed asset paths,
 missing-asset refusal, traversal/hidden-file rejection and browser security headers.
 This is executable/startup acceptance, not a funded bridge or browser-wallet test.
 
+## Signed Solana expiry and retry checkpoint
+
+Unseen signed Solana payments now enter expiry recovery through the same critical
+reconciliation path. An expired wall-clock timeout or missing RPC status is not
+proof. Each configured provider must report the expected genesis, finalized height
+past the saved validity limit, a current finalized slot, an invalid blockhash,
+absent transaction/status, and both complete account histories through the immutable
+token/operating origins. Failed history entries count as observations too. Canonical
+mode requires the independent provider. History traversal retains the bounded
+scanner contract; missing/truncated/oversized histories fail closed.
+
+Verified expiry atomically preserves the signed bytes, retires that preparation,
+releases only unused operating capacity and leaves customer principal/inventory (or
+earned principal) untouched in review. Retired attempts leave the executable queue;
+their original policy, draft and allowance remain readable for revalidation even
+when later generations use a different fee hold.
+
+The private command `{"operation":"retry-solana","transaction":"SIGNATURE","reason":"reviewed expiry"}`
+uses the operator existential and critical evaluator. It requires pause, revalidates
+the exact signed attempt, refreshes its source, repeats complete expiry proof and
+custody reconciliation, and records immutable approval for the latest retired
+generation. It does not sign, send or resume. The existing preparation engine then
+re-reserves operating capacity and creates the next bounded generation after resume.
+Mixed histories of approved expiry and unsigned cancellation are supported; another
+recorded, unexpired attempt blocks retry. Customer conversion/refund and earned
+payments share this engine. Earned-reservation release remains restricted to wholly
+unsigned cancellation history; proved expiry permits retry, not that release command.
+
+Verified locally: provider disagreement, non-expiry, stale context/height, valid
+blockhash, incomplete histories, observed failed signatures and observed transactions
+all reject expiry. PostgreSQL contracts verify exact-attempt binding, immutable bytes,
+no balance movement, replay/conflict handling, explicit latest-generation approval,
+old-callback isolation, mixed histories, fresh preparation and earned-payment retry.
+The executable rejects private retry commands in observation mode. Funded expiry,
+wallet interaction and restart acceptance on real networks remain release work.
+
+Scoped counts: expiry-proof function **43 baseline lines → 41 rebuild lines**,
+using the same bounded history collector. Existing observation module **95 → 140**,
+critical runtime **352 → 380**, control **106 → 109** lines, all still one file each.
+Store grows **150 net lines**, including shared retry-history checks and customer
+status updates; schema projections add seven lines. **No new files or migration**.
+These additions complete another recovery path; they are not a whole-repository
+size reduction or a claim of release readiness.
+
 ## Unsigned cancellation and retry checkpoint
 
 The private command is `{"operation":"cancel-preparation","payment":"PAYMENT_ID","generation":0,"reason":"maintenance"}`.
@@ -610,8 +654,8 @@ with fresh budgeting and a new generation, without creating another payment engi
 The worker selects these retries as eligible work. After eight generations it leaves
 the payment in review; it does not leave an unpayable item silently Ready. Earned
 payments use the same path and may instead release their reserved revenue after
-completed cancellation. Signed Solana expiry and native replacement have separate
-requirements and are still unfinished.
+completed cancellation. Signed Solana expiry uses the separate proof/approval path above; native replacement
+is still unfinished.
 
 `migrations/002.sql` advances rebuild schema 19 to 20. Its 29-line forward migration
 retains the old records and changes the fee-release trigger to accept only paused,
@@ -730,7 +774,7 @@ Scoped physical-line comparisons (not whole-product reduction claims):
 | Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
 | Signer module | 144 / 1 file | 117 / 1 file | Now includes startup key validation and shared file permissions; replacement parity pending |
 | Signer transport | 103 / 1 file plus shared web boundary | 69 / 1 file + shared 71-line Web module | Shared module also serves customer API; initial signer route only |
-| Customer/worker runtime | Part of broader Runtime | 352 / 1 file (previous checkpoint 326) | Adds guarded unsigned cancellation; single critical dispatch retained; retains one critical dispatch |
+| Customer/worker runtime | Part of broader Runtime | 380 / 1 file (previous checkpoint 352) | Adds proved Solana expiry/retry; single critical dispatch retained; retains one critical dispatch |
 | Focused source validation | 63-line mixed validation/storage/recovery function | 67-line dedicated module | Covered-source recovery is still separate unfinished work |
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |
@@ -755,8 +799,8 @@ performance remains to be measured. Source eligibility checking is shared with s
 
 Still required: successful TLS worker/signer integration and deployed OS/native-RPC
 authority separation; remaining private recovery commands and funded resume/browser-wallet acceptance;
-integrated positive submission/reconciliation acceptance; signed Solana expiry/retry,
-replacement/winner changes and covered-source approvals generalized to earned
+integrated positive submission/reconciliation and funded Solana expiry/retry acceptance;
+native replacement/winner changes and covered-source approvals generalized to earned
 funding; complete custody acceptance and Haskell backup/restore integration; actual populated-ledger migration and funded
 Signet/Devnet flows. Supported-wallet signing, off-host restore, canonical activation
 and independent review remain release gates. Retain the baseline until parity and

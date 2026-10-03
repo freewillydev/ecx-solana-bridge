@@ -253,3 +253,10 @@ custodyReport = O.table "custody_check" $ p2 (O.requiredTableField "singleton",O
 preparationCancellations :: O.Table (TextField,IntField,TextField,TextField,IntField,IntField) (TextField,IntField,TextField,TextField,IntField,IntField)
 preparationCancellations = O.table "preparation_cancellations" $ p6
   (O.requiredTableField "intent_id",O.requiredTableField "generation",O.requiredTableField "reason",O.requiredTableField "cleanup_json",O.requiredTableField "critical_sequence",O.requiredTableField "completed")
+
+solanaExpiries :: O.Table (TextField,TextField,IntField) (TextField,TextField,IntField)
+solanaExpiries = O.table "solana_expiries" $ p3
+  (O.requiredTableField "txid",O.requiredTableField "proof_json",O.requiredTableField "critical_sequence")
+solanaRetryApprovals :: O.Table (TextField,TextField,TextField,IntField) (TextField,TextField,TextField,IntField)
+solanaRetryApprovals = O.table "solana_retry_approvals" $ p4
+  (O.requiredTableField "expired_txid",O.requiredTableField "reason",O.requiredTableField "proof_json",O.requiredTableField "critical_sequence")

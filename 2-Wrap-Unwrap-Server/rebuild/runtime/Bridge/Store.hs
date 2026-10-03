@@ -74,6 +74,10 @@ data CustodySnapshot = CustodySnapshot
   { custodyRevision :: Int64, custodyTotals :: M.Map Asset Integer
   , custodyHeads :: [(Text,Text)], custodySlot :: Int64, custodyPending :: [RecordedAttempt] } deriving (Eq,Show)
 data StoreRead a where
+  ReadSolanaExpiry :: Text -> StoreRead (Maybe Text)
+  ReadRetryApproval :: Text -> StoreRead (Maybe Text)
+  ReadRecordedPreparation :: Text -> StoreRead PreparedPayment
+  CheckExpiryOrigins :: (Text,Text) -> StoreRead ()
   ReadCancellation :: Text -> Int -> StoreRead (Maybe (Text,Text,Bool))
   ReadUnsignedPreparation :: Text -> StoreRead PreparedPayment
   ReadNativeLockWork :: StoreRead (Maybe NativeLockWork)
@@ -107,6 +111,8 @@ data StoreRead a where
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
+  RecordSolanaExpiry :: RecordedAttempt -> Text -> StoreWrite ()
+  ApproveSolanaRetry :: Int64 -> RecordedAttempt -> Text -> Text -> StoreWrite ()
   BeginCancellation :: PreparedPayment -> Int64 -> Text -> Text -> StoreWrite ()
   FinishCancellation :: PreparedPayment -> Text -> Text -> StoreWrite ()
   AuthorizeRefund :: Int64 -> Text -> StoreWrite W.RefundAuthorization
@@ -198,6 +204,10 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
       PendingAttempts -> pendingAttempts c
       PaymentCandidates -> paymentCandidates c
       ReadState -> pure (LedgerState (S.criticalSequence row) (S.backupSequence row) (S.paused row/=0) (S.pauseReason row))
+      ReadSolanaExpiry txid -> expiryProof c txid
+      ReadRetryApproval txid -> retryReason c txid
+      ReadRecordedPreparation txid -> recordedPreparation c identity txid
+      CheckExpiryOrigins origins -> checkExpiryOrigins c origins
       ReadCancellation identifier generation -> readCancellation c identifier generation
       ReadUnsignedPreparation identifier -> cancellationPreparation c identity identifier
       ReadPaymentWork identifier -> paymentWork c identity identifier
@@ -230,6 +240,8 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
 evalWrite :: Writer -> StoreWrite a -> IO a
 evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
  let policy=executionTerms config; limit=admissionLimits config in case operation of
+  RecordSolanaExpiry expected proof -> recordSolanaExpiry c config expected proof
+  ApproveSolanaRetry now expected reason proof -> approveSolanaRetry c config now expected reason proof
   BeginCancellation expected now reason cleanup -> beginCancellation c config expected now reason cleanup
   FinishCancellation expected reason cleanup -> finishCancellation c config expected reason cleanup
   AuthorizeRefund now receipt -> authorizeRefund c config now receipt
@@ -1229,7 +1241,7 @@ readPayment c identity identifier = do
             O.where_ (intent O..== O.sqlStrictText identifier O..&& status O..== O.sqlStrictText "settled")
             pure tx
             :: IO [Text]
-          retry<-cancelledGeneration c identifier
+          retry<-retryGeneration c identifier
           pure (if length winners==1 then PaymentPaid else if maybe False (<8) retry then PaymentReady else PaymentReview)
         _->reject "payment_funding_mismatch"
       pure (PaymentView (withdrawalPayment saved) (withdrawalTerms saved) state)
@@ -1311,7 +1323,7 @@ preparePayment c config now identifier allowance plan = do
       require (preparedPolicy saved==plan && preparedFee saved==allowance && S.intentChain intent==chain) "preparation_conflict"
       pure saved
     previous | null previous || resolved -> do
-      generation<-if null previous then pure 0 else cancelledGeneration c identifier >>= maybe (reject "preparation_retry_not_authorized") pure
+      generation<-if null previous then pure 0 else retryGeneration c identifier >>= maybe (reject "preparation_retry_not_authorized") pure
       require (generation<8) "preparation_generation_limit"
       intakeReady c identity now
       require (savedStatus view==PaymentReady) "payment_not_ready"
@@ -1325,10 +1337,11 @@ preparePayment c config now identifier allowance plan = do
         paymentSource c outgoing
         fees<-O.runSelect c $ do
           (key,asset,n,released)<-O.selectTable S.feeHolds
-          O.where_ (key O..== text identifier)
-          pure(asset,n,released)
-          :: IO [(Text,Int64,Int64)]
-        require (case fees of [(asset,n,0)]->asset==T.pack(show feeAsset) && n>0; _->False) "preparation_fee_hold_missing"
+          (p,g,_,_,retired,_)<-S.workPreparations
+          O.where_ (key O..== text identifier O..&& p O..== key O..&& g O..== num(fromIntegral generation-1))
+          pure(asset,n,released,retired)
+          :: IO [(Text,Int64,Int64,Maybe Text)]
+        require (case fees of [(asset,n,released,retired)]->asset==T.pack(show feeAsset) && n>0 && released==(if retired==Nothing then 0 else 1); _->False) "preparation_fee_hold_missing"
         _<-O.runUpdate c O.Update {O.uTable=S.feeHolds,O.uUpdateWith= \(key,a,n,_)->(key,a,n,num 1),O.uWhere= \(key,_,_,_)->key O..== text identifier,O.uReturning=O.rCount}
         pure ()
       booked <- balances c
@@ -1482,7 +1495,11 @@ paymentWork c identity identifier = do
   prepared <- case active of []->pure Nothing; [_]->Just <$> readPreparation c identity identifier; _->reject "duplicate_payment_intent"
   attempts <- O.runSelect c $ O.limit 1001 $ O.orderBy (O.asc id) $ do
     row <- O.selectTable S.attempts
-    O.where_ (S.attemptIntent row O..== O.sqlStrictText identifier)
+    expired<-Exists.exists $ do
+      (key,_,_)<-O.selectTable S.solanaExpiries
+      O.where_ (key O..== S.attemptId row)
+      pure ()
+    O.where_ (S.attemptIntent row O..== O.sqlStrictText identifier O..&& O.not expired)
     pure (S.attemptId row)
     :: IO [Text]
   require (length attempts<=1000) "payment_history_too_large"
@@ -1783,7 +1800,7 @@ pendingAttempts c = do
   pure rows
 
 -- Prefer the existing intent on each chain; never prepare a competing payment.
--- Resolved intents return only after unsigned cancellation; settled history and
+-- Resolved intents return only after cancellation or approved expiry; settled history and
 -- cancelled withdrawals cannot fill the bounded queue. Candidates are revalidated.
 paymentCandidates :: PG.Connection -> IO [Text]
 paymentCandidates c = do
@@ -1799,20 +1816,30 @@ paymentCandidates c = do
           pure ()
         retry<-Exists.exists $ do
           row<-O.selectTable S.intents
-          (key,g,_,_,done)<-S.workCancellations
-          (p,pg,_,_,retired,cancelled)<-S.workPreparations
+          (key,g,_,_,retired,cancelled)<-S.workPreparations
           O.where_ (S.intentId row O..== identifier O..&& S.intentResolved row O..== O.sqlInt8 1
-            O..&& key O..== identifier O..&& p O..== key O..&& pg O..== g O..&& done O..== O.sqlInt8 1
-            O..&& cancelled O..== O.sqlInt8 1 O..&& O.isNull retired O..&& g O..< O.sqlInt8 7)
+            O..&& key O..== identifier O..&& g O..< O.sqlInt8 7)
+          cancelledWork<-Exists.exists $ do
+            (other,generation,_,_,done)<-S.workCancellations
+            O.where_ (other O..== key O..&& generation O..== g O..&& done O..== O.sqlInt8 1 O..&& cancelled O..== O.sqlInt8 1 O..&& O.isNull retired)
+            pure ()
+          expiredWork<-Exists.exists $ do
+            (tx,_,_,_)<-O.selectTable S.solanaRetryApprovals
+            O.where_ (O.matchNullable (O.sqlBool False) (O..== tx) retired O..&& cancelled O..== O.sqlInt8 0)
+            pure ()
           later<-Exists.exists $ do
             (other,generation,_,_,_,_)<-S.workPreparations
             O.where_ (other O..== key O..&& generation O..> g)
             pure ()
-          signed<-Exists.exists $ do
-            (_,other,_,_,_,_)<-S.workAttempts
-            O.where_ (other O..== key)
+          pending<-Exists.exists $ do
+            (tx,other,_,_,_,_)<-S.workAttempts
+            expired<-Exists.exists $ do
+              (retiredId,_,_)<-O.selectTable S.solanaExpiries
+              O.where_ (retiredId O..== tx)
+              pure ()
+            O.where_ (other O..== key O..&& O.not expired)
             pure ()
-          O.where_ (O.not later O..&& O.not signed)
+          O.where_ ((cancelledWork O..|| expiredWork) O..&& O.not later O..&& O.not pending)
           pure ()
         O.where_ (O.not found O..|| retry)
       orders=do
@@ -2095,22 +2122,145 @@ finishCancellation c config expected reason cleanup = do
         audit c "preparation_cancellation_completed" (identifier<>"@"<>T.pack(show generation))
     Nothing->reject "preparation_cancellation_not_expected"
 
--- Only wholly unsigned, consecutively cancelled generations can restart here.
--- Solana expiry and signed-attempt replacement require separate authority.
+-- Fee-reservation release accepts only wholly unsigned cancellation history.
+-- Preparation retries also accept separately proved and approved Solana expiry.
 cancelledGeneration :: PG.Connection -> Text -> IO (Maybe Int)
-cancelledGeneration c identifier = do
+cancelledGeneration=nextGeneration False
+retryGeneration :: PG.Connection -> Text -> IO (Maybe Int)
+retryGeneration=nextGeneration True
+nextGeneration :: Bool -> PG.Connection -> Text -> IO (Maybe Int)
+nextGeneration includeExpired c identifier = do
   rows<-O.runSelect c $ O.orderBy (O.asc (\(g,_,_)->g)) $ do
     (key,g,_,_,retired,cancelled)<-S.workPreparations
     O.where_ (key O..== O.sqlStrictText identifier)
     pure (g,retired,cancelled)
     :: IO [(Int64,Maybe Text,Int64)]
-  attempts<-O.runSelect c $ O.limit 1 $ do
-    (tx,key,_,_,_,_)<-S.workAttempts
+  attempts<-O.runSelect c $ do
+    (tx,key,_,g,_,_)<-S.workAttempts
     O.where_ (key O..== O.sqlStrictText identifier)
-    pure tx
-    :: IO [Text]
-  if null rows || length rows>8 || not(null attempts) ||
-    map (\(g,_,_)->g) rows/=[0..fromIntegral(length rows)-1] || any (\(_,retired,cancelled)->retired/=Nothing || cancelled/=1) rows
+    pure (tx,g)
+    :: IO [(Text,Int64)]
+  if null rows || length rows>8 || map (\(g,_,_)->g) rows/=[0..fromIntegral(length rows)-1]
     then pure Nothing else do
-      completed<-readCancellation c identifier (length rows-1)
-      pure $ case completed of Just(_,_,True)->Just(length rows); _->Nothing
+      permitted<-forM rows $ \(g,retired,cancelled)->case (retired,cancelled) of
+        (Nothing,1)->do
+          done<-readCancellation c identifier (fromIntegral g)
+          pure (case done of Just(_,_,True)->all ((/=g).snd) attempts; _->False)
+        (Just txid,0) | includeExpired->do
+          expired<-expiryProof c txid
+          approved<-retryReason c txid
+          pure (expired/=Nothing && approved/=Nothing && filter ((==g).snd) attempts==[(txid,g)])
+        _->pure False
+      pure $ if and permitted && all (\(_,g)->g>=0 && g<fromIntegral(length rows)) attempts then Just(length rows) else Nothing
+
+expiryProof :: PG.Connection -> Text -> IO (Maybe Text)
+expiryProof c txid = do
+  rows<-O.runSelect c $ do
+    (key,proof,_)<-O.selectTable S.solanaExpiries
+    O.where_ (key O..== O.sqlStrictText txid)
+    pure proof
+  case rows of []->pure Nothing; [proof]->pure (Just proof); _->reject "duplicate_expiry"
+retryReason :: PG.Connection -> Text -> IO (Maybe Text)
+retryReason c txid = do
+  rows<-O.runSelect c $ do
+    (key,reason,_,_)<-O.selectTable S.solanaRetryApprovals
+    O.where_ (key O..== O.sqlStrictText txid)
+    pure reason
+  case rows of []->pure Nothing; [reason]->pure (Just reason); _->reject "duplicate_retry_approval"
+checkExpiryOrigins :: PG.Connection -> (Text,Text) -> IO ()
+checkExpiryOrigins c (token,operating) = do
+  rows<-O.runSelect c $ do
+    (chain,origin)<-O.selectTable S.scanOrigins
+    O.where_ (O.in_ (map O.sqlStrictText ["Solana","SolanaOperating"]) chain)
+    pure (chain,origin)
+    :: IO [(Text,Text)]
+  require (sortOn fst rows==[("Solana",token),("SolanaOperating",operating)] && not(T.null token) && not(T.null operating)) "expiry_scan_origin_mismatch"
+
+-- Reverification of retired signed bytes uses that generation's saved policy,
+-- draft and attempt allowance, never the latest generation's mutable fee hold.
+recordedPreparation :: PG.Connection -> Text -> Text -> IO PreparedPayment
+recordedPreparation c identity txid = do
+  saved<-readAttempt c txid
+  view<-readPayment c identity (recordedPayment saved)
+  rows<-O.runSelect c $ do
+    (key,g,policy,draft,_,_)<-S.workPreparations
+    O.where_ (key O..== O.sqlStrictText(recordedPayment saved) O..&& g O..== O.sqlInt8(fromIntegral $ recordedGeneration saved))
+    pure (policy,draft)
+    :: IO [(Text,Maybe Text)]
+  case rows of
+    [(policy,Just draft)]->pure (PreparedPayment view (recordedGeneration saved) policy (Just draft) (recordedFee saved))
+    _->reject "expiry_preparation_missing"
+
+recordSolanaExpiry :: PG.Connection -> StorePolicy -> RecordedAttempt -> Text -> IO ()
+recordSolanaExpiry c config expected proof = do
+  validateSavedJson 200000 proof
+  let txid=signedId $ recordedSigned expected; identifier=recordedPayment expected
+      identity=deploymentFingerprint $ paymentPolicy $ executionTerms config
+      text=O.sqlStrictText; num=O.sqlInt8
+  require (recordedChain expected=="Solana" && recordedState expected `elem` ["signed","broadcast_intent"]) "invalid_solana_expiry"
+  previous<-expiryProof c txid
+  case previous of
+    Just old->require (old==proof) "expiry_evidence_conflict"
+    Nothing->do
+      current<-readAttempt c txid
+      prepared<-readPreparation c identity identifier
+      require (current==expected && preparedGeneration prepared==recordedGeneration expected) "expiry_attempt_changed"
+      family<-O.runSelect c $ do
+        (key,intent,_,_,_,_)<-S.workAttempts
+        expired<-Exists.exists $ do
+          (other,_,_)<-O.selectTable S.solanaExpiries
+          O.where_ (other O..== key)
+          pure ()
+        O.where_ (intent O..== text identifier O..&& O.not expired)
+        pure key
+        :: IO [Text]
+      require (family==[txid]) "expiry_attempt_changed"
+      sequenceNo<-nextSequence c
+      _<-O.runInsert c O.Insert {O.iTable=S.solanaExpiries,O.iRows=[(text txid,text proof,num sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      _<-O.runUpdate c O.Update {O.uTable=S.preparations,O.uUpdateWith= \(key,g,p,d,_,cancelled)->(key,g,p,d,O.toNullable $ text txid,cancelled),O.uWhere= \(key,g,_,_,_,_)->key O..== text identifier O..&& g O..== num(fromIntegral $ recordedGeneration expected),O.uReturning=O.rCount}
+      _<-O.runUpdate c O.Update {O.uTable=S.attempts,O.uUpdateWith= \r->r {S.attemptState=text "review",S.attemptObservation=O.toNullable $ text proof},O.uWhere= \r->S.attemptId r O..== text txid,O.uReturning=O.rCount}
+      _<-O.runUpdate c O.Update {O.uTable=S.feeHolds,O.uUpdateWith= \(key,a,n,_)->(key,a,n,num 1),O.uWhere= \(key,_,_,_)->key O..== text identifier,O.uReturning=O.rCount}
+      _<-O.runUpdate c O.Update {O.uTable=S.intents,O.uUpdateWith= \r->r {S.intentResolved=num 1},O.uWhere= \r->S.intentId r O..== text identifier,O.uReturning=O.rCount}
+      setCustomerPaymentState c (savedPayment $ preparedView prepared) "review" "NeedsReview"
+      audit c "solana_expiry_verified" txid
+
+approveSolanaRetry :: PG.Connection -> StorePolicy -> Int64 -> RecordedAttempt -> Text -> Text -> IO ()
+approveSolanaRetry c config now expected reason proof = do
+  validReason reason
+  validateSavedJson 200000 proof
+  let txid=signedId $ recordedSigned expected; identifier=recordedPayment expected
+      identity=deploymentFingerprint $ paymentPolicy $ executionTerms config
+  old<-retryReason c txid
+  case old of
+    Just previous->require (previous==reason) "retry_approval_conflict"
+    Nothing->do
+      metadata c identity >>= \state->require (S.paused state==1) "pause_before_operator_action"
+      fresh c now
+      current<-readAttempt c txid
+      expired<-expiryProof c txid
+      require (current==expected && recordedChain expected=="Solana" && recordedState expected=="review" && expired/=Nothing) "solana_retry_not_expected"
+      rows<-O.runSelect c $ do
+        i<-O.selectTable S.intents
+        (key,g,_,_,retired,cancelled)<-S.workPreparations
+        O.where_ (S.intentId i O..== O.sqlStrictText identifier O..&& key O..== S.intentId i)
+        pure (g,retired,cancelled,S.intentResolved i)
+        :: IO [(Int64,Maybe Text,Int64,Int64)]
+      require (not(null rows) && maximum(map (\(g,_,_,_)->g) rows)==fromIntegral(recordedGeneration expected)
+        && (fromIntegral(recordedGeneration expected),Just txid,0,1) `elem` rows && recordedGeneration expected<7) "solana_retry_not_expected"
+      view<-readPayment c identity identifier
+      require (savedStatus view==PaymentReview) "solana_retry_not_expected"
+      paymentSource c (savedPayment view)
+      sequenceNo<-nextSequence c
+      _<-O.runInsert c O.Insert {O.iTable=S.solanaRetryApprovals,O.iRows=[(O.sqlStrictText txid,O.sqlStrictText reason,O.sqlStrictText proof,O.sqlInt8 sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      setCustomerPaymentState c (savedPayment view) "ready" "Ready"
+      audit c "solana_retry_approved" txid
+
+setCustomerPaymentState :: PG.Connection -> Payment -> Text -> Text -> IO ()
+setCustomerPaymentState c outgoing obligationState orderState = do
+  let binding=case paymentFunding outgoing of Conversion oid _ _ _->Just oid; Refund oid _ _ _->Just oid; EarnedFees{}->Nothing
+      text=O.sqlStrictText
+      status=case paymentFunding outgoing of Refund{} | orderState=="Ready"->"Refunding"; _->orderState
+  forM_ binding $ \oid->do
+    _<-O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \r->r {S.obligationStatus=text obligationState},O.uWhere= \r->S.obligationId r O..== text(paymentId outgoing),O.uReturning=O.rCount}
+    _<-O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text status},O.uWhere= \r->S.orderId r O..== text oid O..&& S.status r O../= text "Paid",O.uReturning=O.rCount}
+    pure ()

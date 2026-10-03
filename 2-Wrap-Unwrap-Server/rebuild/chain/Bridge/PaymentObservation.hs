@@ -1,14 +1,15 @@
 module Bridge.PaymentObservation
   ( PaymentObservation(..), observeNativePayment, readNativePayment, activeNativeBlock
-  , observeSolanaPayment ) where
+  , observeSolanaPayment, solanaExpiryEvidence ) where
 import Bridge.Domain (Amount,amount)
 import Bridge.Error
 import Bridge.Identity (digest)
 import Bridge.Native (nativeAmount)
 import Bridge.NativePayment
+import Bridge.Solana (solanaGenesis,collectSignatures,SignatureInfo(..))
 import Bridge.SolanaHelper
 import Bridge.SolanaPayment
-import Bridge.Wire (PaymentCosts(..))
+import Bridge.Wire (PaymentCosts(..),Profile(..))
 import Bridge.RPC (fieldValue,parseValue)
 import Control.Exception (try)
 import Data.Aeson
@@ -93,3 +94,47 @@ observeSolanaPayment call config signed = do
 
 encoded :: ToJSON a => a -> Text
 encoded=TE.decodeUtf8 . BL.toStrict . encode
+
+-- Finalized height alone is insufficient: every configured provider must prove
+-- absence from transaction/status lookup and both complete anchored histories.
+solanaExpiryEvidence :: SolanaRPC -> Maybe SolanaRPC -> Profile -> SolanaPolicy -> (Text,Text) -> SolanaSigned -> IO (Maybe Text)
+solanaExpiryEvidence primary independent profile config (tokenOrigin,operatingOrigin) signed=do
+  require (solPlanFingerprint(signedSolanaPlan signed)==fingerprint config && minimumSlot>=0 && recentLastValidHeight recent>0) "saved_solana_policy_mismatch"
+  height<-primary "getBlockHeight" [options minimumSlot] >>= parseValue parseJSON :: IO Int64
+  require (height>=0) "expiry_provider_behind"
+  if height<=recentLastValidHeight recent then pure Nothing else do
+    require (not(T.null tokenOrigin) && not(T.null operatingOrigin)) "solana_expiry_history_required"
+    signature<-maybe (reject "helper_signature_missing") pure (replySignature $ signedSolanaReply signed)
+    proof<-evidence primary signature
+    other<-case independent of
+      Nothing->require (profile/=CanonicalBeta) "independent_rpc_required" >> pure Nothing
+      Just call->Just <$> evidence call signature
+    pure $ Just $ encoded $ object ["signature" .= signature,"blockhash" .= recentHash recent,
+      "lastValidBlockHeight" .= recentLastValidHeight recent,"primary" .= proof,"independent" .= other]
+ where
+  recent=solPlanRecent $ signedSolanaPlan signed
+  minimumSlot=recentSlot recent
+  options slot=object ["commitment" .= ("finalized"::Text),"minContextSlot" .= slot]
+  evidence call signature=do
+    genesis<-call "getGenesisHash" [] >>= parseValue parseJSON
+    require (genesis==solanaGenesis profile) "expiry_wrong_genesis"
+    height<-call "getBlockHeight" [options minimumSlot] >>= parseValue parseJSON :: IO Int64
+    require (height>recentLastValidHeight recent) "expiry_provider_behind"
+    slot<-call "getSlot" [options minimumSlot] >>= parseValue parseJSON :: IO Int64
+    require (slot>=minimumSlot) "expiry_provider_behind"
+    (_,valid)<-call "isBlockhashValid" [toJSON $ recentHash recent,options slot] >>= contextValue slot
+    require (valid==Bool False) "blockhash_still_valid"
+    histories<-mapM (\(address,origin)->do
+      rows<-collectSignatures origin Nothing $ \before->call "getSignaturesForAddress"
+        [toJSON address,object $ ["commitment" .= ("finalized"::Text),"minContextSlot" .= slot,"limit" .= (100::Int)]
+          <> maybe [] (\sig->["before" .= sig]) before] >>= parseValue parseJSON
+      require (all ((/=signature).historySignature) rows) "expired_signature_in_history"
+      pure $ object ["address" .= address,"origin" .= origin,"signatures" .=
+        [object ["signature" .= historySignature row,"slot" .= historySlot row,"failed" .= historyFailed row] | row<-rows]])
+      [(custodyAta config,tokenOrigin),(custodyOwner config,operatingOrigin)]
+    transaction<-call "getTransaction" [toJSON signature,object ["commitment" .= ("finalized"::Text),"encoding" .= ("json"::Text),"maxSupportedTransactionVersion" .= (0::Int)]]
+    require (transaction==Null) "expired_transaction_observed"
+    (_,statuses)<-call "getSignatureStatuses" [toJSON [signature],object ["searchTransactionHistory" .= True]] >>= contextValue slot
+    require (statuses==toJSON [Null]) "expired_signature_observed"
+    pure $ object ["genesis" .= genesis,"finalizedHeight" .= height,"minimumFinalizedSlot" .= slot,
+      "blockhashValid" .= False,"histories" .= histories,"transaction" .= Null,"signatureStatuses" .= statuses]

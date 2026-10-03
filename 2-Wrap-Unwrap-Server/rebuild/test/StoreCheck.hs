@@ -753,6 +753,7 @@ ledgerMain = do
         orderWorkflowContract fixtures reader writer (store policy limits)
         refundContract fixtures reader writer
         cancellationContract fixtures reader writer
+        expiryContract fixtures reader writer
         -- Actual runtime cycle with unavailable RPC: retain all money, stay
         -- paused, record scanner failures, and never reach signer credentials.
         let cycleKey=T.replicate 32 "1"
@@ -764,7 +765,9 @@ ledgerMain = do
         pendingBeforeCycle<-evalRead reader PendingAttempts
         bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> reject "offline_cycle_rpc"}) closeManager $ \manager ->
           withRuntime manager (ObserverSettings cycleNative cycleSolana 2 "sol-origin" "opening-signature") cyclePolicy Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret _customer _operator ->
-            void (try (interpret $ Request RunWorkerCycle) :: IO (Either BridgeError ()))
+            do
+              interpret (Request $ ReconcilePayment "expiry-signed-0")
+              void (try (interpret $ Request RunWorkerCycle) :: IO (Either BridgeError ()))
         evalRead reader ReadBalances >>= check . (==beforeCycle)
         evalRead reader ReadState >>= check . ledgerPaused
         evalRead reader PendingAttempts >>= check . (==pendingBeforeCycle)
@@ -810,6 +813,7 @@ data Fixture a where
   OperatingPhase :: T.Text -> T.Text -> Fixture ()
   HistoricalHolds :: T.Text -> Fixture ()
   PromotionFunds :: Fixture ()
+  SeedWrappedRevenue :: Fixture ()
   RejectPreparedFeeRelease :: T.Text -> Fixture Bool
   CheckRefundHolds :: T.Text -> Asset -> Fixture Bool
   RefundProof :: T.Text -> T.Text -> T.Text -> Fixture ()
@@ -939,6 +943,10 @@ fixture c PromotionFunds = PG.withTransaction c $ do
   void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(text "promotion-funds",text "test operating budget")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.postings,
     O.iRows=[(Nothing,text "promotion-funds",text asset,text account,O.sqlInt8 n)|asset<-["Native","Sol"],(account,n)<-[("external",-10000),("operating",10000)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+fixture c SeedWrappedRevenue = PG.withTransaction c $ do
+  let text=O.sqlStrictText
+  void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(text "expiry-earned",text "offline earned-payment funding")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.postings,O.iRows=[(Nothing,text "expiry-earned",text "Wrapped",text account,O.sqlInt8 n) | (account,n)<-[("external",-10),("earned",10)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
 fixture c (RejectPreparedFeeRelease key) = do
   result<-try $ PG.withTransaction c $ O.runInsert c O.Insert {O.iTable=S.cancellations,
     O.iRows=[(O.sqlStrictText key,O.sqlStrictText "bypass prepared work",O.sqlInt8 1000000)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
@@ -1270,6 +1278,7 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       expectStore "observation_only" (operatorControl $ Op.operator Op.ResumeService)
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.RefundDeposit "missing")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.CancelPreparation "missing" 0 "test")
+      expectStore "observation_only" (operatorControl $ Op.operator $ Op.RetrySolanaPayment "missing" "test")
       operatorControl (Op.operator $ Op.PauseService "operator contract")
       serviceAfter<-operatorControl (Op.operatorRead Op.ServiceState)
       check (W.paused serviceAfter && W.pauseReason serviceAfter=="operator contract")
@@ -1421,6 +1430,8 @@ serverMain = do
               check (refused==object ["error" .= ("observation_only"::T.Text)])
               refundRefused<-control (object ["operation" .= ("refund"::T.Text),"deposit" .= ("missing"::T.Text)])
               check (refundRefused==object ["error" .= ("observation_only"::T.Text)])
+              retryRefused<-control (object ["operation" .= ("retry-solana"::T.Text),"transaction" .= ("missing"::T.Text),"reason" .= ("test"::T.Text)])
+              check (retryRefused==object ["error" .= ("observation_only"::T.Text)])
               expectStore "invalid_operator_operation" (control $ object ["operation" .= ("refund"::T.Text),"deposit" .= ("missing"::T.Text),"recipient" .= ("attacker"::T.Text)])
               expectStore "invalid_operator_operation" (control $ object ["operation" .= ("resume"::T.Text),"bypass" .= True])
               _<-control (object ["operation" .= ("pause"::T.Text),"reason" .= ("operator process contract"::T.Text)])
@@ -1608,3 +1619,101 @@ earnedCancellationContract fixtures reader writer=do
   evalRead reader PaymentCandidates >>= check . notElem identifier
   after<-evalRead reader ReadBalances
   check (M.filter (/=0) before==M.filter (/=0) after)
+
+expiryContract :: PG.Connection -> Reader -> Writer -> IO ()
+expiryContract fixtures reader writer=do
+  let header="Bearer "<>T.replicate 64 "0"
+      request=W.OrderRequest NativeToWrapped (money 10) "recipient" "native-refund" Nothing "expiry-contract"
+      check :: HasCallStack => Bool -> IO ()
+      check ok=unless ok (fail $ "expiry contract failed\n"<>prettyCallStack callStack)
+      ready=fixture fixtures ReadyIntake
+      paused=evalWrite writer (Pause "expiry contract") >> fixture fixtures RefreshCustody
+      prepare identifier=do
+        ready
+        prepared<-evalWrite writer (PreparePayment 110 identifier (money 20) "{}")
+        evalWrite writer (SaveDraft identifier (preparedGeneration prepared) "{\"draft\":1}")
+        fixture fixtures CoverBackup
+        ready
+        evalRead reader (ReadSigningDecision 110 identifier (preparedGeneration prepared))
+      sign prepared=evalWrite writer $ RecordAttempt prepared
+        (SignedAttempt ("expiry-signed-"<>T.pack(show $ preparedGeneration prepared)) "immutable signed bytes" "{\"signed\":true}" Nothing)
+      proof="{\"expiry\":\"offline ledger contract\"}"
+  ready
+  oid<-evalWrite writer (CreateOrder 110 header request)
+  claim<-evalWrite writer (ClaimNative 110 header oid)
+  void $ evalWrite writer (RecordNative header oid (allocationLabel claim) "expiry-contract-address")
+  fixture fixtures (SeedReceipt "expiry-source" (Just oid) Native 10 2 True 110)
+  evalWrite writer (PromoteDeposit 110 "expiry-source") >>= check
+  let identifier="convert:"<>oid
+  prepared<-prepare identifier
+  first<-sign prepared
+  evalRead reader (CheckExpiryOrigins ("sol-origin","opening-signature"))
+  expectStore "expiry_scan_origin_mismatch" (evalRead reader $ CheckExpiryOrigins ("wrong","opening-signature"))
+  before<-evalRead reader ReadBalances
+  expectStore "expiry_attempt_changed" (evalWrite writer $ RecordSolanaExpiry first {recordedGeneration=1} proof)
+  evalWrite writer (RecordSolanaExpiry first proof)
+  recorded<-evalRead reader ReadState
+  evalWrite writer (RecordSolanaExpiry first proof)
+  replay<-evalRead reader ReadState
+  check (ledgerSequence replay==ledgerSequence recorded)
+  expectStore "expiry_evidence_conflict" (evalWrite writer $ RecordSolanaExpiry first "{\"changed\":true}")
+  expired<-evalRead reader (ReadAttempt "expiry-signed-0")
+  check (recordedState expired=="review" && recordedSigned expired==recordedSigned first)
+  restored<-evalRead reader (ReadRecordedPreparation "expiry-signed-0")
+  check (preparedPolicy restored==preparedPolicy prepared && preparedDraft restored==preparedDraft prepared && preparedFee restored==preparedFee prepared)
+  evalRead reader PendingAttempts >>= check . notElem "expiry-signed-0"
+  (view,active,attempts)<-evalRead reader (ReadPaymentWork identifier)
+  check (savedStatus view==PaymentReview && active==Nothing && null attempts)
+  evalRead reader ReadBalances >>= check . (==before)
+  ready
+  expectStore "preparation_retry_not_authorized" (evalWrite writer $ PreparePayment 110 identifier (money 20) "{}")
+  expectStore "pause_before_operator_action" (evalWrite writer $ ApproveSolanaRetry 110 expired "reviewed" proof)
+  paused
+  expectStore "solana_retry_not_expected" (evalWrite writer $ ApproveSolanaRetry 110 first "reviewed" proof)
+  evalWrite writer (ApproveSolanaRetry 110 expired "reviewed" proof)
+  approved<-evalRead reader ReadState
+  evalWrite writer (ApproveSolanaRetry 110 expired "reviewed" proof)
+  repeated<-evalRead reader ReadState
+  check (ledgerSequence repeated==ledgerSequence approved)
+  expectStore "retry_approval_conflict" (evalWrite writer $ ApproveSolanaRetry 110 expired "different" proof)
+  next<-prepare identifier
+  check (preparedGeneration next==1 && savedPayment(preparedView next)==savedPayment(preparedView prepared))
+  -- A mixed history of proved expiry and unsigned cancellation remains bounded.
+  paused
+  evalWrite writer (BeginCancellation next 110 "unsigned retry" "{}")
+  evalWrite writer (FinishCancellation next "unsigned retry" "{}")
+  third<-prepare identifier
+  check (preparedGeneration third==2)
+  current<-sign third
+  evalWrite writer (RecordSolanaExpiry current proof)
+  latest<-evalRead reader (ReadAttempt "expiry-signed-2")
+  paused
+  evalWrite writer (ApproveSolanaRetry 110 latest "reviewed latest" proof)
+  fourth<-prepare identifier
+  check (preparedGeneration fourth==3)
+  lastAttempt<-sign fourth
+  saved<-evalRead reader (ReadAttempt "expiry-signed-0")
+  check (recordedSigned saved==recordedSigned first)
+  evalWrite writer (RecordSolanaExpiry first proof)
+  evalWrite writer (ApproveSolanaRetry 110 expired "reviewed" proof)
+  activeAgain<-evalRead reader (ReadPreparation identifier)
+  check (activeAgain==fourth)
+  evalRead reader ReadBalances >>= check . (==before)
+  evalWrite writer (RecordSolanaExpiry lastAttempt proof)
+  fixture fixtures SeedWrappedRevenue
+  paused
+  let key=T.replicate 64 "f"; earnedId="fee:"<>key
+  void $ evalWrite writer (ReserveFees 110 key Wrapped (money 3) "owner-address" "earned expiry contract")
+  earnedBefore<-evalRead reader ReadBalances
+  earned<-prepare earnedId
+  let signed=SignedAttempt "earned-expiry-signature" "exact earned signed bytes" "{\"signed\":true}" Nothing
+  attempt<-evalWrite writer (RecordAttempt earned signed)
+  evalWrite writer (RecordSolanaExpiry attempt proof)
+  earnedExpired<-evalRead reader (ReadAttempt "earned-expiry-signature")
+  evalRead reader (ReadPayment earnedId) >>= check . (==PaymentReview) . savedStatus
+  paused
+  evalWrite writer (ApproveSolanaRetry 110 earnedExpired "earned retry reviewed" proof)
+  evalRead reader (ReadPayment earnedId) >>= check . (==PaymentReady) . savedStatus
+  earnedNext<-prepare earnedId
+  check (preparedGeneration earnedNext==1 && savedPayment(preparedView earnedNext)==savedPayment(preparedView earned))
+  evalRead reader ReadBalances >>= check . (==earnedBefore)
