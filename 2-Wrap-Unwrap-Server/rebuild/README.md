@@ -231,9 +231,10 @@ Identity and sequence stayed unchanged; schema advanced from 18 to 21 while paus
 An archived in-flight host-restore ledger also passed: three signed attempts and
 33 postings survived, and its one pending attempt remained discoverable and readable.
 The comparison includes cancellation, expiry/retry, replacement/winner and source
-recovery records. Two older archives preserved their records but failed cutover
-acceptance: each contains three payments without saved order cost policies; the
-rebuild refuses those payments rather than inventing historical limits. The original
+recovery records. Two older archives also contain three completed historical payments without full
+saved order cost policies. Such records retain their immutable history but cannot
+be read as executable payment terms. The migration contract now distinguishes this
+settled archival case from unfinished work; it never fills in missing limits. The original
 ledgers were untouched. The in-flight copy also passed real-node reconciliation
 through the critical evaluator: its signed native transaction remained unseen and
 pending, exact bytes/ledger history stayed unchanged, and repeated reconciliation
@@ -241,15 +242,19 @@ was idempotent. No signer or broadcast was enabled. This proves retained-work re
 not migrated settlement or funded recovery parity. The schema-18 backups lacked
 baseline DDL 005: verify installed DDL, not only the version number.
 
-A fresh copy of the larger `ecx_bridge_runtime` ledger was also checked: 17 orders,
-18 attempts, schema 18 and critical sequence 82. Financial history and identity
-survived migration. Despite retained signed/broadcast-intent history, no attempts
-belonged to unresolved intents. Cutover still failed on three **paid** historical
-obligations with no `order_cost_limits` row. Their signed records retain the cost
-bounds for their outgoing chain, but not the complete original order cost policy.
-The original database and a consistent private dump are preserved. Supporting this
-history requires explicit treatment of missing terms; do not invent limits or
-mistake historical attempt states for pending economic payments.
+A fresh copy of the larger `ecx_bridge_runtime` ledger now passes migration and
+live observation-only custody reconciliation: 17 orders, 18 attempts and 145
+postings are retained, with fingerprint and critical sequence 82 unchanged.
+Despite historical signed/broadcast-intent rows, all intents are resolved and no
+attempt is pending. The three payments without full order cost policies qualify
+only as settled history: each obligation is paid, its order completed, all related
+intents resolved, and exactly one settled winner has recorded evidence. Reading
+these as executable payment work still fails. Reopening one copied obligation to
+review was tested and correctly rejected migration. Real native/Solana scans and
+custody balance checks passed with no signer, preparation, broadcast or resume.
+The original database and consistent private dump are untouched; actual deployment
+adoption/retirement is still separate. Any future refund/recovery needing missing
+historical terms requires explicit policy treatment; this check does not invent it.
 
 Prior root Cabal, QuickCheck, PostgreSQL, TLS and local-restic runs passed their
 recorded scopes. Protocol mutations, receipt fixtures and local-restic transport
@@ -329,8 +334,9 @@ after acceptance; keys, ledger, exact attempts and private evidence remain saved
    boundaries on the actual test networks. Finish actual Solana Pay wallet signing
    and the remaining browser cases; keep tester-client evidence distinct from wallet
    acceptance. Native refunds and restart of the broadcast refund now pass above.
-2. Prove populated baseline migration and financial/recovery parity, then remove the
-   superseded application and duplicate tooling. Retain unique checks until covered.
+2. Complete original-deployment adoption/retirement and remaining recovery parity,
+   then remove the superseded application and duplicate tooling. Populated migration
+   and live read-only custody parity pass on a copy as described above. Retain unique checks until covered.
    Consolidate stale repository-wide architecture/operating documents around the
    accepted rebuild; their earlier checkpoints are not current release certification.
 3. Verify replacement/reorg/winner-change/rebroadcast and covered-source flows with

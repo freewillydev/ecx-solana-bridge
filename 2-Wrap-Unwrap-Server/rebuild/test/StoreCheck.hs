@@ -83,7 +83,7 @@ main = do
 
 -- Restore an offline schema-18 backup into a disposable database and apply any
 -- missing baseline migrations through 005 before invoking this mode.
--- This mode never connects to the original ledger, a chain or a signer.
+-- Never touch the original ledger or a signer. Optional recovery only reads chains.
 migrationMain :: IO ()
 migrationMain=do
   database<-getEnv "ECX_REBUILD_CONTRACT_DATABASE"
@@ -111,7 +111,9 @@ migrationMain=do
       (after==[original {S.schemaVersion=21,S.paused=1,S.pauseReason="payment_funding_migration"}])
     intents<-fixture connection MigratedIntents
     check "migration changed customer funding" (all (\row->S.intentWithdrawal row==Nothing && S.intentObligation row==Just(S.intentId row)) intents)
-    legacy<-fixture connection MigrationLegacyPayments
+    legacyRecords<-fixture connection MigrationLegacyPayments
+    let legacy=map fst legacyRecords
+    check "unfinished legacy payments require explicit cost-policy review" (all snd legacyRecords)
     withReader (settings {PG.connectUser=role}) (S.fingerprint original) False $ \reader->do
       state<-evalRead reader ReadState
       check "rebuild cannot read migrated sequence" (ledgerSequence state==S.criticalSequence original && ledgerPaused state)
@@ -127,11 +129,10 @@ migrationMain=do
       void $ evalRead reader PaymentCandidates
       void $ evalRead reader ReadBalances
       putStrLn ("Pending migrated attempts: "<>show(length pending))
-    putStrLn ("Legacy payments missing saved cost policy: "<>show(length legacy))
-    check "migration requires explicit legacy cost-policy review; history preserved but cutover not accepted" (null legacy)
+    putStrLn ("Read-only settled legacy payments without complete order cost policy: "<>show(length legacy))
     recovery<-lookupEnv "ECX_REBUILD_MIGRATION_RECOVERY_CONFIG"
     forM_ recovery $ migrationRecovery settings role (S.fingerprint original) connection
-    putStrLn ("Populated migration PASS: "<>show(length attempts)<>" signed attempts; "<>show(length postings)<>" postings preserved; migrated payments readable")
+    putStrLn ("Populated migration PASS: "<>show(length attempts)<>" signed attempts; "<>show(length postings)<>" postings preserved; executable terms checked; settled legacy history retained")
 
 -- Observation-only recovery of saved bytes on real public test networks. Never
 -- start a signer, prepare a new payment, resume intake or broadcast from a copy.
@@ -153,7 +154,6 @@ migrationRecovery settings role identity fixtures path=do
           withRuntime manager (Config.observerSettings config) (Config.solanaPolicy config) Nothing
             (SigningEndpoint 9443 (directory </> "no-signer")) reader writer $ \worker _ _->do
               pending<-evalRead reader PendingAttempts
-              check (not $ null pending)
               before<-mapM (evalRead reader . ReadAttempt) pending
               original<-fixture fixtures ArchiveRecords
               mapM_ (worker . Request . ReconcilePayment) pending
@@ -170,7 +170,12 @@ migrationRecovery settings role identity fixtures path=do
               mapM_ (worker . Request . ReconcilePayment) pending
               repeated<-fixture fixtures ArchiveRecords
               check (snapshot==repeated)
-              putStrLn ("Live migrated reconciliation PASS: "<>show(length settled)<>" settled; "<>
+              worker (Request ObserveChains)
+              worker (Request ReconcileCustody)
+              (checkedAt,_,problem)<-fixture fixtures ReadCustodyCheck
+              check (checkedAt/=Nothing && problem==Nothing)
+              evalRead reader ReadState >>= check . ledgerPaused
+              putStrLn ("Live migrated custody and reconciliation PASS: "<>show(length settled)<>" settled; "<>
                 show(length retained)<>" retained pending; exact bytes and replay preserved")
 
 -- Actual chain history, isolated ledger, and observation-only DSL authority.
@@ -1275,7 +1280,7 @@ data Fixture a where
   RestoreDatabases :: Fixture [T.Text]
   MigrationRecords :: Fixture [String]
   MigratedIntents :: Fixture [S.Intent]
-  MigrationLegacyPayments :: Fixture [T.Text]
+  MigrationLegacyPayments :: Fixture [(T.Text,Bool)]
   ArchiveRecords :: Fixture ([S.Deployment],[S.Attempt],[(Int64,T.Text,T.Text,T.Text,Int64)])
   SourceRecipient :: T.Text -> T.Text -> Fixture ()
   TLSFunds :: Fixture ()
@@ -1337,7 +1342,19 @@ fixture c SetupResidue = void $ O.runInsert c O.Insert {O.iTable=S.events,
 fixture c MigrationLegacyPayments = do
   obligations<-O.runSelect c (O.selectTable S.obligations) :: IO [S.Obligation]
   costs<-O.runSelect c (O.selectTable S.orderCosts) :: IO [(T.Text,Int64,Int64,Int64)]
-  pure [S.obligationId row | row<-obligations, S.obligationOrder row `notElem` [key | (key,_,_,_)<-costs]]
+  orders<-O.runSelect c (O.selectTable S.orders) :: IO [S.Order]
+  intents<-O.runSelect c (O.selectTable S.intents) :: IO [S.Intent]
+  attempts<-O.runSelect c (O.selectTable S.attempts) :: IO [S.Attempt]
+  let archived row =
+        let matching=[i | i<-intents,S.intentObligation i==Just(S.obligationId row)]
+            winners=[a | a<-attempts,S.attemptIntent a `elem` map S.intentId matching,S.attemptState a=="settled"]
+        in S.obligationStatus row=="paid" && not(null matching) && all ((==1).S.intentResolved) matching
+          && length winners==1 && all ((/=Nothing).S.attemptObservation) winners
+          && any (\o->S.orderId o==S.obligationOrder row && S.status o `elem` ["Paid","Refunded"]) orders
+  -- Missing historical terms never become executable PaymentTerms. Require a
+  -- resolved intent and unique recorded winner; unfinished/review work must fail.
+  pure [(S.obligationId row,archived row) | row<-obligations,
+    S.obligationOrder row `notElem` [key | (key,_,_,_)<-costs]]
 fixture c MigratedIntents = O.runSelect c (O.selectTable S.intents)
 fixture c MigrationRecords = sequence
   [ rows (O.runSelect c (O.selectTable S.orders) :: IO [S.Order])
