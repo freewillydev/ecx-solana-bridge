@@ -111,7 +111,7 @@ readDecision settings cfg command = bracket (PG.connect settings) PG.close $ \c-
       SignPrepared _ intent generation->do
         require (generation>=0 && not(T.null intent) && T.length intent<=256) "invalid_signing_decision"
         Order.checkIntakeReadyC c now
-        (prepared,policy) <- Preparation.signingDecisionC c cfg intent generation
+        (prepared,PaymentTerms policy limits) <- Preparation.signingDecisionC c cfg intent generation
         let ob=preparationObligation prepared
         draft <- maybe (reject "preparation_draft_required") pure (preparationDraft prepared)
         case preparationChain prepared of
@@ -120,7 +120,7 @@ readDecision settings cfg command = bracket (PG.connect settings) PG.close $ \c-
             value <- decodePaymentRecord draft
             require (planProfile plan==profile cfg && planDepth plan==nativeDepth policy
               && planRecipient plan==obligationRecipient ob && units(planAmount plan)==obligationAmount ob
-              && units(planFeeLimit plan)==preparationFeeLimit prepared) "saved_native_policy_mismatch"
+              && units(planFeeLimit plan)==preparationFeeLimit prepared && planFeeLimit plan<=savedNativeFee limits) "saved_native_policy_mismatch"
             pure(InitialNative plan value)
           "Solana"->do
             plan <- decodePaymentRecord(preparationPolicy prepared)
@@ -129,6 +129,7 @@ readDecision settings cfg command = bracket (PG.connect settings) PG.close $ \c-
             require (solPlanFingerprint plan==fingerprint cfg && solanaCommitment policy=="finalized"
               && solPlanRecipient plan==obligationRecipient ob && units(solPlanAmount plan)==obligationAmount ob
               && solPlanReference plan==payoutReference cfg ob && units limit==preparationFeeLimit prepared
+              && solPlanFeeLimit plan<=savedSolanaFee limits && solPlanRentLimit plan<=savedSolanaRent limits
               && request==solanaPayoutRequest cfg plan) "saved_solana_policy_mismatch"
             pure(InitialSolana plan request)
           _->reject "wrong_destination_chain"

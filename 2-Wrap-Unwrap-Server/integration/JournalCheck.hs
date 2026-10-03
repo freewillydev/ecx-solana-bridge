@@ -4,7 +4,7 @@ module Main (main) where
 import qualified AuthorityCheck
 import qualified SourceApprovalCheck
 import Bridge.Types hiding (deploymentFingerprint)
-import Bridge.Ledger.Model (Deposit(..),Obligation(..),Preparation(..),Attempt(..),CostLimits(..),ScanBatch(..),ChainEvent(..))
+import Bridge.Ledger.Model (Deposit(..),Obligation(..),Preparation(..),Attempt(..),CostLimits(..),PaymentTerms(..),ScanBatch(..),ChainEvent(..))
 import qualified Bridge.Postgres.Treasury as Treasury
 import qualified Bridge.Postgres.Preparation as Preparation
 import qualified Bridge.Postgres.Settlement as Settlement
@@ -504,7 +504,7 @@ orderContracts settings = do
     saved <- Order.createOrder ledger cfg{nativeConfirmations=6,maxNativeFee=quantity 5,
       maxSolFee=quantity 1,maxSolAccountRent=quantity 999999} 100 capability request
     require (saved==first) "configuration_changed_existing_order"
-    limits <- Preparation.costLimits ledger (ordersId first)
+    limits <- paymentLimits <$> Preparation.terms ledger (ordersId first)
     require (limits==CostLimits (quantity 1000) (quantity 10000) (quantity 0)) "saved_fee_ceilings_changed"
     fresh <- Order.createOrder ledger cfg{nativeConfirmations=6} 100 capability request{idempotencyKey="new-policy"}
     newView <- Order.exposeOrder ledger False capability (ordersId fresh)
@@ -650,7 +650,9 @@ broadcastWriteContract settings = do
     expectError "payment_not_prepared" $ L.ledgerAction ledger $ \c->
       Preparation.signingDecisionC c cfg (obligationId ob) generation
     Preparation.storeDraft ledger (obligationId ob) "{}" generation
-    (prepared,_) <- L.ledgerAction ledger $ \c->Preparation.signingDecisionC c cfg (obligationId ob) generation
+    (prepared,savedTerms) <- L.ledgerAction ledger $ \c->Preparation.signingDecisionC c cfg (obligationId ob) generation
+    customerTerms <- Preparation.terms ledger (obligationOrder ob)
+    require (savedTerms==customerTerms) "signer_payment_terms_changed"
     require (preparationObligation prepared==ob && preparationDraft prepared==Just "{}"
       && preparationGeneration prepared==generation) "signing_decision_not_bound"
     expectError "preparation_generation_changed" $ L.ledgerAction ledger $ \c->

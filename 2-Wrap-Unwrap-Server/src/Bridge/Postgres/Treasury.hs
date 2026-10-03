@@ -1,6 +1,6 @@
 module Bridge.Postgres.Treasury (allocate, classifySpend, reserveFees, cancelFees) where
 
-import Bridge.Ledger.Model (economicOutflow,encodeRecord,decodeRecord)
+import Bridge.Ledger.Model (economicOutflow,encodeRecord,decodeRecord,PaymentTerms(..),CostLimits(..))
 import Control.Monad (forM_)
 import Bridge.Types hiding (deploymentFingerprint)
 import Bridge.Config
@@ -171,9 +171,9 @@ reserveFees ledger cfg now key currency n destination explanation = ledgerAction
    && not(T.null destination) && T.length destination<=128 && validReason explanation) "invalid_fee_withdrawal"
  deployment<-O.runSelect c $ fmap (\d->(deploymentPaused d,deploymentFingerprint d)) $ O.selectTable deploymentTable :: IO [(Int64,Text)]
  require(map snd deployment==[fingerprint cfg]) "fee_withdrawal_profile_mismatch"
- let saved=encodeRecord $ object
-       ["fingerprint" .= fingerprint cfg,"policy" .= PolicySnapshot (nativeConfirmations cfg) "finalized" (fingerprint cfg),
-        "nativeFee" .= maxNativeFee cfg,"solanaFee" .= maxSolFee cfg,"solanaRent" .= maxSolAccountRent cfg]
+ let saved=encodeRecord $ PaymentTerms
+       (PolicySnapshot (nativeConfirmations cfg) "finalized" (fingerprint cfg))
+       (CostLimits (maxNativeFee cfg) (maxSolFee cfg) (maxSolAccountRent cfg))
      expected :: FeeWithdrawals
      expected=FeeWithdrawals key (T.pack $ show currency) (units n) destination saved explanation 0
  old <- O.runSelect c $ do

@@ -258,7 +258,7 @@ cancelPreparationWith clock transport c ledger intent generation reason=do
 preparationPolicyFor :: Config -> Ledger -> Preparation -> IO PolicySnapshot
 preparationPolicyFor c ledger p=do
   let ob=preparationObligation p
-  policy <- PgPreparation.orderPolicy ledger (obligationOrder ob)
+  policy <- paymentPolicy <$> PgPreparation.terms ledger (obligationOrder ob)
   require (deploymentFingerprint policy==fingerprint c && solanaCommitment policy=="finalized") "payment_profile_mismatch"
   pure policy
 

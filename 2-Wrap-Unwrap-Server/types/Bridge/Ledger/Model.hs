@@ -1,6 +1,6 @@
 -- Shared economic records and evidence decoding; no database capability.
 module Bridge.Ledger.Model
-  ( View(..), CostLimits(..), Deposit(..), ChainEvent(..), ScanBatch(..), SourceCheck(..)
+  ( View(..), CostLimits(..), PaymentTerms(..), Deposit(..), ChainEvent(..), ScanBatch(..), SourceCheck(..)
   , LossCapital(..), Obligation(..), Attempt(..), Preparation(..), PaymentCosts(..)
   , NativeSettlementCheck(..), economicOutflow, encodeRecord, decodeRecord, decodePaymentRecord
   ) where
@@ -24,6 +24,23 @@ data View = View
 data CostLimits = CostLimits
   { savedNativeFee :: !Amount, savedSolanaFee :: !Amount, savedSolanaRent :: !Amount }
   deriving (Eq,Show)
+
+-- Immutable execution terms shared by customer payouts and earned-fee funding.
+-- The fee-funding JSON layout is retained exactly for existing reservations.
+data PaymentTerms = PaymentTerms
+  { paymentPolicy :: !PolicySnapshot, paymentLimits :: !CostLimits }
+  deriving (Eq,Show)
+instance ToJSON PaymentTerms where
+  toJSON (PaymentTerms policy limits) = object
+    ["fingerprint" .= deploymentFingerprint policy,"policy" .= policy,
+     "nativeFee" .= savedNativeFee limits,"solanaFee" .= savedSolanaFee limits,
+     "solanaRent" .= savedSolanaRent limits]
+instance FromJSON PaymentTerms where
+  parseJSON = withObject "payment terms" $ \o->do
+    identity <- o .: "fingerprint"
+    policy <- o .: "policy"
+    if identity/=deploymentFingerprint policy then fail "payment_profile_mismatch" else
+      PaymentTerms policy <$> (CostLimits <$> o .: "nativeFee" <*> o .: "solanaFee" <*> o .: "solanaRent")
 
 data Deposit = Deposit { depositId :: !Text, depositOrder :: !(Maybe Text), depositAsset :: !Asset, depositAmount :: !Amount, depositAnchor :: !Text, depositConfirmations :: !Int, depositEligible :: !Bool, depositSeenAt :: !Int64 } deriving (Eq,Show)
 

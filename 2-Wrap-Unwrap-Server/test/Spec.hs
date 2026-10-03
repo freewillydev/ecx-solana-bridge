@@ -606,6 +606,20 @@ main=hspec $ do
       nativeAmount (scientific 1 (-1000000000)) `shouldBe` Left "native_amount_out_of_range"
     it "conserves principal and bounds upward rounding in both directions" $ property $ forAll (chooseInteger (1000,1000000000000)) $ \n -> all (valid n) [NativeToWrapped,WrappedToNative]
     it "never quotes an input consumed entirely by its fee" $ makeQuote NativeToWrapped (amt 1) `shouldBe` Left "nonpositive_net"
+  describe "saved payment terms" $ do
+    it "preserves the historical fee-policy bytes and rejects crossed identities" $ property $
+      forAll (chooseInteger (1,1000000000)) $ \n ->
+        let policy=PolicySnapshot 2 "finalized" "saved-deployment"
+            terms=PaymentTerms policy (CostLimits (amt n) (amt $ n+1) (amt $ n+2))
+            historical identity=object ["fingerprint" .= (identity::T.Text),"policy" .= policy,
+              "nativeFee" .= amt n,"solanaFee" .= amt (n+1),"solanaRent" .= amt (n+2)]
+        in conjoin
+          [encode terms === encode (historical "saved-deployment")
+          ,eitherDecode (encode $ historical "saved-deployment") === Right terms
+          ,counterexample "crossed payment identity accepted" $
+            case (eitherDecode (encode $ historical "other-deployment") :: Either String PaymentTerms) of
+              Left _->True
+              Right _->False]
   describe "Solana history pagination (transport contract tests)" $ do
     it "reads multiple pages through the exact saved anchor in durable order" $ do
       calls<-newIORef []

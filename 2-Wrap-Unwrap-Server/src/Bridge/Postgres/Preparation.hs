@@ -1,10 +1,10 @@
 module Bridge.Postgres.Preparation
-  ( orderPolicy, costLimits, begin, active, activeC, storeDraft, storeAttempt, pending, pendingC, signingDecisionC, nativeLockAudit
+  ( terms, begin, active, activeC, storeDraft, storeAttempt, pending, pendingC, signingDecisionC, nativeLockAudit
   , readCancellation, beginCancellation, finishCancellation ) where
 
 import Bridge.Config
 import Bridge.Types
-import Bridge.Ledger.Model (encodeRecord, decodePaymentRecord, CostLimits(..), Obligation(..), Preparation(..))
+import Bridge.Ledger.Model (encodeRecord, decodePaymentRecord, CostLimits(..), PaymentTerms(..), Obligation(..), Preparation(..))
 import Bridge.Postgres.Ledger
 import Bridge.Postgres.Schema hiding (deploymentFingerprint)
 import qualified Bridge.Postgres.Source as Source
@@ -17,17 +17,18 @@ import qualified Data.Text as T
 import qualified Database.PostgreSQL.Simple as PG
 import qualified Opaleye as O
 
-orderPolicy :: Ledger -> Text -> IO PolicySnapshot
-orderPolicy ledger oid = ledgerAction ledger $ \c->do
-  rows <- O.runSelect c $ fmap ordersPolicyJson $ whereRows (\row->ordersId row O..== text oid) (O.selectTable ordersTable) :: IO [Text]
-  case rows of [value]->decodePaymentRecord value; _->reject "order_not_found"
+terms :: Ledger -> Text -> IO PaymentTerms
+terms ledger oid = ledgerAction ledger (termsC oid)
 
-costLimits :: Ledger -> Text -> IO CostLimits
-costLimits ledger oid = ledgerAction ledger $ \c->do
+termsC :: Text -> PG.Connection -> IO PaymentTerms
+termsC oid c = do
+  policies <- O.runSelect c $ fmap ordersPolicyJson $ whereRows (\row->ordersId row O..== text oid) (O.selectTable ordersTable) :: IO [Text]
+  policy <- case policies of [value]->decodePaymentRecord value; _->reject "order_not_found"
   rows <- O.runSelect c $ whereRows (\row->ordercostlimitsOrderId row O..== text oid) (O.selectTable ordercostlimitsTable) :: IO [OrderCostLimits]
-  case rows of
+  limits <- case rows of
     [row]->CostLimits <$> quantity (ordercostlimitsNativeFee row) <*> quantity (ordercostlimitsSolanaFee row) <*> quantity (ordercostlimitsSolanaRent row)
     _->reject "order_cost_policy_missing"
+  pure (PaymentTerms policy limits)
  where quantity=either reject pure . amount . toInteger
 
 context :: PG.Connection -> Obligation -> Text -> IO Obligations
@@ -182,7 +183,7 @@ num = O.sqlInt8
 
 -- Specific read-only signer operation. It accepts durable identity, never a
 -- caller-supplied plan or transaction. No connection escapes the signer.
-signingDecisionC :: PG.Connection -> Config -> Text -> Int -> IO (Preparation,PolicySnapshot)
+signingDecisionC :: PG.Connection -> Config -> Text -> Int -> IO (Preparation,PaymentTerms)
 signingDecisionC c cfg intent generation = do
   actual <- activeC c intent
   require (actual==fromIntegral generation) "preparation_generation_changed"
@@ -198,10 +199,9 @@ signingDecisionC c cfg intent generation = do
     && preparationDraft prepared/=Nothing) "payment_not_prepared"
   fees <- O.runSelect c $ whereRows (\r->feereservationsIntentId r O..== text intent) (O.selectTable feereservationsTable) :: IO [FeeReservations]
   require ([(feereservationsAmount r,feereservationsReleased r) | r<-fees]==[(preparationFeeLimit prepared,0)]) "payment_not_prepared"
-  policies <- O.runSelect c $ fmap ordersPolicyJson $ whereRows (\r->ordersId r O..== text(obligationOrder ob)) (O.selectTable ordersTable) :: IO [Text]
-  policy <- case policies of [value]->decodePaymentRecord value; _->reject "order_not_found"
-  require (deploymentFingerprint policy==fingerprint cfg) "payment_profile_mismatch"
-  pure (prepared,policy)
+  savedTerms <- termsC (obligationOrder ob) c
+  require (deploymentFingerprint (paymentPolicy savedTerms)==fingerprint cfg) "payment_profile_mismatch"
+  pure (prepared,savedTerms)
 
 nativeLockAudit :: Ledger -> Text -> IO ()
 nativeLockAudit ledger subject = ledgerAction ledger $ \connection->do

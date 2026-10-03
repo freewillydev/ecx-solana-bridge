@@ -24,7 +24,7 @@ prepareNativeWithSigner call signer c ledger obligation = prepare `onException` 
   prepare = do
     require (obligationAsset obligation=="Native") "wrong_destination_chain"
     quantity <- either reject pure (amount $ toInteger $ obligationAmount obligation)
-    policy <- PgPreparation.orderPolicy ledger (obligationOrder obligation)
+    PaymentTerms policy limits <- PgPreparation.terms ledger (obligationOrder obligation)
     require (deploymentFingerprint policy==fingerprint c) "payment_profile_mismatch"
     attempts <- filter ((==obligationId obligation) . attemptIntent) <$> PgSettlement.pendingAttempts ledger
     case attempts of
@@ -41,7 +41,6 @@ prepareNativeWithSigner call signer c ledger obligation = prepare `onException` 
         preparations <- filter ((==obligationId obligation) . obligationId . preparationObligation) <$> PgPreparation.pending ledger
         (plan,savedDraft,generation) <- case preparations of
           [] -> do
-            limits <- PgPreparation.costLimits ledger (obligationOrder obligation)
             plan <- newNativePlan call (profile c) (nativeDepth policy) (savedNativeFee limits) (obligationRecipient obligation) quantity
             PgPreparation.begin ledger c obligation "Native" (units $ planFeeLimit plan) (encodeRecord plan)
             g <- PgPreparation.active ledger (obligationId obligation)
@@ -91,7 +90,7 @@ prepareSolanaWithSigner call signer c ledger obligation = prepare `onException` 
   prepare = do
     require (obligationAsset obligation=="Wrapped") "wrong_destination_chain"
     quantity <- either reject pure (amount $ toInteger $ obligationAmount obligation)
-    policy <- PgPreparation.orderPolicy ledger (obligationOrder obligation)
+    PaymentTerms policy limits <- PgPreparation.terms ledger (obligationOrder obligation)
     require (deploymentFingerprint policy==fingerprint c && solanaCommitment policy=="finalized") "payment_profile_mismatch"
     attempts <- filter ((==obligationId obligation) . attemptIntent) <$> PgSettlement.pendingAttempts ledger
     case attempts of
@@ -113,7 +112,6 @@ prepareSolanaWithSigner call signer c ledger obligation = prepare `onException` 
         preparations <- filter ((==obligationId obligation) . obligationId . preparationObligation) <$> PgPreparation.pending ledger
         (plan,savedDraft,generation) <- case preparations of
           [] -> do
-            limits <- PgPreparation.costLimits ledger (obligationOrder obligation)
             recent <- getRecentBlockhash call
             let plan=SolanaPlan (fingerprint c) (obligationRecipient obligation) quantity
                   (payoutReference c obligation) recent (savedSolanaFee limits) (savedSolanaRent limits)
