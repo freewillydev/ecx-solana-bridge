@@ -1973,7 +1973,15 @@ fenceMain = do
       Fence.initializeFence wrong (T.replicate 64 "b") 0
       expectStore "worker_fence_identity_mismatch" (evalRestore settings $ AdoptLedger wrong identity 1)
       Fence.withFence directory identity $ \advance->do
-        let uncertain n=advance n >> when (n==2) (reject "injected_uncertain_commit")
+        let uncertain n=do
+              advance n
+              -- A separate reader must still see the previous committed sequence.
+              visible<-evalRead reader ReadState
+              check (ledgerSequence visible==1)
+              bytes<-BS.readFile (directory</>"sequence.json")
+              watermark<-either fail pure (eitherDecodeStrict' bytes)
+              fieldValue "sequence" watermark >>= check . (==n)
+              when (n==2) (reject "injected_uncertain_commit")
         withWriter settings policy uncertain $ \writer->do
           expectStore "injected_uncertain_commit" (evalWrite writer $ CancelFees key "fence cancel")
           expectStore "ledger_connection_fenced" (evalWrite writer $ Pause "must remain fenced")
@@ -2087,6 +2095,18 @@ serverMain = do
               decoded<-either fail pure (eitherDecodeStrict' $ BL.toStrict $ HTTP.responseBody public)
               check (W.pubDeployment decoded==Config.deploymentId config && not(W.pubIntakeEnabled decoded)
                 && W.pubAvailability decoded==W.Availability False "observation_only")
+              orderRequest<-HTTP.parseRequest ("http://127.0.0.1:"<>show port<>"/api/v1/orders")
+              deniedOrder<-HTTP.httpLbs orderRequest {HTTP.method="POST"
+                ,HTTP.requestHeaders=[("Content-Type","application/json"),("Authorization","Bearer "<>BS.replicate 64 97)]
+                ,HTTP.requestBody=HTTP.RequestBodyLBS $ encode $
+                  W.OrderRequest WrappedToNative (money 10000) "recipient" "" Nothing "observer-contract"} manager
+              deniedBody<-either fail pure (eitherDecodeStrict' $ BL.toStrict $ HTTP.responseBody deniedOrder)
+              check (statusCode(HTTP.responseStatus deniedOrder)==409
+                && deniedBody==object ["error" .= ("observation_only"::T.Text)])
+              bracket (PG.connect settings) PG.close $ \connection->do
+                (rows,attempts,_)<-fixture connection ArchiveRecords
+                counts<-fixture connection OrderSnapshot
+                check (counts==[0,0,0,0] && null attempts && case rows of [row]->S.criticalSequence row==0; _->False)
               page<-get "/"
               script<-get "/wallet.js"
               style<-get "/style.css"

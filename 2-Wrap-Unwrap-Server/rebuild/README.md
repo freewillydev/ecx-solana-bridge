@@ -208,7 +208,9 @@ The existing `rebuild-store-check` Cabal executable uses a fresh disposable migr
 PostgreSQL database and SELECT-only role, supplied by
 `ECX_REBUILD_CONTRACT_DATABASE` and `ECX_REBUILD_CONTRACT_READER`. Inspect
 [test/StoreCheck.hs](test/StoreCheck.hs) for fixture setup and mode requirements;
-never point contract fixtures at custody. Direct binary invocation needs Cabal's
+never point contract fixtures at custody. The reader needs SELECT on tables and
+sequences for snapshot exports, with no sequence USAGE/UPDATE or table-write
+privileges. Direct binary invocation needs Cabal's
 `ecx_bridge_rebuild_datadir`; `cabal run` supplies packaged fixture data.
 
 | Mode | Additional environment / scope |
@@ -391,6 +393,16 @@ funds decreased by exactly 392 units (1,292 → 900). Authorization replay remai
 identical; the original completed-order response and payout link were unchanged.
 The attempt remained unique and settled. Both temporary processes were stopped
 after acceptance; keys, ledger, exact attempts and private evidence remain saved.
+
+The legacy 245-line `integration/AuthorityCheck.hs` is retired. Its filesystem and
+cross-process ownership checks run in `SigningTransportCheck`; durable precommit
+watermark/rollback checks run in the PostgreSQL fence mode; actual observer HTTP
+order refusal, private operator refusal and unchanged financial state run in server
+mode. Both PostgreSQL modes passed against fresh disposable databases after the
+remaining assertions were transferred. The server test reaps its child, and the
+acceptance databases/role were removed. These local checks do not certify cross-UID
+signer isolation or cross-host recovery. The legacy runner retains only its journal
+and source modes until their remaining parity review is complete.
 
 ## Remaining release work, in order
 

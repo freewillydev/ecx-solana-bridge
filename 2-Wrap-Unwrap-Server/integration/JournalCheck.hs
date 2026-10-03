@@ -1,7 +1,6 @@
 {-# LANGUAGE GADTs #-}
 module Main (main) where
 
-import qualified AuthorityCheck
 import qualified SourceApprovalCheck
 import Bridge.Types hiding (deploymentFingerprint)
 import Bridge.Ledger.Model (Deposit(..),Obligation(..),Preparation(..),Attempt(..),CostLimits(..),PaymentTerms(..),ScanBatch(..),ChainEvent(..))
@@ -39,7 +38,7 @@ import qualified Data.Map.Strict as M
 import qualified Database.PostgreSQL.Simple as PG
 import System.Posix.User (getEffectiveUserName)
 import qualified Data.Text as T
-import System.Environment (lookupEnv,getArgs,withArgs)
+import System.Environment (lookupEnv,getArgs)
 import Test.QuickCheck (quickCheckWithResult, stdArgs, maxSuccess, forAll, chooseInt, elements, ioProperty, isSuccess, conjoin, counterexample)
 
 -- Dedicated fresh schema contract, never the funded bridge's database.
@@ -47,9 +46,7 @@ main :: IO ()
 main = getArgs >>= \case
   ["journal"] -> journalContracts
   ["source"] -> SourceApprovalCheck.run
-  "fence":arguments -> withArgs arguments AuthorityCheck.run
-  "observer":arguments -> withArgs ("observer":arguments) AuthorityCheck.run
-  _ -> reject "postgres_contract_mode_required: journal | source | fence DATABASE_A DATABASE_B DIRECTORY | observer BRIDGE_BINARY CONFIG DATABASE DIRECTORY"
+  _ -> reject "postgres_contract_mode_required: journal | source"
 
 journalContracts :: IO ()
 journalContracts = do
