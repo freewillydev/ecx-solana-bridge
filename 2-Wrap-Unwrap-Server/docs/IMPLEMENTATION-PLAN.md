@@ -126,56 +126,29 @@ on real chains; previous package evidence describes the earlier process design.
 
 ## Current refactor checkpoint
 
-The customer HTTP API now has four routes: configuration, create order, read order,
-and read payment instructions. Servant handlers return `Plan a` with a constrained
-existential `Request`; Runtime resolves its dictionary into the severity-indexed
-DSL. Wire results use concrete records, not arbitrary JSON `Value`. Operator
-recovery is a local CLI over a mode-0600 framed Unix socket, using the same runtime
-dispatcher; its old HTTP routes and handlers, health/readiness routes and optional
-deposit-hint operation are removed. The signer uses its separate authenticated Servant API.
+Implemented in source:
 
-The dedicated Haskell signer and critical-only client are implemented in source;
-real two-process acceptance, OS isolation and restricted native RPC credentials
-still need deployment verification. The signer uses a SELECT-only database role,
-checks the durable decision before and after signing, and never broadcasts.
-Old deployment/acceptance helpers still need conversion to this architecture;
-previous installer evidence cannot establish this new boundary.
+- Four customer routes, connection-free orders, existential Plan/Request handlers,
+  separate safe/critical evaluators and Cabal-enforced private components.
+- One direct HTTP server and an authenticated loopback HTTPS signer. Its ClientM
+  capability is private to critical evaluation; operator control remains local.
+- PostgreSQL/Opaleye only; the SQLite component, storage typeclasses and dbPath
+  setting are removed. Existing configs must omit dbPath. Financial identity and
+  legacy-ledger refusal remain unchanged.
+- Shared admission, accounting, saved-record codecs, preparation/cancellation,
+  settlement/refunds, source coverage/return, treasury funding and resume checks.
+  Earned-fee withdrawal has reservation/cancellation only, not a complete payment flow.
+- Root Cabal builds the native app, bounded Solana SDK FFI and GHC JavaScript
+  frontend. No TypeScript/npm application or WASM backend remains.
+- One native QuickCheck suite and one PostgreSQL contract executable for journal,
+  source recovery, host fencing and actual observer authority. These checks do not
+  substitute for funded-chain, wallet or deployment acceptance.
 
-The legacy SQLite component and migrations are retired. QuickCheck checks integer
-accounting and the SDK boundary; generated journal and immutable-quote properties
-run against real PostgreSQL in the consolidated contract runner. Captured native
-and Solana protocol checks remain. Recovery interruption, native winner changes,
-replacement/cancellation and loss-cover acceptance must be reverified against the
-current PostgreSQL DSL and dedicated signer. Removing the obsolete backend does
-not establish parity of every former SQLite fixture or complete release acceptance.
-
-Unused adapter convenience functions and four run-specific native/Solana probes
-are removed. Production flows use the checked workflow primitives; captured
-protocol fixtures and current acceptance runners remain. The obsolete probes
-are recoverable from Git history, and `file-embed` is no longer a direct dependency.
-
-Cabal project and dependency lock are at the repository root. Its tracked build
-hook generates the native SDK artifact before compiling Haskell and tracks Rust
-source/lock/toolchain inputs. `cabal test` also runs the SDK's own contracts. The GHC JavaScript frontend now builds through the same Cabal entry point,
-with a separate frozen pure dependency graph and shared domain types. Its real
-observation-only API browser checks cover configuration, rounded fees, precision,
-direction switching, recovery-fragment stripping, saved reload and missing-order
-errors without console errors. TypeScript/npm application files and build commands
-are removed. Full funded browser/Solana Pay flows remain acceptance work. Linux
-cross-compiler/bootstrap and its runtime notices remain release packaging gates;
-the local Cabal build does not prove a clean Linux release.
-
-The private signing Servant boundary now lives in `Bridge.Operator`: only
-sign-preparation, draft-replacement and sign-replacement. Handlers package critical
-existential requests; the hoist resolves `SigningDSL` and serializes evaluation.
-`Bridge.Signer` retains independent ledger checks and signing credentials.
-Signer transport is now authenticated HTTPS on 127.0.0.1, with a protected shared
-token and a dedicated pinned trust certificate. Runtime uses the shared Servant
-ClientM contract only inside critical evaluation. No signer Unix listener remains.
-Credential/certificate ownership, renewal and separate service users still require
-installation acceptance. The
-existing private control protocol is preserved separately in `Bridge.Control`;
-this change does not remove pause/refund/recovery functionality or add public routes.
+Current ownership and invariants live in [ARCHITECTURE.md](ARCHITECTURE.md); change
+history belongs in Git. Remaining Python tools/tests need consolidation. Signer OS
+isolation/native-RPC restrictions, actual two-process funded flows, supported-wallet
+signing, clean-host recovery and Linux packaging remain unverified release gates.
+Historical installer evidence describes an earlier process design.
 
 ## Reinstall and recovery contract
 
@@ -240,102 +213,26 @@ The sequence below remains the broader refactor checklist, subject to that prior
    Do not move the clutter into another directory in the same checkout. Preserve
    required licenses, provenance and dependency locks.
 
-3. **Remove SQLite and duplicate storage abstractions.** Move unique useful assertions
-   from legacy tests into pure/PostgreSQL tests, then delete legacy-src, its Cabal
-   component, sqlite-simple, obsolete SQLite migrations and active import tooling.
-   Historical migration tools remain available at the baseline revision. Replace
-   PreparationStore, SettlementStore and similar backend-compatibility classes with
-   concrete PostgreSQL functions where abstraction no longer pays for itself. All eleven
-   single-instance storage typeclasses and the Store newtype are now removed.
-   Fifty forwarding bindings are removed; workflows call their concrete PostgreSQL
-   operations directly. The severity-indexed Operation dictionary is retained.
-   Custody inspection/recording now lives together in Reconciliation, rather than
-   creating a cycle through a backend adapter. Ledger queries and transaction
-   boundaries are unchanged by this consolidation.
-   The unused SQLite dbPath setting and its validation are removed. Existing
-   configs must omit it; the financial identity hash and old-ledger refusal remain
-   unchanged.
-   The remaining PaymentStore module is now removed: settlement queries live with
-   settlement mutations, custody queries live with custody checks, and native
-   families use their existing validator directly. One domain View replaces the
-   duplicate Snapshot; schema-to-obligation/attempt projections have one definition.
-   Customer handlers now sit beside their four Servant routes in API.hs; the
-   operation algebra depends on pure model types rather than the HTTP API module.
-   Saved-record JSON encoding and decoding now share one implementation in
-   Ledger.Model. Payment records share their error category; other workflows retain
-   their existing error codes. Stored bytes and Aeson parsing rules are unchanged.
-   Preparation cancellation now lives with preparation; Solana retry and refund
-   creation live with settlement. Their separate store modules are removed, and
-   the custody freshness check is called directly from its owner. Cancellation
-   generation lookups share one query with preparation/signing checks.
-   Native replacement-family validation now lives with draft/sign/cancel storage
-   in Replacement, removing its separate storage module without changing checks
-   or transaction boundaries.
-   Native and Solana quote preflights now share Admission and one order-workflow
-   entry point; discarded report types and the unused wallet-bound redemption
-   preflight are removed. Actual Solana Pay deposits establish refund ownership.
-   Source recovery now owns loss-cover decisions, capital return and covered-payment
-   authorization together; their shared query excludes returned cover sequences.
-   The separate LossCover module is removed without changing transaction boundaries.
-   Treasury now owns earned-fee reservation/cancellation, with table definitions
-   in Schema. Loss coverage and fee funding use Ledger's shared free-inventory
-   and earned-fee queries instead of rebuilding balances. The separate
-   FeeWithdrawal module is removed; signing/send integration remains unfinished.
-   Resume RPC checks now live in Recovery; the atomic readiness/attempt check
-   lives in the order store. The mixed Startup module and forwarding entry point
-   are removed, retaining separate startup and operator-reviewed paths.
-   Remove redundant wrappers immediately after their replacement works.
-   The standalone TLS executable and Python certificate generator are retired;
-   their real-validator assertions now run as generated QuickCheck cases inside
-   the existing Cabal suite, including exact and descendant DNS exclusions.
-   Encrypted-backup command refusal/redaction checks now run as generated
-   QuickCheck cases in the Cabal suite; the standalone Python unittest is removed.
-   The underlying backup command still needs its planned Haskell consolidation.
-   Core PostgreSQL budgeting is now part of Ledger, so allowance and journal
-   arithmetic share one implementation. Retain remaining unique SQLite assertions
-   until their production equivalent exists. Treasury-spend classification now uses
-   the PostgreSQL operator DSL; duplicate SQLite treasury allocation/spend mutations
-   and the separate treasury runner are retired. Funding guarantees are checked by
-   the consolidated PostgreSQL journal contract, including immutable replay across restart.
-   The standalone raw-SQL FeeWithdrawalCheck is retired: its unique funding,
-   pause/freshness, immutable replay and cancellation assertions now run as
-   QuickCheck cases for both Native and Wrapped in the existing journal runner,
-   using closed Opaleye fixture operations. SourceApprovalCheck now also uses closed Opaleye fixture operations and typed
-   whole-row snapshots. Its restoration, native finality, replacement winner,
-   loss-cover/return and covered-source send-fence assertions are preserved and
-   pass against a fresh disposable PostgreSQL database; no signer or chain call
-   occurs in that contract.
-   Journal, source-recovery and host-fence contracts now share the single
-   ecx-postgres-check executable. Fence fixtures initialize only explicitly named
-   fresh disposable databases and use Opaleye for every row read/write; the last
-   Haskell raw row queries are removed. Fault-injection DDL stays explicit.
-   The obsolete Python worker-fence runner is also replaced by a mode in this
-   executable: actual CLI startup/alias refusals use the current schema, a restricted
-   reader and closed Opaleye rollback fixtures. Observer-authority acceptance now
-   shares that runner and checks the actual customer API plus private local-control
-   protocol; its obsolete Python/operator-HTTP runner is removed.
-   Receipt/page atomicity and delayed verification also use the PostgreSQL contract;
-   legacy resume-policy checks remain until their whole workflow is migrated.
-   Chain scanning no longer executes Opaleye directly: reference lookup, promotion
-   selection and scanner diagnostics are named operations in the observation store.
+3. **Finish storage and test consolidation.** PostgreSQL has replaced SQLite and
+   its single-instance compatibility classes. Preserve unique legacy assertions
+   until their current workflow has equivalent coverage; do not treat backend
+   removal as proof of parity. Keep all row access, including diagnostics and test
+   fixtures, inside closed Opaleye operations. Driver connection/transaction control
+   and schema/role/fault-injection DDL remain explicit infrastructure. Consolidate
+   remaining Python acceptance tools into the existing Haskell suite/runner, then
+   delete their predecessors. Preserve exact saved records, failure categories,
+   atomicity, interruption/replay and sequence/backup fences. Historical migration
+   tools remain in Git; do not restore them as another active backend.
 
-4. **Make the domain and DSL the entry point for auditing.** Consolidate duplicate
-   Plan/Request/DSL layers only when they add no distinct guarantee. Use explicit
-   business ADTs/records instead of scattered state strings and Value blobs.
-   Payment reconciliation now returns typed error codes directly; recovery and
-   resume checks no longer build/parse an unused JSON report or query its winner
-   solely for formatting. Settlement retains its transactional uniqueness checks.
-   Worker scanning and custody reconciliation now return unit; discarded JSON
-   wrappers and the unused post-scan health query are removed. Durable custody
-   evidence, scanner health and operator diagnostics remain.
-   Confine raw chain JSON to adapters. Put the operation vocabulary and permission
-   table in one place. Preserve separate safe/critical evaluators and compile-time
-   authority checks. Cabal now separates private types, customer API and runtime
-   libraries. The API hides internal DSL constructors and cannot depend on database,
-   signing or RPC implementations; operator planning is internal to the runtime.
-   SDK/browser hooks live in a separate build-support package so Cabal 3.16 can
-   enforce these component boundaries. No new runtime service is introduced.
-   Check the final design directly against the supplied Main.hs and document intentional corrections.
+4. **Make the domain and DSL the entry point for auditing.** Keep the supplied
+   Main.hs reference, Operation dictionaries, existential requests, separate
+   evaluators and compile-time authority checks. Preserve the guarantees of
+   Plan/Request/DSL while removing redundant wrappers and discarded reports.
+   Use explicit business types instead of scattered state strings and Value blobs;
+   confine raw chain JSON to adapters. Keep operation vocabulary and permissions
+   traceable, customer components unable to import runtime/database/signer authority,
+   and SDK/browser build hooks separate from runtime services. Document intentional
+   corrections to Main.hs in ARCHITECTURE rather than duplicating that explanation.
 
 5. **Unify complete payment flows.** Trace wrap, unwrap, refund and fee withdrawal
    through one workflow. Represent customer-deposit funding and operator-earned
