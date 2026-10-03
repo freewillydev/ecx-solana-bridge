@@ -218,12 +218,19 @@ pendingAttempts ledger = ledgerAction ledger $ \connection->do
     O.where_ (attemptsIntentId a O..== intentsId i O..&& intentsResolved i O..== O.sqlInt8 0)
     pure (a,intentsChain i)
     :: IO [(Attempts,Text)]
-  expired <- O.runSelect connection (O.selectTable solanaexpiriesTable) :: IO [SolanaExpiries]
+  expired <- O.runSelect connection $ do
+    expiry <- O.selectTable solanaexpiriesTable
+    attempt <- O.selectTable attemptsTable
+    intent <- O.selectTable intentsTable
+    O.where_ (solanaexpiriesTxid expiry O..== attemptsTxid attempt O..&& attemptsIntentId attempt O..== intentsId intent
+      O..&& intentsResolved intent O..== O.sqlInt8 0)
+    pure (solanaexpiriesTxid expiry)
+    :: IO [Text]
   native <- fmap concat $ forM (nub [attemptsIntentId a | (a,chain)<-rows,chain=="Native"]) (Replacement.familyC connection)
   -- A newly signed replacement has no broadcast sequence yet. Sorting on that
   -- nullable field puts it before its parent; lineage readers require fee order.
   -- Use the same verified family order as signing, settlement and recovery.
-  pure $ native <> [asAttempt a chain | (a,chain)<-sortOn (\(a,_)->(attemptsPreparationGeneration a,attemptsCriticalSequence a,attemptsTxid a)) rows,chain/="Native",not(any ((==attemptsTxid a).solanaexpiriesTxid) expired)]
+  pure $ native <> [asAttempt a chain | (a,chain)<-sortOn (\(a,_)->(attemptsPreparationGeneration a,attemptsCriticalSequence a,attemptsTxid a)) rows,chain/="Native",attemptsTxid a `notElem` expired]
 
 ready :: Ledger -> IO [Obligation]
 ready ledger = ledgerAction ledger $ \c->do

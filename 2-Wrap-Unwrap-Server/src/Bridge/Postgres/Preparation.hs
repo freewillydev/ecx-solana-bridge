@@ -158,9 +158,14 @@ pendingC c = do
     O.where_ (preparationsIntentId p O..== intentsId i O..&& intentsObligationId i O..== obligationsId ob O..&& feereservationsIntentId f O..== intentsId i O..&& intentsResolved i O..== num 0 O..&& O.isNull(preparationsRetiredTxid p) O..&& preparationsCancelled p O..== num 0)
     pure(p,i,ob,f)
     :: IO [(Preparations,Intents,Obligations,FeeReservations)]
-  attempts <- O.runSelect c (O.selectTable attemptsTable) :: IO [Attempts]
+  attempts <- O.runSelect c $ do
+    attempt <- O.selectTable attemptsTable
+    intent <- O.selectTable intentsTable
+    O.where_ (attemptsIntentId attempt O..== intentsId intent O..&& intentsResolved intent O..== num 0)
+    pure (attemptsIntentId attempt,attemptsPreparationGeneration attempt)
+    :: IO [(Text,Int64)]
   mapM (\(p,i,ob,f)->Preparation (asObligation ob) (intentsChain i) (feereservationsAmount f) (preparationsPolicyJson p) (preparationsDraftJson p) <$> generationInt(preparationsGeneration p))
-    [row | row@(p,i,_,_)<-rows,not(any (\a->attemptsIntentId a==intentsId i && attemptsPreparationGeneration a==preparationsGeneration p) attempts)]
+    [row | row@(p,i,_,_)<-rows,(intentsId i,preparationsGeneration p) `notElem` attempts]
 
 orderStatus :: PG.Connection -> Text -> Text -> IO ()
 orderStatus c oid status = do

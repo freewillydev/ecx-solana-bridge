@@ -4,7 +4,7 @@ module Main (main) where
 import qualified AuthorityCheck
 import qualified SourceApprovalCheck
 import Bridge.Types hiding (deploymentFingerprint)
-import Bridge.Ledger.Model (Deposit(..),Obligation(..),Preparation(..),CostLimits(..),ScanBatch(..),ChainEvent(..))
+import Bridge.Ledger.Model (Deposit(..),Obligation(..),Preparation(..),Attempt(..),CostLimits(..),ScanBatch(..),ChainEvent(..))
 import qualified Bridge.Postgres.Treasury as Treasury
 import qualified Bridge.Postgres.Preparation as Preparation
 import qualified Bridge.Postgres.Settlement as Settlement
@@ -277,6 +277,7 @@ data Fixture a where
   OperatingFunds :: Fixture (Integer,Integer)
   InterruptedWrite :: MVar () -> MVar () -> Fixture ()
   FundedObligation :: Fixture Obligation
+  ExpireContractAttempt :: T.Text -> Fixture ()
   SendState :: Fixture ([Attempts],[FeeReservations],[Reservations],[OperatingReservations])
   JournalState :: Fixture JournalSnapshot
 
@@ -414,6 +415,11 @@ fixture connection = \case
     orders <- O.runSelect connection (O.selectTable ordersTable)
     pure (JournalSnapshot (sortOn eventsId events) (sortOn postingsId postings) coverage
       custody (sortOn checkpointsChain checkpoints) (sortOn ordercostlimitsOrderId limits) (sortOn ordersId orders))
+  ExpireContractAttempt txid -> do
+    sequenceNo <- L.criticalSequence connection
+    void $ O.runInsert connection O.Insert
+      {O.iTable=solanaexpiriesTable,O.iRows=[SolanaExpiries (O.sqlStrictText txid) (O.sqlStrictText "database-only expiry fixture") (O.sqlInt8 sequenceNo)]
+      ,O.iReturning=O.rCount,O.iOnConflict=Nothing}
   SendState -> (,,,)
     <$> (sortOn attemptsTxid <$> O.runSelect connection (O.selectTable attemptsTable))
     <*> (sortOn feereservationsIntentId <$> O.runSelect connection (O.selectTable feereservationsTable))
@@ -679,9 +685,13 @@ broadcastWriteContract settings = do
     require (nextGeneration==generation+1) "cancelled_generation_reused"
     expectError "preparation_generation_changed" (signing generation)
     Preparation.storeDraft ledger (obligationId ob) "{}" nextGeneration
+    unsigned <- Preparation.pending ledger
+    require ([(obligationId $ preparationObligation p,preparationGeneration p) | p<-unsigned]==[(obligationId ob,nextGeneration)]) "unsigned_preparation_missing"
     Preparation.storeAttempt ledger ob "Solana" txid "original-contract-bytes" "{}" 10000 Nothing nextGeneration
     expectError "preparation_not_unsigned" $ L.ledgerAction ledger $ \c->
       Preparation.signingDecisionC c cfg (obligationId ob) nextGeneration
+    Preparation.pending ledger >>= \pending->require (null pending) "signed_preparation_still_pending"
+    Settlement.pendingAttempts ledger >>= \pending->require (map attemptId pending==[txid]) "signed_attempt_not_pending"
     original <- state ledger JournalState
     signed <- state ledger SendState
     -- A genuine server constraint refuses the authority-granting state write.
@@ -698,6 +708,9 @@ broadcastWriteContract settings = do
     attempts <- state ledger SendState
     require (before==after && saved==attempts) "failed_broadcast_write_changed_bytes_or_holds"
     expectError "broadcast_intent_required" (Settlement.authorizeRecordedSend ledger False txid)
+    state ledger (ExpireContractAttempt txid)
+    Settlement.pendingAttempts ledger >>= \pending->require (null pending) "expired_attempt_still_pending"
+    state ledger SendState >>= \retained->require (retained==saved) "expiry_selection_changed_bytes_or_holds"
 
 -- Database-only scanner observations, not a live-chain acceptance claim.
 -- Reuse the production scanner, allocation, quote and spend transactions.
