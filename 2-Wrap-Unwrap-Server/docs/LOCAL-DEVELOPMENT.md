@@ -12,7 +12,7 @@ From the repository root, use the pinned dependencies and one build job:
 
 ```sh
 cabal build all -j1 --offline
-cabal test bridge-test -j1 --offline --test-show-details=failures
+cabal test ecx-bridge-rebuild:rebuild-test -j1 --offline --test-show-details=failures
 ```
 
 Offline builds assume cached dependencies. Cabal builds the pinned Rust SDK FFI

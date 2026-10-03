@@ -340,12 +340,25 @@ with `--with-hc-pkg`. Browser smoke checks against the migrated deployment passe
 configuration decoding and both fee previews (10,001 → 101 fee / 9,900 net),
 without console errors. This check did not create or submit a customer order.
 
-The rebuilt QuickCheck suite now owns the real TLS name-constraint regression
-(permitted, excluded and outside-namespace certificate chains) and pinned Rust SDK
-codec/FFI tests, invoked through root Cabal using the warm Cargo cache. These
-checks were removed from the baseline suite rather than duplicated. The baseline
-test file shrank 1,388 → 1,332 lines; the existing rebuilt transport-test file
-grew by 57 lines, with no new files. Both suites build; the rebuilt suite passes.
+The rebuilt QuickCheck suite owns the TLS name-constraint, pinned Rust SDK,
+wallet-readiness/unlock and release-authentication regressions. The baseline Hspec
+suite and its ten fixture files are retired (11 files, approximately 2,500 net
+lines removed including the transferred cases). Seven fixtures were byte-identical
+to the retained rebuild vectors; the legacy PostgreSQL checker now reads its two
+required vectors there. Three unreferenced baseline-only vectors were removed.
+The old suite remains in Git at `37b216f` for comparison.
+
+Retained coverage maps monetary/quote contracts to `Main.hs`; configuration, native
+wallet/RPC authority, rate limits and identity to `ChainCheck.hs`; admission,
+preparation, replacement and actual-effect validation to the native/Solana payment
+checks; deposit ownership/history to `ObservationCheck.hs`; HTTP, signer, filesystem,
+TLS, SDK and release trust to `SigningTransportCheck.hs`; and journal, custody,
+source-loss, backup/restore and recovery contracts to `StoreCheck.hs`. Obsolete
+customer Unix-socket/proxy tests were removed with that superseded interface.
+Backup credential/refusal tests now exercise the rebuilt closed backup operations,
+not the old Python acceptance helper. The legacy installer test remains until its
+replacement is ready; this cleanup does not certify the installer or remove the
+remaining real-wallet, recovery and deployment release gates.
 
 Native extra-deposit refund acceptance passed on L2L Signet. Confirmed receipt
 `cc36b9d6f9c1a494b8a7b1b2da1793330019e33765e9bfe8831685804cd29755:0`

@@ -191,13 +191,13 @@ jsonText = TE.decodeUtf8 . LBS.toStrict . encode
 winnerContract :: L.Ledger -> IO ()
 winnerContract ledger = do
   cfg <- BS.readFile "config/l2l-devnet.example.json" >>= either fail pure . eitherDecodeStrict' :: IO Config
-  captured <- BS.readFile "test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
+  captured <- BS.readFile "rebuild/test/fixtures/native-signet-payment.json" >>= either fail pure . eitherDecodeStrict'
   plan <- fieldValue "plan" captured
   prevouts <- fieldValue "previous" captured
   oldFee <- fieldValue "fee" captured
   tx <- fieldValue "decoded" captured >>= either reject pure . decodeNativeTx
   raw <- fieldValue "raw" captured
-  replacement <- BS.readFile "test/fixtures/native-signet-replacement-draft.json" >>= either fail pure . eitherDecodeStrict'
+  replacement <- BS.readFile "rebuild/test/fixtures/native-signet-replacement-draft.json" >>= either fail pure . eitherDecodeStrict'
   draft <- fieldValue "draft" replacement
   point <- case nativeInputs tx of input:_->pure(nativeOutpoint input); _->reject "contract_native_inputs_missing"
   let original=NativeSigned raw tx plan prevouts oldFee

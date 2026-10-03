@@ -36,7 +36,21 @@ import Test.QuickCheck hiding (label)
 
 checks :: IO [Result]
 checks = (\deployment native solana observation common->deployment<>native<>solana<>observation<>common) <$> deploymentChecks <*> NativePaymentCheck.checks <*> SolanaPaymentCheck.checks <*> ObservationCheck.checks <*> sequence
-  [ check "native worker credentials must explicitly deny every signing/export method" $ once $ ioProperty $ do
+  [ check "native observation requires the correct ready descriptor wallet, without signing authority" $ \(sameName::Bool) (descriptors::Bool) (scanning::Bool)->ioProperty $ do
+      let wallet=object ["walletname" .= (if sameName then nativeWallet settings else "other"),"descriptors" .= descriptors,"scanning" .= scanning]
+          call scoped method args=if (scoped,method,args)==(True,"getwalletinfo",[]) then pure wallet else fail "unexpected wallet RPC"
+          expected=sameName && descriptors && not scanning
+      result<-try (nativeWalletInfoWith call settings) :: IO (Either BridgeError Value)
+      pure $ case result of Right value->expected && value==wallet; Left (BridgeError code)->not expected && code=="native_wallet_not_ready"
+  , check "native signing requires local keys and an unexpired wallet unlock" $ \(keys::Bool) (external::Bool)->
+      forAll (elements [Nothing,Just 0,Just 99,Just 100,Just 101]) $ \unlocked->ioProperty $ do
+        let wallet=object (["walletname" .= nativeWallet settings,"descriptors" .= True,"scanning" .= False,
+              "private_keys_enabled" .= keys,"external_signer" .= external]<>maybe [] (\n->["unlocked_until" .= (n::Int64)]) unlocked)
+            call scoped method args=if (scoped,method,args)==(True,"getwalletinfo",[]) then pure wallet else fail "unexpected wallet RPC"
+            expected=keys && not external && maybe True (>100) unlocked
+        result<-try (nativeWalletReadyWith call settings 100) :: IO (Either BridgeError ())
+        pure $ case result of Right ()->expected; Left (BridgeError code)->not expected && code=="native_wallet_not_ready"
+  , check "native worker credentials must explicitly deny every signing/export method" $ once $ ioProperty $ do
       calls<-newIORef ([]::[Text])
       verifyNativeBoundaryWith $ \wallet method args->do
         if wallet && null args then modifyIORef' calls (method:) else fail "unexpected boundary request"

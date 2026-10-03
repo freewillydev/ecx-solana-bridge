@@ -9,7 +9,7 @@ license: MIT
 license-file: LICENSE
 build-type: Simple
 extra-source-files: migrations/postgresql/*.sql, config/*.json, web/*.html, web/*.css, web/*.hs, web/*.cabal, web/cabal.project*, docs/*.md,
-                    test/fixtures/*.json, solana-helper/Cargo.toml, solana-helper/Cargo.lock,
+                    rebuild/test/fixtures/native-signet-payment.json, rebuild/test/fixtures/native-signet-replacement-draft.json, solana-helper/Cargo.toml, solana-helper/Cargo.lock,
                     solana-helper/src/lib.rs, rust-toolchain.toml
 
 common settings
@@ -72,19 +72,6 @@ executable ecx-bridge
   main-is: server.hs
   ghc-options: -threaded -rtsopts -with-rtsopts=-N2
   build-depends: base, ecx-bridge:bridge-types, ecx-bridge:customer-api, ecx-bridge:bridge-runtime, postgresql-simple, unix, aeson, bytestring, text
-
-test-suite bridge-test
-  import: settings
-  type: exitcode-stdio-1.0
-  hs-source-dirs: test
-  main-is: Spec.hs
-  ghc-options: -threaded
-  build-depends: base, ecx-bridge:bridge-types, ecx-bridge:customer-api, ecx-bridge:bridge-runtime, aeson, bytestring, containers, directory, filepath,
-    hspec >=2.11 && <2.12, QuickCheck >=2.15 && <2.19,
-    text, time, async, network, http-client, servant-client, servant, servant-server, postgresql-simple, unix, scientific, base64-bytestring,
-    crypton, ram, wai, wai-extra, warp, warp-tls, http-types, process,
-    http-client-tls, crypton-connection, tls, crypton-x509-store,
-    data-default, crypton-pem, crypton-x509, crypton-x509-validation
 
 -- One database contract runner; every row operation uses a closed Opaleye fixture.
 executable ecx-postgres-check
