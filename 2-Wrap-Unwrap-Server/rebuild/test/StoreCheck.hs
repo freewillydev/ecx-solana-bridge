@@ -1327,6 +1327,7 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       check (W.paused service==ledgerPaused ledgerBefore)
       expectStore "observation_only" (operatorControl $ Op.operator Op.ResumeService)
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.CoverLostSource "missing" 1 (money 1) (money 0) "cover")
+      expectStore "observation_only" (operatorControl $ Op.operator $ Op.ApproveCovered "missing" 1 "covered")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.RestoreSource "missing" 1 "restored")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.ClassifySpend "Native" "missing" "owned")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.AllocateReceipt "missing" [("float",money 1)] "owned")
@@ -2079,3 +2080,43 @@ restorationContract fixtures reader writer=do
   approve key second "second restoration"
   evalRead reader (ReadPayment key) >>= check . (==PaymentReady) . savedStatus
   evalRead reader ReadBalances >>= check . (==before)
+
+  -- Capital cover permits an explicit review decision, never source eligibility.
+  suspend
+  source<-evalRead reader (ReadSource did)
+  let block=T.replicate 64 "a"
+      proof=object ["transaction" .= tx,"output" .= (0::Int),"confirmations" .= (-1::Int),"observationHash" .= observationHash,"nodeBlock" .= block,"nodeHeight" .= (100::Int)]
+      report=object ["matches" .= True,"nativeBlock" .= block,"nativeHeight" .= (100::Int)]
+      certify=do
+        revision<-evalRead reader ReadCustodyRevision
+        evalWrite writer (RecordCustody revision 110 Nothing $ Just report)
+  evalWrite writer (RecordSourceCheck source $ W.SourceMissing proof)
+  loss<-ledgerSequence <$> evalRead reader ReadState
+  expectStore "source_loss_not_covered" (evalRead reader $ CheckCoveredSource key loss)
+  revision<-evalRead reader ReadCustodyRevision
+  evalWrite writer (CoverSourceLoss source loss 110 (money 10) (money 0) "replace missing capital" proof (revision,110,True,report))
+  evalRead reader (CheckCoveredSource key loss)
+  expectStore "source_approval_not_expected" (evalRead reader $ CheckSourceRestoration key loss)
+  let approveCovered evidence=evalWrite writer (ApproveCoveredSource 110 key loss "covered loss reviewed" evidence)
+  expectStore "custody_not_reconciled" (approveCovered proof)
+  certify
+  expectStore "source_recovery_scan_not_current" (approveCovered $ object ["transaction" .= tx,"output" .= (0::Int),"confirmations" .= (-1::Int),"observationHash" .= ("wrong"::T.Text)])
+  expectStore "source_loss_custody_view_changed" (approveCovered $ object ["transaction" .= tx,"output" .= (0::Int),"confirmations" .= (-1::Int),"observationHash" .= observationHash,"nodeBlock" .= ("wrong"::T.Text),"nodeHeight" .= (100::Int)])
+  fixture fixtures (SourceRecipient key "changed")
+  expectStore "source_review_work_changed" (approveCovered proof)
+  fixture fixtures (SourceRecipient key "recipient")
+  certify
+  coveredBalances<-evalRead reader ReadBalances
+  approveCovered proof
+  approved<-evalRead reader ReadState
+  check (ledgerPaused approved)
+  evalRead reader (ReadPayment key) >>= check . (==PaymentReady) . savedStatus
+  evalRead reader (ReadSource did) >>= check . not . W.depositEligible
+  evalRead reader (ReadCoveredApproval key loss) >>= check . (==Just "covered loss reviewed")
+  expectStore "source_approval_kind_mismatch" (evalRead reader $ ReadSourceApproval key loss)
+  expectStore "source_approval_kind_mismatch" (evalRead reader $ ReadCoveredApproval key second)
+  approveCovered proof
+  replayed<-evalRead reader ReadState
+  check (ledgerSequence replayed==ledgerSequence approved)
+  expectStore "source_approval_conflict" (evalWrite writer $ ApproveCoveredSource 110 key loss "changed" proof)
+  evalRead reader ReadBalances >>= check . (==coveredBalances)

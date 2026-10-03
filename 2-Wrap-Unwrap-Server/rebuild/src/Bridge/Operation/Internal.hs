@@ -29,6 +29,7 @@ data OperatorRead a where
 
 data OperatorWrite a where
   CoverLostSource :: Text -> Int64 -> Amount -> Amount -> Text -> OperatorWrite ()
+  ApproveCovered :: Text -> Int64 -> Text -> OperatorWrite ()
   RestoreSource :: Text -> Int64 -> Text -> OperatorWrite ()
   ClassifySpend :: Text -> Text -> Text -> OperatorWrite Int64
   AllocateReceipt :: Text -> [(Text,Amount)] -> Text -> OperatorWrite Int64

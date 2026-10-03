@@ -1062,3 +1062,33 @@ replace that operational path before claiming complete backup/restore support.
 The executable uses the host-fenced writer, but does not initialize a database,
 initialize/adopt a fence or provide remote backup. Guarded private resume is now
 wired; real-chain acceptance of that workflow remains outstanding.
+
+## Covered-source approval checkpoint
+
+Private command `{"operation":"approve-covered-source","payment":"convert:ORDER",
+"recovery":123,"reason":"reviewed covered loss"}` records a distinct paused
+operator decision. It obtains its own native missing-source proof, reconciles pending
+attempts and custody, and atomically verifies the latest full loss, active full cover,
+unchanged suspended-work hash and previous state. The proof must match the scanned
+outpoint and the custody report's native block/height. Exact replay changes nothing;
+restoration and coverage approvals cannot be substituted for each other.
+
+This checkpoint does not finish covered-source payment execution. Existing preparation,
+signing and sending still require an eligible physical source; the next integration
+must explicitly authorize an active, approved cover at all those boundaries and
+repeat the missing-source proof. Approval itself neither resumes nor sends nor marks
+the source eligible. Do not treat this intermediate command as operational recovery.
+
+Scoped changes from the preceding rebuild checkpoint: Store **2,613 → 2,640 lines**,
+critical runtime **460 → 478**, control **127 → 130**, operation grammar **96 → 97**;
+**four existing production files, no new files or schema**. Tests **2,081 → 2,122**
+in the existing PostgreSQL contract file. This is required integration, not a net
+size reduction. Both approval kinds share one work-history check and atomic writer;
+capital coverage and approval share one source/custody proof verifier. No new
+query escape hatch or critical evaluator is introduced.
+
+Validation: root Cabal build, QuickCheck/protocol suite and disposable PostgreSQL
+contracts. Contracts exercise missing cover, stale custody, mismatched observation
+and block, changed payment work, approval-kind confusion, conflicting replay,
+unchanged money, retained pause and source ineligibility. These are local contracts,
+not funded-chain or deployed signer-isolation acceptance.

@@ -130,13 +130,26 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
           Just old->require (old==(capital,earned,reason)) "source_loss_cover_conflict"
           Nothing->do
             source<-evalRead reader (ReadSource receipt)
-            _<-N.nativeIdentity rpc native
-            (binding,evidence)<-evalRead reader (ReadNativeSourceInspection receipt)
-            result<-inspectNativeSource (N.nativeCall rpc native) native (defaultNativeDepth settings) (H.fingerprint config) source binding evidence
-            proof<-case result of W.SourceMissing proof->pure proof; _->reject "source_loss_not_proven"
+            proof<-proveMissing source
             custody<-inspectLossCustody rpc settings config reader
             now<-floor <$> getPOSIXTime
             evalWrite writer (CoverSourceLoss source recovery now capital earned reason proof custody)
+      evalCritical (OperatorDSL (ApproveCovered key recovery reason))=guarded $ do
+        require (recovery>0 && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_source_approval"
+        state<-evalRead reader ReadState
+        require (ledgerPaused state) "pause_before_operator_action"
+        previous<-evalRead reader (ReadCoveredApproval key recovery)
+        case previous of
+          Just old->require (old==reason) "source_approval_conflict"
+          Nothing->do
+            evalRead reader (CheckCoveredSource key recovery)
+            binding<-evalRead reader (ReadPaymentSource key) >>= maybe (reject "source_approval_not_expected") pure
+            proof<-proveMissing (W.sourceDeposit binding)
+            pending<-evalRead reader PendingAttempts
+            mapM_ (evalWorker . ReconcilePayment) pending
+            evalWorker ReconcileCustody
+            now<-floor <$> getPOSIXTime
+            evalWrite writer (ApproveCoveredSource now key recovery reason proof)
       evalCritical (OperatorDSL (RestoreSource key restoration reason))=guarded $ do
         require (restoration>0 && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_source_approval"
         state<-evalRead reader ReadState
@@ -439,6 +452,11 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         evalRead reader (CheckExpiryOrigins origins)
         solanaExpiryEvidence (S.solanaCall rpc solana)
           (fmap (\url->RPC.rpc rpc url Nothing) $ S.solanaVerifierRpc solana) (N.profile native) config origins signed
+      proveMissing source = do
+        _<-N.nativeIdentity rpc native
+        (binding,evidence)<-evalRead reader (ReadNativeSourceInspection $ W.depositId source)
+        result<-inspectNativeSource (N.nativeCall rpc native) native (defaultNativeDepth settings) (H.fingerprint config) source binding evidence
+        case result of W.SourceMissing proof->pure proof; _->reject "source_loss_not_proven"
       refreshSource identifier = do
         source<-evalRead reader (ReadPaymentSource identifier)
         forM_ source $ \binding->do

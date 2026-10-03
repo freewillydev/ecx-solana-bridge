@@ -36,6 +36,9 @@ controlPlan=withObject "operator command" $ \o->do
     "cover-source-loss"->do
       fields ["operation","deposit","recovery","float","earned","reason"]
       ControlPlan . operator <$> (CoverLostSource <$> o .: "deposit" <*> o .: "recovery" <*> o .: "float" <*> o .: "earned" <*> o .: "reason")
+    "approve-covered-source"->do
+      fields ["operation","payment","recovery","reason"]
+      ControlPlan . operator <$> (ApproveCovered <$> o .: "payment" <*> o .: "recovery" <*> o .: "reason")
     "approve-source-recovery"->do
       fields ["operation","payment","restoration","reason"]
       ControlPlan . operator <$> (RestoreSource <$> o .: "payment" <*> o .: "restoration" <*> o .: "reason")

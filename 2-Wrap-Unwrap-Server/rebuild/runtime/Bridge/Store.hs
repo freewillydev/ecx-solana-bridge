@@ -77,6 +77,8 @@ data StoreRead a where
   ReadLossCover :: Text -> Int64 -> StoreRead (Maybe (Amount,Amount,Text))
   NativeSourceCandidates :: StoreRead [W.Deposit]
   ReadNativeSourceInspection :: Text -> StoreRead (Maybe (Text,W.PolicySnapshot),(Text,Value))
+  ReadCoveredApproval :: Text -> Int64 -> StoreRead (Maybe Text)
+  CheckCoveredSource :: Text -> Int64 -> StoreRead ()
   ReadSourceApproval :: Text -> Int64 -> StoreRead (Maybe Text)
   CheckSourceRestoration :: Text -> Int64 -> StoreRead ()
   ReadSolanaExpiry :: Text -> StoreRead (Maybe Text)
@@ -117,6 +119,7 @@ data StoreRead a where
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
   CoverSourceLoss :: W.Deposit -> Int64 -> Int64 -> Amount -> Amount -> Text -> Value -> (Int64,Int64,Bool,Value) -> StoreWrite ()
+  ApproveCoveredSource :: Int64 -> Text -> Int64 -> Text -> Value -> StoreWrite ()
   ApproveSourceRestoration :: Int64 -> Text -> Int64 -> Text -> StoreWrite ()
   ClassifyTreasurySpend :: Text -> Text -> Text -> StoreWrite Int64
   AllocateTreasury :: Int64 -> Text -> [(Text,Amount)] -> Text -> StoreWrite Int64
@@ -216,8 +219,10 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
       ReadLossCover key recovery -> lossCover c key recovery
       NativeSourceCandidates -> nativeSourceCandidates c
       ReadNativeSourceInspection key -> nativeSourceInspection c key
-      ReadSourceApproval key restoration -> sourceApproval c key restoration
-      CheckSourceRestoration key restoration -> sourceRestoration c key restoration >> pure ()
+      ReadSourceApproval key restoration -> sourceApproval c False key restoration
+      ReadCoveredApproval key recovery -> sourceApproval c True key recovery
+      CheckCoveredSource key recovery -> sourceRecovery c True key recovery >> pure ()
+      CheckSourceRestoration key restoration -> sourceRecovery c False key restoration >> pure ()
       ReadSolanaExpiry txid -> expiryProof c txid
       ReadRetryApproval txid -> retryReason c txid
       ReadRecordedPreparation txid -> recordedPreparation c identity txid
@@ -347,7 +352,8 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
       O.iRows=[(Nothing,O.sqlStrictText "pause",O.sqlStrictText explanation)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
     pure ()
   CoverSourceLoss source recovery now capital earned reason proof custody -> coverSourceLoss c policy source recovery now capital earned reason proof custody
-  ApproveSourceRestoration now key restoration reason -> approveSourceRestoration c policy now key restoration reason
+  ApproveCoveredSource now key recovery reason proof -> approveSourceRecovery c policy (Just proof) now key recovery reason
+  ApproveSourceRestoration now key restoration reason -> approveSourceRecovery c policy Nothing now key restoration reason
   ClassifyTreasurySpend chain key reason -> classifyTreasurySpend c policy chain key reason
   AllocateTreasury now receipt split reason -> allocateTreasury c policy now receipt split reason
   ReserveFees now key currency n destination explanation -> do
@@ -2418,8 +2424,8 @@ classifyTreasurySpend c policy chain key reason = do
   pure sequenceNo
  where field name value=either (const $ reject "invalid_treasury_evidence") pure (parseEither (withObject "treasury evidence" (.: name)) value)
 
-sourceApproval :: PG.Connection -> Text -> Int64 -> IO (Maybe Text)
-sourceApproval c key restoration = do
+sourceApproval :: PG.Connection -> Bool -> Text -> Int64 -> IO (Maybe Text)
+sourceApproval c covered key restoration = do
   rows<-O.runSelect c $ do
     (identifier,sequenceNo,_,_,_,reason,proof,_)<-O.selectTable S.sourceRecoveryDecisions
     O.where_ (identifier O..== O.sqlStrictText key O..&& sequenceNo O..== O.sqlInt8 restoration)
@@ -2430,14 +2436,14 @@ sourceApproval c key restoration = do
     [(reason,raw)]->do
       proof<-decodeSaved raw
       cover<-either (const $ reject "invalid_source_approval") pure (parseEither (withObject "approval" (.:? "sourceCover")) proof) :: IO (Maybe Int64)
-      require (cover==Nothing) "source_approval_kind_mismatch"
+      require (if covered then maybe False (>0) cover else cover==Nothing) "source_approval_kind_mismatch"
       pure (Just reason)
     _->reject "duplicate_source_approval"
 
 -- Bind approval to the latest restoration and the exact suspended work. Source
 -- eligibility alone cannot revive an obligation or approve a newer work history.
-sourceRestoration :: PG.Connection -> Text -> Int64 -> IO (S.Obligation,Text,Int64,Text)
-sourceRestoration c key restoration = do
+sourceRecovery :: PG.Connection -> Bool -> Text -> Int64 -> IO (S.Obligation,Text,Int64,Text,Maybe Int64)
+sourceRecovery c covered key restoration = do
   let text=O.sqlStrictText; num=O.sqlInt8
   rows<-O.runSelect c $ do
     obligation<-O.selectTable S.obligations
@@ -2451,8 +2457,18 @@ sourceRestoration c key restoration = do
     O.where_ (receipt O..== text(S.depositId deposit))
     pure row
     :: IO [(Int64,Text,Text,Int64,Text,Int64)]
-  require (S.obligationStatus obligation=="review" && S.depositEligible deposit==1 && case history of
-    (_,_,"restored",0,_,n):_->n==restoration; _->False) "source_approval_not_expected"
+  require (S.obligationStatus obligation=="review" && case history of
+    (_,_,phase,shortfall,_,n):_->n==restoration && if covered
+      then S.depositAsset deposit=="Native" && S.depositEligible deposit==0 && phase=="missing" && shortfall==S.depositAmount deposit
+      else S.depositEligible deposit==1 && phase=="restored" && shortfall==0
+    _->False) "source_approval_not_expected"
+  cover<-if not covered then pure Nothing else do
+    covers<-O.runSelect c $ do
+      (n,receipt,quantity,_,_)<-S.activeSourceCovers
+      O.where_ (receipt O..== text(S.depositId deposit) O..&& quantity O..== num(S.depositAmount deposit))
+      pure n
+      :: IO [Int64]
+    case covers of [n]->pure (Just n); _->reject "source_loss_not_covered"
   approvals<-O.runSelect c $ do
     (identifier,n)<-S.sourceApprovals
     O.where_ (identifier O..== text key)
@@ -2482,27 +2498,31 @@ sourceRestoration c key restoration = do
     pure g
     :: IO [Int64]
   require (null pending) "preparation_cancellation_pending"
-  pure (obligation,previous,loss,actual)
+  pure (obligation,previous,loss,actual,cover)
  where field name value=either (const $ reject "invalid_source_recovery_evidence") pure (parseEither (withObject "recovery" (.: name)) value)
 
-approveSourceRestoration :: PG.Connection -> PaymentTerms -> Int64 -> Text -> Int64 -> Text -> IO ()
-approveSourceRestoration c policy now key restoration reason = do
+approveSourceRecovery :: PG.Connection -> PaymentTerms -> Maybe Value -> Int64 -> Text -> Int64 -> Text -> IO ()
+approveSourceRecovery c policy sourceProof now key restoration reason = do
   validReason reason
   require (restoration>0) "invalid_source_approval"
   state<-metadata c (deploymentFingerprint $ paymentPolicy policy)
   require (S.paused state==1) "pause_before_operator_action"
-  old<-sourceApproval c key restoration
+  old<-sourceApproval c (maybe False (const True) sourceProof) key restoration
   case old of
     Just previous->require (previous==reason) "source_approval_conflict"
     Nothing->do
-      (_,previous,loss,hash)<-sourceRestoration c key restoration
+      (obligation,previous,loss,hash,cover)<-sourceRecovery c (maybe False (const True) sourceProof) key restoration
       fresh c now
       checks<-O.runSelect c $ do
         (_,revision,_,at,_)<-O.selectTable S.custody
         (_,report)<-O.selectTable S.custodyReport
         pure (revision,at,report)
         :: IO [(Int64,Maybe Int64,Maybe Text)]
-      let proof=encodeSaved $ object ["custody" .= checks,"sourceRestoration" .= restoration]
+      forM_ sourceProof $ \evidence->do
+        report<-case checks of [(_,_,Just raw)]->decodeSaved raw; _->reject "custody_not_reconciled"
+        verifyLossView c (S.obligationDeposit obligation) evidence report
+      let proof=encodeSaved $ object $ ["custody" .= checks,"sourceRestoration" .= restoration]
+            <> maybe [] (\n->["sourceCover" .= n,"source" .= sourceProof]) cover
           text=O.sqlStrictText; num=O.sqlInt8
       require (T.length proof<=32768) "source_approval_evidence_too_large"
       sequenceNo<-nextSequence c
@@ -2581,18 +2601,9 @@ coverSourceLoss c policy source recovery now capital earned reason proof (revisi
         pure n
         :: IO [Int64]
       require (null covers) "source_loss_already_covered"
-      transaction<-field "transaction" proof; index<-field "output" proof :: IO Int64
-      depth<-field "confirmations" proof :: IO Int64
-      hash<-field "observationHash" proof
-      require (depth<0 && index>=0 && receipt=="native:"<>transaction<>":"<>T.pack(show index)) "source_loss_not_proven"
-      (observed,_)<-sourceEvidence c transaction
-      require (observed==hash) "source_recovery_scan_not_current"
-      block<-field "nativeBlock" report :: IO Text; height<-field "nativeHeight" report :: IO Int64
-      sourceBlock<-field "nodeBlock" proof; sourceHeight<-field "nodeHeight" proof
-      require (block==sourceBlock && height==sourceHeight) "source_loss_custody_view_changed"
-      matched<-field "matches" report
+      verifyLossView c receipt proof report
       currentRevision<-readCustodyRevision c
-      require (matches && matched && currentRevision==revision && at>=0 && at<=now && toInteger now-toInteger at<=60) "source_loss_custody_not_current"
+      require (matches && currentRevision==revision && at>=0 && at<=now && toInteger now-toInteger at<=60) "source_loss_custody_not_current"
       booked<-balances c
       holds<-O.runSelect c $ do
         (_,asset,n,phase)<-O.selectTable S.reservations
@@ -2610,4 +2621,20 @@ coverSourceLoss c policy source recovery now capital earned reason proof (revisi
       post c ("source-loss-cover:"<>T.pack(show sequenceNo)) "operator capital covers verified source shortfall"
         [Posting Native Float (negate $ toInteger $ units capital),Posting Native Earned (negate $ toInteger $ units earned),Posting Native SourceDeficit (toInteger quantity)]
       audit c "source_loss_covered" receipt
+
+-- Both capital coverage and payment approval bind to the same scanned outpoint
+-- and independently reconciled native chain view.
+verifyLossView :: PG.Connection -> Text -> Value -> Value -> IO ()
+verifyLossView c receipt proof report = do
+  transaction<-field "transaction" proof; index<-field "output" proof :: IO Int64
+  depth<-field "confirmations" proof :: IO Int64
+  hash<-field "observationHash" proof
+  require (depth<0 && index>=0 && receipt=="native:"<>transaction<>":"<>T.pack(show index)) "source_loss_not_proven"
+  (observed,_)<-sourceEvidence c transaction
+  require (observed==hash) "source_recovery_scan_not_current"
+  block<-field "nativeBlock" report :: IO Text; height<-field "nativeHeight" report :: IO Int64
+  sourceBlock<-field "nodeBlock" proof; sourceHeight<-field "nodeHeight" proof
+  require (block==sourceBlock && height==sourceHeight) "source_loss_custody_view_changed"
+  matched<-field "matches" report
+  require matched "source_loss_custody_not_current"
  where field name value=either (const $ reject "invalid_source_loss_evidence") pure (parseEither (withObject "source loss" (.: name)) value)
