@@ -95,6 +95,14 @@ main = do
       rolledBack <- evalRead reader (ReadWithdrawal $ T.replicate 64 "c")
       state <- evalRead reader ReadState
       check (rolledBack==Nothing && ledgerSequence state==ledgerSequence beforeFailure)
+      -- A checkpoint can use the same error type as policy refusal. Its origin,
+      -- not just its type, must determine whether the writer is fenced.
+      withWriter settings (store policy limits)
+        (\n->when (n>ledgerSequence beforeFailure) $ throwIO $ BridgeError "checkpoint_rejected") $ \writer -> do
+          expectStore "checkpoint_rejected" (evalWrite writer $ ReserveFees 100 (T.replicate 64 "c") Native (money 100) "recipient" "test typed checkpoint failure")
+          expectStore "ledger_connection_fenced" (evalWrite writer $ Pause "must stay fenced")
+      rolledBackAgain<-evalRead reader (ReadWithdrawal $ T.replicate 64 "c")
+      check (rolledBackAgain==Nothing)
       fixture fixtures SeedOrders
       let auth="Bearer "<>T.replicate 64 "0"
       hidden <- evalRead reader (ReadOrder auth "hidden")
@@ -290,6 +298,9 @@ main = do
         expectStore "order_fee_limit_exceeded" (evalWrite writer $ PreparePayment 100 intent (money 21) "{}")
         fixture fixtures ReadyIntake
         expectStore "destination_payment_unresolved" (evalWrite writer $ PreparePayment 100 ("convert:"<>missing) (money 10) "{}")
+        fixture fixtures CoverBackup
+        fixture fixtures ReadyIntake
+        expectStore "payment_not_prepared" (evalRead reader $ ReadSigningDecision 100 intent 0)
         evalWrite writer (SaveDraft intent 0 "{\"draft\":1}")
         savedDraft<-evalRead reader (ReadPreparation intent)
         draftSequence<-evalRead reader ReadState
@@ -298,6 +309,34 @@ main = do
         check (preparedDraft savedDraft==Just "{\"draft\":1}" && ledgerSequence draftSequence==ledgerSequence replaySequence)
         expectStore "preparation_draft_conflict" (evalWrite writer $ SaveDraft intent 0 "{\"draft\":2}")
         expectStore "preparation_generation_changed" (evalWrite writer $ SaveDraft intent 1 "{}")
+        expectStore "signing_backup_required" (evalRead reader $ ReadSigningDecision 100 intent 0)
+        fixture fixtures CoverBackup
+        fixture fixtures ReadyIntake
+        decision<-evalRead reader (ReadSigningDecision 100 intent 0)
+        check (decision==savedDraft)
+        expectStore "preparation_generation_changed" (evalRead reader $ ReadSigningDecision 100 intent 1)
+        let signed=SignedAttempt "fixture-signed-solana" "exact-fixture-bytes" "{\"signed\":true}" Nothing
+        expectStore "preparation_changed" (evalWrite writer $ RecordAttempt decision {preparedPolicy="{\"changed\":true}"} signed)
+        expectStore "attempt_common_input_mismatch" (evalWrite writer $ RecordAttempt decision signed {commonInput=Just "unexpected:0"})
+        fixture fixtures (SourceEligibility "historical-fee" False)
+        fixture fixtures ReadyIntake
+        expectStore "source_not_eligible" (evalRead reader $ ReadSigningDecision 100 intent 0)
+        expectStore "source_not_eligible" (evalWrite writer $ RecordAttempt decision signed)
+        fixture fixtures (SourceEligibility "historical-fee" True)
+        beforeSignature<-evalRead reader ReadBalances
+        recorded<-evalWrite writer (RecordAttempt decision signed)
+        firstSequence<-evalRead reader ReadState
+        repeated<-evalWrite writer (RecordAttempt decision signed)
+        secondSequence<-evalRead reader ReadState
+        afterSignature<-evalRead reader ReadBalances
+        check (recorded==repeated && recordedSigned recorded==signed && recordedState recorded=="signed" &&
+          recordedSequence recorded==Nothing && ledgerSequence firstSequence==ledgerSequence secondSequence && beforeSignature==afterSignature)
+        expectStore "attempt_identity_conflict" (evalWrite writer $ RecordAttempt decision signed {signedBytes="different"})
+        expectStore "attempt_already_recorded" (evalWrite writer $ RecordAttempt decision signed {signedId="another-signature"})
+        fixture fixtures CoverBackup
+        fixture fixtures ReadyIntake
+        expectStore "attempt_already_recorded" (evalRead reader $ ReadSigningDecision 100 intent 0)
+        fixture fixtures (ImmutableAttempt "fixture-signed-solana") >>= check
         let withdrawalKey=T.replicate 64 "d"
         evalWrite writer (Pause "reserve earned")
         fixture fixtures RefreshCustody
@@ -307,15 +346,22 @@ main = do
         check (paymentAsset(savedPayment $ preparedView earnedPrepared)==Native && savedStatus(preparedView earnedPrepared)==PaymentPaying)
         expectStore "fee_withdrawal_payment_exists" (evalWrite writer $ CancelFees withdrawalKey "must retain")
         fixture fixtures (CheckFundingBinding ("fee:"<>withdrawalKey) withdrawalKey) >>= check
-        -- End the fixture-only unsigned work so later unrelated scan cases can use Native.
+        evalWrite writer (SaveDraft ("fee:"<>withdrawalKey) 0 "{\"nativeDraft\":true}")
+        earnedDraft<-evalRead reader (ReadPreparation $ "fee:"<>withdrawalKey)
+        let nativeSigned=SignedAttempt (T.replicate 64 "f") "native-fixture-bytes" "{\"nativeSigned\":true}" (Just "fixture-prevout:0")
+        nativeRecorded<-evalWrite writer (RecordAttempt earnedDraft nativeSigned)
+        check (recordedChain nativeRecorded=="Native" && recordedSigned nativeRecorded==nativeSigned && recordedState nativeRecorded=="signed")
+        -- End fixture work without asserting settlement, so later scan cases can use Native.
         fixture fixtures (ResolveFixtureIntent $ "fee:"<>withdrawalKey)
         fixture fixtures (SeedReceipt "unknown-source" Nothing Native 10 2 True 100)
         evalWrite writer (PromoteDeposit 100 "unknown-source") >>= check . not
         expectStore "deposit_not_found" (evalWrite writer $ PromoteDeposit 100 "missing")
         expectStore "invalid_promotion_time" (evalWrite writer $ PromoteDeposit (-1) "promote-source")
         pure "promote-source"
-      withWriter settings (store policy limits) (const $ pure ()) $ \writer ->
+      withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
         evalWrite writer (PromoteDeposit 100 promoted) >>= check . not
+        persisted<-evalRead reader (ReadAttempt "fixture-signed-solana")
+        check (signedBytes(recordedSigned persisted)=="exact-fixture-bytes" && recordedState persisted=="signed")
       withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
         let tx=T.replicate 64 "d"; did="native:"<>tx<>":0"; hash=T.replicate 64 "e"
             proof=object ["observationHash" .= hash]
@@ -496,6 +542,7 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  ImmutableAttempt :: T.Text -> Fixture Bool
   CheckFundingBinding :: T.Text -> T.Text -> Fixture Bool
   ResolveFixtureIntent :: T.Text -> Fixture ()
   ResetOperatingScan :: Fixture ()
@@ -773,3 +820,8 @@ fixture c (CheckFundingBinding identifier withdrawal) = do
     :: IO [(Maybe T.Text,Maybe T.Text)]
   changed<-try (O.runUpdate c O.Update {O.uTable=S.intents,O.uUpdateWith= \r->r {S.intentChain=O.sqlStrictText "Solana"},O.uWhere= \r->S.intentId r O..== O.sqlStrictText identifier,O.uReturning=O.rCount}) :: IO (Either PG.SqlError Int64)
   pure (rows==[(Nothing,Just withdrawal)] && case changed of Left err->PG.sqlState err=="23514"; _->False)
+
+fixture c (ImmutableAttempt identifier) = do
+  result<-try (O.runUpdate c O.Update {O.uTable=S.attempts,O.uUpdateWith= \r->r {S.attemptBytes=O.sqlStrictText "modified"},
+    O.uWhere= \r->S.attemptId r O..== O.sqlStrictText identifier,O.uReturning=O.rCount}) :: IO (Either PG.SqlError Int64)
+  pure $ case result of Left err->PG.sqlState err=="23514"; _->False

@@ -2,7 +2,7 @@
 -- Closed ledger operations. Connections, queries and transaction callbacks never
 -- escape this module; the runtime will interpret its customer/operator DSL here.
 module Bridge.Store
-  ( Reader, Writer, BridgeError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), StorePolicy(..), AllocationClaim(..), LedgerState(..), WithdrawalView(..), PaymentView(..), PaymentStatus(..), PreparedPayment(..)
+  ( Reader, Writer, BridgeError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), StorePolicy(..), AllocationClaim(..), LedgerState(..), WithdrawalView(..), PaymentView(..), PaymentStatus(..), PreparedPayment(..), SignedAttempt(..), RecordedAttempt(..)
   , withReader, withWriter, evalRead, evalWrite ) where
 
 import Bridge.Error
@@ -25,6 +25,7 @@ import Data.Aeson (FromJSON,ToJSON,Value(Null),object,(.=),encode,eitherDecodeSt
 import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
+import Data.IORef (newIORef,readIORef,writeIORef)
 import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -56,12 +57,22 @@ data PaymentView = PaymentView
 data PreparedPayment = PreparedPayment
   { preparedView :: PaymentView, preparedGeneration :: Int, preparedPolicy :: Text
   , preparedDraft :: Maybe Text, preparedFee :: Amount } deriving (Eq,Show)
+-- Chain validators verify the transaction before this record reaches storage.
+-- These values alone grant neither signing nor broadcast authority.
+data SignedAttempt = SignedAttempt
+  { signedId :: Text, signedBytes :: Text, signedPolicy :: Text, commonInput :: Maybe Text } deriving (Eq,Show)
+data RecordedAttempt = RecordedAttempt
+  { recordedPayment :: Text, recordedChain :: Text, recordedGeneration :: Int
+  , recordedFee :: Amount, recordedState :: Text, recordedSequence :: Maybe Int64
+  , recordedObservation :: Maybe Text, recordedSigned :: SignedAttempt } deriving (Eq,Show)
 data AllocationClaim = AllocationClaim { allocationLabel :: Text, mayAllocate :: Bool }
   deriving (Eq,Show)
 
 data StoreRead a where
   ReadState :: StoreRead LedgerState
   ReadBalances :: StoreRead (M.Map (Asset,Account) Integer)
+  ReadSigningDecision :: Int64 -> Text -> Int -> StoreRead PreparedPayment
+  ReadAttempt :: Text -> StoreRead RecordedAttempt
   ReadPreparation :: Text -> StoreRead PreparedPayment
   ReadPayment :: Text -> StoreRead PaymentView
   ReadWithdrawal :: Text -> StoreRead (Maybe WithdrawalView)
@@ -76,6 +87,7 @@ data StoreRead a where
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
+  RecordAttempt :: PreparedPayment -> SignedAttempt -> StoreWrite RecordedAttempt
   PreparePayment :: Int64 -> Text -> Amount -> Text -> StoreWrite PreparedPayment
   SaveDraft :: Text -> Int -> Text -> StoreWrite ()
   CommitScan :: W.ScanBatch -> StoreWrite ()
@@ -129,6 +141,8 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
     row <- metadata c identity
     case operation of
       ReadState -> pure (LedgerState (S.criticalSequence row) (S.backupSequence row) (S.paused row/=0) (S.pauseReason row))
+      ReadSigningDecision now identifier generation -> signingDecision c identity remote now identifier generation
+      ReadAttempt identifier -> readAttempt c identifier
       ReadPreparation identifier -> readPreparation c identity identifier
       ReadPayment identifier -> readPayment c identity identifier
       PendingVerification -> pendingVerification c
@@ -149,6 +163,7 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
 evalWrite :: Writer -> StoreWrite a -> IO a
 evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
  let policy=executionTerms config; limit=admissionLimits config in case operation of
+  RecordAttempt prepared signed -> recordAttempt c (deploymentFingerprint $ paymentPolicy policy) prepared signed
   PreparePayment now identifier allowance plan -> preparePayment c config now identifier allowance plan
   SaveDraft identifier generation draft -> saveDraft c (deploymentFingerprint $ paymentPolicy policy) identifier generation draft
   CommitScan batch -> commitScan c batch
@@ -273,6 +288,7 @@ transaction (Writer cell config checkpoint) action = do
   outcome <- modifyMVar cell $ \case
     Nothing -> pure (Nothing,Left (toException $ BridgeError "ledger_connection_fenced"))
     Just c -> mask $ \restore -> do
+      refused <- newIORef False
       result <- try $ do
         PG.begin c
         locked <- O.runSelect c $ Locking.forUpdate $ do
@@ -281,7 +297,9 @@ transaction (Writer cell config checkpoint) action = do
           pure (S.singleton r)
         require (locked==[1::Int64]) "corrupt_deployment"
         _ <- metadata c (deploymentFingerprint $ paymentPolicy policy)
-        value <- restore (action c)
+        value <- restore (action c) `catch` \(err :: SomeException) -> do
+          writeIORef refused (case fromException err :: Maybe BridgeError of Just _->True; _->False)
+          throwIO err
         row <- metadata c (deploymentFingerprint $ paymentPolicy policy)
         checkpoint (S.criticalSequence row)
         PG.commit c
@@ -290,8 +308,9 @@ transaction (Writer cell config checkpoint) action = do
         Right value -> pure (Just c,Right value)
         Left (err :: SomeException) -> do
           rollback <- try (PG.rollback c) :: IO (Either SomeException ())
-          let reusable = case (fromException err :: Maybe BridgeError,rollback) of
-                (Just _,Right ()) -> True
+          policyRefusal <- readIORef refused
+          let reusable = case (policyRefusal,rollback) of
+                (True,Right ()) -> True
                 _ -> False
           pure (if reusable then Just c else Nothing,Left err)
   either throwIO pure outcome
@@ -1241,3 +1260,86 @@ saveDraft c identity identifier generation draft = do
         O.uUpdateWith= \(key,g,policy,_,retired,cancelled)->(key,g,policy,O.toNullable $ O.sqlStrictText draft,retired,cancelled),
         O.uWhere= \(key,g,_,_,_,_)->key O..== O.sqlStrictText identifier O..&& g O..== O.sqlInt8(fromIntegral generation),O.uReturning=O.rCount}
       pure ()
+
+readAttempt :: PG.Connection -> Text -> IO RecordedAttempt
+readAttempt c identifier = do
+  rows <- O.runSelect c $ do
+    attempt <- O.selectTable S.attempts
+    intent <- O.selectTable S.intents
+    O.where_ (S.attemptId attempt O..== O.sqlStrictText identifier O..&& S.attemptIntent attempt O..== S.intentId intent)
+    pure (attempt,S.intentChain intent,S.intentCommon intent)
+    :: IO [(S.Attempt,Text,Maybe Text)]
+  case rows of
+    [(row,chain,common)] -> do
+      require (S.attemptGeneration row>=0 && S.attemptGeneration row<8 && chain `elem` ["Native","Solana"]) "invalid_saved_attempt"
+      allowance <- checked (amount $ toInteger $ S.attemptFee row)
+      pure (RecordedAttempt (S.attemptIntent row) chain (fromIntegral $ S.attemptGeneration row) allowance
+        (S.attemptState row) (S.attemptSequence row) (S.attemptObservation row)
+        (SignedAttempt (S.attemptId row) (S.attemptBytes row) (S.attemptPolicy row) common))
+    _ -> reject "attempt_not_found"
+
+unsignedPreparation :: PG.Connection -> Text -> Text -> Int -> IO PreparedPayment
+unsignedPreparation c identity identifier generation = do
+  prepared <- readPreparation c identity identifier
+  require (generation==preparedGeneration prepared) "preparation_generation_changed"
+  require (savedStatus(preparedView prepared)==PaymentPaying && preparedDraft prepared/=Nothing) "payment_not_prepared"
+  attempts <- O.runSelect c $ O.limit 1 $ do
+    (tx,intent,_,g,_,_) <- S.workAttempts
+    O.where_ (intent O..== O.sqlStrictText identifier O..&& g O..== O.sqlInt8(fromIntegral generation))
+    pure tx
+    :: IO [Text]
+  require (null attempts) "attempt_already_recorded"
+  case paymentFunding (savedPayment $ preparedView prepared) of
+    EarnedFees{} -> pure ()
+    Conversion _ receipt _ _ -> eligible receipt
+    Refund _ receipt _ _ -> eligible receipt
+  pure prepared
+ where eligible receipt=readSource c receipt >>= \source->require (S.depositEligible source==1) "source_not_eligible"
+
+-- The dedicated signer's read-only capability resolves durable IDs, never
+-- caller-supplied transaction bytes. Chain-specific plan checks follow this read.
+signingDecision :: PG.Connection -> Text -> Bool -> Int64 -> Text -> Int -> IO PreparedPayment
+signingDecision c identity backed now identifier generation = do
+  require (generation>=0 && generation<8 && not(T.null identifier) && T.length identifier<=256) "invalid_signing_decision"
+  row <- metadata c identity
+  when backed $ require (S.backupSequence row>=S.criticalSequence row) "signing_backup_required"
+  intakeReady c identity now
+  unsignedPreparation c identity identifier generation
+
+recordAttempt :: PG.Connection -> Text -> PreparedPayment -> SignedAttempt -> IO RecordedAttempt
+recordAttempt c identity expected signed = do
+  let identifier=paymentId $ savedPayment $ preparedView expected; generation=preparedGeneration expected
+      text=O.sqlStrictText; num=O.sqlInt8
+  require (not(T.null $ signedId signed) && T.length(signedId signed)<=128 &&
+    not(T.null $ signedBytes signed) && T.length(signedBytes signed)<=200000 &&
+    maybe True (\value->not(T.null value) && T.length value<=160) (commonInput signed)) "invalid_attempt"
+  validateSavedJson 32768 (signedPolicy signed)
+  existing <- O.runSelect c $ O.limit 1 $ do
+    row <- O.selectTable S.attempts
+    O.where_ (S.attemptId row O..== text(signedId signed))
+    pure (S.attemptId row)
+    :: IO [Text]
+  case existing of
+    [_] -> do
+      saved <- readAttempt c (signedId signed)
+      require (recordedPayment saved==identifier && recordedGeneration saved==generation && recordedFee saved==preparedFee expected && recordedSigned saved==signed) "attempt_identity_conflict"
+      pure saved
+    [] -> do
+      current <- unsignedPreparation c identity identifier generation
+      require (current==expected) "preparation_changed"
+      let native=paymentAsset(savedPayment $ preparedView current)==Native
+      require (native==maybe False (const True) (commonInput signed)) "attempt_common_input_mismatch"
+      _ <- nextSequence c
+      _ <- O.runUpdate c O.Update {O.uTable=S.intents,
+        O.uUpdateWith= \r->r {S.intentCommon=maybe O.null (O.toNullable . text) (commonInput signed)},
+        O.uWhere= \r->S.intentId r O..== text identifier,O.uReturning=O.rCount}
+      _ <- O.runInsert c O.Insert {O.iTable=S.attempts,
+        O.iRows=[S.Attempt (text $ signedId signed) (text identifier) (text $ signedBytes signed) (text $ signedPolicy signed)
+          (num $ units $ preparedFee current) (text "signed") O.null O.null (num $ fromIntegral generation)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      let funding=paymentFunding(savedPayment $ preparedView current)
+          order=case funding of Conversion oid _ _ _->Just oid; Refund oid _ _ _->Just oid; EarnedFees{}->Nothing
+      forM_ order $ \oid->do
+        _ <- O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text "Paying"},O.uWhere= \r->S.orderId r O..== text oid,O.uReturning=O.rCount}
+        pure ()
+      readAttempt c (signedId signed)
+    _ -> reject "duplicate_attempt"

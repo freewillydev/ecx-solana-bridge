@@ -380,11 +380,35 @@ contracts still pass. The old native-attempt fixture incorrectly used a wrapped
 payout obligation; the new chain-binding constraint caught it. It now cancels the
 conversion before inserting a native refund for the observation-only fixture.
 
-Preparation retries, covered-source authorization, cancellation workflow, signed
-attempt persistence, broadcast/settlement and replacement generalization to earned
+Preparation retries, covered-source authorization, cancellation workflow,
+broadcast/settlement and replacement generalization to earned
 funding remain incomplete. An already resolved intent currently refuses another
 preparation until the recovery path is implemented; this is not retry acceptance.
 Neither preparation nor these tests call a signer or broadcast funds.
+
+Closed signing-decision reads now require saved generation/draft, paying status,
+eligible source, no recorded attempt, current intake/custody and configured backup
+coverage. They return durable authorization data; chain-specific plan/transaction
+validation and the dedicated signer transport still need workflow integration.
+Exact signed-attempt storage binds the complete preparation snapshot, derives its
+fee/chain, preserves bytes and proof, and accepts identical replay without another
+sequence or posting. A different attempt for the same initial generation is refused.
+Signed state has no broadcast sequence and cannot itself explain a chain outflow.
+
+Attempt persistence is 16→37 lines in the existing Store file; its extra work is
+snapshot binding, explicit replay/conflict handling and customer/earned support.
+The shared unsigned/signing guards are 27 lines and saved-attempt reading is 16.
+The existing schema file adds the full nine-column attempt mapping; no production
+file is added. This is a capability/safety checkpoint, not a reduction claim.
+
+PostgreSQL acceptance covers missing/unbacked drafts, wrong generations, changed
+preparations, lost eligibility, exact replay, byte conflicts, second initial
+attempt refusal, database immutability and unchanged balances for customer and
+earned payments, plus a writer restart read of the customer attempt. Attempt payloads in this contract are explicitly
+labelled fixture data; they do not prove cryptographic validity or real signing.
+The store/workflow build passes. Transaction tests also prove that both IO and
+typed checkpoint failures fence the writer after rollback: only policy refusals
+originating inside the closed operation allow connection reuse.
 
 Connecting those adapters to the high-level safe/critical runtime, actual host fence,
 dedicated signer and durable payment execution remains unfinished. Native source-loss detection,

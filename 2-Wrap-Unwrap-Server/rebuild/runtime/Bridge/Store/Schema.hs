@@ -222,3 +222,18 @@ preparations = O.table "preparations" $ p6
 feeHolds :: O.Table (TextField,TextField,IntField,IntField) (TextField,TextField,IntField,IntField)
 feeHolds = O.table "fee_reservations" $ p4
   (O.requiredTableField "intent_id",O.requiredTableField "asset",O.requiredTableField "amount",O.requiredTableField "released")
+
+data AttemptF t n nt nn = Attempt
+  { attemptId :: t, attemptIntent :: t, attemptBytes :: t, attemptPolicy :: t
+  , attemptFee :: n, attemptState :: t, attemptSequence :: nn, attemptObservation :: nt
+  , attemptGeneration :: n } deriving (Eq,Show)
+$(makeAdaptorAndInstance "pAttempt" ''AttemptF)
+type Attempt = AttemptF Text Int64 (Maybe Text) (Maybe Int64)
+type AttemptFields = AttemptF TextField IntField (O.FieldNullable O.SqlText) (O.FieldNullable O.SqlInt8)
+attempts :: O.Table AttemptFields AttemptFields
+attempts = O.table "attempts" $ pAttempt Attempt
+  { attemptId=O.requiredTableField "txid", attemptIntent=O.requiredTableField "intent_id"
+  , attemptBytes=O.requiredTableField "signed_bytes", attemptPolicy=O.requiredTableField "policy_json"
+  , attemptFee=O.requiredTableField "fee_limit", attemptState=O.requiredTableField "state"
+  , attemptSequence=O.requiredTableField "critical_sequence", attemptObservation=O.requiredTableField "observation_json"
+  , attemptGeneration=O.requiredTableField "preparation_generation" }

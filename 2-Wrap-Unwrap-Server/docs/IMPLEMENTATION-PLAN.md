@@ -46,8 +46,9 @@ and fee-payer scan contracts, reference matching and pending verification also p
 The combined observer workflow builds, but live-node/runtime acceptance is pending.
 Unified customer/earned payment reads, initial preparation and immutable draft
 storage are implemented against rebuild schema 19. The forward migration is
-tested only on disposable databases; retries, signing/send/settlement and live
-cutover remain unfinished.
+tested only on disposable databases. Durable signing-decision reads and exact
+signed-attempt storage pass PostgreSQL replay/restart checks; real signer workflow,
+retries, send/settlement and live cutover remain unfinished.
 No existing custody state has been moved. See the rebuild README for scoped counts
 and evidence; do not compare this subset against the entire old storage layer.
 
