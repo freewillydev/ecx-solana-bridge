@@ -3,7 +3,7 @@ module Bridge.NativePayment
   ( NativeRPC, Outpoint(..), NativeInput(..), NativeOutput(..), NativeTx(..)
   , NativePrevout(..), NativePlan(..), NativeDraft(..), NativeSigned(..)
   , decodeNativeTx, validateNativeTx, sameNativeTemplate, sameNativePrevouts
-  , previewNativePayment, newNativePlan, fundNativeDraft, signNativeDraft
+  , previewNativePayment, newNativePlan, fundNativeDraft, checkNativeDraft, signNativeDraft
   , readNativePrevoutsWith, ownedNativeLocks, restoreNativeInputLocks, checkNativeAcceptance
   ) where
 
@@ -201,17 +201,23 @@ fundNativeDraft call plan@NativePlan{..} = do
 
 signNativeDraft :: NativeRPC -> NativePlan -> NativeDraft -> IO NativeSigned
 signNativeDraft call plan draft = do
+  unsigned<-checkNativeDraft call plan draft
+  current <- readNativePrevouts call (planDepth plan) (nativeInputs unsigned)
+  require (sameNativePrevouts current (draftPrevouts draft)) "native_previous_output_changed"
+  -- Restore only saved inputs; this grants no broadcast authority.
+  _ <- restoreNativeInputLocks call (map nativeOutpoint $ nativeInputs unsigned)
+  signNativeTemplate call plan draft current
+
+checkNativeDraft :: NativeRPC -> NativePlan -> NativeDraft -> IO NativeTx
+checkNativeDraft call plan draft = do
   require (not (T.null $ draftPsbt draft) && T.length (draftPsbt draft)<=100000) "invalid_native_psbt"
   either reject pure (validateNativeTx plan (draftPrevouts draft) (draftFee draft) (draftTransaction draft))
   decoded <- call False "decodepsbt" [toJSON (draftPsbt draft)]
   unsigned <- fieldValue "tx" decoded >>= either reject pure . decodeNativeTx
   require (sameNativeTemplate unsigned (draftTransaction draft)) "native_psbt_changed"
-  current <- readNativePrevouts call (planDepth plan) (nativeInputs unsigned)
-  require (sameNativePrevouts current (draftPrevouts draft)) "native_previous_output_changed"
-  -- Reapply advisory locks, including after a daemon restart. Signing does
-  -- not authorize sending; the caller must save the exact result to its ledger.
-  _ <- restoreNativeInputLocks call (map nativeOutpoint $ nativeInputs unsigned)
-  signNativeTemplate call plan draft current
+  fee<-fieldValue "fee" decoded >>= either reject pure . nativeAmount
+  require (fee==draftFee draft) "native_psbt_changed"
+  pure unsigned
 
 -- Both original and replacement adapters validate the saved PSBT and current
 -- input ownership before invoking this shared daemon signer. It never sends.

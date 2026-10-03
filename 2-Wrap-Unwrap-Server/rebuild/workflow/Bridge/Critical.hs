@@ -100,6 +100,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         let command=resolve request
         case command of
           SigningDSL _->reject "signer_operation_forbidden"
+          WorkerDSL RecoverNativeLocks->pure ()
           WorkerDSL RunWorkerCycle->pure ()
           WorkerDSL ObserveChains->pure ()
           WorkerDSL ReconcileCustody->pure ()
@@ -116,6 +117,12 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (coverBackup c) reader writer header request
       evalCritical (WorkerDSL operation)=evalWorker operation
       evalWorker :: forall a. WorkerOperation a -> IO a
+      evalWorker RecoverNativeLocks = guarded $ do
+        _<-N.nativeIdentity rpc native
+        _<-N.nativeWalletInfoWith (N.nativeCall rpc native) native
+        saved<-evalRead reader ReadNativeLockWork
+        restored<-restoreNativeWork (N.nativeCall rpc native) (N.profile native) config saved
+        when (restored>0) $ forM_ saved $ \work->evalWrite writer (RecordNativeLockRestore work restored)
       evalWorker ObserveChains = observeOnce rpc settings reader writer
       evalWorker (PrepareOutgoing identifier) = guarded $ do
         now<-floor <$> getPOSIXTime
@@ -203,6 +210,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         if code=="custody_not_reconciled" then pure () else evalWrite writer (Pause code) >> reject code)
        where
         cycleWork = do
+          locks<-tryBridge (evalWorker RecoverNativeLocks)
           scanned<-tryBridge (evalWorker ObserveChains)
           now<-floor <$> getPOSIXTime
           evalWrite writer (ExpireQuotes now)
@@ -210,7 +218,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
           -- A policy error on one attempt must not hide another finalized effect.
           outcomes<-mapM (tryBridge . evalWorker . ReconcilePayment) pending
           evalWorker ReconcileCustody
-          mapM_ (either throwIO pure) (scanned:outcomes)
+          mapM_ (either throwIO pure) (locks:scanned:outcomes)
           state<-evalRead reader ReadState
           when (paying && not(ledgerPaused state)) $ do
             candidates<-evalRead reader PaymentCandidates

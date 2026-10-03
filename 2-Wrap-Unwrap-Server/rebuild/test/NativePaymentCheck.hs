@@ -2,7 +2,7 @@
 -- The spent fixture input is not a spendable wallet or live acceptance evidence.
 module NativePaymentCheck (checks) where
 
-import Bridge.Domain (Asset(..),amount, units,refund,payment)
+import Bridge.Domain (Asset(..),amount, units,refund,earnedFees,payment)
 import Bridge.Payment
 import Bridge.PaymentObservation
 import Bridge.Store
@@ -50,6 +50,7 @@ checks = do
               ("gettransaction",[String ident,Bool False,Bool True]) | ident==nativeTxid tx->pure $ object
                 ["hex" .= (raw::Text),"decoded" .= decoded,"txid" .= nativeTxid tx,"fee" .= Number (negate $ fromIntegral(units fee)/100000000)
                 ,"confirmations" .= planDepth plan,"walletconflicts" .= ([]::[Text]),"blockhash" .= T.replicate 64 "e"]
+              ("getmempoolentry",_)->pure $ object ["vsize" .= (140::Int)]
               ("getblockheader",[String anchor])->pure $ object ["hash" .= anchor,"height" .= (16001::Int),"confirmations" .= planDepth plan]
               ("getblockhash",[Number 16001])->pure $ String $ T.replicate 64 "e"
               ("listunspent",[_,_,_,Bool False,_])->pure $ toJSON [object ["safe" .= True,"spendable" .= True,
@@ -171,6 +172,52 @@ checks = do
         pure (refused && methods==["decodepsbt"])
     , check "native empty or oversized PSBT refuses all RPC" $ forAll (elements ["",T.replicate 100001 "a"]) $ \psbt -> ioProperty $
         rejects "invalid_native_psbt" (signNativeDraft (\_ _ _->fail "unexpected wallet RPC") plan draft {draftPsbt=psbt})
+    , check "durable native lock recovery is idempotent and cannot sign send or allocate" $ once $ ioProperty $ do
+        let work=Just $ NativeLockWork prepared False []
+        ((first,second),methods)<-contract (\_ v->pure v) $ \call->do
+          first<-restoreNativeWork call L2LSignetDevnet config work
+          second<-restoreNativeWork call L2LSignetDevnet config work
+          pure (first,second)
+        earned<-either reject pure (earnedFees "revenue" Native $ planAmount plan)
+        outgoingFee<-either reject pure (payment "fee:revenue" earned $ planRecipient plan)
+        (feeLocks,_)<-contract (\_ v->pure v) $ \call->restoreNativeWork call L2LSignetDevnet config
+          (Just $ NativeLockWork prepared {preparedView=PaymentView outgoingFee terms PaymentPaying} False [])
+        pure (first==length(nativeInputs tx) && second==0 && feeLocks==first
+          && length(filter (=="lockunspent") methods)==1
+          && all (`notElem` methods) ["walletprocesspsbt","sendrawtransaction","getrawchangeaddress","getnewaddress"])
+    , check "undrafted and cancelling native work verifies locks without restoring them" $ once $ ioProperty $ do
+        (empty,emptyCalls)<-contract (\_ v->pure v) $ \call->restoreNativeWork call L2LSignetDevnet config Nothing
+        (undrafted,undraftedCalls)<-contract (\_ v->pure v) $ \call->restoreNativeWork call L2LSignetDevnet config
+          (Just $ NativeLockWork prepared {preparedDraft=Nothing} False [])
+        (cancelled,cancelCalls)<-contract (\_ v->pure v) $ \call->restoreNativeWork call L2LSignetDevnet config
+          (Just $ NativeLockWork prepared True [])
+        pure (empty==0 && undrafted==0 && cancelled==0 && emptyCalls==["listlockunspent"]
+          && undraftedCalls==emptyCalls && cancelCalls==["decodepsbt","listlockunspent"])
+    , check "saved native attempts restore unseen inputs but not confirmed or mempool spends" $ once $ ioProperty $ do
+        (signed,_)<-contract (\_ v->pure v) $ \call->verifySigningReply call L2LSignetDevnet config prepared (NativeReply boundSigned)
+        let recorded=RecordedAttempt "refund:order" "Native" 0 (planFeeLimit plan) "broadcast_intent" (Just 1) Nothing signed
+            work attempt=Just $ NativeLockWork prepared False [attempt]
+            missing method value=if method=="gettransaction" then reject "rpc_error_-5" else pure value
+            mempool method (Object fields) | method=="gettransaction"=pure $ Object $ KM.insert "confirmations" (Number 0) fields
+            mempool _ value=pure value
+        (unseen,unseenCalls)<-contract missing $ \call->restoreNativeWork call L2LSignetDevnet config (work recorded {recordedState="signed",recordedSequence=Nothing})
+        (confirmed,confirmedCalls)<-contract (\_ v->pure v) $ \call->restoreNativeWork call L2LSignetDevnet config (work recorded)
+        (pending,pendingCalls)<-contract mempool $ \call->restoreNativeWork call L2LSignetDevnet config (work recorded)
+        (unauthorized,_)<-contract (\_ v->pure v) $ \call->rejects "unrecorded_broadcast_observed"
+          (restoreNativeWork call L2LSignetDevnet config $ work recorded {recordedState="signed",recordedSequence=Nothing})
+        (changed,_)<-contract (\_ v->pure v) $ \call->rejects "native_lock_work_changed"
+          (restoreNativeWork call L2LSignetDevnet config $ work recorded {recordedGeneration=1})
+        family<-rejects "native_lock_recovery_requires_family" (restoreNativeWork (\_ _ _->fail "family reached RPC") L2LSignetDevnet config (Just $ NativeLockWork prepared False [recorded,recorded]))
+        pure (unseen==length(nativeInputs tx) && "lockunspent" `elem` unseenCalls && confirmed==0 && pending==0
+          && all (`notElem` (confirmedCalls<>pendingCalls)) ["gettxout","lockunspent","walletprocesspsbt"]
+          && "getmempoolentry" `elem` pendingCalls && unauthorized && changed && family)
+    , check "native recovery rejects changed PSBT fees and owned prevouts before locking" $ once $ ioProperty $ do
+        let altered key method (Object fields) | method==key=pure $ Object $ KM.insert (if key=="decodepsbt" then "fee" else "value") (nativeNumber $ amt 1) fields
+            altered _ _ value=pure value
+            run change code=contract change $ \call->rejects code (restoreNativeWork call L2LSignetDevnet config (Just $ NativeLockWork prepared False []))
+        (badFee,feeCalls)<-run (altered "decodepsbt") "native_psbt_changed"
+        (badPrevious,previousCalls)<-run (altered "gettxout") "native_previous_output_changed"
+        pure (badFee && badPrevious && all (`notElem` (feeCalls<>previousCalls)) ["lockunspent","walletprocesspsbt"])
     , check "native lock recovery never clears foreign locks or sends empty mutations" $ once $ ioProperty $ do
         let points=map nativeOutpoint (nativeInputs tx)
         locked <- newIORef ([]::[Outpoint]); mutations <- newIORef (0::Int)

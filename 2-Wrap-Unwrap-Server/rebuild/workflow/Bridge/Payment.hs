@@ -1,18 +1,20 @@
 -- Preparation never signs or broadcasts. Only the critical interpreter owns
 -- signer transport; both ends use the same saved-plan checks below.
 module Bridge.Payment
-  ( SigningPlan(..), SigningReply(..), prepareUnsigned, resolveSigningPlan
-  , verifySigningReply, verifySignedAttempt, payoutReference ) where
+  ( SigningPlan(..), SigningReply(..), prepareUnsigned, resolveSigningPlan, nativePreparationPlan
+  , verifySigningReply, verifySignedAttempt, payoutReference, restoreNativeWork ) where
 import Bridge.Domain
 import Bridge.Error
 import Bridge.Identity (digest)
 import Bridge.NativePayment
+import Bridge.PaymentObservation (readNativePayment,activeNativeBlock)
+import Bridge.RPC (fieldValue)
 import Bridge.SolanaPayment
 import qualified Bridge.SolanaHelper as H
 import Bridge.Store
 import Bridge.Wire (Profile,PaymentTerms(..),CostLimits(..),PolicySnapshot(..))
-import Control.Exception (onException)
-import Data.Aeson (FromJSON,ToJSON,encode,eitherDecodeStrict',toJSON)
+import Control.Exception (onException,try)
+import Data.Aeson (Value,FromJSON,ToJSON,encode,eitherDecodeStrict',toJSON)
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
 import Data.Text (Text)
@@ -74,11 +76,8 @@ resolveSigningPlan profile config prepared = do
   draft <- maybe (reject "preparation_draft_required") pure (preparedDraft prepared)
   case paymentAsset outgoing of
     Native -> do
-      plan <- decodeSaved (preparedPolicy prepared)
+      plan <- nativePreparationPlan profile config prepared
       value <- decodeSaved draft
-      require (planProfile plan==profile && planDepth plan==nativeDepth policy && planAmount plan==paymentAmount outgoing
-        && planRecipient plan==paymentRecipient outgoing && units(planFeeLimit plan)>0
-        && planFeeLimit plan==preparedFee prepared && planFeeLimit plan<=savedNativeFee costs) "saved_native_policy_mismatch"
       either reject pure (validateNativeTx plan (draftPrevouts value) (draftFee value) (draftTransaction value))
       pure (NativeAuthorization plan value)
     Wrapped -> do
@@ -95,6 +94,18 @@ resolveSigningPlan profile config prepared = do
       either reject pure (H.validateHelperRequest config request)
       pure (SolanaAuthorization plan request)
     Sol -> reject "invalid_payout_asset"
+
+-- Shared by signing and paused lock recovery, including undrafted work.
+nativePreparationPlan :: Profile -> H.SolanaPolicy -> PreparedPayment -> IO NativePlan
+nativePreparationPlan profile config prepared = do
+  let view=preparedView prepared; outgoing=savedPayment view
+      PaymentTerms policy costs=savedTerms view
+  require (paymentAsset outgoing==Native && deploymentFingerprint policy==H.fingerprint config) "payment_profile_mismatch"
+  plan<-decodeSaved (preparedPolicy prepared)
+  require (planProfile plan==profile && planDepth plan==nativeDepth policy && planAmount plan==paymentAmount outgoing
+    && planRecipient plan==paymentRecipient outgoing && units(planFeeLimit plan)>0
+    && planFeeLimit plan==preparedFee prepared && planFeeLimit plan<=savedNativeFee costs) "saved_native_policy_mismatch"
+  pure plan
 
 verifySigningReply :: NativeRPC -> Profile -> H.SolanaPolicy -> PreparedPayment -> SigningReply -> IO SignedAttempt
 verifySigningReply native profile config prepared reply = do
@@ -133,3 +144,56 @@ encodeSaved :: ToJSON a => a -> Text
 encodeSaved=TE.decodeUtf8 . BL.toStrict . encode
 decodeSaved :: FromJSON a => Text -> IO a
 decodeSaved=either (const $ reject "invalid_saved_payment") pure . eitherDecodeStrict' . TE.encodeUtf8
+
+-- Paused recovery never signs, broadcasts, unlocks or releases ledger funds.
+restoreNativeWork :: NativeRPC -> Profile -> H.SolanaPolicy -> Maybe NativeLockWork -> IO Int
+restoreNativeWork call profile config work = case work of
+  Nothing->verifyOnly []
+  Just saved->do
+    let prepared=lockPreparation saved
+    plan<-nativePreparationPlan profile config prepared
+    draft<-mapM decodeSaved (preparedDraft prepared)
+    case (draft,lockAttempts saved) of
+      (Nothing,[])->verifyOnly []
+      (Just unsigned,[])->do
+        tx<-checkNativeDraft call plan unsigned
+        if lockCancelling saved then verifyOnly (points tx)
+          else restore plan tx (draftPrevouts unsigned)
+      (Just _,[attempt])->do
+        require (not(lockCancelling saved) && recordedChain attempt=="Native"
+          && recordedPayment attempt==paymentId(savedPayment $ preparedView prepared)
+          && recordedGeneration attempt==preparedGeneration prepared && recordedFee attempt==preparedFee prepared
+          && recordedState attempt `elem` ["signed","broadcast_intent"]) "native_lock_work_changed"
+        verifySignedAttempt call profile config prepared (recordedSigned attempt)
+        signed<-decodeSaved (signedPolicy $ recordedSigned attempt)
+        spent<-recordedSpend attempt signed
+        if spent then verifyOnly (points $ signedNativeTransaction signed)
+          else restore plan (signedNativeTransaction signed) (signedNativePrevouts signed)
+      -- Replacement lineage needs its own verified winner view; never guess.
+      _->reject "native_lock_recovery_requires_family"
+ where
+  points=map nativeOutpoint . nativeInputs
+  verifyOnly expected=ownedNativeLocks call expected >> pure 0
+  restore plan tx previous=do
+    current<-readNativePrevoutsWith True call (planDepth plan) (nativeInputs tx)
+    require (sameNativePrevouts current previous) "native_previous_output_changed"
+    restoreNativeInputLocks call (points tx)
+  recordedSpend attempt signed=do
+    found<-readNativePayment call signed
+    case found of
+      Nothing->pure False
+      Just (depth,value)->do
+        require (recordedState attempt=="broadcast_intent" && recordedSequence attempt/=Nothing) "unrecorded_broadcast_observed"
+        if depth>0 then do
+          anchor<-fieldValue "blockhash" value
+          _<-activeNativeBlock call anchor 1
+          pure True
+        else do
+          mempool<-try (call False "getmempoolentry" [toJSON $ signedId $ recordedSigned attempt]) :: IO (Either BridgeError Value)
+          case mempool of
+            Left (BridgeError "rpc_error_-5")->pure False
+            Left (BridgeError code)->reject code
+            Right entry->do
+              size<-fieldValue "vsize" entry :: IO Int
+              require (size>0) "native_mempool_evidence_invalid"
+              pure True

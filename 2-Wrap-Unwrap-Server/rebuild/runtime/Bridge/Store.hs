@@ -2,7 +2,7 @@
 -- Closed ledger operations. Connections, queries and transaction callbacks never
 -- escape this module; the runtime will interpret its customer/operator DSL here.
 module Bridge.Store
-  ( Reader, Writer, BridgeError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), StorePolicy(..), AllocationClaim(..), LedgerState(..), WithdrawalView(..), PaymentView(..), PaymentStatus(..), PreparedPayment(..), SignedAttempt(..), RecordedAttempt(..), CustodySnapshot(..)
+  ( Reader, Writer, BridgeError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), StorePolicy(..), AllocationClaim(..), LedgerState(..), WithdrawalView(..), PaymentView(..), PaymentStatus(..), PreparedPayment(..), SignedAttempt(..), RecordedAttempt(..), NativeLockWork(..), CustodySnapshot(..)
   , withReader, withWriter, withFencedWriter, evalRead, evalWrite ) where
 
 import Bridge.Error
@@ -67,10 +67,14 @@ data RecordedAttempt = RecordedAttempt
 data AllocationClaim = AllocationClaim { allocationLabel :: Text, mayAllocate :: Bool }
   deriving (Eq,Show)
 
+data NativeLockWork = NativeLockWork
+  { lockPreparation :: PreparedPayment, lockCancelling :: Bool, lockAttempts :: [RecordedAttempt] } deriving (Eq,Show)
+
 data CustodySnapshot = CustodySnapshot
   { custodyRevision :: Int64, custodyTotals :: M.Map Asset Integer
   , custodyHeads :: [(Text,Text)], custodySlot :: Int64, custodyPending :: [RecordedAttempt] } deriving (Eq,Show)
 data StoreRead a where
+  ReadNativeLockWork :: StoreRead (Maybe NativeLockWork)
   FindOrder :: Text -> W.OrderRequest -> StoreRead (Maybe Text)
   ReadProvisioning :: Text -> Text -> StoreRead (W.OrderView,Maybe Int64)
   CheckIntake :: Int64 -> StoreRead ()
@@ -101,6 +105,7 @@ data StoreRead a where
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
+  RecordNativeLockRestore :: NativeLockWork -> Int -> StoreWrite ()
   RecordCustody :: Int64 -> Int64 -> Maybe Text -> Maybe Value -> StoreWrite ()
   MarkBroadcast :: Int64 -> Text -> StoreWrite Int64
   AuthorizeSend :: Int64 -> Text -> StoreWrite RecordedAttempt
@@ -183,6 +188,7 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
           O.where_ (S.eventId event O..== O.sqlStrictText identifier O..&& O.in_ (map O.sqlStrictText $ if chain=="Solana" then ["Solana","SolanaOperating"] else [chain]) (S.eventChain event))
           pure (S.eventId event)
         pure (not $ null (rows :: [Text]))
+      ReadNativeLockWork -> nativeLockWork c identity
       PendingAttempts -> pendingAttempts c
       PaymentCandidates -> paymentCandidates c
       ReadState -> pure (LedgerState (S.criticalSequence row) (S.backupSequence row) (S.paused row/=0) (S.pauseReason row))
@@ -216,6 +222,12 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
 evalWrite :: Writer -> StoreWrite a -> IO a
 evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
  let policy=executionTerms config; limit=admissionLimits config in case operation of
+  RecordNativeLockRestore expected count -> do
+    current<-nativeLockWork c (deploymentFingerprint $ paymentPolicy policy)
+    require (current==Just expected && not(lockCancelling expected) && preparedDraft(lockPreparation expected)/=Nothing && count>0 && count<=100) "native_lock_work_changed"
+    let saved=lockPreparation expected
+        subject=paymentId(savedPayment $ preparedView saved)<>"@"<>T.pack(show $ preparedGeneration saved)
+    audit c "native_locks_restored" (subject<>":"<>T.pack(show count))
   RecordCustody revision now problem report -> recordCustody c revision now problem report
   MarkBroadcast now txid -> markBroadcast c config now txid
   AuthorizeSend now txid -> authorizeSend c config now txid
@@ -1236,6 +1248,13 @@ operatingCapacity c limits booked allowances = do
 
 readPreparation :: PG.Connection -> Text -> Text -> IO PreparedPayment
 readPreparation c identity identifier = do
+  (prepared,cancelling)<-preparationState c identity identifier
+  require (not cancelling) "preparation_cancellation_pending"
+  pure prepared
+
+-- Recovery may inspect a pending cancellation, but ordinary signing may not.
+preparationState :: PG.Connection -> Text -> Text -> IO (PreparedPayment,Bool)
+preparationState c identity identifier = do
   view <- readPayment c identity identifier
   rows <- O.runSelect c $ do
     intent <- O.selectTable S.intents
@@ -1252,8 +1271,9 @@ readPreparation c identity identifier = do
     O.where_ (key O..== O.sqlStrictText identifier O..&& g O..== O.sqlInt8 generation)
     pure key
     :: IO [Text]
-  require (null cancellations) "preparation_cancellation_pending"
-  PreparedPayment view (fromIntegral generation) policy draft <$> checked (amount $ toInteger n)
+  require (length cancellations<=1) "duplicate_preparation_cancellation"
+  fee<-checked (amount $ toInteger n)
+  pure (PreparedPayment view (fromIntegral generation) policy draft fee,not $ null cancellations)
 
 preparePayment :: PG.Connection -> StorePolicy -> Int64 -> Text -> Amount -> Text -> IO PreparedPayment
 preparePayment c config now identifier allowance plan = do
@@ -1769,3 +1789,24 @@ paymentCandidates c = do
     && all ((`elem` ["Native","Wrapped"]).snd) ready) "payment_queue_requires_review"
   let waiting=[(key,if asset=="Native" then "Native" else "Solana")|(key,asset)<-ready]
   pure [key|chain<-["Native","Solana"],key<-take 1 ([i|(i,currency)<-active,currency==chain]<>[i|(i,currency)<-waiting,currency==chain])]
+
+-- Saved native work only: no source/payment authorization is granted by this read.
+nativeLockWork :: PG.Connection -> Text -> IO (Maybe NativeLockWork)
+nativeLockWork c identity = do
+  active<-O.runSelect c $ O.limit 2 $ do
+    row<-O.selectTable S.intents
+    O.where_ (S.intentChain row O..== O.sqlStrictText "Native" O..&& S.intentResolved row O..== O.sqlInt8 0)
+    pure (S.intentId row)
+  case active of
+    []->pure Nothing
+    [identifier]->do
+      (prepared,cancelling)<-preparationState c identity identifier
+      require (paymentAsset(savedPayment $ preparedView prepared)==Native) "payment_funding_mismatch"
+      ids<-O.runSelect c $ O.limit 9 $ O.orderBy (O.asc id) $ do
+        row<-O.selectTable S.attempts
+        O.where_ (S.attemptIntent row O..== O.sqlStrictText identifier)
+        pure (S.attemptId row)
+      require (length ids<=8) "native_replacement_family_bounds"
+      attempts<-mapM (readAttempt c) ids
+      pure (Just $ NativeLockWork prepared cancelling attempts)
+    _->reject "native_lock_recovery_bounds"

@@ -28,6 +28,7 @@ data SigningOperation a where
   SignPrepared :: Text -> Text -> Int -> SigningOperation SignedAttempt
 
 data WorkerOperation a where
+  RecoverNativeLocks :: WorkerOperation ()
   RunWorkerCycle :: WorkerOperation ()
   ObserveChains :: WorkerOperation ()
   PrepareOutgoing :: Text -> WorkerOperation ()

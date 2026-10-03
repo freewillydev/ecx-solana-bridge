@@ -80,6 +80,7 @@ ledgerMain = do
       expectStore "ledger_profile_or_schema_mismatch" (withReader readerSettings "wrong" True $ const $ pure ())
       withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
         expectStore "worker_already_running" (withWriter settings (store policy limits) (const $ pure ()) $ const $ pure ())
+        evalRead reader ReadNativeLockWork >>= check . (==Nothing)
         evalRead reader PendingAttempts >>= check . null
         evalRead reader PaymentCandidates >>= check . null
         initial <- evalRead reader ReadBalances
@@ -458,13 +459,26 @@ ledgerMain = do
         fixture fixtures ReadyIntake
         earnedPrepared<-evalWrite writer (PreparePayment 100 ("fee:"<>withdrawalKey) (money 5) "{}")
         check (paymentAsset(savedPayment $ preparedView earnedPrepared)==Native && savedStatus(preparedView earnedPrepared)==PaymentPaying)
+        evalRead reader ReadNativeLockWork >>= check . (==Just(NativeLockWork earnedPrepared False []))
+        expectStore "native_lock_work_changed" (evalWrite writer $ RecordNativeLockRestore (NativeLockWork earnedPrepared False []) 1)
         evalRead reader (ReadPaymentSource $ "fee:"<>withdrawalKey) >>= check . (==Nothing)
         expectStore "fee_withdrawal_payment_exists" (evalWrite writer $ CancelFees withdrawalKey "must retain")
         fixture fixtures (CheckFundingBinding ("fee:"<>withdrawalKey) withdrawalKey) >>= check
         evalWrite writer (SaveDraft ("fee:"<>withdrawalKey) 0 "{\"nativeDraft\":true}")
         earnedDraft<-evalRead reader (ReadPreparation $ "fee:"<>withdrawalKey)
+        let lockWork=NativeLockWork earnedDraft False []
+        evalRead reader ReadNativeLockWork >>= check . (==Just lockWork)
+        beforeLockAudit<-evalRead reader ReadState
+        beforeLockBalances<-evalRead reader ReadBalances
+        evalWrite writer (RecordNativeLockRestore lockWork 1)
+        evalRead reader ReadState >>= check . (==beforeLockAudit)
+        evalRead reader ReadBalances >>= check . (==beforeLockBalances)
+        fixture fixtures LockRestoreAudits >>= check . (==["fee:"<>withdrawalKey<>"@0:1"])
+        expectStore "native_lock_work_changed" (evalWrite writer $ RecordNativeLockRestore lockWork 0)
+        expectStore "native_lock_work_changed" (evalWrite writer $ RecordNativeLockRestore lockWork {lockCancelling=True} 1)
         let nativeSigned=SignedAttempt (T.replicate 64 "f") "native-fixture-bytes" "{\"nativeSigned\":true}" (Just "fixture-prevout:0")
         nativeRecorded<-evalWrite writer (RecordAttempt earnedDraft nativeSigned)
+        evalRead reader ReadNativeLockWork >>= check . (==Just lockWork {lockAttempts=[nativeRecorded]})
         check (recordedChain nativeRecorded=="Native" && recordedSigned nativeRecorded==nativeSigned && recordedState nativeRecorded=="signed")
         evalRead reader PaymentCandidates >>= check . (==["fee:"<>withdrawalKey,intent])
         evalRead reader PendingAttempts >>= check . (==sort [signedId nativeSigned,"fixture-signed-solana"])
@@ -493,6 +507,7 @@ ledgerMain = do
         expectStore "settlement_evidence_conflict" (evalWrite writer $ SettlePayment authorized nativeCosts "changed-proof")
         completed<-evalRead reader (ReadPayment $ "fee:"<>withdrawalKey)
         check (savedStatus completed==PaymentPaid)
+        evalRead reader ReadNativeLockWork >>= check . (==Nothing)
         evalRead reader PendingAttempts >>= check . (notElem nativeTx)
         evalRead reader PaymentCandidates >>= check . (notElem ("fee:"<>withdrawalKey))
         bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "terminal payment must not call RPC"}) closeManager $ \manager ->
@@ -752,6 +767,7 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  LockRestoreAudits :: Fixture [T.Text]
   OrderWorkflowFunds :: Fixture ()
   CustodyHeadReview :: Int64 -> Fixture ()
   SeedCustodyHeads :: Fixture ()
@@ -788,6 +804,10 @@ data Fixture a where
   ProtectHolds :: T.Text -> Fixture ()
   CheckPhases :: T.Text -> T.Text -> Fixture Bool
 fixture :: PG.Connection -> Fixture a -> IO a
+fixture c LockRestoreAudits = O.runSelect c $ do
+  (_,kind,subject)<-O.selectTable S.audit
+  O.where_ (kind O..== O.sqlStrictText "native_locks_restored")
+  pure subject
 fixture c Initialize = fixture c (InitializeIdentity "contract")
 fixture c (InitializeIdentity identity) = PG.withTransaction c $ do
   void $ O.runInsert c O.Insert {O.iTable=S.deployment,O.iRows=[S.Deployment (O.sqlInt8 1) (O.sqlInt8 19) (O.sqlStrictText identity) (O.sqlInt8 0) (O.sqlInt8 0) (O.sqlInt8 1) (O.sqlStrictText "test")],O.iReturning=O.rCount,O.iOnConflict=Nothing}

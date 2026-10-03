@@ -526,9 +526,26 @@ lifetime owner. Tests verify queue selection across reservation, cancellation,
 preparation, signing, settlement and failure, plus a real PostgreSQL runtime cycle
 with unavailable RPC retaining balances/pending work and recording all three scan
 failures. QuickCheck verifies loop backoff and cancellation. Positive funded cycles,
-native lock reconstruction, recovery-family parity and explicit resume remain
+replacement-family lock recovery, recovery-family parity and explicit resume remain
 unfinished. The executable now owns HTTP and the worker together through
 structured concurrency; either terminating cancels its sibling.
+
+Native lock reconstruction now runs before chain scanning, independently of Solana
+availability, through `RecoverNativeLocks`. The closed store read binds the native
+intent, active generation, pending cancellation and at most eight saved attempts.
+Recovery shares native plan/PSBT validation with signing. It restores only still-owned
+saved inputs; undrafted/cancelling work and already-confirmed/mempool spends only
+verify existing locks. Unknown locks are never cleared. Changed inputs, unrecorded
+broadcasts and unsupported replacement families refuse recovery and retain pause.
+A snapshot-bound closed audit write records restorations without changing balances
+or financial sequence. Captured Signet protocol checks cover idempotency, earned
+funding, cancellation, confirmed/mempool/unseen outcomes and changed PSBT/prevouts;
+PostgreSQL checks cover native work selection, audit binding and unchanged money.
+These do not replace actual daemon-restart or replacement-family acceptance.
+The implementation stays in Payment: 135 → 199 lines in that existing file, plus
+41 Store lines, 8 runtime lines, 6 adapter lines and one grammar constructor; no new
+production file. Baseline lock recovery occupied 71 lines plus shared helpers and
+included family handling still pending here, so this is not an equivalent reduction.
 
 Customer admission now has the baseline native dust/fee funding preview and Solana
 account/fee/rent/unsigned-simulation preflight. Its adapter, fingerprint, depth and
@@ -585,7 +602,7 @@ Scoped physical-line comparisons (not whole-product reduction claims):
 | Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
 | Signer module | 144 / 1 file | 117 / 1 file | Now includes startup key validation and shared file permissions; replacement parity pending |
 | Signer transport | 103 / 1 file plus shared web boundary | 69 / 1 file + shared 71-line Web module | Shared module also serves customer API; initial signer route only |
-| Customer/worker runtime | Part of broader Runtime | 294 / 1 file (previous checkpoint 232) | Adds recovery-first cycle, refreshed custody/backup gates and bounded retry interval |
+| Customer/worker runtime | Part of broader Runtime | 302 / 1 file (previous checkpoint 294) | Adds native lock reconstruction before scans; retains one critical dispatch |
 | Focused source validation | 63-line mixed validation/storage/recovery function | 67-line dedicated module | Covered-source recovery is still separate unfinished work |
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |
