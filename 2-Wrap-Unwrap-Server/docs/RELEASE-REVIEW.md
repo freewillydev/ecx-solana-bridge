@@ -5,6 +5,23 @@ The private draft predates current authorization, frontend, escrow and subproces
 changes. Passing evidence for an older binary does not certify the current source.
 No independent reviewer has signed off, and canonical intake remains disabled.
 
+## Current signer deployment evidence
+
+Source `5f450a9`: the restricted native worker credential was tested against
+Bitcoin Core 31.1 with the real L2L Signet challenge. Observation succeeded and
+19 signing/export/admin methods returned HTTP 403. This was an unsynchronized,
+wallet-free authority check, not a funded-chain acceptance run.
+
+The same source's credential provisioning passed on a fresh Ubuntu 24.04 ARM64
+guest with distinct real worker/signer users. Worker reads of custody material,
+private signer configuration, TLS key and full native cookie were denied; signer
+reads succeeded. Both ordinary Unix permissions and transient services using the
+committed systemd sandbox properties passed. Repeated provisioning preserved all
+credential bytes, owners and modes. The temporary guest was stopped and deleted.
+This verifies the file-authority boundary only: it did not run the bridge binary,
+exercise PostgreSQL peer roles, test reboot or transfer funds. Those remain required
+with the current application, together with wallet and recovery acceptance.
+
 ## Working product and evidence
 
 | Requirement | Evidence and practical limit |

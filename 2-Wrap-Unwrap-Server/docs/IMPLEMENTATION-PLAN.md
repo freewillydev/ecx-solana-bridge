@@ -200,16 +200,16 @@ Complete these milestones in order:
    methods and refusal of signing/key export at the real node. Retire the old
    helper subprocess/sandbox. Do not regenerate existing custody keys or reset
    the ledger. A second process without credential isolation does not pass.
-2. **Accept the current customer product.** With that signer and the current
+2. **Finish earned-fee withdrawal.** Connect earned-fund reservation through the
+   same durable signing/send/settlement workflow using an explicit funding type.
+   Cover cancellation, retry and interrupted operation without synthetic orders
+   or deposits, and accept a bounded withdrawal on the real test networks.
+3. **Accept the current customer product.** With that signer and the current
    browser, complete both funded L2L Signet/Solana Devnet directions, refund,
    saved-order reload, restart and interrupted signed-attempt recovery. Use an
    actual supported Solana Pay wallet for the customer signing check. Preserve
    exact source revision and transaction identifiers in one acceptance record;
    injected database fixtures do not establish network or wallet behavior.
-3. **Finish earned-fee withdrawal.** Connect earned-fund reservation through the
-   same durable signing/send/settlement workflow using an explicit funding type.
-   Cover cancellation, retry and interrupted operation without synthetic orders
-   or deposits, and accept a bounded withdrawal on the real test networks.
 4. **Retire incompatible tooling in one pass.** Move unique Python row assertions
    and acceptance behavior into the Cabal/Opaleye runner; remove superseded
    scripts, obsolete helper configuration and standalone Rust example entry
@@ -222,6 +222,8 @@ Complete these milestones in order:
    separate the reviewable public-test milestone from off-host clean-host restore,
    broader loss/reorg acceptance, canonical activation and independent review.
 
+Finish fee-withdrawal implementation before the next costly Linux build so that
+current customer and operator workflows receive one integrated acceptance batch.
 No arbitrary module/file target is a completion gate. Keep one build job, reuse
 warm caches, and stop only task-owned temporary services. Packaging for both Linux
 architectures follows substantive runtime acceptance, not each source edit.
