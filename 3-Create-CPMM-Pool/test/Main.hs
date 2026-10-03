@@ -1,6 +1,7 @@
 module Main (main) where
 import Pool
 import qualified Pool.Signing as S
+import qualified Pool.Position as P
 import qualified Crypto.PubKey.Ed25519 as Ed
 import Crypto.Error (CryptoFailable(..))
 import qualified Data.ByteArray as BA
@@ -31,6 +32,9 @@ main=do
       request<-c .: "request"; prepared<-c .: "prepared"
       snapshot<-c .: "snapshot" >>= withObject "snapshot" (\x->Snapshot <$> x .: "slot" <*> x .: "accounts")
       pure(request,prepared,snapshot)) value) fixture
+  (positionRequest,positionPrepared,positionAccounts)<-either fail pure $ parseEither (withObject "fixture" $ \o->do
+    o .: "simulatedPosition" >>= withObject "simulation" (\v->(,,) <$> v .: "request" <*> v .: "prepared" <*> v .: "accounts")) fixture
+  positionBytes<-either fail pure $ B64.decode $ TE.encodeUtf8 $ P.transaction positionPrepared
   let request=Create "3psSKHRPopKXPcBajcm2crjoKzrUtWyfsqeprTRMxAqZ" (expectedA expected) (expectedB expected)
         "HcctYHWCfLGrE5WigGKHg5hR6Q1P1Gntb5PYQWSQFHXg" "AzNd4srpctGzR5Q7LqkQh6aUwwqNEveTcCTNX8uHixDC"
         (2^(64::Int)) (pool expected)
@@ -51,6 +55,15 @@ main=do
       saved=S.Saved Devnet signingRequest signingPrepared 20000 20000000 (base58 first) (TE.decodeUtf8 $ B64.encode signedBytes)
   results<-sequence
     [ quickCheckResult $ once $ property $
+        not(isLeft $ P.validate positionRequest positionPrepared)
+        && not(isLeft $ P.validateOpened positionRequest positionAccounts)
+        && isLeft(P.validateOpened positionRequest {P.payer=P.positionMint positionRequest} positionAccounts)
+        && isLeft(P.validateOpened positionRequest {P.pool=P.payer positionRequest} positionAccounts)
+        && isLeft(P.validate positionRequest {P.blockhash=P.pool positionRequest} positionPrepared)
+        && isLeft(decodeTransaction $ P.transaction positionPrepared)
+        && all (\index->isLeft $ P.validate positionRequest positionPrepared {P.transaction=TE.decodeUtf8 $ B64.encode $
+          B.take index positionBytes<>B.singleton((B.index positionBytes index) `xor` 1)<>B.drop (index+1) positionBytes}) [0..B.length positionBytes-1]
+    , quickCheckResult $ once $ property $
         not(isLeft $ S.validateSaved saved)
         && (eitherDecode (encode saved) :: Either String S.Saved)==Right saved
         && isLeft(S.validateSaved saved {S.identifier=payer signingRequest})

@@ -2,8 +2,8 @@
 
 Liquidity uses separate operator capital and keys, outside bridge custody. The
 root-Cabal `ecx-pool` CLI derives canonical addresses and verifies existing
-full-range pools and prepares unsigned classic Splash-pool creation. Position ownership/funding and fee collection are
-still unfinished; inspection is not a substitute for those operations.
+full-range pools, creates classic Splash pools and prepares full-range positions.
+Position signing/funding and fee collection remain unfinished.
 
 ```sh
 cabal run -v0 ecx-pool -- prepare devnet REQUEST.json > prepared.json
@@ -12,6 +12,8 @@ cabal run -v0 ecx-pool -- sign HTTPS_RPC MAX_FEE MAX_COST prepared.json PAYER_KE
 cabal run -v0 ecx-pool -- submit HTTPS_RPC ATTEMPT.json
 cabal run -v0 ecx-pool -- address devnet MINT_A MINT_B FEE_TIER_INDEX
 cabal run -v0 ecx-pool -- inspect devnet HTTPS_RPC POOL MINT_A MINT_B
+cabal run -v0 ecx-pool -- prepare-position devnet POSITION_REQUEST.json > position.json
+cabal run -v0 ecx-pool -- check-position HTTPS_RPC MAX_FEE MAX_COST position.json
 cabal test ecx-pool:pool-test --offline -j1 --test-show-details=direct
 ```
 
@@ -21,7 +23,7 @@ it is not necessarily the tick spacing. Inspection reads that index from the poo
 independently derives its PDA through the existing Solana SDK and verifies it.
 
 `Pool.hs` owns a closed safe DSL. It has no signer, private-key, database, broadcast
-or custody capability. It uses the shared bounded HTTPS RPC adapter and a narrow
+or custody capability. It uses the shared bounded HTTPS RPC adapter and narrow
 read-only FFI entry points for PDA derivation and unsigned instruction construction. No additional SDK dependencies are
 introduced. Inspection verifies:
 
@@ -85,6 +87,28 @@ bytes and the saved fee/total-debit limits. A timeout retains the attempt; run
 `submit` again. No command refreshes its blockhash, overwrites an attempt, or
 silently signs a replacement. Expired/unresolved attempts require review.
 
+## Full-range position preparation
+
+`POSITION_REQUEST.json` has exactly six string fields: `payer`, `pool`, `mintA`,
+`mintB`, `positionMint`, and `blockhash`. The payer also owns the position; the
+position mint is a fresh keypair public key, not either pool asset. The supported
+tick spacing is 32896, with full-range ticks -427648 and 427648. Preparation derives
+the position PDA, ownership ATA and both boundary-array PDAs, and combines two
+idempotent dynamic-array initializations with classic `OpenPosition`. Existing
+compatible arrays can be reused. No liquidity moves in this transaction.
+
+`Pool.Position` independently checks all three instructions, two zero signatures,
+account roles, blockhash and tick bounds. Preflight verifies the real pool and
+network, absent position accounts, system payer and fee limit. Exact simulation
+must create an empty full-range position and one payer-owned NFT, with no mint or
+freeze authority and no token-account delegate/close authority. The conservative
+simulated debit must fit `MAX_COST`. These checks do not yet authorize signing.
+
+Actual Devnet simulation at slot 507074039 passed with conservative debit 8,264,840
+lamports; fee limit 1 and cost limit 20,000 were refused. The public simulation is
+retained in the existing fixture, with ownership/request/byte-mutation regression
+checks. No position creation has yet been signed or submitted.
+
 ## Verified checkpoint
 
 Live read-only acceptance passed for:
@@ -129,8 +153,9 @@ This proves creation only, not funded liquidity or trading.
 
 Creation preflight now binds the real ordinary tier and explicit price/cost limits.
 The closed signer supports independent vault signatures in addition to the payer,
-keeping the bridge's one-signature custody protocol unchanged. Add tick-array
-initialization, full-range position creation,
+keeping the bridge's one-signature custody protocol unchanged. Full-range position
+and boundary-array preparation/preflight now pass real Devnet simulation. Connect
+that operation to saved signing/submission, then add
 liquidity deposit/withdrawal and fee collection with saved-attempt recovery and
 real Devnet acceptance. Adaptive-tier initialization can have additional authority
 requirements; do not assume the published tier is permissionless.

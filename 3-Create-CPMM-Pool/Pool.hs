@@ -1,6 +1,6 @@
 {-# LANGUAGE GADTs, ForeignFunctionInterface #-}
 -- Closed, read-only liquidity operations. No signing key, ledger or custody access.
-module Pool (Network(..),Safe(..),Create(..),Prepared(..),Costs(..),validatePrepared,validateCreated,Expected(..),Snapshot(..),Report(..),Whirlpool(..),evalSafe,validate,decodePool,program,configuration,networkGenesis) where
+module Pool (Network(..),Safe(..),Create(..),Prepared(..),Costs(..),validatePrepared,validateCreated,Expected(..),Snapshot(..),Report(..),Whirlpool(..),evalSafe,validate,decodePool,program,configuration,networkGenesis,accountData,parse,mintParser,vaultParser) where
 import Bridge.Error (require,reject)
 import Bridge.RPC
 import Bridge.Solana (tokenProgram)
@@ -112,11 +112,14 @@ validateCreated network r p expectedFee snapshot=do
 
 data Safe a where
   Check :: FilePath -> Network -> String -> Word64 -> Word64 -> Create -> Prepared -> Safe Costs
+  PositionBytes :: FilePath -> Text -> Text -> Text -> Text -> Safe B.ByteString
   Prepare :: FilePath -> Network -> Create -> Safe Prepared
   Address :: FilePath -> Network -> Text -> Text -> Word16 -> Safe Text
   Inspect :: FilePath -> Network -> String -> Expected -> Safe Report
 
 evalSafe :: Safe a -> IO a
+evalSafe (PositionBytes library payerKey poolKey mintKey hash)=invoke "ecx_position_prepare_v1" library $ object
+  ["protocol" .= (1::Int),"payer" .= payerKey,"pool" .= poolKey,"position_mint" .= mintKey,"blockhash" .= hash]
 evalSafe (Prepare library network r)=do
   require (initialPrice r>=4295048016 && initialPrice r<=79226673515401279992447579055) "invalid_pool_price"
   reply<-invoke "ecx_pool_prepare_v1" library $ object

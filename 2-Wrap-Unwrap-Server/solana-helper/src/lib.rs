@@ -370,6 +370,45 @@ pub unsafe extern "C" fn ecx_pool_prepare_v1(
     config:*const u8,config_len:usize,request:*const u8,request_len:usize,
     output:*mut u8,capacity:usize,output_len:*mut usize,
 )->i32 { unsafe { prepare_ffi(3,config,config_len,request,request_len,output,capacity,output_len) } }
+// Atomic full-range position opening plus idempotent dynamic boundary arrays.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PositionRequest {protocol:u8,payer:String,pool:String,position_mint:String,blockhash:String}
+fn prepare_position(r:PositionRequest)->Result<serde_json::Value,&'static str> {
+    use solana_instruction::{AccountMeta as A,Instruction};
+    let payer=key(&r.payer)?; let pool=key(&r.pool)?; let mint=key(&r.position_mint)?;
+    if r.protocol!=1 || payer==mint || !payer.is_on_curve() || !mint.is_on_curve() { return Err("invalid_position_request"); }
+    let program=key("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc")?;
+    let token=spl_token_interface::id(); let system=Pubkey::default();
+    let (position,bump)=Pubkey::find_program_address(&[b"position",mint.as_ref()],&program);
+    let account=get_associated_token_address_with_program_id(&payer,&mint,&token);
+    let starts=[-2894848i32,0];
+    let arrays=starts.map(|start|Pubkey::find_program_address(&[b"tick_array",pool.as_ref(),start.to_string().as_bytes()],&program).0);
+    let mut instructions=Vec::new();
+    for (start,array) in starts.into_iter().zip(arrays) {
+        let mut data=vec![41,33,165,200,120,231,142,50]; data.extend_from_slice(&start.to_le_bytes()); data.push(1);
+        instructions.push(Instruction {program_id:program,accounts:vec![A::new_readonly(pool,false),A::new(payer,true),A::new(array,false),A::new_readonly(system,false)],data});
+    }
+    let accounts=vec![A::new(payer,true),A::new_readonly(payer,false),A::new(position,false),A::new(mint,true),
+        A::new(account,false),A::new_readonly(pool,false),A::new_readonly(token,false),A::new_readonly(system,false),
+        A::new_readonly(key("SysvarRent111111111111111111111111111111111")?,false),
+        A::new_readonly(key("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL")?,false)];
+    let mut data=vec![135,128,47,77,15,152,240,49,bump];
+    data.extend_from_slice(&(-427648i32).to_le_bytes()); data.extend_from_slice(&427648i32.to_le_bytes());
+    instructions.push(Instruction {program_id:program,accounts,data});
+    let hash=Hash::from_str(&r.blockhash).map_err(|_| "invalid_blockhash")?;
+    let message=Message::new_with_blockhash(&instructions,Some(&payer),&hash);
+    if message.account_keys.len()!=12 || message.header.num_required_signatures!=2 { return Err("position_account_collision"); }
+    let bytes=bincode::serialize(&Transaction::new_unsigned(message)).map_err(|_| "serialization_failed")?;
+    if bytes.len()>1232 { return Err("transaction_too_large"); }
+    Ok(serde_json::json!({"position":position.to_string(),"tokenAccount":account.to_string(),"lowerArray":arrays[0].to_string(),
+        "upperArray":arrays[1].to_string(),"bump":bump,"transaction":STANDARD.encode(bytes)}))
+}
+#[no_mangle]
+pub unsafe extern "C" fn ecx_position_prepare_v1(
+    config:*const u8,config_len:usize,request:*const u8,request_len:usize,
+    output:*mut u8,capacity:usize,output_len:*mut usize,
+)->i32 { unsafe { prepare_ffi(4,config,config_len,request,request_len,output,capacity,output_len) } }
 unsafe fn prepare_ffi(
     mode: u8, config: *const u8, config_len: usize, request: *const u8, request_len: usize,
     output: *mut u8, capacity: usize, output_len: *mut usize,
@@ -390,6 +429,11 @@ unsafe fn prepare_ffi(
         return 2;
     }
     let result = std::panic::catch_unwind(|| {
+        if mode == 4 {
+            if unsafe { std::slice::from_raw_parts(config,config_len) } != b"{}" { return Err("invalid_position_config"); }
+            let r=serde_json::from_slice(unsafe { std::slice::from_raw_parts(request,request_len) }).map_err(|_| "invalid_position_request")?;
+            return serde_json::to_vec(&prepare_position(r)?).map_err(|_| "serialization_failed");
+        }
         if mode == 3 {
             if unsafe { std::slice::from_raw_parts(config,config_len) } != b"{}" { return Err("invalid_pool_config"); }
             let r=serde_json::from_slice(unsafe { std::slice::from_raw_parts(request,request_len) }).map_err(|_| "invalid_pool_request")?;

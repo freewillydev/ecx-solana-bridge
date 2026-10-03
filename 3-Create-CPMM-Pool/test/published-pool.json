@@ -168,5 +168,63 @@
     },
     "source": "https://api.devnet.solana.com",
     "kind": "unsigned simulation; no transaction submitted"
+  },
+  "simulatedPosition": {
+    "network": "devnet",
+    "prepared": {
+      "bump": 253,
+      "lowerArray": "CyUvoiFwF8bjq57wSPMYi8TCucgEsgQE1FPHcrbzyhhH",
+      "position": "7gadbytE2t3vQs9skcq2EYXkjBGYcGboGeeCHfUavLRT",
+      "tokenAccount": "Dg5XRaYFDiAdPHUptN121vB1MRTKX7J5Y4x3JrndNJwa",
+      "transaction": "AgAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAgAGDCn6s1kD0r01XYwIjgIPxumA1CtH/1T6IU3HRZUfpjIciysxarpsYmCbS/pJ6Udjj73oLvnjaukNIEoT2gnBPPxjSczGjifHyT6x7dYymfNFNoLZ/bL2hsrKqhRqMvcO7pJS7W65CjwgQ2UbNiHGRU29RAVgHxXx05nB31+OiEA3seio0BWtyLQ46G2hyK8rRiMuOi8phEu7P1GxzaqtjRC8TwK2ME7z+ykniTGRORK3LhCVE7T+FFuXsBoK8jd1KQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABqfVFxksXFEhjMlMPUrxf1ja7gibof1E49vZigAAAAAG3fbh12Whk9nL4UbO63msHLSF7V9bN5E6jPWFfv8AqQ4DaF+OkJBT5FgSHGb1p2rtx3BqoRyC+KqVKo8reHmpjJclj04kifG7PRApFI4NgwtaE5na/xCEBI572Nvp+FnTLDL3HL1cl3r02rNzGbV8mXbeQmVsHpq5OkVk3HfDr8rdTDVSnF4NGiltTGElfay3OHGsFgmc+k7f76FDg30WAwkECwAEBg0pIaXIeOeOMgDU0/8BCQQLAAMGDSkhpch4544yAAAAAAEJCgAAAgEFCwgGBwoRh4AvTQ+Y8DH9gHn5/4CGBgA=",
+      "upperArray": "ArBsC2ufFoX7NwAEAAKpeKquPL8HRDX13GWYPhf7otyC"
+    },
+    "request": {
+      "blockhash": "Eeu5AMQ4sNhgkwgZnWFVw2obVfTKkTVQsfRz1Gu8XK6D",
+      "mintA": "BRjpCHtyQLNCo8gqRUr8jtdAj5AjPYQaoqbvcZiHok1k",
+      "mintB": "EGiiQQYXtQLing36xCFnNCHwBfuP2ddSkRTo6TDRQFHT",
+      "payer": "3psSKHRPopKXPcBajcm2crjoKzrUtWyfsqeprTRMxAqZ",
+      "pool": "FDL7cuLgL3Yog4B5MJY51eLA9fWqjqm9XFX1vnwdLs9Y",
+      "positionMint": "ANFsU7NAXfs5sAbsQNQf1GkQSMyCftZ6yWGGT6ydXwvs"
+    },
+    "accounts": [
+      {
+        "data": [
+          "qryP5HpA99DTLDL3HL1cl3r02rNzGbV8mXbeQmVsHpq5OkVk3HfDr4srMWq6bGJgm0v6SelHY4+96C7542rpDSBKE9oJwTz8AAAAAAAAAAAAAAAAAAAAAIB5+f+AhgYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "base64"
+        ],
+        "executable": false,
+        "lamports": 2885440,
+        "owner": "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc",
+        "rentEpoch": 18446744073709551615,
+        "space": 216
+      },
+      {
+        "data": [
+          "AAAAANMsMvccvVyXevTas3MZtXyZdt5CZWwemrk6RWTcd8OvAQAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+          "base64"
+        ],
+        "executable": false,
+        "lamports": 1066800,
+        "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+        "rentEpoch": 18446744073709551615,
+        "space": 82
+      },
+      {
+        "data": [
+          "iysxarpsYmCbS/pJ6Udjj73oLvnjaukNIEoT2gnBPPwp+rNZA9K9NV2MCI4CD8bpgNQrR/9U+iFNx0WVH6YyHAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+          "base64"
+        ],
+        "executable": false,
+        "lamports": 1488440,
+        "owner": "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+        "rentEpoch": 18446744073709551615,
+        "space": 165
+      }
+    ],
+    "slot": 507074039,
+    "maximumDebit": 8264840,
+    "source": "https://api.devnet.solana.com",
+    "kind": "unsigned simulation only"
   }
 }
