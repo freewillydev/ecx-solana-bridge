@@ -57,7 +57,9 @@ data StoreRead a where
   ReadBalances :: StoreRead (M.Map (Asset,Account) Integer)
   ReadWithdrawal :: Text -> StoreRead (Maybe WithdrawalView)
   ReadOrder :: Text -> Text -> StoreRead W.OrderView
+  PromotionCandidates :: StoreRead [Text]
 data StoreWrite a where
+  PromoteDeposit :: Int64 -> Text -> StoreWrite Bool
   Pause :: Text -> StoreWrite ()
   CreateOrder :: Int64 -> Text -> W.OrderRequest -> StoreWrite Text
   ClaimNative :: Int64 -> Text -> Text -> StoreWrite AllocationClaim
@@ -105,6 +107,7 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
     row <- metadata c identity
     case operation of
       ReadState -> pure (LedgerState (S.criticalSequence row) (S.backupSequence row) (S.paused row/=0) (S.pauseReason row))
+      PromotionCandidates -> promotionCandidates c
       ReadBalances -> balances c
       ReadWithdrawal key -> readWithdrawal c key
       ReadOrder header identifier -> do
@@ -114,6 +117,7 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
 evalWrite :: Writer -> StoreWrite a -> IO a
 evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
  let policy=executionTerms config; limit=admissionLimits config in case operation of
+  PromoteDeposit now identifier -> promoteDeposit c policy now identifier
   CreateOrder now header request -> createOrder c policy limit now header request
   ClaimNative now header identifier -> do
     row <- authorizedOrder c (deploymentFingerprint $ paymentPolicy policy) header identifier
@@ -578,3 +582,89 @@ audit :: PG.Connection -> Text -> Text -> IO ()
 audit c action detail = do
   _ <- O.runInsert c O.Insert {O.iTable=S.audit,O.iRows=[(Nothing,O.sqlStrictText action,O.sqlStrictText detail)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   pure ()
+
+-- Promotion records a liability's payout terms; it does not sign, send or settle.
+-- The writer transaction serializes duplicate receipts and competing promotions.
+promotionCandidates :: PG.Connection -> IO [Text]
+promotionCandidates c = O.runSelect c $ fmap snd $ O.limit 1000 $ O.orderBy (O.asc fst <> O.asc snd) $ do
+  d <- O.selectTable S.deposits
+  o <- O.selectTable S.orders
+  O.where_ (O.matchNullable (O.sqlBool False) (O..== S.orderId o) (S.depositOrder d) O..&&
+    S.depositEligible d O..== O.sqlInt8 1 O..&& S.depositAllocated d O..== O.sqlInt8 0 O..&&
+    (S.status o O..== O.sqlStrictText "Provisioning" O..|| S.status o O..== O.sqlStrictText "AwaitingDeposit"))
+  pure (S.depositSeen d,S.depositId d)
+
+promoteDeposit :: PG.Connection -> PaymentTerms -> Int64 -> Text -> IO Bool
+promoteDeposit c terms now identifier = do
+  require (now>=0) "invalid_promotion_time"
+  rows <- O.runSelect c $ do
+    d <- O.selectTable S.deposits
+    O.where_ (S.depositId d O..== O.sqlStrictText identifier)
+    pure d
+    :: IO [S.Deposit]
+  d <- case rows of [one]->pure one; _->reject "deposit_not_found"
+  case S.depositOrder d of
+    Nothing -> pure False
+    Just _ | S.depositAllocated d==1 || S.depositEligible d==0 -> pure False
+    Just oid -> do
+      orders <- O.runSelect c $ do
+        o <- O.selectTable S.orders
+        O.where_ (S.orderId o O..== O.sqlStrictText oid)
+        pure o
+        :: IO [S.Order]
+      o <- case orders of [one]->pure one; _->reject "order_not_found"
+      request <- decodeSaved (S.requestJson o)
+      savedQuote <- decodeSaved (S.quoteJson o)
+      policy <- decodeSaved (S.policyJson o)
+      require (W.input request==gross savedQuote && deploymentFingerprint policy==deploymentFingerprint(paymentPolicy terms)) "saved_order_terms_mismatch"
+      previous <- O.runSelect c $ do
+        obligation <- O.selectTable S.obligations
+        O.where_ (S.obligationOrder obligation O..== O.sqlStrictText oid O..&& S.obligationKind obligation O..== O.sqlStrictText "conversion")
+        pure (S.obligationId obligation)
+        :: IO [Text]
+      let exact=S.depositAmount d==units(gross savedQuote) && S.depositAsset d==T.pack(show $ sourceAsset $ W.direction request)
+          eligible=S.depositAsset d/="Native" || S.depositDepth d>=fromIntegral(nativeDepth policy)
+          timely=S.depositSeen d>=0 && S.depositSeen d<=S.deadline o && now<=S.graceDeadline o
+          pending=S.status o `elem` ["Provisioning","AwaitingDeposit"] && S.instruction o/=Nothing
+      if not (exact && eligible && timely && pending && null previous) then do
+        _ <- O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=O.sqlStrictText "NeedsReview"},
+          O.uWhere= \r->S.orderId r O..== O.sqlStrictText oid O..&& S.status r O../= O.sqlStrictText "Paid",O.uReturning=O.rCount}
+        pure False
+      else do
+        holds <- O.runSelect c $ do
+          (key,asset,n,phase) <- O.selectTable S.reservations
+          O.where_ (key O..== O.sqlStrictText oid)
+          pure (asset,n,phase)
+          :: IO [(Text,Int64,Text)]
+        require (holds==[(T.pack(show $ destinationAsset $ W.direction request),units(net savedQuote),"quote")]) "reservation_not_provisional"
+        costs <- O.runSelect c $ do
+          (key,nativeFee,solFee,rent) <- O.selectTable S.orderCosts
+          O.where_ (key O..== O.sqlStrictText oid)
+          pure (nativeFee,solFee,rent)
+          :: IO [(Int64,Int64,Int64)]
+        (nativeFee,solFee,rent) <- case costs of [one]->pure one; _->reject "missing_order_cost_policy"
+        solTotal <- checked (amount $ toInteger solFee+toInteger rent)
+        require (nativeFee>0 && solFee>0 && rent>=0) "invalid_order_cost_policy"
+        allowances <- O.runSelect c $ do
+          (key,kind,asset,n,phase) <- O.selectTable S.operatingReservations
+          O.where_ (key O..== O.sqlStrictText oid)
+          pure (kind,asset,n,phase)
+          :: IO [(Text,Text,Int64,Text)]
+        let nativeKind=if W.direction request==NativeToWrapped then "refund" else "conversion"
+            solKind=if W.direction request==NativeToWrapped then "conversion" else "refund"
+        require (sortOn id allowances==sortOn id [(nativeKind,"Native",nativeFee,"quote"),(solKind,"Sol",units solTotal,"quote")]) "operating_reservation_not_provisional"
+        _ <- O.runInsert c O.Insert {O.iTable=S.obligations,
+          O.iRows=[S.Obligation (O.sqlStrictText $ "convert:"<>oid) (O.sqlStrictText oid) (O.sqlStrictText identifier)
+            (O.sqlStrictText "conversion") (O.sqlStrictText $ T.pack $ show $ destinationAsset $ W.direction request)
+            (O.sqlInt8 $ units $ net savedQuote) (O.sqlStrictText $ W.recipient request) (O.sqlStrictText "ready")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+        _ <- O.runUpdate c O.Update {O.uTable=S.deposits,O.uUpdateWith= \r->r {S.depositAllocated=O.sqlInt8 1},
+          O.uWhere= \r->S.depositId r O..== O.sqlStrictText identifier,O.uReturning=O.rCount}
+        _ <- O.runUpdate c O.Update {O.uTable=S.reservations,
+          O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,O.sqlStrictText "obligation"),
+          O.uWhere= \(key,_,_,_)->key O..== O.sqlStrictText oid,O.uReturning=O.rCount}
+        _ <- O.runUpdate c O.Update {O.uTable=S.operatingReservations,
+          O.uUpdateWith= \(key,kind,asset,n,_)->(key,kind,asset,n,O.sqlStrictText "obligation"),
+          O.uWhere= \(key,_,_,_,phase)->key O..== O.sqlStrictText oid O..&& phase O..== O.sqlStrictText "quote",O.uReturning=O.rCount}
+        _ <- O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=O.sqlStrictText "Ready"},
+          O.uWhere= \r->S.orderId r O..== O.sqlStrictText oid,O.uReturning=O.rCount}
+        pure True

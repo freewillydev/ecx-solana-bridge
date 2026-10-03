@@ -244,8 +244,28 @@ malformed instructions/accounts, exact URI amounts, bounded pagination and captu
 SOL fee/rent effects. Pay/v0 rewrites are offline parser contracts, not captured
 wallet flows. The complete rebuild suite passes; no funded transaction was sent.
 
+Closed store operations now select promotion candidates and promote an observed
+receipt into one conversion obligation. SQL orders/limits candidate selection
+instead of loading/sorting the full history. Promotion checks saved deployment,
+quote, amount/asset, native depth, timing and pending state; it verifies exact payout
+inventory plus both saved operating allowances before atomically allocating the
+receipt, transferring holds and recording the immutable net/recipient. It neither
+moves money nor signs. Duplicate/late/partial receipts retain their liabilities;
+replays, including restart, cannot produce another conversion. Reviewed/expired
+orders cannot be reopened by this operation.
+
+The disposable PostgreSQL contract passes both directions, duplicate receipts,
+confirmation/timing refusals, unknown/unconfirmed receipts, missing-allowance
+rollback, unchanged balances, historical 7% terms and restart replay. Row fixtures
+use Opaleye; no live ledger was changed. Promotion/candidate functions are 52→83
+lines; the corresponding full deposit/obligation definitions are 57→27, preserving
+all 18 columns. Combined: 109→110 lines across two existing production files,
+excluding shared dispatch/transaction code. Extra checks account for the larger
+functions; compact named records remove generated schema repetition. Review
+projections and test fixtures now reuse those mappings.
+
 Connecting those adapters to the high-level safe/critical runtime, actual host fence,
 dedicated signer and durable payment execution remains unfinished. Native observation,
-atomic scan commits/promotion, observer orchestration, recovery and SDK build integration
-also remain. Passing these checks is not end-to-end payment, migration or real-chain
-acceptance.
+atomic scan commits with source/outflow recovery, observer orchestration, broader
+recovery and SDK build integration also remain. Passing these checks is not
+end-to-end payment, migration or real-chain acceptance.

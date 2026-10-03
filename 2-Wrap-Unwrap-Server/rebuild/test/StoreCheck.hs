@@ -5,7 +5,6 @@ import qualified Bridge.Wire as W
 import Data.Aeson (encode)
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text.Encoding as TE
-import Data.Profunctor.Product (p8,p10)
 import Bridge.Domain
 import Bridge.Wire (PaymentTerms(..),CostLimits(..),PolicySnapshot(..))
 import Bridge.Store
@@ -14,6 +13,7 @@ import Control.Exception
 import Data.Int (Int64)
 import Data.List (sort)
 import Data.IORef
+import GHC.Stack (HasCallStack,callStack,prettyCallStack)
 import Test.QuickCheck (quickCheckWithResult,stdArgs,maxSuccess,forAll,chooseInteger,ioProperty,isSuccess)
 import Control.Monad (unless,void,when,forM_)
 import qualified Data.Map.Strict as M
@@ -35,7 +35,8 @@ main = do
       store terms config=StorePolicy terms config "contract" True
       key=T.replicate 64 "a"
       reserve=ReserveFees 100 key Native (money 100) "recipient" "test owned revenue"
-      check ok=unless ok (fail "store contract failed")
+      check :: HasCallStack => Bool -> IO ()
+      check ok=unless ok (fail $ "store contract failed\n"<>prettyCallStack callStack)
   bracket (PG.connect settings) PG.close $ \fixtures -> do
     fixture fixtures Initialize
     withReader readerSettings "contract" True $ \reader -> do
@@ -197,6 +198,78 @@ main = do
         fixture fixtures (CheckPhases solana "obligation") >>= check
         evalWrite writer (ExpireQuotes 301)
         fixture fixtures (CheckPhases solana "obligation") >>= check
+      fixture fixtures PromotionFunds
+      promoted <- withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
+        let make name direction=do
+              fixture fixtures ReadyIntake
+              oid<-evalWrite writer (create newRequest {W.idempotencyKey=name,W.input=money 10,W.direction=direction,W.refund=if direction==NativeToWrapped then "refund" else ""})
+              if direction==NativeToWrapped then do
+                claim<-evalWrite writer (ClaimNative 100 auth oid)
+                _<-evalWrite writer (RecordNative auth oid (allocationLabel claim) ("fixture-address-"<>name))
+                pure ()
+              else evalWrite writer (BindSolana 100 auth oid) >> pure ()
+              pure oid
+            seed did oid asset quantity depth eligible seen=fixture fixtures (SeedReceipt did (Just oid) asset quantity depth eligible seen)
+        native<-make "promote-native" NativeToWrapped
+        seed "promote-source" native Native 10 2 True 100
+        candidates<-evalRead reader PromotionCandidates
+        check ("promote-source" `elem` candidates)
+        before<-evalRead reader ReadBalances
+        first<-evalWrite writer (PromoteDeposit 100 "promote-source")
+        replay<-evalWrite writer (PromoteDeposit 100 "promote-source")
+        after<-evalRead reader ReadBalances
+        check (first && not replay && before==after)
+        fixture fixtures (CheckPromotion native "promote-source" Wrapped 9 "Ready") >>= check
+        fixture fixtures (CheckPhases native "obligation") >>= check
+        candidatesAfter<-evalRead reader PromotionCandidates
+        check ("promote-source" `notElem` candidatesAfter)
+        -- A second exact receipt remains a protected liability, never a second conversion.
+        seed "extra-source" native Native 10 2 True 100
+        extra<-evalWrite writer (PromoteDeposit 100 "extra-source")
+        check (not extra)
+        fixture fixtures (CheckPromotion native "promote-source" Wrapped 9 "NeedsReview") >>= check
+        forM_ [("wrong-amount",9,2,100,100),("shallow",10,1,100,100),
+               ("late-seen",10,2,201,201),("late-confirmed",10,2,100,301)] $ \(name,n,depth,seen,now)->do
+          oid<-make name NativeToWrapped
+          seed name oid Native n depth True seen
+          result<-evalWrite writer (PromoteDeposit now name)
+          check (not result)
+          view<-evalRead reader (ReadOrder auth oid)
+          check (W.status view=="NeedsReview")
+          fixture fixtures (CheckPhases oid "quote") >>= check
+        waiting<-make "unconfirmed" NativeToWrapped
+        seed "unconfirmed" waiting Native 10 0 False 100
+        evalWrite writer (PromoteDeposit 100 "unconfirmed") >>= check . not
+        waitView<-evalRead reader (ReadOrder auth waiting)
+        check (W.status waitView=="AwaitingDeposit")
+        unwrap<-make "promote-unwrap" WrappedToNative
+        seed "wrapped-source" unwrap Wrapped 10 1 True 100
+        evalWrite writer (PromoteDeposit 100 "wrapped-source") >>= check
+        fixture fixtures (CheckPromotion unwrap "wrapped-source" Native 9 "Ready") >>= check
+        fixture fixtures (CheckPhases unwrap "obligation") >>= check
+        missing<-make "missing-allowance" NativeToWrapped
+        seed "missing-allowance" missing Native 10 2 True 100
+        fixture fixtures (OperatingPhase missing "released")
+        expectStore "operating_reservation_not_provisional" (evalWrite writer $ PromoteDeposit 100 "missing-allowance")
+        pending<-evalRead reader PromotionCandidates
+        check ("missing-allowance" `elem` pending)
+        pendingView<-evalRead reader (ReadOrder auth missing)
+        check (W.status pendingView=="AwaitingDeposit")
+        fixture fixtures (OperatingPhase missing "quote")
+        evalWrite writer (PromoteDeposit 100 "missing-allowance") >>= check
+        fixture fixtures (CheckPromotion missing "missing-allowance" Wrapped 9 "Ready") >>= check
+        let historical="historical-promotion"
+        fixture fixtures (HistoricalHolds historical)
+        seed "historical-fee" historical Native 100 2 True 100
+        evalWrite writer (PromoteDeposit 100 "historical-fee") >>= check
+        fixture fixtures (CheckPromotion historical "historical-fee" Wrapped 93 "Ready") >>= check
+        fixture fixtures (SeedReceipt "unknown-source" Nothing Native 10 2 True 100)
+        evalWrite writer (PromoteDeposit 100 "unknown-source") >>= check . not
+        expectStore "deposit_not_found" (evalWrite writer $ PromoteDeposit 100 "missing")
+        expectStore "invalid_promotion_time" (evalWrite writer $ PromoteDeposit (-1) "promote-source")
+        pure "promote-source"
+      withWriter settings (store policy limits) (const $ pure ()) $ \writer ->
+        evalWrite writer (PromoteDeposit 100 promoted) >>= check . not
       fixture fixtures LargeBalances
       huge <- evalRead reader ReadBalances
       check (M.lookup (Wrapped,Float) huge==Just (1000+2*toInteger(maxBound::Int64)))
@@ -215,6 +288,11 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  OperatingPhase :: T.Text -> T.Text -> Fixture ()
+  HistoricalHolds :: T.Text -> Fixture ()
+  PromotionFunds :: Fixture ()
+  SeedReceipt :: T.Text -> Maybe T.Text -> Asset -> Int64 -> Int64 -> Bool -> Int64 -> Fixture ()
+  CheckPromotion :: T.Text -> T.Text -> Asset -> Int64 -> T.Text -> Fixture Bool
   Initialize :: Fixture ()
   RefreshCustody :: Fixture ()
   SeedOrders :: Fixture ()
@@ -258,13 +336,9 @@ fixture c SeedOrders = PG.withTransaction c $ do
 fixture c CoverBackup = void $ O.runUpdate c O.Update {O.uTable=S.deployment,
   O.uUpdateWith= \r->r {S.backupSequence=S.criticalSequence r},O.uWhere= \r->S.singleton r O..== O.sqlInt8 1,O.uReturning=O.rCount}
 fixture c SeedReview = PG.withTransaction c $ do
-  let deposits=O.table "deposits" $ p10
-        (O.requiredTableField "id",O.requiredTableField "order_id",O.requiredTableField "asset",O.requiredTableField "amount",O.requiredTableField "anchor",O.requiredTableField "first_seen",O.requiredTableField "confirmations",O.requiredTableField "eligible",O.requiredTableField "allocated",O.requiredTableField "state")
-      obligations=O.table "obligations" $ p8
-        (O.requiredTableField "id",O.requiredTableField "order_id",O.requiredTableField "deposit_id",O.requiredTableField "kind",O.requiredTableField "asset",O.requiredTableField "amount",O.requiredTableField "recipient",O.requiredTableField "status")
-      text=O.sqlStrictText; num=O.sqlInt8
-  void $ O.runInsert c O.Insert {O.iTable=deposits,O.iRows=[(text "review-deposit",O.toNullable $ text "visible",text "Native",num 100,text "anchor",num 100,num 2,num 1,num 1,text "observed")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-  void $ O.runInsert c O.Insert {O.iTable=obligations,O.iRows=[(text "review-obligation",text "visible",text "review-deposit",text "conversion",text "Wrapped",num 93,text "recipient",text "review")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  let text=O.sqlStrictText; num=O.sqlInt8
+  void $ O.runInsert c O.Insert {O.iTable=S.deposits,O.iRows=[S.Deposit (text "review-deposit") (O.toNullable $ text "visible") (text "Native") (num 100) (text "anchor") (num 100) (num 2) (num 1) (num 1) (text "observed")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.obligations,O.iRows=[S.Obligation (text "review-obligation") (text "visible") (text "review-deposit") (text "conversion") (text "Wrapped") (num 93) (text "recipient") (text "review")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
 
 fixture c SeedIntake = PG.withTransaction c $ do
   let text=O.sqlStrictText; num=O.sqlInt8
@@ -331,3 +405,53 @@ fixture c (CheckPhases identifier expected) = do
     pure phase
     :: IO [T.Text]
   pure (inventory==[expected] && operating==[expected,expected])
+
+fixture c PromotionFunds = PG.withTransaction c $ do
+  let text=O.sqlStrictText
+  void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(text "promotion-funds",text "test operating budget")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.postings,
+    O.iRows=[(Nothing,text "promotion-funds",text asset,text account,O.sqlInt8 n)|asset<-["Native","Sol"],(account,n)<-[("external",-10000),("operating",10000)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+fixture c (SeedReceipt did oid asset quantity depth eligible seen) = PG.withTransaction c $ do
+  let text=O.sqlStrictText; num=O.sqlInt8
+      account=maybe "unallocated" (const "principal") oid
+  void $ O.runInsert c O.Insert {O.iTable=S.deposits,
+    O.iRows=[S.Deposit (text did) (maybe O.null (O.toNullable . text) oid) (text $ T.pack $ show asset)
+      (num quantity) (text "fixture-anchor") (num seen) (num depth) (num $ if eligible then 1 else 0) (num 0) (text "observed")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(text $ "deposit:"<>did,text "fixture observed value")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.postings,
+    O.iRows=[(Nothing,text $ "deposit:"<>did,text $ T.pack $ show asset,text target,num n)| (target,n)<-[(account,quantity),("external",negate quantity)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+fixture c (CheckPromotion oid did asset quantity status) = do
+  obligations<-O.runSelect c $ do
+    row<-O.selectTable S.obligations
+    O.where_ (S.obligationOrder row O..== O.sqlStrictText oid)
+    pure row
+    :: IO [S.Obligation]
+  deposits<-O.runSelect c $ do
+    row<-O.selectTable S.deposits
+    O.where_ (S.depositId row O..== O.sqlStrictText did)
+    pure (S.depositAllocated row)
+    :: IO [Int64]
+  orders<-O.runSelect c $ do
+    row<-O.selectTable S.orders
+    O.where_ (S.orderId row O..== O.sqlStrictText oid)
+    pure (S.status row)
+    :: IO [T.Text]
+  pure (obligations==[S.Obligation ("convert:"<>oid) oid did "conversion" (T.pack $ show asset) quantity "recipient" "ready"] && deposits==[1] && orders==[status])
+
+fixture c (OperatingPhase oid phase) = void $ O.runUpdate c O.Update {O.uTable=S.operatingReservations,
+  O.uUpdateWith= \(key,kind,asset,n,_)->(key,kind,asset,n,O.sqlStrictText phase),
+  O.uWhere= \(key,_,_,_,_)->key O..== O.sqlStrictText oid,O.uReturning=O.rCount}
+fixture c (HistoricalHolds oid) = PG.withTransaction c $ do
+  let text=O.sqlStrictText; num=O.sqlInt8
+      raw value=TE.decodeUtf8 (BL.toStrict $ encode value)
+      cap=either (error . T.unpack) id (capabilityHash $ T.replicate 64 "0")
+      request=W.OrderRequest NativeToWrapped (money 100) "recipient" "refund" Nothing oid
+      saved=either (error . T.unpack) id (historicalQuote (money 100) (money 7))
+  void $ O.runInsert c O.Insert {O.iTable=S.orders,
+    O.iRows=[S.Order (text oid) (text cap) (text oid) (text "fixture") (text $ raw request) (text $ raw saved)
+      (text $ raw $ W.PolicySnapshot 2 "finalized" "contract") (text "AwaitingDeposit") (num 200) (num 300)
+      (O.toNullable $ text "historical-native-fixture") (O.toNullable $ num 0) O.null (num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.reservations,O.iRows=[(text oid,text "Wrapped",num 93,text "quote")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.orderCosts,O.iRows=[(text oid,num 10,num 10,num 10)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.operatingReservations,
+    O.iRows=[(text oid,text kind,text asset,num n,text "quote") | (kind,asset,n)<-[("conversion","Sol",20),("refund","Native",10)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}

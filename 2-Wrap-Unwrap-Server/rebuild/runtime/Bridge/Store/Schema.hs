@@ -69,6 +69,34 @@ orders = O.table "orders" $ pOrder Order
   , instruction=O.requiredTableField "instruction", instructionSequence=O.requiredTableField "instruction_sequence"
   , payoutTx=O.requiredTableField "payout_tx", instructionIssued=O.requiredTableField "instruction_issued" }
 
+data DepositF t n nt = Deposit
+  { depositId :: t, depositOrder :: nt, depositAsset :: t, depositAmount :: n
+  , depositAnchor :: t, depositSeen :: n, depositDepth :: n, depositEligible :: n
+  , depositAllocated :: n, depositState :: t } deriving (Eq,Show)
+$(makeAdaptorAndInstance "pDeposit" ''DepositF)
+type Deposit = DepositF Text Int64 (Maybe Text)
+type DepositFields = DepositF TextField IntField (O.FieldNullable O.SqlText)
+deposits :: O.Table DepositFields DepositFields
+deposits = O.table "deposits" $ pDeposit Deposit
+  { depositId=O.requiredTableField "id", depositOrder=O.requiredTableField "order_id"
+  , depositAsset=O.requiredTableField "asset", depositAmount=O.requiredTableField "amount"
+  , depositAnchor=O.requiredTableField "anchor", depositSeen=O.requiredTableField "first_seen"
+  , depositDepth=O.requiredTableField "confirmations", depositEligible=O.requiredTableField "eligible"
+  , depositAllocated=O.requiredTableField "allocated", depositState=O.requiredTableField "state" }
+
+data ObligationF t n = Obligation
+  { obligationId :: t, obligationOrder :: t, obligationDeposit :: t, obligationKind :: t
+  , obligationAsset :: t, obligationAmount :: n, obligationRecipient :: t, obligationStatus :: t } deriving (Eq,Show)
+$(makeAdaptorAndInstance "pObligation" ''ObligationF)
+type Obligation = ObligationF Text Int64
+type ObligationFields = ObligationF TextField IntField
+obligations :: O.Table ObligationFields ObligationFields
+obligations = O.table "obligations" $ pObligation Obligation
+  { obligationId=O.requiredTableField "id", obligationOrder=O.requiredTableField "order_id"
+  , obligationDeposit=O.requiredTableField "deposit_id", obligationKind=O.requiredTableField "kind"
+  , obligationAsset=O.requiredTableField "asset", obligationAmount=O.requiredTableField "amount"
+  , obligationRecipient=O.requiredTableField "recipient", obligationStatus=O.requiredTableField "status" }
+
 -- Read projections for recovery overlays. They grant no update capability.
 nativeRecovery, sourceRecovery :: O.Select (TextField,TextField)
 nativeRecovery = O.selectTable $ O.table "native_payment_recovery_state" $ p2
@@ -78,11 +106,9 @@ sourceRecovery = O.selectTable $ O.table "source_recovery_state" $ p2
 accountedLosses :: O.Select TextField
 accountedLosses = O.selectTable $ O.table "accounted_source_losses" (O.requiredTableField "deposit_id")
 orderDeposits :: O.Select (TextField,O.FieldNullable O.SqlText)
-orderDeposits = O.selectTable $ O.table "deposits" $ p2
-  (O.requiredTableField "id",O.requiredTableField "order_id")
+orderDeposits = fmap (\row->(depositId row,depositOrder row)) (O.selectTable deposits)
 orderObligations :: O.Select (TextField,TextField,TextField,TextField)
-orderObligations = O.selectTable $ O.table "obligations" $ p4
-  (O.requiredTableField "id",O.requiredTableField "order_id",O.requiredTableField "deposit_id",O.requiredTableField "status")
+orderObligations = fmap (\row->(obligationId row,obligationOrder row,obligationDeposit row,obligationStatus row)) (O.selectTable obligations)
 intentObligations, attemptIntents :: O.Select (TextField,TextField)
 intentObligations = O.selectTable $ O.table "intents" $ p2
   (O.requiredTableField "id",O.requiredTableField "obligation_id")
