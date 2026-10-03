@@ -112,6 +112,31 @@ extracted from the prior scattered helpers; no new authentication scheme is used
 The earlier 367-line storage count describes the fee checkpoint, not the current
 expanded storage total.
 
-Customer order creation/provisioning, the high-level safe/critical runtime, actual host fence,
+Atomic order creation is now implemented as a closed write operation returning
+only an order ID. It checks capability/idempotency, request shape, amount/queue
+limits, pause/scanner/custody readiness and available payout inventory. It saves
+immutable 1% terms, inventory holds and both conversion/refund operating allowances
+in one transaction. The existing monotonic operating clock, payment/order holds
+and daily cost budgets are retained. Chain address preflight and instruction
+provisioning must still run through their separate workflow before exposure.
+
+The PostgreSQL contract now checks both directions and upward rounding, exact
+inventory and operating holds, identical replay, changed-request rejection, stale
+custody/scans, pause, queue/input limits, insufficient inventory/operating funds and
+daily budgets. Rejected requests leave no added orders, holds or cost reservations.
+Balance reads use Opaleye numeric aggregation in PostgreSQL and checked exact
+Integer decoding; a contract verifies totals beyond Int64 without loading the
+entire postings history into the process.
+
+Order-admission/budget functions occupy 144 lines across two baseline files versus
+125 across one replacement file, counting the named creation/readiness/inventory/
+cost-budget functions and their balance/freshness helpers, excluding shared
+transaction/authentication plumbing and schema declarations. The seven equivalent
+full table mappings for reservations, checkpoints, scan health, operating clock,
+operating costs, saved order costs and operating reservations are 116 to 18 lines
+in one schema file each; the additional fee-reservation read projection is three
+lines. These are piece-level comparisons, not whole-application totals.
+
+Order provisioning, the high-level safe/critical runtime, actual host fence,
 chain adapters, signer and payment execution remain unfinished. Passing these
 checks is not payment, migration or real-chain acceptance.

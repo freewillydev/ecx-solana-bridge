@@ -2,19 +2,25 @@
 -- Closed ledger operations. Connections, queries and transaction callbacks never
 -- escape this module; the runtime will interpret its customer/operator DSL here.
 module Bridge.Store
-  ( Reader, Writer, StoreError(..), StoreRead(..), StoreWrite(..), LedgerState(..), WithdrawalView(..)
+  ( Reader, Writer, StoreError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), LedgerState(..), WithdrawalView(..)
   , withReader, withWriter, evalRead, evalWrite ) where
 
-import Bridge.Identity (bearerHash)
+import Bridge.Identity (bearerHash,digest)
 import qualified Bridge.Wire as W
 import Bridge.Domain
-import Bridge.Wire (PaymentTerms(..),PolicySnapshot(..))
+import Bridge.Wire (PaymentTerms(..),PolicySnapshot(..),CostLimits(..))
 import qualified Bridge.Store.Schema as S
 import Bridge.Store.Catalog (claimWorker,verifyReadRole)
+import Crypto.Random (getRandomBytes)
+import qualified Data.ByteString as BS
+import Data.List (nub,sortOn)
+import Data.Profunctor.Product (p3)
+import Data.Scientific (Scientific,floatingOrInteger)
+import Data.Time.Clock.POSIX (getPOSIXTime)
 import Control.Concurrent.MVar
 import Control.Exception
-import Control.Monad (unless)
-import Data.Aeson (FromJSON,encode,eitherDecodeStrict')
+import Control.Monad (unless,forM_)
+import Data.Aeson (FromJSON,ToJSON,encode,eitherDecodeStrict')
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
 import qualified Data.Map.Strict as M
@@ -41,6 +47,11 @@ data WithdrawalView = WithdrawalView
   , withdrawalSequence :: Int64, withdrawalCancellation :: Maybe (Text,Int64) }
   deriving (Eq,Show)
 
+data OrderLimits = OrderLimits
+  { orderMinimum :: Amount, orderMaximum :: Amount, quoteSeconds :: Int64
+  , graceSeconds :: Int64, maximumQueued :: Int, nativeDaily :: Amount, solanaDaily :: Amount }
+  deriving (Eq,Show)
+
 data StoreRead a where
   ReadState :: StoreRead LedgerState
   ReadBalances :: StoreRead (M.Map (Asset,Account) Integer)
@@ -48,12 +59,13 @@ data StoreRead a where
   ReadOrder :: Text -> Text -> StoreRead W.OrderView
 data StoreWrite a where
   Pause :: Text -> StoreWrite ()
+  CreateOrder :: Int64 -> Text -> W.OrderRequest -> StoreWrite Text
   ReserveFees :: Int64 -> Text -> Asset -> Amount -> Text -> Text -> StoreWrite WithdrawalView
   CancelFees :: Text -> Text -> StoreWrite WithdrawalView
 
 -- Reader has no writer connection, checkpoint or writable credentials.
 data Reader = Reader PG.ConnectInfo Text Bool
-data Writer = Writer (MVar (Maybe PG.Connection)) PaymentTerms Amount (Int64 -> IO ())
+data Writer = Writer (MVar (Maybe PG.Connection)) PaymentTerms OrderLimits (Int64 -> IO ())
 
 withReader :: PG.ConnectInfo -> Text -> Bool -> (Reader -> IO a) -> IO a
 withReader settings identity remote action = do
@@ -63,9 +75,14 @@ withReader settings identity remote action = do
 
 -- The checkpoint must persist the monotonic host fence before commit. It is
 -- infrastructure, not an operation supplied by a handler. No optional bypass.
-withWriter :: PG.ConnectInfo -> PaymentTerms -> Amount -> (Int64 -> IO ()) -> (Writer -> IO a) -> IO a
+withWriter :: PG.ConnectInfo -> PaymentTerms -> OrderLimits -> (Int64 -> IO ()) -> (Writer -> IO a) -> IO a
 withWriter settings policy limit checkpoint action = bracket (PG.connect settings) PG.close $ \c -> do
-  require (units limit>0 && nativeDepth (paymentPolicy policy)>0 && solanaCommitment (paymentPolicy policy)=="finalized") "invalid_store_policy"
+  minimumInput <- checked (amount 2)
+  require (orderMinimum limit>=minimumInput && orderMaximum limit>=orderMinimum limit
+    && quoteSeconds limit>0 && graceSeconds limit>=0 && maximumQueued limit>0
+    && units (savedNativeFee $ paymentLimits policy)>0 && units (savedSolanaFee $ paymentLimits policy)>0
+    && nativeDepth (paymentPolicy policy)>0 && solanaCommitment (paymentPolicy policy)=="finalized") "invalid_store_policy"
+  _ <- checked $ amount (toInteger(units $ savedSolanaFee $ paymentLimits policy)+toInteger(units $ savedSolanaRent $ paymentLimits policy))
   claimWorker c >>= flip require "worker_already_running"
   row <- metadata c (deploymentFingerprint $ paymentPolicy policy)
   checkpoint (S.criticalSequence row)
@@ -88,6 +105,7 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
 
 evalWrite :: Writer -> StoreWrite a -> IO a
 evalWrite writer@(Writer _ policy limit _) operation = transaction writer $ \c -> case operation of
+  CreateOrder now header request -> createOrder c policy limit now header request
   Pause explanation -> do
     validReason explanation
     count <- O.runUpdate c O.Update {O.uTable=S.deployment,
@@ -99,7 +117,7 @@ evalWrite writer@(Writer _ policy limit _) operation = transaction writer $ \c -
     pure ()
   ReserveFees now key currency n destination explanation -> do
     validReason explanation
-    require (now>=0 && T.length key==64 && T.all (`elem` ("0123456789abcdef"::String)) key && n<=limit) "invalid_fee_withdrawal"
+    require (now>=0 && T.length key==64 && T.all (`elem` ("0123456789abcdef"::String)) key && n<=orderMaximum limit) "invalid_fee_withdrawal"
     funding <- checked (earnedFees key currency n)
     outgoing <- checked (payment ("fee:"<>key) funding destination)
     old <- readWithdrawal c key
@@ -218,14 +236,17 @@ readWithdrawal c key = do
     _ -> reject "duplicate_withdrawal"
 balances :: PG.Connection -> IO (M.Map (Asset,Account) Integer)
 balances c = do
-  rows <- O.runSelect c $ do
+  rows <- O.runSelect c $ O.aggregate (p3 (O.groupBy,O.groupBy,O.sumInt8)) $ do
     (_,_,currency,account,delta) <- O.selectTable S.postings
     pure (currency,account,delta)
-    :: IO [(Text,Text,Int64)]
+    :: IO [(Text,Text,Scientific)]
   entries <- mapM (\(currency,account,delta)->do
     a<-parseAsset currency
     b<-maybe (reject "unknown_ledger_account") pure (lookup account accounts)
-    pure ((a,b),toInteger delta)) rows
+    exact <- case floatingOrInteger delta :: Either Double Integer of
+      Right n -> pure n
+      Left _ -> reject "fractional_ledger_balance"
+    pure ((a,b),exact)) rows
   pure (M.fromListWith (+) entries)
 post :: PG.Connection -> Text -> Text -> [Posting] -> IO ()
 post c event explanation entries = do
@@ -305,3 +326,116 @@ readOrder c identity coverage cap identifier = do
     (S.deadline r) visible (S.payoutTx r) policy)
 decodeSaved :: FromJSON a => Text -> IO a
 decodeSaved=either (const $ reject "corrupt_ledger_json") pure . eitherDecodeStrict' . TE.encodeUtf8
+
+-- Chain-specific admission happens before this closed operation. It does not
+-- allocate an address or issue instructions: it atomically saves an order and
+-- both its payout inventory and conversion/refund operating allowances.
+createOrder :: PG.Connection -> PaymentTerms -> OrderLimits -> Int64 -> Text -> W.OrderRequest -> IO Text
+createOrder c terms limits now header request = do
+  cap <- checked (bearerHash header)
+  let key=W.idempotencyKey request; identity=deploymentFingerprint (paymentPolicy terms)
+      encoded=encodeSaved request; requestDigest=digest (TE.encodeUtf8 $ identity<>encoded)
+  require (not(T.null key) && T.length key<=64 && T.all (\x->x `elem` ("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_"::String)) key) "invalid_idempotency_key"
+  previous <- O.runSelect c $ do
+    row <- O.selectTable S.orders
+    O.where_ (S.capabilityHash row O..== O.sqlStrictText cap O..&& S.idempotencyKey row O..== O.sqlStrictText key)
+    pure (S.orderId row,S.requestHash row)
+    :: IO [(Text,Text)]
+  case previous of
+    [(identifier,saved)] -> require (saved==requestDigest) "idempotency_conflict" >> pure identifier
+    [] -> do
+      intakeReady c identity now
+      require (W.input request>=orderMinimum limits && W.input request<=orderMaximum limits) "amount_outside_limits"
+      require (W.sourceOwner request==Nothing && (W.direction request/=WrappedToNative || T.null(W.refund request))) "invalid_connection_free_order"
+      let address t=not(T.null t) && T.length t<=128 && not(T.any (<= ' ') t)
+      require (address(W.recipient request) && (W.direction request/=NativeToWrapped || address(W.refund request))) "invalid_destination"
+      termsQuote <- checked (quote $ W.input request)
+      queued <- O.runSelect c $ do
+        row <- O.selectTable S.orders
+        O.where_ (O.not $ O.in_ (map O.sqlStrictText ["Paid","Refunded","ExpiredUnfunded"]) (S.status row))
+        pure (S.orderId row)
+        :: IO [Text]
+      unpaid <- O.runSelect c $ do
+        (_,order,_,state) <- S.orderObligations
+        O.where_ (O.not $ O.in_ (map O.sqlStrictText ["paid","cancelled"]) state)
+        pure order
+        :: IO [Text]
+      require (length(nub $ queued<>unpaid)<maximumQueued limits) "queue_full"
+      booked <- balances c
+      let destination=destinationAsset (W.direction request); name=T.pack(show destination)
+      holds <- O.runSelect c $ do
+        (_,asset,n,phase) <- O.selectTable S.reservations
+        O.where_ (asset O..== O.sqlStrictText name O..&& phase O../= O.sqlStrictText "released")
+        pure n
+        :: IO [Int64]
+      require (M.findWithDefault 0 (destination,Float) booked-sum(map toInteger holds)>=toInteger(units $ net termsQuote)) "insufficient_inventory"
+      let end=toInteger now+toInteger(quoteSeconds limits); grace=end+toInteger(graceSeconds limits)
+      require (now>=0 && grace<=toInteger(maxBound::Int64)) "invalid_order_time"
+      identifier <- digest <$> (getRandomBytes 32 :: IO BS.ByteString)
+      let text=O.sqlStrictText; num=O.sqlInt8
+          row=S.Order (text identifier) (text cap) (text key) (text requestDigest) (text encoded)
+            (text $ encodeSaved termsQuote) (text $ encodeSaved $ paymentPolicy terms) (text "Provisioning")
+            (num $ fromInteger end) (num $ fromInteger grace) O.null O.null O.null (num 0)
+      _ <- O.runInsert c O.Insert {O.iTable=S.orders,O.iRows=[row],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      _ <- O.runInsert c O.Insert {O.iTable=S.reservations,O.iRows=[(text identifier,text name,num $ units $ net termsQuote,text "quote")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      reserveOrderCosts c limits (paymentLimits terms) booked identifier (W.direction request)
+      pure identifier
+    _ -> reject "duplicate_idempotency"
+
+intakeReady :: PG.Connection -> Text -> Int64 -> IO ()
+intakeReady c identity now = do
+  require (now>=0) "invalid_order_time"
+  d <- metadata c identity
+  require (S.paused d==0) "intake_paused"
+  scans <- O.runSelect c $ do
+    (chain,success,problem,_) <- O.selectTable S.scanHealth
+    (stream,anchor) <- O.selectTable S.checkpoints
+    O.where_ (chain O..== stream)
+    pure (chain,success,problem,anchor)
+    :: IO [(Text,Maybe Int64,Maybe Text,Text)]
+  let ordered=sortOn (\(chain,_,_,_)->chain) scans
+  require (map (\(chain,_,_,_)->chain) ordered==["Native","Solana","SolanaOperating"] &&
+    all (\(_,at,problem,anchor)->problem==Nothing && not(T.null anchor) &&
+      maybe False (\t->t>=0 && t<=now && toInteger now-toInteger t<=60) at) ordered) "scanners_not_fresh"
+  fresh c now
+
+reserveOrderCosts :: PG.Connection -> OrderLimits -> CostLimits -> M.Map (Asset,Account) Integer -> Text -> Direction -> IO ()
+reserveOrderCosts c limits costs booked identifier direction = do
+  total <- checked $ amount (toInteger(units $ savedSolanaFee costs)+toInteger(units $ savedSolanaRent costs))
+  wallTime <- floor <$> getPOSIXTime
+  times <- O.runUpdate c O.Update {O.uTable=S.operatingClock,
+    O.uUpdateWith= \(key,old)->(key,O.ifThenElse (old O..> O.sqlInt8 wallTime) old (O.sqlInt8 wallTime)),
+    O.uWhere= \(key,_)->key O..== O.sqlInt8 1,O.uReturning=O.rReturning snd}
+  now <- case times of [t]->pure t; _->reject "operating_clock_missing"
+  let allowances=[(Native,savedNativeFee costs,nativeDaily limits),(Sol,total,solanaDaily limits)]
+  forM_ allowances $ \(asset,quantity,daily)->do
+    let name=T.pack(show asset)
+    orderHolds <- O.runSelect c $ do
+      (_,_,currency,n,phase) <- O.selectTable S.operatingReservations
+      O.where_ (currency O..== O.sqlStrictText name O..&& O.in_ (map O.sqlStrictText ["quote","obligation"]) phase)
+      pure n
+      :: IO [Int64]
+    paymentHolds <- O.runSelect c $ do
+      (currency,n,released) <- S.feeReservations
+      O.where_ (currency O..== O.sqlStrictText name O..&& released O..== O.sqlInt8 0)
+      pure n
+      :: IO [Int64]
+    spending <- O.runSelect c $ do
+      (posting,_,currency,_,delta) <- O.selectTable S.postings
+      (cost,at) <- O.selectTable S.operatingCosts
+      O.where_ (posting O..== cost O..&& currency O..== O.sqlStrictText name O..&& at O..> O.sqlInt8 (now-86400))
+      pure delta
+      :: IO [Int64]
+    let held=sum(map toInteger $ orderHolds<>paymentHolds); needed=toInteger(units quantity)
+    require (M.findWithDefault 0 (asset,Operating) booked-held>=needed) "insufficient_fee_budget"
+    require (negate(sum(map toInteger spending))+held+needed<=toInteger(units daily)) "operating_daily_limit"
+  let text=O.sqlStrictText; num=O.sqlInt8
+  _ <- O.runInsert c O.Insert {O.iTable=S.orderCosts,
+    O.iRows=[(text identifier,num $ units $ savedNativeFee costs,num $ units $ savedSolanaFee costs,num $ units $ savedSolanaRent costs)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  forM_ allowances $ \(asset,quantity,_)->do
+    let isConversion=(direction==NativeToWrapped && asset==Sol) || (direction==WrappedToNative && asset==Native)
+    _ <- O.runInsert c O.Insert {O.iTable=S.operatingReservations,
+      O.iRows=[(text identifier,text $ if isConversion then "conversion" else "refund",text $ T.pack(show asset),num $ units quantity,text "quote")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+    pure ()
+encodeSaved :: ToJSON a => a -> Text
+encodeSaved=TE.decodeUtf8 . BL.toStrict . encode

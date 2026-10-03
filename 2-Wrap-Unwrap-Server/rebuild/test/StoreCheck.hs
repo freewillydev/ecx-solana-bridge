@@ -11,6 +11,8 @@ import Bridge.Wire (PaymentTerms(..),CostLimits(..),PolicySnapshot(..))
 import Bridge.Store
 import qualified Bridge.Store.Schema as S
 import Control.Exception
+import Data.Int (Int64)
+import Data.List (sort)
 import Data.IORef
 import Test.QuickCheck (quickCheckWithResult,stdArgs,maxSuccess,forAll,chooseInteger,ioProperty,isSuccess)
 import Control.Monad (unless,void,when,forM_)
@@ -29,6 +31,7 @@ main = do
   let settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
       readerSettings=settings {PG.connectUser=readRole}
       policy=PaymentTerms (PolicySnapshot 2 "finalized" "contract") (CostLimits (money 10) (money 10) (money 10))
+      limits=OrderLimits (money 2) (money 1000) 100 100 100 (money 100000) (money 100000)
       key=T.replicate 64 "a"
       reserve=ReserveFees 100 key Native (money 100) "recipient" "test owned revenue"
       check ok=unless ok (fail "store contract failed")
@@ -37,8 +40,8 @@ main = do
     withReader readerSettings "contract" True $ \reader -> do
       expectStore "unsafe_read_database_role" (withReader settings "contract" True $ const $ pure ())
       expectStore "ledger_profile_or_schema_mismatch" (withReader readerSettings "wrong" True $ const $ pure ())
-      withWriter settings policy (money 1000) (const $ pure ()) $ \writer -> do
-        expectStore "worker_already_running" (withWriter settings policy (money 1000) (const $ pure ()) $ const $ pure ())
+      withWriter settings policy limits (const $ pure ()) $ \writer -> do
+        expectStore "worker_already_running" (withWriter settings policy limits (const $ pure ()) $ const $ pure ())
         initial <- evalRead reader ReadBalances
         first <- evalWrite writer reserve
         replay <- evalWrite writer reserve
@@ -77,7 +80,7 @@ main = do
       fixture fixtures RefreshCustody
       beforeFailure <- evalRead reader ReadState
       let failCheckpoint n=when (n>ledgerSequence beforeFailure) (ioError $ userError "injected checkpoint failure")
-      withWriter settings policy (money 1000) failCheckpoint $ \writer -> do
+      withWriter settings policy limits failCheckpoint $ \writer -> do
         failure <- try (evalWrite writer $ ReserveFees 100 (T.replicate 64 "c") Native (money 100) "recipient" "test rollback") :: IO (Either IOException WithdrawalView)
         check (case failure of Left _->True; Right _->False)
         expectStore "ledger_connection_fenced" (evalWrite writer (Pause "must fail"))
@@ -100,6 +103,53 @@ main = do
       fixture fixtures SeedReview
       reviewed <- evalRead reader (ReadOrder auth "visible")
       check (W.status reviewed=="NeedsReview")
+      fixture fixtures SeedIntake
+      let newRequest=W.OrderRequest NativeToWrapped (money 100) "recipient" "refund" Nothing "new-wrap"
+          create request=CreateOrder 100 auth request
+      withWriter settings policy limits (const $ pure ()) $ \writer -> do
+        expectStore "intake_paused" (evalWrite writer $ create newRequest)
+        fixture fixtures ReadyIntake
+        before <- fixture fixtures OrderSnapshot
+        identifier <- evalWrite writer (create newRequest)
+        replay <- evalWrite writer (create newRequest)
+        after <- fixture fixtures OrderSnapshot
+        check (identifier==replay && zipWith (-) after before==[1,1,1,2])
+        view <- evalRead reader (ReadOrder auth identifier)
+        check (W.request view==newRequest && gross(W.quote view)==money 100 && fee(W.quote view)==money 1 && net(W.quote view)==money 99 && W.status view=="Provisioning" && W.depositInstruction view==Nothing && W.deadline view==200)
+        expectStore "idempotency_conflict" (evalWrite writer $ create newRequest {W.input=money 101})
+        -- Each rejection must leave orders, inventory holds, saved cost limits
+        -- and operating reservations exactly unchanged.
+        let rejected expected request=do
+              prior <- fixture fixtures OrderSnapshot
+              expectStore expected (evalWrite writer $ create request)
+              following <- fixture fixtures OrderSnapshot
+              check (prior==following)
+        fixture fixtures StaleCustody
+        rejected "custody_not_reconciled" newRequest {W.idempotencyKey="stale"}
+        fixture fixtures ReadyIntake
+        rejected "amount_outside_limits" newRequest {W.idempotencyKey="small",W.input=money 1}
+        rejected "invalid_connection_free_order" newRequest {W.idempotencyKey="connected",W.sourceOwner=Just "owner"}
+        rejected "insufficient_inventory" newRequest {W.idempotencyKey="large",W.input=money 1000}
+        let unwrap=newRequest {W.idempotencyKey="new-unwrap",W.direction=WrappedToNative,W.refund="",W.input=money 201}
+        other <- evalWrite writer (create unwrap)
+        fixture fixtures (CheckHolds identifier NativeToWrapped 99) >>= check
+        fixture fixtures (CheckHolds other WrappedToNative 198) >>= check
+        otherView <- evalRead reader (ReadOrder auth other)
+        check (fee(W.quote otherView)==money 3 && net(W.quote otherView)==money 198)
+        fixture fixtures ReadyIntake
+        expectStore "scanners_not_fresh" (evalWrite writer $ CreateOrder 161 auth newRequest {W.idempotencyKey="old-scan"})
+      let failedAdmission config terms expected=withWriter settings terms config (const $ pure ()) $ \writer -> do
+            fixture fixtures ReadyIntake
+            before <- fixture fixtures OrderSnapshot
+            expectStore expected (evalWrite writer $ create newRequest {W.idempotencyKey="reject"})
+            after <- fixture fixtures OrderSnapshot
+            check (before==after)
+      failedAdmission limits {maximumQueued=1} policy "queue_full"
+      failedAdmission limits {nativeDaily=money 1} policy "operating_daily_limit"
+      failedAdmission limits policy {paymentLimits=CostLimits (money 1000) (money 10) (money 10)} "insufficient_fee_budget"
+      fixture fixtures LargeBalances
+      huge <- evalRead reader ReadBalances
+      check (M.lookup (Wrapped,Float) huge==Just (1000+2*toInteger(maxBound::Int64)))
   putStrLn "PASS: PostgreSQL role isolation, profile binding, exclusive writer, replay, conflicts, custody freshness, earned funds, cancellation, checkpoint rollback/fencing, authorized saved orders, historical terms, backup gating and review overlay"
 
 money :: Integer -> Amount
@@ -114,8 +164,19 @@ expectStore expected action = do
 
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
-data Fixture = Initialize | RefreshCustody | SeedOrders | CoverBackup | SeedReview
-fixture :: PG.Connection -> Fixture -> IO ()
+data Fixture a where
+  Initialize :: Fixture ()
+  RefreshCustody :: Fixture ()
+  SeedOrders :: Fixture ()
+  CoverBackup :: Fixture ()
+  SeedReview :: Fixture ()
+  SeedIntake :: Fixture ()
+  ReadyIntake :: Fixture ()
+  OrderSnapshot :: Fixture [Int]
+  StaleCustody :: Fixture ()
+  LargeBalances :: Fixture ()
+  CheckHolds :: T.Text -> Direction -> Int64 -> Fixture Bool
+fixture :: PG.Connection -> Fixture a -> IO a
 fixture c Initialize = PG.withTransaction c $ do
   void $ O.runInsert c O.Insert {O.iTable=S.deployment,O.iRows=[S.Deployment (O.sqlInt8 1) (O.sqlInt8 18) (O.sqlStrictText "contract") (O.sqlInt8 0) (O.sqlInt8 0) (O.sqlInt8 1) (O.sqlStrictText "test")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.custody,O.iRows=[(O.sqlInt8 1,O.sqlInt8 0,O.null,O.null,O.null)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
@@ -152,3 +213,49 @@ fixture c SeedReview = PG.withTransaction c $ do
       text=O.sqlStrictText; num=O.sqlInt8
   void $ O.runInsert c O.Insert {O.iTable=deposits,O.iRows=[(text "review-deposit",O.toNullable $ text "visible",text "Native",num 100,text "anchor",num 100,num 2,num 1,num 1,text "observed")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=obligations,O.iRows=[(text "review-obligation",text "visible",text "review-deposit",text "conversion",text "Wrapped",num 93,text "recipient",text "review")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+
+fixture c SeedIntake = PG.withTransaction c $ do
+  let text=O.sqlStrictText; num=O.sqlInt8
+  void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(text "intake-capital",text "test inventory and operating funds")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.postings,
+    O.iRows=[(Nothing,text "intake-capital",text asset,text account,num n)| (asset,account,n)<-
+      [("Native","external",-1100),("Native","float",1000),("Native","operating",100),
+       ("Wrapped","external",-1000),("Wrapped","float",1000),("Sol","external",-100),("Sol","operating",100)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.operatingClock,O.iRows=[(num 1,num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.scanHealth,O.iRows=[(text chain,O.toNullable $ num 100,O.null,num 100)|chain<-["Native","Solana","SolanaOperating"]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.checkpoints,O.iRows=[(text chain,text "fixture-anchor")|chain<-["Native","Solana","SolanaOperating"]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+fixture c ReadyIntake = PG.withTransaction c $ do
+  void $ O.runUpdate c O.Update {O.uTable=S.deployment,O.uUpdateWith= \r->r {S.paused=O.sqlInt8 0},O.uWhere= \r->S.singleton r O..== O.sqlInt8 1,O.uReturning=O.rCount}
+  fixture c RefreshCustody
+fixture c OrderSnapshot = do
+  orders <- O.runSelect c (fmap S.orderId $ O.selectTable S.orders) :: IO [T.Text]
+  holds <- O.runSelect c (fmap (\(key,_,_,_)->key) $ O.selectTable S.reservations) :: IO [T.Text]
+  costs <- O.runSelect c (fmap (\(key,_,_,_)->key) $ O.selectTable S.orderCosts) :: IO [T.Text]
+  allowances <- O.runSelect c (fmap (\(key,_,_,_,_)->key) $ O.selectTable S.operatingReservations) :: IO [T.Text]
+  pure (map length [orders,holds,costs,allowances])
+
+fixture c StaleCustody = void $ O.runUpdate c O.Update {O.uTable=S.custody,
+  O.uUpdateWith= \(key,revision,checked,_,problem)->(key,revision,checked,O.toNullable $ O.sqlInt8 39,problem),
+  O.uWhere= \(key,_,_,_,_)->key O..== O.sqlInt8 1,O.uReturning=O.rCount}
+fixture c (CheckHolds identifier direction quantity) = do
+  inventory <- O.runSelect c $ do
+    (key,asset,n,phase) <- O.selectTable S.reservations
+    O.where_ (key O..== O.sqlStrictText identifier)
+    pure (asset,n,phase)
+    :: IO [(T.Text,Int64,T.Text)]
+  costs <- O.runSelect c $ do
+    (key,kind,asset,n,phase) <- O.selectTable S.operatingReservations
+    O.where_ (key O..== O.sqlStrictText identifier)
+    pure (kind,asset,n,phase)
+    :: IO [(T.Text,T.Text,Int64,T.Text)]
+  let nativeKind=if direction==WrappedToNative then "conversion" else "refund"
+      solanaKind=if direction==NativeToWrapped then "conversion" else "refund"
+  pure (inventory==[(T.pack $ show $ destinationAsset direction,quantity,"quote")] &&
+    sort costs==sort [(nativeKind,"Native",10,"quote"),(solanaKind,"Sol",20,"quote")])
+
+fixture c LargeBalances = PG.withTransaction c $ do
+  let text=O.sqlStrictText
+  void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(text "large-balances",text "exact aggregation past Int64")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.postings,
+    O.iRows=[(Nothing,text "large-balances",text "Wrapped",text account,O.sqlInt8 n)| (account,n)<-
+      [("external",negate maxBound),("float",maxBound),("external",negate maxBound),("float",maxBound)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}

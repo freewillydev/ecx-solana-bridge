@@ -88,3 +88,25 @@ intentObligations = O.selectTable $ O.table "intents" $ p2
   (O.requiredTableField "id",O.requiredTableField "obligation_id")
 attemptIntents = O.selectTable $ O.table "attempts" $ p2
   (O.requiredTableField "txid",O.requiredTableField "intent_id")
+
+reservations :: O.Table (TextField,TextField,IntField,TextField) (TextField,TextField,IntField,TextField)
+reservations = O.table "reservations" $ p4
+  (O.requiredTableField "order_id",O.requiredTableField "asset",O.requiredTableField "amount",O.requiredTableField "phase")
+orderCosts :: O.Table (TextField,IntField,IntField,IntField) (TextField,IntField,IntField,IntField)
+orderCosts = O.table "order_cost_limits" $ p4
+  (O.requiredTableField "order_id",O.requiredTableField "native_fee",O.requiredTableField "solana_fee",O.requiredTableField "solana_rent")
+operatingReservations :: O.Table (TextField,TextField,TextField,IntField,TextField) (TextField,TextField,TextField,IntField,TextField)
+operatingReservations = O.table "operating_reservations" $ p5
+  (O.requiredTableField "order_id",O.requiredTableField "kind",O.requiredTableField "asset",O.requiredTableField "amount",O.requiredTableField "phase")
+feeReservations :: O.Select (TextField,IntField,IntField)
+feeReservations = O.selectTable $ O.table "fee_reservations" $ p3
+  (O.requiredTableField "asset",O.requiredTableField "amount",O.requiredTableField "released")
+operatingClock, operatingCosts :: O.Table (IntField,IntField) (IntField,IntField)
+operatingClock = O.table "operating_clock" $ p2 (O.requiredTableField "singleton",O.requiredTableField "last_time")
+operatingCosts = O.table "operating_costs" $ p2 (O.requiredTableField "posting_id",O.requiredTableField "recorded_at")
+scanHealth :: O.Table (TextField,O.FieldNullable O.SqlInt8,O.FieldNullable O.SqlText,IntField)
+                     (TextField,O.FieldNullable O.SqlInt8,O.FieldNullable O.SqlText,IntField)
+scanHealth = O.table "scan_health" $ p4
+  (O.requiredTableField "chain",O.requiredTableField "last_success",O.requiredTableField "last_error",O.requiredTableField "checked_at")
+checkpoints :: O.Table (TextField,TextField) (TextField,TextField)
+checkpoints = O.table "checkpoints" $ p2 (O.requiredTableField "chain",O.requiredTableField "anchor")
