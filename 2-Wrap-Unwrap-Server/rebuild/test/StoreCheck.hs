@@ -1633,6 +1633,32 @@ orderWorkflowContract fixtures reader writer storePolicy = do
     expectStore "customer_configuration_mismatch" $ withRuntime manager chainSettings config
       (Just customerSettings {publicConfiguration=public {W.pubMint="wrong"}}) endpoint reader writer (\_ _ _->pure ())
 
+  -- A slow checkpoint neither exposes stale instructions nor renews a quote.
+  -- Clock/freshness changes are fixtures; this is a PostgreSQL workflow contract.
+  fixture fixtures ReadyIntake
+  clock<-newIORef 110
+  let slow=unwrap {W.idempotencyKey="workflow-slow-backup"}
+      delayed=transport {orderClock=readIORef clock,orderBackup= \n->backup n >> writeIORef clock 180}
+      resume=createCustomerOrderWith delayed native True reader writer header slow
+  expectStore "scanners_not_fresh" resume
+  Just slowId<-evalRead reader (FindOrder header slow)
+  pending<-evalRead reader (ReadOrder header slowId)
+  check (W.depositInstruction pending==Nothing && W.deadline pending==210)
+  balances<-evalRead reader ReadBalances
+  beforeAdmissions<-readIORef admissions
+  fixture fixtures (FreshAt 180)
+  completed<-resume
+  check (W.orderId completed==slowId && W.quote completed==W.quote pending
+    && W.deadline completed==210 && W.depositInstruction completed/=Nothing)
+  readIORef admissions >>= check . (==beforeAdmissions)
+  evalRead reader ReadBalances >>= check . (==balances)
+  let expired=unwrap {W.idempotencyKey="workflow-expired-backup"}
+      expires=delayed {orderBackup= \n->backup n >> writeIORef clock 281 >> fixture fixtures (FreshAt 281)}
+  expectStore "deposit_window_closed" (createCustomerOrderWith expires native True reader writer header expired)
+  Just expiredId<-evalRead reader (FindOrder header expired)
+  evalRead reader (ReadOrder header expiredId) >>= check . (==Nothing) . W.depositInstruction
+  fixture fixtures (FreshAt 100)
+
 -- Same schema and closed ledger operations, with a real fsynced host watermark.
 fenceMain :: IO ()
 fenceMain = do

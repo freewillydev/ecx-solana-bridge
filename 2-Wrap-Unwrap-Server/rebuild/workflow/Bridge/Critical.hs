@@ -124,7 +124,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
       evalCritical (SigningDSL _)=reject "signer_operation_forbidden"
       evalCritical (WriteCustomer (Bridge.Operation.Internal.CreateOrder header request))=do
         c<-customer
-        createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (evalWorker . CheckpointBackup) reader writer header request
+        createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (\n->evalWorker (CheckpointBackup n) >> freshIntake) reader writer header request
       evalCritical (OperatorDSL (RebroadcastNative txid anchor reason))=guarded $ do
         require (NP.transactionId txid && anchor>0 && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_native_rebroadcast_approval"
         (saved,family,current)<-evalRead reader (ReadNativeRebroadcastContext txid)
@@ -253,6 +253,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
             identifier<-evalRead reader (ReadReplacementPayment decision)
             refreshSource identifier
             backupDecisions
+            evalWorker ObserveChains
             evalWorker ReconcileCustody
             now<-floor <$> getPOSIXTime
             (family,draft)<-evalRead reader (ReadReplacementSigning now decision)
@@ -330,6 +331,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         reviewed<-mapM (evalRead reader . ReadAttempt) ids
         forM_ reviewed (refreshSource . recordedPayment)
         backupDecisions
+        evalWorker ObserveChains
         evalWorker ReconcileCustody
         now<-floor <$> getPOSIXTime
         evalWrite writer (ResumeLedger now [("Native",N.nativeCheckpointHash native),("Solana",tokenOrigin settings),("SolanaOperating",operatingOrigin settings)] reviewed)
@@ -472,6 +474,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
                   evalWorker (PrepareOutgoing identifier)
                   freshIntake
                   backupDecisions
+                  freshIntake
                   evalWorker (SignPreparedPayment identifier)
                 [saved]->pure saved
                 _->do
@@ -482,15 +485,18 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
               backupDecisions
               freshIntake
               evalWorker (BroadcastPayment txid)
-        freshIntake=do
-          now<-floor <$> getPOSIXTime
-          result<-tryBridge (evalRead reader $ CheckIntake now)
-          case result of
-            Left (BridgeError "custody_not_reconciled")->do
-              evalWorker ReconcileCustody
-              later<-floor <$> getPOSIXTime
-              evalRead reader (CheckIntake later)
-            _->either throwIO pure result
+      -- A checkpoint may outlive the 60-second observation window. Refresh
+      -- stale evidence, then recheck; never extend a quote or bypass coverage.
+      freshIntake=do
+        now<-floor <$> getPOSIXTime
+        result<-tryBridge (evalRead reader $ CheckIntake now)
+        case result of
+          Left (BridgeError code) | code `elem` ["scanners_not_fresh","custody_not_reconciled"]->do
+            when (code=="scanners_not_fresh") (evalWorker ObserveChains)
+            evalWorker ReconcileCustody
+            later<-floor <$> getPOSIXTime
+            evalRead reader (CheckIntake later)
+          _->either throwIO pure result
       backupDecisions=do
         c<-customer
         when (requireBackup $ customerPolicy c) $ do

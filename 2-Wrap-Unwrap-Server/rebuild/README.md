@@ -1601,7 +1601,12 @@ rechecks that no financial decision changed. Unknown, malformed, stale or foreig
 replies grant no coverage. Covered requests replay without contacting the signer.
 Customer settings no longer accept a generic backup callback. Order instructions,
 payment/replacement/send barriers and explicit resume use the same operation;
-existing freshness and accounting checks remain authoritative afterward.
+existing freshness and accounting checks remain authoritative afterward. Slow
+checkpoints can exceed the 60-second scan/custody window: the shared intake check
+refreshes stale scans and reconciliation before exposing an instruction or signing
+or sending a payment. Paused replacement signing and resume also rescan after
+checkpointing. Refresh does not extend deadlines or waive coverage when it discovers
+new financial decisions. Such changes still need their own covered authorization.
 The blanket `backupRequired` startup refusal is removed. Missing or unsuccessful
 signer backup configuration still prevents new required coverage; startup itself
 never grants permission to sign, expose a deposit instruction or send.
@@ -1621,7 +1626,13 @@ network-free replay, while preserving SDK signing and saved bytes. Those receipt
 are explicitly fixtures, not remote durability evidence. The existing real Signet
 recovery contract also verifies a SELECT-only online export while the worker owns
 the ledger, followed by bundle inspection; encrypted local-restic restoration and
-the financial/ledger regression remain required checks.
+the financial/ledger regression pass. The delayed-backup PostgreSQL contract proves
+that stale evidence hides instructions, retry preserves the saved quote/deadline and
+balances without repeating admission, and refreshed evidence cannot revive an
+expired quote. Clock and freshness changes in that contract are fixtures, not a
+measurement of off-host latency. Versus `3c41149`, the freshness integration changes
+only Critical (637 → 643 production lines) and the existing acceptance runner
+(2,891 → 2,917); it adds no file, operation, dependency or service.
 
 Still required: actual off-host HTTPS checkpoint/upload/readback acceptance,
 encrypted-wallet unlock material, cross-UID deployment and funded recovery. Local
