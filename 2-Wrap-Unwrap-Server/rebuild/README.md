@@ -443,18 +443,31 @@ report write. It reuses the aggregated balance read and scanner freshness check,
 checks source/native recovery and terminal-payment evidence, and includes bounded
 pending attempts. PostgreSQL acceptance covers origins, scan freshness, review
 refusal, report validation, revision mismatch, failure pause, no implicit resume,
-and unchanged balances/revision. This is storage acceptance, not chain-balance or
-live custody acceptance; the chain reconciliation workflow is still unfinished.
+and unchanged balances/revision. The critical worker now evaluates `ReconcileCustody` with configured origins and
+actual chain transports. Inspection checks native balance/history/canonical-block
+consistency, finalized Solana accounts/history, optional independent-provider
+agreement, a 60-second deadline and the unchanged ledger revision. Pending effects
+must match verified saved bytes and both scanner evidence and actual transaction
+effects. Offline RPC contracts over PostgreSQL cover matching/mismatched balances,
+history advancement, changed native views, provider disagreement, timeout and a
+revision changed during inspection. This is not live-chain acceptance.
+
+Native replacement families explicitly refuse custody certification until the
+winner-proof recovery port is complete; they must never be summed as independent
+payments. Positive pending-transfer custody and funded Signet/Devnet acceptance,
+source-loss diagnostic dispatch, and integration with the complete scheduler are
+still required.
 
 Scoped physical-line comparisons (not whole-product reduction claims):
 
 | Piece | Baseline | Rebuild | Scope limit |
 | --- | ---: | ---: | --- |
+| Custody chain workflow | 202 / 1 file | 188 / 1 file | Replacement-family and source-loss wrapper parity pending; not equivalent full-feature reduction |
 | Custody snapshot function | 79 / existing custody file | 71 / existing Store file | Reuses freshness/balance helpers; chain workflow pending |
 | Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
 | Signer module | 144 / 1 file | 73 / 1 file | Startup and replacement parity pending |
 | Signer transport | 103 / 1 file plus shared web boundary | 112 / 1 file | Includes local body/concurrency boundary; initial route only |
-| Worker signing/queue/send/reconciliation | Part of broader Runtime | 157 / 1 file (previous checkpoint 111) | Full runtime/submission acceptance remains |
+| Worker signing/queue/send/reconciliation | Part of broader Runtime | 161 / 1 file (previous checkpoint 157) | Full runtime/submission acceptance remains |
 | Focused source validation | 63-line mixed validation/storage/recovery function | 67-line dedicated module | Covered-source recovery is still separate unfinished work |
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |
@@ -470,7 +483,7 @@ Still required: successful TLS worker/signer integration and private-key startup
 checks; a unified safe/critical runtime gate, configuration, app/browser integration;
 integrated positive submission/reconciliation acceptance; retry, cancellation,
 replacement/winner changes and covered-source approvals generalized to earned
-funding; custody/host fencing/backup; actual populated-ledger migration and funded
+funding; complete custody acceptance/host fencing/backup; actual populated-ledger migration and funded
 Signet/Devnet flows. Supported-wallet signing, off-host restore, canonical activation
 and independent review remain release gates. Retain the baseline until parity and
 real-chain acceptance permit deletion. Key seeds alone do not restore ledger history.

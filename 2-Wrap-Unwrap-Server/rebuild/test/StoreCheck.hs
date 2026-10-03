@@ -2,7 +2,7 @@
 module Main (main) where
 import Bridge.Identity (capabilityHash,payInstruction,digest)
 import qualified Bridge.Wire as W
-import Data.Aeson (encode,object,(.=),toJSON,Value(Null),eitherDecodeStrict')
+import Data.Aeson (encode,object,(.=),toJSON,Value(..),eitherDecodeStrict')
 import Data.Profunctor.Product (p5,p6,p8,p9)
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.Text.Encoding as TE
@@ -11,6 +11,9 @@ import Bridge.Wire (PaymentTerms(..),CostLimits(..),PolicySnapshot(..))
 import Bridge.Store
 import Bridge.Signer
 import Bridge.Critical
+import Bridge.Observer (ObserverSettings(..))
+import Bridge.Reconciliation (inspectCustodyWith,nativeBalance)
+import Bridge.RPC (fieldValue)
 import Bridge.SigningTransport (SigningEndpoint(..))
 import Bridge.Operation.Internal (Request(..),SigningOperation(..),WorkerOperation(..))
 import qualified Bridge.Native as N
@@ -137,16 +140,17 @@ main = do
       expectStore "scanners_not_fresh" (evalRead reader $ ReadCustodySnapshot 161 origins False)
       expectStore "scanners_not_fresh" (evalRead reader $ ReadCustodySnapshot 99 origins False)
       expectStore "custody_scan_origin_mismatch" (evalRead reader $ ReadCustodySnapshot 100 (drop 1 origins) False)
-      known<-evalRead reader (HasCustodyEvent "Solana" "fixture-anchor")
-      unknown<-evalRead reader (HasCustodyEvent "Native" "fixture-anchor")
+      known<-evalRead reader (HasCustodyEvent "Solana" (T.replicate 64 "1"))
+      unknown<-evalRead reader (HasCustodyEvent "Native" (T.replicate 64 "1"))
       check (known && not unknown)
-      evidence<-evalRead reader (ReadCustodyEvent "SolanaOperating" "fixture-anchor")
+      evidence<-evalRead reader (ReadCustodyEvent "SolanaOperating" (T.replicate 64 "1"))
       check (evidence==("reference","42",object []))
-      expectStore "custody_history_not_current" (evalRead reader $ ReadCustodyEvent "Native" "fixture-anchor")
+      expectStore "custody_history_not_current" (evalRead reader $ ReadCustodyEvent "Native" (T.replicate 64 "1"))
       fixture fixtures (CustodyHeadReview 1)
       expectStore "chain_observations_require_review" (evalRead reader $ ReadCustodySnapshot 100 origins False)
-      expectStore "custody_history_not_current" (evalRead reader $ ReadCustodyEvent "Solana" "fixture-anchor")
+      expectStore "custody_history_not_current" (evalRead reader $ ReadCustodyEvent "Solana" (T.replicate 64 "1"))
       fixture fixtures (CustodyHeadReview 0)
+      custodyContract fixtures reader
       let newRequest=W.OrderRequest NativeToWrapped (money 100) "recipient" "refund" Nothing "new-wrap"
           create request=CreateOrder 100 auth request
       withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
@@ -384,7 +388,7 @@ main = do
             expectStore "signer_profile_mismatch" (interpret $ Request $ SignPrepared "other" intent 0)
             expectStore "invalid_signing_decision" (interpret $ Request $ SignPrepared "contract" intent 8)
             expectStore "signing_backup_required" (interpret $ Request $ SignPrepared "contract" intent 0)
-          withPaymentWorker manager native solana (signingPolicy signing) (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret ->
+          withPaymentWorker manager (ObserverSettings native solana 2 "sol-origin" "opening-signature") (signingPolicy signing) (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret ->
             expectStore "invalid_saved_payment" (interpret $ Request $ SignPreparedPayment intent)
           pausedAfterRefusal<-evalRead reader ReadState
           check (ledgerPaused pausedAfterRefusal)
@@ -456,7 +460,7 @@ main = do
         completed<-evalRead reader (ReadPayment $ "fee:"<>withdrawalKey)
         check (savedStatus completed==PaymentPaid)
         bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "terminal payment must not call RPC"}) closeManager $ \manager ->
-          withPaymentWorker manager native solana (signingPolicy signing) (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret ->
+          withPaymentWorker manager (ObserverSettings native solana 2 "sol-origin" "opening-signature") (signingPolicy signing) (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret ->
             interpret (Request $ ReconcilePayment nativeTx)
         evalRead reader ReadBalances >>= check . (==afterSettlement)
         fixture fixtures (SeedReceipt "unknown-source" Nothing Native 10 2 True 100)
@@ -978,13 +982,79 @@ fixture c SeedCustodyHeads = PG.withTransaction c $ do
   void $ O.runInsert c O.Insert {O.iTable=S.scanOrigins,O.iRows=[(text chain,text origin) |
     (chain,origin)<-[("Native","scan-origin"),("Solana","sol-origin"),("SolanaOperating","opening-signature")]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   forM_ ["Solana","SolanaOperating"] $ \chain->do
+    void $ O.runUpdate c O.Update {O.uTable=S.checkpoints,O.uUpdateWith= \(key,_)->(key,text $ T.replicate 64 "1"),O.uWhere= \(key,_)->key O..== text chain,O.uReturning=O.rCount}
     let proof=text $ TE.decodeUtf8 $ BL.toStrict $ encode $ object ["proof" .= object []]
-    void $ O.runInsert c O.Insert {O.iTable=S.observationEvidence,O.iRows=[(text chain,text chain,text "fixture-anchor",proof)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-    void $ O.runInsert c O.Insert {O.iTable=S.chainEvents,O.iRows=[S.ChainEvent (text chain) (text "fixture-anchor") (text "reference") (text "42") (text chain) (num 100) (num 100) (num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+    void $ O.runInsert c O.Insert {O.iTable=S.observationEvidence,O.iRows=[(text chain,text chain,text (T.replicate 64 "1"),proof)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+    void $ O.runInsert c O.Insert {O.iTable=S.chainEvents,O.iRows=[S.ChainEvent (text chain) (text $ T.replicate 64 "1") (text "reference") (text "42") (text chain) (num 100) (num 100) (num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
 fixture c ReadCustodyCheck = do
   rows<-O.runSelect c $ fmap (\(_,_,revision,at,problem)->(revision,at,problem)) (O.selectTable S.custody)
   case rows of [row]->pure row; _->fail "missing custody check"
 
 fixture c (CustodyHeadReview flag) = void $ O.runUpdate c O.Update {O.uTable=S.chainEvents,
   O.uUpdateWith= \r->r {S.eventReview=O.sqlInt8 flag},O.uWhere= \r->S.eventChain r O..== O.sqlStrictText "Solana"
-    O..&& S.eventId r O..== O.sqlStrictText "fixture-anchor",O.uReturning=O.rCount}
+    O..&& S.eventId r O..== O.sqlStrictText (T.replicate 64 "1"),O.uReturning=O.rCount}
+
+-- Offline RPC contracts over an actual PostgreSQL snapshot. No live-chain claim.
+custodyContract :: PG.Connection -> Reader -> IO ()
+custodyContract fixtures reader = do
+  let key=T.replicate 32 "1"; signature=T.replicate 64 "1"; block=T.replicate 64 "a"
+      config=H.SolanaPolicy "contract" "contract" key key key (money 10) (money 10)
+      native=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:29432" "/unused" "test" 1 "scan-origin"
+      solana=Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing key key key
+      settings=ObserverSettings native solana 2 "sol-origin" "opening-signature"
+      balance=object ["mine" .= object ["trusted" .= (0.000021::Double),"untrusted_pending" .= (0::Int),"immature" .= (0::Int)],
+        "lastprocessedblock" .= object ["hash" .= block,"height" .= (100::Int)]]
+      nativeCall wallet method params=case (wallet,method,params) of
+        (True,"getbalances",[])->pure balance
+        (True,"listsinceblock",[String "fixture-anchor",Number 2,Bool False,Bool True])->pure $ object
+          ["lastblock" .= ("fixture-anchor"::T.Text),"transactions" .= ([]::[Value]),"removed" .= ([]::[Value])]
+        (False,"getblockhash",[Number 100])->pure $ String block
+        _->fail "unexpected custody native RPC"
+      token n=object ["owner" .= Solana.tokenProgram,"executable" .= False,"data" .= object
+        ["space" .= (165::Int),"parsed" .= object ["type" .= ("account"::T.Text),"info" .= object
+          ["mint" .= key,"owner" .= key,"state" .= ("initialized"::T.Text),"isNative" .= False,
+           "tokenAmount" .= object ["amount" .= T.pack(show (n::Int)),"decimals" .= (8::Int)]]]]]
+      owner=object ["owner" .= key,"executable" .= False,"data" .= ["","base64"::T.Text],"lamports" .= (100::Int)]
+      solCall n headSignature method params=case (method,params) of
+        ("getMultipleAccounts",[addresses,options])->do
+          minimumSlot<-fieldValue "minContextSlot" options :: IO Int
+          commitment<-fieldValue "commitment" options :: IO T.Text
+          unless (addresses==toJSON [key,key] && minimumSlot==42 && commitment=="finalized") (fail "incorrect custody account request")
+          pure $ object ["context" .= object ["slot" .= (42::Int)],"value" .= [token n,owner]]
+        ("getSignaturesForAddress",[String address,options])->do
+          limit<-fieldValue "limit" options :: IO Int
+          minimumSlot<-fieldValue "minContextSlot" options :: IO Int
+          unless (address==key && limit==1 && minimumSlot==42) (fail "incorrect custody history request")
+          pure $ toJSON [object ["signature" .= headSignature,"slot" .= (42::Int),"err" .= Null,"confirmationStatus" .= ("finalized"::T.Text)]]
+        _->fail "unexpected custody Solana RPC"
+      inspect clock identity ncall scall verifier cfg=inspectCustodyWith clock identity ncall scall verifier cfg config reader False
+      good=solCall 1000 signature
+  identities<-newIORef (0::Int)
+  (_,at,matches,_)<-inspect (pure 100) (modifyIORef' identities (+1)) nativeCall good Nothing settings
+  count<-readIORef identities
+  unless (at==100 && matches && count==1) (fail "custody inspection failed")
+  (_,_,mismatch,_)<-inspect (pure 100) (pure ()) nativeCall (solCall 999 signature) Nothing settings
+  when mismatch (fail "custody accepted unequal balances")
+  expectStore "custody_solana_history_advanced" (inspect (pure 100) (pure ()) nativeCall (solCall 1000 $ T.replicate 63 "1"<>"2") Nothing settings)
+  expectStore "custody_verifier_disagreement" (inspect (pure 100) (pure ()) nativeCall good (Just $ solCall 999 signature)
+    settings {solanaSettings=solana {Solana.solanaVerifierRpc=Just "https://independent.example"}})
+  let advanced wallet method params=if method=="listsinceblock" then pure $ object ["lastblock" .= ("advanced"::T.Text)] else nativeCall wallet method params
+  expectStore "custody_native_history_advanced" (inspect (pure 100) (pure ()) advanced good Nothing settings)
+  samples<-newIORef (0::Int)
+  let unstable wallet method params=if method=="getbalances" then do
+        count<-atomicModifyIORef' samples (\n->(n+1,n))
+        if count==0 then pure balance else pure $ object
+          ["mine" .= object ["trusted" .= (0.000022::Double),"untrusted_pending" .= (0::Int),"immature" .= (0::Int)],
+           "lastprocessedblock" .= object ["hash" .= block,"height" .= (100::Int)]]
+       else nativeCall wallet method params
+  expectStore "custody_native_view_changed" (inspect (pure 100) (pure ()) unstable good Nothing settings)
+  times<-newIORef [100,161::Int64]
+  let clock=atomicModifyIORef' times (\xs->case xs of t:rest->(rest,t); []->([],161))
+  expectStore "custody_check_timed_out" (inspect clock (pure ()) nativeCall good Nothing settings)
+  let changed wallet method params=do
+        value<-nativeCall wallet method params
+        when (method=="getblockhash") (fixture fixtures $ CustodyHeadReview 0)
+        pure value
+  expectStore "custody_ledger_changed" (inspect (pure 100) (pure ()) changed good Nothing settings)
+  expectStore "native_reused_balance_requires_review" (nativeBalance $ \_ _ _->pure $ object
+    ["mine" .= object ["trusted" .= (0::Int),"untrusted_pending" .= (0::Int),"immature" .= (0::Int),"used" .= (1::Int)]])

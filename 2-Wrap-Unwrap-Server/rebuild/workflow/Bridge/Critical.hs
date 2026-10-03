@@ -5,6 +5,8 @@ import Bridge.Operation.Internal
 import Bridge.Domain (Asset(..))
 import Bridge.Error
 import Bridge.Payment
+import Bridge.Observer (ObserverSettings(..))
+import Bridge.Reconciliation (reconcileCustody)
 import Bridge.PaymentSource (verifyPaymentSource)
 import qualified Bridge.Wire as W
 import Control.Monad (forM_)
@@ -37,9 +39,10 @@ import qualified Servant.Client as SC
 
 -- Preparation and backup have already committed. No transaction spans signing.
 -- Full runtime will share this gate with other critical worker operations.
-withPaymentWorker :: Manager -> N.NativeSettings -> S.SolanaSettings -> H.SolanaPolicy -> SigningEndpoint -> Reader -> Writer
+withPaymentWorker :: Manager -> ObserverSettings -> H.SolanaPolicy -> SigningEndpoint -> Reader -> Writer
   -> ((forall a. Request 'Worker 'Critical a -> IO a) -> IO b) -> IO b
-withPaymentWorker rpc native solana config endpoint reader writer action = do
+withPaymentWorker rpc settings config endpoint reader writer action = do
+  let native=nativeSettings settings; solana=solanaSettings settings
   require (N.profile native==S.solanaProfile solana && S.mint solana==H.mint config
     && S.custodyOwner solana==H.custodyOwner config && S.custodyAta solana==H.custodyAta config) "payment_profile_mismatch"
   N.validateNativeSettings native
@@ -48,6 +51,7 @@ withPaymentWorker rpc native solana config endpoint reader writer action = do
   let interpret :: forall a. Request 'Worker 'Critical a -> IO a
       interpret request=withMVar gate $ \_ -> evalCritical (resolve request)
       evalCritical :: forall a. DSL 'Worker 'Critical a -> IO a
+      evalCritical (WorkerDSL ReconcileCustody) = reconcileCustody rpc settings config reader writer
       evalCritical (WorkerDSL (QueuePayment txid)) = guarded $ do
         (recorded,_)<-loadActive txid
         refreshSource (recordedPayment recorded)

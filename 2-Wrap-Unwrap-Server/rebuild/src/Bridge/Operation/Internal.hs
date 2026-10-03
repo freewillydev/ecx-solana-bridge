@@ -28,6 +28,7 @@ data SigningOperation a where
   SignPrepared :: Text -> Text -> Int -> SigningOperation SignedAttempt
 
 data WorkerOperation a where
+  ReconcileCustody :: WorkerOperation ()
   SignPreparedPayment :: Text -> WorkerOperation Text
   ReconcilePayment :: Text -> WorkerOperation ()
   QueuePayment :: Text -> WorkerOperation Int64
