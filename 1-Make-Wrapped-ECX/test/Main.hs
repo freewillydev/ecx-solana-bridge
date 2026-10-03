@@ -1,15 +1,26 @@
 module Main (main) where
 import Token
+import Token.Signing
+import Crypto.Error (CryptoFailable(..))
+import qualified Crypto.PubKey.Ed25519 as Ed
+import qualified Data.ByteArray as BA
+import qualified Data.ByteString.Lazy as L
+import System.IO (openTempFile,hClose)
+import System.Directory (removeDirectoryRecursive,removeFile)
+import qualified System.Posix.Directory as PD
+import System.Posix.Files (setFileMode,createSymbolicLink)
+import System.FilePath ((</>))
 import qualified Bridge.SolanaHelper as H
 import Bridge.Domain (amount)
 import Data.Word (Word64)
-import Data.Aeson (encode,eitherDecode,object,(.=))
+import Data.Aeson (encode,eitherDecode,object,(.=),withObject,(.:))
+import Data.Aeson.Types (parseEither)
 import Bridge.SDKBuild (sdkLibraryPath)
-import Bridge.SolanaMessage (Transaction(..))
+import Bridge.SolanaMessage (Transaction(..),decodeTransaction,base58)
 import qualified Data.ByteString as B
 import Data.Text (Text)
 import Data.Either (isLeft)
-import Control.Exception (SomeException,try)
+import Control.Exception (SomeException,try,bracket)
 import System.Exit (exitFailure)
 import Test.QuickCheck
 
@@ -31,6 +42,7 @@ main=do
             transfer=H.HelperRequest False (authority original) recipient (money 3) (blockhash original) "order-1"
         reply<-H.invokeUnsignedHelper sdkLibraryPath config transfer
         pure (H.replySignature reply==Nothing && H.replyDestination reply==account original)
+    , quickCheckResult $ once $ ioProperty signingCheck
     , quickCheckResult $ once $ property $
         eitherDecode (encode $ request Mint maxBound)==Right(request Mint maxBound)
         && all (\raw->isLeft (eitherDecode (encode $ object
@@ -55,3 +67,48 @@ main=do
         , isLeft $ validate original {authority=account original} encoded
         , isLeft $ validate original {blockhash=mint original} encoded ]
       _ -> False
+
+-- Only disposable fixture keys are signed, never the real Devnet authority.
+signingCheck :: IO Bool
+signingCheck=bracket temporary removeDirectoryRecursive $ \directory->do
+  let seed=B.replicate 32 1
+      secret=case Ed.secretKey seed of CryptoPassed key->key; _->error "fixture seed"
+      public=BA.convert (Ed.toPublic secret) :: B.ByteString
+      keyfile=directory </> "authority.json"
+      output=directory </> "attempt.json"
+      original=(request Mint 7) {authority=base58 public}
+      refuse action= isLeft <$> (try action :: IO (Either SomeException Text))
+  L.writeFile keyfile (encode $ B.unpack $ seed<>public)
+  setFileMode keyfile 0o600
+  unsigned<-evalSafe (Prepare sdkLibraryPath original)
+  mismatch<-refuse $ evalCritical (Sign keyfile output original {quantity=8} unsigned)
+  identifier<-evalCritical (Sign keyfile output original unsigned)
+  saved<-B.readFile output
+  duplicate<-refuse $ evalCritical (Sign keyfile output original unsigned)
+  unchanged<-(==saved) <$> B.readFile output
+  createSymbolicLink keyfile (directory </> "linked.json")
+  symlink<-refuse $ evalCritical (Sign (directory </> "linked.json") (directory </> "other.json") original unsigned)
+  setFileMode keyfile 0o644
+  permissions<-refuse $ evalCritical (Sign keyfile (directory </> "other.json") original unsigned)
+  setFileMode keyfile 0o600
+  let wrong=(request Mint 7) {authority="9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu"}
+  altered<-evalSafe (Prepare sdkLibraryPath wrong)
+  wrongAuthority<-refuse $ evalCritical (Sign keyfile (directory </> "other.json") wrong altered)
+  L.writeFile keyfile (encode $ replicate 64 (256::Integer))
+  wrappedBytes<-refuse $ evalCritical (Sign keyfile (directory </> "other.json") original unsigned)
+  L.writeFile keyfile (encode $ B.unpack $ seed<>B.replicate 32 0)
+  wrongPublicHalf<-refuse $ evalCritical (Sign keyfile (directory </> "other.json") original unsigned)
+  -- Decode only the transaction field; independently verify the actual signature.
+  case eitherDecode (L.fromStrict saved) of
+    Left _->pure False
+    Right record->case parseEither (withObject "attempt" (.: "transaction")) record >>= either (Left . show) Right . decodeTransaction of
+      Right (Transaction [bytes] _ body)->case Ed.signature bytes of
+        CryptoPassed signature->pure (all id [mismatch,duplicate,unchanged,symlink,permissions,wrongAuthority,wrappedBytes,wrongPublicHalf]
+          && base58 bytes==identifier && Ed.verify (Ed.toPublic secret) body signature)
+        _->pure False
+      _->pure False
+ where
+  temporary=do
+    (path,handle)<-openTempFile "/tmp" "ecx-token-sign"
+    hClose handle; removeFile path; PD.createDirectory path 0o700
+    pure path

@@ -10,9 +10,9 @@ library
   default-extensions: OverloadedStrings
   ghc-options: -Wall -Wcompat
   hs-source-dirs: .
-  exposed-modules: Token
+  exposed-modules: Token, Token.Signing
   build-depends: base >=4.20 && <4.23, ecx-bridge-rebuild, ecx-bridge-rebuild:chain,
-    aeson, bytestring, text, binary, unix
+    aeson, bytestring, text, binary, unix, filepath, crypton, ram, base64-bytestring
 
 test-suite token-test
   type: exitcode-stdio-1.0
@@ -22,7 +22,7 @@ test-suite token-test
   hs-source-dirs: test
   main-is: Main.hs
   build-depends: base, ecx-token, ecx-build-assets, ecx-bridge-rebuild, ecx-bridge-rebuild:chain,
-    QuickCheck, text, bytestring, aeson
+    QuickCheck, text, bytestring, aeson, crypton, ram, directory, filepath, unix
 
 executable ecx-token
   default-language: GHC2021
