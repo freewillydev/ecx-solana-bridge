@@ -64,7 +64,8 @@ test-suite rebuild-test
   other-modules: ChainCheck, NativePaymentCheck, SolanaPaymentCheck, ObservationCheck, SigningTransportCheck, Paths_ecx_bridge_rebuild
   autogen-modules: Paths_ecx_bridge_rebuild
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:customer-api, ecx-bridge-rebuild:chain, ecx-bridge-rebuild:store, ecx-bridge-rebuild:workflow, servant, aeson, text, containers,
-    QuickCheck >=2.15 && <2.19, bytestring, scientific, http-client, base64-bytestring, wai, wai-extra, http-types, directory, unix, filepath
+    QuickCheck >=2.15 && <2.19, bytestring, scientific, http-client, base64-bytestring, wai, wai-extra, http-types, directory, unix, filepath,
+    ecx-build-assets, process, data-default, crypton-pem, crypton-x509, crypton-x509-validation, crypton-x509-store
 
 executable ecx-bridge-rebuild
   import: settings

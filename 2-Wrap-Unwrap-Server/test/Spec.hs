@@ -1,7 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 module Main where
 import Bridge.Types
-import Bridge.Process (runBoundedWithEnvironment)
 import Bridge.Config
 import qualified Bridge.Postgres.Maintenance as Maintenance
 import Bridge.Ledger.Model
@@ -9,7 +8,7 @@ import Bridge.SolanaMessage
 import qualified Bridge.SolanaPay as Pay
 import Bridge.SolanaDeposit
 import Bridge.Solana (inspectTokenAccount)
-import Bridge.SDKBuild (sdkLibraryPath, sdkSourceDirectory, sdkTargetDirectory)
+import Bridge.SDKBuild (sdkLibraryPath)
 import qualified Data.Map.Strict as M
 import Bridge.SolanaHelper
 import Bridge.SolanaPayment
@@ -38,10 +37,6 @@ import Network.HTTP.Client.TLS (mkManagerSettings)
 import qualified Network.Connection as NC
 import qualified Network.TLS as TLS
 import Network.TLS.Extra.Cipher (ciphersuite_default)
-import Data.Default (def)
-import Data.PEM (pemParseBS,pemContent)
-import Data.X509 (decodeSignedCertificate,CertificateChain(..))
-import Data.X509.Validation (validateDefault,FailedReason(..))
 import Data.X509.CertificateStore (makeCertificateStore)
 import Control.Concurrent.MVar (newEmptyMVar,putMVar,takeMVar)
 import Network.HTTP.Types (status200,status404,status403,status409,status400,status413,status401)
@@ -75,7 +70,7 @@ import System.Posix.Files (getFileStatus,fileMode,setFileMode)
 import Data.Bits ((.&.),xor)
 import Data.Word (Word8)
 import System.Exit (ExitCode(..))
-import System.Environment (lookupEnv,getEnvironment)
+import System.Environment (lookupEnv)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Test.Hspec hiding (before,after)
@@ -160,37 +155,6 @@ withDir action=do
   base <- getTemporaryDirectory
   ident <- T.take 12 <$> randomId
   bracket (let p=base</>("ecx-test-"<>T.unpack ident) in createDirectory p >> pure p) removePathForcibly action
--- Real temporary certificate chain; no network, wallet or fixed expiry fixture.
-constrainedIssuer :: FilePath -> IO (String -> IO [FailedReason])
-constrainedIssuer dir = do
-  setFileMode dir 0o700
-  environment <- getEnvironment
-  let file name=dir</>name
-      openssl args=void $ runBoundedWithEnvironment environment 30 8192 "openssl" args BS.empty
-      key name=openssl ["genpkey","-algorithm","EC","-pkeyopt","ec_paramgen_curve:prime256v1","-out",file (name<>".key")]
-      csr name subject=openssl ["req","-new","-key",file (name<>".key"),"-out",file (name<>".csr"),"-subj","/CN="<>subject]
-      sign name issuer=openssl ["x509","-req","-in",file (name<>".csr"),"-CA",file (issuer<>".pem"),"-CAkey",file (issuer<>".key")
-        ,"-CAcreateserial","-out",file (name<>".pem"),"-days","1","-extfile",file (name<>".ext")]
-      certificate name=do
-        bytes <- BS.readFile (file $ name<>".pem")
-        pems <- either fail pure (pemParseBS bytes)
-        case pems of [pem]->either fail pure (decodeSignedCertificate $ pemContent pem); _->fail "one fixture certificate required"
-  key "root"
-  openssl ["req","-x509","-new","-key",file "root.key","-out",file "root.pem","-days","1","-subj","/CN=Temporary fixture root"
-    ,"-addext","basicConstraints=critical,CA:TRUE","-addext","keyUsage=critical,keyCertSign,cRLSign"]
-  key "issuer"
-  csr "issuer" "Temporary constrained issuer"
-  writeFile (file "issuer.ext") "basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nnameConstraints=critical,permitted;DNS:allowed.example,excluded;DNS:blocked.allowed.example\n"
-  sign "issuer" "root"
-  root <- certificate "root"
-  issuer <- certificate "issuer"
-  key "leaf"
-  pure $ \name->do
-    csr "leaf" name
-    writeFile (file "leaf.ext") ("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nsubjectAltName=DNS:"<>name<>"\n")
-    sign "leaf" "issuer"
-    leaf <- certificate "leaf"
-    validateDefault (makeCertificateStore [root]) def (name,BS.empty) (CertificateChain [leaf,issuer])
 
 isError :: Text -> BridgeError -> Bool
 isError expected (BridgeError actual)=expected==actual
@@ -1051,26 +1015,6 @@ main=hspec $ do
       forM_ [changed ["uiTokenAmount","amount"] (String "4"),changed ["owner"] (String "wrong")
         ,setPath ["meta","err"] (String "fixture-failure") proof] $ \bad ->
           verifySolanaOutcome c signed bad `shouldBe` Left "solana_settlement_evidence_mismatch"
-  describe "TLS name-constraint properties" $ do
-    it "accepts permitted DNS and rejects outside/excluded DNS through the real validator" $ withDir $ \dir->do
-      check <- constrainedIssuer dir
-      let invalidName (InvalidName _) = True
-          invalidName _ = False
-      check "blocked.allowed.example" >>= (`shouldSatisfy` any invalidName)
-      result <- quickCheckWithResult stdArgs{maxSuccess=20} $
-        forAll (chooseInt (1,12) >>= \n->vectorOf n (elements ['a'..'z'])) $ \label->ioProperty $ do
-          valid <- check ("ok-"<>label<>".allowed.example")
-          outside <- check (label<>".other.example")
-          excluded <- check (label<>".blocked.allowed.example")
-          pure $ counterexample (show (valid,outside,excluded)) $
-            null valid && any invalidName outside && any invalidName excluded
-      result `shouldSatisfy` isSuccess
-  describe "pinned SDK properties through Cabal" $ do
-    it "passes the official SDK codec and FFI boundary contracts" $ do
-      (exit, _, errors) <- readProcessWithExitCode "cargo"
-        ["test", "--locked", "--manifest-path", sdkSourceDirectory</>"Cargo.toml",
-         "--target-dir", sdkTargetDirectory, "--lib", "-j1"] ""
-      when (exit/=ExitSuccess) (expectationFailure errors)
   describe "release authentication properties" $ do
     forM_ [minBound..maxBound] $ \fault->it (show fault) $ property $ withNumTests 5 $
       forAll (vectorOf 32 arbitrary) $ \seed->forAll (elements ["aarch64","x86_64"]) $ \arch->

@@ -3,6 +3,13 @@
 -- Only a public zero-seed key vector; no chain RPC or funds are used here.
 module SigningTransportCheck (checks) where
 import Bridge.Critical (runWorkerLoop)
+import Bridge.SDKBuild (sdkSourceDirectory,sdkTargetDirectory)
+import Data.Default (def)
+import Data.PEM (pemParseBS,pemContent)
+import Data.X509 (decodeSignedCertificate,CertificateChain(..))
+import Data.X509.Validation (validateDefault,FailedReason(..))
+import Data.X509.CertificateStore (makeCertificateStore)
+import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Bridge.Signer (verifySigningKey)
 import Bridge.SigningTransport
@@ -36,7 +43,24 @@ import Test.QuickCheck
 
 checks :: IO [Result]
 checks=sequence
-  [ check "worker loop backs off after policy errors and propagates shutdown" $ once $ ioProperty $ do
+  [ check "TLS validator enforces permitted and excluded issuer names" $ once $ ioProperty $
+      bracket temporary removeDirectoryRecursive $ \directory->do
+        validate<-constrainedIssuer directory
+        exactExcluded<-validate "blocked.allowed.example"
+        let invalidName (InvalidName _)=True; invalidName _=False
+        result<-quickCheckWithResult stdArgs{maxSuccess=20} $
+          forAll (chooseInt (1,12) >>= \n->vectorOf n (elements ['a'..'z'])) $ \label->ioProperty $ do
+            valid<-validate ("ok-"<>label<>".allowed.example")
+            outside<-validate (label<>".other.example")
+            excluded<-validate (label<>".blocked.allowed.example")
+            pure (null valid && all (any invalidName) [outside,excluded,exactExcluded])
+        pure (isSuccess result)
+  , check "pinned Solana SDK passes its own codec and FFI contracts" $ once $ ioProperty $ do
+      result<-timeout 120000000 (readProcessWithExitCode "cargo"
+        ["test","--locked","--offline","--manifest-path",sdkSourceDirectory</>"Cargo.toml",
+         "--target-dir",sdkTargetDirectory,"--lib","-j1"] "")
+      pure $ case result of Just (ExitSuccess,_,_)->True; _->False
+  , check "worker loop backs off after policy errors and propagates shutdown" $ once $ ioProperty $ do
       calls<-newIORef (0::Int)
       let refuse :: forall a. Request 'Worker 'Critical a -> IO a
           refuse request=case resolve request of
@@ -257,3 +281,36 @@ checks=sequence
   refuses action=do
     outcome<-try (action >> pure ())
     pure $ case outcome of Left (BridgeError _)->True; Right _->False
+
+-- Real temporary certificate chain; no network, wallet or fixed expiry fixture.
+constrainedIssuer :: FilePath -> IO (String -> IO [FailedReason])
+constrainedIssuer dir = do
+  setFileMode dir 0o700
+  let file name=dir</>name
+      openssl args=do
+        result <- timeout 30000000 (readProcessWithExitCode "openssl" args "")
+        case result of Just (ExitSuccess,_,_) -> pure (); _ -> fail "certificate fixture generation failed"
+      key name=openssl ["genpkey","-algorithm","EC","-pkeyopt","ec_paramgen_curve:prime256v1","-out",file (name<>".key")]
+      csr name subject=openssl ["req","-new","-key",file (name<>".key"),"-out",file (name<>".csr"),"-subj","/CN="<>subject]
+      sign name issuer=openssl ["x509","-req","-in",file (name<>".csr"),"-CA",file (issuer<>".pem"),"-CAkey",file (issuer<>".key")
+        ,"-CAcreateserial","-out",file (name<>".pem"),"-days","1","-extfile",file (name<>".ext")]
+      certificate name=do
+        bytes <- BS.readFile (file $ name<>".pem")
+        pems <- either fail pure (pemParseBS bytes)
+        case pems of [pem]->either fail pure (decodeSignedCertificate $ pemContent pem); _->fail "one fixture certificate required"
+  key "root"
+  openssl ["req","-x509","-new","-key",file "root.key","-out",file "root.pem","-days","1","-subj","/CN=Temporary fixture root"
+    ,"-addext","basicConstraints=critical,CA:TRUE","-addext","keyUsage=critical,keyCertSign,cRLSign"]
+  key "issuer"
+  csr "issuer" "Temporary constrained issuer"
+  writeFile (file "issuer.ext") "basicConstraints=critical,CA:TRUE\nkeyUsage=critical,keyCertSign,cRLSign\nnameConstraints=critical,permitted;DNS:allowed.example,excluded;DNS:blocked.allowed.example\n"
+  sign "issuer" "root"
+  root <- certificate "root"
+  issuer <- certificate "issuer"
+  key "leaf"
+  pure $ \name->do
+    csr "leaf" name
+    writeFile (file "leaf.ext") ("basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature\nsubjectAltName=DNS:"<>name<>"\n")
+    sign "leaf" "issuer"
+    leaf <- certificate "leaf"
+    validateDefault (makeCertificateStore [root]) def (name,BS.empty) (CertificateChain [leaf,issuer])

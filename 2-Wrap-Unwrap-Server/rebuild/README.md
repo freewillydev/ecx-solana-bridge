@@ -264,7 +264,10 @@ finalized and the unwrap paid native transaction
 `35cd02a112319cf73ccf8e7262e6fe5b0e0eaa9ffc2830220784517a114c4e12`.
 The 50,000-unit wrap-back deposit
 `445e65553b772d558ea3c67dcdf2433174ee99bfdfa579d31719f45f0939ed2e`
-was submitted; wrap-back settlement and native earned-fee withdrawal remain pending. Never restore the pre-cutover ledger over newer on-chain activity.
+confirmed and the wrap paid Solana transaction
+`5eWzmgGVNGZkKVET6kHAokYUttkNrX4bGLiQm6uRz1xMCtKnw73AiGwSUZYjNerzWV2WrmZn4GL9NsXzM87m5chg`.
+Both customer quotes retained the 500-unit fee and 49,500-unit payout. A separate
+500-unit native earned-fee withdrawal is authorized; its settlement remains pending. Never restore the pre-cutover ledger over newer on-chain activity.
 Any future refund/recovery needing missing historical terms still requires explicit
 policy treatment; migration does not invent those terms.
 
@@ -336,6 +339,13 @@ assets and native server; the hook explicitly selects the matching package tool
 with `--with-hc-pkg`. Browser smoke checks against the migrated deployment passed
 configuration decoding and both fee previews (10,001 → 101 fee / 9,900 net),
 without console errors. This check did not create or submit a customer order.
+
+The rebuilt QuickCheck suite now owns the real TLS name-constraint regression
+(permitted, excluded and outside-namespace certificate chains) and pinned Rust SDK
+codec/FFI tests, invoked through root Cabal using the warm Cargo cache. These
+checks were removed from the baseline suite rather than duplicated. The baseline
+test file shrank 1,388 → 1,332 lines; the existing rebuilt transport-test file
+grew by 57 lines, with no new files. Both suites build; the rebuilt suite passes.
 
 Native extra-deposit refund acceptance passed on L2L Signet. Confirmed receipt
 `cc36b9d6f9c1a494b8a7b1b2da1793330019e33765e9bfe8831685804cd29755:0`
