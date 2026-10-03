@@ -1,7 +1,6 @@
 {-# LANGUAGE GADTs #-}
 module Main (main) where
 
-import qualified SourceApprovalCheck
 import Bridge.Types hiding (deploymentFingerprint)
 import Bridge.Ledger.Model (Deposit(..),Obligation(..),Preparation(..),Attempt(..),CostLimits(..),PaymentTerms(..),ScanBatch(..),ChainEvent(..))
 import qualified Bridge.Postgres.Treasury as Treasury
@@ -45,8 +44,7 @@ import Test.QuickCheck (quickCheckWithResult, stdArgs, maxSuccess, forAll, choos
 main :: IO ()
 main = getArgs >>= \case
   ["journal"] -> journalContracts
-  ["source"] -> SourceApprovalCheck.run
-  _ -> reject "postgres_contract_mode_required: journal | source"
+  _ -> reject "postgres_contract_mode_required: journal"
 
 journalContracts :: IO ()
 journalContracts = do

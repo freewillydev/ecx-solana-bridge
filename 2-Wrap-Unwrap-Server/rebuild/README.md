@@ -401,8 +401,8 @@ order refusal, private operator refusal and unchanged financial state run in ser
 mode. Both PostgreSQL modes passed against fresh disposable databases after the
 remaining assertions were transferred. The server test reaps its child, and the
 acceptance databases/role were removed. These local checks do not certify cross-UID
-signer isolation or cross-host recovery. The legacy runner retains only its journal
-and source modes until their remaining parity review is complete.
+signer isolation or cross-host recovery. The legacy runner now retains only its journal contract until its parity review
+is complete.
 
 Recovery parity now includes source loss after a payout has already been signed.
 The existing PostgreSQL restoration contract verifies return/approval to `paying`,
@@ -412,8 +412,14 @@ Settlement still posts principal/fees once and source return restores capital on
 The full ledger/real-restic contract passes; chain effects in this case are explicit
 offline fixtures, not a funded reorg claim. The same replacement contract now runs for earned-fee withdrawals and customer
 conversions, checking winner-link updates and preservation of an unrelated primary
-payout link while only network-fee deltas change balances. Legacy source tests
-remain pending review of multi-payment failure traversal.
+payout link while only network-fee deltas change balances. The actual worker-cycle
+contract also retains an earlier malformed native attempt alongside a signed Solana
+attempt: both failures and native-lock failure are visited on repeated cycles,
+Solana status observation is reached, intake stays paused, and balances/saved bytes
+remain unchanged. It uses real PostgreSQL, HTTPS signer and SDK signatures with
+explicit offline RPC fixtures. The 686-line legacy `SourceApprovalCheck.hs` and its
+command are retired; the source, covered-capital, replacement, winner-change and
+rebroadcast assertions now live in the existing rebuild contracts.
 
 ## Remaining release work, in order
 

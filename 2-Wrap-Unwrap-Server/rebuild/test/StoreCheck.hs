@@ -1288,6 +1288,7 @@ data Fixture a where
   FreshAt :: Int64 -> Fixture ()
   ChangeTreasuryAnchor :: T.Text -> T.Text -> Fixture ()
   SeedTreasuryEvidence :: T.Text -> T.Text -> T.Text -> T.Text -> Int64 -> Value -> Fixture ()
+  RecoveryPauseCount :: Fixture Int
   LockRestoreAudits :: Fixture [T.Text]
   OrderWorkflowFunds :: Fixture ()
   CustodyHeadReview :: Int64 -> Fixture ()
@@ -1398,6 +1399,10 @@ fixture c TLSFunds = PG.withTransaction c $ do
 fixture c (FreshAt now) = do
   void $ O.runUpdate c O.Update {O.uTable=S.scanHealth,O.uUpdateWith= \(chain,_,_,_)->(chain,O.toNullable $ O.sqlInt8 now,O.null,O.sqlInt8 now),O.uWhere=const $ O.sqlBool True,O.uReturning=O.rCount}
   void $ O.runUpdate c O.Update {O.uTable=S.custody,O.uUpdateWith= \(key,revision,_,_,_)->(key,revision,O.toNullable revision,O.toNullable $ O.sqlInt8 now,O.null),O.uWhere=const $ O.sqlBool True,O.uReturning=O.rCount}
+fixture c RecoveryPauseCount = length <$> (O.runSelect c (do
+  (_,kind,reason)<-O.selectTable S.audit
+  O.where_ (kind O..== O.sqlStrictText "pause" O..&& reason O..== O.sqlStrictText "payment_requires_reconciliation")
+  pure reason) :: IO [T.Text])
 fixture c LockRestoreAudits = O.runSelect c $ do
   (_,kind,subject)<-O.selectTable S.audit
   O.where_ (kind O..== O.sqlStrictText "native_locks_restored")
@@ -2634,6 +2639,7 @@ tlsMain=do
         method<-fieldValue "method" value; params<-fieldValue "params" value :: IO [Value]; requestId<-fieldValue "id" value :: IO Value
         modifyIORef' calls (<>[method])
         result<-case method of
+          "getSignatureStatuses"->pure Null -- Deliberate unavailable observation, never a successful chain effect.
           "getGenesisHash"->pure $ toJSON (Solana.solanaGenesis W.L2LSignetDevnet)
           "getAccountInfo"->pure $ context $ if take 1 params==[toJSON mint] then mintAccount else token
           "getBlockHeight"->pure $ Number 900
@@ -2641,7 +2647,7 @@ tlsMain=do
           "getMinimumBalanceForRentExemption"->pure $ Number 1488440
           "getFeeForMessage"->pure $ context $ Number 5000
           "simulateTransaction"->pure $ context $ object ["err" .= Null]
-          _->fail ("unexpected fixture RPC: "<>T.unpack method)
+          _->pure Null -- Unavailable scan/custody replies must not abort the fixture server.
         respond $ Wai.responseLBS status200 [("Content-Type","application/json")] (encode $ object ["jsonrpc" .= ("2.0"::T.Text),"id" .= requestId,"result" .= result])
   bracket (PG.connect settings) PG.close $ \fixtures->do
     fixture fixtures (InitializeIdentity identity); fixture fixtures SeedIntake; fixture fixtures TLSFunds
@@ -2740,6 +2746,34 @@ tlsMain=do
                     evalRead reader ReadBalances >>= check . (==before)
                     methods<-readIORef calls
                     check ("simulateTransaction" `elem` methods && "sendTransaction" `notElem` methods)
+                    -- A malformed earlier native payment must not hide the later
+                    -- Solana payment. Each failure pauses; no signer/send is used.
+                    let nativeKey=T.replicate 64 "0"; nativeId="fee:"<>nativeKey
+                    recoveryNow<-floor <$> getPOSIXTime
+                    evalWrite writer (Pause "multi-payment recovery contract")
+                    fixture fixtures (FreshAt recoveryNow)
+                    void $ evalWrite writer (ReserveFees recoveryNow nativeKey Native (money 3) "recipient" "recovery fixture")
+                    fixture fixtures ReadyIntake
+                    fixture fixtures (FreshAt recoveryNow)
+                    void $ evalWrite writer (PreparePayment recoveryNow nativeId (money 1) "{}")
+                    evalWrite writer (SaveDraft nativeId 0 "{}")
+                    nativePrepared<-evalRead reader (ReadPreparation nativeId)
+                    void $ evalWrite writer (RecordAttempt nativePrepared $ SignedAttempt "malformed-native" "00" "{}" (Just "offline:0"))
+                    original<-evalRead reader ReadBalances
+                    pending<-evalRead reader PendingAttempts >>= mapM (evalRead reader . ReadAttempt)
+                    check (sort(map recordedPayment pending)==[nativeId,identifier])
+                    forM_ [1,2::Int] $ \_->do
+                      countBefore<-fixture fixtures RecoveryPauseCount
+                      writeIORef calls []
+                      outcome<-try (worker $ Request RunWorkerCycle) :: IO (Either BridgeError ())
+                      check (case outcome of Left _->True; _->False)
+                      countAfter<-fixture fixtures RecoveryPauseCount
+                      check (countAfter-countBefore==3) -- native lock + both payment failures
+                      observed<-readIORef calls
+                      check ("getSignatureStatuses" `elem` observed && "sendTransaction" `notElem` observed)
+                      evalRead reader ReadState >>= check . ledgerPaused
+                      evalRead reader ReadBalances >>= check . (==original)
+                      evalRead reader PendingAttempts >>= mapM (evalRead reader . ReadAttempt) >>= check . (==pending)
   putStrLn "PASS: actual HTTPS worker/signer evaluators, auth/certificate refusal, SDK signature, persisted bytes, checkpoint receipt rejection/acknowledgment/replay; offline RPC and receipt fixtures only"
 
 restorationContract :: PG.Connection -> Reader -> Writer -> IO ()

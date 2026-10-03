@@ -9,7 +9,7 @@ license: MIT
 license-file: LICENSE
 build-type: Simple
 extra-source-files: migrations/postgresql/*.sql, config/*.json, web/*.html, web/*.css, web/*.hs, web/*.cabal, web/cabal.project*, docs/*.md,
-                    rebuild/test/fixtures/native-signet-payment.json, rebuild/test/fixtures/native-signet-replacement-draft.json, solana-helper/Cargo.toml, solana-helper/Cargo.lock,
+                    solana-helper/Cargo.toml, solana-helper/Cargo.lock,
                     solana-helper/src/lib.rs, rust-toolchain.toml
 
 common settings
@@ -78,7 +78,6 @@ executable ecx-postgres-check
   import: settings
   hs-source-dirs: integration
   main-is: JournalCheck.hs
-  other-modules: SourceApprovalCheck
   build-depends: base, ecx-bridge:bridge-types, ecx-bridge:bridge-runtime,
     aeson, async, bytestring, containers, directory, filepath, opaleye,
     postgresql-simple, process, QuickCheck, text, unix
