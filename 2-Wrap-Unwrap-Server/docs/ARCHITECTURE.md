@@ -22,7 +22,7 @@ Current acceptance and remaining gates are in [rebuild/README.md](../rebuild/REA
 | Native/Solana protocol validation | `chain/Bridge/` |
 | Observation, reconciliation and recovery | `workflow/Bridge/Observer.hs`, `Reconciliation.hs`, `Recovery.hs`, `Critical.hs` |
 | Transactions, accounting, immutable records | `runtime/Bridge/Store.hs`, `Store/Schema.hs`, `migrations/` |
-| Dedicated signer and local operator control | `workflow/Bridge/Signer.hs`, `SigningTransport.hs`, `Control.hs` |
+| Dedicated signer and local operator control | `workflow/Bridge/Signer.hs`, `Control.hs` |
 | Host fence and backup | `runtime/Bridge/Fence.hs`, `Store/Backup.hs` |
 
 The deployment has one HTTP/API process and one dedicated signer process.
@@ -62,7 +62,10 @@ The signer uses `ServerT SigningAPI (Request 'Signer 'Critical)` and resolves it
 own `SigningDSL` under separate authorization and serialization.
 
 Safe and critical evaluators remain separate. `Critical.hs` has one runtime
-`evalCritical` dispatch under its workflow gate; authority is checked before waiting.
+`evalCritical` call in private `dispatch`; external authority is checked before
+waiting for the workflow gate. Internal signer requests use that same dispatch
+under the already-held gate, without reacquiring it. The `SigningDSL` branch alone
+constructs the signer ClientM and independently refuses observation-only mode.
 The gate spans chain calls and individual database transactions, so scanning cannot
 change a payment's observed source midway through a workflow. Safe reads remain
 concurrent. The signer independently evaluates its restricted signing operations.
@@ -114,13 +117,14 @@ response format. Customer responses and durable signed bytes are unchanged.
 
 [SignerPaths.tla](../rebuild/test/formal/SignerPaths.tla) defines `OutputStates` as
 an explicit set and checks that each member has exactly one generating API path.
-It models receive, authentication/routing, typeclass resolution, evaluation and
-refusal, with abstract saved-authorization and stability guards. `Alignment` binds
+It models request creation, paying-mode critical dispatch, authentication/routing,
+typeclass resolution, evaluation and refusal, with abstract saved-authorization and stability guards. `Alignment` binds
 every emitted constructor to its originating path; `OnlyEvaluatorCreates` checks
 that no other transition produces it. The supplied two-request model exhaustively
 checks interleavings, invalid paths, failed authorization and failed decision checks.
-It reached 12,769 distinct states with no violations using TLC 1.7.4. Deliberate
+It reached 54,289 distinct states with no violations using TLC 1.7.4. Deliberate
 wrong-output, authentication-bypass and reused-constructor mutations are rejected.
+Dispatch-bypass and observer-mode dispatch mutations are also rejected.
 The module contains the transition-by-transition inductive argument; there is no
 TLAPS-checked unbounded theorem or automatically verified Haskell refinement.
 
@@ -133,7 +137,12 @@ java -Xmx256m -XX:+UseParallelGC -cp /path/to/tla2tools.jar tlc2.TLC -workers 1 
 The property concerns successful evaluator emissions through the production API.
 It does not make ordinary data constructors or JSON unforgeable: trusted Haskell
 code/tests can construct values, and JSON decoders necessarily construct them too.
-The production entry point passes `withSigner` directly to `runSigningServer`;
+The production entry point uses `runSigner`. The real evaluator is local to
+`signerApplication`, which returns only an authenticated WAI application; callers
+never receive its evaluator as a callback. Transport helpers share `Signer.hs`.
+The worker holds its transport capability only inside the critical signer branch.
+The dispatch model covers this worker pipeline: another client possessing valid
+signer credentials can still call HTTPS directly, subject to the signer's own checks.
 TLS/authentication and independent saved-decision validation remain essential.
 Retries may repeat the same result through the same path. The model does not prove
 cryptography, chain/ledger validity, process isolation or all other critical DSLs.

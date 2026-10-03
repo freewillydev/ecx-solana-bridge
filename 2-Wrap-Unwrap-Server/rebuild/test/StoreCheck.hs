@@ -18,9 +18,10 @@ import qualified Opaleye.Internal.Locking as Locking
 import Bridge.Identity (capabilityHash,payInstruction,digest,publicKey)
 import qualified Bridge.Wire as W
 import qualified Data.Aeson.KeyMap as KM
-import Data.Aeson (encode,object,(.=),toJSON,Value(..),eitherDecodeStrict')
+import Data.Aeson (ToJSON,encode,object,(.=),toJSON,Value(..),eitherDecodeStrict')
 import Data.Profunctor.Product (p5,p6,p8,p9)
 import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteString.Base64 as B64
 import qualified Data.Text.Encoding as TE
 import Bridge.Domain
 import Bridge.Wire (PaymentTerms(..),CostLimits(..),PolicySnapshot(..))
@@ -47,12 +48,12 @@ import Bridge.Error (BridgeError(..),reject)
 import Bridge.Observer (ObserverSettings(..))
 import Bridge.Reconciliation (inspectCustodyWith,nativeBalance)
 import Bridge.RPC (fieldValue,newRpcManager)
-import Bridge.SigningTransport (SigningEndpoint(..),runSigningServer)
 import qualified Bridge.SolanaPayment as SP
 import qualified Network.Wai.Handler.Warp as Warp
 import qualified Data.ByteString as BS
 import Data.Time.Clock.POSIX (getPOSIXTime)
-import Bridge.Operation.Internal (Request(..),SignPrepared(..),CheckpointCustody(..),WorkerOperation(..))
+import Bridge.Operation.Internal (Request(..),CheckpointCustody(..),WorkerOperation(..))
+import Servant.API (BasicAuthData(..))
 import qualified Bridge.Native as N
 import qualified Bridge.Solana as Solana
 import qualified Bridge.SolanaHelper as H
@@ -907,12 +908,21 @@ ledgerMain = do
             signing=SignerSettings native solana (H.SolanaPolicy "contract" "contract" publicKey publicKey publicKey (money 10) (money 10))
               "/unused/sdk" "/unused/key" Nothing
         bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "unauthorized signer reached network"}) closeManager $ \manager -> do
-          withTestSigningKey $ \keyFile->withSigner manager reader signing {signingKey=keyFile} $ \interpret -> do
-            expectStore "custody_checkpoint_not_configured" (interpret $ Request $ CheckpointCustody "contract" 0)
-            expectStore "invalid_custody_checkpoint" (interpret $ Request $ CheckpointCustody "other" 0)
-            expectStore "signer_profile_mismatch" (interpret $ Request $ SignPrepared "other" intent 0)
-            expectStore "invalid_signing_decision" (interpret $ Request $ SignPrepared "contract" intent 8)
-            expectStore "signing_backup_required" (interpret $ Request $ SignPrepared "contract" intent 0)
+          withTestSigningKey $ \keyFile->do
+            let token=BS.replicate 64 97
+            app<-signerApplication manager reader signing {signingKey=keyFile} (BasicAuthData "worker" token)
+            let refused :: ToJSON a => T.Text -> BS.ByteString -> a -> IO ()
+                refused code path body=do
+                  response<-WaiTest.runSession (WaiTest.srequest $ WaiTest.SRequest
+                    ((WaiTest.setPath Wai.defaultRequest path) {Wai.requestMethod="POST",
+                      Wai.requestHeaders=[("Content-Type","application/json"),("Authorization","Basic "<>B64.encode ("worker:"<>token))]}) (encode body)) app
+                  check (statusCode (WaiTest.simpleStatus response)==409 &&
+                    eitherDecodeStrict' (BL.toStrict $ WaiTest.simpleBody response)==Right (object ["error" .= (code::T.Text)]))
+            refused "custody_checkpoint_not_configured" "/checkpoint-custody" ("contract"::T.Text,0::Int64)
+            refused "invalid_custody_checkpoint" "/checkpoint-custody" ("other"::T.Text,0::Int64)
+            refused "signer_profile_mismatch" "/sign-preparation" ("other"::T.Text,intent,0::Int)
+            refused "invalid_signing_decision" "/sign-preparation" ("contract"::T.Text,intent,8::Int)
+            refused "signing_backup_required" "/sign-preparation" ("contract"::T.Text,intent,0::Int)
           withRuntime manager (ObserverSettings native solana 2 "sol-origin" "opening-signature") (signingPolicy signing) Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret _customer _operator -> do
             expectStore "invalid_saved_payment" (interpret $ Request $ SignPreparedPayment intent)
             expectStore "intake_paused" (interpret $ Request $ PrepareOutgoing intent)
@@ -2720,8 +2730,9 @@ tlsMain=do
             address<-NS.getSocketName socket
             case address of NS.SockAddrInet p _->pure (fromIntegral p); _->fail "unexpected listener"
           Warp.testWithApplication (pure rpcApplication) $ \rpcPort->
-            bracket (newManager defaultManagerSettings {managerModifyRequest= \request->pure request {HTTP.secure=False,HTTP.host="127.0.0.1",HTTP.port=rpcPort}}) closeManager $ \manager->
-              withSigner manager reader (SignerSettings native solana config sdk keyFile Nothing) $ \signer->do
+            bracket (newManager defaultManagerSettings {managerModifyRequest= \request->pure request {HTTP.secure=False,HTTP.host="127.0.0.1",HTTP.port=rpcPort}}) closeManager $ \manager->do
+                let credentials=BasicAuthData "worker" (BS.replicate 64 97)
+                signer<-signerApplication manager reader (SignerSettings native solana config sdk keyFile Nothing) credentials
                 -- Receipt fixtures exercise HTTPS and the actual worker's
                 -- acknowledgment gate, not off-host backup durability.
                 checkpointReply<-newIORef (Nothing :: Maybe W.BackupReceipt)
@@ -2731,8 +2742,10 @@ tlsMain=do
                       Op.SigningDSL (Op.CheckpointSigning CheckpointCustody{})->do
                         modifyIORef' checkpoints (+1)
                         Op.CheckpointResult <$> (readIORef checkpointReply >>= maybe (reject "checkpoint_fixture_refused") pure)
-                      _->signer request
-                bracket (forkIO $ runSigningServer (endpoint port) evaluate) killThread $ \_thread->do
+                      _->reject "checkpoint_fixture_only"
+                checkpointApp<-signingApplication credentials evaluate
+                let application request=if Wai.pathInfo request==["checkpoint-custody"] then checkpointApp request else signer request
+                bracket (forkIO $ runSigningServer (endpoint port) application) killThread $ \_thread->do
                   let wait 0=fail "TLS signer did not bind"
                       wait n=do
                         result<-try $ bracket (NS.socket NS.AF_INET NS.Stream NS.defaultProtocol) NS.close $ \socket->NS.connect socket (NS.SockAddrInet (fromIntegral port) (NS.tupleToHostAddress (127,0,0,1)))

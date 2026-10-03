@@ -51,7 +51,7 @@ library workflow
   visibility: private
   hs-source-dirs: workflow
   other-modules: Bridge.Credentials
-  exposed-modules: Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.SigningTransport, Bridge.Critical, Bridge.Reconciliation, Bridge.Admission, Bridge.Order, Bridge.Web, Bridge.Config, Bridge.Control, Bridge.Recovery
+  exposed-modules: Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.Critical, Bridge.Reconciliation, Bridge.Admission, Bridge.Order, Bridge.Web, Bridge.Config, Bridge.Control, Bridge.Recovery
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:customer-api, ecx-bridge-rebuild:store,
     ecx-bridge-rebuild:chain, aeson, bytestring, text, time, containers, http-client, servant, servant-server,
     transformers, stm, ram, crypton, crypton-pem, crypton-x509, http-types, wai, warp, warp-tls, filepath, unix,
@@ -83,9 +83,9 @@ executable rebuild-store-check
   ghc-options: -threaded -rtsopts -with-rtsopts=-N1
   hs-source-dirs: test, runtime, workflow
   main-is: StoreCheck.hs
-  other-modules: Bridge.Fence, Bridge.Store, Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Store.Backup, Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.SigningTransport, Bridge.Critical, Bridge.Reconciliation, Bridge.Admission, Bridge.Order, Bridge.Web, Bridge.Config, Bridge.Control, Bridge.Recovery, Bridge.Credentials, Paths_ecx_bridge_rebuild
+  other-modules: Bridge.Fence, Bridge.Store, Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Store.Backup, Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.Critical, Bridge.Reconciliation, Bridge.Admission, Bridge.Order, Bridge.Web, Bridge.Config, Bridge.Control, Bridge.Recovery, Bridge.Credentials, Paths_ecx_bridge_rebuild
   autogen-modules: Paths_ecx_bridge_rebuild
   build-depends: base, async, ecx-bridge-rebuild, ecx-bridge-rebuild:customer-api, ecx-bridge-rebuild:chain, http-client, servant, servant-server, aeson, bytestring,
-    containers, text, crypton, base16-bytestring, time, directory, scientific, opaleye, postgresql-simple, product-profunctors, QuickCheck,
+    base64-bytestring, containers, text, crypton, base16-bytestring, time, directory, scientific, opaleye, postgresql-simple, product-profunctors, QuickCheck,
     transformers, stm, ram, crypton-pem, crypton-x509, http-types, wai, wai-extra, warp, warp-tls, filepath, unix,
     servant-client, http-client-tls, crypton-connection, tls, crypton-x509-store, process, network, binary

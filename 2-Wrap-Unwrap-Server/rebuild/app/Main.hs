@@ -10,7 +10,6 @@ import Bridge.RPC (newRpcManager)
 import qualified Bridge.Native as N
 import Bridge.Recovery (CustodyRecovery(..),evalCustodyRecovery)
 import Bridge.Signer
-import Bridge.SigningTransport
 import Bridge.Store (withReader,withFencedWriter,StoreRestore(..),evalRestore,StoreSetup(..),evalSetup,BackupReceipt(..))
 import Bridge.Web (publicApplication)
 import Bridge.Wire (Profile(..))
@@ -114,8 +113,8 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
     database<-databaseSettings
     withReader database (C.fingerprint c) (C.backupRequired c) $ \reader->
       bracket newRpcManager closeManager $ \manager->
-        withSigner manager reader (SignerSettings (C.nativeSettings c) (C.solanaSettings c) (C.solanaPolicy c) (C.solanaSdkLibrary c) key ((\(configuration,parent)->(c,configuration,parent)) <$> backup)) $
-          runSigningServer (SigningEndpoint (C.signerPort c) (C.signerAuthFile c))
+        runSigner manager reader (SignerSettings (C.nativeSettings c) (C.solanaSettings c) (C.solanaPolicy c) (C.solanaSdkLibrary c) key ((\(configuration,parent)->(c,configuration,parent)) <$> backup))
+          (SigningEndpoint (C.signerPort c) (C.signerAuthFile c))
   restoreCommand path minimumText operation=do
     c<-C.loadConfig path
     minimumSequence<-maybe (reject "invalid_restore_policy") pure (readMaybe minimumText)

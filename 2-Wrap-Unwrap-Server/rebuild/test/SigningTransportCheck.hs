@@ -18,8 +18,7 @@ import Data.X509.Validation (validateDefault,FailedReason(..))
 import Data.X509.CertificateStore (makeCertificateStore)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
-import Bridge.Signer (verifySigningKey)
-import Bridge.SigningTransport
+import Bridge.Signer
 import qualified Bridge.Fence as Fence
 import qualified Data.Text as T
 import System.Posix.Process (forkProcess,getProcessStatus,exitImmediately,ProcessStatus(..))

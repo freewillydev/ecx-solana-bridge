@@ -17,7 +17,7 @@ Detailed development history and previous per-piece line comparisons are in Git
 | Admission, orders, payment, observation and custody | `workflow/Bridge/{Admission,Order,Payment,Observer,Reconciliation}.hs` |
 | Closed Opaleye operations and atomic ledger transitions | `runtime/Bridge/Store.hs`, `Store/{Schema,Catalog}.hs` |
 | Actual native/Solana RPC, codecs and effect validation | `chain/Bridge/` |
-| Independent signing checks and authenticated HTTPS | `workflow/Bridge/{Signer,SigningTransport,Credentials}.hs` |
+| Independent signing checks and authenticated HTTPS | `workflow/Bridge/{Signer,Credentials}.hs` |
 | Private operator commands | `workflow/Bridge/Control.hs` |
 | Host fence, encrypted archives and custody recovery | `runtime/Bridge/{Fence,Store/Backup}.hs`, `workflow/Bridge/Recovery.hs` |
 | Configuration, browser serving and resource lifetime | `workflow/Bridge/{Config,Web}.hs`, `app/Main.hs` |

@@ -1,4 +1,4 @@
-{-# LANGUAGE DataKinds, GADTs, RankNTypes, ScopedTypeVariables, FlexibleContexts #-}
+{-# LANGUAGE DataKinds, GADTs, RankNTypes, ScopedTypeVariables #-}
 -- The signer ClientM is constructed only inside this critical evaluator.
 module Bridge.Critical (CustomerSettings(..),withRuntime,runWorkerLoop) where
 import Bridge.Operation.Internal
@@ -24,8 +24,7 @@ import Bridge.PaymentObservation
 import qualified Bridge.Solana as S
 import Data.Aeson (eitherDecodeStrict',FromJSON,toJSON,object,(.=),parseJSON)
 import qualified Data.Text.Encoding as TE
-import Bridge.Signer (signingAPI)
-import Bridge.SigningTransport
+import Bridge.Signer (signingAPI,SigningEndpoint(..),signerCredentials,signerCertificate)
 import Bridge.Store
 import qualified Bridge.Native as N
 import qualified Bridge.SolanaHelper as H
@@ -116,12 +115,43 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
           WorkerDSL ReconcileCustody->pure ()
           WorkerDSL ReconcilePayment{}->pure ()
           _->require paying "observation_only"
-        withMVar gate $ \_ -> evalCritical command
+        withMVar gate $ \_ -> dispatch command
       customerRequest :: forall caller a. Plan caller a -> IO a
       customerRequest (SafePlan request)=evalSafe reader (publicConfiguration <$> customerSettings) (resolve request)
       customerRequest (CriticalPlan request)=interpret request
+      -- The sole critical evaluation site. External requests reach it under the
+      -- gate above; internal signer requests reuse that held gate, never reenter it.
+      -- Neither this dispatcher nor a signer client escapes withRuntime.
+      dispatch :: forall caller a. DSL caller 'Critical a -> IO a
+      dispatch operation=evalCritical operation
       evalCritical :: forall caller a. DSL caller 'Critical a -> IO a
-      evalCritical (SigningDSL _)=reject "signer_operation_forbidden"
+      evalCritical (SigningDSL operation)=do
+        require paying "observation_only"
+        credentials<-signerCredentials endpoint
+        certificate<-signerCertificate endpoint
+        let base=TLS.defaultParamsClient "127.0.0.1" BS.empty
+            tls=base {TLS.clientShared=(TLS.clientShared base) {TLS.sharedCAStore=makeCertificateStore [certificate]}
+              ,TLS.clientSupported=(TLS.clientSupported base) {TLS.supportedCiphers=ciphersuite_default}}
+            settings=managerSetProxy noProxy (mkManagerSettings (NC.TLSSettings tls) Nothing)
+              {managerRetryableException=const False,managerIdleConnectionCount=0
+              ,managerResponseTimeout=responseTimeoutMicro (case operation of CheckpointSigning{}->315000000; _->60000000)
+              ,managerModifyRequest= \request->pure request {redirectCount=0}
+              ,managerModifyResponse= \response->do
+                bytes<-boundedBody 524288 (responseBody response)
+                body<-newIORef bytes
+                pure response {responseBody=atomicModifyIORef' body $ \chunk->(BS.empty,chunk)}}
+        bracket (newManager settings) closeManager $ \local->do
+          let prepared :<|> replacement :<|> draft :<|> checkpoint=SC.client signingAPI credentials
+              environment=SC.mkClientEnv local (SC.BaseUrl SC.Https "127.0.0.1" (signerPort endpoint) "")
+              call=case operation of
+                CheckpointSigning (CheckpointCustody identity minimumSequence)->checkpoint (identity,minimumSequence)
+                PreparedSigning (SignPrepared identity identifier generation)->prepared (identity,identifier,generation)
+                ReplacementSigning (SignReplacement identity decision)->replacement (identity,decision)
+                DraftSigning (DraftReplacement identity parent fee)->draft (identity,parent,fee)
+          result<-SC.runClientM call environment
+          -- Even an HTTP failure may follow signing. Retain the preparation;
+          -- never automatically retry or pretend the outcome is known.
+          either (const $ reject "signer_outcome_unknown") pure result
       evalCritical (WriteCustomer (Bridge.Operation.Internal.CreateOrder header request))=do
         c<-customer
         createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (\n->evalWorker (CheckpointBackup n) >> freshIntake) reader writer header request
@@ -238,7 +268,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
             evalWorker ReconcileCustody
             now<-floor <$> getPOSIXTime
             family<-evalRead reader (ReadReplacementDraftContext now parent fee)
-            draft<-draftOutput <$> callSigner (DraftReplacement (H.fingerprint config) parent fee)
+            draft<-draftOutput <$> dispatch (command $ DraftReplacement (H.fingerprint config) parent fee)
             either reject pure (NP.validateNativeReplacementDraft (map snd family) fee draft)
             later<-floor <$> getPOSIXTime
             evalWrite writer (SaveReplacementDraft later saved draft reason)
@@ -257,7 +287,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
             evalWorker ReconcileCustody
             now<-floor <$> getPOSIXTime
             (family,draft)<-evalRead reader (ReadReplacementSigning now decision)
-            wire<-replacementOutput <$> callSigner (SignReplacement (H.fingerprint config) decision)
+            wire<-replacementOutput <$> dispatch (command $ SignReplacement (H.fingerprint config) decision)
             signed<-decode (signedPolicy wire)
             require (signedId wire==NP.nativeTxid(NP.signedNativeTransaction signed)
               && signedBytes wire==NP.signedNativeBytes signed
@@ -344,7 +374,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         before<-evalRead reader ReadState
         require (minimumSequence>=0 && minimumSequence<=ledgerSequence before) "invalid_custody_checkpoint"
         when (ledgerBackup before<minimumSequence) $ do
-          receipt<-checkpointOutput <$> callSigner (CheckpointCustody (H.fingerprint config) minimumSequence)
+          receipt<-checkpointOutput <$> dispatch (command $ CheckpointCustody (H.fingerprint config) minimumSequence)
           let hash value=T.length value==64 && T.all (`elem` ("0123456789abcdef"::String)) value
           require (W.receiptIdentity receipt==H.fingerprint config && W.receiptSequence receipt==ledgerSequence before
             && hash (W.receiptSnapshot receipt) && hash (W.receiptArchiveHash receipt)) "invalid_custody_checkpoint_receipt"
@@ -457,7 +487,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
           now<-floor <$> getPOSIXTime
           decision<-evalRead reader (ReadSigningDecision now identifier $ preparedGeneration prepared)
           require (decision==prepared) "preparation_changed"
-          signed<-preparedOutput <$> callSigner (SignPrepared (H.fingerprint config) identifier $ preparedGeneration prepared)
+          signed<-preparedOutput <$> dispatch (command $ SignPrepared (H.fingerprint config) identifier $ preparedGeneration prepared)
           verifySignedAttempt (N.nativeCall rpc native) (N.profile native) config prepared signed
           recorded<-evalWrite writer (RecordAttempt prepared signed)
           pure (signedId $ recordedSigned recorded)
@@ -508,36 +538,6 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
             evalWorker (CheckpointBackup $ ledgerSequence before)
             after<-evalRead reader ReadState
             require (ledgerBackup after>=ledgerSequence before) "backup_pending"
-      callSigner :: Operation 'Signer 'Critical op => op a -> IO a
-      callSigner input=case command input of
-        SigningDSL operation->sendSigning operation
-      sendSigning :: SigningOperation a -> IO a
-      sendSigning operation=do
-        credentials<-signerCredentials endpoint
-        certificate<-signerCertificate endpoint
-        let base=TLS.defaultParamsClient "127.0.0.1" BS.empty
-            tls=base {TLS.clientShared=(TLS.clientShared base) {TLS.sharedCAStore=makeCertificateStore [certificate]}
-              ,TLS.clientSupported=(TLS.clientSupported base) {TLS.supportedCiphers=ciphersuite_default}}
-            settings=managerSetProxy noProxy (mkManagerSettings (NC.TLSSettings tls) Nothing)
-              {managerRetryableException=const False,managerIdleConnectionCount=0
-              ,managerResponseTimeout=responseTimeoutMicro (case operation of CheckpointSigning{}->315000000; _->60000000)
-              ,managerModifyRequest= \request->pure request {redirectCount=0}
-              ,managerModifyResponse= \response->do
-                bytes<-boundedBody 524288 (responseBody response)
-                body<-newIORef bytes
-                pure response {responseBody=atomicModifyIORef' body $ \chunk->(BS.empty,chunk)}}
-        bracket (newManager settings) closeManager $ \local->do
-          let prepared :<|> replacement :<|> draft :<|> checkpoint=SC.client signingAPI credentials
-              environment=SC.mkClientEnv local (SC.BaseUrl SC.Https "127.0.0.1" (signerPort endpoint) "")
-              call=case operation of
-                CheckpointSigning (CheckpointCustody identity minimumSequence)->checkpoint (identity,minimumSequence)
-                PreparedSigning (SignPrepared identity identifier generation)->prepared (identity,identifier,generation)
-                ReplacementSigning (SignReplacement identity decision)->replacement (identity,decision)
-                DraftSigning (DraftReplacement identity parent fee)->draft (identity,parent,fee)
-          result<-SC.runClientM call environment
-          -- Even an HTTP failure may follow signing. Retain the preparation;
-          -- never automatically retry or pretend the outcome is known.
-          either (const $ reject "signer_outcome_unknown") pure result
       -- Explicit resume must retain every recovery error; the scheduler alone
       -- may defer a custody check while waiting for the next observation cycle.
       recoverPending :: IO ()

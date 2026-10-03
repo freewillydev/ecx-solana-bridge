@@ -1,17 +1,18 @@
 {-# LANGUAGE DataKinds, GADTs, RankNTypes, TypeOperators #-}
 -- Dedicated signing evaluator: read-only ledger, private signing credentials,
--- no writer or broadcast operation. TLS/auth transport is installed by runtime.
+-- no writer or broadcast operation. The real evaluator never escapes its API.
 module Bridge.Signer
-  ( SigningAPI, signingAPI, signingServer, SignerSettings(..), withSigner, verifySigningKey, protectedSignerFile ) where
+  ( SigningAPI, signingAPI, signingServer, SignerSettings(..), signerApplication, runSigner, verifySigningKey, protectedSignerFile
+  , SigningEndpoint(..), signerCredentials, signerCertificate, signingApplication, runSigningServer ) where
 import Bridge.Operation.Internal
 import Bridge.Credentials
 import qualified Bridge.Config as C
 import Bridge.Recovery
-import Control.Exception (bracket)
+import Control.Exception (bracket,catch)
 import System.Directory (removeDirectoryRecursive)
 import System.FilePath (takeDirectory)
 import System.Timeout (timeout)
-import Data.Aeson (encode)
+import Data.Aeson (encode,object,(.=))
 import Bridge.Wire (Profile(..),SignedAttempt(..))
 import Bridge.Domain (Amount)
 import Bridge.Error
@@ -29,7 +30,17 @@ import Control.Concurrent.MVar (newMVar,withMVar)
 import Data.Text (Text)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Network.HTTP.Client (Manager)
-import Servant
+import Servant hiding (respond)
+import Bridge.Web (boundedApplication)
+import Control.Monad.IO.Class (liftIO)
+import qualified Data.ByteArray as BA
+import qualified Data.ByteString as BS
+import Data.PEM (pemParseBS,pemContent)
+import Data.X509 (SignedCertificate,decodeSignedCertificate)
+import Network.Wai hiding (Request)
+import Network.Wai.Handler.Warp (setHost,setPort,setTimeout,defaultSettings)
+import Network.Wai.Handler.WarpTLS (runTLS,tlsSettings)
+import System.IO (withBinaryFile,IOMode(ReadMode))
 
 -- Keep the shared API pure; only the critical runtime will generate ClientM.
 type SigningAPI = BasicAuth "signer" () :>
@@ -52,9 +63,8 @@ data SignerSettings = SignerSettings
 
 -- The gate serializes complete decisions, including RPC/FFI and the second read.
 -- Database read transactions finish before any external work starts.
-withSigner :: Manager -> Reader -> SignerSettings
-  -> ((forall a. Request 'Signer 'Critical a -> IO a) -> IO b) -> IO b
-withSigner manager reader settings action = do
+signerApplication :: Manager -> Reader -> SignerSettings -> BasicAuthData -> IO Application
+signerApplication manager reader settings credentials = do
   let native=signingNative settings; solana=signingSolana settings; config=signingPolicy settings
   require (N.profile native `elem` [L2LSignetDevnet,ECXBetanetDevnet]
     && S.solanaProfile solana==N.profile native
@@ -127,4 +137,58 @@ withSigner manager reader settings action = do
           after<-readDecision
           require (before==after) "signing_decision_changed"
           pure $ PreparedResult verified
-  action interpret
+  signingApplication credentials interpret
+
+-- Startup exposes an authenticated application/server, never its evaluator.
+runSigner :: Manager -> Reader -> SignerSettings -> SigningEndpoint -> IO ()
+runSigner manager reader settings endpoint=do
+  credentials<-signerCredentials endpoint
+  app<-signerApplication manager reader settings credentials
+  runSigningServer endpoint app
+
+data SigningEndpoint = SigningEndpoint { signerPort :: Int, signerAuthFile :: FilePath } deriving (Eq,Show)
+
+signerCredentials :: SigningEndpoint -> IO BasicAuthData
+signerCredentials endpoint = do
+  require (signerPort endpoint>0 && signerPort endpoint<=65535) "invalid_signer_port"
+  let path=signerAuthFile endpoint
+  protectedSignerFile path True True
+  bytes<-withBinaryFile path ReadMode (`BS.hGet` 66)
+  let token=BS.take 64 bytes
+  require (BS.length token==64 && BS.all (\x->x>=48 && x<=57 || x>=97 && x<=102) token
+    && (bytes==token || bytes==token<>"\n")) "invalid_signer_auth_token"
+  pure (BasicAuthData "worker" token)
+
+signerCertificate :: SigningEndpoint -> IO SignedCertificate
+signerCertificate endpoint = do
+  let path=signerAuthFile endpoint<>".pem"
+  protectedSignerFile path False False
+  bytes<-withBinaryFile path ReadMode (`BS.hGet` 8193)
+  require (BS.length bytes<=8192) "signer_certificate_too_large"
+  pems<-either (const $ reject "invalid_signer_certificate") pure (pemParseBS bytes)
+  case pems of
+    [pem]->either (const $ reject "invalid_signer_certificate") pure (decodeSignedCertificate $ pemContent pem)
+    _->reject "invalid_signer_certificate"
+
+signingApplication :: BasicAuthData -> (forall a. Request 'Signer 'Critical a -> IO a) -> IO Application
+signingApplication credentials evaluate = do
+  let authenticate=BasicAuthCheck $ \supplied->pure $
+        if BA.constEq (basicAuthUsername supplied) (basicAuthUsername credentials)
+          && BA.constEq (basicAuthPassword supplied) (basicAuthPassword credentials)
+        then Authorized () else Unauthorized
+      interpret :: forall a. Request 'Signer 'Critical a -> Handler a
+      interpret request = do
+        result<-liftIO $ (Right <$> evaluate request) `catch` (\(BridgeError code)->pure $ Left code)
+        either (\code->throwError err409 {errBody=encode $ object ["error" .= code],errHeaders=[("Content-Type","application/json")]}) pure result
+      context=authenticate :. EmptyContext
+      app=serveWithContext signingAPI context
+        (hoistServerWithContext signingAPI (Proxy :: Proxy '[BasicAuthCheck ()]) interpret signingServer)
+  boundedApplication 16 "signer_busy" app
+
+runSigningServer :: SigningEndpoint -> Application -> IO ()
+runSigningServer endpoint app = do
+  _<-signerCertificate endpoint
+  let key=signerAuthFile endpoint<>".key"
+  protectedSignerFile key True False
+  runTLS (tlsSettings (signerAuthFile endpoint<>".pem") key)
+    (setHost "127.0.0.1" $ setPort (signerPort endpoint) $ setTimeout 315 defaultSettings) app
