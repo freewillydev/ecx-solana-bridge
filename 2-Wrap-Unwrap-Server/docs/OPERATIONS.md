@@ -116,20 +116,12 @@ bridge server. Custody compromise must not also grant token issuance or control
 of unrelated liquidity capital. Solana separates mint and other authority roles;
 see the [Token Program basics](https://solana.com/docs/tokens/basics).
 
-The repository provides a **Devnet-only** setup example, excluded from the installed
-custody helper:
-
-```sh
-cd solana-helper
-cargo run --locked -j 1 --example setup_devnet -- /absolute/private/test-state
-```
-
-It pins Devnet genesis, creates an eight-decimal classic SPL mint with no freeze
-authority, creates custody/tester associated token accounts, and issues test
-inventory. It retains a pending transaction journal and refuses a second attempt
-while its predecessor is unresolved. If funding is missing it reports a public
-Devnet funding address and sends nothing. This creates a distinct test mint; it
-must never be described as the canonical wrapped ECX token.
+The root-Cabal [token administration CLI](../../1-Make-Wrapped-ECX/README.md)
+provides key generation, eight-decimal classic mint creation, associated token
+accounts, mint/burn and metadata operations. It replaces the standalone Rust setup
+example. Fund separate test identities explicitly; use prepare/check/sign/submit
+for each operation and keep every immutable signed attempt. Choose Devnet explicitly
+for testing. A newly created test mint is not the canonical wrapped ECX token.
 
 For canonical adoption, first obtain the issuer-approved cluster, mint, decimals,
 Token Program, authorities and backing policy. Verify them from finalized on-chain

@@ -1,10 +1,11 @@
 {-# LANGUAGE GADTs #-}
--- Offline authority: only validated mint/burn messages, saved before returning.
+-- Offline key creation and validated administration signing, saved before returning.
 module Token.Signing (Critical(..),evalCritical,Saved(..),validateSaved) where
 import Token
 import Bridge.Error (require,reject)
 import Bridge.SolanaMessage (Transaction(..),base58,publicKey,decodeTransaction)
 import Control.Exception (bracket,bracketOnError)
+import Crypto.Random (getRandomBytes)
 import Crypto.Error (CryptoFailable(..))
 import qualified Crypto.PubKey.Ed25519 as Ed
 import qualified Data.ByteArray as BA
@@ -44,9 +45,18 @@ validateSaved (Saved request identifier encoded)=do
     _->Left "invalid_token_signature"
 
 data Critical a where
+  GenerateKey :: FilePath -> Critical Text
   Sign :: FilePath -> FilePath -> Request -> Text -> Critical Text
 
 evalCritical :: Critical a -> IO a
+evalCritical (GenerateKey output)=do
+  privateParent output
+  seed<-getRandomBytes 32 :: IO BA.ScrubbedBytes
+  secret<-case Ed.secretKey seed of CryptoPassed key->pure key; _->reject "token_key_generation_failed"
+  let public=BA.convert (Ed.toPublic secret) :: B.ByteString
+      bytes=BA.convert seed<>public :: B.ByteString
+  savePrivate output (L.toStrict $ encode $ B.unpack bytes)
+  pure (base58 public)
 evalCritical (Sign keyfile output request unsigned)=do
   Transaction _ _ message<-either reject pure (validate request unsigned)
   privateParent keyfile
@@ -75,6 +85,12 @@ evalCritical (Sign keyfile output request unsigned)=do
       record=L.toStrict $ encode $ object
         ["request" .= request,"signature" .= identifier,"transaction" .= transaction]
   require (Ed.verify (Ed.toPublic secret) message signature) "token_signature_invalid"
+  savePrivate output record
+  pure identifier
+
+-- Used only by the closed critical evaluator; callers cannot write arbitrary files.
+savePrivate :: FilePath -> B.ByteString -> IO ()
+savePrivate output record=do
   -- Exclusive creation refuses retries with a different blockhash or amount.
   -- Keep even a partial file on failure: operators must inspect, never overwrite.
   bracket (openFd output WriteOnly defaultFileFlags
@@ -85,7 +101,6 @@ evalCritical (Sign keyfile output request unsigned)=do
         fileSynchronise fd
         hClose handle
   bracket (openFd (takeDirectory output) ReadOnly defaultFileFlags {nofollow=True,cloexec=True}) closeFd fileSynchronise
-  pure identifier
 
 privateParent :: FilePath -> IO ()
 privateParent path=do

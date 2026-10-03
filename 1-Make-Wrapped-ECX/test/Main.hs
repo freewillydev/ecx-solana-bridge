@@ -91,6 +91,21 @@ main=do
           transaction<-evalSafe (Prepare sdkLibraryPath $ Metadata (authority original) (mint original) terms (blockhash original))
           pure (show (hash (TE.encodeUtf8 transaction) :: Digest SHA256))) [True,False]
         pure (address==reference && hashes==["0640af0794fb42396d44234c5cf720e05a2d13cf6cec79d42ead25656e1da0d1", "d90662feccbc56229eaca30a40ee94eef9a20f79257a67b877c5e10e56a69e71"])
+    , quickCheckResult $ once $ ioProperty $ do
+        let original=request Mint 1
+        captured<-evalSafe (AssociatedAddress sdkLibraryPath "HcctYHWCfLGrE5WigGKHg5hR6Q1P1Gntb5PYQWSQFHXg" "Hqb82J658UeWXCdr6DA6Au2ChMzrhxoSd3vdXk2hkNqM")
+        checks<-mapM (\recipient->do
+          address<-evalSafe (AssociatedAddress sdkLibraryPath recipient (mint original))
+          let operation=Associated (authority original) (mint original) address recipient 2039280 (blockhash original)
+          transaction<-evalSafe (Prepare sdkLibraryPath operation)
+          pure (eitherDecode(encode operation)==Right operation && not(isLeft $ validate operation transaction)
+            && isLeft(validate operation {account=mint original} transaction)
+            && isLeft(validate operation {owner=mint original} transaction)
+            && isLeft(validate operation {mint=account original} transaction)
+            && isLeft(validate operation {blockhash=mint original} transaction)
+            && isLeft(validate operation {rent=0} transaction)))
+          [authority original,"9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu"]
+        pure (captured=="GQnRnfs2B9j6pymrbY4KmX9WnAQ6czPAdt2u6XpWZSjQ" && and checks)
     , quickCheckResult $ once $ ioProperty signingCheck
     , quickCheckResult $ once $ property $
         eitherDecode (encode $ request Mint maxBound)==Right(request Mint maxBound)
@@ -129,6 +144,14 @@ signingCheck=bracket temporary removeDirectoryRecursive $ \directory->do
       refuse action= isLeft <$> (try action :: IO (Either SomeException Text))
   L.writeFile keyfile (encode $ B.unpack $ seed<>public)
   setFileMode keyfile 0o600
+  let generatedPath=directory </> "generated.json"
+  generatedOwner<-evalCritical (GenerateKey generatedPath)
+  generatedBytes<-B.readFile generatedPath
+  generatedRefusal<-refuse $ evalCritical (GenerateKey generatedPath)
+  generatedUnchanged<-(==generatedBytes) <$> B.readFile generatedPath
+  let generatedOperation=(request Mint 1) {authority=generatedOwner}
+  generatedUnsigned<-evalSafe (Prepare sdkLibraryPath generatedOperation)
+  _<-evalCritical (Sign generatedPath (directory </> "generated-attempt.json") generatedOperation generatedUnsigned)
   unsigned<-evalSafe (Prepare sdkLibraryPath original)
   mismatch<-refuse $ evalCritical (Sign keyfile output original {quantity=8} unsigned)
   identifier<-evalCritical (Sign keyfile output original unsigned)
@@ -158,7 +181,7 @@ signingCheck=bracket temporary removeDirectoryRecursive $ \directory->do
     Left _->pure False
     Right record->case parseEither (withObject "attempt" (.: "transaction")) record >>= either (Left . show) Right . decodeTransaction of
       Right (Transaction [bytes] _ body)->case Ed.signature bytes of
-        CryptoPassed signature->pure (all id [mismatch,duplicate,unchanged,symlink,permissions,wrongAuthority,wrappedBytes,wrongPublicHalf,validated]
+        CryptoPassed signature->pure (all id [mismatch,duplicate,unchanged,symlink,permissions,wrongAuthority,wrappedBytes,wrongPublicHalf,validated,generatedRefusal,generatedUnchanged]
           && base58 bytes==identifier && Ed.verify (Ed.toPublic secret) body signature)
         _->pure False
       _->pure False

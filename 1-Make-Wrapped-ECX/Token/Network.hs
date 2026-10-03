@@ -44,6 +44,15 @@ evalSafe (Check network endpoint feeLimit request unsigned)=do
         minimumRent<-call "getMinimumBalanceForRentExemption" [toJSON (82::Int),object ["commitment" .= ("finalized"::Text)]] >>= parseValue parseJSON :: IO Integer
         require (minimumRent>0 && minimumRent==toInteger(rent request)) "mint_rent_mismatch"
         pure minimumRent
+      Associated{owner=recipient}->do
+        _<-accountInfo (mint request) >>= parseValue inspectMint
+        minimumRent<-call "getMinimumBalanceForRentExemption" [toJSON (165::Int),object ["commitment" .= ("finalized"::Text)]] >>= parseValue parseJSON :: IO Integer
+        require (minimumRent>0 && minimumRent==toInteger(rent request)) "account_rent_mismatch"
+        existing<-accountInfo (account request)
+        if existing==Null then pure minimumRent else do
+          (actualOwner,_,actualMint)<-parseValue inspectAccount existing
+          require (actualOwner==recipient && actualMint==mint request) "associated_account_identity_mismatch"
+          pure 0
       Metadata{metadata=terms}->do
         (issuer,_)<-accountInfo (mint request) >>= parseValue inspectMint
         existing<-accountInfo (M.address terms)
@@ -135,14 +144,19 @@ evalCritical (Submit network endpoint feeLimit path)=do
         errorValue<-fieldValue "err" metadata :: IO Value
         fee<-fieldValue "fee" metadata :: IO Integer
         require (errorValue==failure && fee>=0 && fee<=toInteger feeLimit) "token_finalized_metadata_mismatch"
-        case savedRequest saved of
-          Metadata{metadata=terms}->do
+        let costLimit=case savedRequest saved of
+              Metadata{metadata=terms}->Just (toInteger $ M.maxCost terms)
+              Associated{rent=lamports}->Just (toInteger lamports+fee)
+              CreateMint{rent=lamports}->Just (toInteger lamports+fee)
+              Request{}->Nothing
+        case costLimit of
+          Just maximumDebit->do
             before<-fieldValue "preBalances" metadata :: IO [Integer]
             after<-fieldValue "postBalances" metadata :: IO [Integer]
             require (case (before,after) of
-              (a:_,b:_)->a>=b && a-b>=fee && a-b<=toInteger(M.maxCost terms)
-              _->False) "metadata_finalized_cost_exceeded"
-          _->pure ()
+              (a:_,b:_)->a>=0 && b>=0 && a>=b && a-b>=fee && a-b<=maximumDebit
+              _->False) "token_finalized_cost_exceeded"
+          Nothing->pure ()
         pure $ object ["signature" .= identifier,"status" .= (if failure==Null then "finalized" else "failed"::Text),"feeLamports" .= fee]
     else do
       _<-evalSafe (Check network endpoint feeLimit (savedRequest saved) unsigned)

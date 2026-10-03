@@ -19,14 +19,18 @@ Publish the configured mint and distinguish Devnet inventory from canonical
 assets. Changing a mint or custody identity requires a new reviewed deployment,
 not editing an active ledger's fingerprint.
 
-The genuine Devnet setup example is
-[`setup_devnet.rs`](../solana-helper/examples/setup_devnet.rs). It creates a
-separate test mint and journals submitted setup transactions. Reconcile a saved
-attempt before running setup again. This does not create or authorize the
-canonical token. Existing canonical assets require their actual authority and
-reserve records; the bridge cannot recreate them under the same address.
+Use the root-Cabal [token administration CLI](../../1-Make-Wrapped-ECX/README.md)
+for separate key generation, mint creation, associated token accounts, issuance,
+burning and metadata. It has real Devnet acceptance, immutable signed attempts,
+separate safe/critical evaluators and independent transaction validation. Create
+and fund distinct test identities explicitly; retain the saved attempts and
+reconcile them before issuing another operation. These test mints do not authorize
+or replace the canonical token. Existing canonical assets require their actual
+authority and reserve records; the bridge cannot recreate their identity.
+The previous standalone Rust setup example is preserved in Git at `d6246c8`;
+its private keys and transaction records are not migrated or deleted by this change.
 
-## Use existing administration tools
+## Upstream administration reference
 
 Marcus's [wecx-mint scripts](https://github.com/ecash-com/wrapped-ecx/tree/b980b4372c4844d3d42ff1926fd0da848631cebc/1-make-wrapped-ecx/wecx-mint)
 provide separate mint creation, metadata creation/update, mint-to and burn
@@ -42,8 +46,7 @@ Use the actual metadata update authority, retain transaction identifiers and the
 old/new metadata URI, and verify the resulting account on the intended chain.
 Metadata updates are independent of customer quotes and the bridge ledger.
 Authority changes, additional issuance and burns require separate operator
-review, matching reserve/circulation accounting and the release gates. No
-administration transaction was executed by this documentation change.
+review, matching reserve/circulation accounting and the release gates. The dedicated test mint acceptance is recorded in the token CLI README.
 
 ## Fund the bridge
 

@@ -170,9 +170,9 @@ fn prepare(c: &Config, r: &Request) -> Result<Reply, &'static str> {
 enum AdminRequest { Token(TokenRequest), Address(MetadataAddressRequest) }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct MetadataAddressRequest { protocol:u8, verb:AddressVerb, mint:String }
+struct MetadataAddressRequest { protocol:u8, verb:AddressVerb, mint:String, owner:Option<String> }
 #[derive(Deserialize)]
-enum AddressVerb { #[serde(rename="metadata_address")] MetadataAddress }
+enum AddressVerb { #[serde(rename="metadata_address")] MetadataAddress, #[serde(rename="associated_address")] AssociatedAddress }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct TokenRequest {
@@ -181,6 +181,7 @@ struct TokenRequest {
     authority: String,
     mint: String,
     account: Option<String>,
+    owner: Option<String>,
     amount: Option<String>,
     metadata: Option<MetadataRequest>,
     seed: Option<String>,
@@ -189,7 +190,7 @@ struct TokenRequest {
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum TokenVerb { Mint, Burn, Create, Metadata }
+enum TokenVerb { Mint, Burn, Create, Metadata, Associated }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MetadataRequest {
@@ -233,6 +234,21 @@ fn prepare_token(r: &TokenRequest) -> Result<String, &'static str> {
     let mint = key(&r.mint)?;
     let program = spl_token_interface::id();
     let blockhash = Hash::from_str(&r.blockhash).map_err(|_| "invalid_blockhash")?;
+    if matches!(r.verb, TokenVerb::Associated) {
+        let owner=key(r.owner.as_deref().ok_or("missing_account_owner")?)?;
+        let account=key(r.account.as_deref().ok_or("missing_token_account")?)?;
+        if !authority.is_on_curve() || !owner.is_on_curve() || mint==owner || mint==authority
+            || r.amount.is_some() || r.seed.is_some() || r.metadata.is_some()
+            || account!=get_associated_token_address_with_program_id(&owner,&mint,&program) {
+            return Err("invalid_associated_account");
+        }
+        raw_amount(r.rent.as_deref().ok_or("missing_account_rent")?)?;
+        let instruction=create_associated_token_account_idempotent(&authority,&owner,&mint,&program);
+        let message=Message::new_with_blockhash(&[instruction],Some(&authority),&blockhash);
+        return bincode::serialize(&Transaction::new_unsigned(message)).map(|bytes| STANDARD.encode(bytes))
+            .map_err(|_| "serialization_failed");
+    }
+    if r.owner.is_some() { return Err("unexpected_account_owner"); }
     if matches!(r.verb, TokenVerb::Metadata) {
         if !authority.is_on_curve() { return Err("invalid_metadata_authority"); }
         let instruction=metadata_instruction(r)?;
@@ -269,7 +285,7 @@ fn prepare_token(r: &TokenRequest) -> Result<String, &'static str> {
             &program, &mint, &account, &authority, &[], amount, 8),
         TokenVerb::Burn => spl_token_interface::instruction::burn_checked(
             &program, &account, &mint, &authority, &[], amount, 8),
-        TokenVerb::Create | TokenVerb::Metadata => return Err("invalid_admin_instruction"),
+        TokenVerb::Create | TokenVerb::Metadata | TokenVerb::Associated => return Err("invalid_admin_instruction"),
     }.map_err(|_| "invalid_admin_instruction")?;
     let blockhash = Hash::from_str(&r.blockhash).map_err(|_| "invalid_blockhash")?;
     let message = Message::new_with_blockhash(&[instruction], Some(&authority), &blockhash);
@@ -331,11 +347,21 @@ unsafe fn prepare_ffi(
                 .map_err(|_| "invalid_admin_request")?;
             let reply=match request {
                 AdminRequest::Token(r)=>prepare_token(&r)?,
-                AdminRequest::Address(MetadataAddressRequest {protocol,verb:AddressVerb::MetadataAddress,mint})=>{
+                AdminRequest::Address(MetadataAddressRequest {protocol,verb,mint,owner})=>{
                     if protocol!=1 { return Err("invalid_protocol"); }
                     let mint=key(&mint)?;
-                    let program=key("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s")?;
-                    metadata_address(&mint,&program).to_string()
+                    match verb {
+                        AddressVerb::MetadataAddress=>{
+                            if owner.is_some() { return Err("unexpected_account_owner"); }
+                            let program=key("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s")?;
+                            metadata_address(&mint,&program).to_string()
+                        }
+                        AddressVerb::AssociatedAddress=>{
+                            let owner=key(owner.as_deref().ok_or("missing_account_owner")?)?;
+                            if !owner.is_on_curve() { return Err("invalid_account_owner"); }
+                            get_associated_token_address_with_program_id(&owner,&mint,&spl_token_interface::id()).to_string()
+                        }
+                    }
                 }
             };
             return serde_json::to_vec(&reply).map_err(|_| "serialization_failed");

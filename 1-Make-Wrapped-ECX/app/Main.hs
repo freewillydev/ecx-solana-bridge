@@ -4,6 +4,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Token.Network as Network
 import Text.Read (readMaybe)
+import Data.Word (Word64)
 import Token.Signing
 import Control.Monad (unless)
 import Bridge.SDKBuild (sdkLibraryPath)
@@ -17,6 +18,8 @@ import System.IO (withBinaryFile,IOMode(ReadMode))
 
 main :: IO ()
 main=getArgs >>= \args->case args of
+  ["keygen",output]->evalCritical (GenerateKey output) >>= L.putStrLn . encode
+  ["associated-address",recipient,key]->evalSafe (AssociatedAddress sdkLibraryPath (T.pack recipient) (T.pack key)) >>= L.putStrLn . encode
   ["metadata-address",key]->evalSafe (MetadataAddress sdkLibraryPath $ T.pack key) >>= L.putStrLn . encode
   ["address",owner,label]->either (die . show) (L.putStrLn . encode) (mintAddress (T.pack owner) (T.pack label))
   ["prepare",path]->do
@@ -26,20 +29,25 @@ main=getArgs >>= \args->case args of
     L.putStrLn $ encode $ object ["request" .= request,"unsignedTransaction" .= transaction]
   ["check",network,endpoint,limit,prepared]->do
     selected<-case network of "devnet"->pure Network.Devnet; "mainnet"->pure Network.Mainnet; _->die "Choose devnet or mainnet"
-    feeLimit<-maybe (die "Invalid fee ceiling") pure (readMaybe limit)
+    feeLimit<-readFee limit
     (request,unsigned)<-readPrepared prepared
     fee<-Network.evalSafe (Network.Check selected endpoint feeLimit request unsigned)
     L.putStrLn $ encode $ object ["feeLamports" .= fee,"simulationOnly" .= True]
   ["submit",network,endpoint,limit,attempt]->do
     selected<-case network of "devnet"->pure Network.Devnet; "mainnet"->pure Network.Mainnet; _->die "Choose devnet or mainnet"
-    feeLimit<-maybe (die "Invalid fee ceiling") pure (readMaybe limit)
+    feeLimit<-readFee limit
     result<-Network.evalCritical (Network.Submit selected endpoint feeLimit attempt)
     L.putStrLn (encode result)
   ["sign",prepared,keyfile,output]->do
     (request,unsigned)<-readPrepared prepared
     identifier<-evalCritical (Sign keyfile output request unsigned)
     L.putStrLn $ encode $ object ["signature" .= identifier,"saved" .= output]
-  _->die "Usage: ecx-token metadata-address MINT | address AUTHORITY SEED | prepare REQUEST.json | check devnet|mainnet HTTPS_RPC MAX_FEE PREPARED.json | submit devnet|mainnet HTTPS_RPC MAX_FEE ATTEMPT.json | sign PREPARED.json AUTHORITY_KEY.json NEW_ATTEMPT.json (prepare/check/sign never broadcast; submit sends saved bytes)"
+  _->die "Usage: ecx-token keygen NEW_PRIVATE_KEY.json | associated-address OWNER MINT | metadata-address MINT | address AUTHORITY SEED | prepare REQUEST.json | check devnet|mainnet HTTPS_RPC MAX_FEE PREPARED.json | submit devnet|mainnet HTTPS_RPC MAX_FEE ATTEMPT.json | sign PREPARED.json AUTHORITY_KEY.json NEW_ATTEMPT.json (prepare/check/sign never broadcast; submit sends saved bytes)"
+
+readFee :: String -> IO Word64
+readFee raw=case readMaybe raw :: Maybe Integer of
+  Just n | n>0 && n<=toInteger(maxBound::Word64) && show n==raw->pure(fromInteger n)
+  _->die "Invalid fee ceiling"
 
 readBounded :: FilePath -> IO B.ByteString
 readBounded path=do

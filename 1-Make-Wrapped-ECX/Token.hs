@@ -8,6 +8,7 @@ import Bridge.SolanaMessage
 import Control.Exception (bracket)
 import Control.Monad (unless)
 import Data.Aeson
+import Data.List (nub,sort)
 import Crypto.Hash (hash,Digest,SHA256)
 import qualified Data.ByteArray as BA
 import qualified Data.Text.Encoding as TE
@@ -26,10 +27,14 @@ data Request = Request
   { action :: Action, authority :: Text, mint :: Text, account :: Text
   , quantity :: Word64, blockhash :: Text }
   | CreateMint {authority :: Text,mint :: Text,seed :: Text,rent :: Word64,blockhash :: Text}
+  | Associated {authority :: Text,mint :: Text,account :: Text,owner :: Text,rent :: Word64,blockhash :: Text}
   | Metadata {authority :: Text,mint :: Text,metadata :: M.Terms,blockhash :: Text}
   deriving (Eq,Show)
 
 instance ToJSON Request where
+  toJSON Associated{authority=payer,mint=key,account=address,owner=recipient,rent=lamports,blockhash=recent}=object
+    ["protocol" .= (1::Int),"verb" .= ("associated"::Text),"authority" .= payer,"mint" .= key
+    ,"account" .= address,"owner" .= recipient,"rent" .= T.pack(show lamports),"blockhash" .= recent]
   toJSON Metadata{authority=owner,mint=key,metadata=terms,blockhash=recent}=object
     ["protocol" .= (1::Int),"verb" .= ("metadata"::Text),"authority" .= owner,"mint" .= key
     ,"metadata" .= terms,"blockhash" .= recent]
@@ -49,12 +54,13 @@ instance FromJSON Request where
       unless (length o==6) (fail "invalid_metadata_fields")
       Metadata <$> o .: "authority" <*> o .: "mint" <*> o .: "metadata" <*> o .: "blockhash"
     else do
-      raw<-o .: (if verb==("create"::Text) then "rent" else "amount")
-      unless (length o==7) (fail "invalid_token_fields")
+      raw<-o .: (if verb `elem` (["create","associated"]::[Text]) then "rent" else "amount")
+      unless (length o==(if verb=="associated" then 8 else 7)) (fail "invalid_token_fields")
       n<-case readMaybe (T.unpack raw) :: Maybe Integer of
         Just x | x>0 && x<=toInteger(maxBound::Word64) && T.pack(show x)==raw -> pure(fromInteger x)
         _->fail "invalid_token_amount"
       case (verb::Text) of
+        "associated"->Associated <$> o .: "authority" <*> o .: "mint" <*> o .: "account" <*> o .: "owner" <*> pure n <*> o .: "blockhash"
         "create"->CreateMint <$> o .: "authority" <*> o .: "mint" <*> o .: "seed" <*> pure n <*> o .: "blockhash"
         _->do
           operation<-case verb of "mint"->pure Mint; "burn"->pure Burn; _->fail "invalid_token_operation"
@@ -63,8 +69,14 @@ instance FromJSON Request where
 data Safe a where
   Prepare :: FilePath -> Request -> Safe Text
   MetadataAddress :: FilePath -> Text -> Safe Text
+  AssociatedAddress :: FilePath -> Text -> Text -> Safe Text
 
 evalSafe :: Safe a -> IO a
+evalSafe (AssociatedAddress library recipient key)=do
+  mapM_ (either reject (const $ pure ()) . publicKey) [recipient,key]
+  output<-invoke library (L.toStrict $ encode $ object ["protocol" .= (1::Int),"verb" .= ("associated_address"::Text),"mint" .= key,"owner" .= recipient])
+  address<-either (const $ reject "invalid_associated_address_reply") pure (eitherDecodeStrict' output)
+  either reject (const $ pure address) (publicKey address)
 evalSafe (MetadataAddress library key)=do
   _<-either reject pure (publicKey key)
   output<-invoke library (L.toStrict $ encode $ object ["protocol" .= (1::Int),"verb" .= ("metadata_address"::Text),"mint" .= key])
@@ -72,6 +84,9 @@ evalSafe (MetadataAddress library key)=do
   either reject (const $ pure address) (publicKey address)
 evalSafe (Prepare library request)=do
   either reject pure $ case request of
+    Associated{account=address,owner=recipient,rent=n}->do
+      unless (n>0) (Left "invalid_account_rent")
+      mapM_ publicKey [address,recipient]
     Metadata{metadata=terms}->M.checkTerms terms
     CreateMint{seed=label,rent=n}->do
       derived<-mintAddress (authority request) label
@@ -86,6 +101,23 @@ evalSafe (Prepare library request)=do
 -- Independently check the SDK's entire message: one zero signature, exact keys,
 -- writable roles, program, instruction, blockhash, integer amount and decimals.
 validate :: Request -> Text -> Either Text Transaction
+validate Associated{authority=payer,mint=key,account=address,owner=recipient,rent=lamports,blockhash=recent} encoded=do
+  unless (lamports>0) (Left "invalid_account_rent")
+  paying<-publicKey payer; token<-publicKey key; destination<-publicKey address; holder<-publicKey recipient
+  recentHash<-publicKey recent; spl<-publicKey tokenProgram
+  system<-publicKey "11111111111111111111111111111111"
+  ata<-publicKey "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+  transaction<-decodeTransaction encoded
+  case transaction of
+    Transaction [signature] (Message 1 0 readonly keys hash [Instruction program indexes payload]) _->do
+      let at i=keys !! fromIntegral i -- decoder bounds indices
+          accounts=[paying,destination,holder,token,system,spl]
+      unless (paying/=destination && token/=holder && token/=paying && signature==B.replicate 64 0
+        && hash==recentHash && take 1 keys==[paying] && sort keys==sort(nub $ ata:accounts)
+        && sort(take (length keys-fromIntegral readonly) keys)==sort [paying,destination]
+        && at program==ata && map at indexes==accounts && payload==B.singleton 1) (Left "associated_account_mismatch")
+      pure transaction
+    _->Left "associated_account_shape"
 validate Metadata{authority=owner,mint=key,metadata=terms,blockhash=recent} encoded=M.validate owner key recent terms encoded
 validate request@CreateMint{} encoded=do
   owner<-publicKey (authority request)

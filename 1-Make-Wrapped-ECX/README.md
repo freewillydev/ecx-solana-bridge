@@ -16,7 +16,7 @@ cabal run -v0 ecx-token -- submit devnet https://api.devnet.solana.com 10000 /pr
 cabal test ecx-token:token-test --test-show-details=direct -j1
 ```
 
-The JSON request has exactly seven fields:
+Mint/burn requests have exactly seven fields:
 
 | Field | Meaning |
 | --- | --- |
@@ -43,6 +43,29 @@ signs. `prepare`, `check`, `sign` and `submit` use the same workflow as mint/bur
 Preflight refuses an existing account or changed rent rather than overwriting or
 refunding it. Haskell checks the address derivation and both exact instructions
 independently of the SDK.
+
+Create separate standard Solana keypair files with
+`cabal run -v0 ecx-token -- keygen /absolute/private/new-key.json`. The parent must
+already be owned and private. The critical evaluator uses the cryptographic random
+source, writes the 64-byte CLI-compatible keypair as mode-0600 JSON, synchronizes
+file and directory, and returns only the public key. It refuses existing files.
+Back up these keys; repeating key generation does not recover an earlier identity.
+Keep issuance, custody and tester/LP identities separate. Fund each required fee
+payer explicitly from your wallet or the real Devnet faucet.
+
+Derive a classic associated token account with
+`cabal run -v0 ecx-token -- associated-address OWNER MINT`. To provision it, use a
+request with exactly `protocol: 1`, `verb: "associated"`, `authority` (fee payer),
+`mint`, `account` (derived address), `owner`, `rent` and `blockhash`. `rent` is the
+positive decimal lamport result of `getMinimumBalanceForRentExemption(165)` on the
+selected network. Pass this request through the same prepare/check/sign/submit
+commands. Owners must be ordinary on-curve public keys; the payer may be the owner.
+The SDK derives the canonical address and uses idempotent creation. Haskell checks
+the complete instruction and writable roles independently. Preflight accepts an
+absent account or an initialized account with matching owner/mint and no freeze,
+delegate or close authority. Existing accounts need no further rent. Finalization
+checks that payer debit is at most the saved rent allowance plus the network fee.
+No account is closed, reassigned or funded through an arbitrary transfer operation.
 
 Metadata uses the same prepare/check/sign/submit sequence. Derive its standard
 Metaplex PDA with `cabal run -v0 ecx-token -- metadata-address MINT`. The request has
@@ -156,12 +179,24 @@ wrong update authority and insufficient total-cost ceiling were refused. QuickCh
 covers official SDK golden messages, both operations, changed fields/roles,
 UTF-8 byte bounds and the full maximum-length instruction.
 
+The new mint's tester ATA, `Cdyg4e8nyuxxnLnwsb4R7PagtCzLPrbTv8hA3drhKeAU`, was
+created and used for a one-base-unit issuance/burn round trip on real Devnet:
+
+- Account: `5uMsuYGaTH6k8fch1VFqSVmo9xj23Vy9fMNkMMnY5EXcHobxRDdQ8Xu4LvmykUdy6yDYQUfDCTWrJfLDUirLbULD`
+- Mint: `3a8Bu8ta5mggCw6xcDqHoyUKfVFWkHedrjSZs8cj9cLR6LaSTGy1ktMrb63vxhMQEFoHA99fTuUwY97ztx3iqBcW`
+- Burn: `2u1FhizTSRbDv94MEodxcPKZ2fH3fRikNitwtQw3L21DcNkc758vCrHNmRcMEuGh2knGymon4htKsg435zMvYpRS`
+
+Finalized readback and saved-attempt replay verify the account identity and supply
+returning to zero. The old standalone Rust setup example is retired; its historical
+source remains in Git and private keys/attempts remain untouched. Its one-shot
+key generation and automatic SOL transfers are replaced by explicit key generation,
+funding, and individual durable token operations above.
+
 Wrong-network, plain-HTTP and inadequate-fee-ceiling submissions were refused.
 No canonical administration acceptance is claimed.
 Protocol references: [Solana minting](https://solana.com/docs/tokens/basics/mint-tokens)
 and [burning](https://solana.com/docs/tokens/basics/burn-tokens).
 
-Remaining: standalone token-account provisioning, automatic bounded
-expiry recovery and canonical administration acceptance. Keep the old Devnet setup example until those replacements pass.
+Remaining: automatic bounded expiry recovery and canonical administration acceptance.
 Canonical issuance additionally requires actual issuer authority and reserve records;
 see the [token operations guide](../2-Wrap-Unwrap-Server/docs/TOKEN-OPERATIONS.md).
