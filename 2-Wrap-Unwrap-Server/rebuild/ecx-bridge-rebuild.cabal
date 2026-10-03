@@ -38,7 +38,7 @@ library store
 
 library chain
   import: settings
-  visibility: private
+  visibility: public
   hs-source-dirs: chain
   exposed-modules: Bridge.RPC, Bridge.Native, Bridge.NativeObservation, Bridge.NativePayment, Bridge.Solana, Bridge.SolanaObservation, Bridge.SolanaMessage, Bridge.SolanaHelper, Bridge.SolanaPayment, Bridge.SolanaDeposit, Bridge.PaymentObservation, Bridge.PaymentSource
   build-depends: base, ecx-bridge-rebuild, aeson, bytestring, text, scientific,

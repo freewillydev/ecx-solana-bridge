@@ -303,6 +303,8 @@ Private keys/attempts/ledger remain outside Git.
    real effects, including funded restore. Complete cross-UID signer isolation,
    encrypted-wallet unlock handling and off-host HTTPS/cross-host recovery.
 4. Complete required Haskell/FFI token administration and selected real pool workflow;
+   token mint/burn preparation now has a Cabal CLI and verified Devnet simulations,
+   while signing/submission, mint creation and metadata remain unfinished.
    retire standalone legacy Rust/Python tools after their required behavior is covered.
    Confirm canonical token authority, backing, liquidity and actual route availability.
 5. Finish the current installer/upgrade path last, test clean Linux installation and

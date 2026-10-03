@@ -164,6 +164,45 @@ fn prepare(c: &Config, r: &Request) -> Result<Reply, &'static str> {
         memo,
     })
 }
+// Separate administration preview: no key paths, signatures, RPC or custody API.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TokenRequest {
+    protocol: u8,
+    verb: TokenVerb,
+    authority: String,
+    mint: String,
+    account: String,
+    amount: String,
+    blockhash: String,
+}
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum TokenVerb { Mint, Burn }
+fn prepare_token(r: &TokenRequest) -> Result<String, &'static str> {
+    if r.protocol != 1 { return Err("invalid_protocol"); }
+    let authority = key(&r.authority)?;
+    let mint = key(&r.mint)?;
+    let account = key(&r.account)?;
+    let program = spl_token_interface::id();
+    if !authority.is_on_curve() || [mint, account, program].contains(&authority)
+        || mint == account || mint == program || account == program {
+        return Err("invalid_admin_accounts");
+    }
+    let amount = raw_amount(&r.amount)?;
+    let instruction = match r.verb {
+        TokenVerb::Mint => spl_token_interface::instruction::mint_to_checked(
+            &program, &mint, &account, &authority, &[], amount, 8),
+        TokenVerb::Burn => spl_token_interface::instruction::burn_checked(
+            &program, &account, &mint, &authority, &[], amount, 8),
+    }.map_err(|_| "invalid_admin_instruction")?;
+    let blockhash = Hash::from_str(&r.blockhash).map_err(|_| "invalid_blockhash")?;
+    let message = Message::new_with_blockhash(&[instruction], Some(&authority), &blockhash);
+    let bytes = bincode::serialize(&Transaction::new_unsigned(message)).map_err(|_| "serialization_failed")?;
+    if bytes.len() > 1232 { return Err("transaction_too_large"); }
+    Ok(STANDARD.encode(bytes))
+}
+
 // The caller owns every buffer. No Rust allocation or pointer escapes this ABI.
 // Status: 0 = reply JSON, 1 = fixed error code, 2 = invalid buffers/capacity.
 // SAFETY: nonnull buffers must be valid for their lengths, aligned as declared,
@@ -177,6 +216,21 @@ pub unsafe extern "C" fn ecx_solana_prepare_v1(
     output: *mut u8,
     capacity: usize,
     output_len: *mut usize,
+) -> i32 {
+    unsafe { prepare_ffi(false, config, config_len, request, request_len, output, capacity, output_len) }
+}
+
+// Same caller-owned buffer and pointer requirements as ecx_solana_prepare_v1.
+#[no_mangle]
+pub unsafe extern "C" fn ecx_token_prepare_v1(
+    config: *const u8, config_len: usize, request: *const u8, request_len: usize,
+    output: *mut u8, capacity: usize, output_len: *mut usize,
+) -> i32 {
+    unsafe { prepare_ffi(true, config, config_len, request, request_len, output, capacity, output_len) }
+}
+unsafe fn prepare_ffi(
+    admin: bool, config: *const u8, config_len: usize, request: *const u8, request_len: usize,
+    output: *mut u8, capacity: usize, output_len: *mut usize,
 ) -> i32 {
     if output_len.is_null() {
         return 2;
@@ -194,6 +248,14 @@ pub unsafe extern "C" fn ecx_solana_prepare_v1(
         return 2;
     }
     let result = std::panic::catch_unwind(|| {
+        if admin {
+            if unsafe { std::slice::from_raw_parts(config, config_len) } != b"{}" {
+                return Err("invalid_admin_config");
+            }
+            let request: TokenRequest = serde_json::from_slice(unsafe { std::slice::from_raw_parts(request, request_len) })
+                .map_err(|_| "invalid_admin_request")?;
+            return serde_json::to_vec(&prepare_token(&request)?).map_err(|_| "serialization_failed");
+        }
         let config: Config =
             serde_json::from_slice(unsafe { std::slice::from_raw_parts(config, config_len) })
                 .map_err(|_| "invalid_config")?;

@@ -1,0 +1,33 @@
+cabal-version: 3.14
+name: ecx-token
+version: 0.1.0.0
+synopsis: Separate ECX token administration through bounded SDK FFI
+license: MIT
+build-type: Simple
+
+library
+  default-language: GHC2021
+  default-extensions: OverloadedStrings
+  ghc-options: -Wall -Wcompat
+  hs-source-dirs: .
+  exposed-modules: Token
+  build-depends: base >=4.20 && <4.23, ecx-bridge-rebuild, ecx-bridge-rebuild:chain,
+    aeson, bytestring, text, binary, unix
+
+test-suite token-test
+  type: exitcode-stdio-1.0
+  default-language: GHC2021
+  default-extensions: OverloadedStrings
+  ghc-options: -Wall
+  hs-source-dirs: test
+  main-is: Main.hs
+  build-depends: base, ecx-token, ecx-build-assets, ecx-bridge-rebuild, ecx-bridge-rebuild:chain,
+    QuickCheck, text, bytestring, aeson
+
+executable ecx-token
+  default-language: GHC2021
+  default-extensions: OverloadedStrings
+  ghc-options: -Wall
+  hs-source-dirs: app
+  main-is: Main.hs
+  build-depends: base, ecx-token, ecx-build-assets, aeson, bytestring
