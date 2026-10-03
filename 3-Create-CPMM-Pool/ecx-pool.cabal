@@ -1,0 +1,35 @@
+cabal-version: 3.14
+name: ecx-pool
+version: 0.1.0.0
+synopsis: Separate Orca full-range liquidity operations
+license: MIT
+build-type: Simple
+data-files: test/published-pool.json
+
+library
+  default-language: GHC2021
+  default-extensions: OverloadedStrings
+  ghc-options: -Wall -Wcompat
+  hs-source-dirs: .
+  exposed-modules: Pool
+  build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:chain,
+    aeson, binary, bytestring, text, unix, http-client, base64-bytestring
+
+executable ecx-pool
+  default-language: GHC2021
+  default-extensions: OverloadedStrings
+  ghc-options: -Wall
+  hs-source-dirs: app
+  main-is: Main.hs
+  build-depends: base, ecx-pool, ecx-build-assets, aeson, bytestring, text
+
+test-suite pool-test
+  type: exitcode-stdio-1.0
+  default-language: GHC2021
+  default-extensions: OverloadedStrings
+  ghc-options: -Wall
+  hs-source-dirs: test
+  main-is: Main.hs
+  autogen-modules: Paths_ecx_pool
+  other-modules: Paths_ecx_pool
+  build-depends: base, ecx-pool, ecx-build-assets, QuickCheck, aeson, bytestring, text, base64-bytestring

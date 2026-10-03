@@ -309,6 +309,9 @@ Private keys/attempts/ledger remain outside Git.
    real Devnet readback and saved-attempt replay, with no new SDK dependencies.
    Token-account provisioning and a new-mint issuance/burn round trip also pass;
    the standalone Rust setup example is retired. Administration expiry recovery remains.
+   The pool CLI now verifies real mainnet/Devnet full-range pools and canonical
+   addresses, including distinct adaptive fee-tier indexes. Pool creation, position
+   funding and fee management remain unimplemented.
    Retire remaining legacy Rust/Python tools after their required behavior is covered.
    Confirm canonical token authority, backing, liquidity and actual route availability.
 5. Finish the current installer/upgrade path last, test clean Linux installation and

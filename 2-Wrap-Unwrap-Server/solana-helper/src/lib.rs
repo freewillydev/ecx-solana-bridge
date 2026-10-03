@@ -308,7 +308,7 @@ pub unsafe extern "C" fn ecx_solana_prepare_v1(
     capacity: usize,
     output_len: *mut usize,
 ) -> i32 {
-    unsafe { prepare_ffi(false, config, config_len, request, request_len, output, capacity, output_len) }
+    unsafe { prepare_ffi(0, config, config_len, request, request_len, output, capacity, output_len) }
 }
 
 // Same caller-owned buffer and pointer requirements as ecx_solana_prepare_v1.
@@ -317,10 +317,21 @@ pub unsafe extern "C" fn ecx_token_prepare_v1(
     config: *const u8, config_len: usize, request: *const u8, request_len: usize,
     output: *mut u8, capacity: usize, output_len: *mut usize,
 ) -> i32 {
-    unsafe { prepare_ffi(true, config, config_len, request, request_len, output, capacity, output_len) }
+    unsafe { prepare_ffi(1, config, config_len, request, request_len, output, capacity, output_len) }
+}
+// Read-only pool address derivation; no instruction, key or RPC input.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PoolAddressRequest {protocol:u8,config:String,mint_a:String,mint_b:String,fee_tier_index:u16}
+#[no_mangle]
+pub unsafe extern "C" fn ecx_pool_address_v1(
+    config: *const u8, config_len: usize, request: *const u8, request_len: usize,
+    output: *mut u8, capacity: usize, output_len: *mut usize,
+) -> i32 {
+    unsafe { prepare_ffi(2, config, config_len, request, request_len, output, capacity, output_len) }
 }
 unsafe fn prepare_ffi(
-    admin: bool, config: *const u8, config_len: usize, request: *const u8, request_len: usize,
+    mode: u8, config: *const u8, config_len: usize, request: *const u8, request_len: usize,
     output: *mut u8, capacity: usize, output_len: *mut usize,
 ) -> i32 {
     if output_len.is_null() {
@@ -339,7 +350,17 @@ unsafe fn prepare_ffi(
         return 2;
     }
     let result = std::panic::catch_unwind(|| {
-        if admin {
+        if mode == 2 {
+            if unsafe { std::slice::from_raw_parts(config, config_len) } != b"{}" { return Err("invalid_pool_config"); }
+            let r: PoolAddressRequest=serde_json::from_slice(unsafe { std::slice::from_raw_parts(request,request_len) })
+                .map_err(|_| "invalid_pool_request")?;
+            let config=key(&r.config)?; let a=key(&r.mint_a)?; let b=key(&r.mint_b)?;
+            if r.protocol!=1 || a>=b { return Err("invalid_pool_mints"); }
+            let program=key("whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc")?;
+            let address=Pubkey::find_program_address(&[b"whirlpool",config.as_ref(),a.as_ref(),b.as_ref(),&r.fee_tier_index.to_le_bytes()],&program).0;
+            return serde_json::to_vec(&address.to_string()).map_err(|_| "serialization_failed");
+        }
+        if mode == 1 {
             if unsafe { std::slice::from_raw_parts(config, config_len) } != b"{}" {
                 return Err("invalid_admin_config");
             }

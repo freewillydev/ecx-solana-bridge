@@ -108,7 +108,10 @@ threshold of 32768; its fee-rate field is 10000 hundredths of a basis point
 (1%). Layout/discriminator/owner and source hashes are recorded in
 `https://github.com/ekulkisnek/ecx-solana-bridge/blob/6d293a3/docs/evidence/published-orca-pool-readback.json`. This single-provider read does not
 prove issuer approval, reserve backing, LP ownership/lock, auto-compounding or
-Jupiter routing. It does not change the bridge's configured dedicated Devnet
+Jupiter routing. The current [Cabal pool verifier](../../3-Create-CPMM-Pool/README.md)
+additionally verifies the canonical PDA and reports the published pool's distinct
+fee-tier index 1034 and adaptive-fee status; its stored 1% is a base fee, not a
+guaranteed total swap fee. It does not change the bridge's configured dedicated Devnet
 mint or authorize mainnet operations.
 
 ## Published Jupiter routes
