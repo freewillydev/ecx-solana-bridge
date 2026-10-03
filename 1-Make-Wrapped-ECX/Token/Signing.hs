@@ -4,7 +4,7 @@ module Token.Signing (Critical(..),evalCritical,Saved(..),validateSaved) where
 import Token
 import Bridge.Error (require,reject)
 import Bridge.SolanaMessage (Transaction(..),base58,publicKey,decodeTransaction)
-import Bridge.AdminKey (readKey,savePrivate,privateParent)
+import Bridge.AdminKey (readKey,savePrivate,privateParent,newPrivatePath)
 import Crypto.Random (getRandomBytes)
 import Crypto.Error (CryptoFailable(..))
 import qualified Crypto.PubKey.Ed25519 as Ed
@@ -42,7 +42,7 @@ data Critical a where
 
 evalCritical :: Critical a -> IO a
 evalCritical (GenerateKey output)=do
-  privateParent output
+  newPrivatePath output
   seed<-getRandomBytes 32 :: IO BA.ScrubbedBytes
   secret<-case Ed.secretKey seed of CryptoPassed key->pure key; _->reject "token_key_generation_failed"
   let public=BA.convert (Ed.toPublic secret) :: B.ByteString
@@ -52,7 +52,7 @@ evalCritical (GenerateKey output)=do
 evalCritical (Sign keyfile output request unsigned)=do
   Transaction _ _ message<-either reject pure (validate request unsigned)
   privateParent keyfile
-  privateParent output
+  newPrivatePath output
   secret<-readKey (authority request) keyfile
   let signature=Ed.sign secret (Ed.toPublic secret) message
       signatureBytes=BA.convert signature :: B.ByteString

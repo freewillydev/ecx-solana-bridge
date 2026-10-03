@@ -3,10 +3,11 @@
 module Pool.Signing (Action(..),Critical(..),evalCritical,Saved(..),validateSaved) where
 import Pool
 import qualified Pool.Position as P
-import Bridge.AdminKey (readKey,savePrivate,privateParent)
+import qualified Pool.Liquidity as Q
+import Bridge.AdminKey (readKey,savePrivate,newPrivatePath)
 import Bridge.Error (require,reject)
 import Bridge.RPC
-import Bridge.SolanaMessage (Transaction(..),Message(..),decodePoolTransaction,decodePositionTransaction,base58)
+import Bridge.SolanaMessage (Transaction(..),Message(..),decodePoolTransaction,decodePositionTransaction,decodeLiquidityTransaction,base58)
 import Control.Exception (bracket)
 import Control.Monad (unless,zipWithM)
 import Crypto.Error (CryptoFailable(..))
@@ -25,7 +26,7 @@ import System.IO (withBinaryFile,IOMode(ReadMode))
 import Text.Read (readMaybe)
 
 -- Closed alternatives share execution without a sign-arbitrary-message operation.
-data Action = Creation Create Prepared | Opening P.Request P.Prepared deriving (Eq,Show)
+data Action = Creation Create Prepared | Opening P.Request P.Prepared | Liquidity Q.Request Q.Prepared deriving (Eq,Show)
 data Saved = Saved {network :: Network,action :: Action,feeLimit :: Word64,costLimit :: Word64
   ,identifier :: Text,transaction :: Text} deriving (Eq,Show)
 instance ToJSON Saved where
@@ -34,12 +35,14 @@ instance ToJSON Saved where
     <> case action s of
       Creation r p->["request" .= r,"prepared" .= p]
       Opening r p->["operation" .= ("open-position"::Text),"request" .= r,"prepared" .= p]
+      Liquidity r p->["operation" .= ("liquidity"::Text),"request" .= r,"prepared" .= p]
 instance FromJSON Saved where
   parseJSON=withObject "saved pool creation" $ \o->do
     kind<-o .:? "operation" :: Parser (Maybe Text)
     operation<-case kind of
       Nothing | length o==7->Creation <$> o .: "request" <*> o .: "prepared"
       Just "open-position" | length o==8->Opening <$> o .: "request" <*> o .: "prepared"
+      Just "liquidity" | length o==8->Liquidity <$> o .: "request" <*> o .: "prepared"
       _->fail "unexpected saved operation fields"
     name<-o .: "network" :: Parser Text
     selected<-case name of "devnet"->pure Devnet; "mainnet"->pure Mainnet; _->fail "unknown network"
@@ -65,18 +68,22 @@ validateSaved s=do
 validateAction :: Network -> Action -> Either Text Transaction
 validateAction selected (Creation r p)=validatePrepared selected r p
 validateAction _ (Opening r p)=P.validate r p
+validateAction _ (Liquidity r p)=Q.validate r p
 decodeAction :: Action -> Text -> Either Text Transaction
 decodeAction Creation{}=decodePoolTransaction
 decodeAction Opening{}=decodePositionTransaction
+decodeAction Liquidity{}=decodeLiquidityTransaction
 checkAction :: FilePath -> Network -> String -> Word64 -> Word64 -> Action -> IO ()
 checkAction library selected endpoint fee cost operation=case operation of
   Creation r p->evalSafe (Check library selected endpoint fee cost r p) >> pure ()
   Opening r p->P.evalSafe (P.Check library selected endpoint fee cost r p) >> pure ()
+  Liquidity r p->Q.evalSafe (Q.Check library selected endpoint fee cost r p) >> pure ()
 checkDerivation :: FilePath -> Network -> Action -> IO ()
 checkDerivation library selected operation=do
   matches<-case operation of
     Creation r p->(==p) <$> evalSafe (Prepare library selected r)
     Opening r p->(==p) <$> P.evalSafe (P.Prepare library r)
+    Liquidity r p->(==p) <$> Q.evalSafe (Q.Prepare library r)
   require matches "pool_saved_derivation_mismatch"
 
 data Critical a where
@@ -85,10 +92,10 @@ data Critical a where
 
 evalCritical :: Critical a -> IO a
 evalCritical (Sign library selected endpoint fee cost operation keyfiles output)=do
-  privateParent output
+  newPrivatePath output
   checkAction library selected endpoint fee cost operation
   Transaction _ (Message _ _ _ keys _ _) message<-either reject pure (validateAction selected operation)
-  let owners=case operation of Creation r _->[payer r,createVaultA r,createVaultB r]; Opening r _->[P.payer r,P.positionMint r]
+  let owners=case operation of Creation r _->[payer r,createVaultA r,createVaultB r]; Opening r _->[P.payer r,P.positionMint r]; Liquidity r _->[P.payer $ Q.positionRequest r]
       sources=zip owners keyfiles
   require (length keyfiles==length owners) "pool_signer_count_mismatch"
   signatures<-mapM (\key->do

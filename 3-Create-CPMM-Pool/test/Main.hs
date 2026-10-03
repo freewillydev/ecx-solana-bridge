@@ -1,12 +1,13 @@
 module Main (main) where
 import Pool
+import qualified Pool.Operation as O
 import qualified Pool.Signing as S
 import qualified Pool.Position as P
 import qualified Pool.Liquidity as Q
 import qualified Crypto.PubKey.Ed25519 as Ed
 import Crypto.Error (CryptoFailable(..))
 import qualified Data.ByteArray as BA
-import Bridge.SolanaMessage (decodeTransaction,decodePoolTransaction,decodePositionTransaction,Transaction(..),Message(..),base58)
+import Bridge.SolanaMessage (decodeTransaction,decodePoolTransaction,decodePositionTransaction,decodeLiquidityTransaction,Transaction(..),Message(..),base58)
 import Data.Bits (xor)
 import Bridge.SDKBuild (sdkLibraryPath)
 import Paths_ecx_pool (getDataFileName)
@@ -46,14 +47,14 @@ main=do
   let request=Create "3psSKHRPopKXPcBajcm2crjoKzrUtWyfsqeprTRMxAqZ" (expectedA expected) (expectedB expected)
         "HcctYHWCfLGrE5WigGKHg5hR6Q1P1Gntb5PYQWSQFHXg" "AzNd4srpctGzR5Q7LqkQh6aUwwqNEveTcCTNX8uHixDC"
         (2^(64::Int)) (pool expected)
-  prepared<-evalSafe (Prepare sdkLibraryPath Devnet request)
+  prepared<-(O.runSafe . O.Request) (Prepare sdkLibraryPath Devnet request)
   bytes<-either fail pure $ B64.decode $ TE.encodeUtf8 $ unsignedTransaction prepared
   secrets<-mapM (\n->case Ed.secretKey (B.replicate 32 n) of CryptoPassed key->pure key; _->fail "test key") [1,2,3]
   let publics=map (base58 . BA.convert . Ed.toPublic) secrets
   signingRequest<-case publics of
     [owner,a,b]->pure request {payer=owner,createVaultA=a,createVaultB=b}
     _->fail "test keys"
-  signingPrepared<-evalSafe (Prepare sdkLibraryPath Devnet signingRequest)
+  signingPrepared<-(O.runSafe . O.Request) (Prepare sdkLibraryPath Devnet signingRequest)
   Transaction _ (Message _ _ _ signingKeys _ _) message<-either (fail . show) pure $ decodePoolTransaction(unsignedTransaction signingPrepared)
   signatures<-mapM (\key->case lookup (base58 key) (zip publics secrets) of
     Just secret->pure (BA.convert (Ed.sign secret (Ed.toPublic secret) message) :: B.ByteString)
@@ -64,7 +65,7 @@ main=do
   openingRequest<-case publics of
     owner:mint:_->pure positionRequest {P.payer=owner,P.positionMint=mint}
     _->fail "position test keys"
-  openingPrepared<-P.evalSafe(P.Prepare sdkLibraryPath openingRequest)
+  openingPrepared<-(O.runSafe . O.Request) (P.Prepare sdkLibraryPath openingRequest)
   Transaction _ _ openingMessage<-either (fail . show) pure $ decodePositionTransaction(P.transaction openingPrepared)
   let openingSignatures=[BA.convert(Ed.sign secret (Ed.toPublic secret) openingMessage) :: B.ByteString | secret<-take 2 secrets]
   openingFirst<-case openingSignatures of first:_->pure first; _->fail "position signature"
@@ -73,9 +74,21 @@ main=do
   let liquidityRequests=[Q.Request action positionRequest quantity
         (if action==Q.Collect then 0 else 1000) (if action==Q.Collect then 0 else 1000)
         (createVaultA creation) (createVaultB creation) | (action,quantity)<-[(Q.Deposit,1000),(Q.Withdraw,1000),(Q.Collect,0),(Q.Collect,1000)]]
-  liquidityPreparations<-mapM (Q.evalSafe . Q.Prepare sdkLibraryPath) liquidityRequests
+  liquidityPreparations<-mapM (O.runSafe . O.Request . Q.Prepare sdkLibraryPath) liquidityRequests
+  liquiditySigned<-mapM (\original->do
+    let r=original {Q.positionRequest=openingRequest}
+    p<-(O.runSafe . O.Request) (Q.Prepare sdkLibraryPath r)
+    Transaction _ _ msg<-either (fail . show) pure $ decodeLiquidityTransaction(Q.transaction p)
+    secret<-case secrets of key:_->pure key; _->fail "liquidity key"
+    let sig=BA.convert(Ed.sign secret (Ed.toPublic secret) msg) :: B.ByteString
+        tx=TE.decodeUtf8 $ B64.encode $ B.singleton 1<>sig<>msg
+    pure(S.Saved Devnet (S.Liquidity r p) 20000 20000000 (base58 sig) tx)) liquidityRequests
   results<-sequence
-    [ quickCheckResult $ once $ property $
+    [ quickCheckResult $ once $ property $ all (\record->
+        not(isLeft $ S.validateSaved record) && (eitherDecode(encode record) :: Either String S.Saved)==Right record
+        && isLeft(S.validateSaved record {S.identifier=S.identifier openingSaved})
+        && isLeft(S.validateSaved record {S.action=S.action openingSaved})) liquiditySigned
+    , quickCheckResult $ once $ property $
         Q.validateEffects Devnet collectRequest 5000 10000 collectBefore collectAfter==Right(Q.Effect 0 0 0 10000)
         && isLeft(Q.validateEffects Devnet collectRequest 5000 9999 collectBefore collectAfter)
         && isLeft(Q.validateEffects Mainnet collectRequest 5000 10000 collectBefore collectAfter)
@@ -139,8 +152,8 @@ main=do
         && all (\index->let changed=B.take index bytes<>B.singleton((B.index bytes index) `xor` 1)<>B.drop (index+1) bytes
            in isLeft $ validatePrepared Devnet request prepared {unsignedTransaction=TE.decodeUtf8 $ B64.encode changed}) [0..B.length bytes-1]
     , quickCheckResult $ once $ ioProperty $ do
-        derived<-evalSafe (Address sdkLibraryPath Mainnet (expectedA expected) (expectedB expected) 1034)
-        devnet<-evalSafe (Address sdkLibraryPath Devnet (expectedA expected) (expectedB expected) 1034)
+        derived<-(O.runSafe . O.Request) (Address sdkLibraryPath Mainnet (expectedA expected) (expectedB expected) 1034)
+        devnet<-(O.runSafe . O.Request) (Address sdkLibraryPath Devnet (expectedA expected) (expectedB expected) 1034)
         pure (derived==pool expected && devnet/=derived && not(isLeft $ validate Mainnet expected snapshot))
     , quickCheckResult $ once $ property $
         isLeft(validate Devnet expected snapshot)

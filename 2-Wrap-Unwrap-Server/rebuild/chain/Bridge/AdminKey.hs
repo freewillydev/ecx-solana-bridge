@@ -1,6 +1,6 @@
 -- Protected administration files shared by closed token and pool evaluators.
 -- No signing or network authority is exposed here.
-module Bridge.AdminKey (readKey,savePrivate,privateParent) where
+module Bridge.AdminKey (readKey,savePrivate,privateParent,newPrivatePath) where
 import Bridge.Error (require,reject)
 import Bridge.SolanaMessage (publicKey)
 import Control.Exception (bracket,bracketOnError)
@@ -61,3 +61,10 @@ privateParent path=do
   status<-getSymbolicLinkStatus (takeDirectory path)
   uid<-getEffectiveUserID
   require (isDirectory status && fileOwner status==uid && fileMode status .&. 0o077==0) "unsafe_token_directory"
+
+-- Fast rejection before RPC or signing; exclusive creation remains the final guard.
+newPrivatePath :: FilePath -> IO ()
+newPrivatePath path=do
+  privateParent path
+  exists<-fileExist path
+  require (not exists) "private_output_already_exists"

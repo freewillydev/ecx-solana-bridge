@@ -1,5 +1,6 @@
 module Main (main) where
 import Pool
+import qualified Pool.Operation as O
 import qualified Pool.Signing as S
 import qualified Pool.Position as P
 import qualified Pool.Liquidity as Q
@@ -16,50 +17,54 @@ import System.Exit (die)
 import System.IO (withBinaryFile,IOMode(ReadMode))
 main :: IO ()
 main=getArgs >>= \args->case args of
+  ["sign-liquidity",endpoint,fee,cost,path,key,output]->do
+    (selected,request,prepared)<-readPrepared path
+    feeLimit<-amount fee; costLimit<-amount cost
+    (O.runCritical . O.Request) (S.Sign sdkLibraryPath selected endpoint feeLimit costLimit (S.Liquidity request prepared) [key] output) >>= L.putStrLn . encode
   ["check-liquidity",endpoint,fee,cost,path]->do
     (selected,request,prepared)<-readPrepared path
     feeLimit<-amount fee; costLimit<-amount cost
-    Q.evalSafe (Q.Check sdkLibraryPath selected endpoint feeLimit costLimit request prepared) >>= L.putStrLn . encode
+    (O.runSafe . O.Request) (Q.Check sdkLibraryPath selected endpoint feeLimit costLimit request prepared) >>= L.putStrLn . encode
   ["prepare-liquidity",network,path]->do
     _<-choose network
     request<-readJSON path
-    prepared<-Q.evalSafe (Q.Prepare sdkLibraryPath request)
+    prepared<-(O.runSafe . O.Request) (Q.Prepare sdkLibraryPath request)
     L.putStrLn $ encode $ object ["network" .= network,"request" .= request,"prepared" .= prepared]
   ["prepare-position",network,path]->do
     _<-choose network
     request<-readJSON path
-    prepared<-P.evalSafe (P.Prepare sdkLibraryPath request)
+    prepared<-(O.runSafe . O.Request) (P.Prepare sdkLibraryPath request)
     L.putStrLn $ encode $ object ["network" .= network,"request" .= request,"prepared" .= prepared]
   ["check-position",endpoint,fee,cost,path]->do
     (selected,request,prepared)<-readPrepared path
     feeLimit<-amount fee; costLimit<-amount cost
-    P.evalSafe (P.Check sdkLibraryPath selected endpoint feeLimit costLimit request prepared) >>= \cost->L.putStrLn $ encode $ object ["maximumDebit" .= show cost]
+    (O.runSafe . O.Request) (P.Check sdkLibraryPath selected endpoint feeLimit costLimit request prepared) >>= \debit->L.putStrLn $ encode $ object ["maximumDebit" .= show debit]
   ["sign-position",endpoint,fee,cost,path,payerKey,mintKey,output]->do
     (selected,request,prepared)<-readPrepared path
     feeLimit<-amount fee; costLimit<-amount cost
-    S.evalCritical (S.Sign sdkLibraryPath selected endpoint feeLimit costLimit (S.Opening request prepared) [payerKey,mintKey] output) >>= L.putStrLn . encode
+    (O.runCritical . O.Request) (S.Sign sdkLibraryPath selected endpoint feeLimit costLimit (S.Opening request prepared) [payerKey,mintKey] output) >>= L.putStrLn . encode
   ["sign",endpoint,fee,cost,path,payerKey,vaultAKey,vaultBKey,output]->do
     (selected,request,prepared)<-readPrepared path
     feeLimit<-amount fee; costLimit<-amount cost
-    S.evalCritical (S.Sign sdkLibraryPath selected endpoint feeLimit costLimit (S.Creation request prepared) [payerKey,vaultAKey,vaultBKey] output) >>= L.putStrLn . encode
-  ["submit",endpoint,path]->S.evalCritical (S.Submit sdkLibraryPath endpoint path) >>= L.putStrLn . encode
+    (O.runCritical . O.Request) (S.Sign sdkLibraryPath selected endpoint feeLimit costLimit (S.Creation request prepared) [payerKey,vaultAKey,vaultBKey] output) >>= L.putStrLn . encode
+  ["submit",endpoint,path]->(O.runCritical . O.Request) (S.Submit sdkLibraryPath endpoint path) >>= L.putStrLn . encode
   ["check",endpoint,fee,cost,path]->do
     (selected,request,prepared)<-readPrepared path
     feeLimit<-amount fee; costLimit<-amount cost
-    evalSafe (Check sdkLibraryPath selected endpoint feeLimit costLimit request prepared) >>= L.putStrLn . encode
+    (O.runSafe . O.Request) (Check sdkLibraryPath selected endpoint feeLimit costLimit request prepared) >>= L.putStrLn . encode
   ["prepare",network,path]->do
     selected<-choose network
     request<-readJSON path
-    prepared<-evalSafe (Prepare sdkLibraryPath selected request)
+    prepared<-(O.runSafe . O.Request) (Prepare sdkLibraryPath selected request)
     L.putStrLn $ encode $ object ["network" .= network,"request" .= request,"prepared" .= prepared]
   ["address",network,a,b,index]->do
     selected<-choose network
     tier<-case readMaybe index :: Maybe Integer of
       Just n | n>=0 && n<=65535 && show n==index->pure(fromInteger n :: Word16)
       _->die "Invalid fee-tier index"
-    evalSafe (Address sdkLibraryPath selected (T.pack a) (T.pack b) tier) >>= L.putStrLn . encode
-  ["inspect",network,endpoint,pool,a,b]->choose network >>= \selected->evalSafe (Inspect sdkLibraryPath selected endpoint (Expected (T.pack pool) (T.pack a) (T.pack b))) >>= L.putStrLn . encode
-  _->die "Usage: ecx-pool check-liquidity HTTPS_RPC MAX_FEE MAX_COST PREPARED.json | prepare-liquidity devnet|mainnet REQUEST.json | sign-position HTTPS_RPC MAX_FEE MAX_COST PREPARED.json PAYER_KEY POSITION_MINT_KEY NEW_ATTEMPT.json | prepare-position devnet|mainnet REQUEST.json | check-position HTTPS_RPC MAX_FEE MAX_COST PREPARED.json | sign HTTPS_RPC MAX_FEE MAX_COST PREPARED.json PAYER_KEY VAULT_A_KEY VAULT_B_KEY NEW_ATTEMPT.json | submit HTTPS_RPC ATTEMPT.json | check HTTPS_RPC MAX_FEE MAX_COST PREPARED.json | prepare devnet|mainnet REQUEST.json | address devnet|mainnet MINT_A MINT_B FEE_TIER_INDEX | inspect devnet|mainnet HTTPS_RPC POOL MINT_A MINT_B (mints in byte order; read-only)"
+    (O.runSafe . O.Request) (Address sdkLibraryPath selected (T.pack a) (T.pack b) tier) >>= L.putStrLn . encode
+  ["inspect",network,endpoint,pool,a,b]->choose network >>= \selected->(O.runSafe . O.Request) (Inspect sdkLibraryPath selected endpoint (Expected (T.pack pool) (T.pack a) (T.pack b))) >>= L.putStrLn . encode
+  _->die "Usage: ecx-pool sign-liquidity HTTPS_RPC MAX_FEE MAX_COST PREPARED.json OWNER_KEY NEW_ATTEMPT.json | check-liquidity HTTPS_RPC MAX_FEE MAX_COST PREPARED.json | prepare-liquidity devnet|mainnet REQUEST.json | sign-position HTTPS_RPC MAX_FEE MAX_COST PREPARED.json PAYER_KEY POSITION_MINT_KEY NEW_ATTEMPT.json | prepare-position devnet|mainnet REQUEST.json | check-position HTTPS_RPC MAX_FEE MAX_COST PREPARED.json | sign HTTPS_RPC MAX_FEE MAX_COST PREPARED.json PAYER_KEY VAULT_A_KEY VAULT_B_KEY NEW_ATTEMPT.json | submit HTTPS_RPC ATTEMPT.json | check HTTPS_RPC MAX_FEE MAX_COST PREPARED.json | prepare devnet|mainnet REQUEST.json | address devnet|mainnet MINT_A MINT_B FEE_TIER_INDEX | inspect devnet|mainnet HTTPS_RPC POOL MINT_A MINT_B (mints in byte order; read-only)"
 choose :: String -> IO Network
 choose "devnet"=pure Devnet
 choose "mainnet"=pure Mainnet

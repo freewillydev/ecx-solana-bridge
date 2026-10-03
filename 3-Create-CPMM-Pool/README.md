@@ -3,9 +3,9 @@
 Liquidity uses separate operator capital and keys, outside bridge custody. The
 root-Cabal `ecx-pool` CLI derives canonical addresses and verifies existing
 full-range pools, creates classic Splash pools and prepares full-range positions.
-Position signing/submission is verified on Devnet. Unsigned liquidity deposit,
-withdrawal and fee-collection preparation and preflight are implemented; funded
-execution remains unfinished.
+Position creation, funded liquidity deposit/withdrawal and fee collection now have
+finalized Devnet acceptance and saved-attempt replay. Collection acceptance has
+zero earned fees; actual trading revenue and reinvestment remain unverified.
 
 ```sh
 cabal run -v0 ecx-pool -- prepare devnet REQUEST.json > prepared.json
@@ -19,6 +19,7 @@ cabal run -v0 ecx-pool -- check-position HTTPS_RPC MAX_FEE MAX_COST position.jso
 cabal run -v0 ecx-pool -- sign-position HTTPS_RPC MAX_FEE MAX_COST position.json PAYER_KEY POSITION_MINT_KEY NEW_ATTEMPT.json
 cabal run -v0 ecx-pool -- prepare-liquidity devnet LIQUIDITY_REQUEST.json > liquidity.json
 cabal run -v0 ecx-pool -- check-liquidity HTTPS_RPC MAX_FEE MAX_COST liquidity.json
+cabal run -v0 ecx-pool -- sign-liquidity HTTPS_RPC MAX_FEE MAX_COST liquidity.json OWNER_KEY NEW_ATTEMPT.json
 cabal test ecx-pool:pool-test --offline -j1 --test-show-details=direct
 ```
 
@@ -26,6 +27,14 @@ Choose `devnet` or `mainnet` explicitly. Mints must be in raw public-key byte or
 not alphabetical order. The address command takes the actual fee-tier index;
 it is not necessarily the tick spacing. Inspection reads that index from the pool,
 independently derives its PDA through the existing Solana SDK and verifies it.
+
+`Pool.Operation` packages CLI operations as constrained existential `Request s a`
+values. Their `Operation` dictionary converts them to a closed `DSL s a`; separate
+safe and critical evaluators preserve severity and result type. All CLI operations
+use this boundary, with one dispatch to `Pool.Signing.evalCritical`. This follows
+the bridge request pattern without adding liquidity HTTP endpoints. DSL constructors
+are hidden; there is no arbitrary IO/callback operation. Lower-level evaluators
+remain library exports for internal composition; this is not OS capability isolation.
 
 `Pool.hs` owns a closed safe DSL. It has no signer, private-key, database, broadcast
 or custody capability. It uses the shared bounded HTTPS RPC adapter and narrow
@@ -215,6 +224,25 @@ never-submitted test attempt was preserved after finalized blockhash expiry and
 absent transaction/history checks; the CLI did not replace it automatically.
 This proves creation only, not funded liquidity or trading.
 
+## Funded Devnet acceptance
+
+The same position completed this round trip with separate test capital:
+
+| Operation | Finalized signature | Result |
+| --- | --- | --- |
+| Deposit | `5Y16u8YqQ6Aa91uGwDZ75Tr2qZ1LkAqrCKpbNysAPBeWa9tPPUZivnkNqSeXHk24V6MznR3YgynyquzHgFT6jD6V` | 1,000 raw units per asset spent; 1,000 liquidity added |
+| Collect | `36maD578fFBQUj2RDjdrSzgNmghZ8p3Q3fjjP5osPDmM4EAGDLqgXy3sqzmvigTR7Q2HQid7iZdz3cWZ8cHqay8k` | No earned fees; liquidity retained |
+| Withdraw | `2ooco1YXgHEn6uoriVy23RLhNzaNeigzphwdd9MxgeVnmGY9MZTGem2f9R1YS9PAXvaVcJsQXDTQCyzGcAQtrs5f` | 999 raw units per asset returned; pool/position liquidity zero |
+| Collect empty | `5zugWMRVCuUZRjf9f5aF4RgBRz74t3AAnYz6UsR936DFGAwELU4YN1i1QEfkh2WYGxky5UTf283X4s3HExoA9haY` | Zero movement; no zero-liquidity refresh |
+
+Each cost 5,000 lamports and passed exact saved-byte finalized replay. Deposit caps
+below the required spend and withdrawal minima above the receipt were refused.
+The one-unit difference per asset is retained in the pool after integer rounding.
+A prior collection attempt expired during an RPC interruption; its bytes and
+explicit absent-history/expired-blockhash checks were preserved before a new test
+attempt. The application never auto-replaced it. Private attempts/keys stay outside
+Git. This proves the tested liquidity path, not nonzero fee income or public routes.
+
 ## Remaining implementation
 
 Creation preflight now binds the real ordinary tier and explicit price/cost limits.
@@ -222,8 +250,8 @@ The closed signer supports independent vault signatures in addition to the payer
 keeping the bridge's one-signature custody protocol unchanged. Full-range position
 and boundary-array preparation/preflight, signing/submission and finalized ownership readback now pass Devnet
 acceptance. Liquidity deposit/withdrawal and fee-collection wire preparation is
-implemented and actual-account/effect preflight passes empty-position collection
-simulation. Complete saved signing/submission and funded Devnet acceptance. Adaptive-tier initialization can have additional authority
+implemented with actual-account/effect preflight and shared saved signing/submission.
+Funded Devnet acceptance passes as recorded below. Adaptive-tier initialization can have additional authority
 requirements; do not assume the published tier is permissionless.
 
 LP ownership/lock, fee reinvestment, issuer approval, reserve backing, deployed

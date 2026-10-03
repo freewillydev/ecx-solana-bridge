@@ -11,7 +11,7 @@ library
   default-extensions: OverloadedStrings
   ghc-options: -Wall -Wcompat
   hs-source-dirs: .
-  exposed-modules: Pool, Pool.Signing, Pool.Position, Pool.Liquidity
+  exposed-modules: Pool, Pool.Signing, Pool.Position, Pool.Liquidity, Pool.Operation
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:chain,
     aeson, binary, bytestring, text, unix, http-client, base64-bytestring, crypton, ram
 
