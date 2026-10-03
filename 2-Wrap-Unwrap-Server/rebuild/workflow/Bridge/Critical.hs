@@ -2,7 +2,7 @@
 -- The signer ClientM is constructed only inside this critical evaluator.
 module Bridge.Critical (CustomerSettings(..),withRuntime,runWorkerLoop) where
 import Bridge.Operation.Internal
-import Bridge.Domain (Asset(..),gross)
+import Bridge.Domain (Asset(..),gross,paymentAsset)
 import Bridge.Identity (payURIFor)
 import Bridge.Order (createCustomerOrder)
 import Data.Int (Int64)
@@ -15,7 +15,7 @@ import Bridge.Reconciliation (reconcileCustody)
 import Bridge.PaymentSource (verifyPaymentSource)
 import qualified Bridge.Wire as W
 import Control.Monad (forM_,when,forever)
-import Bridge.NativePayment (NativeSigned,checkNativeAcceptance)
+import Bridge.NativePayment (NativeSigned,checkNativeAcceptance,releaseNativeInputLocks)
 import Bridge.SolanaPayment (SolanaSigned,signedSolanaPlan,solPlanRecent,checkBlockhashWindow)
 import Data.Text (Text)
 import Bridge.PaymentObservation
@@ -119,6 +119,32 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
       evalCritical (WriteCustomer (Bridge.Operation.Internal.CreateOrder header request))=do
         c<-customer
         createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (coverBackup c) reader writer header request
+      evalCritical (OperatorDSL (CancelPreparation identifier generation reason))=guarded $ do
+        require (generation>=0 && generation<8 && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_preparation_cancellation"
+        state<-evalRead reader ReadState
+        require (ledgerPaused state) "pause_before_operator_action"
+        previous<-evalRead reader (ReadCancellation identifier generation)
+        forM_ previous $ \(old,_,_)->require (old==reason) "preparation_cancellation_conflict"
+        case previous of
+          Just (_,_,True)->pure ()
+          _->do
+            unsigned<-evalRead reader (ReadUnsignedPreparation identifier)
+            require (preparedGeneration unsigned==generation) "preparation_generation_changed"
+            case paymentAsset(savedPayment $ preparedView unsigned) of
+              Native->N.nativeIdentity rpc native >> pure ()
+              Wrapped->S.solanaIdentity rpc solana >> pure ()
+              Sol->reject "invalid_payout_asset"
+            refreshSource identifier
+            evalWorker ReconcileCustody
+            prepared<-evalRead reader (ReadUnsignedPreparation identifier)
+            require (preparedGeneration prepared==generation) "preparation_generation_changed"
+            (points,cleanup)<-cancellationPlan (N.nativeCall rpc native) (N.profile native) config prepared
+            forM_ previous $ \(_,plan,_)->require (plan==cleanup) "preparation_cancellation_conflict"
+            now<-floor <$> getPOSIXTime
+            evalWrite writer (BeginCancellation prepared now reason cleanup)
+            when (paymentAsset(savedPayment $ preparedView prepared)==Native) $
+              releaseNativeInputLocks (N.nativeCall rpc native) points
+            evalWrite writer (FinishCancellation prepared reason cleanup)
       evalCritical (OperatorDSL (RefundDeposit receipt))=do
         now<-floor <$> getPOSIXTime
         evalWrite writer (AuthorizeRefund now receipt)

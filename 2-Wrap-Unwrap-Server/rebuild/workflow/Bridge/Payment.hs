@@ -2,7 +2,7 @@
 -- signer transport; both ends use the same saved-plan checks below.
 module Bridge.Payment
   ( SigningPlan(..), SigningReply(..), prepareUnsigned, resolveSigningPlan, nativePreparationPlan
-  , verifySigningReply, verifySignedAttempt, payoutReference, restoreNativeWork ) where
+  , verifySigningReply, verifySignedAttempt, payoutReference, restoreNativeWork, cancellationPlan ) where
 import Bridge.Domain
 import Bridge.Error
 import Bridge.Identity (digest)
@@ -14,7 +14,7 @@ import qualified Bridge.SolanaHelper as H
 import Bridge.Store
 import Bridge.Wire (Profile,PaymentTerms(..),CostLimits(..),PolicySnapshot(..))
 import Control.Exception (onException,try)
-import Data.Aeson (Value,FromJSON,ToJSON,encode,eitherDecodeStrict',toJSON)
+import Data.Aeson (Value,FromJSON,ToJSON,encode,eitherDecodeStrict',toJSON,object,(.=))
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
 import Data.Text (Text)
@@ -197,3 +197,26 @@ restoreNativeWork call profile config work = case work of
               size<-fieldValue "vsize" entry :: IO Int
               require (size>0) "native_mempool_evidence_invalid"
               pure True
+
+-- Reconstruct cleanup solely from the saved policy/draft; never accept outpoints
+-- from the operator. Signing validation also applies when the draft is absent.
+cancellationPlan :: NativeRPC -> Profile -> H.SolanaPolicy -> PreparedPayment -> IO ([Outpoint],Text)
+cancellationPlan call profile config prepared=do
+  let asset=paymentAsset(savedPayment $ preparedView prepared)
+  points<-case asset of
+    Native->do
+      plan<-nativePreparationPlan profile config prepared
+      case preparedDraft prepared of
+        Nothing->pure []
+        Just encoded->do
+          draft<-decodeSaved encoded
+          tx<-checkNativeDraft call plan draft
+          pure (map nativeOutpoint $ nativeInputs tx)
+    Wrapped->do
+      plan<-decodeSaved (preparedPolicy prepared)
+      let expected=encodeSaved (solanaPayoutRequest config plan)
+      _<-resolveSigningPlan profile config prepared {preparedDraft=Just $ maybe expected id (preparedDraft prepared)}
+      pure []
+    Sol->reject "invalid_payout_asset"
+  pure (points,encodeSaved $ object ["chain" .= (if asset==Native then "Native" else "Solana"::Text),
+    "nativeInputs" .= points,"draftHash" .= fmap (digest . TE.encodeUtf8) (preparedDraft prepared)])

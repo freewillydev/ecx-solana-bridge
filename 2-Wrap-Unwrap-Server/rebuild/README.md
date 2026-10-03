@@ -108,7 +108,7 @@ state; replay cannot silently reactivate released money.
 fully migrated `ECX_REBUILD_CONTRACT_DATABASE` with the `ecx_rebuild_contract_`
 prefix, `ECX_REBUILD_CONTRACT_READER` with a SELECT-only role, and `USER` for fixture
 setup on `/tmp/ecx-pg-seam:29436`. Apply baseline PostgreSQL migrations 001–005,
-then the Cabal-packaged `rebuild/migrations/001.sql` (schema 19). It refuses an unprefixed database. Fixtures and
+then the Cabal-packaged `rebuild/migrations/001.sql` and `002.sql` (schema 20). It refuses an unprefixed database. Fixtures and
 assertions use Opaleye; schema/role provisioning is separate DDL. Checks cover role
 and profile refusal, exclusive writer ownership, exact replay/conflicts, custody
 freshness, insufficient earned revenue, cancellation and checkpoint rollback/fencing,
@@ -587,6 +587,52 @@ lock release after process termination. WAI tests cover fixed asset paths,
 missing-asset refusal, traversal/hidden-file rejection and browser security headers.
 This is executable/startup acceptance, not a funded bridge or browser-wallet test.
 
+## Unsigned cancellation and retry checkpoint
+
+The private command is `{"operation":"cancel-preparation","payment":"PAYMENT_ID","generation":0,"reason":"maintenance"}`.
+It resolves through the operator existential and the single critical evaluator.
+Cancellation requires pause, source verification, fresh custody, the exact current
+generation and no recorded signature in that generation. Its cleanup plan comes
+from the saved economic policy and draft, never operator-supplied outpoints.
+Native PSBT/template/fee validation is shared with signing; Solana policy/request
+validation is also shared and permits an unsigned expired blockhash to be discarded.
+
+The ledger first saves the immutable cleanup/reason with a critical sequence.
+Native cleanup unlocks only listed saved inputs, refuses foreign locks and never
+sends Core an empty unlock list. A lost reply leaves cancellation pending; retry
+rechecks current locks and the same saved plan. Completion records a second durable
+sequence and resolves the intent while retaining principal, inventory and its fee
+hold. A pending cancellation blocks draft/signature mutation in both application
+checks and database triggers. Completed old-generation callbacks cannot change new work.
+
+The existing preparation engine can reuse a completed, wholly unsigned cancellation,
+with fresh budgeting and a new generation, without creating another payment engine.
+The worker selects these retries as eligible work. After eight generations it leaves
+the payment in review; it does not leave an unpayable item silently Ready. Earned
+payments use the same path and may instead release their reserved revenue after
+completed cancellation. Signed Solana expiry and native replacement have separate
+requirements and are still unfinished.
+
+`migrations/002.sql` advances rebuild schema 19 to 20. Its 29-line forward migration
+retains the old records and changes the fee-release trigger to accept only paused,
+resolved, fully cancelled unsigned work with released fee capacity. It still rejects
+pending preparations or any recorded attempt. Migrations require the worker stopped;
+this migration has run only against disposable databases, not existing custody.
+
+Cabal/QuickCheck checks cover saved Native/Solana cleanup, absent drafts, invalid
+policy, lost unlock replies and foreign/empty locks. PostgreSQL checks cover journal
+and sequence invariants, pending/replayed/conflicting cancellation, signed refusal,
+all eight generations, stale completion, held fees, earned retry/release and the
+independent SQL refusal of premature earned release. Runtime observation mode
+rejects cancellation. Actual funded interrupted-cancellation/restart acceptance remains.
+
+Scoped counts: native unlock **9 baseline lines → 8 rebuild lines** (excluding shared
+lock validation). Existing `Payment.hs` **199 → 222**, `Critical.hs` **326 → 352**, and
+`Control.hs` **103 → 106** lines, each still one file. Store grows **149 net lines**
+for cancellation, earned resolution and retry eligibility; schema projections add
+four lines. **No new Haskell production file**; the sole new file is the forward
+migration. This adds missing behavior rather than claiming a whole-feature reduction.
+
 ## Refund authorization checkpoint
 
 The private command `{"operation":"refund","deposit":"DEPOSIT_ID"}` resolves
@@ -684,7 +730,7 @@ Scoped physical-line comparisons (not whole-product reduction claims):
 | Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
 | Signer module | 144 / 1 file | 117 / 1 file | Now includes startup key validation and shared file permissions; replacement parity pending |
 | Signer transport | 103 / 1 file plus shared web boundary | 69 / 1 file + shared 71-line Web module | Shared module also serves customer API; initial signer route only |
-| Customer/worker runtime | Part of broader Runtime | 326 / 1 file (previous checkpoint 323) | Adds refund authorization to guarded operator controls; retains one critical dispatch |
+| Customer/worker runtime | Part of broader Runtime | 352 / 1 file (previous checkpoint 326) | Adds guarded unsigned cancellation; single critical dispatch retained; retains one critical dispatch |
 | Focused source validation | 63-line mixed validation/storage/recovery function | 67-line dedicated module | Covered-source recovery is still separate unfinished work |
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |
@@ -709,7 +755,7 @@ performance remains to be measured. Source eligibility checking is shared with s
 
 Still required: successful TLS worker/signer integration and deployed OS/native-RPC
 authority separation; remaining private recovery commands and funded resume/browser-wallet acceptance;
-integrated positive submission/reconciliation acceptance; retry, cancellation,
+integrated positive submission/reconciliation acceptance; signed Solana expiry/retry,
 replacement/winner changes and covered-source approvals generalized to earned
 funding; complete custody acceptance and Haskell backup/restore integration; actual populated-ledger migration and funded
 Signet/Devnet flows. Supported-wallet signing, off-host restore, canonical activation

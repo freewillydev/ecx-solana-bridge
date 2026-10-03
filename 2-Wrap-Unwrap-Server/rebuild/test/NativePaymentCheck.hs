@@ -218,6 +218,30 @@ checks = do
         (badFee,feeCalls)<-run (altered "decodepsbt") "native_psbt_changed"
         (badPrevious,previousCalls)<-run (altered "gettxout") "native_previous_output_changed"
         pure (badFee && badPrevious && all (`notElem` (feeCalls<>previousCalls)) ["lockunspent","walletprocesspsbt"])
+    , check "cancellation derives exact saved native inputs without signing or unlocking" $ once $ ioProperty $ do
+        ((points,cleanup),calls)<-contract (\_ v->pure v) $ \call->cancellationPlan call L2LSignetDevnet config prepared
+        ((empty,_),emptyCalls)<-contract (\_ v->pure v) $ \call->cancellationPlan call L2LSignetDevnet config prepared {preparedDraft=Nothing}
+        pure (points==map nativeOutpoint(nativeInputs tx) && not(T.null cleanup) && calls==["decodepsbt"] && null empty && null emptyCalls)
+    , check "cancellation cleanup handles lost replies and never unlocks foreign or empty inputs" $ once $ ioProperty $ do
+        let points=map nativeOutpoint(nativeInputs tx)
+        locked<-newIORef points; mutations<-newIORef (0::Int); lost<-newIORef True
+        let call _ method args=case (method,args) of
+              ("listlockunspent",[])->toJSON <$> readIORef locked
+              ("lockunspent",[Bool True,v])->case fromJSON v of
+                Success ps | not(null ps) && ps==points->do
+                  modifyIORef' locked (filter (`notElem` ps))
+                  modifyIORef' mutations (+1)
+                  unknown<-readIORef lost
+                  if unknown then writeIORef lost False >> reject "rpc_transport_unknown_outcome" else pure (Bool True)
+                _->fail "empty or foreign unlock"
+              _->fail "unexpected cancellation RPC"
+        unknown<-rejects "rpc_transport_unknown_outcome" (releaseNativeInputLocks call points)
+        releaseNativeInputLocks call points
+        releaseNativeInputLocks call []
+        count<-readIORef mutations
+        writeIORef locked [Outpoint (T.replicate 64 "a") 0]
+        refused<-rejects "native_preparation_locks_require_review" (releaseNativeInputLocks call points)
+        pure (unknown && refused && count==1)
     , check "native lock recovery never clears foreign locks or sends empty mutations" $ once $ ioProperty $ do
         let points=map nativeOutpoint (nativeInputs tx)
         locked <- newIORef ([]::[Outpoint]); mutations <- newIORef (0::Int)

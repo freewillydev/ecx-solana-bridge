@@ -4,7 +4,7 @@ module Bridge.NativePayment
   , NativePrevout(..), NativePlan(..), NativeDraft(..), NativeSigned(..)
   , decodeNativeTx, validateNativeTx, sameNativeTemplate, sameNativePrevouts
   , previewNativePayment, newNativePlan, fundNativeDraft, checkNativeDraft, signNativeDraft
-  , readNativePrevoutsWith, ownedNativeLocks, restoreNativeInputLocks, checkNativeAcceptance
+  , readNativePrevoutsWith, ownedNativeLocks, releaseNativeInputLocks, restoreNativeInputLocks, checkNativeAcceptance
   ) where
 
 import Bridge.Wire (Profile(..))
@@ -256,6 +256,17 @@ ownedNativeLocks call expected=do
   locked <- call True "listlockunspent" [] >>= parseValue parseJSON :: IO [Outpoint]
   require (length locked<=100 && length locked==length (nub locked) && all (`elem` expected) locked) "native_preparation_locks_require_review"
   pure locked
+
+-- Never use Core's empty-list unlock-all operation. An unknown reply leaves the
+-- durable cancellation pending; a retry observes which expected locks remain.
+releaseNativeInputLocks :: NativeRPC -> [Outpoint] -> IO ()
+releaseNativeInputLocks call expected=do
+  locked<-ownedNativeLocks call expected
+  when (not $ null locked) $ do
+    ok<-call True "lockunspent" [Bool True,toJSON locked] >>= parseValue parseJSON
+    require ok "native_input_unlock_failed"
+  after<-ownedNativeLocks call expected
+  require (null after) "native_input_unlock_unverified"
 
 restoreNativeInputLocks :: NativeRPC -> [Outpoint] -> IO Int
 restoreNativeInputLocks call expected=do

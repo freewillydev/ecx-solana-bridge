@@ -63,7 +63,13 @@ checks=do
       verify=verifySigningReply (\_ _ _->fail "Solana validation must not call native RPC") W.L2LSignetDevnet config
   proofResults <- mapM captured ["new","existing"]
   local <- sequence
-    [ check "Solana admission simulates an unsigned payout and rejects signed previews" $ once $ ioProperty $ do
+    [ check "unsigned Solana cancellation validates saved policy without RPC or a draft" $ once $ ioProperty $ do
+        let noRPC _ _ _=fail "Solana cancellation reached native RPC"
+        (points,cleanup)<-cancellationPlan noRPC W.L2LSignetDevnet config prepared
+        (empty,undrafted)<-cancellationPlan noRPC W.L2LSignetDevnet config prepared {preparedDraft=Nothing}
+        bad<-rejectsAny (cancellationPlan noRPC W.L2LSignetDevnet config prepared {preparedFee=amt 1})
+        pure (null points && null empty && not(T.null cleanup) && cleanup/=undrafted && bad)
+    , check "Solana admission simulates an unsigned payout and rejects signed previews" $ once $ ioProperty $ do
         let order=W.OrderRequest NativeToWrapped (amt 4) recipient "refund" Nothing "quote"
             quoteRequest=request {helperReference="quote-check"}
             memo=TE.encodeUtf8 $ helperMemo config quoteRequest

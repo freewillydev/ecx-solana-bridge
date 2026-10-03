@@ -249,3 +249,7 @@ provenLosses :: O.Select TextField
 provenLosses = O.selectTable $ O.table "proven_source_losses" (O.requiredTableField "deposit_id")
 custodyReport :: O.Table (IntField,O.FieldNullable O.SqlText) (IntField,O.FieldNullable O.SqlText)
 custodyReport = O.table "custody_check" $ p2 (O.requiredTableField "singleton",O.requiredTableField "report_json")
+
+preparationCancellations :: O.Table (TextField,IntField,TextField,TextField,IntField,IntField) (TextField,IntField,TextField,TextField,IntField,IntField)
+preparationCancellations = O.table "preparation_cancellations" $ p6
+  (O.requiredTableField "intent_id",O.requiredTableField "generation",O.requiredTableField "reason",O.requiredTableField "cleanup_json",O.requiredTableField "critical_sequence",O.requiredTableField "completed")

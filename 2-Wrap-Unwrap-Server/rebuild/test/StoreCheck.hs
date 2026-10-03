@@ -470,7 +470,9 @@ ledgerMain = do
         fixture fixtures CoverBackup
         fixture fixtures ReadyIntake
         expectStore "attempt_already_recorded" (evalRead reader $ ReadSigningDecision 100 intent 0)
+        expectStore "preparation_already_signed" (evalRead reader $ ReadUnsignedPreparation intent)
         fixture fixtures (ImmutableAttempt "fixture-signed-solana") >>= check
+        earnedCancellationContract fixtures reader writer
         let withdrawalKey=T.replicate 64 "d"
         evalWrite writer (Pause "reserve earned")
         fixture fixtures RefreshCustody
@@ -750,6 +752,7 @@ ledgerMain = do
         fixture fixtures OrderWorkflowFunds
         orderWorkflowContract fixtures reader writer (store policy limits)
         refundContract fixtures reader writer
+        cancellationContract fixtures reader writer
         -- Actual runtime cycle with unavailable RPC: retain all money, stay
         -- paused, record scanner failures, and never reach signer credentials.
         let cycleKey=T.replicate 32 "1"
@@ -807,6 +810,7 @@ data Fixture a where
   OperatingPhase :: T.Text -> T.Text -> Fixture ()
   HistoricalHolds :: T.Text -> Fixture ()
   PromotionFunds :: Fixture ()
+  RejectPreparedFeeRelease :: T.Text -> Fixture Bool
   CheckRefundHolds :: T.Text -> Asset -> Fixture Bool
   RefundProof :: T.Text -> T.Text -> T.Text -> Fixture ()
   SeedReceipt :: T.Text -> Maybe T.Text -> Asset -> Int64 -> Int64 -> Bool -> Int64 -> Fixture ()
@@ -832,7 +836,7 @@ fixture c LockRestoreAudits = O.runSelect c $ do
   pure subject
 fixture c Initialize = fixture c (InitializeIdentity "contract")
 fixture c (InitializeIdentity identity) = PG.withTransaction c $ do
-  void $ O.runInsert c O.Insert {O.iTable=S.deployment,O.iRows=[S.Deployment (O.sqlInt8 1) (O.sqlInt8 19) (O.sqlStrictText identity) (O.sqlInt8 0) (O.sqlInt8 0) (O.sqlInt8 1) (O.sqlStrictText "test")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.deployment,O.iRows=[S.Deployment (O.sqlInt8 1) (O.sqlInt8 20) (O.sqlStrictText identity) (O.sqlInt8 0) (O.sqlInt8 0) (O.sqlInt8 1) (O.sqlStrictText "test")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.custody,O.iRows=[(O.sqlInt8 1,O.sqlInt8 0,O.null,O.null,O.null)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(O.sqlStrictText "fixture",O.sqlStrictText "contract balances")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.postings,O.iRows=[(Nothing,O.sqlStrictText "fixture",O.sqlStrictText "Native",O.sqlStrictText account,O.sqlInt8 delta)| (account,delta)<-[("external",-1000),("earned",1000)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
@@ -935,6 +939,11 @@ fixture c PromotionFunds = PG.withTransaction c $ do
   void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(text "promotion-funds",text "test operating budget")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.postings,
     O.iRows=[(Nothing,text "promotion-funds",text asset,text account,O.sqlInt8 n)|asset<-["Native","Sol"],(account,n)<-[("external",-10000),("operating",10000)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+fixture c (RejectPreparedFeeRelease key) = do
+  result<-try $ PG.withTransaction c $ O.runInsert c O.Insert {O.iTable=S.cancellations,
+    O.iRows=[(O.sqlStrictText key,O.sqlStrictText "bypass prepared work",O.sqlInt8 1000000)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+    :: IO (Either PG.SqlError Int64)
+  pure $ case result of Left err->PG.sqlState err=="23514" && PG.sqlErrorMsg err=="fee_withdrawal_cancellation_binding"; _->False
 fixture c (CheckRefundHolds oid asset) = do
   rows<-O.runSelect c $ do
     (key,kind,currency,_,phase)<-O.selectTable S.operatingReservations
@@ -1260,6 +1269,7 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       check (W.paused service==ledgerPaused ledgerBefore)
       expectStore "observation_only" (operatorControl $ Op.operator Op.ResumeService)
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.RefundDeposit "missing")
+      expectStore "observation_only" (operatorControl $ Op.operator $ Op.CancelPreparation "missing" 0 "test")
       operatorControl (Op.operator $ Op.PauseService "operator contract")
       serviceAfter<-operatorControl (Op.operatorRead Op.ServiceState)
       check (W.paused serviceAfter && W.pauseReason serviceAfter=="operator contract")
@@ -1520,3 +1530,81 @@ refundContract fixtures reader writer=do
     expectStore code (authorize sourceId)
     evalRead reader ReadBalances >>= check . (==beforeRejected)
   expectStore "refundable_deposit_not_found" (ready >> authorize "unknown-source")
+
+cancellationContract :: PG.Connection -> Reader -> Writer -> IO ()
+cancellationContract fixtures reader writer=do
+  let header="Bearer "<>T.replicate 64 "0"
+      request=W.OrderRequest NativeToWrapped (money 10) "recipient" "native-refund" Nothing "refund-racing"
+      reason="review unsigned work"; cleanup="{\"nativeInputs\":[]}"
+      check :: HasCallStack => Bool -> IO ()
+      check ok=unless ok (fail $ "cancellation contract failed\n"<>prettyCallStack callStack)
+  Just oid<-evalRead reader (FindOrder header request)
+  let identifier="convert:"<>oid
+  before<-evalRead reader ReadBalances
+  original<-evalRead reader (ReadUnsignedPreparation identifier)
+  forM_ [0..7] $ \generation->do
+    prepared<-evalRead reader (ReadUnsignedPreparation identifier)
+    check (preparedGeneration prepared==generation)
+    fixture fixtures ReadyIntake
+    expectStore "pause_before_operator_action" (evalWrite writer $ BeginCancellation prepared 110 reason cleanup)
+    evalWrite writer (Pause "cancel contract")
+    fixture fixtures RefreshCustody
+    expectStore "preparation_cancellation_not_expected" (evalWrite writer $ FinishCancellation prepared reason cleanup)
+    evalWrite writer (BeginCancellation prepared 110 reason cleanup)
+    recorded<-evalRead reader ReadState
+    evalWrite writer (BeginCancellation prepared 110 reason cleanup)
+    replay<-evalRead reader ReadState
+    check (ledgerSequence replay==ledgerSequence recorded)
+    expectStore "preparation_cancellation_pending" (evalRead reader $ ReadPreparation identifier)
+    expectStore "preparation_cancellation_conflict" (evalWrite writer $ BeginCancellation prepared 110 "changed" cleanup)
+    expectStore "preparation_cancellation_not_expected" (evalWrite writer $ FinishCancellation prepared {preparedFee=money 1} reason cleanup)
+    evalWrite writer (FinishCancellation prepared reason cleanup)
+    finished<-evalRead reader ReadState
+    evalWrite writer (FinishCancellation prepared reason cleanup)
+    again<-evalRead reader ReadState
+    check (ledgerSequence again==ledgerSequence finished)
+    evalRead reader ReadBalances >>= check . (==before)
+    saved<-evalRead reader (ReadCancellation identifier generation)
+    check (saved==Just(reason,cleanup,True))
+    evalRead reader (ReadPayment identifier) >>= check . (==if generation<7 then PaymentReady else PaymentReview) . savedStatus
+    when (generation==7) $ evalRead reader PaymentCandidates >>= check . notElem identifier
+    fixture fixtures ReadyIntake
+    if generation==7 then expectStore "preparation_generation_limit" (evalWrite writer $ PreparePayment 110 identifier (money 20) "{}")
+      else do
+        next<-evalWrite writer (PreparePayment 110 identifier (money 20) "{}")
+        check (preparedGeneration next==generation+1)
+        evalWrite writer (Pause "stale callback contract")
+        evalWrite writer (FinishCancellation original reason cleanup)
+        current<-evalRead reader (ReadUnsignedPreparation identifier)
+        check (current==next)
+  evalRead reader ReadBalances >>= check . (==before)
+
+earnedCancellationContract :: PG.Connection -> Reader -> Writer -> IO ()
+earnedCancellationContract fixtures reader writer=do
+  let key=T.replicate 64 "e"; identifier="fee:"<>key; reason="cancel unsigned earned payment"; cleanup="{}"
+      check ok=unless ok (fail "earned cancellation contract failed")
+  evalWrite writer (Pause "earned cancellation contract")
+  fixture fixtures RefreshCustody
+  before<-evalRead reader ReadBalances
+  void $ evalWrite writer (ReserveFees 100 key Native (money 5) "owner-address" "test retained fees")
+  fixture fixtures ReadyIntake
+  prepared<-evalWrite writer (PreparePayment 100 identifier (money 5) "{}")
+  fixture fixtures (RejectPreparedFeeRelease key) >>= check
+  evalWrite writer (Pause "earned cancellation")
+  fixture fixtures RefreshCustody
+  evalWrite writer (BeginCancellation prepared 100 reason cleanup)
+  fixture fixtures (RejectPreparedFeeRelease key) >>= check
+  evalWrite writer (FinishCancellation prepared reason cleanup)
+  evalRead reader (ReadPayment identifier) >>= check . (==PaymentReady) . savedStatus
+  fixture fixtures ReadyIntake
+  next<-evalWrite writer (PreparePayment 100 identifier (money 5) "{}")
+  check (preparedGeneration next==1)
+  evalWrite writer (Pause "earned cancellation retry")
+  fixture fixtures RefreshCustody
+  evalWrite writer (BeginCancellation next 100 reason cleanup)
+  evalWrite writer (FinishCancellation next reason cleanup)
+  void $ evalWrite writer (CancelFees key "release cancelled earned work")
+  evalRead reader (ReadPayment identifier) >>= check . (==PaymentCancelled) . savedStatus
+  evalRead reader PaymentCandidates >>= check . notElem identifier
+  after<-evalRead reader ReadBalances
+  check (M.filter (/=0) before==M.filter (/=0) after)
