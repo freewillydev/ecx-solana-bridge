@@ -2,11 +2,12 @@
 -- Closed ledger operations. Connections, queries and transaction callbacks never
 -- escape this module; the runtime will interpret its customer/operator DSL here.
 module Bridge.Store
-  ( Reader, Writer, BridgeError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), StorePolicy(..), AllocationClaim(..), LedgerState(..), WithdrawalView(..), PaymentView(..), PaymentStatus(..), PreparedPayment(..), SignedAttempt(..), RecordedAttempt(..)
+  ( Reader, Writer, BridgeError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), StorePolicy(..), AllocationClaim(..), LedgerState(..), WithdrawalView(..), PaymentView(..), PaymentStatus(..), PreparedPayment(..), SignedAttempt(..), RecordedAttempt(..), CustodySnapshot(..)
   , withReader, withWriter, evalRead, evalWrite ) where
 
 import Bridge.Error
 import Bridge.Identity (bearerHash,digest,payInstruction)
+import Text.Read (readMaybe)
 import qualified Bridge.Wire as W
 import Bridge.Domain
 import Bridge.Wire (PaymentTerms(..),PolicySnapshot(..),CostLimits(..),SignedAttempt(..))
@@ -21,7 +22,7 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import Control.Concurrent.MVar
 import Control.Exception
 import Control.Monad (unless,forM,forM_,when)
-import Data.Aeson (FromJSON,ToJSON,Value(Null),object,(.=),encode,eitherDecodeStrict',withObject,(.:))
+import Data.Aeson (Key,FromJSON,ToJSON,Value(Null),object,(.=),encode,eitherDecodeStrict',withObject,(.:))
 import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
@@ -64,7 +65,14 @@ data RecordedAttempt = RecordedAttempt
 data AllocationClaim = AllocationClaim { allocationLabel :: Text, mayAllocate :: Bool }
   deriving (Eq,Show)
 
+data CustodySnapshot = CustodySnapshot
+  { custodyRevision :: Int64, custodyTotals :: M.Map Asset Integer
+  , custodyHeads :: [(Text,Text)], custodySlot :: Int64, custodyPending :: [RecordedAttempt] } deriving (Eq,Show)
 data StoreRead a where
+  ReadCustodyRevision :: StoreRead Int64
+  ReadCustodySnapshot :: Int64 -> [(Text,Text)] -> Bool -> StoreRead CustodySnapshot
+  ReadCustodyEvent :: Text -> Text -> StoreRead (Text,Text,Value)
+  HasCustodyEvent :: Text -> Text -> StoreRead Bool
   ReadState :: StoreRead LedgerState
   ReadBalances :: StoreRead (M.Map (Asset,Account) Integer)
   ReadPaymentWork :: Text -> StoreRead (PaymentView,Maybe PreparedPayment,[Text])
@@ -85,6 +93,7 @@ data StoreRead a where
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
+  RecordCustody :: Int64 -> Int64 -> Maybe Text -> Maybe Value -> StoreWrite ()
   MarkBroadcast :: Int64 -> Text -> StoreWrite Int64
   AuthorizeSend :: Int64 -> Text -> StoreWrite RecordedAttempt
   SettlePayment :: RecordedAttempt -> W.PaymentCosts -> Text -> StoreWrite ()
@@ -143,6 +152,15 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
     verifyReadRole c >>= flip require "unsafe_read_database_role"
     row <- metadata c identity
     case operation of
+      ReadCustodyRevision -> readCustodyRevision c
+      ReadCustodySnapshot now origins losses -> custodySnapshot c now origins losses
+      ReadCustodyEvent chain identifier -> custodyEvent c chain identifier
+      HasCustodyEvent chain identifier -> do
+        rows<-O.runSelect c $ O.limit 1 $ do
+          event<-O.selectTable S.chainEvents
+          O.where_ (S.eventId event O..== O.sqlStrictText identifier O..&& O.in_ (map O.sqlStrictText $ if chain=="Solana" then ["Solana","SolanaOperating"] else [chain]) (S.eventChain event))
+          pure (S.eventId event)
+        pure (not $ null (rows :: [Text]))
       ReadState -> pure (LedgerState (S.criticalSequence row) (S.backupSequence row) (S.paused row/=0) (S.pauseReason row))
       ReadPaymentWork identifier -> paymentWork c identity identifier
       ReadSigningDecision now identifier generation -> signingDecision c identity remote now identifier generation
@@ -168,6 +186,7 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
 evalWrite :: Writer -> StoreWrite a -> IO a
 evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
  let policy=executionTerms config; limit=admissionLimits config in case operation of
+  RecordCustody revision now problem report -> recordCustody c revision now problem report
   MarkBroadcast now txid -> markBroadcast c config now txid
   AuthorizeSend now txid -> authorizeSend c config now txid
   SettlePayment expected costs proof -> settlePayment c (deploymentFingerprint $ paymentPolicy policy) expected costs proof
@@ -524,6 +543,12 @@ intakeReady c identity now = do
   require (now>=0) "invalid_order_time"
   d <- metadata c identity
   require (S.paused d==0) "intake_paused"
+  _<-scanHeads c now
+  fresh c now
+
+scanHeads :: PG.Connection -> Int64 -> IO [(Text,Text)]
+scanHeads c now = do
+  require (now>=0) "invalid_custody_time"
   scans <- O.runSelect c $ do
     (chain,success,problem,_) <- O.selectTable S.scanHealth
     (stream,anchor) <- O.selectTable S.checkpoints
@@ -534,7 +559,7 @@ intakeReady c identity now = do
   require (map (\(chain,_,_,_)->chain) ordered==["Native","Solana","SolanaOperating"] &&
     all (\(_,at,problem,anchor)->problem==Nothing && not(T.null anchor) &&
       maybe False (\t->t>=0 && t<=now && toInteger now-toInteger t<=60) at) ordered) "scanners_not_fresh"
-  fresh c now
+  pure [(chain,anchor) | (chain,_,_,anchor)<-ordered]
 
 reserveOrderCosts :: PG.Connection -> OrderLimits -> CostLimits -> M.Map (Asset,Account) Integer -> Text -> Direction -> IO ()
 reserveOrderCosts c limits costs booked identifier direction = do
@@ -1536,3 +1561,121 @@ readPaymentSource c identity identifier = do
       _->reject "source_instruction_missing"
     require (W.depositOrder deposit==Just order && W.depositAsset deposit==sourceAsset(W.direction request)) "source_binding_mismatch"
     pure (W.PaymentSource deposit request (paymentPolicy $ savedTerms view) instruction)
+
+readCustodyRevision :: PG.Connection -> IO Int64
+readCustodyRevision c = do
+  rows<-O.runSelect c $ fmap (\(_,revision,_,_,_)->revision) (O.selectTable S.custody)
+  case rows of [revision]->pure revision; _->reject "custody_check_missing"
+
+custodyEvent :: PG.Connection -> Text -> Text -> IO (Text,Text,Value)
+custodyEvent c chain identifier = do
+  rows<-O.runSelect c $ do
+    event<-O.selectTable S.chainEvents
+    (hash,_,_,proof)<-O.selectTable S.observationEvidence
+    O.where_ (S.eventChain event O..== O.sqlStrictText chain O..&& S.eventId event O..== O.sqlStrictText identifier
+      O..&& S.eventReview event O..== O.sqlInt8 0 O..&& S.eventHash event O..== hash)
+    pure (S.eventKind event,S.eventAnchor event,proof)
+    :: IO [(Text,Text,Text)]
+  case rows of
+    [(kind,anchor,encoded)]->do
+      value<-decodeSaved encoded >>= field "proof"
+      pure (kind,anchor,value)
+    _->reject "custody_history_not_current"
+ where field key value=either (const $ reject "invalid_reconciliation_evidence") pure (parseEither (withObject "evidence" (.: key)) value)
+
+custodySnapshot :: PG.Connection -> Int64 -> [(Text,Text)] -> Bool -> IO CustodySnapshot
+custodySnapshot c now expectedOrigins inspectLosses = do
+  revision<-readCustodyRevision c
+  heads<-scanHeads c now
+  origins<-O.runSelect c (O.selectTable S.scanOrigins) :: IO [(Text,Text)]
+  require (sortOn fst origins==sortOn fst expectedOrigins && map fst (sortOn fst origins)==map fst heads) "custody_scan_origin_mismatch"
+  reviewed<-O.runSelect c $ O.limit 1 $ do
+    event<-O.selectTable S.chainEvents
+    O.where_ (S.eventReview event O../= O.sqlInt8 0)
+    pure (S.eventId event)
+    :: IO [Text]
+  require (null reviewed) "chain_observations_require_review"
+  accounted<-O.runSelect c S.accountedLosses :: IO [Text]
+  proven<-if inspectLosses then O.runSelect c S.provenLosses else pure []
+  let ignored key=key `elem` accounted || key `elem` proven
+  ineligible<-O.runSelect c $ do
+    deposit<-O.selectTable S.deposits
+    O.where_ (S.depositAllocated deposit O..== O.sqlInt8 1 O..&& S.depositEligible deposit O..== O.sqlInt8 0)
+    pure (S.depositId deposit)
+    :: IO [Text]
+  require (all ignored ineligible) "source_reorg_requires_review"
+  recovery<-O.runSelect c S.sourceRecovery :: IO [(Text,Text)]
+  require (all (\(key,state)->state=="restored" || ignored key) recovery) "source_recovery_requires_review"
+  native<-O.runSelect c $ O.limit 1 $ do
+    (tx,state)<-S.nativeRecovery
+    O.where_ (state O../= O.sqlStrictText "reconfirmed")
+    pure tx
+    :: IO [Text]
+  require (null native) "native_settlement_requires_review"
+  terminal<-O.runSelect c $ do
+    a<-O.selectTable S.attempts
+    O.where_ (O.in_ (map O.sqlStrictText ["settled","failed"]) (S.attemptState a))
+    pure (S.attemptId a)
+    :: IO [Text]
+  forM_ terminal $ \txid->do
+    saved<-readAttempt c txid
+    observation<-maybe (reject "invalid_reconciliation_evidence") decodeSaved (recordedObservation saved)
+    proof<-if recordedState saved=="settled" then field "proof" observation >>= decodeSaved else pure observation
+    (kind,anchor,evidence)<-custodyEvent c (recordedChain saved) txid
+    if recordedChain saved=="Native" then do
+      block<-field "blockhash" proof
+      depth<-field "requiredDepth" proof :: IO Int64
+      actual<-field "confirmations" evidence :: IO Int64
+      require (recordedState saved=="settled" && kind=="outgoing" && anchor==block && depth>0 && actual>=depth) "settled_payment_observation_changed"
+    else do
+      outcome<-field "outcome" proof
+      slot<-field "outcomeSlot" outcome :: IO Int64
+      (operating,operatingAnchor,_)<-custodyEvent c "SolanaOperating" txid
+      require (anchor==T.pack(show slot) && operatingAnchor==anchor && operating=="outgoing"
+        && kind==(if recordedState saved=="settled" then "outgoing" else "failed")) "booked_solana_observation_changed"
+  booked<-balances c
+  let total asset=sum [n | ((currency,_),n)<-M.toList booked,currency==asset]
+      owned asset=sum [n | ((currency,account),n)<-M.toList booked,currency==asset,account/=External]
+      assets=[Native,Wrapped,Sol]
+  require (all (\asset->total asset==0 && owned asset>=0) assets) "invalid_custody_journal"
+  slots<-forM (filter ((/="Native").fst) heads) $ \(chain,txid)->do
+    (_,anchor,_)<-custodyEvent c chain txid
+    case readMaybe(T.unpack anchor) of Just n | n>=0->pure n; _->reject "custody_history_anchor_missing"
+  require (length slots==2) "custody_history_anchor_missing"
+  pendingIds<-O.runSelect c $ O.limit 1001 $ do
+    a<-O.selectTable S.attempts
+    i<-O.selectTable S.intents
+    O.where_ (S.attemptIntent a O..== S.intentId i O..&& S.intentResolved i O..== O.sqlInt8 0)
+    pure (S.attemptId a)
+    :: IO [Text]
+  require (length pendingIds<=1000) "custody_attempt_bounds"
+  pending<-mapM (readAttempt c) pendingIds
+  pure (CustodySnapshot revision (M.fromList [(asset,owned asset)|asset<-assets]) heads (maximum slots) pending)
+ where
+  field :: FromJSON a => Key -> Value -> IO a
+  field key value=either (const $ reject "invalid_reconciliation_evidence") pure (parseEither (withObject "evidence" (.: key)) value)
+
+recordCustody :: PG.Connection -> Int64 -> Int64 -> Maybe Text -> Maybe Value -> IO ()
+recordCustody c expected now problem report = do
+  require (now>=0 && expected>=0) "invalid_custody_time"
+  actual<-readCustodyRevision c
+  require (actual==expected) "custody_ledger_changed"
+  forM_ problem validReason
+  forM_ report (validateSavedJson 200000 . encodeSaved)
+  when (problem==Nothing) $ do
+    matches<-case report of
+      Just value->either (const $ reject "invalid_custody_report") pure (parseEither (withObject "report" (.: "matches")) value)
+      Nothing->pure False
+    require matches "invalid_custody_report"
+  let text=O.sqlStrictText; number=O.sqlInt8
+  forM_ problem $ \code->do
+    old<-O.runSelect c $ fmap (\(_,_,_,_,err)->err) (O.selectTable S.custody) :: IO [Maybe Text]
+    when (old/=[Just code]) (audit c "custody_failure" code)
+    when (code `notElem` ["custody_native_history_advanced","custody_solana_history_advanced","custody_ledger_changed"]) $ do
+      _<-O.runUpdate c O.Update {O.uTable=S.deployment,O.uUpdateWith= \r->r {S.paused=number 1,S.pauseReason=text $ "custody:"<>code},O.uWhere= \r->S.singleton r O..== number 1,O.uReturning=O.rCount}
+      pure ()
+  _<-O.runUpdate c O.Update {O.uTable=S.custody,
+    O.uUpdateWith= \(key,revision,_,_,_)->(key,revision,if report==Nothing then O.null else O.toNullable(number expected),O.toNullable(number now),maybe O.null (O.toNullable.text) problem),
+    O.uWhere= \(key,_,_,_,_)->key O..== number 1,O.uReturning=O.rCount}
+  _<-O.runUpdate c O.Update {O.uTable=S.custodyReport,O.uUpdateWith= \(key,_)->(key,maybe O.null (O.toNullable.text.encodeSaved) report),O.uWhere= \(key,_)->key O..== number 1,O.uReturning=O.rCount}
+  pure ()

@@ -438,10 +438,20 @@ Current evidence:
   IO and typed checkpoint failures fence the writer; actual host-fence integration
   is still pending.
 
+Custody storage now has closed revision/snapshot/evidence reads and a revision-bound
+report write. It reuses the aggregated balance read and scanner freshness check,
+checks source/native recovery and terminal-payment evidence, and includes bounded
+pending attempts. PostgreSQL acceptance covers origins, scan freshness, review
+refusal, report validation, revision mismatch, failure pause, no implicit resume,
+and unchanged balances/revision. This is storage acceptance, not chain-balance or
+live custody acceptance; the chain reconciliation workflow is still unfinished.
+
 Scoped physical-line comparisons (not whole-product reduction claims):
 
 | Piece | Baseline | Rebuild | Scope limit |
 | --- | ---: | ---: | --- |
+| Custody snapshot function | 79 / existing custody file | 71 / existing Store file | Reuses freshness/balance helpers; chain workflow pending |
+| Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
 | Signer module | 144 / 1 file | 73 / 1 file | Startup and replacement parity pending |
 | Signer transport | 103 / 1 file plus shared web boundary | 112 / 1 file | Includes local body/concurrency boundary; initial route only |
 | Worker signing/queue/send/reconciliation | Part of broader Runtime | 157 / 1 file (previous checkpoint 111) | Full runtime/submission acceptance remains |
@@ -449,9 +459,12 @@ Scoped physical-line comparisons (not whole-product reduction claims):
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |
 
-The last slice adds seven schema-projection lines and three typed-cost lines, with
-no new production file. Its extra lines implement required funding/security checks;
-it is not a size reduction. Source eligibility checking is shared with signing.
+Custody storage adds five schema-projection lines and no production files. The
+snapshot comparison excludes shared helpers, grammar, evidence/revision reads and
+tests on both sides; it is not a whole-feature line comparison. Indexed evidence
+reads avoid loading the complete evidence table; aggregate balances avoid loading
+all journal rows. Terminal attempts are still checked individually, so long-history
+performance remains to be measured. Source eligibility checking is shared with signing.
 
 Still required: successful TLS worker/signer integration and private-key startup
 checks; a unified safe/critical runtime gate, configuration, app/browser integration;

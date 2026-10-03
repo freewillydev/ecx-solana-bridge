@@ -244,3 +244,8 @@ replacementMembers = O.selectTable $ O.table "native_replacement_members" $ p3
 sourceApprovals :: O.Select (TextField,IntField)
 sourceApprovals = O.selectTable $ O.table "source_recovery_approvals" $ p2
   (O.requiredTableField "obligation_id",O.requiredTableField "critical_sequence")
+
+provenLosses :: O.Select TextField
+provenLosses = O.selectTable $ O.table "proven_source_losses" (O.requiredTableField "deposit_id")
+custodyReport :: O.Table (IntField,O.FieldNullable O.SqlText) (IntField,O.FieldNullable O.SqlText)
+custodyReport = O.table "custody_check" $ p2 (O.requiredTableField "singleton",O.requiredTableField "report_json")

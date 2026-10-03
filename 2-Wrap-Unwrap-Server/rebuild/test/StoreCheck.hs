@@ -128,9 +128,50 @@ main = do
       reviewed <- evalRead reader (ReadOrder auth "visible")
       check (W.status reviewed=="NeedsReview")
       fixture fixtures SeedIntake
+      let origins=[("Native","scan-origin"),("Solana","sol-origin"),("SolanaOperating","opening-signature")]
+      expectStore "custody_scan_origin_mismatch" (evalRead reader $ ReadCustodySnapshot 100 origins False)
+      fixture fixtures SeedCustodyHeads
+      snapshot<-evalRead reader (ReadCustodySnapshot 100 origins False)
+      check (custodyTotals snapshot==M.fromList [(Native,2100),(Wrapped,1000),(Sol,100)]
+        && custodySlot snapshot==42 && null(custodyPending snapshot))
+      expectStore "scanners_not_fresh" (evalRead reader $ ReadCustodySnapshot 161 origins False)
+      expectStore "scanners_not_fresh" (evalRead reader $ ReadCustodySnapshot 99 origins False)
+      expectStore "custody_scan_origin_mismatch" (evalRead reader $ ReadCustodySnapshot 100 (drop 1 origins) False)
+      known<-evalRead reader (HasCustodyEvent "Solana" "fixture-anchor")
+      unknown<-evalRead reader (HasCustodyEvent "Native" "fixture-anchor")
+      check (known && not unknown)
+      evidence<-evalRead reader (ReadCustodyEvent "SolanaOperating" "fixture-anchor")
+      check (evidence==("reference","42",object []))
+      expectStore "custody_history_not_current" (evalRead reader $ ReadCustodyEvent "Native" "fixture-anchor")
+      fixture fixtures (CustodyHeadReview 1)
+      expectStore "chain_observations_require_review" (evalRead reader $ ReadCustodySnapshot 100 origins False)
+      expectStore "custody_history_not_current" (evalRead reader $ ReadCustodyEvent "Solana" "fixture-anchor")
+      fixture fixtures (CustodyHeadReview 0)
       let newRequest=W.OrderRequest NativeToWrapped (money 100) "recipient" "refund" Nothing "new-wrap"
           create request=CreateOrder 100 auth request
       withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
+        revision<-evalRead reader ReadCustodyRevision
+        let good=Just(object ["matches" .= True])
+        check (revision>custodyRevision snapshot)
+        expectStore "custody_ledger_changed" (evalWrite writer $ RecordCustody (custodyRevision snapshot) 100 Nothing good)
+        beforeCustody<-evalRead reader ReadBalances
+        expectStore "custody_ledger_changed" (evalWrite writer $ RecordCustody (revision+1) 100 Nothing good)
+        expectStore "invalid_custody_report" (evalWrite writer $ RecordCustody revision 100 Nothing Nothing)
+        expectStore "invalid_custody_report" (evalWrite writer $ RecordCustody revision 100 Nothing (Just $ object ["matches" .= False]))
+        evalWrite writer (RecordCustody revision 100 Nothing good)
+        certified<-fixture fixtures ReadCustodyCheck
+        check (certified==(Just revision,Just 100,Nothing))
+        evalRead reader ReadState >>= check . ledgerPaused
+        fixture fixtures ReadyIntake
+        evalWrite writer (RecordCustody revision 100 (Just "custody_native_history_advanced") Nothing)
+        evalRead reader ReadState >>= check . not . ledgerPaused
+        evalWrite writer (RecordCustody revision 100 (Just "balance_mismatch") (Just $ object ["matches" .= False]))
+        evalRead reader ReadState >>= check . ledgerPaused
+        evalWrite writer (RecordCustody revision 100 Nothing good)
+        evalRead reader ReadState >>= check . ledgerPaused
+        afterCustody<-evalRead reader ReadBalances
+        afterRevision<-evalRead reader ReadCustodyRevision
+        check (beforeCustody==afterCustody && afterRevision==revision)
         expectStore "intake_paused" (evalWrite writer $ create newRequest)
         fixture fixtures ReadyIntake
         before <- fixture fixtures OrderSnapshot
@@ -648,6 +689,9 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  CustodyHeadReview :: Int64 -> Fixture ()
+  SeedCustodyHeads :: Fixture ()
+  ReadCustodyCheck :: Fixture (Maybe Int64,Maybe Int64,Maybe T.Text)
   ImmutableAttempt :: T.Text -> Fixture Bool
   CheckFundingBinding :: T.Text -> T.Text -> Fixture Bool
   ResetOperatingScan :: Fixture ()
@@ -928,3 +972,19 @@ fixture c (ImmutableAttempt identifier) = do
   result<-try (O.runUpdate c O.Update {O.uTable=S.attempts,O.uUpdateWith= \r->r {S.attemptBytes=O.sqlStrictText "modified"},
     O.uWhere= \r->S.attemptId r O..== O.sqlStrictText identifier,O.uReturning=O.rCount}) :: IO (Either PG.SqlError Int64)
   pure $ case result of Left err->PG.sqlState err=="23514"; _->False
+
+fixture c SeedCustodyHeads = PG.withTransaction c $ do
+  let text=O.sqlStrictText; num=O.sqlInt8
+  void $ O.runInsert c O.Insert {O.iTable=S.scanOrigins,O.iRows=[(text chain,text origin) |
+    (chain,origin)<-[("Native","scan-origin"),("Solana","sol-origin"),("SolanaOperating","opening-signature")]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  forM_ ["Solana","SolanaOperating"] $ \chain->do
+    let proof=text $ TE.decodeUtf8 $ BL.toStrict $ encode $ object ["proof" .= object []]
+    void $ O.runInsert c O.Insert {O.iTable=S.observationEvidence,O.iRows=[(text chain,text chain,text "fixture-anchor",proof)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+    void $ O.runInsert c O.Insert {O.iTable=S.chainEvents,O.iRows=[S.ChainEvent (text chain) (text "fixture-anchor") (text "reference") (text "42") (text chain) (num 100) (num 100) (num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+fixture c ReadCustodyCheck = do
+  rows<-O.runSelect c $ fmap (\(_,_,revision,at,problem)->(revision,at,problem)) (O.selectTable S.custody)
+  case rows of [row]->pure row; _->fail "missing custody check"
+
+fixture c (CustodyHeadReview flag) = void $ O.runUpdate c O.Update {O.uTable=S.chainEvents,
+  O.uUpdateWith= \r->r {S.eventReview=O.sqlInt8 flag},O.uWhere= \r->S.eventChain r O..== O.sqlStrictText "Solana"
+    O..&& S.eventId r O..== O.sqlStrictText "fixture-anchor",O.uReturning=O.rCount}
