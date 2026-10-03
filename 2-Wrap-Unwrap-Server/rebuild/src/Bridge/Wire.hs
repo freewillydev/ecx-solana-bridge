@@ -128,3 +128,11 @@ economicOutflow stream = either (const $ Left "invalid_treasury_outflow") Right 
       outflow <- quantity (negate delta)
       pure (asset,outflow,fee)
     else fail "invalid outgoing value"
+
+-- Signatures are evidence, not authority to broadcast. The worker independently
+-- validates this reply against its durable preparation before storing it.
+data SignedAttempt = SignedAttempt
+  { signedId :: Text, signedBytes :: Text, signedPolicy :: Text, commonInput :: Maybe Text }
+  deriving stock (Eq,Show,Generic) deriving anyclass (ToJSON)
+instance FromJSON SignedAttempt where
+  parseJSON = genericParseJSON defaultOptions { rejectUnknownFields = True }

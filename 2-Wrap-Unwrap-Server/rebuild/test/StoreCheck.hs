@@ -9,6 +9,12 @@ import qualified Data.Text.Encoding as TE
 import Bridge.Domain
 import Bridge.Wire (PaymentTerms(..),CostLimits(..),PolicySnapshot(..))
 import Bridge.Store
+import Bridge.Signer
+import Bridge.Operation.Internal (Request(..),SigningOperation(..))
+import qualified Bridge.Native as N
+import qualified Bridge.Solana as Solana
+import qualified Bridge.SolanaHelper as H
+import Network.HTTP.Client (newManager,closeManager,defaultManagerSettings,managerModifyRequest)
 import qualified Bridge.Store.Schema as S
 import Control.Exception
 import Data.Int (Int64)
@@ -314,6 +320,19 @@ main = do
         expectStore "preparation_draft_conflict" (evalWrite writer $ SaveDraft intent 0 "{\"draft\":2}")
         expectStore "preparation_generation_changed" (evalWrite writer $ SaveDraft intent 1 "{}")
         expectStore "signing_backup_required" (evalRead reader $ ReadSigningDecision 100 intent 0)
+        -- Exercise the real signer evaluator's refusal path; the manager forbids
+        -- network access, so no identity RPC or signing can hide behind the test.
+        let publicKey=T.replicate 32 "1"
+            native=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:29432" "/unused/credential" "ecx-bridge-test"
+              16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47"
+            solana=Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing publicKey publicKey publicKey
+            signing=SignerSettings native solana (H.SolanaPolicy "contract" "contract" publicKey publicKey publicKey (money 10) (money 10))
+              "/unused/sdk" "/unused/key"
+        bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "unauthorized signer reached network"}) closeManager $ \manager ->
+          withSigner manager reader signing $ \interpret -> do
+            expectStore "signer_profile_mismatch" (interpret $ Request $ SignPrepared "other" intent 0)
+            expectStore "invalid_signing_decision" (interpret $ Request $ SignPrepared "contract" intent 8)
+            expectStore "signing_backup_required" (interpret $ Request $ SignPrepared "contract" intent 0)
         fixture fixtures CoverBackup
         fixture fixtures ReadyIntake
         decision<-evalRead reader (ReadSigningDecision 100 intent 0)

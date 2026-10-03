@@ -7,7 +7,7 @@ import Data.Kind (Type)
 import Data.Text (Text)
 
 data Severity = Safe | Critical
-data Caller = Customer
+data Caller = Customer | Signer
 
 -- Caller and severity belong to the operation, not to the caller's choice.
 class Operation (caller :: Caller) (severity :: Severity) (op :: Type -> Type)
@@ -22,10 +22,16 @@ data CustomerRead a where
 data CustomerWrite a where
   CreateOrder :: Text -> OrderRequest -> CustomerWrite OrderView
 
+-- Initial signing is tied to a durable decision, never caller-supplied bytes.
+data SigningOperation a where
+  SignPrepared :: Text -> Text -> Int -> SigningOperation SignedAttempt
+
 data DSL (caller :: Caller) (severity :: Severity) a where
+  SigningDSL :: SigningOperation a -> DSL 'Signer 'Critical a
   ReadCustomer :: CustomerRead a -> DSL 'Customer 'Safe a
   WriteCustomer :: CustomerWrite a -> DSL 'Customer 'Critical a
 
+instance Operation 'Signer 'Critical SigningOperation where command = SigningDSL
 instance Operation 'Customer 'Safe CustomerRead where command = ReadCustomer
 instance Operation 'Customer 'Critical CustomerWrite where command = WriteCustomer
 

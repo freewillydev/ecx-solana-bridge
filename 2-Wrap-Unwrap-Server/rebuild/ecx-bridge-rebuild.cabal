@@ -49,9 +49,9 @@ library workflow
   import: settings
   visibility: private
   hs-source-dirs: workflow
-  exposed-modules: Bridge.Observer, Bridge.Payment
+  exposed-modules: Bridge.Observer, Bridge.Payment, Bridge.Signer
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:store,
-    ecx-bridge-rebuild:chain, aeson, bytestring, text, time, http-client
+    ecx-bridge-rebuild:chain, aeson, bytestring, text, time, http-client, servant, servant-server
 
 test-suite rebuild-test
   import: settings
@@ -66,8 +66,8 @@ test-suite rebuild-test
 -- Explicitly invoked against a disposable migrated database, never live custody.
 executable rebuild-store-check
   import: settings
-  hs-source-dirs: test, runtime
+  hs-source-dirs: test, runtime, workflow
   main-is: StoreCheck.hs
-  other-modules: Bridge.Store, Bridge.Store.Schema, Bridge.Store.Catalog
-  build-depends: base, ecx-bridge-rebuild, aeson, bytestring,
+  other-modules: Bridge.Store, Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Payment, Bridge.Signer
+  build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:chain, http-client, servant, servant-server, aeson, bytestring,
     containers, text, crypton, time, scientific, opaleye, postgresql-simple, product-profunctors, QuickCheck

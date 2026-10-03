@@ -9,7 +9,7 @@ import Bridge.Error
 import Bridge.Identity (bearerHash,digest,payInstruction)
 import qualified Bridge.Wire as W
 import Bridge.Domain
-import Bridge.Wire (PaymentTerms(..),PolicySnapshot(..),CostLimits(..))
+import Bridge.Wire (PaymentTerms(..),PolicySnapshot(..),CostLimits(..),SignedAttempt(..))
 import qualified Bridge.Store.Schema as S
 import Bridge.Store.Catalog (claimWorker,verifyReadRole)
 import Crypto.Random (getRandomBytes)
@@ -57,10 +57,6 @@ data PaymentView = PaymentView
 data PreparedPayment = PreparedPayment
   { preparedView :: PaymentView, preparedGeneration :: Int, preparedPolicy :: Text
   , preparedDraft :: Maybe Text, preparedFee :: Amount } deriving (Eq,Show)
--- Chain validators verify the transaction before this record reaches storage.
--- These values alone grant neither signing nor broadcast authority.
-data SignedAttempt = SignedAttempt
-  { signedId :: Text, signedBytes :: Text, signedPolicy :: Text, commonInput :: Maybe Text } deriving (Eq,Show)
 data RecordedAttempt = RecordedAttempt
   { recordedPayment :: Text, recordedChain :: Text, recordedGeneration :: Int
   , recordedFee :: Amount, recordedState :: Text, recordedSequence :: Maybe Int64

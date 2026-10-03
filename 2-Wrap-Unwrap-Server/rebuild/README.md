@@ -441,3 +441,29 @@ never sends funds and is not Devnet acceptance. PostgreSQL contracts check the
 payment-work snapshot before preparation, after draft persistence and after restart
 with signed history. Complete unsigned-workflow execution against the database,
 critical/signing dispatch and funded end-to-end execution remain integration work.
+
+The signer now has its own caller-indexed critical operation and pure Servant
+handler returning a constrained Request. Initial signing accepts only deployment,
+payment ID and generation; the response is a concrete SignedAttempt rather than
+JSON Value. That record lives once in Wire and is reused by storage. The worker
+reconstructs and verifies every response field against its saved preparation before
+accepting it, including transaction ID, bytes, proof and native common input.
+
+The new Signer module is 73 physical lines in one file; the baseline Signer is
+144 lines in one file. This is not full parity or a completed 71-line reduction:
+private-file startup, transport and native replacement remain outside this new
+module's current scope. Its initial evaluator reuses closed signing-decision reads
+and shared plan validation, holds one signing gate across the whole operation,
+verifies chain identity, signs with the actual native/SDK adapters, independently
+validates the result, and rereads the exact authorization before releasing it.
+It has no writer or broadcast command. Customer facade exports remain unchanged.
+
+QuickCheck checks existential handler resolution, typed response serialization,
+and refusal of changed response identifiers, bytes or common inputs. PostgreSQL
+checks exercise the real signer evaluator's refusal of a wrong deployment,
+invalid generation and missing backup coverage with all HTTP requests disabled.
+These prove pre-sign refusal, not a successful deployed signing session. The
+BasicAuth API type alone does not install authentication: runtime must still
+provide authenticated bounded TLS transport, protected credential checks, the
+private critical-only ClientM and actual two-process acceptance. The new evaluator
+is not yet reachable from a production executable.

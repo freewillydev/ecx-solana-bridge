@@ -4,6 +4,7 @@ module Main (main) where
 import qualified ChainCheck
 import Bridge.Identity (bearerHash,capabilityHash,payInstruction)
 import Bridge.API (customerServer)
+import Bridge.Signer (signingServer)
 import Bridge.Operation.Internal
 import qualified Bridge.Wire as W
 import Servant.API ((:<|>)(..))
@@ -25,6 +26,12 @@ main = do
             ,bearerHash ("Bearer "<>T.replicate 64 "0")==capabilityHash (T.replicate 64 "0")
             ,all (isLeft . bearerHash) ["", "bearer "<>T.replicate 64 "0", "Bearer "<>T.replicate 64 "A", "Bearer "<>T.replicate 64 "0"<>" "]]
     , check "customer handlers preserve request, result type and severity" $ once $ property handlerContract
+    , check "signer handler resolves an existential to a signer-only critical operation" $ once $ property $
+        case resolve (signingServer () ("deployment","payment",3)) of
+          SigningDSL (SignPrepared identity identifier generation)->identity=="deployment" && identifier=="payment" && generation==3
+    , check "typed signer result preserves all evidence through JSON" $ once $ property $
+        let result=W.SignedAttempt "id" "bytes" "proof" (Just "outpoint")
+        in eitherDecode (encode result)==Right result
     , check "serialized quotes cannot change saved accounting" $ forAll (chooseInteger (2,1000000000)) $ \n ->
         let q=good (quote $ good $ amount n)
         in conjoin [eitherDecode (encode q)===Right q,

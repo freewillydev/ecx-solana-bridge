@@ -2,7 +2,7 @@
 -- signer transport; both ends use the same saved-plan checks below.
 module Bridge.Payment
   ( SigningPlan(..), SigningReply(..), prepareUnsigned, resolveSigningPlan
-  , verifySigningReply, payoutReference ) where
+  , verifySigningReply, verifySignedAttempt, payoutReference ) where
 import Bridge.Domain
 import Bridge.Error
 import Bridge.Identity (digest)
@@ -117,6 +117,17 @@ verifySigningReply native profile config prepared reply = do
       signature <- maybe (reject "helper_signature_missing") pure (H.replySignature value)
       pure (SignedAttempt signature (H.replyTransaction value) (encodeSaved signed) Nothing)
     _ -> reject "signer_reply_chain_mismatch"
+
+-- An HTTP reply is untrusted even if its accompanying proof parses. Reconstruct
+-- the exact record from independently checked bytes and compare every field.
+verifySignedAttempt :: NativeRPC -> Profile -> H.SolanaPolicy -> PreparedPayment -> SignedAttempt -> IO ()
+verifySignedAttempt native profile config prepared actual = do
+  reply <- case paymentAsset (savedPayment $ preparedView prepared) of
+    Native -> NativeReply <$> decodeSaved (signedPolicy actual)
+    Wrapped -> SolanaReply <$> decodeSaved (signedPolicy actual)
+    Sol -> reject "invalid_payout_asset"
+  expected <- verifySigningReply native profile config prepared reply
+  require (actual==expected) "signer_attempt_mismatch"
 
 encodeSaved :: ToJSON a => a -> Text
 encodeSaved=TE.decodeUtf8 . BL.toStrict . encode

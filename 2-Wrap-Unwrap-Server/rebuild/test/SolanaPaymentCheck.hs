@@ -57,18 +57,21 @@ checks=do
         (W.CostLimits (amt 1) (maxSolFee config) (maxSolAccountRent config))
       prepared=PreparedPayment (PaymentView outgoing terms PaymentPaying) 0 (encoded boundPlan)
         (Just $ encoded boundRequest) (amt 2110000)
-      signed=SolanaSigned boundPlan workflowReply (amt 5000) (amt 1488440)
+      boundSigned=SolanaSigned boundPlan workflowReply (amt 5000) (amt 1488440)
       verify=verifySigningReply (\_ _ _->fail "Solana validation must not call native RPC") W.L2LSignetDevnet config
   proofResults <- mapM captured ["new","existing"]
   local <- sequence
     [ check "payment workflow verifies SDK bytes bound to earned funding and saved reference" $ once $ ioProperty $ do
-        attempt<-verify prepared (SolanaReply signed)
+        attempt<-verify prepared (SolanaReply boundSigned)
+        verifySignedAttempt (\_ _ _->fail "unexpected RPC") W.L2LSignetDevnet config prepared attempt
+        alteredEnvelope<-mapM (rejects "signer_attempt_mismatch" . verifySignedAttempt (\_ _ _->fail "unexpected RPC") W.L2LSignetDevnet config prepared)
+          [attempt {signedId="other"},attempt {signedBytes="other"},attempt {commonInput=Just "other:0"}]
         wrongReference<-rejects "saved_solana_policy_mismatch" $ resolveSigningPlan W.L2LSignetDevnet config
           prepared {preparedPolicy=encoded boundPlan {solPlanReference="order-1"}}
-        wrongFee<-rejects "invalid_saved_payment" $ verify prepared (SolanaReply signed {signedSolanaFeeEstimate=amt 10001})
-        wrongSignature<-rejectsAny $ verify prepared (SolanaReply signed {signedSolanaReply=workflowReply {replyTransaction=replyTransaction reply}})
+        wrongFee<-rejects "invalid_saved_payment" $ verify prepared (SolanaReply boundSigned {signedSolanaFeeEstimate=amt 10001})
+        wrongSignature<-rejectsAny $ verify prepared (SolanaReply boundSigned {signedSolanaReply=workflowReply {replyTransaction=replyTransaction reply}})
         pure (Just (signedId attempt)==replySignature workflowReply && signedBytes attempt==replyTransaction workflowReply
-          && commonInput attempt==Nothing && wrongReference && wrongFee && wrongSignature)
+          && commonInput attempt==Nothing && and alteredEnvelope && wrongReference && wrongFee && wrongSignature)
     , check "Solana signed SDK vector binds identity message and signature" $ once $
         isRight (validateHelperReply config request reply) &&
         all (isLeft . validateHelperReply config request)
