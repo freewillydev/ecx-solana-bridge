@@ -44,6 +44,10 @@ The native observer now returns checked batches and passes captured-output RPC
 contracts; its closed instruction/depth reads pass PostgreSQL checks. Solana token
 and fee-payer scan contracts, reference matching and pending verification also pass.
 The combined observer workflow builds, but live-node/runtime acceptance is pending.
+Unified customer/earned payment reads, initial preparation and immutable draft
+storage are implemented against rebuild schema 19. The forward migration is
+tested only on disposable databases; retries, signing/send/settlement and live
+cutover remain unfinished.
 No existing custody state has been moved. See the rebuild README for scoped counts
 and evidence; do not compare this subset against the entire old storage layer.
 

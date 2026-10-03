@@ -4,7 +4,7 @@ version: 0.1.0.0
 synopsis: Replacement ECX bridge with explicit payment funding
 license: MIT
 build-type: Simple
-data-files: test/fixtures/*.json
+data-files: test/fixtures/*.json, migrations/*.sql
 
 common settings
   default-language: GHC2021

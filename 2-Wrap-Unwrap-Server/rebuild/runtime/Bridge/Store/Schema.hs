@@ -109,7 +109,8 @@ orderDeposits :: O.Select (TextField,O.FieldNullable O.SqlText)
 orderDeposits = fmap (\row->(depositId row,depositOrder row)) (O.selectTable deposits)
 orderObligations :: O.Select (TextField,TextField,TextField,TextField)
 orderObligations = fmap (\row->(obligationId row,obligationOrder row,obligationDeposit row,obligationStatus row)) (O.selectTable obligations)
-intentObligations, attemptIntents :: O.Select (TextField,TextField)
+intentObligations :: O.Select (TextField,O.FieldNullable O.SqlText)
+attemptIntents :: O.Select (TextField,TextField)
 intentObligations = O.selectTable $ O.table "intents" $ p2
   (O.requiredTableField "id",O.requiredTableField "obligation_id")
 attemptIntents = O.selectTable $ O.table "attempts" $ p2
@@ -199,3 +200,25 @@ chainEvents = O.table "chain_events" $ pChainEvent ChainEvent
   { eventChain=O.requiredTableField "chain",eventId=O.requiredTableField "event_id"
   , eventKind=O.requiredTableField "kind",eventAnchor=O.requiredTableField "anchor",eventHash=O.requiredTableField "evidence_hash"
   , eventFirstSeen=O.requiredTableField "first_seen",eventLastSeen=O.requiredTableField "last_seen",eventReview=O.requiredTableField "needs_review" }
+
+-- Exactly one immutable funding source; no synthetic order for earned fees.
+data IntentF t nt n = Intent
+  { intentId :: t, intentObligation :: nt, intentWithdrawal :: nt
+  , intentChain :: t, intentCommon :: nt, intentResolved :: n } deriving (Eq,Show)
+$(makeAdaptorAndInstance "pIntent" ''IntentF)
+type Intent = IntentF Text (Maybe Text) Int64
+type IntentFields = IntentF TextField (O.FieldNullable O.SqlText) IntField
+intents :: O.Table IntentFields IntentFields
+intents = O.table "intents" $ pIntent Intent
+  { intentId=O.requiredTableField "id", intentObligation=O.requiredTableField "obligation_id"
+  , intentWithdrawal=O.requiredTableField "withdrawal_id", intentChain=O.requiredTableField "chain"
+  , intentCommon=O.requiredTableField "common_input", intentResolved=O.requiredTableField "resolved" }
+
+preparations :: O.Table (TextField,IntField,TextField,O.FieldNullable O.SqlText,O.FieldNullable O.SqlText,IntField)
+                       (TextField,IntField,TextField,O.FieldNullable O.SqlText,O.FieldNullable O.SqlText,IntField)
+preparations = O.table "preparations" $ p6
+  (O.requiredTableField "intent_id",O.requiredTableField "generation",O.requiredTableField "policy_json",
+   O.requiredTableField "draft_json",O.requiredTableField "retired_txid",O.requiredTableField "cancelled")
+feeHolds :: O.Table (TextField,TextField,IntField,IntField) (TextField,TextField,IntField,IntField)
+feeHolds = O.table "fee_reservations" $ p4
+  (O.requiredTableField "intent_id",O.requiredTableField "asset",O.requiredTableField "amount",O.requiredTableField "released")

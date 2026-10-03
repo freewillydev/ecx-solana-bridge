@@ -49,6 +49,9 @@ main = do
         first <- evalWrite writer reserve
         replay <- evalWrite writer reserve
         check (first==replay && withdrawalSequence first==1)
+        feeView<-evalRead reader (ReadPayment $ "fee:"<>key)
+        check (savedPayment feeView==withdrawalPayment first && savedTerms feeView==policy && savedStatus feeView==PaymentReady)
+        expectStore "payment_not_found" (evalRead reader $ ReadPayment "absent")
         booked <- evalRead reader ReadBalances
         check (M.lookup (Native,Earned) booked==Just 900 && M.lookup (Native,FeePending) booked==Just 100)
         expectStore "fee_withdrawal_conflict" (evalWrite writer $ ReserveFees 100 key Native (money 101) "recipient" "test owned revenue")
@@ -60,6 +63,8 @@ main = do
         check (cancelled==replayCancelled && withdrawalCancellation cancelled==Just("cancel",2))
         restored <- evalRead reader ReadBalances
         check (M.filter (/=0) restored==M.filter (/=0) initial)
+        cancelledView<-evalRead reader (ReadPayment $ "fee:"<>key)
+        check (savedStatus cancelledView==PaymentCancelled)
         expectStore "fee_withdrawal_cancellation_conflict" (evalWrite writer (CancelFees key "changed"))
         resumed <- evalWrite writer reserve
         check (withdrawalCancellation resumed==Just("cancel",2))
@@ -227,6 +232,8 @@ main = do
         after<-evalRead reader ReadBalances
         check (first && not replay && before==after)
         fixture fixtures (CheckPromotion native "promote-source" Wrapped 9 "Ready") >>= check
+        conversionView<-evalRead reader (ReadPayment $ "convert:"<>native)
+        check (paymentAmount(savedPayment conversionView)==money 9 && savedStatus conversionView==PaymentReady)
         fixture fixtures (CheckPhases native "obligation") >>= check
         candidatesAfter<-evalRead reader PromotionCandidates
         check ("promote-source" `notElem` candidatesAfter)
@@ -270,6 +277,38 @@ main = do
         seed "historical-fee" historical Native 100 2 True 100
         evalWrite writer (PromoteDeposit 100 "historical-fee") >>= check
         fixture fixtures (CheckPromotion historical "historical-fee" Wrapped 93 "Ready") >>= check
+        historicalView<-evalRead reader (ReadPayment $ "convert:"<>historical)
+        check (paymentAmount(savedPayment historicalView)==money 93)
+        fixture fixtures ReadyIntake
+        let intent="convert:"<>historical
+        prepared<-evalWrite writer (PreparePayment 100 intent (money 10) "{}")
+        sequenceBefore<-evalRead reader ReadState
+        replayPrepared<-evalWrite writer (PreparePayment 100 intent (money 10) "{}")
+        sequenceAfter<-evalRead reader ReadState
+        check (prepared==replayPrepared && ledgerSequence sequenceBefore==ledgerSequence sequenceAfter && savedStatus(preparedView prepared)==PaymentPaying)
+        expectStore "preparation_conflict" (evalWrite writer $ PreparePayment 100 intent (money 9) "{}")
+        expectStore "order_fee_limit_exceeded" (evalWrite writer $ PreparePayment 100 intent (money 21) "{}")
+        fixture fixtures ReadyIntake
+        expectStore "destination_payment_unresolved" (evalWrite writer $ PreparePayment 100 ("convert:"<>missing) (money 10) "{}")
+        evalWrite writer (SaveDraft intent 0 "{\"draft\":1}")
+        savedDraft<-evalRead reader (ReadPreparation intent)
+        draftSequence<-evalRead reader ReadState
+        evalWrite writer (SaveDraft intent 0 "{\"draft\":1}")
+        replaySequence<-evalRead reader ReadState
+        check (preparedDraft savedDraft==Just "{\"draft\":1}" && ledgerSequence draftSequence==ledgerSequence replaySequence)
+        expectStore "preparation_draft_conflict" (evalWrite writer $ SaveDraft intent 0 "{\"draft\":2}")
+        expectStore "preparation_generation_changed" (evalWrite writer $ SaveDraft intent 1 "{}")
+        let withdrawalKey=T.replicate 64 "d"
+        evalWrite writer (Pause "reserve earned")
+        fixture fixtures RefreshCustody
+        _<-evalWrite writer (ReserveFees 100 withdrawalKey Native (money 10) "owner-address" "test earned payment")
+        fixture fixtures ReadyIntake
+        earnedPrepared<-evalWrite writer (PreparePayment 100 ("fee:"<>withdrawalKey) (money 5) "{}")
+        check (paymentAsset(savedPayment $ preparedView earnedPrepared)==Native && savedStatus(preparedView earnedPrepared)==PaymentPaying)
+        expectStore "fee_withdrawal_payment_exists" (evalWrite writer $ CancelFees withdrawalKey "must retain")
+        fixture fixtures (CheckFundingBinding ("fee:"<>withdrawalKey) withdrawalKey) >>= check
+        -- End the fixture-only unsigned work so later unrelated scan cases can use Native.
+        fixture fixtures (ResolveFixtureIntent $ "fee:"<>withdrawalKey)
         fixture fixtures (SeedReceipt "unknown-source" Nothing Native 10 2 True 100)
         evalWrite writer (PromoteDeposit 100 "unknown-source") >>= check . not
         expectStore "deposit_not_found" (evalWrite writer $ PromoteDeposit 100 "missing")
@@ -384,11 +423,13 @@ main = do
         check (recoveredHealth==(Just 100,Nothing,100))
         -- A signature alone cannot explain an outflow; a recorded send intent can.
         fixture fixtures (SeedScanAttempts oid)
-        hashWithAttempts<-evalRead reader (ReadSourceWorkHash $ "convert:"<>oid)
+        hashWithAttempts<-evalRead reader (ReadSourceWorkHash $ "refund:"<>oid)
+        refundView<-evalRead reader (ReadPayment $ "refund:"<>oid)
+        check (paymentAmount(savedPayment refundView)==money 10 && paymentAsset(savedPayment refundView)==Native)
         let attemptRows=[("saved-intent"::T.Text,"broadcast_intent"::T.Text,0::Int64,Just(1::Int64),Nothing::Maybe T.Text),
               ("saved-signed","signed",0,Nothing,Nothing)]
             expectedWithAttempts=digest $ BL.toStrict $ encode
-              [toJSON [obligation],toJSON [("Native"::T.Text,False,Nothing::Maybe T.Text)],
+              [toJSON [("refund:"<>oid,oid,did,"refund"::T.Text,"Native"::T.Text,10::Int64,"refund"::T.Text)],toJSON [("Native"::T.Text,False,Nothing::Maybe T.Text)],
                toJSON [(0::Int64,"{}"::T.Text,Just("{}"::T.Text),Nothing::Maybe T.Text,False)],
                toJSON attemptRows,toJSON ([]::[Value]),toJSON ([]::[Value])]
         check (hashWithAttempts/=workHash && hashWithAttempts==expectedWithAttempts)
@@ -455,6 +496,8 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  CheckFundingBinding :: T.Text -> T.Text -> Fixture Bool
+  ResolveFixtureIntent :: T.Text -> Fixture ()
   ResetOperatingScan :: Fixture ()
   LatestSourceState :: T.Text -> Fixture T.Text
   ReadScanHealth :: T.Text -> Fixture (Maybe Int64,Maybe T.Text,Int64)
@@ -485,7 +528,7 @@ data Fixture a where
   CheckPhases :: T.Text -> T.Text -> Fixture Bool
 fixture :: PG.Connection -> Fixture a -> IO a
 fixture c Initialize = PG.withTransaction c $ do
-  void $ O.runInsert c O.Insert {O.iTable=S.deployment,O.iRows=[S.Deployment (O.sqlInt8 1) (O.sqlInt8 18) (O.sqlStrictText "contract") (O.sqlInt8 0) (O.sqlInt8 0) (O.sqlInt8 1) (O.sqlStrictText "test")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.deployment,O.iRows=[S.Deployment (O.sqlInt8 1) (O.sqlInt8 19) (O.sqlStrictText "contract") (O.sqlInt8 0) (O.sqlInt8 0) (O.sqlInt8 1) (O.sqlStrictText "test")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.custody,O.iRows=[(O.sqlInt8 1,O.sqlInt8 0,O.null,O.null,O.null)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(O.sqlStrictText "fixture",O.sqlStrictText "contract balances")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.postings,O.iRows=[(Nothing,O.sqlStrictText "fixture",O.sqlStrictText "Native",O.sqlStrictText account,O.sqlInt8 delta)| (account,delta)<-[("external",-1000),("earned",1000)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
@@ -685,10 +728,19 @@ fixture c (CheckSuspended oid did hash) = do
         "anchor" .= ("unconfirmed"::T.Text),"reviewedObligations" .= [object ["intent" .= ("convert:"<>oid),"previousStatus" .= ("ready"::T.Text),"workHash" .= hash]]]
   pure (obligations==["review"] && case proofs of [("unavailable",raw)]->eitherDecodeStrict' (TE.encodeUtf8 raw)==Right expected; _->False)
 fixture c (SeedScanAttempts oid) = PG.withTransaction c $ do
-  let text=O.sqlStrictText; num=O.sqlInt8; intent="convert:"<>oid
+  let text=O.sqlStrictText; num=O.sqlInt8; intent="refund:"<>oid
       intents=O.table "intents" $ p5 (O.requiredTableField "id",O.requiredTableField "obligation_id",O.requiredTableField "chain",O.requiredTableField "common_input",O.requiredTableField "resolved")
       preparations=O.table "preparations" $ p6 (O.requiredTableField "intent_id",O.requiredTableField "generation",O.requiredTableField "policy_json",O.requiredTableField "draft_json",O.requiredTableField "retired_txid",O.requiredTableField "cancelled")
       attempts=O.table "attempts" $ p9 (O.requiredTableField "txid",O.requiredTableField "intent_id",O.requiredTableField "signed_bytes",O.requiredTableField "policy_json",O.requiredTableField "fee_limit",O.requiredTableField "state",O.requiredTableField "critical_sequence",O.requiredTableField "observation_json",O.requiredTableField "preparation_generation")
+  sources<-O.runSelect c $ do
+    row<-O.selectTable S.obligations
+    O.where_ (S.obligationId row O..== text ("convert:"<>oid))
+    pure (S.obligationDeposit row)
+  source<-case sources of [did]->pure did; _->fail "missing scan source"
+  void $ O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \r->r {S.obligationStatus=text "cancelled"},
+    O.uWhere= \r->S.obligationId r O..== text ("convert:"<>oid),O.uReturning=O.rCount}
+  void $ O.runInsert c O.Insert {O.iTable=S.obligations,
+    O.iRows=[S.Obligation (text intent) (text oid) (text source) (text "refund") (text "Native") (num 10) (text "refund") (text "review")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=intents,O.iRows=[(text intent,text intent,text "Native",O.null,num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=preparations,O.iRows=[(text intent,num 0,text "{}",O.toNullable $ text "{}",O.null,num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=attempts,
@@ -710,3 +762,14 @@ fixture c (LatestSourceState did) = do
     O.where_ (source O..== O.sqlStrictText did)
     pure (key,state)
   case rows of [state]->pure state; _->fail "missing source recovery"
+
+fixture c (ResolveFixtureIntent identifier) = do
+  void $ O.runUpdate c O.Update {O.uTable=S.intents,O.uUpdateWith= \r->r {S.intentResolved=O.sqlInt8 1},O.uWhere= \r->S.intentId r O..== O.sqlStrictText identifier,O.uReturning=O.rCount}
+fixture c (CheckFundingBinding identifier withdrawal) = do
+  rows<-O.runSelect c $ do
+    row<-O.selectTable S.intents
+    O.where_ (S.intentId row O..== O.sqlStrictText identifier)
+    pure (S.intentObligation row,S.intentWithdrawal row)
+    :: IO [(Maybe T.Text,Maybe T.Text)]
+  changed<-try (O.runUpdate c O.Update {O.uTable=S.intents,O.uUpdateWith= \r->r {S.intentChain=O.sqlStrictText "Solana"},O.uWhere= \r->S.intentId r O..== O.sqlStrictText identifier,O.uReturning=O.rCount}) :: IO (Either PG.SqlError Int64)
+  pure (rows==[(Nothing,Just withdrawal)] && case changed of Left err->PG.sqlState err=="23514"; _->False)

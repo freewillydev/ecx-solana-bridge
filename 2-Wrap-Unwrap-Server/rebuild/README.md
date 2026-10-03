@@ -77,7 +77,8 @@ state; replay cannot silently reactivate released money.
 `rebuild-store-check` is the Cabal-built PostgreSQL contract runner. Supply a fresh
 fully migrated `ECX_REBUILD_CONTRACT_DATABASE` with the `ecx_rebuild_contract_`
 prefix, `ECX_REBUILD_CONTRACT_READER` with a SELECT-only role, and `USER` for fixture
-setup on `/tmp/ecx-pg-seam:29436`. It refuses an unprefixed database. Fixtures and
+setup on `/tmp/ecx-pg-seam:29436`. Apply baseline PostgreSQL migrations 001–005,
+then the Cabal-packaged `rebuild/migrations/001.sql` (schema 19). It refuses an unprefixed database. Fixtures and
 assertions use Opaleye; schema/role provisioning is separate DDL. Checks cover role
 and profile refusal, exclusive writer ownership, exact replay/conflicts, custody
 freshness, insufficient earned revenue, cancellation and checkpoint rollback/fencing,
@@ -348,6 +349,42 @@ current history window, missing/unsupported transactions and captured SOL costs.
 PostgreSQL contracts pass reference matching/bounds and pending-proof clearing.
 The workflow builds through root Cabal; it has not yet run against live nodes or
 been connected to the final critical runtime. No live custody state was changed.
+
+The payment store now reads one checked PaymentView for conversion, refund or
+reserved earned-fee funding, retaining saved quote and cost terms. Initial
+preparation shares operating-capacity/daily-budget checks with order admission,
+transfers customer allowances atomically, excludes concurrent work on the same
+chain and persists the immutable policy. Draft storage is generation-bound,
+replay-safe and cannot introduce a draft after a recorded signature.
+
+A 36-line forward migration adds a nullable withdrawal binding alongside the
+customer obligation binding. Exactly one is required; funding identity/chain cannot
+change, cancelled withdrawals cannot acquire an intent, and existing attempt bytes
+are untouched. It takes the existing worker's advisory lock, requires schema 18,
+advances to 19 and pauses the deployment. The rebuild now refuses schema 18; the
+baseline refuses 19. This was applied only to disposable databases. Populated-ledger
+cutover and the production migration command remain acceptance work.
+
+This adds capability rather than reducing equivalent existing code: the unified
+payment reader is 64 lines; active preparation plus initial creation is 80 lines.
+Draft persistence is 13→19 lines, adding JSON/bounds checks (a shared five-line
+helper) and refusal after signing. Schema mappings use existing files; the only new
+file is the 36-line migration. Shared operating-budget logic is extracted once,
+not copied into a second payment path. These counts exclude imports/dispatch.
+
+PostgreSQL checks cover conversion/refund/earned views, retained historical fees,
+initial preparation of customer and earned payments, replay without new sequences,
+fee-limit/busy-chain refusal, immutable draft/generation and funding binding, and
+cancellation refusal after preparation. Existing admission, observation and ledger
+contracts still pass. The old native-attempt fixture incorrectly used a wrapped
+payout obligation; the new chain-binding constraint caught it. It now cancels the
+conversion before inserting a native refund for the observation-only fixture.
+
+Preparation retries, covered-source authorization, cancellation workflow, signed
+attempt persistence, broadcast/settlement and replacement generalization to earned
+funding remain incomplete. An already resolved intent currently refuses another
+preparation until the recovery path is implemented; this is not retry acceptance.
+Neither preparation nor these tests call a signer or broadcast funds.
 
 Connecting those adapters to the high-level safe/critical runtime, actual host fence,
 dedicated signer and durable payment execution remains unfinished. Native source-loss detection,
