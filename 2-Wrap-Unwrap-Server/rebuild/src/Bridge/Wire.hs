@@ -136,3 +136,6 @@ data SignedAttempt = SignedAttempt
   deriving stock (Eq,Show,Generic) deriving anyclass (ToJSON)
 instance FromJSON SignedAttempt where
   parseJSON = genericParseJSON defaultOptions { rejectUnknownFields = True }
+
+data PaymentCosts = PaymentCosts { networkFee :: Amount, accountRent :: Amount }
+  deriving stock (Eq,Show,Generic) deriving anyclass (ToJSON,FromJSON)

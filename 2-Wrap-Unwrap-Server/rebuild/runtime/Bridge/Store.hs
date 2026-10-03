@@ -84,6 +84,10 @@ data StoreRead a where
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
+  MarkBroadcast :: Int64 -> Text -> StoreWrite Int64
+  AuthorizeSend :: Int64 -> Text -> StoreWrite RecordedAttempt
+  SettlePayment :: RecordedAttempt -> W.PaymentCosts -> Text -> StoreWrite ()
+  FailSolana :: RecordedAttempt -> Amount -> Text -> StoreWrite ()
   RecordAttempt :: PreparedPayment -> SignedAttempt -> StoreWrite RecordedAttempt
   PreparePayment :: Int64 -> Text -> Amount -> Text -> StoreWrite PreparedPayment
   SaveDraft :: Text -> Int -> Text -> StoreWrite ()
@@ -161,6 +165,10 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
 evalWrite :: Writer -> StoreWrite a -> IO a
 evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
  let policy=executionTerms config; limit=admissionLimits config in case operation of
+  MarkBroadcast now txid -> markBroadcast c config now txid
+  AuthorizeSend now txid -> authorizeSend c config now txid
+  SettlePayment expected costs proof -> settlePayment c (deploymentFingerprint $ paymentPolicy policy) expected costs proof
+  FailSolana expected fee proof -> failSolana c (deploymentFingerprint $ paymentPolicy policy) expected fee proof
   RecordAttempt prepared signed -> recordAttempt c (deploymentFingerprint $ paymentPolicy policy) prepared signed
   PreparePayment now identifier allowance plan -> preparePayment c config now identifier allowance plan
   SaveDraft identifier generation draft -> saveDraft c (deploymentFingerprint $ paymentPolicy policy) identifier generation draft
@@ -1287,12 +1295,8 @@ unsignedPreparation c identity identifier generation = do
     pure tx
     :: IO [Text]
   require (null attempts) "attempt_already_recorded"
-  case paymentFunding (savedPayment $ preparedView prepared) of
-    EarnedFees{} -> pure ()
-    Conversion _ receipt _ _ -> eligible receipt
-    Refund _ receipt _ _ -> eligible receipt
+  paymentSource c (savedPayment $ preparedView prepared)
   pure prepared
- where eligible receipt=readSource c receipt >>= \source->require (S.depositEligible source==1) "source_not_eligible"
 
 -- The dedicated signer's read-only capability resolves durable IDs, never
 -- caller-supplied transaction bytes. Chain-specific plan checks follow this read.
@@ -1358,3 +1362,149 @@ paymentWork c identity identifier = do
     :: IO [Text]
   require (length attempts<=1000) "payment_history_too_large"
   pure (view,prepared,attempts)
+
+-- Sending is authorized from recorded bytes, never a request payload. Backup
+-- coverage and chain-family selection are rechecked at each boundary.
+paymentSource :: PG.Connection -> Payment -> IO ()
+paymentSource c outgoing = case paymentFunding outgoing of
+  EarnedFees{}->pure ()
+  Conversion _ receipt _ _->eligible receipt
+  Refund _ receipt _ _->eligible receipt
+ where eligible receipt=readSource c receipt >>= \source->require (S.depositEligible source==1) "source_not_eligible"
+
+sendContext :: PG.Connection -> Text -> Text -> IO RecordedAttempt
+sendContext c identity txid = do
+  saved<-readAttempt c txid
+  prepared<-readPreparation c identity (recordedPayment saved)
+  require (savedStatus(preparedView prepared)==PaymentPaying && recordedGeneration saved==preparedGeneration prepared
+    && recordedFee saved==preparedFee prepared) "payment_not_sendable"
+  paymentSource c (savedPayment $ preparedView prepared)
+  when (recordedChain saved=="Native") $ do
+    family<-O.runSelect c $ do
+      row<-O.selectTable S.attempts
+      O.where_ (S.attemptIntent row O..== O.sqlStrictText(recordedPayment saved))
+      pure (S.attemptId row)
+      :: IO [Text]
+    members<-O.runSelect c S.replacementMembers :: IO [(Int64,Text,Int64)]
+    drafts<-O.runSelect c S.replacementDrafts :: IO [(Int64,Text,Int64,Text,Text,Text)]
+    cancelled<-O.runSelect c S.replacementCancellations :: IO [(Int64,Text,Int64)]
+    let descendants=sortOn (\(_,_,n)->n) [m | m@(_,tx,_)<-members,tx `elem` family]
+        latest=case reverse descendants of (_,tx,_):_->Just tx; []->case family of [tx]->Just tx; _->Nothing
+    require (latest==Just txid) "native_replacement_not_current"
+    require (all (\(n,parent,_,_,_,_)->parent `notElem` family || any (\(d,_,_)->d==n) (members<>cancelled)) drafts) "native_replacement_draft_pending"
+  pure saved
+
+broadcastCoverage :: PG.Connection -> RecordedAttempt -> IO Int64
+broadcastCoverage c saved = do
+  original<-maybe (reject "broadcast_intent_required") pure (recordedSequence saved)
+  approvals<-O.runSelect c $ do
+    (identifier,n)<-S.sourceApprovals
+    O.where_ (identifier O..== O.sqlStrictText(recordedPayment saved))
+    pure n
+    :: IO [Int64]
+  pure (maximum $ original:approvals)
+
+markBroadcast :: PG.Connection -> StorePolicy -> Int64 -> Text -> IO Int64
+markBroadcast c config now txid = do
+  let identity=deploymentFingerprint $ paymentPolicy $ executionTerms config
+  intakeReady c identity now
+  saved<-sendContext c identity txid
+  case (recordedState saved,recordedSequence saved) of
+    ("broadcast_intent",Just _)->broadcastCoverage c saved
+    ("signed",Nothing)->do
+      n<-nextSequence c
+      _<-O.runUpdate c O.Update {O.uTable=S.attempts,
+        O.uUpdateWith= \r->r {S.attemptState=O.sqlStrictText "broadcast_intent",S.attemptSequence=O.toNullable $ O.sqlInt8 n},
+        O.uWhere= \r->S.attemptId r O..== O.sqlStrictText txid,O.uReturning=O.rCount}
+      pure n
+    _->reject "attempt_not_sendable"
+
+authorizeSend :: PG.Connection -> StorePolicy -> Int64 -> Text -> IO RecordedAttempt
+authorizeSend c config now txid = do
+  let identity=deploymentFingerprint $ paymentPolicy $ executionTerms config
+  intakeReady c identity now
+  saved<-sendContext c identity txid
+  require (recordedState saved=="broadcast_intent") "broadcast_intent_required"
+  needed<-broadcastCoverage c saved
+  row<-metadata c identity
+  require (not(requireBackup config) || S.backupSequence row>=needed) "backup_pending"
+  pure saved
+
+-- Settlement accepts only an independently verified outcome for the exact saved
+-- attempt. Pausing/source loss does not erase an already finalized liability.
+settlePayment :: PG.Connection -> Text -> RecordedAttempt -> W.PaymentCosts -> Text -> IO ()
+settlePayment c identity expected costs proof = do
+  let txid=signedId(recordedSigned expected)
+      saved=encodeSaved $ object ["costs" .= costs,"proof" .= proof]
+      actual=toInteger(units $ W.networkFee costs)+toInteger(units $ W.accountRent costs)
+  require (not(T.null proof) && T.length proof<=32768 && units(W.networkFee costs)>0
+    && actual<=toInteger(units $ recordedFee expected)
+    && (recordedChain expected=="Solana" || units(W.accountRent costs)==0)) "settlement_fee_or_evidence_invalid"
+  (current,view)<-settlementContext c identity expected "settled" saved
+  unless (recordedState current=="settled") $ do
+    post c ("settlement:"<>txid) "successful finalized payout" (settlement $ savedPayment view)
+    forM_ [("network-fee",W.networkFee costs),("account-rent",W.accountRent costs)] $ \(label,cost)->
+      when (units cost>0) $ paymentCost c current (label<>":"<>txid) label cost
+    resolvePayment c current view "settled" saved
+
+failSolana :: PG.Connection -> Text -> RecordedAttempt -> Amount -> Text -> IO ()
+failSolana c identity expected fee proof = do
+  require (recordedChain expected=="Solana" && units fee>0 && fee<=recordedFee expected
+    && not(T.null proof) && T.length proof<=32768) "invalid_failure_evidence"
+  let txid=signedId(recordedSigned expected)
+  (current,view)<-settlementContext c identity expected "failed" proof
+  if recordedState current=="failed" then do
+    charged<-O.runSelect c $ do
+      (_,event,_,account,n)<-O.selectTable S.postings
+      O.where_ (event O..== O.sqlStrictText("failed-fee:"<>txid) O..&& account O..== O.sqlStrictText "external")
+      pure n
+      :: IO [Int64]
+    require (charged==[units fee]) "failure_evidence_conflict"
+  else do
+    paymentCost c current ("failed-fee:"<>txid) "finalized Solana failure network fee" fee
+    resolvePayment c current view "failed" proof
+
+settlementContext :: PG.Connection -> Text -> RecordedAttempt -> Text -> Text -> IO (RecordedAttempt,PaymentView)
+settlementContext c identity expected state proof = do
+  current<-readAttempt c (signedId $ recordedSigned expected)
+  require (recordedState expected=="broadcast_intent" && recordedSequence expected/=Nothing
+    && current {recordedState=recordedState expected,recordedObservation=recordedObservation expected}==expected) "settlement_attempt_changed"
+  view<-readPayment c identity (recordedPayment current)
+  if recordedState current==state then require (recordedObservation current==Just proof) "settlement_evidence_conflict"
+  else do
+    require (current==expected && savedStatus view `elem` [PaymentPaying,PaymentReview]) "settlement_not_expected"
+    rows<-O.runSelect c $ do
+      intent<-O.selectTable S.intents
+      (key,currency,n,released)<-O.selectTable S.feeHolds
+      O.where_ (S.intentId intent O..== O.sqlStrictText(recordedPayment current) O..&& key O..== S.intentId intent)
+      pure (S.intentResolved intent,currency,n,released)
+      :: IO [(Int64,Text,Int64,Int64)]
+    let asset=if recordedChain current=="Native" then "Native" else "Sol"
+    require (case rows of [(0,currency,n,0)]->currency==asset && n>=units(recordedFee current); _->False) "payment_intent_not_settleable"
+    winners<-O.runSelect c $ do
+      r<-O.selectTable S.attempts
+      O.where_ (S.attemptIntent r O..== O.sqlStrictText(recordedPayment current) O..&& S.attemptState r O..== O.sqlStrictText "settled")
+      pure (S.attemptId r)
+      :: IO [Text]
+    require (null winners) "payment_already_settled"
+  pure (current,view)
+
+paymentCost :: PG.Connection -> RecordedAttempt -> Text -> Text -> Amount -> IO ()
+paymentCost c saved event explanation quantity =
+  let asset=if recordedChain saved=="Native" then Native else Sol; n=toInteger(units quantity)
+  in post c event explanation [Posting asset Operating (-n),Posting asset External n]
+
+resolvePayment :: PG.Connection -> RecordedAttempt -> PaymentView -> Text -> Text -> IO ()
+resolvePayment c saved view state proof = do
+  let text=O.sqlStrictText; identifier=recordedPayment saved; paid=state=="settled"
+  _<-O.runUpdate c O.Update {O.uTable=S.attempts,O.uUpdateWith= \r->r {S.attemptState=text state,S.attemptObservation=O.toNullable $ text proof},O.uWhere= \r->S.attemptId r O..== text(signedId $ recordedSigned saved),O.uReturning=O.rCount}
+  _<-O.runUpdate c O.Update {O.uTable=S.intents,O.uUpdateWith= \r->r {S.intentResolved=O.sqlInt8 1},O.uWhere= \r->S.intentId r O..== text identifier,O.uReturning=O.rCount}
+  _<-O.runUpdate c O.Update {O.uTable=S.feeHolds,O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,O.sqlInt8 1),O.uWhere= \(key,_,_,_)->key O..== text identifier,O.uReturning=O.rCount}
+  let customer=case paymentFunding(savedPayment view) of Conversion order _ _ _->Just(order,False); Refund order _ _ _->Just(order,True); EarnedFees{}->Nothing
+  forM_ customer $ \(order,isRefund)->do
+    _<-O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \r->r {S.obligationStatus=text $ if paid then "paid" else "review"},O.uWhere= \r->S.obligationId r O..== text identifier,O.uReturning=O.rCount}
+    _<-O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text $ if not paid then "NeedsReview" else if isRefund then "Refunded" else "Paid",S.payoutTx=if paid then O.toNullable(text $ signedId $ recordedSigned saved) else S.payoutTx r},O.uWhere= \r->S.orderId r O..== text order O..&& (O.sqlBool(not isRefund) O..|| S.status r O../= text "Paid"),O.uReturning=O.rCount}
+    when paid $ do
+      _<-O.runUpdate c O.Update {O.uTable=S.reservations,O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,text "released"),O.uWhere= \(key,_,_,_)->key O..== text order,O.uReturning=O.rCount}
+      _<-O.runUpdate c O.Update {O.uTable=S.operatingReservations,O.uUpdateWith= \(key,kind,asset,n,_)->(key,kind,asset,n,text "released"),O.uWhere= \(key,_,_,_,phase)->key O..== text order O..&& O.in_ (map text ["quote","obligation"]) phase,O.uReturning=O.rCount}
+      pure ()

@@ -29,9 +29,8 @@ Handlers return `Plan caller a` containing `Request caller severity a`; the oper
 converts it to the DSL only at the interpreter boundary. Safe and critical
 evaluators are separate. Critical signer ClientM access is private. Customers
 cannot import the runtime or construct operator authority. The customer API already has a separate Cabal component that hides the internal
-grammar and has no database, runtime or signer dependency. Operator, worker and
-signer vocabularies will be added with their concrete workflows; the current
-grammar implements the four customer operations only.
+grammar and has no database, runtime or signer dependency. The grammar also contains initial signer and worker operations; operator and
+remaining recovery operations must be added with their concrete workflows.
 
 No generic SQL/IO operation, alternative database, synthetic receipt/order for
 withdrawal, or chain stand-in is permitted. Row access is Opaleye inside specific
@@ -89,10 +88,7 @@ Size comparison (physical lines, including comments/blanks): the six equivalent
 full table mappings for deployment, events, postings, audit, fee withdrawals and
 cancellations occupy 89 declaration lines in the baseline schema versus 34 here,
 in one schema file in each version. Repeated per-column type parameters and
-read/write aliases are removed; mapped columns are retained. The current storage
-slice is 367 production lines in three files plus a 105-line contract runner.
-Other baseline storage behavior has not been ported, so those totals are not a
-whole-storage reduction claim.
+read/write aliases are removed; mapped columns are retained. This is a table-mapping comparison, not a whole-storage reduction claim.
 
 Saved-order reads now verify bearer capabilities using the exact baseline digest,
 load historical terms without repricing, check request/quote/profile consistency,
@@ -350,156 +346,81 @@ PostgreSQL contracts pass reference matching/bounds and pending-proof clearing.
 The workflow builds through root Cabal; it has not yet run against live nodes or
 been connected to the final critical runtime. No live custody state was changed.
 
-The payment store now reads one checked PaymentView for conversion, refund or
-reserved earned-fee funding, retaining saved quote and cost terms. Initial
-preparation shares operating-capacity/daily-budget checks with order admission,
-transfers customer allowances atomically, excludes concurrent work on the same
-chain and persists the immutable policy. Draft storage is generation-bound,
-replay-safe and cannot introduce a draft after a recorded signature.
+## Payment and signer checkpoint
 
-A 36-line forward migration adds a nullable withdrawal binding alongside the
-customer obligation binding. Exactly one is required; funding identity/chain cannot
-change, cancelled withdrawals cannot acquire an intent, and existing attempt bytes
-are untouched. It takes the existing worker's advisory lock, requires schema 18,
-advances to 19 and pauses the deployment. The rebuild now refuses schema 18; the
-baseline refuses 19. This was applied only to disposable databases. Populated-ledger
-cutover and the production migration command remain acceptance work.
+One checked PaymentView represents conversion, refund or earned-fee funding with
+immutable saved terms. Initial preparation shares order operating-budget rules,
+persists a generation-bound plan/draft and excludes concurrent work per chain.
+The 36-line schema-19 migration binds intents to exactly one obligation or earned
+withdrawal, preserves existing attempt bytes, excludes the baseline worker and
+pauses the deployment. It has only been applied to disposable databases.
 
-This adds capability rather than reducing equivalent existing code: the unified
-payment reader is 64 lines; active preparation plus initial creation is 80 lines.
-Draft persistence is 13→19 lines, adding JSON/bounds checks (a shared five-line
-helper) and refusal after signing. Schema mappings use existing files; the only new
-file is the 36-line migration. Shared operating-budget logic is extracted once,
-not copied into a second payment path. These counts exclude imports/dispatch.
+The common payment workflow prepares unsigned work and validates signer replies.
+Native returned bytes are independently decoded against the saved draft; Solana
+messages, signatures and derived payment references are checked locally. The signer
+accepts only deployment/payment/generation identifiers through its critical-only
+existential DSL operation, uses read-only Opaleye authorization, serializes signing
+and rereads the exact decision before releasing a typed SignedAttempt. The worker
+independently validates every returned field before immutable, replay-safe storage.
 
-PostgreSQL checks cover conversion/refund/earned views, retained historical fees,
-initial preparation of customer and earned payments, replay without new sequences,
-fee-limit/busy-chain refusal, immutable draft/generation and funding binding, and
-cancellation refusal after preparation. Existing admission, observation and ledger
-contracts still pass. The old native-attempt fixture incorrectly used a wrapped
-payout obligation; the new chain-binding constraint caught it. It now cancels the
-conversion before inserting a native refund for the observation-only fixture.
+SigningTransport provides loopback HTTPS, protected auth/certificate/key files,
+Servant BasicAuth, 16-request concurrency and 4096-byte input bounds. Critical owns
+the private ClientM with pinned trust, no proxy/redirect/retry, a 60-second timeout
+and a 512-KiB response bound. Uncertain signing outcomes retain the preparation and
+pause. Existing recorded attempts are verified without another signer request.
+These are library entry points; no production executable calls them yet.
 
-Preparation retries, covered-source authorization, cancellation workflow,
-broadcast/settlement and replacement generalization to earned
-funding remain incomplete. An already resolved intent currently refuses another
-preparation until the recovery path is implemented; this is not retry acceptance.
-Neither preparation nor these tests call a signer or broadcast funds.
+Closed MarkBroadcast and AuthorizeSend operations require current intake/custody,
+saved paying work, source eligibility and the current native replacement member.
+Pending replacement drafts block sending. Broadcast intent saves a critical
+sequence; identical replay preserves it. Send authorization requires applicable
+backup coverage, including recorded source-restoration approvals. Covered-source
+spending remains unported and refuses; it is not silently treated as eligible.
 
-Closed signing-decision reads now require saved generation/draft, paying status,
-eligible source, no recorded attempt, current intake/custody and configured backup
-coverage. They return durable authorization data; chain-specific plan/transaction
-validation and the dedicated signer transport still need workflow integration.
-Exact signed-attempt storage binds the complete preparation snapshot, derives its
-fee/chain, preserves bytes and proof, and accepts identical replay without another
-sequence or posting. A different attempt for the same initial generation is refused.
-Signed state has no broadcast sequence and cannot itself explain a chain outflow.
+SettlePayment binds the exact saved attempt, actual costs and proof, allows only a
+recorded broadcast intent, checks the live fee hold and excludes another winner.
+It uses the Domain funding accounting for customer and earned funds alike, then
+atomically resolves the intent and releases appropriate holds. FailSolana books
+only the proven network fee and retains principal/inventory for recovery. Identical
+outcomes are idempotent; changed evidence/costs/bytes refuse. Paused operation may
+record proven effects. These store operations do not verify chain finality or send
+transactions themselves; the observation workflow must supply verified evidence.
 
-Attempt persistence is 16→37 lines in the existing Store file; its extra work is
-snapshot binding, explicit replay/conflict handling and customer/earned support.
-The shared unsigned/signing guards are 27 lines and saved-attempt reading is 16.
-The existing schema file adds the full nine-column attempt mapping; no production
-file is added. This is a capability/safety checkpoint, not a reduction claim.
+Current evidence:
 
-PostgreSQL acceptance covers missing/unbacked drafts, wrong generations, changed
-preparations, lost eligibility, exact replay, byte conflicts, second initial
-attempt refusal, database immutability and unchanged balances for customer and
-earned payments, plus a writer restart read of the customer attempt. Attempt payloads in this contract are explicitly
-labelled fixture data; they do not prove cryptographic validity or real signing.
-The store/workflow build passes. Transaction tests also prove that both IO and
-typed checkpoint failures fence the writer after rollback: only policy refusals
-originating inside the closed operation allow connection reuse.
+- Cabal QuickCheck passes protocol vectors, independent native decoding, Solana
+  signature/reference and typed reply mutations, and existential handler checks.
+  The SDK workflow vector uses a public test seed, never funded or broadcast.
+- Actual WAI/Servant checks cover auth, typed replies, refusals, malformed/oversized
+  bodies, cross-site requests, absent broadcast route and evaluator call counts.
+  Credential tests cover modes, parent permissions, symlinks, token format and port.
+- Disposable PostgreSQL contracts pass signing/broadcast gates, exact saved bytes,
+  restart reads, replay and source refusal. Settlement checks verify a 7% historical
+  conversion, earned withdrawal without customer debit, finalized-failure fee-only
+  accounting, changed-evidence/cost refusal and no duplicate postings. Proofs/bytes
+  in database fixtures are labelled offline data, not real-chain acceptance.
+- Only operation-origin policy refusals permit connection reuse after rollback.
+  IO and typed checkpoint failures fence the writer; actual host-fence integration
+  is still pending.
 
-Connecting those adapters to the high-level safe/critical runtime, actual host fence,
-dedicated signer and durable payment execution remains unfinished. Native source-loss detection,
-restoration approval binding, operator loss-cover authorization,
-live observer integration, broader recovery and SDK build integration also remain.
-Passing these checks is not end-to-end payment, migration or real-chain acceptance.
+Scoped physical-line comparisons (not whole-product reduction claims):
 
-The shared payment workflow now prepares native or wrapped payouts from the same
-explicit funding view, persists an unsigned plan/draft, and validates signer replies.
-It has no signer transport or broadcast function. Both signer and worker can use
-one saved-plan validator; native replies are decoded independently through the node
-and checked against the saved draft, while Solana replies undergo local message and
-Ed25519 validation against the payment-derived reference. Saved cost terms remain
-authoritative, including for earned withdrawals. Signed history prevents another
-initial preparation; recovery must handle retries explicitly.
+| Piece | Baseline | Rebuild | Scope limit |
+| --- | ---: | ---: | --- |
+| Signer module | 144 / 1 file | 73 / 1 file | Startup and replacement parity pending |
+| Signer transport | 103 / 1 file plus shared web boundary | 112 / 1 file | Includes local body/concurrency boundary; initial route only |
+| Worker critical signing | Part of broader Runtime | 76 / 1 file | Initial signing only |
+| Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |
 
-This checkpoint adds one 124-line production Payment module, compared with the
-baseline's one 153-line Payment module, plus 19 lines in the existing Store module
-for a closed, snapshot-consistent payment-work read. This is a partial replacement,
-not a completed 29-line reduction: signer invocation, recorded-attempt replay and
-runtime dispatch remain to be connected. The clearer boundary is the improvement:
-unsigned preparation, reply verification and durable attempt storage have distinct
-responsibilities, shared across customer and earned funding. The baseline remains
-until equivalent integrated behavior is accepted.
+The last slice adds seven schema-projection lines and three typed-cost lines, with
+no new production file. Its extra lines implement required funding/security checks;
+it is not a size reduction. Source eligibility checking is shared with signing.
 
-QuickCheck checks the native returned-byte mismatch and saved-policy refusal,
-and a deterministic actual-SDK Solana signature tied to earned funding, including
-reference, cost and signature mismatch refusal. The vector uses a public test seed,
-never sends funds and is not Devnet acceptance. PostgreSQL contracts check the
-payment-work snapshot before preparation, after draft persistence and after restart
-with signed history. Complete unsigned-workflow execution against the database,
-critical/signing dispatch and funded end-to-end execution remain integration work.
-
-The signer now has its own caller-indexed critical operation and pure Servant
-handler returning a constrained Request. Initial signing accepts only deployment,
-payment ID and generation; the response is a concrete SignedAttempt rather than
-JSON Value. That record lives once in Wire and is reused by storage. The worker
-reconstructs and verifies every response field against its saved preparation before
-accepting it, including transaction ID, bytes, proof and native common input.
-
-The new Signer module is 73 physical lines in one file; the baseline Signer is
-144 lines in one file. This is not full parity or a completed 71-line reduction:
-private-file startup, transport and native replacement remain outside this new
-module's current scope. Its initial evaluator reuses closed signing-decision reads
-and shared plan validation, holds one signing gate across the whole operation,
-verifies chain identity, signs with the actual native/SDK adapters, independently
-validates the result, and rereads the exact authorization before releasing it.
-It has no writer or broadcast command. Customer facade exports remain unchanged.
-
-QuickCheck checks existential handler resolution, typed response serialization,
-and refusal of changed response identifiers, bytes or common inputs. PostgreSQL
-checks exercise the real signer evaluator's refusal of a wrong deployment,
-invalid generation and missing backup coverage with all HTTP requests disabled.
-These prove pre-sign refusal, not a successful deployed signing session. The
-BasicAuth API type alone does not install authentication: runtime must still
-provide authenticated bounded TLS transport, protected credential checks, the
-private critical-only ClientM and actual two-process acceptance. The new evaluator
-is not yet reachable from a production executable.
-
-Authenticated signer transport and initial worker signing are now implemented as
-library entry points. SigningTransport binds HTTPS to loopback, reads protected
-credentials/certificate/key files, authenticates through Servant BasicAuth, caps
-active requests at 16 and bodies at 4096 bytes, and prevents cross-site requests.
-Its application maps closed policy errors to JSON without exposing arbitrary
-exceptions. Critical owns the only generated signer ClientM: pinned certificate,
-fixed loopback destination, no proxy/redirect/automatic retry, 60-second response
-timeout and a 512-KiB body bound. A transport failure preserves uncertain work and
-pauses the worker.
-
-SignPreparedPayment is a worker-only critical operation. It validates the saved
-preparation and current signing decision, then independently verifies and records
-the returned attempt. A single existing attempt is verified and returned without
-another signer call; multiple/generation-mismatched work requires recovery. There
-is no broadcast operation here. Preparation and applicable backup acknowledgment
-must already be durable. The eventual runtime must share this worker gate across
-observation and other critical operations, rather than create independent gates.
-
-Scope counts: transport is 112 lines/one new file versus the baseline Operator's
-103 lines/one file, which also used the separate Web security boundary. The new
-file includes its own smaller signing-only body/concurrency boundary. Critical is
-76 lines/one new file, extracting initial signing from the much broader baseline
-Runtime; there is no honest whole-Runtime reduction comparison yet. Native
-replacement routes are still pending, so neither count establishes full parity.
-
-The Cabal suite exercises the actual WAI/Servant application: missing/bad auth,
-accepted typed response, closed refusal, invalid JSON, oversized input, cross-site
-requests and absent broadcast route, with exact evaluator-call checks. Credential
-checks cover 0600/0640, refusal of public read, writable parent, symlink, malformed
-token and invalid port. PostgreSQL tests exercise the real critical worker's
-invalid-plan refusal and persisted pause with all network requests disabled.
-Both suites pass. TLS listening/handshake, successful worker-to-signer signing,
-private-key startup checks and OS credential isolation still need integrated
-acceptance; WAI tests are not evidence of TLS or funded-chain operation. No
-production executable currently calls these new entry points.
+Still required: successful TLS worker/signer integration and private-key startup
+checks; a unified safe/critical runtime gate, configuration, app/browser integration;
+verified source/chain observations before actual send/settlement; retry, cancellation,
+replacement/winner changes and covered-source approvals generalized to earned
+funding; custody/host fencing/backup; actual populated-ledger migration and funded
+Signet/Devnet flows. Supported-wallet signing, off-host restore, canonical activation
+and independent review remain release gates. Retain the baseline until parity and
+real-chain acceptance permit deletion. Key seeds alone do not restore ledger history.

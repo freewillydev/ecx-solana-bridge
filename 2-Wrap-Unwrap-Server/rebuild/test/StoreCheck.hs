@@ -227,7 +227,7 @@ main = do
         evalWrite writer (ExpireQuotes 301)
         fixture fixtures (CheckPhases solana "obligation") >>= check
       fixture fixtures PromotionFunds
-      promoted <- withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
+      (promoted,failedPayment) <- withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
         let make name direction=do
               fixture fixtures ReadyIntake
               oid<-evalWrite writer (create newRequest {W.idempotencyKey=name,W.input=money 10,W.direction=direction,W.refund=if direction==NativeToWrapped then "refund" else ""})
@@ -380,19 +380,80 @@ main = do
         let nativeSigned=SignedAttempt (T.replicate 64 "f") "native-fixture-bytes" "{\"nativeSigned\":true}" (Just "fixture-prevout:0")
         nativeRecorded<-evalWrite writer (RecordAttempt earnedDraft nativeSigned)
         check (recordedChain nativeRecorded=="Native" && recordedSigned nativeRecorded==nativeSigned && recordedState nativeRecorded=="signed")
-        -- End fixture work without asserting settlement, so later scan cases can use Native.
-        fixture fixtures (ResolveFixtureIntent $ "fee:"<>withdrawalKey)
+        let nativeTx=signedId nativeSigned; nativeCosts=W.PaymentCosts (money 3) (money 0)
+        expectStore "settlement_attempt_changed" (evalWrite writer $ SettlePayment nativeRecorded nativeCosts "offline-finalized-proof")
+        fixture fixtures ReadyIntake
+        expectStore "broadcast_intent_required" (evalWrite writer $ AuthorizeSend 100 nativeTx)
+        broadcastSequence<-evalWrite writer (MarkBroadcast 100 nativeTx)
+        fixture fixtures ReadyIntake
+        repeatedSequence<-evalWrite writer (MarkBroadcast 100 nativeTx)
+        check (broadcastSequence==repeatedSequence)
+        expectStore "backup_pending" (evalWrite writer $ AuthorizeSend 100 nativeTx)
+        fixture fixtures CoverBackup
+        fixture fixtures ReadyIntake
+        authorized<-evalWrite writer (AuthorizeSend 100 nativeTx)
+        check (recordedSigned authorized==nativeSigned && recordedSequence authorized==Just broadcastSequence)
+        beforeSettlement<-evalRead reader ReadBalances
+        expectStore "settlement_fee_or_evidence_invalid" (evalWrite writer $ SettlePayment authorized (W.PaymentCosts (money 3) (money 1)) "offline-finalized-proof")
+        expectStore "settlement_attempt_changed" (evalWrite writer $ SettlePayment authorized {recordedSigned=nativeSigned {signedBytes="changed"}} nativeCosts "offline-finalized-proof")
+        evalWrite writer (SettlePayment authorized nativeCosts "offline-finalized-proof")
+        afterSettlement<-evalRead reader ReadBalances
+        let change account=M.findWithDefault 0 (Native,account) afterSettlement-M.findWithDefault 0 (Native,account) beforeSettlement
+        check (change FeePending==(-10) && change Operating==(-3) && change External==13 && change Principal==0 && change Float==0 && change Earned==0)
+        evalWrite writer (SettlePayment authorized nativeCosts "offline-finalized-proof")
+        evalRead reader ReadBalances >>= check . (==afterSettlement)
+        expectStore "settlement_evidence_conflict" (evalWrite writer $ SettlePayment authorized nativeCosts "changed-proof")
+        completed<-evalRead reader (ReadPayment $ "fee:"<>withdrawalKey)
+        check (savedStatus completed==PaymentPaid)
         fixture fixtures (SeedReceipt "unknown-source" Nothing Native 10 2 True 100)
         evalWrite writer (PromoteDeposit 100 "unknown-source") >>= check . not
         expectStore "deposit_not_found" (evalWrite writer $ PromoteDeposit 100 "missing")
         expectStore "invalid_promotion_time" (evalWrite writer $ PromoteDeposit (-1) "promote-source")
-        pure "promote-source"
+        pure ("promote-source",missing)
       withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
         evalWrite writer (PromoteDeposit 100 promoted) >>= check . not
         (_,restartedPreparation,restartedHistory)<-evalRead reader (ReadPaymentWork "convert:historical-promotion")
         check (restartedPreparation/=Nothing && restartedHistory==["fixture-signed-solana"])
         persisted<-evalRead reader (ReadAttempt "fixture-signed-solana")
         check (signedBytes(recordedSigned persisted)=="exact-fixture-bytes" && recordedState persisted=="signed")
+        fixture fixtures ReadyIntake
+        fixture fixtures (SourceEligibility "historical-fee" False)
+        fixture fixtures ReadyIntake
+        expectStore "source_not_eligible" (evalWrite writer $ MarkBroadcast 100 "fixture-signed-solana")
+        fixture fixtures (SourceEligibility "historical-fee" True)
+        fixture fixtures ReadyIntake
+        _<-evalWrite writer (MarkBroadcast 100 "fixture-signed-solana")
+        fixture fixtures CoverBackup
+        fixture fixtures ReadyIntake
+        authorized<-evalWrite writer (AuthorizeSend 100 "fixture-signed-solana")
+        beforeSettlement<-evalRead reader ReadBalances
+        evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 3) (money 2)) "offline-conversion-proof")
+        afterSettlement<-evalRead reader ReadBalances
+        let change asset account=M.findWithDefault 0 (asset,account) afterSettlement-M.findWithDefault 0 (asset,account) beforeSettlement
+        check (change Native Principal==(-100) && change Native Float==93 && change Native Earned==7
+          && change Wrapped Float==(-93) && change Wrapped External==93 && change Sol Operating==(-5) && change Sol External==5)
+        completed<-evalRead reader (ReadPayment "convert:historical-promotion")
+        check (savedStatus completed==PaymentPaid)
+        fixture fixtures ReadyIntake
+        _<-evalWrite writer (PreparePayment 100 ("convert:"<>failedPayment) (money 10) "{}")
+        evalWrite writer (SaveDraft ("convert:"<>failedPayment) 0 "{}")
+        failedDraft<-evalRead reader (ReadPreparation ("convert:"<>failedPayment))
+        _<-evalWrite writer (RecordAttempt failedDraft $ SignedAttempt "fixture-failed-solana" "failure-fixture-bytes" "{}" Nothing)
+        fixture fixtures ReadyIntake
+        _<-evalWrite writer (MarkBroadcast 100 "fixture-failed-solana")
+        fixture fixtures CoverBackup
+        fixture fixtures ReadyIntake
+        failedAttempt<-evalWrite writer (AuthorizeSend 100 "fixture-failed-solana")
+        beforeFailure<-evalRead reader ReadBalances
+        evalWrite writer (FailSolana failedAttempt (money 2) "offline-failure-proof")
+        afterFailure<-evalRead reader ReadBalances
+        let expected=M.insertWith (+) (Sol,External) 2 $ M.insertWith (+) (Sol,Operating) (-2) beforeFailure
+        check (afterFailure==expected)
+        evalWrite writer (FailSolana failedAttempt (money 2) "offline-failure-proof")
+        evalRead reader ReadBalances >>= check . (==afterFailure)
+        expectStore "failure_evidence_conflict" (evalWrite writer $ FailSolana failedAttempt (money 3) "offline-failure-proof")
+        failedView<-evalRead reader (ReadPayment ("convert:"<>failedPayment))
+        check (savedStatus failedView==PaymentReview)
       withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
         let tx=T.replicate 64 "d"; did="native:"<>tx<>":0"; hash=T.replicate 64 "e"
             proof=object ["observationHash" .= hash]
@@ -555,27 +616,27 @@ main = do
         commit (W.ScanBatch "SolanaOperating" "opening-signature" Nothing "opening-signature" 110 [funding] [])
         afterSol<-evalRead reader ReadBalances
         check (M.findWithDefault 0 (Sol,Unallocated) afterSol==M.findWithDefault 0 (Sol,Unallocated) beforeSol+3)
+      beforeLarge<-evalRead reader ReadBalances
       fixture fixtures LargeBalances
       huge <- evalRead reader ReadBalances
-      check (M.lookup (Wrapped,Float) huge==Just (1000+2*toInteger(maxBound::Int64)))
+      check (M.lookup (Wrapped,Float) huge==Just (M.findWithDefault 0 (Wrapped,Float) beforeLarge+2*toInteger(maxBound::Int64)))
   putStrLn "PASS: PostgreSQL role isolation, profile binding, exclusive writer, replay, conflicts, custody freshness, earned funds, cancellation, checkpoint rollback/fencing, authorized saved orders, historical terms, backup gating and review overlay"
 
 money :: Integer -> Amount
 money = either (error . T.unpack) id . amount
-expectStore :: T.Text -> IO a -> IO ()
+expectStore :: HasCallStack => T.Text -> IO a -> IO ()
 expectStore expected action = do
   result <- try action
   case result of
     Left (BridgeError actual) | expected==actual -> pure ()
-    Left err -> fail ("unexpected rejection: "<>show err)
-    Right _ -> fail ("expected rejection: "<>T.unpack expected)
+    Left err -> fail ("expected "<>T.unpack expected<>", unexpected rejection: "<>show err<>"\n"<>prettyCallStack callStack)
+    Right _ -> fail ("expected rejection: "<>T.unpack expected<>"\n"<>prettyCallStack callStack)
 
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
   ImmutableAttempt :: T.Text -> Fixture Bool
   CheckFundingBinding :: T.Text -> T.Text -> Fixture Bool
-  ResolveFixtureIntent :: T.Text -> Fixture ()
   ResetOperatingScan :: Fixture ()
   LatestSourceState :: T.Text -> Fixture T.Text
   ReadScanHealth :: T.Text -> Fixture (Maybe Int64,Maybe T.Text,Int64)
@@ -841,8 +902,6 @@ fixture c (LatestSourceState did) = do
     pure (key,state)
   case rows of [state]->pure state; _->fail "missing source recovery"
 
-fixture c (ResolveFixtureIntent identifier) = do
-  void $ O.runUpdate c O.Update {O.uTable=S.intents,O.uUpdateWith= \r->r {S.intentResolved=O.sqlInt8 1},O.uWhere= \r->S.intentId r O..== O.sqlStrictText identifier,O.uReturning=O.rCount}
 fixture c (CheckFundingBinding identifier withdrawal) = do
   rows<-O.runSelect c $ do
     row<-O.selectTable S.intents

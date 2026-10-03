@@ -237,3 +237,10 @@ attempts = O.table "attempts" $ pAttempt Attempt
   , attemptFee=O.requiredTableField "fee_limit", attemptState=O.requiredTableField "state"
   , attemptSequence=O.requiredTableField "critical_sequence", attemptObservation=O.requiredTableField "observation_json"
   , attemptGeneration=O.requiredTableField "preparation_generation" }
+
+replacementMembers :: O.Select (IntField,TextField,IntField)
+replacementMembers = O.selectTable $ O.table "native_replacement_members" $ p3
+  (O.requiredTableField "draft_sequence",O.requiredTableField "txid",O.requiredTableField "critical_sequence")
+sourceApprovals :: O.Select (TextField,IntField)
+sourceApprovals = O.selectTable $ O.table "source_recovery_approvals" $ p2
+  (O.requiredTableField "obligation_id",O.requiredTableField "critical_sequence")
