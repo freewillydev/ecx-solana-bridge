@@ -2,7 +2,7 @@
 module ObservationCheck (checks) where
 import Bridge.Domain (Amount, Asset(..), Direction(..), amount, units)
 import qualified Bridge.Wire as W
-import Bridge.PaymentSource (verifyPaymentSource)
+import Bridge.PaymentSource (verifyPaymentSource,inspectNativeSource)
 import qualified Bridge.SolanaHelper as H
 import Bridge.Error
 import Bridge.RPC (fieldValue)
@@ -239,7 +239,36 @@ nativeChecks=do
         (\_ _->fail "unexpected Solana RPC") Nothing W.L2LSignetDevnet
         (H.SolanaPolicy "source-test" "profile" "" "" "" (amt 1) (amt 0)) (W.PaymentSource deposit request policy address)
   sequence
-    [ check "focused native source checks bind outpoint ownership depth and canonical block" $ once $ ioProperty $ do
+    [ check "native source loss requires matching scanner/wallet conflict, absent mempool and spent output" $ once $ ioProperty $ do
+        let position=object ["height" .= (20::Int),"hash" .= tip]
+            source depth=deposit {W.depositConfirmations=max 0 depth,W.depositEligible=depth>=3}
+            evidence depth=("saved-hash",object ["anchor" .= tip,"proof" .= object ["confirmations" .= (depth::Int)]])
+            transactionAt depth=replace ["lastprocessedblock"] position $ replace ["confirmations"] (toJSON (depth::Int)) transaction
+            call depth _ method params=case method of
+              "gettransaction"->pure (transactionAt depth)
+              "getmempoolentry"->if depth<0 then reject "rpc_error_-5" else pure $ object ["vsize" .= (120::Int)]
+              "gettxout"->pure Null
+              _->response method params
+            inspect depth rpc=inspectNativeSource rpc settings 3 "profile" (source depth) (Just(address,policy)) (evidence depth)
+        missing<-inspect (-1) (call (-1))
+        restored<-inspect 3 (call 3)
+        shallow<-inspect 1 (call 1)
+        timeoutRefused<-rejects "native_source_conflict_not_proven" $ inspect (-1) $ \wallet method params->
+          if method=="getmempoolentry" then reject "rpc_transport_unknown_outcome" else call (-1) wallet method params
+        unspentRefused<-rejects "native_source_conflict_not_proven" $ inspect (-1) $ \wallet method params->
+          if method=="gettxout" then pure (object []) else call (-1) wallet method params
+        mempoolRefused<-rejects "native_source_conflict_not_proven" $ inspect (-1) $ \wallet method params->
+          if method=="getmempoolentry" then pure (object []) else call (-1) wallet method params
+        stale<-rejects "source_recovery_scan_not_current" $ inspectNativeSource (call (-1)) settings 3 "profile" (source (-1)) (Just(address,policy)) (evidence 3)
+        reads<-newIORef (0::Int)
+        changed<-rejects "native_source_view_changed" $ inspect (-1) $ \wallet method params->
+          if method/="gettransaction" then call (-1) wallet method params else do
+            n<-atomicModifyIORef' reads (\n->(n+1,n))
+            pure (transactionAt $ if n==0 then -1 else 3)
+        pure (case (missing,restored,shallow) of
+          (W.SourceMissing _,W.SourceRestored _,W.SourcePending _)->and [timeoutRefused,unspentRefused,mempoolRefused,stale,changed]
+          _->False)
+    , check "focused native source checks bind outpoint ownership depth and canonical block" $ once $ ioProperty $ do
         unchanged<-recheck (const id)
         shallow<-recheck (\method->if method=="gettransaction" then replace ["confirmations"] (Number 1) else id)
         unowned<-rejects "source_binding_mismatch" $ recheck (\method->if method=="getaddressinfo" then replace ["ismine"] (Bool False) else id)

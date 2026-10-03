@@ -2,7 +2,7 @@
 module Bridge.NativePayment
   ( NativeRPC, Outpoint(..), NativeInput(..), NativeOutput(..), NativeTx(..)
   , NativePrevout(..), NativePlan(..), NativeDraft(..), NativeSigned(..)
-  , decodeNativeTx, validateNativeTx, sameNativeTemplate, sameNativePrevouts
+  , transactionId, ownedScript, decodeNativeTx, validateNativeTx, sameNativeTemplate, sameNativePrevouts
   , previewNativePayment, newNativePlan, fundNativeDraft, checkNativeDraft, signNativeDraft
   , readNativePrevoutsWith, ownedNativeLocks, releaseNativeInputLocks, restoreNativeInputLocks, checkNativeAcceptance
   ) where

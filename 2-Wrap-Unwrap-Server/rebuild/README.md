@@ -308,7 +308,8 @@ receipt/check records; no new production file is added. PostgreSQL acceptance
 covers ordinary pending, missing-value replay, unavailable evidence preserving a
 known deficit, stale receipts/proof hashes, invalid evidence, restoration and exact
 covered-capital return/replay. All row fixtures use Opaleye. The test cover is seeded;
-operator cover authorization and actual native loss detection are not claimed done.
+native loss detection is now wired through the closed worker operation (see below);
+operator cover authorization and funded loss acceptance remain unfinished.
 
 Atomic scan commits now preserve receipts, immutable origins/evidence, cursors and
 health in one transaction. Cursor comparison refuses stale batches; duplicate
@@ -718,6 +719,39 @@ runtime lines; **no new production file or refund-specific payout engine**.
 This checkpoint increases source size to complete required behavior; it is not
 presented as a reduction or a claim of perfect security.
 
+## Native source-loss inspection
+
+The worker now runs a bounded native source-recovery pass after scanning and before
+custody reconciliation, including while paused and during explicit resume. Closed
+Opaleye reads select at most 1,000 ineligible/recovering native receipts and load
+their saved order binding and scanner evidence. No caller supplies a query or RPC
+method. The shared native inspector verifies network/wallet context, exact owned
+outpoint/amount, immutable customer instruction/policy, scanner depth/anchor and
+current canonical wallet position. A missing source requires negative wallet
+confirmations, the explicit mempool-not-found response and an absent UTXO. A
+timeout or unsupported response is not loss. A second identical wallet transaction
+read detects an inconsistent view. Confirmed return and still-pending sources use
+the same inspector, with coinbase maturity handling for unbound receipts.
+
+Results use the existing append-only recovery operation and balanced deficit/
+return journals. Unavailable observations preserve the existing loss and hold the
+service for review. The pass visits the other candidates before propagating a
+recording failure. It neither approves recovery nor signs/sends. Capital coverage
+and covered-source approval still need implementation; this inspection is their
+prerequisite and supplies their chain proof.
+
+Build, QuickCheck, PostgreSQL and executable checks pass. Captured-output/offline
+RPC tests cover missing/restored/pending outcomes, unknown mempool results, a live
+mempool entry, an unspent output, stale scanner state and a changed transaction
+view. Database contracts cover candidate selection/evidence reads and the existing
+loss/return persistence. Live reorg/loss recovery remains unverified.
+The inspector is **73 lines versus 75** in retained `Reorg.hs`; identity checking
+now belongs to the caller and ledger reads to closed Store operations. The whole
+PaymentSource module grows **67 → 147** lines, Store adds 33 and runtime adds 16,
+plus one grammar line; there are **no new files or migrations**. This is recovery
+integration, not a whole-repo reduction. Existing native script/transaction-ID
+validators are reused rather than copied.
+
 ## Restored-source approval
 
 The private operator DSL now accepts:
@@ -955,8 +989,8 @@ Scoped physical-line comparisons (not whole-product reduction claims):
 | Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
 | Signer module | 144 / 1 file | 117 / 1 file | Now includes startup key validation and shared file permissions; replacement parity pending |
 | Signer transport | 103 / 1 file plus shared web boundary | 69 / 1 file + shared 71-line Web module | Shared module also serves customer API; initial signer route only |
-| Customer/worker runtime | Part of broader Runtime | 428 / 1 file (previous checkpoint 413) | Adds restored-source approval; single critical dispatch retained |
-| Focused source validation | 63-line mixed validation/storage/recovery function | 67-line dedicated module | Covered-source recovery is still separate unfinished work |
+| Customer/worker runtime | Part of broader Runtime | 444 / 1 file (previous checkpoint 428) | Adds native source inspection; single critical dispatch retained |
+| Focused source validation | 63-line mixed validation/storage/recovery function | 147-line module including native loss inspector | Covered-source approval remains unfinished; larger functional scope |
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |
 

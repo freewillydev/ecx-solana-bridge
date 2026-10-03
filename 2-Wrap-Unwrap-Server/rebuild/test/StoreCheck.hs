@@ -603,6 +603,10 @@ ledgerMain = do
         before<-evalRead reader ReadBalances
         initial<-evalRead reader ReadState
         record (W.SourcePending proof)
+        candidates<-evalRead reader NativeSourceCandidates
+        check (did `elem` map W.depositId candidates)
+        (_,evidence)<-evalRead reader (ReadNativeSourceInspection did)
+        check (fst evidence==hash)
         ordinary<-evalRead reader ReadState
         check (ledgerSequence ordinary==ledgerSequence initial)
         snapshot<-evalRead reader (ReadSource did)

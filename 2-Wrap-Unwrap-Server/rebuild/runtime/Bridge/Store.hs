@@ -74,6 +74,8 @@ data CustodySnapshot = CustodySnapshot
   { custodyRevision :: Int64, custodyTotals :: M.Map Asset Integer
   , custodyHeads :: [(Text,Text)], custodySlot :: Int64, custodyPending :: [RecordedAttempt] } deriving (Eq,Show)
 data StoreRead a where
+  NativeSourceCandidates :: StoreRead [W.Deposit]
+  ReadNativeSourceInspection :: Text -> StoreRead (Maybe (Text,W.PolicySnapshot),(Text,Value))
   ReadSourceApproval :: Text -> Int64 -> StoreRead (Maybe Text)
   CheckSourceRestoration :: Text -> Int64 -> StoreRead ()
   ReadSolanaExpiry :: Text -> StoreRead (Maybe Text)
@@ -209,6 +211,8 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
       PendingAttempts -> pendingAttempts c
       PaymentCandidates -> paymentCandidates c
       ReadState -> pure (LedgerState (S.criticalSequence row) (S.backupSequence row) (S.paused row/=0) (S.pauseReason row))
+      NativeSourceCandidates -> nativeSourceCandidates c
+      ReadNativeSourceInspection key -> nativeSourceInspection c key
       ReadSourceApproval key restoration -> sourceApproval c key restoration
       CheckSourceRestoration key restoration -> sourceRestoration c key restoration >> pure ()
       ReadSolanaExpiry txid -> expiryProof c txid
@@ -2502,3 +2506,32 @@ approveSourceRestoration c policy now key restoration reason = do
       updated<-O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \row->row {S.obligationStatus=text previous},O.uWhere= \row->S.obligationId row O..== text key,O.uReturning=O.rCount}
       require (count==1 && updated==1) "source_approval_changed"
       audit c "source_recovery_approved" key
+
+nativeSourceCandidates :: PG.Connection -> IO [W.Deposit]
+nativeSourceCandidates c = do
+  rows<-O.runSelect c $ O.limit 1001 $ O.orderBy (O.asc S.depositSeen <> O.asc S.depositId) $ do
+    deposit<-O.selectTable S.deposits
+    recovering<-Exists.exists $ do
+      (key,state)<-S.sourceRecovery
+      O.where_ (key O..== S.depositId deposit O..&& state O../= O.sqlStrictText "restored")
+      pure ()
+    O.where_ (S.depositAsset deposit O..== O.sqlStrictText "Native" O..&& (S.depositEligible deposit O..== O.sqlInt8 0 O..|| recovering))
+    pure deposit
+  require (length rows<=1000) "source_recovery_backlog"
+  mapM asDeposit rows
+
+nativeSourceInspection :: PG.Connection -> Text -> IO (Maybe (Text,W.PolicySnapshot),(Text,Value))
+nativeSourceInspection c key = do
+  source<-readSource c key
+  require (S.depositAsset source=="Native") "invalid_native_source_receipt"
+  tx<-case T.splitOn ":" key of ["native",transaction,_]->pure transaction; _->reject "invalid_native_deposit_id"
+  (hash,raw)<-sourceEvidence c tx
+  evidence<-decodeSaved raw
+  binding<-forM (S.depositOrder source) $ \oid->do
+    rows<-O.runSelect c $ do
+      order<-O.selectTable S.orders
+      O.where_ (S.orderId order O..== O.sqlStrictText oid)
+      pure (S.instruction order,S.policyJson order)
+      :: IO [(Maybe Text,Text)]
+    case rows of [(Just address,policy)]->(address,) <$> decodeSaved policy; _->reject "source_instruction_missing"
+  pure (binding,(hash,evidence))

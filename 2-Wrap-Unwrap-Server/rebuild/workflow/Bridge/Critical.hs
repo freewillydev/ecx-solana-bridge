@@ -13,9 +13,9 @@ import Bridge.Error
 import Bridge.Payment
 import Bridge.Observer (ObserverSettings(..),observeOnce)
 import Bridge.Reconciliation (reconcileCustody)
-import Bridge.PaymentSource (verifyPaymentSource)
+import Bridge.PaymentSource (verifyPaymentSource,inspectNativeSource)
 import qualified Bridge.Wire as W
-import Control.Monad (forM_,when,forever)
+import Control.Monad (forM,forM_,when,forever)
 import Bridge.NativePayment (NativeSigned,previewNativePayment,checkNativeAcceptance,releaseNativeInputLocks)
 import Bridge.SolanaPayment (SolanaSigned,signedSolanaPlan,solPlanRecent,checkBlockhashWindow)
 import Data.Text (Text)
@@ -105,6 +105,7 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         case command of
           OperatorDSL PauseService{}->pure ()
           SigningDSL _->reject "signer_operation_forbidden"
+          WorkerDSL RecoverNativeSources->pure ()
           WorkerDSL RecoverNativeLocks->pure ()
           WorkerDSL RunWorkerCycle->pure ()
           WorkerDSL ObserveChains->pure ()
@@ -229,6 +230,20 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
         evalWrite writer (ResumeLedger now [("Native",N.nativeCheckpointHash native),("Solana",tokenOrigin settings),("SolanaOperating",operatingOrigin settings)] reviewed)
       evalCritical (WorkerDSL operation)=evalWorker operation
       evalWorker :: forall a. WorkerOperation a -> IO a
+      evalWorker RecoverNativeSources = do
+        sources<-evalRead reader NativeSourceCandidates
+        outcomes<-forM sources $ \source->tryBridge $ do
+          result<-tryBridge $ do
+            _<-N.nativeIdentity rpc native
+            (binding,evidence)<-evalRead reader (ReadNativeSourceInspection $ W.depositId source)
+            inspectNativeSource (N.nativeCall rpc native) native (defaultNativeDepth settings) (H.fingerprint config) source binding evidence
+          let unavailable code=W.SourceUnavailable $ object ["reason" .= code]
+              checked=either (\(BridgeError code)->unavailable code) id result
+          recorded<-tryBridge (evalWrite writer $ RecordSourceCheck source checked)
+          case recorded of
+            Right ()->pure ()
+            Left (BridgeError code)->evalWrite writer (RecordSourceCheck source $ unavailable code)
+        mapM_ (either throwIO pure) outcomes
       evalWorker RecoverNativeLocks = guarded $ do
         _<-N.nativeIdentity rpc native
         _<-N.nativeWalletInfoWith (N.nativeCall rpc native) native
@@ -366,13 +381,14 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
       recoverPending=do
         locks<-tryBridge (evalWorker RecoverNativeLocks)
         scanned<-tryBridge (evalWorker ObserveChains)
+        sources<-tryBridge (evalWorker RecoverNativeSources)
         now<-floor <$> getPOSIXTime
         evalWrite writer (ExpireQuotes now)
         pending<-evalRead reader PendingAttempts
         -- A policy error on one attempt must not hide another finalized effect.
         outcomes<-mapM (tryBridge . evalWorker . ReconcilePayment) pending
         evalWorker ReconcileCustody
-        mapM_ (either throwIO pure) (locks:scanned:outcomes)
+        mapM_ (either throwIO pure) (locks:scanned:sources:outcomes)
       tryBridge :: IO a -> IO (Either BridgeError a)
       tryBridge work=try (work `catch` (\(_::IOException)->reject "worker_io_unavailable"))
       guarded :: IO a -> IO a
