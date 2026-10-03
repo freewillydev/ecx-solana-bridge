@@ -15,42 +15,18 @@ only after migration and real-chain acceptance. The baseline implementation step
 below remain requirements/reference, not a competing instruction to keep polishing
 its installer or reorganizing its modules.
 
-Current replacement checkpoint: pure monetary/funding/accounting types, preserved
-customer wire records, caller/severity-indexed existential requests and four
-restricted Servant handlers. The private Opaleye store now implements ledger reads and atomic pause/earned-fee
-reservation/cancellation, verified against disposable PostgreSQL. Authorized saved-order reads now preserve
-historical terms, capability access, review overlays and backup-gated instruction
-visibility. Atomic order creation now includes idempotency, immutable terms,
-inventory and both operating holds, readiness and daily-budget checks, with
-PostgreSQL rollback/replay acceptance. Guarded instruction storage now covers native
-allocation claims, immutable results, derived Solana references, backup-gated first
-exposure and expiry preserving obligation holds. The private chain component now
-has HTTP RPC plus native identity/wallet/allocation and Solana identity/account
-checks, with protocol tests and a real Devnet genesis read. Native payment preparation
-and signing checks now pass captured-transaction and offline RPC contracts.
-Solana message/SDK/payment validation now passes captured Devnet proofs and offline
-contracts; the actual cached SDK FFI matches its public-key codec vector.
-Solana deposit/Pay proof validation and anchored signature pagination now pass
-captured-effect and offline protocol tests. Adapter/workflow integration, high-level
-evaluators, live observer integration,
-SDK build integration and durable execution remain unfinished. Closed deposit
-promotion now passes PostgreSQL acceptance for both directions, exact preserved
-holds, historical terms, rejection paths and restart replay. Source-check persistence
-now passes PostgreSQL snapshot/proof binding, loss/restoration replay and covered
-capital-return checks; native detection and recovery approval/cover authorization
-still need integration. Atomic scan storage now passes cursor/receipt rollback,
-replay, source suspension, saved-work hashing and outgoing classification contracts.
-The native observer now returns checked batches and passes captured-output RPC
-contracts; its closed instruction/depth reads pass PostgreSQL checks. Solana token
-and fee-payer scan contracts, reference matching and pending verification also pass.
-The combined observer workflow builds, but live-node/runtime acceptance is pending.
-Unified customer/earned payment reads, initial preparation and immutable draft
-storage are implemented against rebuild schema 19. The forward migration is
-tested only on disposable databases. Durable signing-decision reads and exact
-signed-attempt storage pass PostgreSQL replay/restart checks; real signer workflow,
-retries, send/settlement and live cutover remain unfinished.
-No existing custody state has been moved. See the rebuild README for scoped counts
-and evidence; do not compare this subset against the entire old storage layer.
+Current source and scoped acceptance are recorded in [rebuild/README.md](../rebuild/README.md).
+The rebuild now includes the complete payment workflow, dedicated HTTPS signer,
+observer, custody reconciliation, recovery, backups and root Cabal build. Populated
+legacy-ledger migration, both funded conversion directions, earned-fee withdrawals,
+native refund/restart and same-host custody restoration have passed local real-chain
+acceptance. These do not prove wallet UX, cross-UID isolation or off-host restoration.
+The old application remains only until its installation/integration callers are
+replaced. Its Haskell test library and database runner have been retired after
+transferring required assertions to the rebuild contracts. Remaining Python tools
+still need replacement; some refer to retired helpers and must not be treated as
+current acceptance commands. Follow the remaining-release sequence in the rebuild
+README; the broader requirements below remain binding.
 
 ## Product and audit contract
 
@@ -76,7 +52,7 @@ or license obligation. Readability wins over code golf and arbitrary line quotas
 
 ## Baseline and desired shape
 
-At this review: 431 tracked files; 58 production Haskell modules / 9,331 lines;
+Historical inventory before the rebuild (not current counts): 431 tracked files; 58 production Haskell modules / 9,331 lines;
 9 legacy modules / 2,298 lines; 31 integration files; 27 scripts; 26 deployment
 files; 13 test files / 6,504 lines; 218 documentation files including 186 evidence
 artifacts. Local dependencies and build caches are not tracked source bloat.
@@ -161,15 +137,15 @@ readable. Preserved saved attempts and backup-before-sign/send gates still apply
 
 First-party application and browser logic use Haskell, with the browser compiled
 by GHC’s JavaScript backend and HTML/CSS for presentation. Do not use WebAssembly. Keep the existing Solana SDK Rust
-only behind a bounded Haskell FFI in the signer process; remove its subprocess
-protocol after migration. Browser DOM bindings and the generated JavaScript runtime remain necessary,
+only behind bounded Haskell FFI; unsigned construction is available to the worker
+and administration tools, while custody signing stays in the signer process. Browser DOM bindings and the generated JavaScript runtime remain necessary,
 but no TypeScript application or npm frontend build should remain. Preserve QR,
 integer amounts, payment instructions, saved-order reload and error behavior.
 PostgreSQL, the native node, Solana RPC and backup tooling remain dependencies.
 The signer/FFI and JavaScript-backend frontend are implemented; deployment and
 funded wallet acceptance remain pending.
-The integrated architecture is not yet complete or accepted
-on real chains; previous package evidence describes the earlier process design.
+Current funded acceptance is scoped in the rebuild README; previous installer
+evidence describes the earlier process design and does not certify this deployment.
 
 ## Current refactor checkpoint
 
@@ -184,7 +160,8 @@ Implemented in source:
   legacy-ledger refusal remain unchanged.
 - Shared admission, accounting, saved-record codecs, preparation/cancellation,
   settlement/refunds, source coverage/return, treasury funding and resume checks.
-  Earned-fee withdrawal has reservation/cancellation only, not a complete payment flow.
+  Earned-fee withdrawals use the shared prepare/sign/send/settle workflow and have
+  funded native and wrapped acceptance.
 - Root Cabal builds the native app, bounded Solana SDK FFI and GHC JavaScript
   frontend. No TypeScript/npm application or WASM backend remains.
 - One native QuickCheck suite and one PostgreSQL contract executable for journal,
@@ -193,8 +170,9 @@ Implemented in source:
 
 Current ownership and invariants live in [ARCHITECTURE.md](ARCHITECTURE.md); change
 history belongs in Git. Remaining Python tools/tests need consolidation. Signer OS
-isolation/native-RPC restrictions, actual two-process funded flows, supported-wallet
-signing, clean-host recovery and Linux packaging remain unverified release gates.
+isolation/native-RPC restrictions, supported-wallet signing, off-host clean-host
+recovery and Linux packaging remain unverified release gates. Same-user two-process
+funded flows have passed; they do not establish OS credential isolation.
 Historical installer evidence describes an earlier process design.
 
 ## Reinstall and recovery contract
@@ -382,5 +360,6 @@ accounting and external effects a human can actually verify.
 The root has three project folders: `1-Make-Wrapped-ECX` for token administration,
 `2-Wrap-Unwrap-Server` for the bridge and its build/test sources, and
 `3-Create-CPMM-Pool` for separate liquidity operations. Administration and pool
-programs remain pending; their folders point to the existing operational guide.
+programs have Cabal CLIs, closed DSL evaluators and scoped Devnet acceptance; their
+folder READMEs describe commands and remaining recovery/canonical acceptance.
 Shared Git metadata, CI, license and contributor instructions remain at the root.

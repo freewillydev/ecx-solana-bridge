@@ -7,19 +7,23 @@ historical real-chain evidence from outstanding acceptance; the
 
 ## Audit path
 
+Paths below are relative to `2-Wrap-Unwrap-Server/rebuild/`, the review target.
+The old sibling application remains for installation/integration migration only.
+Current acceptance and remaining gates are in [rebuild/README.md](../rebuild/README.md).
+
 | Responsibility | Source |
 | --- | --- |
-| Amounts, quotes, records | `types/Bridge/Types.hs`, `Model.hs`, `Ledger/Model.hs` |
-| Closed operations and existential requests | `types/Bridge/Operation/Internal.hs`; customer facade `Operation.hs` |
+| Amounts, funding, quotes, wire records | `src/Bridge/Domain.hs`, `Wire.hs` |
+| Closed operations and existential requests | `src/Bridge/Operation/Internal.hs`; customer facade `Operation.hs` |
 | Four customer routes and pure handlers | `api/Bridge/API.hs` |
-| Authorization, safe/critical evaluation, scheduling | `src/Bridge/Postgres/Runtime.hs` |
-| Admission and instruction provisioning | `src/Bridge/Admission.hs`, `Order.hs`, `Postgres/Order.hs` |
-| Preparation, saved-byte send, settlement | `src/Bridge/Payment.hs`, `Settlement.hs`, `Postgres/Preparation.hs`, `Postgres/Settlement.hs` |
-| Native/Solana protocol validation | `src/Bridge/Native*.hs`, `Solana*.hs`, `RPC.hs` |
-| Recovery and custody | `src/Bridge/Recovery.hs`, `Reorg.hs`, `Reconciliation.hs`, corresponding `Postgres/` operations |
-| Transactions, accounting, immutable records | `src/Bridge/Postgres/Ledger.hs`, `Schema.hs`, `migrations/postgresql/` |
-| Dedicated signer and local operator control | `src/Bridge/Operator.hs`, `Signer.hs`, `Control.hs` |
-| Host fence and backup | `src/Bridge/Postgres/Fence.hs`, `Backup.hs`, `Maintenance.hs`, `deploy/` |
+| Authorization, safe/critical evaluation, scheduling | `workflow/Bridge/Critical.hs` |
+| Admission and instruction provisioning | `workflow/Bridge/Admission.hs`, `Order.hs` |
+| Preparation, saved-byte send, settlement | `workflow/Bridge/Payment.hs`, `runtime/Bridge/Store.hs` |
+| Native/Solana protocol validation | `chain/Bridge/` |
+| Observation, reconciliation and recovery | `workflow/Bridge/Observer.hs`, `Reconciliation.hs`, `Recovery.hs`, `Critical.hs` |
+| Transactions, accounting, immutable records | `runtime/Bridge/Store.hs`, `Store/Schema.hs`, `migrations/` |
+| Dedicated signer and local operator control | `workflow/Bridge/Signer.hs`, `SigningTransport.hs`, `Control.hs` |
+| Host fence and backup | `runtime/Bridge/Fence.hs`, `Store/Backup.hs` |
 
 The deployment has one HTTP/API process and one dedicated signer process.
 The HTTP process serves HTML/CSS and the Haskell browser compiled by GHC's
@@ -38,28 +42,30 @@ Keep it unmodified, outside production builds, and read it before changing this 
 The production core retains its typeclass/constrained-existential/GADT design:
 
 ```haskell
-class Operation (s :: Severity) (op :: Type -> Type) | op -> s where
-  command :: op a -> DSL s a
+class Operation (caller :: Caller) (severity :: Severity) (op :: Type -> Type)
+    | op -> caller severity where
+  command :: op a -> DSL caller severity a
 
-data Request (s :: Severity) a where
-  Request :: Operation s op => op a -> Request s a
+data Request (caller :: Caller) (severity :: Severity) a where
+  Request :: Operation caller severity op => op a -> Request caller severity a
 
-resolve :: Request s a -> DSL s a
+resolve :: Request caller severity a -> DSL caller severity a
 resolve (Request operation) = command operation
 ```
 
-`Request s a` hides the operation type, retaining its dictionary, result type and
-severity. `Plan a` wraps that request in a safe/customer/operator/worker envelope.
-Customer handlers have type `ServerT CustomerAPI Plan`; they package operations,
-not IO or an already evaluated result. Servant's hoist calls `interpret`, which
-resolves the dictionary to a DSL and evaluates it. Only the resulting concrete
-record is serialized as the HTTP response. The existential is not wire JSON.
+`Request caller severity a` hides the operation type, retaining its dictionary,
+result, caller and severity. `Plan caller a` holds a safe or critical request.
+Customer handlers have type `ServerT CustomerAPI (Plan 'Customer)`; they package
+operations, not IO or an already evaluated result. Servant's hoist resolves the
+dictionary to a DSL and evaluates it. Only the concrete result is serialized.
+The signer uses `ServerT SigningAPI (Request 'Signer 'Critical)` and resolves its
+own `SigningDSL` under separate authorization and serialization.
 
-Safe and critical evaluators remain separate. The runtime has one `evalCritical`
-call under its workflow gate; authority is checked before waiting for that gate.
+Safe and critical evaluators remain separate. `Critical.hs` has one runtime
+`evalCritical` dispatch under its workflow gate; authority is checked before waiting.
 The gate spans chain calls and individual database transactions, so scanning cannot
 change a payment's observed source midway through a workflow. Safe reads remain
-concurrent. The signer has its own restricted signing evaluator and serialization gate.
+concurrent. The signer independently evaluates its restricted signing operations.
 
 Severity and caller permission are distinct: order creation is critical without
 allowing customers to sign or administer funds. Observer mode allows pause and
@@ -68,12 +74,13 @@ broadcasts. Closed operator commands cover pause/resume, refunds, treasury decis
 cancellation, source recovery, replacement and rebroadcast. No HTTP request can
 supply arbitrary SQL, IO, chain methods, signed bytes to authorize, or an evaluator.
 
-Cabal enforces three private components. `bridge-types` owns the grammar and pure
-records. `customer-api` sees the restricted operation facade, with Internal hidden
-by a module mixin, and has no runtime/database/signer/client dependency.
-`bridge-runtime` owns capabilities and evaluation. The separate `ecx-build-assets`
-package provides Cabal hooks for SDK/browser builds; it adds no runtime service.
-Keep compile-failure checks for forbidden customer imports and authority construction.
+Cabal separates domain/grammar, private `customer-api`, private `store`, public
+`chain` adapters and private `workflow` components. The customer API hides
+`Operation.Internal` through a module mixin and has no store, chain or workflow
+dependency. The separate `ecx-build-assets` package supplies SDK/browser build hooks,
+not a runtime service. Compile-failure checks guard forbidden customer imports and
+authority construction. Token/pool CLIs reuse the public protocol component and
+have separate severity-indexed existential requests and evaluators.
 
 The reference sketch is not itself production-ready: remove its severity-to-operation
 functional dependency because one severity has many operations; never permit a safe
@@ -104,7 +111,8 @@ begins paused. No SQL transaction spans chain RPC, signing or remote backup.
 
 Only the critical evaluator communicates with the signer through generated Servant
 ClientM calls. Its HTTPS API binds to 127.0.0.1 and exposes sign-preparation,
-draft-replacement and sign-replacement, tied to saved decisions. BasicAuth uses a
+draft-replacement, sign-replacement and checkpoint-custody, tied to saved decisions
+and the deployment identity. BasicAuth uses a
 256-bit protected token; the worker trusts only the protected configured certificate
 with hostname validation. No proxy, redirect, automatic retry or unbounded response
 is allowed. Token/certificate ownership and directory permissions are checked;
@@ -193,8 +201,10 @@ Treasury allocation requires a verified eligible unbound receipt, paused operati
 current custody and an immutable ownership attestation; splits equal the receipt,
 and SOL only funds operating. Classification of an already observed operator spend
 protects customer attempts and active holds, then records costs once. Changed evidence
-reopens review. Fee withdrawal currently has reservation/cancellation storage only;
-its complete signing/send workflow remains unfinished.
+reopens review. Earned-fee withdrawal reserves explicit earned funding and uses the
+same durable preparation/signing/send/settlement workflow as customer payments.
+It never fabricates a customer order or source deposit. Cancellation and recovery
+preserve its reservations and saved attempts.
 
 Quotes reserve conversion and alternate refund operating allowances, including rent.
 Admission requires allocation minus holds to cover costs, and the last 86,400 seconds
@@ -308,7 +318,7 @@ both chains and pending work, then explicitly resume. Retire the old worker and 
 its signing authority; a local marker cannot revoke copied keys on another host.
 Never overwrite the only surviving ledger/keys or initialize an empty ledger as recovery.
 
-Outstanding work includes fee-withdrawal integration, remaining test/tool consolidation,
+Outstanding work includes legacy application retirement, remaining test/tool consolidation,
 actual Solana Pay wallet signing, deployed signer/native-RPC isolation, clean-host
 off-host restore, permanent-loss/winner-change acceptance, canonical authority/backing
 and funded flows, dependency/license review and independent security review. Linux
