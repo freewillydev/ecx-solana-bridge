@@ -1592,7 +1592,7 @@ preparePayment c config now identifier allowance plan = do
         _ <- O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \r->r {S.obligationStatus=text "paying"},O.uWhere= \r->S.obligationId r O..== text key,O.uReturning=O.rCount}
         let oid=case funding of Conversion order _ _ _->order; Refund order _ _ _->order; EarnedFees{}->""
         _ <- O.runUpdate c O.Update {O.uTable=S.reservations,O.uUpdateWith= \(order,asset,n,phase)->(order,asset,n,O.ifThenElse (phase O..== text "obligation") (text "payment") phase),O.uWhere= \(order,_,_,_)->order O..== text oid,O.uReturning=O.rCount}
-        _ <- O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text "Preparing"},O.uWhere= \r->S.orderId r O..== text oid,O.uReturning=O.rCount}
+        _ <- O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text "Preparing"},O.uWhere= \r->S.orderId r O..== text oid O..&& S.status r O../= text "Paid",O.uReturning=O.rCount}
         pure ()
       readPreparation c identity identifier
     _ -> reject "preparation_retry_requires_recovery"
@@ -1704,7 +1704,7 @@ recordAttempt c identity expected signed = do
       let funding=paymentFunding(savedPayment $ preparedView current)
           order=case funding of Conversion oid _ _ _->Just oid; Refund oid _ _ _->Just oid; EarnedFees{}->Nothing
       forM_ order $ \oid->do
-        _ <- O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text "Paying"},O.uWhere= \r->S.orderId r O..== text oid,O.uReturning=O.rCount}
+        _ <- O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text "Paying"},O.uWhere= \r->S.orderId r O..== text oid O..&& S.status r O../= text "Paid",O.uReturning=O.rCount}
         pure ()
       readAttempt c (signedId signed)
     _ -> reject "duplicate_attempt"

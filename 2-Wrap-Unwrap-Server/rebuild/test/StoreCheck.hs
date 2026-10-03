@@ -905,6 +905,7 @@ ledgerMain = do
           && change Wrapped Float==(-93) && change Wrapped External==93 && change Sol Operating==(-5) && change Sol External==5)
         completed<-evalRead reader (ReadPayment "convert:historical-promotion")
         check (savedStatus completed==PaymentPaid)
+        paidRefundContract fixtures reader writer
         fixture fixtures ReadyIntake
         _<-evalWrite writer (PreparePayment 100 ("convert:"<>failedPayment) (money 10) "{}")
         evalWrite writer (SaveDraft ("convert:"<>failedPayment) 0 "{}")
@@ -1999,6 +2000,49 @@ serverMain = do
       evalRead reader ReadBalances >>= check . (==before)
   putStrLn "PASS: rebuilt executable, offline adoption/retirement, actual HTTP assets/config, paused unavailable-chain startup, unchanged balances and process/fence cleanup"
 
+paidRefundContract :: PG.Connection -> Reader -> Writer -> IO ()
+paidRefundContract fixtures reader writer=do
+  let header="Bearer "<>T.replicate 64 "0"
+      check ok=unless ok (fail "completed-order refund contract failed")
+  paidReceipt<-evalRead reader (ReadSource "historical-fee")
+  paidOrder<-maybe (fail "missing paid order") pure (W.depositOrder paidReceipt)
+  paidBefore<-evalRead reader (ReadOrder header paidOrder)
+  fixture fixtures (SeedReceipt "refund-after-paid" (Just paidOrder) Native 3 2 True 110)
+  evalWrite writer (Pause "completed-order refund contract")
+  fixture fixtures RefreshCustody
+  extra<-evalWrite writer (AuthorizeRefund 110 "refund-after-paid")
+  check (W.refundAmount extra==money 3)
+  paidAfter<-evalRead reader (ReadOrder header paidOrder)
+  check (W.status paidAfter=="Paid" && W.payoutTx paidAfter==W.payoutTx paidBefore)
+  fixture fixtures (CheckRefundHolds paidOrder Native) >>= check
+  -- Extra-receipt refunds must preserve the completed conversion at every stage.
+  let refundKey=W.refundPayment extra
+      unchanged=evalRead reader (ReadOrder header paidOrder) >>= check . (==paidBefore)
+  fixture fixtures ReadyIntake
+  void $ evalWrite writer (PreparePayment 110 refundKey (money 1) "{}")
+  unchanged
+  evalWrite writer (SaveDraft refundKey 0 "{}")
+  fixture fixtures CoverBackup
+  fixture fixtures ReadyIntake
+  prepared<-evalRead reader (ReadSigningDecision 110 refundKey 0)
+  let signed=SignedAttempt "extra-refund-after-paid" "offline-refund-bytes" "{}" (Just "refund-input:0")
+  void $ evalWrite writer (RecordAttempt prepared signed)
+  unchanged
+  fixture fixtures ReadyIntake
+  void $ evalWrite writer (MarkBroadcast 110 $ signedId signed)
+  fixture fixtures CoverBackup
+  fixture fixtures ReadyIntake
+  authorized<-evalWrite writer (AuthorizeSend 110 $ signedId signed)
+  beforeRefund<-evalRead reader ReadBalances
+  evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 1) (money 0)) "{\"offlineExtraRefund\":true}")
+  unchanged
+  afterRefund<-evalRead reader ReadBalances
+  check (M.findWithDefault 0 (Native,Principal) afterRefund==M.findWithDefault 0 (Native,Principal) beforeRefund-3)
+  evalRead reader (ReadPayment refundKey) >>= check . (==PaymentPaid) . savedStatus
+  evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 1) (money 0)) "{\"offlineExtraRefund\":true}")
+  evalRead reader ReadBalances >>= check . (==afterRefund)
+  unchanged
+
 refundContract :: PG.Connection -> Reader -> Writer -> IO ()
 refundContract fixtures reader writer=do
   let header="Bearer "<>T.replicate 64 "0"
@@ -2045,16 +2089,6 @@ refundContract fixtures reader writer=do
   fixture fixtures (SourceEligibility "historical-fee" True)
   ready
   expectStore "principal_already_resolved" (authorize "historical-fee")
-  paidReceipt<-evalRead reader (ReadSource "historical-fee")
-  paidOrder<-maybe (fail "missing paid order") pure (W.depositOrder paidReceipt)
-  paidBefore<-evalRead reader (ReadOrder header paidOrder)
-  receipt "refund-after-paid" paidOrder Native 3
-  ready
-  extra<-authorize "refund-after-paid"
-  check (W.refundAmount extra==money 3)
-  paidAfter<-evalRead reader (ReadOrder header paidOrder)
-  check (W.status paidAfter=="Paid" && W.payoutTx paidAfter==W.payoutTx paidBefore)
-  fixture fixtures (CheckRefundHolds paidOrder Native) >>= check
   racing<-make "refund-racing" NativeToWrapped
   receipt "refund-racing-source" racing Native 10
   evalWrite writer (PromoteDeposit 110 "refund-racing-source") >>= check

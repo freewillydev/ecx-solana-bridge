@@ -244,9 +244,28 @@ preserved the order, paused at sequence 9 and left one native outgoing transacti
 The test minimum was then lowered to 1,000 units (existing terms unchanged), and
 a reverse wrap quoted 1,000 gross, 10 fee and 990 net. Its native deposit
 `8e9488e637a62b1aa26f15173b3a6baf81e8bf04d999e37cb52132d0a280d0be`
-is submitted; confirmation and wrapped payout remain pending. This does not prove
-arbitrary crash recovery or a real customer wallet. Private keys/attempts/ledger
-remain outside Git.
+confirmed, and the order settled `Paid` with wrapped payout
+`3UBC85cVNBvfsoFKrdmTW43w4BrEbesg2bbBik9sXZTFN4DDyifwGfFhhDYi7tjqbb51UtFDVa6aLxarh6fQ9YJa`.
+The earned 100 wrapped units were withdrawn and settled through the same engine in
+`2M5LN24FVYZxAubrJxZ1ANPZgqXHzCztYc9kj252fnvUB2CZbkJXVhXuyu9o2UGUyP6S9cUdVC9KV4iReK4Rno1c`.
+An additional 1,000-unit deposit to the completed unwrap reference was fully refunded
+to its verified sender in
+`4pb4UpuF14CaVw9WoSxFhREYWnjCP5RBMP5EiJEC36y2ZWTnufBEQHrV6FRjdQmP8bZUU7pG2EiHW1FMYKzfhJC`.
+Both Solana transactions finalized successfully; closed Opaleye reads show `PaymentPaid`,
+released principal/fee holds and actual operating charges of 5,000 lamports each.
+Exact decisions replay; a changed withdrawal amount is refused.
+
+The extra refund exposed an order-view bug: preparation/signature recording changed
+the completed conversion's status, letting refund settlement overwrite its payout
+link. Both updates now preserve `Paid`, matching authorization/settlement guards.
+The PostgreSQL regression failed before the fix and now passes authorization through
+settlement/replay, checking the original view throughout. The full PostgreSQL contract,
+root Cabal build and QuickCheck pass. Store stays at 3,354 lines in one file; the existing
+contract runner grows 3,023 → 3,057 lines, with no new files or operations. The older
+test deployment's affected order view remains preserved as evidence and needs a
+verified repair; its distinct financial payments settled correctly. Native refunds/
+fee withdrawals, arbitrary crash recovery and real-wallet UX remain unproven.
+Private keys/attempts/ledger remain outside Git.
 
 ## Remaining release work, in order
 
