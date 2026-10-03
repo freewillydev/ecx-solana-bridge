@@ -290,6 +290,25 @@ The full PostgreSQL contract, Cabal build and QuickCheck pass. Native refunds/fe
 arbitrary crash recovery and real-wallet UX remain unproven.
 Private keys/attempts/ledger remain outside Git.
 
+The current GHC-JavaScript browser was also checked against the live rebuilt
+server: both directions displayed ceiling-rounded 1% fees (1,001 gross → 11 fee,
+990 net), paused intake disabled creation, and redemption showed native destination
+and verified-owner refund instructions. The existing paid wrap was recovered using
+its private fragment link; the fragment was removed, reload restored the saved
+order, and the original payout link remained correct. Stopping the server produced
+an explicit network error without losing the saved order. Refresh after restart
+cleared the error and showed paused intake. These checks do not establish actual
+Solana Pay wallet signing or every browser/error case.
+
+Native extra-deposit refund acceptance is in progress. Confirmed receipt
+`cc36b9d6f9c1a494b8a7b1b2da1793330019e33765e9bfe8831685804cd29755:0`
+authorized a 1,000-unit refund with exact authorization replay. The signed refund
+`b677dff8985c20c1582be020a2485733c37e401302ef292852e857bacfaa75fc`
+was broadcast with a node-reported 392-unit fee. Both processes were stopped while
+it remained pending; restart retained the same attempt and balances and paused
+intake. Confirmation and ledger settlement remain pending; do not count this as
+completed native-refund acceptance yet.
+
 ## Remaining release work, in order
 
 1. Extend the funded tests to native refunds/fee withdrawals and remaining
