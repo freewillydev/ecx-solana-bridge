@@ -32,7 +32,7 @@ library store
   hs-source-dirs: runtime
   exposed-modules: Bridge.Store, Bridge.Fence
   other-modules: Bridge.Store.Schema, Bridge.Store.Catalog
-  build-depends: base, ecx-bridge-rebuild, aeson, bytestring, text, containers,
+  build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:chain, aeson, bytestring, text, containers,
     crypton, time, directory, filepath, unix, scientific, opaleye ==0.10.8.0, postgresql-simple >=0.7 && <0.8,
     product-profunctors >=0.11 && <0.12
 

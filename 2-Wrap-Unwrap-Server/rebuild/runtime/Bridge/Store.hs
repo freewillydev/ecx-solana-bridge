@@ -5,6 +5,7 @@ module Bridge.Store
   ( Reader, Writer, BridgeError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), StorePolicy(..), AllocationClaim(..), LedgerState(..), WithdrawalView(..), PaymentView(..), PaymentStatus(..), PreparedPayment(..), SignedAttempt(..), RecordedAttempt(..), NativeLockWork(..), CustodySnapshot(..)
   , withReader, withWriter, withFencedWriter, evalRead, evalWrite ) where
 
+import qualified Bridge.NativePayment as N
 import Bridge.Error
 import Bridge.Fence (withFence)
 import Bridge.Identity (bearerHash,digest,payInstruction,publicKey)
@@ -74,6 +75,8 @@ data CustodySnapshot = CustodySnapshot
   { custodyRevision :: Int64, custodyTotals :: M.Map Asset Integer
   , custodyHeads :: [(Text,Text)], custodySlot :: Int64, custodyPending :: [RecordedAttempt] } deriving (Eq,Show)
 data StoreRead a where
+  ReadNativeFamily :: Text -> StoreRead [(RecordedAttempt,N.NativeSigned)]
+  ReadReplacementDecision :: Text -> Amount -> Text -> StoreRead (Maybe (Int64,Bool))
   ReadLossCover :: Text -> Int64 -> StoreRead (Maybe (Amount,Amount,Text))
   NativeSourceCandidates :: StoreRead [W.Deposit]
   ReadNativeSourceInspection :: Text -> StoreRead (Maybe (Text,W.PolicySnapshot),(Text,Value))
@@ -119,6 +122,8 @@ data StoreRead a where
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
+  SaveReplacementDraft :: Int64 -> RecordedAttempt -> N.NativeDraft -> Text -> StoreWrite Int64
+  CancelReplacementDraft :: Int64 -> Text -> StoreWrite ()
   CoverSourceLoss :: W.Deposit -> Int64 -> Int64 -> Amount -> Amount -> Text -> Value -> (Int64,Int64,Bool,Value) -> StoreWrite ()
   ApproveCoveredSource :: Int64 -> Text -> Int64 -> Text -> Value -> StoreWrite ()
   ApproveSourceRestoration :: Int64 -> Text -> Int64 -> Text -> StoreWrite ()
@@ -213,6 +218,8 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
           O.where_ (S.eventId event O..== O.sqlStrictText identifier O..&& O.in_ (map O.sqlStrictText $ if chain=="Solana" then ["Solana","SolanaOperating"] else [chain]) (S.eventChain event))
           pure (S.eventId event)
         pure (not $ null (rows :: [Text]))
+      ReadNativeFamily identifier -> nativeFamily c identity identifier
+      ReadReplacementDecision parent fee reason -> replacementDecision c parent fee reason
       ReadNativeLockWork -> nativeLockWork c identity
       PendingAttempts -> pendingAttempts c
       PaymentCandidates -> paymentCandidates c
@@ -353,6 +360,8 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
     _ <- O.runInsert c O.Insert {O.iTable=S.audit,
       O.iRows=[(Nothing,O.sqlStrictText "pause",O.sqlStrictText explanation)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
     pure ()
+  SaveReplacementDraft now parent draft reason -> saveReplacementDraft c policy now parent draft reason
+  CancelReplacementDraft sequenceNo reason -> cancelReplacementDraft c policy sequenceNo reason
   CoverSourceLoss source recovery now capital earned reason proof custody -> coverSourceLoss c policy source recovery now capital earned reason proof custody
   ApproveCoveredSource now key recovery reason proof -> approveSourceRecovery c policy (Just proof) now key recovery reason
   ApproveSourceRestoration now key restoration reason -> approveSourceRecovery c policy Nothing now key restoration reason
@@ -450,7 +459,7 @@ metadata :: PG.Connection -> Text -> IO S.Deployment
 metadata c identity = do
   rows <- O.runSelect c (O.selectTable S.deployment)
   case rows of
-    [r] | S.singleton r==1 && S.schemaVersion r==20 && S.fingerprint r==identity
+    [r] | S.singleton r==1 && S.schemaVersion r==21 && S.fingerprint r==identity
         && S.criticalSequence r>=0 && S.backupSequence r>=0 && S.backupSequence r<=S.criticalSequence r
         && S.paused r `elem` [0,1] -> pure r
     _ -> reject "ledger_profile_or_schema_mismatch"
@@ -932,7 +941,11 @@ recordSourceCheck c source check = do
 -- Preserve the existing hash preimage exactly: changing it invalidates saved
 -- source-restoration and replacement approvals. Queries project only bound work.
 sourceWorkHash :: PG.Connection -> Text -> IO Text
-sourceWorkHash c intent = do
+sourceWorkHash=workHash True
+paymentWorkHash :: PG.Connection -> Text -> IO Text
+paymentWorkHash=workHash False
+workHash :: Bool -> PG.Connection -> Text -> IO Text
+workHash includeReplacements c intent = do
   obligations <- O.runSelect c $ do
     r <- O.selectTable S.obligations
     O.where_ (S.obligationId r O..== O.sqlStrictText intent)
@@ -978,7 +991,7 @@ sourceWorkHash c intent = do
     :: IO [(Int64,Text,Int64)]
   let hashJson=digest . BL.toStrict . encode
       base=hashJson (obligations,work,preparations,attempts,cancellations,fees)
-  pure (if null drafts && null cancelled then base else digest $ BL.toStrict $ encode (base,drafts,cancelled))
+  pure (if not includeReplacements || null drafts && null cancelled then base else digest $ BL.toStrict $ encode (base,drafts,cancelled))
 
 scanAssets :: [(Text,Asset)]
 scanAssets=[("Native",Native),("Solana",Wrapped),("SolanaOperating",Sol)]
@@ -1603,7 +1616,14 @@ broadcastCoverage c saved = do
     O.where_ (identifier O..== O.sqlStrictText(recordedPayment saved))
     pure n
     :: IO [Int64]
-  pure (maximum $ original:approvals)
+  cancellations<-O.runSelect c $ do
+    (decision,_,sequenceNo)<-S.replacementCancellations
+    (n,parent,_,_,_,_)<-S.replacementDrafts
+    (tx,intent,_,_,_,_)<-S.workAttempts
+    O.where_ (decision O..== n O..&& parent O..== tx O..&& intent O..== O.sqlStrictText(recordedPayment saved))
+    pure sequenceNo
+    :: IO [Int64]
+  pure (maximum $ original:approvals<>cancellations)
 
 markBroadcast :: PG.Connection -> StorePolicy -> Int64 -> Text -> IO Int64
 markBroadcast c config now txid = do
@@ -2673,3 +2693,148 @@ verifyLossView c receipt proof report = do
   matched<-field "matches" report
   require matched "source_loss_custody_not_current"
  where field name value=either (const $ reject "invalid_source_loss_evidence") pure (parseEither (withObject "source loss" (.: name)) value)
+
+-- Families are ordered by increasing actual fee, never transaction ID or caller
+-- order. Every member is bound to the same immutable payment/preparation policy.
+nativeFamily :: PG.Connection -> Text -> Text -> IO [(RecordedAttempt,N.NativeSigned)]
+nativeFamily c identity identifier = do
+  ids<-O.runSelect c $ O.limit 9 $ do
+    row<-O.selectTable S.attempts
+    O.where_ (S.attemptIntent row O..== O.sqlStrictText identifier)
+    pure (S.attemptId row)
+    :: IO [Text]
+  require (not(null ids) && length ids<=8) "native_replacement_family_bounds"
+  pairs<-forM ids $ \tx->do
+    saved<-readAttempt c tx
+    signed<-decodeSaved (signedPolicy $ recordedSigned saved)
+    pure (saved,signed)
+  let ordered=sortOn (N.signedNativeFee.snd) pairs
+      signed=map snd ordered
+  checked (N.validateNativeFamily signed)
+  first<-case ordered of (a,_):_->pure a; _->reject "native_replacement_family_bounds"
+  prepared<-recordedPreparation c identity (signedId $ recordedSigned first)
+  plan<-decodeSaved (preparedPolicy prepared)
+  let outgoing=savedPayment $ preparedView prepared
+      terms=savedTerms $ preparedView prepared
+  require (paymentAsset outgoing==Native && N.planAmount plan==paymentAmount outgoing
+    && N.planRecipient plan==paymentRecipient outgoing && N.planDepth plan==nativeDepth(paymentPolicy terms)
+    && N.planFeeLimit plan==preparedFee prepared) "saved_native_policy_mismatch"
+  previousWinners<-O.runSelect c S.winnerHistory :: IO [(Text,Text)]
+  forM_ ordered $ \(saved,member)->do
+    let wire=recordedSigned saved; tx=N.signedNativeTransaction member
+    point<-case N.nativeInputs tx of input:_->pure (N.nativeOutpoint input); _->reject "native_input_mismatch"
+    require (recordedChain saved=="Native" && recordedGeneration saved==recordedGeneration first
+      && recordedFee saved==N.planFeeLimit plan && N.signedNativePlan member==plan
+      && signedId wire==N.nativeTxid tx && signedBytes wire==N.signedNativeBytes member
+      && commonInput wire==Just(N.outpointTxid point<>":"<>T.pack(show $ N.outpointVout point))) "saved_native_policy_mismatch"
+    when (recordedState saved=="review") $ require
+      (maybe False (\proof->(signedId wire,proof) `elem` previousWinners) $ recordedObservation saved) "native_family_review_not_a_previous_winner"
+  links<-O.runSelect c $ do
+    (decision,child,sequenceNo)<-S.replacementMembers
+    (n,parent,fee,draft,_,_)<-S.replacementDrafts
+    O.where_ (decision O..== n O..&& O.in_ (map O.sqlStrictText ids) child)
+    pure (decision,parent,child,fee,draft,sequenceNo)
+    :: IO [(Int64,Text,Text,Int64,Text,Int64)]
+  cancelled<-O.runSelect c S.replacementCancellations :: IO [(Int64,Text,Int64)]
+  require (length links==length ordered-1) "native_replacement_lineage_missing"
+  forM_ (zip [1..] $ zip ordered $ drop 1 ordered) $ \(index,((parent,_),(child,member)))->do
+    (decision,fee,raw,n)<-case [(d,f,r,s)|(d,p,t,f,r,s)<-links,p==signedId(recordedSigned parent),t==signedId(recordedSigned child)] of
+      [row]->pure row; _->reject "native_replacement_lineage_missing"
+    draft<-decodeSaved raw
+    checked (N.validateNativeReplacementDraft (take index signed) (N.draftFee draft) draft)
+    require (fee==units(N.signedNativeFee member) && fee==units(N.draftFee draft)
+      && N.sameNativeTemplate (N.draftTransaction draft) (N.signedNativeTransaction member)
+      && n>decision && all (\(d,_,_)->d/=decision) cancelled) "native_replacement_member_changed"
+  pure ordered
+
+replacementDecision :: PG.Connection -> Text -> Amount -> Text -> IO (Maybe (Int64,Bool))
+replacementDecision c parent fee reason = do
+  rows<-O.runSelect c $ do
+    (n,p,f,_,_,r)<-S.replacementDrafts
+    O.where_ (p O..== O.sqlStrictText parent O..&& f O..== O.sqlInt8(units fee) O..&& r O..== O.sqlStrictText reason)
+    pure n
+    :: IO [Int64]
+  decision<-case rows of []->pure Nothing; [n]->pure (Just n); _->reject "duplicate_native_replacement_decision"
+  forM decision $ \n->do
+    cancelled<-O.runSelect c $ do
+      (d,_,_)<-S.replacementCancellations
+      O.where_ (d O..== O.sqlInt8 n)
+      pure d
+      :: IO [Int64]
+    pure (n,not $ null cancelled)
+
+saveReplacementDraft :: PG.Connection -> PaymentTerms -> Int64 -> RecordedAttempt -> N.NativeDraft -> Text -> IO Int64
+saveReplacementDraft c policy now expected draft reason = do
+  validReason reason
+  validateSavedJson 200000 (encodeSaved draft)
+  let identity=deploymentFingerprint(paymentPolicy policy); txid=signedId(recordedSigned expected)
+      identifier=recordedPayment expected; text=O.sqlStrictText; num=O.sqlInt8
+  metadata c identity >>= \state->require (S.paused state==1) "pause_before_operator_action"
+  old<-replacementDecision c txid (N.draftFee draft) reason
+  case old of
+    Just (n,_)->do
+      rows<-O.runSelect c $ do
+        (key,_,_,saved,_,_)<-S.replacementDrafts
+        O.where_ (key O..== num n)
+        pure saved
+        :: IO [Text]
+      require (rows==[encodeSaved draft]) "native_replacement_draft_conflict"
+      pure n
+    Nothing->do
+      current<-sendContext c identity txid
+      require (current==expected && recordedChain current=="Native" && recordedState current=="broadcast_intent"
+        && maybe False (>0) (recordedSequence current)) "native_replacement_not_expected"
+      family<-nativeFamily c identity identifier
+      require (fst(last family)==current) "native_replacement_not_current"
+      checked (N.validateNativeReplacementDraft (map snd family) (N.draftFee draft) draft)
+      drafts<-O.runSelect c $ do
+        (n,parent,_,_,_,_)<-S.replacementDrafts
+        O.where_ (O.in_ (map (text.signedId.recordedSigned.fst) family) parent)
+        pure n
+        :: IO [Int64]
+      require (length drafts<7) "native_replacement_draft_limit"
+      fresh c now
+      hash<-paymentWorkHash c identifier
+      custody<-O.runSelect c $ do
+        (_,revision,_,at,_)<-O.selectTable S.custody
+        (_,report)<-O.selectTable S.custodyReport
+        pure (revision,at,report)
+        :: IO [(Int64,Maybe Int64,Maybe Text)]
+      let proof=encodeSaved $ object ["custody" .= custody,"parentBroadcastSequence" .= recordedSequence current]
+      require (T.length proof<=32768) "native_replacement_evidence_too_large"
+      n<-nextSequence c
+      count<-O.runInsert c O.Insert {O.iTable=S.replacementDecisions,
+        O.iRows=[(num n,text txid,num $ units $ N.draftFee draft,text $ encodeSaved draft,text hash,text reason,text proof)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      require (count==1) "native_replacement_draft_insert_failed"
+      audit c "native_replacement_drafted" txid
+      pure n
+
+cancelReplacementDraft :: PG.Connection -> PaymentTerms -> Int64 -> Text -> IO ()
+cancelReplacementDraft c policy decision reason = do
+  validReason reason
+  require (decision>0) "invalid_native_replacement_cancellation"
+  metadata c (deploymentFingerprint $ paymentPolicy policy) >>= \state->require (S.paused state==1) "pause_before_operator_action"
+  old<-O.runSelect c $ do
+    (n,r,_)<-S.replacementCancellations
+    O.where_ (n O..== O.sqlInt8 decision)
+    pure r
+    :: IO [Text]
+  case old of
+    [saved]->require (saved==reason) "native_replacement_cancellation_conflict"
+    []->do
+      drafts<-O.runSelect c $ do
+        (n,parent,_,_,_,_)<-S.replacementDrafts
+        O.where_ (n O..== O.sqlInt8 decision)
+        pure parent
+        :: IO [Text]
+      parent<-case drafts of [p]->pure p; _->reject "native_replacement_draft_missing"
+      members<-O.runSelect c $ do
+        (n,tx,_)<-S.replacementMembers
+        O.where_ (n O..== O.sqlInt8 decision)
+        pure tx
+        :: IO [Text]
+      require (null members) "native_replacement_already_signed"
+      sequenceNo<-nextSequence c
+      _<-O.runInsert c O.Insert {O.iTable=S.replacementCancellationRows,O.iRows=[(O.sqlInt8 decision,O.sqlStrictText reason,O.sqlInt8 sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      audit c "native_replacement_cancelled" parent
+    _->reject "duplicate_native_replacement_cancellation"

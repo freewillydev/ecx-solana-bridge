@@ -30,6 +30,7 @@ import qualified Bridge.Fence as Fence
 import System.Directory (createDirectory,removeDirectoryRecursive,removeFile)
 import System.IO (openTempFile,hClose,withFile,IOMode(WriteMode))
 import System.Posix.Files (setFileMode)
+import qualified Bridge.NativePayment as NP
 import Bridge.Error (reject)
 import Bridge.Observer (ObserverSettings(..))
 import Bridge.Reconciliation (inspectCustodyWith,nativeBalance)
@@ -593,6 +594,7 @@ ledgerMain = do
         evalRead reader PendingAttempts >>= check . null
         evalRead reader PaymentCandidates >>= check . (notElem ("convert:"<>failedPayment))
       withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
+        nativeReplacementContract fixtures reader writer
         let tx=T.replicate 64 "d"; did="native:"<>tx<>":0"; hash=T.replicate 64 "e"
             proof=object ["observationHash" .= hash]
             record decision=do snapshot<-evalRead reader (ReadSource did); evalWrite writer (RecordSourceCheck snapshot decision)
@@ -898,7 +900,7 @@ fixture c LockRestoreAudits = O.runSelect c $ do
   pure subject
 fixture c Initialize = fixture c (InitializeIdentity "contract")
 fixture c (InitializeIdentity identity) = PG.withTransaction c $ do
-  void $ O.runInsert c O.Insert {O.iTable=S.deployment,O.iRows=[S.Deployment (O.sqlInt8 1) (O.sqlInt8 20) (O.sqlStrictText identity) (O.sqlInt8 0) (O.sqlInt8 0) (O.sqlInt8 1) (O.sqlStrictText "test")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.deployment,O.iRows=[S.Deployment (O.sqlInt8 1) (O.sqlInt8 21) (O.sqlStrictText identity) (O.sqlInt8 0) (O.sqlInt8 0) (O.sqlInt8 1) (O.sqlStrictText "test")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.custody,O.iRows=[(O.sqlInt8 1,O.sqlInt8 0,O.null,O.null,O.null)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(O.sqlStrictText "fixture",O.sqlStrictText "contract balances")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.postings,O.iRows=[(Nothing,O.sqlStrictText "fixture",O.sqlStrictText "Native",O.sqlStrictText account,O.sqlInt8 delta)| (account,delta)<-[("external",-1000),("earned",1000)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
@@ -2199,3 +2201,63 @@ restorationContract fixtures reader writer=do
   lostAgain<-evalRead reader (ReadSource did)
   evalWrite writer (RecordSourceCheck lostAgain $ W.SourceMissing proof)
   expectStore "source_not_eligible" (evalRead reader $ CheckPaymentSource key)
+
+-- Deliberately synthetic ledger records: protocol bytes are validated separately
+-- against captured Signet fixtures in NativePaymentCheck.
+nativeReplacementContract :: PG.Connection -> Reader -> Writer -> IO ()
+nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fail $ "native replacement ledger contract: "<>T.unpack code) $ do
+  captured<-getDataFileName "test/fixtures/native-signet-payment.json" >>= BS.readFile >>= either fail pure . eitherDecodeStrict'
+  originalPlan<-fieldValue "plan" captured
+  originalTx<-fieldValue "decoded" captured >>= either reject pure . NP.decodeNativeTx
+  let check ok=unless ok (fail "native replacement ledger contract")
+      key=T.replicate 64 "6"; identifier="fee:"<>key
+      plan=originalPlan {NP.planAmount=money 10,NP.planDepth=2,NP.planFeeLimit=money 5}
+      point=NP.nativeOutpoint $ head $ NP.nativeInputs originalTx
+      prevouts=[NP.NativePrevout point (money 100) (NP.planChangeScript plan) 2 False]
+      outputs n=[NP.NativeOutput (NP.planChangeScript plan) (money n),NP.NativeOutput (NP.planRecipientScript plan) (money 10)]
+      tx=originalTx {NP.nativeTxid=T.replicate 64 "6",NP.nativeOutputs=outputs 89}
+      signed=NP.NativeSigned "00" tx plan prevouts (money 1)
+      wire=SignedAttempt (NP.nativeTxid tx) "00" (encodeText signed) (Just $ NP.outpointTxid point<>":"<>T.pack(show $ NP.outpointVout point))
+      draft=NP.NativeDraft "offline-replacement" tx {NP.nativeTxid=T.replicate 64 "7",NP.nativeOutputs=outputs 88} prevouts (money 2)
+      ready=fixture fixtures ReadyIntake
+      paused=evalWrite writer (Pause "replacement ledger contract") >> fixture fixtures RefreshCustody
+  paused
+  void $ evalWrite writer (ReserveFees 110 key Native (money 10) (NP.planRecipient plan) "replacement earnings")
+  ready
+  void $ evalWrite writer (PreparePayment 110 identifier (money 5) $ encodeText plan)
+  evalWrite writer (SaveDraft identifier 0 $ encodeText $ NP.NativeDraft "offline-original" tx prevouts (money 1))
+  prepared<-evalRead reader (ReadPreparation identifier)
+  void $ evalWrite writer (RecordAttempt prepared wire)
+  ready
+  void $ evalWrite writer (MarkBroadcast 110 $ signedId wire)
+  parent<-evalRead reader (ReadAttempt $ signedId wire)
+  evalRead reader (ReadNativeFamily identifier) >>= check . (==[(parent,signed)])
+  let save reason=evalWrite writer (SaveReplacementDraft 110 parent draft reason)
+  expectStore "pause_before_operator_action" (save "increase fee")
+  paused
+  before<-evalRead reader ReadBalances
+  decision<-save "increase fee"
+  evalRead reader (ReadReplacementDecision (signedId wire) (money 2) "increase fee") >>= check . (==Just(decision,False))
+  n<-ledgerSequence <$> evalRead reader ReadState
+  save "increase fee" >>= check . (==decision)
+  evalRead reader ReadState >>= check . (==n) . ledgerSequence
+  expectStore "native_replacement_draft_conflict" (evalWrite writer $ SaveReplacementDraft 110 parent draft {NP.draftPsbt="changed"} "increase fee")
+  expectStore "native_replacement_draft_pending" (save "another decision")
+  fixture fixtures CoverBackup
+  ready
+  expectStore "native_replacement_draft_pending" (evalWrite writer $ AuthorizeSend 110 $ signedId wire)
+  paused
+  evalWrite writer (CancelReplacementDraft decision "abandon unsigned draft")
+  evalWrite writer (CancelReplacementDraft decision "abandon unsigned draft")
+  expectStore "native_replacement_cancellation_conflict" (evalWrite writer $ CancelReplacementDraft decision "different")
+  evalRead reader (ReadReplacementDecision (signedId wire) (money 2) "increase fee") >>= check . (==Just(decision,True))
+  save "increase fee" >>= check . (==decision)
+  ready
+  expectStore "backup_pending" (evalWrite writer $ AuthorizeSend 110 $ signedId wire)
+  fixture fixtures CoverBackup
+  ready
+  restored<-evalWrite writer (AuthorizeSend 110 $ signedId wire)
+  check (restored==parent)
+  evalRead reader ReadBalances >>= check . (==before)
+  evalWrite writer (SettlePayment parent (W.PaymentCosts (money 1) (money 0)) "offline original winner after cancellation")
+ where encodeText value=TE.decodeUtf8 (BL.toStrict $ encode value)

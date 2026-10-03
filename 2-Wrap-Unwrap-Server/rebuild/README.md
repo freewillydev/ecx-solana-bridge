@@ -108,7 +108,7 @@ state; replay cannot silently reactivate released money.
 fully migrated `ECX_REBUILD_CONTRACT_DATABASE` with the `ecx_rebuild_contract_`
 prefix, `ECX_REBUILD_CONTRACT_READER` with a SELECT-only role, and `USER` for fixture
 setup on `/tmp/ecx-pg-seam:29436`. Apply baseline PostgreSQL migrations 001–005,
-then the Cabal-packaged `rebuild/migrations/001.sql` and `002.sql` (schema 20). It refuses an unprefixed database. Fixtures and
+then the Cabal-packaged `rebuild/migrations/001.sql` through `003.sql` (schema 21). It refuses an unprefixed database. Fixtures and
 assertions use Opaleye; schema/role provisioning is separate DDL. Checks cover role
 and profile refusal, exclusive writer ownership, exact replay/conflicts, custody
 freshness, insufficient earned revenue, cancellation and checkpoint rollback/fencing,
@@ -1172,3 +1172,41 @@ confirmed winner, foreign spenders and signature-bearing PSBTs, and discard cons
 when the tip changes. The simulated signing reply is not a newly verified real signature.
 Durable replacement decisions, signer routes, worker/family settlement and winner-change
 recovery remain integration work; funded replacement/reorg acceptance remains a gate.
+
+## Durable native replacement decisions
+
+Closed Opaleye operations now read a bounded native family, find/replay an immutable
+draft decision, save a draft and cancel unsigned replacement work. Family reads validate
+the saved payment, generation, fee ceiling, exact bytes/policy, common input, increasing
+fees and draft/member lineage. Saving requires pause, fresh custody, the current
+broadcast parent, unchanged payment/source authorization and no pending draft. A draft
+blocks ordinary sends. Cancellation preserves the decision and money; the parent
+becomes sendable only after backup covers the cancellation sequence. Replay cannot
+reactivate a cancelled draft or rewrite its bytes/reason.
+
+Schema **21** adds forward migration `003.sql`, preserving the existing tables while
+updating the replacement-binding trigger for the shared customer/earned funding engine.
+It retains live native fee reservations, parent broadcast/sequence binding and one
+pending draft, and checks either customer source eligibility/approved cover or a valid
+uncancelled native earned withdrawal. Existing custody databases have not been migrated.
+The private store component reuses the chain component's pure native validators; its
+closed operations gain no caller-supplied RPC, query or IO capability.
+
+Verification uses actual disposable PostgreSQL and synthetic ledger transactions:
+family binding, paused creation, exact replay, changed-byte conflicts, competing drafts,
+blocked sends, immutable cancellation, backup-before-resend and unchanged balances,
+then ordinary settlement of the original. Pure chain fixtures remain separately tested.
+The scenario runs before the scan fixture that intentionally leaves an incomplete intent.
+No concurrency guard was weakened to accommodate test setup.
+
+This completes persistence/cancellation primitives, not the operator replacement flow.
+Dedicated signer routes, durable replacement signatures, worker integration, family
+settlement and winner/reconfirmation recovery remain pending. No replacement signature
+or broadcast is enabled by these new Store operations alone.
+
+Scoped size: Store **2,675 → 2,840**, schema projections **272 → 279**, existing
+PostgreSQL contract **2,201 → 2,263**; one **37-line forward migration**, no new
+Haskell modules or executables. This adds missing behavior rather than reducing total
+lines. It reuses the payment/source checks and native validators instead of adding
+another customer-only replacement engine. Root Cabal build, QuickCheck and migrated
+PostgreSQL contracts pass; populated migration and live replacement remain unverified.

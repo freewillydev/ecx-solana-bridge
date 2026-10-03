@@ -3,7 +3,7 @@
 module Bridge.Store.Schema where
 import Data.Int (Int64)
 import Data.Text (Text)
-import Data.Profunctor.Product (p2,p3,p4,p5,p6,p8)
+import Data.Profunctor.Product (p7,p2,p3,p4,p5,p6,p8)
 import Data.Profunctor.Product.TH (makeAdaptorAndInstance)
 import qualified Opaleye as O
 
@@ -270,3 +270,10 @@ solanaExpiries = O.table "solana_expiries" $ p3
 solanaRetryApprovals :: O.Table (TextField,TextField,TextField,IntField) (TextField,TextField,TextField,IntField)
 solanaRetryApprovals = O.table "solana_retry_approvals" $ p4
   (O.requiredTableField "expired_txid",O.requiredTableField "reason",O.requiredTableField "proof_json",O.requiredTableField "critical_sequence")
+
+replacementDecisions :: O.Table (IntField,TextField,IntField,TextField,TextField,TextField,TextField) (IntField,TextField,IntField,TextField,TextField,TextField,TextField)
+replacementDecisions = O.table "native_replacement_drafts" $ p7
+  (O.requiredTableField "critical_sequence",O.requiredTableField "parent_txid",O.requiredTableField "fee",O.requiredTableField "draft_json",O.requiredTableField "work_hash",O.requiredTableField "reason",O.requiredTableField "proof_json")
+replacementCancellationRows :: O.Table (IntField,TextField,IntField) (IntField,TextField,IntField)
+replacementCancellationRows = O.table "native_replacement_cancellations" $ p3
+  (O.requiredTableField "draft_sequence",O.requiredTableField "reason",O.requiredTableField "critical_sequence")
