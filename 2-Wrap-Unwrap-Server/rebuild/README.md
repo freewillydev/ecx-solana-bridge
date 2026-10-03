@@ -384,13 +384,23 @@ atomically resolves the intent and releases appropriate holds. FailSolana books
 only the proven network fee and retains principal/inventory for recovery. Identical
 outcomes are idempotent; changed evidence/costs/bytes refuse. Paused operation may
 record proven effects. These store operations do not verify chain finality or send
-transactions themselves; the observation workflow must supply verified evidence.
+transactions themselves. ReconcilePayment now obtains evidence through the real
+adapters under the critical gate: native bytes/fee/wallet conflict checks followed
+by canonical block/depth checks, or finalized Solana message/balance-effect checks.
+It verifies deployment identity and the saved attempt before applying a result.
+Unseen/waiting effects leave accounting unchanged; unavailable or conflicting
+proofs pause processing. Terminal paid/failed records return without RPC. This is
+pending-attempt reconciliation, not post-settlement reorg/winner recovery.
 
 Current evidence:
 
 - Cabal QuickCheck passes protocol vectors, independent native decoding, Solana
   signature/reference and typed reply mutations, and existential handler checks.
   The SDK workflow vector uses a public test seed, never funded or broadcast.
+  Captured Signet/Devnet outcomes exercise the actual observer functions, including
+  missing versus unavailable, insufficient depth, conflicting/noncanonical native
+  effects, finalized commitment, missing finalized evidence and fee-only failed
+  Solana effects (the latter are labelled offline mutations of captured proofs).
 - Actual WAI/Servant checks cover auth, typed replies, refusals, malformed/oversized
   bodies, cross-site requests, absent broadcast route and evaluator call counts.
   Credential tests cover modes, parent permissions, symlinks, token format and port.
@@ -409,7 +419,8 @@ Scoped physical-line comparisons (not whole-product reduction claims):
 | --- | ---: | ---: | --- |
 | Signer module | 144 / 1 file | 73 / 1 file | Startup and replacement parity pending |
 | Signer transport | 103 / 1 file plus shared web boundary | 112 / 1 file | Includes local body/concurrency boundary; initial route only |
-| Worker critical signing | Part of broader Runtime | 76 / 1 file | Initial signing only |
+| Worker critical signing/reconciliation | Part of broader Runtime | 111 / 1 file | Pending attempts; full runtime integration remains |
+| Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |
 
 The last slice adds seven schema-projection lines and three typed-cost lines, with
@@ -418,7 +429,7 @@ it is not a size reduction. Source eligibility checking is shared with signing.
 
 Still required: successful TLS worker/signer integration and private-key startup
 checks; a unified safe/critical runtime gate, configuration, app/browser integration;
-verified source/chain observations before actual send/settlement; retry, cancellation,
+source refresh and actual sending, plus integrated positive reconciliation acceptance; retry, cancellation,
 replacement/winner changes and covered-source approvals generalized to earned
 funding; custody/host fencing/backup; actual populated-ledger migration and funded
 Signet/Devnet flows. Supported-wallet signing, off-host restore, canonical activation

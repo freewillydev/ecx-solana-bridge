@@ -2,6 +2,7 @@
 module SolanaPaymentCheck (checks) where
 import Bridge.Domain (Amount, Asset(..), amount, units, earnedFees, payment)
 import Bridge.Payment
+import Bridge.PaymentObservation
 import Bridge.Store
 import qualified Bridge.Wire as W
 import qualified Data.ByteString.Lazy as BL
@@ -139,9 +140,36 @@ checks=do
           replace ["transaction","signatures"] (toJSON ["wrong"::Text]) proof,
           replace ["meta","postTokenBalances"] (toJSON ([]::[Value])) proof,
           replace ["meta","err"] (String "failure") proof]
-    check ("captured finalized Devnet "<>kind<>"-ATA payment and evidence mutations") $ once $
-      validate proof==Right outcome && all (isLeft . validate) changed &&
-      verifySolanaOutcome config {maxSolFee=amt 1,maxSolAccountRent=amt 0} signed proof==Right outcome
+    meta<-fieldValue "meta" proof
+    balances<-fieldValue "preBalances" meta :: IO [Integer]
+    preTokens<-fieldValue "preTokenBalances" meta :: IO Value
+    failedBalances<-case balances of first:rest->pure (first-toInteger(units $ outcomeFee outcome):rest); _->fail "empty fixture balances"
+    let failure=replace ["meta","err"] (String "offline failure mutation")
+          $ replace ["meta","postBalances"] (toJSON failedBalances)
+          $ replace ["meta","postTokenBalances"] preTokens proof
+        readOutcome evidence status method args=case (method,args) of
+          ("getTransaction",[_,options])->do
+            commitment<-fieldValue "commitment" options :: IO Text
+            encoding<-fieldValue "encoding" options :: IO Text
+            require (commitment=="finalized" && encoding=="json") "wrong_observation_commitment"
+            pure evidence
+          ("getSignatureStatuses",[_,options])->do
+            history<-fieldValue "searchTransactionHistory" options
+            require history "missing_historical_status_search"
+            pure $ object ["context" .= object ["slot" .= recentSlot(solPlanRecent $ signedSolanaPlan signed)],"value" .= [status]]
+          _->fail "unexpected observation RPC"
+    check ("captured finalized Devnet "<>kind<>"-ATA payment and pending/failure observation contracts") $ once $ ioProperty $ do
+      confirmed<-observeSolanaPayment (readOutcome proof Null) config signed
+      unseen<-observeSolanaPayment (readOutcome Null Null) config signed
+      waiting<-observeSolanaPayment (readOutcome Null $ object ["confirmationStatus" .= ("confirmed"::Text)]) config signed
+      missing<-rejects "finalized_solana_evidence_unavailable" $ observeSolanaPayment
+        (readOutcome Null $ object ["confirmationStatus" .= ("finalized"::Text)]) config signed
+      failed<-observeSolanaPayment (readOutcome failure Null) config signed
+      pure $ validate proof==Right outcome && all (isLeft . validate) changed
+        && verifySolanaOutcome config {maxSolFee=amt 1,maxSolAccountRent=amt 0} signed proof==Right outcome
+        && unseen==PaymentUnseen && waiting==PaymentWaiting && missing
+        && (case confirmed of PaymentConfirmed costs evidence->costs==W.PaymentCosts (outcomeFee outcome) (outcomeRent outcome) && not(T.null evidence); _->False)
+        && (case failed of PaymentFailed fee evidence->fee==outcomeFee outcome && not(T.null evidence); _->False)
 
 readFixture :: FilePath -> IO Value
 readFixture name=getDataFileName ("test/fixtures/"<>name) >>= BS.readFile >>= either fail pure . eitherDecodeStrict'

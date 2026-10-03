@@ -28,6 +28,7 @@ data SigningOperation a where
 
 data WorkerOperation a where
   SignPreparedPayment :: Text -> WorkerOperation Text
+  ReconcilePayment :: Text -> WorkerOperation ()
 
 data DSL (caller :: Caller) (severity :: Severity) a where
   WorkerDSL :: WorkerOperation a -> DSL 'Worker 'Critical a

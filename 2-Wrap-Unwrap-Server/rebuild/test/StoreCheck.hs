@@ -335,7 +335,7 @@ main = do
             expectStore "signer_profile_mismatch" (interpret $ Request $ SignPrepared "other" intent 0)
             expectStore "invalid_signing_decision" (interpret $ Request $ SignPrepared "contract" intent 8)
             expectStore "signing_backup_required" (interpret $ Request $ SignPrepared "contract" intent 0)
-          withPaymentWorker manager native (signingPolicy signing) (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret ->
+          withPaymentWorker manager native solana (signingPolicy signing) (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret ->
             expectStore "invalid_saved_payment" (interpret $ Request $ SignPreparedPayment intent)
           pausedAfterRefusal<-evalRead reader ReadState
           check (ledgerPaused pausedAfterRefusal)
@@ -405,6 +405,10 @@ main = do
         expectStore "settlement_evidence_conflict" (evalWrite writer $ SettlePayment authorized nativeCosts "changed-proof")
         completed<-evalRead reader (ReadPayment $ "fee:"<>withdrawalKey)
         check (savedStatus completed==PaymentPaid)
+        bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "terminal payment must not call RPC"}) closeManager $ \manager ->
+          withPaymentWorker manager native solana (signingPolicy signing) (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret ->
+            interpret (Request $ ReconcilePayment nativeTx)
+        evalRead reader ReadBalances >>= check . (==afterSettlement)
         fixture fixtures (SeedReceipt "unknown-source" Nothing Native 10 2 True 100)
         evalWrite writer (PromoteDeposit 100 "unknown-source") >>= check . not
         expectStore "deposit_not_found" (evalWrite writer $ PromoteDeposit 100 "missing")

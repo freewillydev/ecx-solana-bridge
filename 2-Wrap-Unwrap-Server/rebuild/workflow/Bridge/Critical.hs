@@ -4,6 +4,10 @@ module Bridge.Critical (withPaymentWorker) where
 import Bridge.Operation.Internal
 import Bridge.Error
 import Bridge.Payment
+import Bridge.PaymentObservation
+import qualified Bridge.Solana as S
+import Data.Aeson (eitherDecodeStrict')
+import qualified Data.Text.Encoding as TE
 import Bridge.Signer (signingAPI)
 import Bridge.SigningTransport
 import Bridge.Store
@@ -25,13 +29,44 @@ import qualified Servant.Client as SC
 
 -- Preparation and backup have already committed. No transaction spans signing.
 -- Full runtime will share this gate with other critical worker operations.
-withPaymentWorker :: Manager -> N.NativeSettings -> H.SolanaPolicy -> SigningEndpoint -> Reader -> Writer
+withPaymentWorker :: Manager -> N.NativeSettings -> S.SolanaSettings -> H.SolanaPolicy -> SigningEndpoint -> Reader -> Writer
   -> ((forall a. Request 'Worker 'Critical a -> IO a) -> IO b) -> IO b
-withPaymentWorker rpc native config endpoint reader writer action = do
+withPaymentWorker rpc native solana config endpoint reader writer action = do
+  require (N.profile native==S.solanaProfile solana && S.mint solana==H.mint config
+    && S.custodyOwner solana==H.custodyOwner config && S.custodyAta solana==H.custodyAta config) "payment_profile_mismatch"
+  N.validateNativeSettings native
+  S.validateSolanaSettings solana
   gate<-newMVar ()
   let interpret :: forall a. Request 'Worker 'Critical a -> IO a
       interpret request=withMVar gate $ \_ -> evalCritical (resolve request)
       evalCritical :: forall a. DSL 'Worker 'Critical a -> IO a
+      evalCritical (WorkerDSL (ReconcilePayment txid)) = reconcile `onException` evalWrite writer (Pause "payment_observation_requires_review")
+       where
+        reconcile = do
+          recorded<-evalRead reader (ReadAttempt txid)
+          case recordedState recorded of
+            "settled"->pure ()
+            "failed"->pure ()
+            _->do
+              require (recordedState recorded `elem` ["signed","broadcast_intent"]) "payment_requires_recovery"
+              prepared<-evalRead reader (ReadPreparation $ recordedPayment recorded)
+              require (preparedGeneration prepared==recordedGeneration recorded) "payment_requires_recovery"
+              let saved=recordedSigned recorded
+                  decode proof=either (const $ reject "invalid_saved_payment") pure (eitherDecodeStrict' $ TE.encodeUtf8 proof)
+              verifySignedAttempt (N.nativeCall rpc native) (N.profile native) config prepared saved
+              observed<-case recordedChain recorded of
+                "Native"->do
+                  _<-N.nativeIdentity rpc native
+                  decode (signedPolicy saved) >>= observeNativePayment (N.nativeCall rpc native)
+                "Solana"->do
+                  _<-S.solanaIdentity rpc solana
+                  decode (signedPolicy saved) >>= observeSolanaPayment (S.solanaCall rpc solana) config
+                _->reject "invalid_payout_asset"
+              case observed of
+                PaymentUnseen->pure ()
+                PaymentWaiting->pure ()
+                PaymentConfirmed costs proof->evalWrite writer (SettlePayment recorded costs proof)
+                PaymentFailed fee proof->evalWrite writer (FailSolana recorded fee proof)
       evalCritical (WorkerDSL (SignPreparedPayment identifier)) = signing `onException` evalWrite writer (Pause "signing_requires_review")
        where
         signing = do

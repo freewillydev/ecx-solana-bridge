@@ -4,6 +4,7 @@ module NativePaymentCheck (checks) where
 
 import Bridge.Domain (Asset(..),amount, units,refund,payment)
 import Bridge.Payment
+import Bridge.PaymentObservation
 import Bridge.Store
 import qualified Bridge.Wire as W
 import qualified Bridge.SolanaHelper as H
@@ -46,6 +47,11 @@ checks = do
   let contract tweak action=do
         locks <- newIORef ([]::[Outpoint]); calls <- newIORef ([]::[Text])
         let base _ method args=case (method,args) of
+              ("gettransaction",[String ident,Bool False,Bool True]) | ident==nativeTxid tx->pure $ object
+                ["hex" .= (raw::Text),"decoded" .= decoded,"txid" .= nativeTxid tx,"fee" .= Number (negate $ fromIntegral(units fee)/100000000)
+                ,"confirmations" .= planDepth plan,"walletconflicts" .= ([]::[Text]),"blockhash" .= T.replicate 64 "e"]
+              ("getblockheader",[String anchor])->pure $ object ["hash" .= anchor,"height" .= (16001::Int),"confirmations" .= planDepth plan]
+              ("getblockhash",[Number 16001])->pure $ String $ T.replicate 64 "e"
               ("listlockunspent",[])->toJSON <$> readIORef locks
               ("lockunspent",[Bool False,v])->case fromJSON v of
                 Success ps | not(null ps)->modifyIORef' locks (<>ps) >> pure (Bool True)
@@ -82,7 +88,25 @@ checks = do
       prepared=PreparedPayment (PaymentView outgoing terms PaymentPaying) 0 (encoded plan) (Just $ encoded draft) (planFeeLimit plan)
       boundSigned=NativeSigned raw tx plan previous fee
   sequence
-    [ check "worker independently decodes returned native bytes against the durable draft" $ once $ ioProperty $ do
+    [ check "native settlement requires exact wallet effect and canonical confirmation depth" $ once $ ioProperty $ do
+        (observed,methods)<-contract (\_ v->pure v) $ \call->observeNativePayment call boundSigned
+        let change method (Object fields) | method=="gettransaction"=pure $ Object $ KM.insert "confirmations" (Number 0) fields
+            change _ value=pure value
+        (waiting,waitMethods)<-contract change $ \call->observeNativePayment call boundSigned
+        (forked,_)<-contract (\method value->pure $ if method=="getblockhash" then String(T.replicate 64 "a") else value) $ \call->
+          rejects "native_settlement_not_canonical" (observeNativePayment call boundSigned)
+        unseen<-observeNativePayment (\_ _ _->reject "rpc_error_-5") boundSigned
+        unavailable<-rejects "rpc_transport_unknown_outcome" (observeNativePayment (\_ _ _->reject "rpc_transport_unknown_outcome") boundSigned)
+        pure $ methods==["gettransaction","getblockheader","getblockhash"] && waitMethods==["gettransaction"]
+          && waiting==PaymentWaiting && unseen==PaymentUnseen && forked && unavailable
+          && case observed of PaymentConfirmed costs proof->costs==W.PaymentCosts fee (amt 0) && not(T.null proof); _->False
+    , check "native outcome refuses changed bytes and wallet conflict evidence" $ once $ ioProperty $ do
+        let corrupt key value method (Object fields) | method=="gettransaction"=pure $ Object $ KM.insert key value fields
+            corrupt _ _ _ value=pure value
+        (bytes,_)<-contract (corrupt "hex" $ String "changed") $ \call->rejects "native_settlement_evidence_mismatch" (observeNativePayment call boundSigned)
+        (conflict,_)<-contract (corrupt "walletconflicts" $ toJSON ["other"::Text]) $ \call->rejects "native_conflict_requires_review" (observeNativePayment call boundSigned)
+        pure (bytes && conflict)
+    , check "worker independently decodes returned native bytes against the durable draft" $ once $ ioProperty $ do
         (attempt,methods)<-contract (\_ v->pure v) $ \call->verifySigningReply call L2LSignetDevnet config prepared (NativeReply boundSigned)
         (refused,_)<-contract (\method value->pure $ if method=="decoderawtransaction" then changedVersion value else value) $ \call->
           rejects "native_signed_bytes_mismatch" (verifySigningReply call L2LSignetDevnet config prepared $ NativeReply boundSigned)
