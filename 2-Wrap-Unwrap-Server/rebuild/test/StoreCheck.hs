@@ -642,7 +642,39 @@ ledgerMain = do
         -- A covered loss returns the exact saved capital split only once.
         fixture fixtures (SourceEligibility did False)
         record (W.SourceMissing proof)
-        fixture fixtures (CoverSource did)
+        loss<-ledgerSequence <$> evalRead reader ReadState
+        source<-evalRead reader (ReadSource did)
+        let block=T.replicate 64 "f"
+            lossProof=object ["transaction" .= tx,"output" .= (0::Int),"confirmations" .= (-1::Int),"observationHash" .= hash,"nodeBlock" .= block,"nodeHeight" .= (100::Int)]
+            report=object ["matches" .= True,"nativeBlock" .= block,"nativeHeight" .= (100::Int)]
+            cover capital earned reason=do
+              revision<-evalRead reader ReadCustodyRevision
+              evalWrite writer (CoverSourceLoss source loss 100 capital earned reason lossProof (revision,100,True,report))
+        expectStore "source_loss_allocation_mismatch" (cover (money 29) (money 20) "test cover")
+        revision<-evalRead reader ReadCustodyRevision
+        expectStore "source_loss_custody_not_current" (evalWrite writer $ CoverSourceLoss source loss 100 (money 30) (money 20) "test cover" lossProof (revision+1,100,True,report))
+        expectStore "source_loss_custody_not_current" (evalWrite writer $ CoverSourceLoss source loss 161 (money 30) (money 20) "test cover" lossProof (revision,100,True,report))
+        expectStore "source_loss_custody_view_changed" (evalWrite writer $ CoverSourceLoss source loss 100 (money 30) (money 20) "test cover" lossProof (revision,100,True,object ["matches" .= True,"nativeBlock" .= ("other"::T.Text),"nativeHeight" .= (100::Int)]))
+        -- Reserved earned withdrawals are not free capital for loss coverage.
+        booked<-evalRead reader ReadBalances
+        let earned=M.findWithDefault 0 (Native,Earned) booked
+            reserved=min 1000 earned; withdrawal=T.replicate 64 "7"
+        check (reserved>0 && earned-reserved<50)
+        fixture fixtures RefreshCustody
+        void $ evalWrite writer (ReserveFees 100 withdrawal Native (money reserved) "recipient" "protect earned fees")
+        expectStore "insufficient_loss_capital" (cover (money 0) (money 50) "test cover")
+        void $ evalWrite writer (CancelFees withdrawal "restore earned reserve")
+        cover (money 30) (money 20) "test cover"
+        covered<-evalRead reader ReadBalances
+        check (covered==M.unionWith (+) missing (M.fromList [((Native,Float),-30),((Native,Earned),-20),((Native,SourceDeficit),50)]))
+        savedCover<-evalRead reader (ReadLossCover did loss)
+        check (savedCover==Just(money 30,money 20,"test cover"))
+        coveredState<-evalRead reader ReadState
+        cover (money 30) (money 20) "test cover"
+        replayedCover<-evalRead reader ReadState
+        check (ledgerSequence coveredState==ledgerSequence replayedCover && ledgerPaused replayedCover)
+        expectStore "source_loss_cover_conflict" (cover (money 30) (money 20) "changed")
+        evalRead reader (ReadSource did) >>= check . not . W.depositEligible
         fixture fixtures (SourceEligibility did True)
         record (W.SourceRestored proof)
         returned<-evalRead reader ReadBalances
@@ -826,7 +858,6 @@ data Fixture a where
   ApproveScanSpend :: W.ChainEvent -> Fixture ()
   SeedSourceEvidence :: T.Text -> T.Text -> Fixture ()
   SourceEligibility :: T.Text -> Bool -> Fixture ()
-  CoverSource :: T.Text -> Fixture ()
   OperatingPhase :: T.Text -> T.Text -> Fixture ()
   HistoricalHolds :: T.Text -> Fixture ()
   PromotionFunds :: Fixture ()
@@ -1054,23 +1085,6 @@ fixture c (SeedSourceEvidence tx hash) = PG.withTransaction c $ do
 fixture c (SourceEligibility did eligible) = void $ O.runUpdate c O.Update {O.uTable=S.deposits,
   O.uUpdateWith= \r->r {S.depositEligible=O.sqlInt8 $ if eligible then 1 else 0},
   O.uWhere= \r->S.depositId r O..== O.sqlStrictText did,O.uReturning=O.rCount}
-fixture c (CoverSource did) = PG.withTransaction c $ do
-  recovery<-O.runSelect c $ O.limit 1 $ O.orderBy (O.desc id) $ do
-    (_,deposit,_,_,_,n)<-O.selectTable S.sourceChecks
-    O.where_ (deposit O..== O.sqlStrictText did)
-    pure n
-    :: IO [Int64]
-  sequences<-O.runUpdate c O.Update {O.uTable=S.deployment,
-    O.uUpdateWith= \r->r {S.criticalSequence=S.criticalSequence r+1},O.uWhere=const(O.sqlBool True),O.uReturning=O.rReturning S.criticalSequence}
-  (loss,n)<-case (recovery,sequences) of ([r],[s])->pure(r,s); _->fail "missing cover fixture state"
-  let text=O.sqlStrictText; num=O.sqlInt8
-      covers=O.table "source_loss_covers" $ p8 (O.requiredTableField "critical_sequence",O.requiredTableField "deposit_id",O.requiredTableField "recovery_sequence",O.requiredTableField "amount",O.requiredTableField "float_amount",O.requiredTableField "earned_amount",O.requiredTableField "reason",O.requiredTableField "proof_json")
-      event="cover-fixture:"<>T.pack(show n)
-  void $ O.runInsert c O.Insert {O.iTable=covers,O.iRows=[(num n,text did,num loss,num 50,num 30,num 20,text "test cover",text "{}")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-  void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(text event,text "test loss cover")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-  void $ O.runInsert c O.Insert {O.iTable=S.postings,
-    O.iRows=[(Nothing,text event,text "Native",text account,num delta) | (account,delta)<-[("float",-30),("earned",-20),("source_deficit",50)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-
 fixture c (ReadScanHealth chain) = do
   rows<-O.runSelect c $ do
     (key,success,failure,at)<-O.selectTable S.scanHealth
@@ -1312,6 +1326,7 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       ledgerBefore<-evalRead reader ReadState
       check (W.paused service==ledgerPaused ledgerBefore)
       expectStore "observation_only" (operatorControl $ Op.operator Op.ResumeService)
+      expectStore "observation_only" (operatorControl $ Op.operator $ Op.CoverLostSource "missing" 1 (money 1) (money 0) "cover")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.RestoreSource "missing" 1 "restored")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.ClassifySpend "Native" "missing" "owned")
       expectStore "observation_only" (operatorControl $ Op.operator $ Op.AllocateReceipt "missing" [("float",money 1)] "owned")
@@ -1483,6 +1498,8 @@ serverMain = do
                 object ["operation" .= ("cancel-fees"::T.Text),"id" .= ("missing"::T.Text),"reason" .= ("test"::T.Text)]] $ \command->do
                   result<-control command
                   check (result==object ["error" .= ("observation_only"::T.Text)])
+              coverRefused<-control (object ["operation" .= ("cover-source-loss"::T.Text),"deposit" .= ("missing"::T.Text),"recovery" .= (1::Int),"float" .= money 1,"earned" .= money 0,"reason" .= ("cover"::T.Text)])
+              check (coverRefused==object ["error" .= ("observation_only"::T.Text)])
               restorationRefused<-control (object ["operation" .= ("approve-source-recovery"::T.Text),"payment" .= ("missing"::T.Text),"restoration" .= (1::Int),"reason" .= ("restored"::T.Text)])
               check (restorationRefused==object ["error" .= ("observation_only"::T.Text)])
               spendRefused<-control (object ["operation" .= ("classify-spend"::T.Text),"chain" .= ("Native"::T.Text),"transaction" .= ("missing"::T.Text),"reason" .= ("owned"::T.Text)])

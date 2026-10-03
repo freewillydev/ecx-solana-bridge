@@ -74,6 +74,7 @@ data CustodySnapshot = CustodySnapshot
   { custodyRevision :: Int64, custodyTotals :: M.Map Asset Integer
   , custodyHeads :: [(Text,Text)], custodySlot :: Int64, custodyPending :: [RecordedAttempt] } deriving (Eq,Show)
 data StoreRead a where
+  ReadLossCover :: Text -> Int64 -> StoreRead (Maybe (Amount,Amount,Text))
   NativeSourceCandidates :: StoreRead [W.Deposit]
   ReadNativeSourceInspection :: Text -> StoreRead (Maybe (Text,W.PolicySnapshot),(Text,Value))
   ReadSourceApproval :: Text -> Int64 -> StoreRead (Maybe Text)
@@ -115,6 +116,7 @@ data StoreRead a where
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
+  CoverSourceLoss :: W.Deposit -> Int64 -> Int64 -> Amount -> Amount -> Text -> Value -> (Int64,Int64,Bool,Value) -> StoreWrite ()
   ApproveSourceRestoration :: Int64 -> Text -> Int64 -> Text -> StoreWrite ()
   ClassifyTreasurySpend :: Text -> Text -> Text -> StoreWrite Int64
   AllocateTreasury :: Int64 -> Text -> [(Text,Amount)] -> Text -> StoreWrite Int64
@@ -211,6 +213,7 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
       PendingAttempts -> pendingAttempts c
       PaymentCandidates -> paymentCandidates c
       ReadState -> pure (LedgerState (S.criticalSequence row) (S.backupSequence row) (S.paused row/=0) (S.pauseReason row))
+      ReadLossCover key recovery -> lossCover c key recovery
       NativeSourceCandidates -> nativeSourceCandidates c
       ReadNativeSourceInspection key -> nativeSourceInspection c key
       ReadSourceApproval key restoration -> sourceApproval c key restoration
@@ -343,6 +346,7 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
     _ <- O.runInsert c O.Insert {O.iTable=S.audit,
       O.iRows=[(Nothing,O.sqlStrictText "pause",O.sqlStrictText explanation)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
     pure ()
+  CoverSourceLoss source recovery now capital earned reason proof custody -> coverSourceLoss c policy source recovery now capital earned reason proof custody
   ApproveSourceRestoration now key restoration reason -> approveSourceRestoration c policy now key restoration reason
   ClassifyTreasurySpend chain key reason -> classifyTreasurySpend c policy chain key reason
   AllocateTreasury now receipt split reason -> allocateTreasury c policy now receipt split reason
@@ -2535,3 +2539,75 @@ nativeSourceInspection c key = do
       :: IO [(Maybe Text,Text)]
     case rows of [(Just address,policy)]->(address,) <$> decodeSaved policy; _->reject "source_instruction_missing"
   pure (binding,(hash,evidence))
+
+lossCover :: PG.Connection -> Text -> Int64 -> IO (Maybe (Amount,Amount,Text))
+lossCover c receipt recovery = do
+  rows<-O.runSelect c $ do
+    (_,key,loss,_,capital,earned,reason,_)<-O.selectTable S.sourceLossCovers
+    O.where_ (key O..== O.sqlStrictText receipt O..&& loss O..== O.sqlInt8 recovery)
+    pure (capital,earned,reason)
+    :: IO [(Int64,Int64,Text)]
+  case rows of
+    []->pure Nothing
+    [(capital,earned,reason)]->Just <$> ((,,) <$> checked(amount $ toInteger capital) <*> checked(amount $ toInteger earned) <*> pure reason)
+    _->reject "duplicate_source_loss_cover"
+
+-- Cover the entire proved deficit using only unreserved operator capital. This
+-- neither restores the physical source nor approves any suspended payment.
+coverSourceLoss :: PG.Connection -> PaymentTerms -> W.Deposit -> Int64 -> Int64 -> Amount -> Amount -> Text -> Value -> (Int64,Int64,Bool,Value) -> IO ()
+coverSourceLoss c policy source recovery now capital earned reason proof (revision,at,matches,report) = do
+  validReason reason
+  require (recovery>0) "invalid_source_loss_cover"
+  state<-metadata c (deploymentFingerprint $ paymentPolicy policy)
+  require (S.paused state==1) "pause_before_operator_action"
+  let receipt=W.depositId source; quantity=units(W.depositAmount source)
+      text=O.sqlStrictText; num=O.sqlInt8
+  previous<-lossCover c receipt recovery
+  case previous of
+    Just saved->require (saved==(capital,earned,reason)) "source_loss_cover_conflict"
+    Nothing->do
+      require (W.depositAsset source==Native && not(W.depositEligible source)) "source_loss_not_proven"
+      current<-readSource c receipt >>= asDeposit
+      history<-O.runSelect c $ O.limit 1 $ O.orderBy (O.desc (\(n,_,_,_,_,_)->n)) $ do
+        row@(_,key,_,_,_,_)<-O.selectTable S.sourceChecks
+        O.where_ (key O..== text receipt)
+        pure row
+        :: IO [(Int64,Text,Text,Int64,Text,Int64)]
+      require (current==source && case history of [(_,_,"missing",n,_,sequenceNo)]->n==quantity && sequenceNo==recovery; _->False) "source_loss_not_proven"
+      require (toInteger(units capital)+toInteger(units earned)==toInteger quantity) "source_loss_allocation_mismatch"
+      covers<-O.runSelect c $ do
+        (n,key,_,_,_)<-S.activeSourceCovers
+        O.where_ (key O..== text receipt)
+        pure n
+        :: IO [Int64]
+      require (null covers) "source_loss_already_covered"
+      transaction<-field "transaction" proof; index<-field "output" proof :: IO Int64
+      depth<-field "confirmations" proof :: IO Int64
+      hash<-field "observationHash" proof
+      require (depth<0 && index>=0 && receipt=="native:"<>transaction<>":"<>T.pack(show index)) "source_loss_not_proven"
+      (observed,_)<-sourceEvidence c transaction
+      require (observed==hash) "source_recovery_scan_not_current"
+      block<-field "nativeBlock" report :: IO Text; height<-field "nativeHeight" report :: IO Int64
+      sourceBlock<-field "nodeBlock" proof; sourceHeight<-field "nodeHeight" proof
+      require (block==sourceBlock && height==sourceHeight) "source_loss_custody_view_changed"
+      matched<-field "matches" report
+      currentRevision<-readCustodyRevision c
+      require (matches && matched && currentRevision==revision && at>=0 && at<=now && toInteger now-toInteger at<=60) "source_loss_custody_not_current"
+      booked<-balances c
+      holds<-O.runSelect c $ do
+        (_,asset,n,phase)<-O.selectTable S.reservations
+        O.where_ (asset O..== text "Native" O..&& phase O../= text "released")
+        pure n
+        :: IO [Int64]
+      require (M.findWithDefault 0 (Native,Float) booked-sum(map toInteger holds)>=toInteger(units capital)
+        && M.findWithDefault 0 (Native,Earned) booked>=toInteger(units earned)) "insufficient_loss_capital"
+      let custody=object ["revision" .= revision,"checkedAt" .= at,"report" .= report]
+          evidence=encodeSaved $ object ["source" .= proof,"custody" .= custody]
+      require (T.length evidence<=32768) "source_loss_evidence_too_large"
+      sequenceNo<-nextSequence c
+      count<-O.runInsert c O.Insert {O.iTable=S.sourceLossCovers,O.iRows=[(num sequenceNo,text receipt,num recovery,num quantity,num $ units capital,num $ units earned,text reason,text evidence)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      require (count==1) "source_loss_cover_insert_failed"
+      post c ("source-loss-cover:"<>T.pack(show sequenceNo)) "operator capital covers verified source shortfall"
+        [Posting Native Float (negate $ toInteger $ units capital),Posting Native Earned (negate $ toInteger $ units earned),Posting Native SourceDeficit (toInteger quantity)]
+      audit c "source_loss_covered" receipt
+ where field name value=either (const $ reject "invalid_source_loss_evidence") pure (parseEither (withObject "source loss" (.: name)) value)

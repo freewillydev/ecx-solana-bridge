@@ -12,7 +12,7 @@ import qualified Data.Text as T
 import Bridge.Error
 import Bridge.Payment
 import Bridge.Observer (ObserverSettings(..),observeOnce)
-import Bridge.Reconciliation (reconcileCustody)
+import Bridge.Reconciliation (reconcileCustody,inspectLossCustody)
 import Bridge.PaymentSource (verifyPaymentSource,inspectNativeSource)
 import qualified Bridge.Wire as W
 import Control.Monad (forM,forM_,when,forever)
@@ -121,6 +121,22 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
       evalCritical (WriteCustomer (Bridge.Operation.Internal.CreateOrder header request))=do
         c<-customer
         createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (coverBackup c) reader writer header request
+      evalCritical (OperatorDSL (CoverLostSource receipt recovery capital earned reason))=guarded $ do
+        require (recovery>0 && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_source_loss_cover"
+        state<-evalRead reader ReadState
+        require (ledgerPaused state) "pause_before_operator_action"
+        previous<-evalRead reader (ReadLossCover receipt recovery)
+        case previous of
+          Just old->require (old==(capital,earned,reason)) "source_loss_cover_conflict"
+          Nothing->do
+            source<-evalRead reader (ReadSource receipt)
+            _<-N.nativeIdentity rpc native
+            (binding,evidence)<-evalRead reader (ReadNativeSourceInspection receipt)
+            result<-inspectNativeSource (N.nativeCall rpc native) native (defaultNativeDepth settings) (H.fingerprint config) source binding evidence
+            proof<-case result of W.SourceMissing proof->pure proof; _->reject "source_loss_not_proven"
+            custody<-inspectLossCustody rpc settings config reader
+            now<-floor <$> getPOSIXTime
+            evalWrite writer (CoverSourceLoss source recovery now capital earned reason proof custody)
       evalCritical (OperatorDSL (RestoreSource key restoration reason))=guarded $ do
         require (restoration>0 && not(T.null $ T.strip reason) && T.length reason<=512) "invalid_source_approval"
         state<-evalRead reader ReadState

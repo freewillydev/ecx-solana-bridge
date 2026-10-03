@@ -309,7 +309,7 @@ covers ordinary pending, missing-value replay, unavailable evidence preserving a
 known deficit, stale receipts/proof hashes, invalid evidence, restoration and exact
 covered-capital return/replay. All row fixtures use Opaleye. The test cover is seeded;
 native loss detection is now wired through the closed worker operation (see below);
-operator cover authorization and funded loss acceptance remain unfinished.
+covered-payment approval and funded loss acceptance remain unfinished.
 
 Atomic scan commits now preserve receipts, immutable origins/evidence, cursors and
 health in one transaction. Cursor comparison refuses stale batches; duplicate
@@ -719,6 +719,42 @@ runtime lines; **no new production file or refund-specific payout engine**.
 This checkpoint increases source size to complete required behavior; it is not
 presented as a reduction or a claim of perfect security.
 
+## Operator capital coverage
+
+The private operator DSL now accepts:
+
+```json
+{"operation":"cover-source-loss","deposit":"native:<txid>:<vout>","recovery":123,"float":"30","earned":"20","reason":"cover the verified 50-unit loss"}
+```
+
+New coverage requires pause and a fresh native missing-source proof. A separate
+read-only custody inspection includes proved deficits without certifying ordinary
+readiness. Its balances must match, its native block/height must match the source
+proof, and its ledger revision and timestamp must still be current at commit.
+The receipt snapshot and latest missing recovery sequence must also remain exact.
+The operator's two nonnegative contributions must cover the entire receipt;
+only free native float and earned fees can be used. Active inventory reservations
+and earned withdrawal reservations remain protected. Principal, operating budgets,
+backing and LP allocations are unavailable to this command.
+
+The immutable cover, fenced sequence and balanced deficit/capital posting commit
+atomically. Exact replay changes nothing; changed contributions or reason conflict.
+The source remains ineligible and the service stays paused. Coverage itself grants
+no signing, sending or payment-resumption authority. If the physical source
+returns, the existing recovery journal returns the saved capital split exactly
+once. Covered-payment approval and the corresponding send-source authorization
+remain the next implementation step; this command alone cannot resume a payment.
+
+The coverage-write function is **57 lines versus 66** in retained `Source.hs`,
+excluding shared helper functions on both sides. Store adds 76 total lines for
+closed operations/read/replay/write, plus three schema projection lines. There
+are **no new files or migrations**. The read-only loss custody wrapper reuses the
+normal inspection path. The old test-only cover insertion was removed: PostgreSQL
+contracts now perform actual coverage, including conflict/replay, stale revision/
+time, mismatched block, partial coverage, protected earned reservations and exact
+capital return. Build, QuickCheck and executable operator checks pass. Funded loss
+coverage and clean-host recovery are still acceptance gates.
+
 ## Native source-loss inspection
 
 The worker now runs a bounded native source-recovery pass after scanning and before
@@ -736,9 +772,8 @@ the same inspector, with coinbase maturity handling for unbound receipts.
 Results use the existing append-only recovery operation and balanced deficit/
 return journals. Unavailable observations preserve the existing loss and hold the
 service for review. The pass visits the other candidates before propagating a
-recording failure. It neither approves recovery nor signs/sends. Capital coverage
-and covered-source approval still need implementation; this inspection is their
-prerequisite and supplies their chain proof.
+recording failure. It neither approves recovery nor signs/sends. Capital coverage is now implemented; covered-source approval remains unfinished.
+This inspection supplies the chain proof for both.
 
 Build, QuickCheck, PostgreSQL and executable checks pass. Captured-output/offline
 RPC tests cover missing/restored/pending outcomes, unknown mempool results, a live
@@ -774,7 +809,7 @@ loss/restoration sequences, reason, work hash and a new fenced critical sequence
 It changes no money and does not sign, send or resume. Exact replay is idempotent;
 changed reasons conflict. Replaying an old approval during a newer suspension
 cannot revive the payment. Covered/permanently lost sources cannot use this
-restoration command; their distinct cover/approval workflow remains unfinished.
+restoration command; their separate payment-approval workflow remains unfinished.
 
 Build, QuickCheck, disposable PostgreSQL and executable operator checks pass.
 Contracts cover pause/freshness, stale restoration, changed payment history,
@@ -989,7 +1024,7 @@ Scoped physical-line comparisons (not whole-product reduction claims):
 | Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
 | Signer module | 144 / 1 file | 117 / 1 file | Now includes startup key validation and shared file permissions; replacement parity pending |
 | Signer transport | 103 / 1 file plus shared web boundary | 69 / 1 file + shared 71-line Web module | Shared module also serves customer API; initial signer route only |
-| Customer/worker runtime | Part of broader Runtime | 444 / 1 file (previous checkpoint 428) | Adds native source inspection; single critical dispatch retained |
+| Customer/worker runtime | Part of broader Runtime | 460 / 1 file (previous checkpoint 444) | Adds operator capital coverage; single critical dispatch retained |
 | Focused source validation | 63-line mixed validation/storage/recovery function | 147-line module including native loss inspector | Covered-source approval remains unfinished; larger functional scope |
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |

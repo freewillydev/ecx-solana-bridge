@@ -148,6 +148,9 @@ sourceChecks = O.table "source_recoveries" $ p6
    O.requiredTableField "shortfall",O.requiredTableField "evidence_json",O.requiredTableField "critical_sequence")
 sourceReturns :: O.Table (IntField,IntField) (IntField,IntField)
 sourceReturns = O.table "source_loss_returns" $ p2 (O.requiredTableField "cover_sequence",O.requiredTableField "recovery_sequence")
+sourceLossCovers :: O.Table (IntField,TextField,IntField,IntField,IntField,IntField,TextField,TextField) (IntField,TextField,IntField,IntField,IntField,IntField,TextField,TextField)
+sourceLossCovers = O.table "source_loss_covers" $ p8
+  (O.requiredTableField "critical_sequence",O.requiredTableField "deposit_id",O.requiredTableField "recovery_sequence",O.requiredTableField "amount",O.requiredTableField "float_amount",O.requiredTableField "earned_amount",O.requiredTableField "reason",O.requiredTableField "proof_json")
 activeSourceCovers :: O.Select (IntField,TextField,IntField,IntField,IntField)
 activeSourceCovers = O.selectTable $ O.table "active_source_loss_covers" $ p5
   (O.requiredTableField "critical_sequence",O.requiredTableField "deposit_id",O.requiredTableField "amount",

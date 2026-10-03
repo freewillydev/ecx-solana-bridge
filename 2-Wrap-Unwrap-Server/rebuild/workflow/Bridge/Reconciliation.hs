@@ -1,6 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 -- Read-only chain inspection; only the closed RecordCustody operation writes.
-module Bridge.Reconciliation (reconcileCustody,inspectCustodyWith,nativeBalance,solanaBalances) where
+module Bridge.Reconciliation (reconcileCustody,inspectLossCustody,inspectCustodyWith,nativeBalance,solanaBalances) where
 import Bridge.Domain (Asset(..),units)
 import Bridge.Error
 import Bridge.Store
@@ -27,16 +27,25 @@ import Network.HTTP.Client (Manager)
 
 reconcileCustody :: Manager -> ObserverSettings -> H.SolanaPolicy -> Reader -> Writer -> IO ()
 reconcileCustody manager settings config reader writer = do
+  expected<-evalRead reader ReadCustodyRevision
+  result<-try (inspectCustody False manager settings config reader `catch` (\(_::IOException)->reject "custody_rpc_unavailable"))
+  case result of
+    Right (revision,at,matches,report)->evalWrite writer (RecordCustody revision at (if matches then Nothing else Just "custody_balance_mismatch") (Just report))
+    Left (BridgeError code)->do
+      at<-floor <$> getPOSIXTime
+      evalWrite writer (RecordCustody expected at (Just code) Nothing)
+
+-- Loss inspection includes proved deficits without certifying normal readiness.
+inspectLossCustody :: Manager -> ObserverSettings -> H.SolanaPolicy -> Reader -> IO (Int64,Int64,Bool,Value)
+inspectLossCustody=inspectCustody True
+
+inspectCustody :: Bool -> Manager -> ObserverSettings -> H.SolanaPolicy -> Reader -> IO (Int64,Int64,Bool,Value)
+inspectCustody losses manager settings config reader = do
   let native=nativeSettings settings; solana=solanaSettings settings
       verifier=fmap (\url->rpc manager url Nothing) (S.solanaVerifierRpc solana)
       identity=N.nativeIdentity manager native >> S.solanaIdentity manager solana >> pure ()
-      clock=floor <$> getPOSIXTime
-  expected<-evalRead reader ReadCustodyRevision
-  result<-try (inspectCustodyWith clock identity (N.nativeCall manager native) (S.solanaCall manager solana)
-    verifier settings config reader False `catch` (\(_::IOException)->reject "custody_rpc_unavailable"))
-  case result of
-    Right (revision,at,matches,report)->evalWrite writer (RecordCustody revision at (if matches then Nothing else Just "custody_balance_mismatch") (Just report))
-    Left (BridgeError code)->clock >>= \at->evalWrite writer (RecordCustody expected at (Just code) Nothing)
+  inspectCustodyWith (floor <$> getPOSIXTime) identity (N.nativeCall manager native) (S.solanaCall manager solana)
+    verifier settings config reader losses
 
 -- Explicit read-only transports allow protocol contracts without invented chains.
 -- No transaction spans RPC; the revision is checked again before certification.
