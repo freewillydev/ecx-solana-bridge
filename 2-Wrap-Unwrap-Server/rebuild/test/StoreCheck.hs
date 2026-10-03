@@ -5,7 +5,9 @@ import Paths_ecx_bridge_rebuild (getDataFileName)
 import qualified Network.HTTP.Client as HTTP
 import qualified Network.Socket as NS
 import qualified System.Process as Process
-import System.FilePath (takeDirectory,(</>))
+import System.FilePath (takeDirectory,isAbsolute,(</>))
+import qualified System.Posix.Directory as PD
+import System.IO.Error (isDoesNotExistError)
 import qualified Bridge.Store.Backup as Backup
 import Crypto.Random (getRandomBytes)
 import Control.Concurrent (threadDelay,forkIO,killThread)
@@ -36,10 +38,10 @@ import System.Posix.Files (setFileMode)
 import qualified System.Posix.Files as Posix
 import Data.Bits ((.&.))
 import qualified Bridge.NativePayment as NP
-import Bridge.Error (reject)
+import Bridge.Error (BridgeError(..),reject)
 import Bridge.Observer (ObserverSettings(..))
 import Bridge.Reconciliation (inspectCustodyWith,nativeBalance)
-import Bridge.RPC (fieldValue)
+import Bridge.RPC (fieldValue,newRpcManager)
 import Bridge.SigningTransport (SigningEndpoint(..),runSigningServer)
 import qualified Bridge.SolanaPayment as SP
 import qualified Network.Wai.Handler.Warp as Warp
@@ -70,7 +72,52 @@ main = do
   fence<-lookupEnv "ECX_REBUILD_FENCE_ONLY"
   server<-lookupEnv "ECX_REBUILD_SERVER_ONLY"
   tls<-lookupEnv "ECX_REBUILD_TLS_ONLY"
-  if tls==Just "1" then tlsMain else if fence==Just "1" then fenceMain else if server==Just "1" then serverMain else ledgerMain
+  native<-lookupEnv "ECX_REBUILD_NATIVE_RECOVERY_ONLY"
+  if native==Just "1" then nativeRecoveryMain else if tls==Just "1" then tlsMain else if fence==Just "1" then fenceMain else if server==Just "1" then serverMain else ledgerMain
+
+-- Real L2L Signet, using only fresh empty test-owned wallets. No funded wallet
+-- is unloaded, changed or copied; the node remains running after this check.
+nativeRecoveryMain :: IO ()
+nativeRecoveryMain = do
+  cookie<-getEnv "ECX_REBUILD_NATIVE_RECOVERY_COOKIE"
+  walletDirectory<-getEnv "ECX_REBUILD_NATIVE_WALLET_DIRECTORY"
+  unless (isAbsolute walletDirectory) (fail "absolute node wallet directory required")
+  suffix<-digest <$> (getRandomBytes 16 :: IO BS.ByteString)
+  let sourceName="ecx-recovery-"<>T.take 20 suffix
+      targetName=sourceName<>"-restored"
+      source=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:29432" cookie sourceName
+        16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47"
+      target=source {N.nativeWallet=targetName}
+      check ok=unless ok (fail "real native wallet recovery failed")
+  bracket newRpcManager closeManager $ \manager->do
+    let call config=N.nativeCall manager config
+        cleanup name=do
+          void (call source False "unloadwallet" [toJSON name,Bool False]) `catch` (\e@(BridgeError code)->
+            if code=="rpc_error_-18" then pure () else throwIO e)
+          removeDirectoryRecursive (walletDirectory </> T.unpack name) `catch` (\(e::IOException)->
+            if isDoesNotExistError e then pure () else throwIO e)
+        allocate label kind=call source True "getnewaddress" [String label,String kind] >>= \v->case v of
+          String address->pure address; _->fail "expected native address"
+    _<-N.nativeIdentity manager source
+    bracket_ (void $ call source False "createwallet" [toJSON sourceName,Bool False,Bool False,String "",Bool False,Bool True,Bool False])
+      (cleanup sourceName) $
+      bracket (do (path,h)<-openTempFile "/tmp" "ecx-native-recovery"; hClose h; removeFile path; PD.createDirectory path 0o700; pure path)
+        removeDirectoryRecursive $ \directory->do
+        address<-allocate "recovery-label" "bech32"
+        legacy<-allocate "recovery-signing-proof" "legacy"
+        backup<-N.evalNativeRecoveryWith (call source) source (N.BackupNativeWallet $ directory </> "wallet.bak")
+        expectedNext<-allocate "next-label" "bech32"
+        void $ call source False "unloadwallet" [toJSON sourceName,Bool False]
+        bracket_ (pure ()) (cleanup targetName) $ do
+          N.evalNativeRecoveryWith (call target) target (N.RestoreNativeWallet backup)
+          recovered<-N.recoverNativeAddressWith (call target) target 0 False "recovery-label"
+          check (recovered==address)
+          next<-call target True "getnewaddress" [String "next-label",String "bech32"]
+          check (next==String expectedNext)
+          signature<-call target True "signmessage" [String legacy,String "ECX empty-wallet recovery acceptance"]
+          verified<-call target False "verifymessage" [String legacy,signature,String "ECX empty-wallet recovery acceptance"]
+          check (verified==Bool True)
+    putStrLn "Real L2L Signet wallet backup/restore: descriptor state, labels, next address and private-key signing PASS; test wallets removed."
 
 ledgerMain :: IO ()
 ledgerMain = do

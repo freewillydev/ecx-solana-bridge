@@ -6,7 +6,10 @@ import qualified Bridge.Store as Store
 import qualified Bridge.SolanaHelper as Helper
 import qualified Bridge.Wire as W
 import Paths_ecx_bridge_rebuild (getDataFileName)
-import System.Directory (removeFile)
+import System.Directory (removeFile,removeDirectoryRecursive)
+import qualified System.Posix.Directory as PD
+import System.Posix.Files (setFileMode)
+import System.FilePath ((</>))
 import System.IO (openTempFile,hClose)
 import qualified ObservationCheck
 import qualified SolanaPaymentCheck
@@ -84,7 +87,7 @@ checks = (\deployment native solana observation common->deployment<>native<>sola
       result <- retryRateLimitedRead (\n->modifyIORef' waits (<>[n])) "getTransaction" action
       count <- readIORef calls; delays <- readIORef waits
       pure (result && count==3 && delays==[5000000,8000000])
-  , check "mutations and unknown methods never retry" $ forAll (elements ["sendTransaction","sendrawtransaction","walletprocesspsbt","getnewaddress","futureMethod"]) $ \method -> ioProperty $ do
+  , check "mutations and unknown methods never retry" $ forAll (elements ["sendTransaction","sendrawtransaction","walletprocesspsbt","getnewaddress","backupwallet","restorewallet","futureMethod"]) $ \method -> ioProperty $ do
       calls <- newIORef (0::Int); waits <- newIORef (0::Int)
       refused <- rejects "rpc_rate_limited" $ retryRateLimitedRead (\_->modifyIORef' waits (+1)) method
         (modifyIORef' calls (+1) >> pure (Left Nothing :: Either (Maybe Int) ()))
@@ -110,6 +113,61 @@ checks = (\deployment native solana observation common->deployment<>native<>sola
         ,rejects "native_synchronizing" (run signetChallenge True (nativeCheckpointHash settings) 1)
         ,rejects "native_checkpoint_mismatch" (run signetChallenge False "wrong" 1)
         ,rejects "native_no_peers" (run signetChallenge False (nativeCheckpointHash settings) 0)] >>= pure . and
+  , check "native recovery binds immutable private backup and refuses existing wallets" $ once $ ioProperty $
+      bracket (do (file,h)<-openTempFile "/tmp" "ecx-wallet-contract"; hClose h; removeFile file; PD.createDirectory file 0o700; pure file)
+        removeDirectoryRecursive $ \directory->do
+        changed<-newIORef False; rangeEnd<-newIORef (999::Int); exists<-newIORef False; backups<-newIORef (0::Int); restores<-newIORef (0::Int)
+        let path=directory </> "wallet.bak"
+            target=settings {nativeWallet="restored"}
+            call config _ method args=case method of
+              "getblockchaininfo"->pure $ object ["chain" .= ("signet"::Text),"initialblockdownload" .= False,"blocks" .= (16000::Int),"signet_challenge" .= signetChallenge]
+              "getblockhash"->pure $ String (nativeCheckpointHash settings)
+              "getconnectioncount"->pure $ Number 1
+              "getwalletinfo"->pure $ object ["walletname" .= nativeWallet config,"descriptors" .= True,"scanning" .= False,"private_keys_enabled" .= True,"external_signer" .= False]
+              "listdescriptors"->do
+                if args==[Bool False] then pure () else fail "private descriptors requested"
+                altered<-readIORef changed
+                end<-readIORef rangeEnd
+                pure $ object ["wallet_name" .= nativeWallet config,"descriptors" .= [object ["desc" .= ("public-descriptor"::Text),"next" .= (if altered then 2 else 1::Int),"range" .= [0,end]]]]
+              "backupwallet"->do
+                if args==[toJSON path] then pure () else fail "unexpected backup destination"
+                BS.writeFile path "private wallet fixture"; setFileMode path 0o600
+                modifyIORef' backups (+1); pure Null
+              "listwalletdir"->do
+                present<-readIORef exists
+                pure $ object ["wallets" .= [object ["name" .= nativeWallet target] | present]]
+              "restorewallet"->do
+                if args==[toJSON $ nativeWallet target,toJSON path,Bool False] then pure () else fail "unexpected restore request"
+                modifyIORef' restores (+1); pure $ object ["name" .= nativeWallet target]
+              _->fail "unexpected recovery request"
+            run config=evalNativeRecoveryWith (call config) config
+        backup<-run settings (BackupNativeWallet path)
+        duplicate<-rejects "native_backup_destination_exists" (run settings $ BackupNativeWallet path)
+        setFileMode path 0o644
+        exposed<-rejects "unsafe_native_backup_file" (run target $ RestoreNativeWallet backup)
+        setFileMode path 0o600
+        BS.appendFile path "changed"
+        corrupt<-rejects "native_backup_hash_mismatch" (run target $ RestoreNativeWallet backup)
+        BS.writeFile path "private wallet fixture"
+        writeIORef exists True
+        occupied<-rejects "native_restore_wallet_exists" (run target $ RestoreNativeWallet backup)
+        writeIORef exists False
+        writeIORef rangeEnd 1000
+        run target (RestoreNativeWallet backup)
+        writeIORef rangeEnd 998
+        shrunk<-rejects "native_restore_descriptors_mismatch" (run target $ RestoreNativeWallet backup)
+        writeIORef rangeEnd 1000
+        writeIORef changed True
+        mismatch<-rejects "native_restore_descriptors_mismatch" (run target $ RestoreNativeWallet backup)
+        removeFile path
+        writeIORef changed False
+        let changing wallet method args=do
+              result<-call settings wallet method args
+              if method=="backupwallet" then writeIORef changed True else pure ()
+              pure result
+        race<-rejects "native_wallet_changed_during_backup" (evalNativeRecoveryWith changing settings $ BackupNativeWallet path)
+        counts<-(,) <$> readIORef backups <*> readIORef restores
+        pure (and [duplicate,exposed,corrupt,occupied,shrunk,mismatch,race] && counts==(2,3))
   , check "native allocation never repeats getnewaddress after a lost claim" $ once $ ioProperty $ do
       saved <- newIORef False; allocations <- newIORef (0::Int)
       let label="ecx-bridge:v1:contract:order:known"

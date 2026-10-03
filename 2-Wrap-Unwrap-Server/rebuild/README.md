@@ -1439,8 +1439,33 @@ its HTTP/lifetime checks preserve balances and clean up the process. Root Cabal
 build and QuickCheck pass. This checkpoint does not re-prove off-host key isolation
 or funded cross-host recovery.
 
-Still required: key/wallet recovery material, backup acknowledgment and runtime
-integration, then acceptance using independent off-host storage and real custody.
+Native wallet recovery now has two closed offline adapter operations in
+`chain/Bridge/Native.hs`: backup through the real node's `backupwallet`, and restore
+into an unused wallet name. The opaque evidence binds the checkpoint/profile,
+private file hash and public descriptor state. The adapter rejects existing paths,
+unsafe ownership/modes, changed backups and descriptor/allocation drift. Restore
+permits only lookahead-range expansion because the real daemon replenishes its
+keypool on load; keys, next indices and other descriptor fields remain exact.
+Neither operation retries uncertain mutations or deletes a failed restore.
+
+Against `f0b0517`, Native grows **163 → 259 lines in the same one production file**
+(+96; added recovery functionality, not a reduction). Existing tests grow ChainCheck
+209 → 267 and StoreCheck 2,643 → 2,690; no new files, services or dependencies.
+Root Cabal QuickCheck and a fresh empty wallet on the actual L2L Signet node pass:
+backup/restore preserves the label and next allocated address, and the restored
+private key signs a message verified by the node. Test wallets/staging are removed;
+funded wallets and the shared daemon remain untouched. Repeat through the existing
+`rebuild-store-check` executable with `ECX_REBUILD_NATIVE_RECOVERY_ONLY=1`,
+`ECX_REBUILD_NATIVE_RECOVERY_COOKIE` and `ECX_REBUILD_NATIVE_WALLET_DIRECTORY`.
+
+This is an offline adapter with in-memory evidence, not yet a durable custody
+bundle or an application CLI. It requires same-UID node/staging access and does
+not grant the web worker backup/key access or add a signer HTTP endpoint.
+Encrypted wallets require separately retained unlock material. Populated/encrypted
+wallets, cross-UID deployment and coherent ledger/key snapshots still need acceptance.
+
+Still required: durable key/wallet recovery material, backup acknowledgment and
+runtime integration, then independent off-host storage and real-custody acceptance.
 The `backupRequired` startup refusal remains until those guarantees are implemented;
 an archive, upload-only receipt or adopted paused ledger does not automatically
 permit signing or sending.

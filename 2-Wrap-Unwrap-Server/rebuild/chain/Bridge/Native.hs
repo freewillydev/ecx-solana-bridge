@@ -1,14 +1,18 @@
+{-# LANGUAGE GADTs, ScopedTypeVariables #-}
 module Bridge.Native
   ( NativeSettings(..), validateNativeSettings, nativeCall, nativeIdentity, nativeIdentityWith
   , verifyNativeBoundaryWith, validateNativeRecipientWith, nativeWalletInfoWith, nativeWalletReadyWith
+  , NativeRecovery(..), NativeWalletBackup, evalNativeRecoveryWith
   , recoverNativeAddressWith, nativeHistory, nativeAmount, nativeNumber, signetChallenge ) where
 
 import Bridge.Wire (Profile(..))
 import Bridge.RPC
 import Bridge.Error
 import Bridge.Domain
-import Control.Exception (catch,throwIO,try)
+import Control.Exception (IOException,bracket,catch,throwIO,try)
+import Crypto.Hash (Context,Digest,SHA256,hashInit,hashUpdate,hashFinalize)
 import Data.Aeson
+import Data.Bits ((.&.))
 import qualified Data.Aeson.Key as K
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
@@ -18,8 +22,13 @@ import Data.Scientific (Scientific, coefficient, base10Exponent)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.HTTP.Client (Manager,parseRequest,host,path,queryString,requestHeaders)
-import System.IO (withBinaryFile,IOMode(ReadMode))
-import System.FilePath (isAbsolute)
+import System.IO (Handle,withBinaryFile,IOMode(ReadMode))
+import System.FilePath (isAbsolute,normalise,takeDirectory)
+import System.IO.Error (isDoesNotExistError)
+import System.Posix.Files
+import System.Posix.IO
+import System.Posix.Unistd (fileSynchronise)
+import System.Posix.User (getEffectiveUserID)
 
 -- Real deployment identity, independent of web/installer/signer configuration.
 data NativeSettings = NativeSettings
@@ -161,3 +170,90 @@ verifyNativeBoundaryWith call = mapM_ denied
   denied method = do
     result<-try (call True method []) :: IO (Either BridgeError Value)
     require (case result of Left(BridgeError "rpc_method_forbidden")->True; _->False) "native_signing_authority_not_separated"
+
+-- Offline custody authority, never a worker or signer HTTP operation. The node
+-- and this evaluator must share a private staging directory under the same UID.
+-- An encrypted wallet still requires its separately retained unlock material.
+data NativeRecovery a where
+  BackupNativeWallet :: FilePath -> NativeRecovery NativeWalletBackup
+  RestoreNativeWallet :: NativeWalletBackup -> NativeRecovery ()
+-- Only a checked backup can supply restore evidence; no private descriptors are
+-- exported over RPC. This in-memory evidence is not a durable recovery manifest.
+data NativeWalletBackup = NativeWalletBackup NativeSettings FilePath Text [Value]
+
+evalNativeRecoveryWith :: (Bool -> Text -> [Value] -> IO Value) -> NativeSettings -> NativeRecovery a -> IO a
+evalNativeRecoveryWith call c operation = do
+  validateNativeSettings c
+  _<-nativeIdentityWith call c
+  case operation of
+    BackupNativeWallet destination -> do
+      privateParent destination
+      exists<-(getSymbolicLinkStatus destination >> pure True) `catch` (\(e::IOException)->
+        if isDoesNotExistError e then pure False else throwIO e)
+      require (not exists) "native_backup_destination_exists"
+      before<-descriptors
+      result<-call True "backupwallet" [toJSON destination]
+      require (result==Null) "unexpected_rpc_schema"
+      privateBackup destination
+      after<-descriptors
+      require (before==after) "native_wallet_changed_during_backup"
+      sync destination
+      sync (takeDirectory destination)
+      checksum<-withBinaryFile destination ReadMode (hashChunks hashInit)
+      pure (NativeWalletBackup c destination checksum before)
+    RestoreNativeWallet (NativeWalletBackup source backup checksum expected) -> do
+      require (profile source==profile c && nativeCheckpointHeight source==nativeCheckpointHeight c
+        && nativeCheckpointHash source==nativeCheckpointHash c) "native_backup_network_mismatch"
+      privateParent backup
+      privateBackup backup
+      actual<-withBinaryFile backup ReadMode (hashChunks hashInit)
+      require (actual==checksum) "native_backup_hash_mismatch"
+      wallets<-call False "listwalletdir" [] >>= fieldValue "wallets" :: IO [Value]
+      names<-mapM (fieldValue "name") wallets
+      require (nativeWallet c `notElem` names) "native_restore_wallet_exists"
+      result<-call False "restorewallet" [toJSON $ nativeWallet c,toJSON backup,Bool False]
+      name<-fieldValue "name" result
+      require (name==nativeWallet c) "native_restore_wallet_mismatch"
+      restored<-descriptors
+      matching<-and <$> sequence (zipWith sameDescriptor expected restored)
+      require (length restored==length expected && matching) "native_restore_descriptors_mismatch"
+ where
+  descriptors = do
+    wallet<-nativeWalletInfoWith call c
+    keys<-fieldValue "private_keys_enabled" wallet
+    external<-fieldValue "external_signer" wallet
+    require (keys && not external) "native_wallet_not_ready"
+    result<-call True "listdescriptors" [Bool False]
+    name<-fieldValue "wallet_name" result
+    values<-fieldValue "descriptors" result :: IO [Value]
+    require (name==nativeWallet c && not(null values)) "native_backup_descriptors_missing"
+    pure values
+  -- Loading a wallet replenishes its lookahead keypool. Only an expanded range
+  -- is allowed; keys, timestamps, allocation indices and other fields stay exact.
+  sameDescriptor (Object before) (Object after)
+    | KM.delete "range" before==KM.delete "range" after = case (KM.lookup "range" before,KM.lookup "range" after) of
+        (Nothing,Nothing)->pure True
+        (Just old,Just new)->do
+          oldRange<-parseValue parseJSON old :: IO [Int64]
+          newRange<-parseValue parseJSON new :: IO [Int64]
+          pure $ case (oldRange,newRange) of
+            ([lo,hi],[loNew,hiNew])->0<=lo && lo<=hi && loNew==lo && hiNew>=hi && hiNew<2147483648
+            _->False
+        _->pure False
+  sameDescriptor _ _=pure False
+  privateParent path = do
+    require (isAbsolute path && normalise path==path) "invalid_native_backup_path"
+    status<-getSymbolicLinkStatus (takeDirectory path)
+    uid<-getEffectiveUserID
+    require (isDirectory status && fileOwner status==uid && fileMode status .&. 0o077==0) "unsafe_native_backup_directory"
+  privateBackup path = do
+    status<-getSymbolicLinkStatus path
+    uid<-getEffectiveUserID
+    require (isRegularFile status && fileOwner status==uid && fileMode status .&. 0o077==0
+      && linkCount status==1 && fileSize status>0) "unsafe_native_backup_file"
+  hashChunks :: Context SHA256 -> Handle -> IO Text
+  hashChunks context handle = do
+    bytes<-BS.hGet handle 65536
+    if BS.null bytes then pure (T.pack $ show (hashFinalize context :: Digest SHA256))
+      else hashChunks (hashUpdate context bytes) handle
+  sync path=bracket (openFd path ReadOnly defaultFileFlags {nofollow=True,cloexec=True}) closeFd fileSynchronise
