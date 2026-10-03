@@ -24,7 +24,10 @@ visibility. Atomic order creation now includes idempotency, immutable terms,
 inventory and both operating holds, readiness and daily-budget checks, with
 PostgreSQL rollback/replay acceptance. Guarded instruction storage now covers native
 allocation claims, immutable results, derived Solana references, backup-gated first
-exposure and expiry preserving obligation holds. Native RPC provisioning, high-level evaluators, chain adapters and execution remain unfinished.
+exposure and expiry preserving obligation holds. The private chain component now
+has HTTP RPC plus native identity/wallet/allocation and Solana identity/account
+checks, with protocol tests and a real Devnet genesis read. Adapter/workflow integration,
+high-level evaluators, chain adapters and execution remain unfinished.
 No existing custody state has been moved. See the rebuild README for scoped counts
 and evidence; do not compare this subset against the entire old storage layer.
 

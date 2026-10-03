@@ -161,6 +161,31 @@ all three existing columns. Both chains share immutable instruction recording;
 Solana binding no longer accepts a caller-chosen reference. This reduces duplicate
 update paths without discarding the late-native-reply recovery rule.
 
-Native RPC address provisioning, the high-level safe/critical runtime, actual host fence,
+The private chain component now contains the existing HTTP JSON-RPC transport,
+native identity/wallet/address-allocation checks and Solana identity/token-account
+checks, with chain-specific settings independent of the old application Config.
+The retired Unix HTTP transport and application-wide PaymentTransport record are
+not carried over. Native credentials are read with a 4,097-byte bound before the
+4,096-byte limit check. Native amounts reject extreme exponent overflow; negative
+Retry-After values fail closed. Mutation/unknown-method retries remain forbidden.
+Solana public-key decoding has a length bound before Base58 work.
+
+QuickCheck/protocol contracts cover exact native amounts, response bounds, bounded
+read retries, mutation non-retry, native endpoint/wallet/checkpoint constraints,
+L2L identity refusals, one-time allocation recovery, Solana endpoint independence
+and token program/mint/owner/layout/delegate/close-authority rejection. The new
+transport also returned the expected genesis from the real public Solana Devnet
+endpoint. That is a live read-only transport check, not funded wallet or mint/custody
+acceptance. The PostgreSQL contract passed after the shared error-type extraction.
+
+Production counts: RPC 103 to 83 lines (one file each); native 128 to 151 (one file
+each); Solana 82 to 108 (one file each). The chain files grow because settings and
+validation move out of the old application-wide Config. An 11-line shared error
+module replaces the replacement store's local exception definition and supports
+both components. These are literal module counts, not a like-for-like total
+reduction claim; the principal gain is clear dependencies and retained protocol
+checks, with targeted input/retry hardening.
+
+Connecting those adapters to the high-level safe/critical runtime, actual host fence,
 chain adapters, signer and payment execution remain unfinished. Passing these
 checks is not payment, migration or real-chain acceptance.

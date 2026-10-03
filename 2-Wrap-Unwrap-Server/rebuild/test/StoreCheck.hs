@@ -208,7 +208,7 @@ expectStore :: T.Text -> IO a -> IO ()
 expectStore expected action = do
   result <- try action
   case result of
-    Left (StoreError actual) | expected==actual -> pure ()
+    Left (BridgeError actual) | expected==actual -> pure ()
     Left err -> fail ("unexpected rejection: "<>show err)
     Right _ -> fail ("expected rejection: "<>T.unpack expected)
 

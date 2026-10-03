@@ -13,7 +13,7 @@ common settings
 library
   import: settings
   hs-source-dirs: src
-  exposed-modules: Bridge.Domain, Bridge.Identity, Bridge.Wire, Bridge.Operation, Bridge.Operation.Internal
+  exposed-modules: Bridge.Domain, Bridge.Error, Bridge.Identity, Bridge.Wire, Bridge.Operation, Bridge.Operation.Internal
   build-depends: base >=4.20 && <4.23, aeson >=2.2 && <2.4, text >=2.1 && <2.2, containers, bytestring, base16-bytestring, base58-bytestring, crypton >=1 && <1.2, ram >=0.22 && <0.23
 
 library customer-api
@@ -35,13 +35,22 @@ library store
     crypton, time, scientific, opaleye ==0.10.8.0, postgresql-simple >=0.7 && <0.8,
     product-profunctors >=0.11 && <0.12
 
+library chain
+  import: settings
+  visibility: private
+  hs-source-dirs: chain
+  exposed-modules: Bridge.RPC, Bridge.Native, Bridge.Solana
+  build-depends: base, ecx-bridge-rebuild, aeson, bytestring, text, scientific,
+    filepath, http-client, http-client-tls, http-types
+
 test-suite rebuild-test
   import: settings
   type: exitcode-stdio-1.0
   hs-source-dirs: test
   main-is: Main.hs
-  build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:customer-api, servant, aeson, text, containers,
-    QuickCheck >=2.15 && <2.19
+  other-modules: ChainCheck
+  build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:customer-api, ecx-bridge-rebuild:chain, servant, aeson, text, containers,
+    QuickCheck >=2.15 && <2.19, bytestring, scientific, http-client
 
 -- Explicitly invoked against a disposable migrated database, never live custody.
 executable rebuild-store-check

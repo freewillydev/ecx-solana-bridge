@@ -2,9 +2,10 @@
 -- Closed ledger operations. Connections, queries and transaction callbacks never
 -- escape this module; the runtime will interpret its customer/operator DSL here.
 module Bridge.Store
-  ( Reader, Writer, StoreError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), StorePolicy(..), AllocationClaim(..), LedgerState(..), WithdrawalView(..)
+  ( Reader, Writer, BridgeError(..), StoreRead(..), StoreWrite(..), OrderLimits(..), StorePolicy(..), AllocationClaim(..), LedgerState(..), WithdrawalView(..)
   , withReader, withWriter, evalRead, evalWrite ) where
 
+import Bridge.Error
 import Bridge.Identity (bearerHash,digest,payInstruction)
 import qualified Bridge.Wire as W
 import Bridge.Domain
@@ -31,13 +32,6 @@ import qualified Database.PostgreSQL.Simple as PG
 import qualified Database.PostgreSQL.Simple.Transaction as Tx
 import qualified Opaleye as O
 import qualified Opaleye.Internal.Locking as Locking
-
-data StoreError = StoreError Text deriving (Eq,Show)
-instance Exception StoreError
-require :: Bool -> Text -> IO ()
-require ok problem = unless ok (throwIO $ StoreError problem)
-reject :: Text -> IO a
-reject = throwIO . StoreError
 
 data LedgerState = LedgerState
   { ledgerSequence :: Int64, ledgerBackup :: Int64, ledgerPaused :: Bool, ledgerReason :: Text }
@@ -224,7 +218,7 @@ transaction :: Writer -> (PG.Connection -> IO a) -> IO a
 transaction (Writer cell config checkpoint) action = do
   let policy=executionTerms config
   outcome <- modifyMVar cell $ \case
-    Nothing -> pure (Nothing,Left (toException $ StoreError "ledger_connection_fenced"))
+    Nothing -> pure (Nothing,Left (toException $ BridgeError "ledger_connection_fenced"))
     Just c -> mask $ \restore -> do
       result <- try $ do
         PG.begin c
@@ -243,7 +237,7 @@ transaction (Writer cell config checkpoint) action = do
         Right value -> pure (Just c,Right value)
         Left (err :: SomeException) -> do
           rollback <- try (PG.rollback c) :: IO (Either SomeException ())
-          let reusable = case (fromException err :: Maybe StoreError,rollback) of
+          let reusable = case (fromException err :: Maybe BridgeError,rollback) of
                 (Just _,Right ()) -> True
                 _ -> False
           pure (if reusable then Just c else Nothing,Left err)

@@ -1,5 +1,5 @@
 -- Exact baseline capability hashing; raw tokens never become persisted IDs.
-module Bridge.Identity (digest, capabilityHash, bearerHash,payInstruction) where
+module Bridge.Identity (digest, capabilityHash, bearerHash,payInstruction,publicKey) where
 import Crypto.Hash (Digest,SHA256,hash)
 import qualified Data.ByteArray.Encoding as BA
 import Data.ByteString (ByteString)
@@ -26,3 +26,10 @@ payInstruction identifier = do
   raw <- either (const $ Left "invalid_order_reference") Right (Hex.decode $ TE.encodeUtf8 identifier)
   if BS.length raw/=32 then Left "invalid_order_reference" else
     Right ("solana-pay:"<>TE.decodeUtf8 (B58.encodeBase58 B58.bitcoinAlphabet raw))
+
+publicKey :: Text -> Either Text BS.ByteString
+publicKey value
+  | T.length value<32 || T.length value>44 = Left "invalid_public_key"
+  | otherwise = case B58.decodeBase58 B58.bitcoinAlphabet (TE.encodeUtf8 value) of
+      Just bytes | BS.length bytes==32 -> Right bytes
+      _ -> Left "invalid_public_key"
