@@ -1,5 +1,6 @@
 -- Exact baseline capability hashing; raw tokens never become persisted IDs.
-module Bridge.Identity (digest, capabilityHash, bearerHash,payInstruction,payReference,publicKey) where
+module Bridge.Identity (digest, capabilityHash, bearerHash,payInstruction,payReference,payURIFor,publicKey) where
+import Bridge.Domain (Amount,renderCoins)
 import Crypto.Hash (Digest,SHA256,hash)
 import qualified Data.ByteArray.Encoding as BA
 import Data.ByteString (ByteString)
@@ -36,3 +37,10 @@ publicKey value
   | otherwise = case B58.decodeBase58 B58.bitcoinAlphabet (TE.encodeUtf8 value) of
       Just bytes | BS.length bytes==32 -> Right bytes
       _ -> Left "invalid_public_key"
+
+-- Keys are validated base58, so only the fixed label needs URI escaping.
+payURIFor :: Text -> Text -> Text -> Amount -> Either Text Text
+payURIFor owner mint instruction quantity = do
+  reference<-maybe (Left "invalid_pay_reference") Right (T.stripPrefix "solana-pay:" instruction)
+  mapM_ publicKey [owner,mint,reference]
+  pure ("solana:"<>owner<>"?amount="<>renderCoins quantity<>"&spl-token="<>mint<>"&reference="<>reference<>"&label=ECX%20Bridge")

@@ -85,6 +85,7 @@ data StoreRead a where
   ReadPayment :: Text -> StoreRead PaymentView
   ReadPaymentSource :: Text -> StoreRead (Maybe W.PaymentSource)
   ReadWithdrawal :: Text -> StoreRead (Maybe WithdrawalView)
+  ReadPayableOrder :: Int64 -> Text -> Text -> StoreRead W.OrderView
   ReadOrder :: Text -> Text -> StoreRead W.OrderView
   PromotionCandidates :: StoreRead [Text]
   PendingVerification :: StoreRead [Text]
@@ -189,6 +190,12 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
       PromotionCandidates -> promotionCandidates c
       ReadBalances -> balances c
       ReadWithdrawal key -> readWithdrawal c key
+      ReadPayableOrder now header identifier -> do
+        cap<-checked (bearerHash header)
+        view<-readOrder c identity (if remote then Just(S.backupSequence row) else Nothing) cap identifier
+        intakeReady c identity now
+        require (W.status view=="AwaitingDeposit" && now<=W.deadline view && W.direction(W.request view)==WrappedToNative) "deposit_window_closed"
+        pure view
       ReadOrder header identifier -> do
         cap <- checked (bearerHash header)
         readOrder c identity (if remote then Just(S.backupSequence row) else Nothing) cap identifier

@@ -11,6 +11,11 @@ import Bridge.Wire (PaymentTerms(..),CostLimits(..),PolicySnapshot(..))
 import Bridge.Store
 import Bridge.Signer
 import Bridge.Critical
+import Bridge.Web (customerApplication)
+import qualified Bridge.Operation.Internal as Op
+import qualified Network.Wai as Wai
+import qualified Network.Wai.Test as WaiTest
+import Network.HTTP.Types (statusCode)
 import Bridge.Order
 import Bridge.Error (reject)
 import Bridge.Observer (ObserverSettings(..))
@@ -390,7 +395,7 @@ main = do
             expectStore "signer_profile_mismatch" (interpret $ Request $ SignPrepared "other" intent 0)
             expectStore "invalid_signing_decision" (interpret $ Request $ SignPrepared "contract" intent 8)
             expectStore "signing_backup_required" (interpret $ Request $ SignPrepared "contract" intent 0)
-          withPaymentWorker manager (ObserverSettings native solana 2 "sol-origin" "opening-signature") (signingPolicy signing) (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret -> do
+          withRuntime manager (ObserverSettings native solana 2 "sol-origin" "opening-signature") (signingPolicy signing) Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret _customer -> do
             expectStore "invalid_saved_payment" (interpret $ Request $ SignPreparedPayment intent)
             expectStore "intake_paused" (interpret $ Request $ PrepareOutgoing intent)
           pausedAfterRefusal<-evalRead reader ReadState
@@ -463,7 +468,7 @@ main = do
         completed<-evalRead reader (ReadPayment $ "fee:"<>withdrawalKey)
         check (savedStatus completed==PaymentPaid)
         bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "terminal payment must not call RPC"}) closeManager $ \manager ->
-          withPaymentWorker manager (ObserverSettings native solana 2 "sol-origin" "opening-signature") (signingPolicy signing) (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret ->
+          withRuntime manager (ObserverSettings native solana 2 "sol-origin" "opening-signature") (signingPolicy signing) Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret _customer ->
             interpret (Request $ ReconcilePayment nativeTx)
         evalRead reader ReadBalances >>= check . (==afterSettlement)
         fixture fixtures (SeedReceipt "unknown-source" Nothing Native 10 2 True 100)
@@ -679,7 +684,7 @@ main = do
         check (M.findWithDefault 0 (Sol,Unallocated) afterSol==M.findWithDefault 0 (Sol,Unallocated) beforeSol+3)
       withWriter settings (store policy limits) (const $ pure ()) $ \writer->do
         fixture fixtures OrderWorkflowFunds
-        orderWorkflowContract fixtures reader writer
+        orderWorkflowContract fixtures reader writer (store policy limits)
       beforeLarge<-evalRead reader ReadBalances
       fixture fixtures LargeBalances
       huge <- evalRead reader ReadBalances
@@ -1076,8 +1081,8 @@ custodyContract fixtures reader = do
   expectStore "native_reused_balance_requires_review" (nativeBalance $ \_ _ _->pure $ object
     ["mine" .= object ["trusted" .= (0::Int),"untrusted_pending" .= (0::Int),"immature" .= (0::Int),"used" .= (1::Int)]])
 
-orderWorkflowContract :: PG.Connection -> Reader -> Writer -> IO ()
-orderWorkflowContract fixtures reader writer = do
+orderWorkflowContract :: PG.Connection -> Reader -> Writer -> StorePolicy -> IO ()
+orderWorkflowContract fixtures reader writer storePolicy = do
   admissions<-newIORef (0::Int); identities<-newIORef (0::Int); allocations<-newIORef (0::Int)
   label<-newIORef Nothing; loseReply<-newIORef True
   let native=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:29432" "/unused" "workflow" 1 (T.replicate 64 "0")
@@ -1113,9 +1118,12 @@ orderWorkflowContract fixtures reader writer = do
   check (W.depositInstruction hidden==Nothing)
   issued<-create unwrap
   check (W.orderId issued==oid && W.status issued=="AwaitingDeposit" && W.depositInstruction issued/=Nothing)
+  payable<-evalRead reader (ReadPayableOrder 110 header oid)
+  check (payable==issued)
   counts<- (,) <$> readIORef admissions <*> readIORef identities
   fixture fixtures (CustodyHeadReview 0)
   evalWrite writer (Pause "test replay while paused")
+  expectStore "intake_paused" (evalRead reader $ ReadPayableOrder 110 header oid)
   replay<-create unwrap
   afterCounts<-(,) <$> readIORef admissions <*> readIORef identities
   check (replay==issued && counts==afterCounts && fst counts==1)
@@ -1126,7 +1134,37 @@ orderWorkflowContract fixtures reader writer = do
   expectStore "rpc_transport_unknown_outcome" (create wrapping)
   Just wrapId<-evalRead reader (FindOrder header wrapping)
   recovered<-create wrapping
+  expectStore "deposit_window_closed" (evalRead reader $ ReadPayableOrder 110 header wrapId)
   allocated<-readIORef allocations
   check (W.orderId recovered==wrapId && W.depositInstruction recovered==Just "offline-order-address" && allocated==1)
   _<-create wrapping
   readIORef allocations >>= check . (==1)
+
+  let key=T.replicate 32 "1"
+      solana=Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing key key key
+      chainSettings=ObserverSettings native solana 2 "sol-origin" "opening-signature"
+      config=H.SolanaPolicy "contract" "contract" key key key (money 10) (money 10)
+      public=W.PublicConfiguration W.L2LSignetDevnet "devnet" (W.InterfaceConfig Nothing Nothing Nothing Nothing Nothing)
+        "contract" key key 8 (money 2) (money 1000) (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]) False False (W.Availability False "starting")
+      customerSettings=CustomerSettings public storePolicy "/unused/sdk" backup
+      endpoint=SigningEndpoint 9443 "/unused/auth"
+  bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "runtime replay/read reached network"}) closeManager $ \manager->do
+    withRuntime manager chainSettings config (Just customerSettings) endpoint reader writer $ \worker customer->do
+      publicView<-customer (Op.safe Op.PublicConfig)
+      check (W.pubAvailability publicView==W.Availability False "observation_only")
+      saved<-customer (Op.safe $ Op.OrderStatus header wrapId)
+      check (saved==recovered)
+      expectStore "observation_only" (customer $ Op.customer $ Op.CreateOrder header wrapping)
+      expectStore "observation_only" (worker $ Request $ SignPreparedPayment "missing")
+      expectStore "observation_only" (worker $ Request $ BroadcastPayment "missing")
+      expectStore "deposit_window_closed" (customer $ Op.safe $ Op.PaymentInstructions header oid)
+      app<-customerApplication customer
+      response<-WaiTest.runSession (WaiTest.srequest $ WaiTest.SRequest
+        ((WaiTest.setPath Wai.defaultRequest ("/api/v1/orders/"<>TE.encodeUtf8 wrapId))
+          {Wai.requestHeaders=[("Authorization",TE.encodeUtf8 header)]}) "") app
+      check (statusCode(WaiTest.simpleStatus response)==200 && eitherDecodeStrict' (BL.toStrict $ WaiTest.simpleBody response)==Right recovered)
+    withRuntime manager chainSettings config (Just customerSettings {publicConfiguration=public {W.pubIntakeEnabled=True}}) endpoint reader writer $ \_ customer->do
+      saved<-customer (Op.customer $ Op.CreateOrder header wrapping)
+      check (W.depositInstruction saved==W.depositInstruction recovered && W.quote saved==W.quote recovered)
+    expectStore "customer_configuration_mismatch" $ withRuntime manager chainSettings config
+      (Just customerSettings {publicConfiguration=public {W.pubMint="wrong"}}) endpoint reader writer (\_ _->pure ())

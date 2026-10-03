@@ -3,6 +3,10 @@
 -- No signing keys, chain RPC, native listener or funds are used here.
 module SigningTransportCheck (checks) where
 import Bridge.SigningTransport
+import Bridge.Web (customerApplication)
+import qualified Bridge.Wire as W
+import qualified Bridge.Domain as D
+import qualified Data.Map.Strict as M
 import Bridge.Operation.Internal
 import Bridge.Error
 import Bridge.Wire (SignedAttempt(..))
@@ -24,7 +28,45 @@ import Test.QuickCheck
 
 checks :: IO [Result]
 checks=sequence
-  [ check "signer HTTP authenticates before evaluating and bounds all request bodies" $ once $ ioProperty $ do
+  [ check "customer Servant routes resolve all four existential requests and reject invalid bodies" $ once $ ioProperty $ do
+      calls<-newIORef ([]::[Text])
+      let amount=either (error . show) id (D.amount 100)
+          quote=either (error . show) id (D.quote amount)
+          request=W.OrderRequest D.NativeToWrapped amount "recipient" "refund" Nothing "key"
+          order=W.OrderView "order" request quote "AwaitingDeposit" 200 (Just "instruction") Nothing (W.PolicySnapshot 2 "finalized" "deployment")
+          config=W.PublicConfiguration W.L2LSignetDevnet "devnet" (W.InterfaceConfig Nothing Nothing Nothing Nothing Nothing)
+            "deployment" "mint" "owner" 8 amount amount M.empty False False (W.Availability False "paused")
+          instruction=W.PaymentInstruction "solana:fixture" "reference" "mint" amount "verified_source_owner"
+          evaluate :: forall a. Plan 'Customer a -> IO a
+          evaluate (SafePlan value)=case resolve value of
+            ReadCustomer PublicConfig->modifyIORef' calls (<>["config"]) >> pure config
+            ReadCustomer (OrderStatus header identifier)->do
+              require (header=="Bearer fixture" && identifier=="order") "order_not_found"
+              modifyIORef' calls (<>["read"]) >> pure order
+            ReadCustomer (PaymentInstructions _ _)->modifyIORef' calls (<>["instructions"]) >> pure instruction
+          evaluate (CriticalPlan value)=case resolve value of
+            WriteCustomer (CreateOrder _ input)->require (input==request) "invalid_request" >> modifyIORef' calls (<>["create"]) >> pure order
+          send method path headers body=srequest $ SRequest
+            ((setPath defaultRequest path) {requestMethod=method,requestHeaders=headers}) body
+          auth=[("Authorization","Bearer fixture"),("Content-Type","application/json")]
+      app<-customerApplication evaluate
+      responses<-runSession (sequence
+        [send "GET" "/api/v1/config" [] ""
+        ,send "POST" "/api/v1/orders" auth (encode request)
+        ,send "GET" "/api/v1/orders/order" auth ""
+        ,send "POST" "/api/v1/orders/order/transaction" auth ""
+        ,send "GET" "/api/v1/orders/order" [] ""
+        ,send "GET" "/api/v1/orders/missing" auth ""
+        ,send "POST" "/api/v1/orders" auth "not-json"
+        ,send "POST" "/api/v1/orders" auth (encode $ replicate 4097 'x')
+        ,send "POST" "/api/v1/orders" (("Sec-Fetch-Site","cross-site"):auth) (encode request)
+        ,send "POST" "/sign-preparation" auth "{}"
+        ,send "GET" "/api/v1/audit" auth ""] ) app
+      seen<-readIORef calls
+      pure (map (statusCode . simpleStatus) responses==[200,200,200,200,400,409,400,413,403,404,404]
+        && seen==["config","create","read","instructions"]
+        && all ((==Just "no-store") . lookup "Cache-Control" . simpleHeaders) responses)
+  , check "signer HTTP authenticates before evaluating and bounds all request bodies" $ once $ ioProperty $ do
       calls<-newIORef ([]::[(Text,Text,Int)])
       let token=BS.replicate 64 97
           credentials=BasicAuthData "worker" token

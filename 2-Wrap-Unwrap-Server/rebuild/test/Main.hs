@@ -3,7 +3,7 @@ module Main (main) where
 
 import qualified SigningTransportCheck
 import qualified ChainCheck
-import Bridge.Identity (bearerHash,capabilityHash,payInstruction)
+import Bridge.Identity (bearerHash,capabilityHash,payInstruction,payURIFor)
 import Bridge.API (customerServer)
 import Bridge.Signer (signingServer)
 import Bridge.Operation.Internal
@@ -20,7 +20,12 @@ import Test.QuickCheck hiding (total)
 main :: IO ()
 main = do
   results <- sequence
-    [ check "Solana Pay reference retains the baseline order binding" $ once $ property $
+    [ check "Solana Pay URI preserves exact units and rejects injectable keys" $ forAll amounts $ \n ->
+        let key=T.replicate 32 "1"; quantity=good(amount n); instruction="solana-pay:"<>key
+        in payURIFor key key instruction quantity==Right("solana:"<>key<>"?amount="<>renderCoins quantity<>"&spl-token="<>key<>"&reference="<>key<>"&label=ECX%20Bridge")
+          && isLeft(payURIFor (key<>"?evil") key instruction quantity)
+          && isLeft(payURIFor key key "invalid" quantity)
+    , check "Solana Pay reference retains the baseline order binding" $ once $ property $
         and [payInstruction (T.replicate 64 "0")==Right ("solana-pay:"<>T.replicate 32 "1"),isLeft(payInstruction "bad")]
     , check "capabilities retain baseline hashing and reject malformed headers" $ once $ property $
         and [capabilityHash (T.replicate 64 "0")==Right "c7de6a9548a8cbddf66a91b07bedaa2949ebe64ce649be6d584f7ba7122b4c04"

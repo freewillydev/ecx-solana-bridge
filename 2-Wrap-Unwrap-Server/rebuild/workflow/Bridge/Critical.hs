@@ -1,8 +1,13 @@
 {-# LANGUAGE DataKinds, GADTs, RankNTypes #-}
 -- The signer ClientM is constructed only inside this critical evaluator.
-module Bridge.Critical (withPaymentWorker) where
+module Bridge.Critical (CustomerSettings(..),withRuntime) where
 import Bridge.Operation.Internal
-import Bridge.Domain (Asset(..))
+import Bridge.Domain (Asset(..),gross)
+import Bridge.Identity (payURIFor)
+import Bridge.Order (createCustomerOrder)
+import Data.Int (Int64)
+import qualified Data.Map.Strict as M
+import qualified Data.Text as T
 import Bridge.Error
 import Bridge.Payment
 import Bridge.Observer (ObserverSettings(..),observeOnce)
@@ -25,7 +30,7 @@ import qualified Bridge.SolanaHelper as H
 import Bridge.RPC (boundedBody,parseValue)
 import qualified Bridge.RPC as RPC
 import Control.Concurrent.MVar (newMVar,withMVar)
-import Control.Exception (bracket,onException)
+import Control.Exception (bracket,onException,try)
 import Data.IORef (newIORef,atomicModifyIORef')
 import qualified Data.ByteString as BS
 import Data.Time.Clock.POSIX (getPOSIXTime)
@@ -37,20 +42,75 @@ import Network.TLS.Extra.Cipher (ciphersuite_default)
 import Data.X509.CertificateStore (makeCertificateStore)
 import qualified Servant.Client as SC
 
--- One worker gate spans observation, custody, preparation, signing and sending.
--- Customer mutations must join this gate when the customer runtime is wired.
-withPaymentWorker :: Manager -> ObserverSettings -> H.SolanaPolicy -> SigningEndpoint -> Reader -> Writer
-  -> ((forall a. Request 'Worker 'Critical a -> IO a) -> IO b) -> IO b
-withPaymentWorker rpc settings config endpoint reader writer action = do
+-- The safe evaluator receives only read credentials and public configuration.
+-- It cannot access the writer, signer transport, backup callback or RPC manager.
+evalSafe :: Reader -> Maybe W.PublicConfiguration -> DSL 'Customer 'Safe a -> IO a
+evalSafe reader public operation = case operation of
+  ReadCustomer PublicConfig->do
+    configuration<-configured
+    if not(W.pubIntakeEnabled configuration) then pure configuration {W.pubAvailability=W.Availability False "observation_only"} else do
+      now<-floor <$> getPOSIXTime
+      result<-try (evalRead reader $ CheckIntake now) :: IO (Either BridgeError ())
+      let state=case result of Right ()->W.Availability True ""; Left (BridgeError code)->W.Availability False code
+      pure configuration {W.pubAvailability=state}
+  ReadCustomer (OrderStatus header identifier)->evalRead reader (ReadOrder header identifier)
+  ReadCustomer (PaymentInstructions header identifier)->do
+    configuration<-configured
+    require (W.pubIntakeEnabled configuration) "deposit_window_closed"
+    now<-floor <$> getPOSIXTime
+    view<-evalRead reader (ReadPayableOrder now header identifier)
+    instruction<-maybe (reject "instruction_not_recorded") pure (W.depositInstruction view)
+    let mint=W.pubMint configuration
+    uri<-either reject pure (payURIFor (W.pubCustodyOwner configuration) mint instruction (gross $ W.quote view))
+    pure $ W.PaymentInstruction uri (T.drop 11 instruction) mint (gross $ W.quote view) "verified_source_owner"
+ where configured=maybe (reject "customer_configuration_unavailable") pure public
+
+data CustomerSettings = CustomerSettings
+  { publicConfiguration :: W.PublicConfiguration, customerPolicy :: StorePolicy
+  , unsignedSdk :: FilePath, coverBackup :: Int64 -> IO () }
+
+-- Startup supplies capabilities. Customer and worker requests share one dispatch
+-- and one gate; safe reads have no writer, signer or network capability.
+withRuntime :: Manager -> ObserverSettings -> H.SolanaPolicy -> Maybe CustomerSettings -> SigningEndpoint -> Reader -> Writer
+  -> ((forall a. Request 'Worker 'Critical a -> IO a) -> (forall a. Plan 'Customer a -> IO a) -> IO b) -> IO b
+withRuntime rpc settings config customerSettings endpoint reader writer action = do
   let native=nativeSettings settings; solana=solanaSettings settings
   require (N.profile native==S.solanaProfile solana && S.mint solana==H.mint config
     && S.custodyOwner solana==H.custodyOwner config && S.custodyAta solana==H.custodyAta config) "payment_profile_mismatch"
   N.validateNativeSettings native
   S.validateSolanaSettings solana
+  forM_ customerSettings $ \customer->do
+    let public=publicConfiguration customer; store=customerPolicy customer
+        policy=W.paymentPolicy(executionTerms store); costs=W.paymentLimits(executionTerms store)
+        limits=admissionLimits store
+    require (W.pubProfile public==N.profile native && W.pubMint public==H.mint config
+      && W.pubCustodyOwner public==H.custodyOwner config && W.pubDeployment public==H.deploymentId config
+      && W.pubDecimals public==8 && W.pubMinInput public==orderMinimum limits && W.pubMaxInput public==orderMaximum limits
+      && W.pubFeesBps public==M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]
+      && W.pubSolanaCluster public==(if N.profile native==W.CanonicalBeta then "mainnet-beta" else "devnet")
+      && W.deploymentFingerprint policy==H.fingerprint config && W.nativeDepth policy==defaultNativeDepth settings
+      && W.savedSolanaFee costs==H.maxSolFee config && W.savedSolanaRent costs==H.maxSolAccountRent config) "customer_configuration_mismatch"
   gate<-newMVar ()
-  let interpret :: forall a. Request 'Worker 'Critical a -> IO a
-      interpret request=withMVar gate $ \_ -> evalCritical (resolve request)
-      evalCritical :: forall a. DSL 'Worker 'Critical a -> IO a
+  let paying=maybe True (W.pubIntakeEnabled . publicConfiguration) customerSettings
+      customer=maybe (reject "customer_configuration_unavailable") pure customerSettings
+      interpret :: forall caller a. Request caller 'Critical a -> IO a
+      interpret request=do
+        let command=resolve request
+        case command of
+          SigningDSL _->reject "signer_operation_forbidden"
+          WorkerDSL ObserveChains->pure ()
+          WorkerDSL ReconcileCustody->pure ()
+          WorkerDSL ReconcilePayment{}->pure ()
+          _->require paying "observation_only"
+        withMVar gate $ \_ -> evalCritical command
+      customerRequest :: forall a. Plan 'Customer a -> IO a
+      customerRequest (SafePlan request)=evalSafe reader (publicConfiguration <$> customerSettings) (resolve request)
+      customerRequest (CriticalPlan request)=interpret request
+      evalCritical :: forall caller a. DSL caller 'Critical a -> IO a
+      evalCritical (SigningDSL _)=reject "signer_operation_forbidden"
+      evalCritical (WriteCustomer (Bridge.Operation.Internal.CreateOrder header request))=do
+        c<-customer
+        createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (coverBackup c) reader writer header request
       evalCritical (WorkerDSL ObserveChains) = observeOnce rpc settings reader writer
       evalCritical (WorkerDSL (PrepareOutgoing identifier)) = guarded $ do
         now<-floor <$> getPOSIXTime
@@ -169,4 +229,4 @@ withPaymentWorker rpc settings config endpoint reader writer action = do
             (fmap (\url->RPC.rpc rpc url Nothing) $ S.solanaVerifierRpc solana) (N.profile native) config binding
           evalWrite writer (RefreshPaymentSource (W.sourceDeposit binding) observed)
           require (W.depositEligible observed) "source_not_eligible"
-  action interpret
+  action interpret customerRequest

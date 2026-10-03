@@ -2,22 +2,18 @@
 -- Shared authenticated HTTP contract, never a signer client or signing authority.
 module Bridge.SigningTransport
   ( SigningEndpoint(..), signerCredentials, signerCertificate, signingApplication, runSigningServer ) where
+import Bridge.Web (boundedApplication)
 import Bridge.Error
 import Bridge.Operation.Internal
 import Bridge.Signer (signingAPI,signingServer)
-import Control.Concurrent.STM
-import Control.Exception (bracket,catch)
-import Control.Monad (when)
+import Control.Exception (catch)
 import Control.Monad.IO.Class (liftIO)
 import Data.Aeson (encode,object,(.=))
 import Data.Bits ((.&.))
 import qualified Data.ByteArray as BA
 import qualified Data.ByteString as BS
-import Data.IORef (newIORef,atomicModifyIORef')
 import Data.PEM (pemParseBS,pemContent)
-import Data.Text (Text)
 import Data.X509 (SignedCertificate,decodeSignedCertificate)
-import qualified Network.HTTP.Types as HTTP
 import Network.Wai hiding (Request)
 import Network.Wai.Handler.Warp (setHost,setPort,setTimeout,defaultSettings)
 import Network.Wai.Handler.WarpTLS (runTLS,tlsSettings)
@@ -66,7 +62,6 @@ signerCertificate endpoint = do
 
 signingApplication :: BasicAuthData -> (forall a. Request 'Signer 'Critical a -> IO a) -> IO Application
 signingApplication credentials evaluate = do
-  active<-newTVarIO (0::Int)
   let authenticate=BasicAuthCheck $ \supplied->pure $
         if BA.constEq (basicAuthUsername supplied) (basicAuthUsername credentials)
           && BA.constEq (basicAuthPassword supplied) (basicAuthPassword credentials)
@@ -78,28 +73,7 @@ signingApplication credentials evaluate = do
       context=authenticate :. EmptyContext
       app=serveWithContext signingAPI context
         (hoistServerWithContext signingAPI (Proxy :: Proxy '[BasicAuthCheck ()]) interpret signingServer)
-      acquire=atomically $ do
-        n<-readTVar active
-        if n>=16 then pure False else writeTVar active (n+1) >> pure True
-      release admitted=when admitted $ atomically (modifyTVar' active (subtract 1))
-  pure $ \request respond->bracket acquire release $ \admitted->do
-    let answer=respond . mapResponseHeaders (("Cache-Control","no-store"):)
-        bad status code=answer $ responseLBS status [("Content-Type","application/json")] (encode $ object ["error" .= (code::Text)])
-    if not admitted then bad HTTP.status503 "signer_busy"
-    else if lookup "Sec-Fetch-Site" (requestHeaders request)==Just "cross-site" then bad HTTP.status403 "cross_origin_request"
-    else do
-      result<-(Right <$> consume request 0 []) `catch` (\(BridgeError code)->pure $ Left code)
-      case result of
-        Left code->bad HTTP.status413 code
-        Right bytes->do
-          body<-newIORef bytes
-          app (setRequestBodyChunks (atomicModifyIORef' body $ \b->(BS.empty,b)) request) answer
- where
-  consume request total chunks = do
-    bytes<-getRequestBodyChunk request
-    let size=total+BS.length bytes
-    require (size<=4096) "request_too_large"
-    if BS.null bytes then pure (BS.concat $ reverse chunks) else consume request size (bytes:chunks)
+  boundedApplication 16 "signer_busy" app
 
 runSigningServer :: SigningEndpoint -> (forall a. Request 'Signer 'Critical a -> IO a) -> IO ()
 runSigningServer endpoint evaluate = do

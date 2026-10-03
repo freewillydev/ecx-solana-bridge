@@ -461,8 +461,11 @@ still required.
 Worker `ObserveChains` and `PrepareOutgoing` now share the existing critical gate
 with custody/sign/queue/send/reconciliation. Preparation checks read-only intake
 before any RPC and refreshes its customer source before saving a plan. A paused
-preparation is verified to refuse without reaching the network. Customer writes
-must still join this same gate when the complete runtime is assembled.
+preparation is verified to refuse without reaching the network. `withRuntime` now
+resolves both customer writes and worker requests through one critical dispatch
+under that gate. The separate safe evaluator receives only the SELECT-only reader
+and public configuration. Observation-only mode refuses customer creation and
+worker preparation/signing/queue/send before taking the gate.
 
 Customer admission now has the baseline native dust/fee funding preview and Solana
 account/fee/rent/unsigned-simulation preflight. Its adapter, fingerprint, depth and
@@ -477,20 +480,28 @@ PostgreSQL workflow tests cover backup callbacks without acknowledgment, replay
 while paused without repeat admission/identity calls, changed-request refusal,
 capability isolation and recovery after a lost native allocation reply with only
 one address allocation. These are offline RPC contracts, not funded acceptance.
-The customer Servant interpreter and unified customer/worker gate still need wiring.
+`customerApplication` hoists the four pure Servant handlers into this runtime.
+Safe Solana Pay instructions check the order, backup visibility, deadline and
+intake in one database snapshot. WAI tests verify all four endpoint results,
+missing authorization, malformed/oversized bodies, cross-site rejection and removed
+routes. An actual PostgreSQL-backed HTTP order read and runtime replay pass without
+network access; observation-only restrictions and configuration mismatch also pass.
+Signer and customer HTTP share one bounded-body/concurrency/no-cache middleware.
+The executable, deployment configuration, scheduler and browser assets remain
+unwired; this library checkpoint does not claim a running replacement service.
 
 Scoped physical-line comparisons (not whole-product reduction claims):
 
 | Piece | Baseline | Rebuild | Scope limit |
 | --- | ---: | ---: | --- |
-| Customer order workflow | 78 / 1 file | 63 / 1 file | Closed reads replace raw row/ledger access; HTTP integration pending |
-| Admission/previews | 106 / 1 file | 86-line module + 20 lines in existing native adapter | Same total; customer runtime integration pending |
+| Customer order workflow | 78 / 1 file | 63 / 1 file | Closed reads replace raw row/ledger access; funded HTTP acceptance pending |
+| Admission/previews | 106 / 1 file | 86-line module + 20 lines in existing native adapter | Same total; customer runtime wired, funded acceptance pending |
 | Custody chain workflow | 202 / 1 file | 188 / 1 file | Replacement-family and source-loss wrapper parity pending; not equivalent full-feature reduction |
-| Custody snapshot function | 79 / existing custody file | 71 / existing Store file | Reuses freshness/balance helpers; chain workflow pending |
+| Custody snapshot function | 79 / existing custody file | 71 / existing Store file | Reuses freshness/balance helpers; live acceptance pending |
 | Custody report persistence | 15 / existing custody file | 24 / existing Store file | Adds time/report validation; no claim of size reduction |
 | Signer module | 144 / 1 file | 73 / 1 file | Startup and replacement parity pending |
-| Signer transport | 103 / 1 file plus shared web boundary | 112 / 1 file | Includes local body/concurrency boundary; initial route only |
-| Worker signing/queue/send/reconciliation | Part of broader Runtime | 172 / 1 file (previous checkpoint 161) | Full runtime/submission acceptance remains |
+| Signer transport | 103 / 1 file plus shared web boundary | 86 / 1 file + shared 53-line Web module | Shared module also serves customer API; initial signer route only |
+| Customer/worker runtime | Part of broader Runtime | 232 / 1 file (previous worker-only checkpoint 172) | Adds safe evaluation, shared gate, customer dispatch and mode/config checks |
 | Focused source validation | 63-line mixed validation/storage/recovery function | 67-line dedicated module | Covered-source recovery is still separate unfinished work |
 | Payment observation functions | 72 / broader Settlement file | 72 / 95-line dedicated file | Same protocol checks, narrower module |
 | Broadcast/settlement store functions | 119 / 1 file | 143 / existing Store file | Adds earned funding, exact attempt binding and freshness gates |
@@ -503,7 +514,7 @@ all journal rows. Terminal attempts are still checked individually, so long-hist
 performance remains to be measured. Source eligibility checking is shared with signing.
 
 Still required: successful TLS worker/signer integration and private-key startup
-checks; a unified safe/critical runtime gate, configuration, app/browser integration;
+checks; executable/configuration/scheduler/browser integration;
 integrated positive submission/reconciliation acceptance; retry, cancellation,
 replacement/winner changes and covered-source approvals generalized to earned
 funding; complete custody acceptance/host fencing/backup; actual populated-ledger migration and funded
