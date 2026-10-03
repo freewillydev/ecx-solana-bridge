@@ -77,6 +77,7 @@ import Data.Word (Word8)
 import System.Exit (ExitCode(..))
 import System.Environment (lookupEnv,getEnvironment)
 import System.Process (readProcessWithExitCode)
+import System.Timeout (timeout)
 import Test.Hspec hiding (before,after)
 import Test.QuickCheck hiding ((.&.))
 
@@ -1267,6 +1268,32 @@ main=hspec $ do
           setVersion x=x
       verifyDeposit binding (setMetaError proof) `shouldSatisfy` either (const True) (const False)
       verifyDeposit binding (setVersion proof) `shouldSatisfy` either (const True) (const False)
+  describe "encrypted backup command refusals (offline)" $ do
+    forM_ ["local","loopback","exposed","incomplete"] $ \fault->
+      it ("rejects "<>fault<>" credentials before staging, without disclosing them") $
+        property $ withNumTests 5 $ forAll (vectorOf 32 $ elements ['a'..'z']) $ \secret->
+          ioProperty $ withDir $ \dir->do
+            setFileMode dir 0o700
+            let repository=dir</>"repository"
+                password=dir</>"password"
+                stage=dir</>"stage"
+                location=case fault of
+                  "local"->dir</>"local-repository"
+                  "loopback"->"rest:https://127.0.0.1/"<>secret
+                  _->"rest:https://backup.example.invalid/"<>secret
+                args=["-B","integration/PostgresEncryptedBackupCheck.py",dir</>"absent-manifest"
+                  ,"--directory",stage,"--restic",dir</>"absent-restic","--repository-file",repository]
+                  <> if fault=="incomplete" then [] else ["--password-file",password]
+            writeFile password secret
+            setFileMode password 0o600
+            writeFile repository location
+            setFileMode repository (if fault=="exposed" then 0o644 else 0o600)
+            result<-timeout 10000000 $ readProcessWithExitCode "python3" args ""
+            staged<-doesPathExist stage
+            pure $ counterexample ("backup refusal contract: "<>fault) $ case result of
+              Just (code,out,err)->code/=ExitSuccess && not staged &&
+                all (\sensitive->not $ T.pack sensitive `T.isInfixOf` T.pack (out<>err)) [secret,location,"Traceback"]
+              Nothing->False
   describe "Haskell / official Solana SDK FFI (offline codec contracts)" $ do
     library <- runIO (maybe sdkLibraryPath id <$> lookupEnv "ECX_SOLANA_SDK_LIBRARY")
     it "preserves captured unsigned messages without opening private configuration" $ do

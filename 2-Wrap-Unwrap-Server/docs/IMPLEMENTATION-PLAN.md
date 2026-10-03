@@ -285,6 +285,9 @@ The sequence below remains the broader refactor checklist, subject to that prior
    The standalone TLS executable and Python certificate generator are retired;
    their real-validator assertions now run as generated QuickCheck cases inside
    the existing Cabal suite, including exact and descendant DNS exclusions.
+   Encrypted-backup command refusal/redaction checks now run as generated
+   QuickCheck cases in the Cabal suite; the standalone Python unittest is removed.
+   The underlying backup command still needs its planned Haskell consolidation.
    Core PostgreSQL budgeting is now part of Ledger, so allowance and journal
    arithmetic share one implementation. Retain remaining unique SQLite assertions
    until their production equivalent exists. Treasury-spend classification now uses
