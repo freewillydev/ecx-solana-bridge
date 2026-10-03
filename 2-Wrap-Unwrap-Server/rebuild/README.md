@@ -467,3 +467,39 @@ BasicAuth API type alone does not install authentication: runtime must still
 provide authenticated bounded TLS transport, protected credential checks, the
 private critical-only ClientM and actual two-process acceptance. The new evaluator
 is not yet reachable from a production executable.
+
+Authenticated signer transport and initial worker signing are now implemented as
+library entry points. SigningTransport binds HTTPS to loopback, reads protected
+credentials/certificate/key files, authenticates through Servant BasicAuth, caps
+active requests at 16 and bodies at 4096 bytes, and prevents cross-site requests.
+Its application maps closed policy errors to JSON without exposing arbitrary
+exceptions. Critical owns the only generated signer ClientM: pinned certificate,
+fixed loopback destination, no proxy/redirect/automatic retry, 60-second response
+timeout and a 512-KiB body bound. A transport failure preserves uncertain work and
+pauses the worker.
+
+SignPreparedPayment is a worker-only critical operation. It validates the saved
+preparation and current signing decision, then independently verifies and records
+the returned attempt. A single existing attempt is verified and returned without
+another signer call; multiple/generation-mismatched work requires recovery. There
+is no broadcast operation here. Preparation and applicable backup acknowledgment
+must already be durable. The eventual runtime must share this worker gate across
+observation and other critical operations, rather than create independent gates.
+
+Scope counts: transport is 112 lines/one new file versus the baseline Operator's
+103 lines/one file, which also used the separate Web security boundary. The new
+file includes its own smaller signing-only body/concurrency boundary. Critical is
+76 lines/one new file, extracting initial signing from the much broader baseline
+Runtime; there is no honest whole-Runtime reduction comparison yet. Native
+replacement routes are still pending, so neither count establishes full parity.
+
+The Cabal suite exercises the actual WAI/Servant application: missing/bad auth,
+accepted typed response, closed refusal, invalid JSON, oversized input, cross-site
+requests and absent broadcast route, with exact evaluator-call checks. Credential
+checks cover 0600/0640, refusal of public read, writable parent, symlink, malformed
+token and invalid port. PostgreSQL tests exercise the real critical worker's
+invalid-plan refusal and persisted pause with all network requests disabled.
+Both suites pass. TLS listening/handshake, successful worker-to-signer signing,
+private-key startup checks and OS credential isolation still need integrated
+acceptance; WAI tests are not evidence of TLS or funded-chain operation. No
+production executable currently calls these new entry points.

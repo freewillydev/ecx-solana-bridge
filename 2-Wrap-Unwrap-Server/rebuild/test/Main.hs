@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds, GADTs #-}
 module Main (main) where
 
+import qualified SigningTransportCheck
 import qualified ChainCheck
 import Bridge.Identity (bearerHash,capabilityHash,payInstruction)
 import Bridge.API (customerServer)
@@ -84,7 +85,8 @@ main = do
             ,isLeft (refund "order" "receipt" Native (good $ amount 0))]
     ]
   chainResults <- ChainCheck.checks
-  if all isSuccess (results<>chainResults) then pure () else exitFailure
+  transportResults <- SigningTransportCheck.checks
+  if all isSuccess (results<>chainResults<>transportResults) then pure () else exitFailure
  where
   check description p=putStrLn description >> quickCheckWithResult stdArgs{maxSuccess=300} p
   amounts=chooseInteger (0,toInteger(maxBound::Int64))

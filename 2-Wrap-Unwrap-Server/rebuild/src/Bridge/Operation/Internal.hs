@@ -7,7 +7,7 @@ import Data.Kind (Type)
 import Data.Text (Text)
 
 data Severity = Safe | Critical
-data Caller = Customer | Signer
+data Caller = Customer | Signer | Worker
 
 -- Caller and severity belong to the operation, not to the caller's choice.
 class Operation (caller :: Caller) (severity :: Severity) (op :: Type -> Type)
@@ -26,11 +26,16 @@ data CustomerWrite a where
 data SigningOperation a where
   SignPrepared :: Text -> Text -> Int -> SigningOperation SignedAttempt
 
+data WorkerOperation a where
+  SignPreparedPayment :: Text -> WorkerOperation Text
+
 data DSL (caller :: Caller) (severity :: Severity) a where
+  WorkerDSL :: WorkerOperation a -> DSL 'Worker 'Critical a
   SigningDSL :: SigningOperation a -> DSL 'Signer 'Critical a
   ReadCustomer :: CustomerRead a -> DSL 'Customer 'Safe a
   WriteCustomer :: CustomerWrite a -> DSL 'Customer 'Critical a
 
+instance Operation 'Worker 'Critical WorkerOperation where command = WorkerDSL
 instance Operation 'Signer 'Critical SigningOperation where command = SigningDSL
 instance Operation 'Customer 'Safe CustomerRead where command = ReadCustomer
 instance Operation 'Customer 'Critical CustomerWrite where command = WriteCustomer

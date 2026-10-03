@@ -10,7 +10,9 @@ import Bridge.Domain
 import Bridge.Wire (PaymentTerms(..),CostLimits(..),PolicySnapshot(..))
 import Bridge.Store
 import Bridge.Signer
-import Bridge.Operation.Internal (Request(..),SigningOperation(..))
+import Bridge.Critical
+import Bridge.SigningTransport (SigningEndpoint(..))
+import Bridge.Operation.Internal (Request(..),SigningOperation(..),WorkerOperation(..))
 import qualified Bridge.Native as N
 import qualified Bridge.Solana as Solana
 import qualified Bridge.SolanaHelper as H
@@ -328,11 +330,15 @@ main = do
             solana=Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing publicKey publicKey publicKey
             signing=SignerSettings native solana (H.SolanaPolicy "contract" "contract" publicKey publicKey publicKey (money 10) (money 10))
               "/unused/sdk" "/unused/key"
-        bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "unauthorized signer reached network"}) closeManager $ \manager ->
+        bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "unauthorized signer reached network"}) closeManager $ \manager -> do
           withSigner manager reader signing $ \interpret -> do
             expectStore "signer_profile_mismatch" (interpret $ Request $ SignPrepared "other" intent 0)
             expectStore "invalid_signing_decision" (interpret $ Request $ SignPrepared "contract" intent 8)
             expectStore "signing_backup_required" (interpret $ Request $ SignPrepared "contract" intent 0)
+          withPaymentWorker manager native (signingPolicy signing) (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret ->
+            expectStore "invalid_saved_payment" (interpret $ Request $ SignPreparedPayment intent)
+          pausedAfterRefusal<-evalRead reader ReadState
+          check (ledgerPaused pausedAfterRefusal)
         fixture fixtures CoverBackup
         fixture fixtures ReadyIntake
         decision<-evalRead reader (ReadSigningDecision 100 intent 0)

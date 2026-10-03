@@ -49,25 +49,29 @@ library workflow
   import: settings
   visibility: private
   hs-source-dirs: workflow
-  exposed-modules: Bridge.Observer, Bridge.Payment, Bridge.Signer
+  exposed-modules: Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.SigningTransport, Bridge.Critical
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:store,
-    ecx-bridge-rebuild:chain, aeson, bytestring, text, time, http-client, servant, servant-server
+    ecx-bridge-rebuild:chain, aeson, bytestring, text, time, http-client, servant, servant-server,
+    transformers, stm, ram, crypton-pem, crypton-x509, http-types, wai, warp, warp-tls, filepath, unix,
+    servant-client, http-client-tls, crypton-connection, tls, crypton-x509-store
 
 test-suite rebuild-test
   import: settings
   type: exitcode-stdio-1.0
   hs-source-dirs: test
   main-is: Main.hs
-  other-modules: ChainCheck, NativePaymentCheck, SolanaPaymentCheck, ObservationCheck, Paths_ecx_bridge_rebuild
+  other-modules: ChainCheck, NativePaymentCheck, SolanaPaymentCheck, ObservationCheck, SigningTransportCheck, Paths_ecx_bridge_rebuild
   autogen-modules: Paths_ecx_bridge_rebuild
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:customer-api, ecx-bridge-rebuild:chain, ecx-bridge-rebuild:store, ecx-bridge-rebuild:workflow, servant, aeson, text, containers,
-    QuickCheck >=2.15 && <2.19, bytestring, scientific, http-client, base64-bytestring
+    QuickCheck >=2.15 && <2.19, bytestring, scientific, http-client, base64-bytestring, wai, wai-extra, http-types, directory, unix, filepath
 
 -- Explicitly invoked against a disposable migrated database, never live custody.
 executable rebuild-store-check
   import: settings
   hs-source-dirs: test, runtime, workflow
   main-is: StoreCheck.hs
-  other-modules: Bridge.Store, Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Payment, Bridge.Signer
+  other-modules: Bridge.Store, Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Payment, Bridge.Signer, Bridge.SigningTransport, Bridge.Critical
   build-depends: base, ecx-bridge-rebuild, ecx-bridge-rebuild:chain, http-client, servant, servant-server, aeson, bytestring,
-    containers, text, crypton, time, scientific, opaleye, postgresql-simple, product-profunctors, QuickCheck
+    containers, text, crypton, time, scientific, opaleye, postgresql-simple, product-profunctors, QuickCheck,
+    transformers, stm, ram, crypton-pem, crypton-x509, http-types, wai, warp, warp-tls, filepath, unix,
+    servant-client, http-client-tls, crypton-connection, tls, crypton-x509-store
