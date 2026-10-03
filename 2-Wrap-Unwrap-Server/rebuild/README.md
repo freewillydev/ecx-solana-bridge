@@ -304,8 +304,27 @@ suite passes, including bounded canonical economic parsing. Treasury authorizati
 is fixture-seeded; populated replacement/cancellation hash and former-winner cases
 still need workflow acceptance. These are storage/protocol checks, not funded scans.
 
+Native wallet observation is now a read-only adapter returning a complete scan
+batch. It validates actual chain/wallet identity, wallet tip and scan origin,
+re-reads canonical gettransaction evidence across removed/re-added history, checks
+owned output scripts and exact amounts, and binds receipts to saved order depth.
+Duplicate receipt identities and insufficient historical scan depth are refused.
+Its clock/cursor and instruction lookup are explicit inputs; it cannot commit rows.
+Two closed store reads supply instruction binding and maximum historical depth;
+the latter selects distinct policies rather than every duplicate policy row.
+
+Observer functions are 94→98 lines, plus 17→17 for the two store reads: 111→115
+across two production files in each version. The new dedicated native-observation
+module is 114 lines including imports/comments; the old functions shared the mixed
+chain Observer module. This is separation of evidence gathering from persistence,
+not a size reduction. Existing tests gain captured-output RPC contracts for reorg
+overlap, historical depth, unbound receipts, negative confirmations, identity,
+origin, script/amount and duplicate-output refusals. Full QuickCheck/protocol and
+disposable PostgreSQL suites pass; closed lookup reads are verified in PostgreSQL.
+No live wallet was scanned, and no funds were sent.
+
 Connecting those adapters to the high-level safe/critical runtime, actual host fence,
-dedicated signer and durable payment execution remains unfinished. Native observation,
+dedicated signer and durable payment execution remains unfinished. Native source-loss detection,
 restoration approval binding, operator loss-cover authorization,
 observer orchestration, broader recovery and SDK build integration also remain.
 Passing these checks is not end-to-end payment, migration or real-chain acceptance.

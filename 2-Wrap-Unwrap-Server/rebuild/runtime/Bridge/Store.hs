@@ -59,6 +59,8 @@ data StoreRead a where
   ReadWithdrawal :: Text -> StoreRead (Maybe WithdrawalView)
   ReadOrder :: Text -> Text -> StoreRead W.OrderView
   PromotionCandidates :: StoreRead [Text]
+  LookupInstruction :: Text -> StoreRead (Maybe (Text,W.OrderRequest,W.PolicySnapshot))
+  MaximumNativeDepth :: Int -> StoreRead Int
   ReadSourceWorkHash :: Text -> StoreRead Text
   ReadCheckpoint :: Text -> StoreRead (Maybe Text)
   ReadSource :: Text -> StoreRead W.Deposit
@@ -115,6 +117,8 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
     row <- metadata c identity
     case operation of
       ReadState -> pure (LedgerState (S.criticalSequence row) (S.backupSequence row) (S.paused row/=0) (S.pauseReason row))
+      LookupInstruction instruction -> lookupInstruction c instruction
+      MaximumNativeDepth minimumDepth -> maximumNativeDepth c minimumDepth
       ReadSourceWorkHash identifier -> sourceWorkHash c identifier
       ReadCheckpoint chain -> readCheckpoint c chain
       ReadSource identifier -> readSource c identifier >>= asDeposit
@@ -1004,3 +1008,21 @@ commitScan c batch = do
     Nothing->O.runInsert c O.Insert {O.iTable=S.checkpoints,O.iRows=[(text chain,text next)],O.iReturning=O.rCount,O.iOnConflict=Nothing} >> pure ()
     Just _->O.runUpdate c O.Update {O.uTable=S.checkpoints,O.uUpdateWith=const(text chain,text next),O.uWhere= \(key,_)->key O..== text chain,O.uReturning=O.rCount} >> pure ()
   scanHealth c chain now Nothing
+
+lookupInstruction :: PG.Connection -> Text -> IO (Maybe (Text,W.OrderRequest,W.PolicySnapshot))
+lookupInstruction connection instruction = do
+  rows <- O.runSelect connection $ do
+    row <- O.selectTable S.orders
+    O.where_ (O.matchNullable (O.sqlBool False) (\value->value O..== O.sqlStrictText instruction) (S.instruction row))
+    pure (S.orderId row,S.requestJson row,S.policyJson row)
+    :: IO [(Text,Text,Text)]
+  case rows of
+    []->pure Nothing
+    [(oid,req,savedPolicy)]->Just <$> ((,,) oid <$> decodeSaved req <*> decodeSaved savedPolicy)
+    _->reject "duplicate_deposit_instruction"
+
+maximumNativeDepth :: PG.Connection -> Int -> IO Int
+maximumNativeDepth connection minimumDepth = do
+  rows <- O.runSelect connection $ O.distinct $ fmap S.policyJson (O.selectTable S.orders) :: IO [Text]
+  policies <- mapM decodeSaved rows
+  pure (maximum (minimumDepth:1:map W.nativeDepth policies))

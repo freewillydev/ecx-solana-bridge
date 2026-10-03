@@ -330,6 +330,10 @@ main = do
         oid<-evalWrite writer (create newRequest {W.idempotencyKey="scanned-order",W.input=money 10})
         claim<-evalWrite writer (ClaimNative 100 auth oid)
         _<-evalWrite writer (RecordNative auth oid (allocationLabel claim) "scan-address-fixture")
+        binding<-evalRead reader (LookupInstruction "scan-address-fixture")
+        absentBinding<-evalRead reader (LookupInstruction "unused-address")
+        historicalDepth<-evalRead reader (MaximumNativeDepth 1)
+        check (fmap (\(boundOrder,_,saved)->(boundOrder,W.nativeDepth saved)) binding==Just(oid,2) && absentBinding==Nothing && historicalDepth>=2)
         let tx=T.replicate 64 "b"; did="native:"<>tx<>":0"
             receipt=W.Deposit did (Just oid) Native (money 10) "block-1" 2 True 100
             event=W.ChainEvent tx "incoming" "block-1" (object ["receipt" .= did])

@@ -1,9 +1,11 @@
 -- Captured Devnet deposit; Pay/v0 rewrites below are offline parser contracts.
 module ObservationCheck (checks) where
-import Bridge.Domain (Amount, Asset(..), amount, units)
+import Bridge.Domain (Amount, Asset(..), Direction(..), amount, units)
 import qualified Bridge.Wire as W
 import Bridge.Error
 import Bridge.RPC (fieldValue)
+import Bridge.Native (NativeSettings(..),signetChallenge)
+import Bridge.NativeObservation (scanNativeWith)
 import Bridge.Solana (SignatureInfo(..),collectSignatures,tokenProgram)
 import Bridge.SolanaDeposit
 import Bridge.SolanaMessage (base58)
@@ -114,7 +116,8 @@ checks=do
           replace ["slot"] (Number (-1)) good,replace ["confirmationStatus"] (String "confirmed") good]
     ]
   effects<-mapM capturedEffect ["new","existing"]
-  pure (local<>effects)
+  native<-nativeChecks
+  pure (local<>effects<>native)
 
 capturedEffect :: String -> IO Result
 capturedEffect kind=do
@@ -169,3 +172,66 @@ replace :: [Key] -> Value -> Value -> Value
 replace [] replacement _=replacement
 replace (key:rest) replacement (Object fields)=Object $ KM.insert key (replace rest replacement $ maybe Null id $ KM.lookup key fields) fields
 replace _ _ value=value
+
+-- Captured decoded output, surrounded by injected RPC responses. This checks
+-- protocol handling and reorg overlap, not a newly funded wallet or live scan.
+nativeChecks :: IO [Result]
+nativeChecks=do
+  captured<-fixture "native-signet-payment.json"
+  decoded<-fieldValue "decoded" captured
+  tx<-fieldValue "txid" decoded :: IO Text
+  outputs<-fieldValue "vout" decoded :: IO [Value]
+  output<-case drop 1 outputs of [v]->pure v; _->fail "captured output missing"
+  script<-fieldValue "scriptPubKey" output
+  address<-fieldValue "address" script :: IO Text
+  scriptHex<-fieldValue "hex" script :: IO Text
+  let origin=T.replicate 64 "a"; tip=T.replicate 64 "b"
+      settings=NativeSettings W.L2LSignetDevnet "http://127.0.0.1:8332" "/unused" "observer" 10 origin
+      detail=object ["category" .= ("receive"::Text),"address" .= address,"vout" .= (1::Int),"amount" .= Number 0.001]
+      transaction=object ["txid" .= tx,"confirmations" .= (3::Int),"blockhash" .= tip,
+        "amount" .= Number 0.001,"decoded" .= decoded,"details" .= [detail]]
+      request=W.OrderRequest NativeToWrapped (amt 100000) "destination" "refund" Nothing "idempotency"
+      policy=W.PolicySnapshot 3 "finalized" "profile"
+      binding a=if a==address then pure (Just ("order",request,policy)) else fail "unexpected address lookup"
+      response method params=case (method,params) of
+        ("getblockchaininfo",[])->pure $ object ["chain" .= ("signet"::Text),"signet_challenge" .= signetChallenge,"initialblockdownload" .= False,"blocks" .= (20::Int)]
+        ("getblockhash",[Number 10])->pure (String origin)
+        ("getblockhash",[Number 20])->pure (String tip)
+        ("getconnectioncount",[])->pure (Number 2)
+        ("getwalletinfo",[])->pure $ object ["walletname" .= ("observer"::Text),"descriptors" .= True,"scanning" .= False,
+          "birthtime" .= (100::Int),"lastprocessedblock" .= object ["height" .= (20::Int),"hash" .= tip]]
+        ("getblockheader",[String anchor]) | anchor==origin->pure $ object ["time" .= (100::Int)]
+        ("listsinceblock",[String anchor,Number 3,Bool False,Bool True]) | anchor==origin->pure $ object
+          ["lastblock" .= tip,"transactions" .= [object ["txid" .= tx]],"removed" .= [object ["txid" .= tx]]]
+        ("gettransaction",[String key,Bool False,Bool True]) | key==tx->pure transaction
+        ("getaddressinfo",[String a]) | a==address->pure $ object ["ismine" .= True,"scriptPubKey" .= scriptHex]
+        _->fail ("unexpected native observation RPC "<>T.unpack method)
+      scan change previous lookupOrder=scanNativeWith (\_ method params->change method <$> response method params)
+        settings 1 3 previous 200 lookupOrder
+  sequence
+    [ check "native observer rereads re-added transactions once and binds saved depth" $ once $ ioProperty $ do
+        calls<-newIORef []
+        batch<-scanNativeWith (\_ method params->modifyIORef' calls (<>[method]) >> response method params) settings 1 3 Nothing 200 binding
+        seen<-readIORef calls
+        pure (W.scanPrevious batch==Nothing && W.scanNext batch==tip && length(filter (=="gettransaction") seen)==1 &&
+          W.scanDeposits batch==[W.Deposit ("native:"<>tx<>":1") (Just "order") Native (amt 100000) tip 3 True 200] &&
+          map W.chainEventKind (W.scanEvents batch)==["incoming"])
+    , check "native eligibility honors saved depth and negative confirmations retain receipt" $ once $ ioProperty $ do
+        let changed n method=if method=="gettransaction" then replace ["confirmations"] (Number n) else id
+        shallow<-scan (changed 2) (Just origin) binding
+        removed<-scan (changed (-1)) (Just origin) binding
+        unbound<-scan (const id) (Just origin) (const $ pure Nothing)
+        pure (all (not . W.depositEligible) (W.scanDeposits shallow<>W.scanDeposits removed) &&
+          map W.depositConfirmations (W.scanDeposits removed)==[0] && map W.chainEventKind (W.scanEvents unbound)==["unmatched_incoming"])
+    , check "native scan refuses origin gaps identity script output and duplicate receipt faults" $ once $ ioProperty $ do
+        let faults=[("getwalletinfo",["birthtime"],Number 99,"native_wallet_predates_scan_origin"),
+              ("getwalletinfo",["lastprocessedblock","hash"],String origin,"native_wallet_behind_chain"),
+              ("gettransaction",["txid"],String origin,"native_transaction_identity_mismatch"),
+              ("gettransaction",["blockhash"],Null,"native_block_anchor_missing"),
+              ("gettransaction",["details"],toJSON [detail,detail],"duplicate_native_receipt"),
+              ("gettransaction",["details"],toJSON [replace ["amount"] (Number 0.002) detail],"native_output_amount_mismatch"),
+              ("getaddressinfo",["ismine"],Bool False,"native_output_script_mismatch")]
+        depthRefused<-rejects "invalid_saved_native_depth" $ scan (const id) Nothing (const $ pure $ Just ("order",request,policy {W.nativeDepth=4}))
+        failures<-mapM (\(target,path,value,code)->rejects code $ scan (\method->if method==target then replace path value else id) Nothing binding) faults
+        pure (depthRefused && and failures)
+    ]
