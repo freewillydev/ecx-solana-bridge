@@ -1391,7 +1391,7 @@ The operation removes its plaintext subdirectory on completion/failure. It still
 returns only a restricted paused database; fence adoption and service activation
 are separate decisions.
 
-Latest checkpoint versus `d5315b0`: **57 added production lines across the same
+Encrypted-recovery checkpoint versus `d5315b0`: **57 added production lines across the same
 three files** (Backup 273 → 319, Store 3,272 → 3,279, Main 93 → 97), no new files or
 executables. Manifest and receipt parsing, subprocess limits and CLI dispatch are
 shared with the existing paths. The test's handwritten download/copy procedure is
@@ -1403,8 +1403,44 @@ CLI refuses a local repository. Root Cabal build, QuickCheck, PostgreSQL/restic 
 executable/HTTP contracts pass. This uses a private local-repository storage seam;
 production still requires HTTPS, and independent off-host acceptance remains open.
 
-Still required: key/wallet recovery material, fence adoption, acknowledgment and
-runtime integration, then acceptance using independent off-host storage. The
-`backupRequired` startup refusal remains until those guarantees are implemented;
-neither an archive, upload-only receipt nor staged restored database permits signing
-or sending.
+Offline host-fence adoption and retirement are now available:
+
+```sh
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- adopt-ledger CONFIG MINIMUM_SEQUENCE
+cabal run ecx-bridge-rebuild:exe:ecx-bridge-rebuild -- retire-ledger CONFIG MINIMUM_SEQUENCE
+```
+
+Select the intended ledger explicitly through `PGDATABASE`; the command returns its
+name and critical sequence. Both closed maintenance operations claim the normal
+worker advisory lock and lock the deployment row. They validate identity/schema,
+require pause and the independently known minimum sequence, then change only the
+configured host fence. No ledger row, balance, authorization or backup coverage is
+changed. A live worker is refused even if using a different fence directory.
+
+Adoption initializes a missing fence or advances an existing matching watermark.
+Equal-sequence replay is unchanged. It rejects a greater surviving watermark,
+wrong identity, corruption, unsafe permissions, an active filesystem lock or a
+retired fence. It never replaces the fence with an older snapshot. Retirement is
+permanent for that local fence and exactly replayable; it does not erase the
+watermark. A lower ledger after an uncertain commit cannot adopt or retire over
+the higher watermark. This local tombstone disables cooperating workers only:
+retiring the old deployment still requires stopping/revoking its separate signing
+authority, particularly across hosts. Neither command resumes service.
+
+Latest checkpoint versus `a4ffb6f`: **50 added production lines across the same
+three files** (Fence 128 → 148, Store 3,279 → 3,307, Main 97 → 99), no new files or
+executables. Initialization/adoption share directory validation, and both offline
+operations share the paused-ledger ownership check. Existing PostgreSQL contract
+2,600 → 2,643 lines. Actual PostgreSQL/filesystem tests cover initialization, replay,
+forward adoption, both lock conflicts, pause/identity/minimum refusal, retirement
+and the higher watermark left by an injected uncertain commit. The real executable
+initializes its fence with `adopt-ledger`, later retires it, and refuses re-adoption;
+its HTTP/lifetime checks preserve balances and clean up the process. Root Cabal
+build and QuickCheck pass. This checkpoint does not re-prove off-host key isolation
+or funded cross-host recovery.
+
+Still required: key/wallet recovery material, backup acknowledgment and runtime
+integration, then acceptance using independent off-host storage and real custody.
+The `backupRequired` startup refusal remains until those guarantees are implemented;
+an archive, upload-only receipt or adopted paused ledger does not automatically
+permit signing or sending.

@@ -9,6 +9,7 @@ module Bridge.Store
 import qualified Bridge.NativePayment as N
 import Bridge.Error
 import Bridge.Fence (withFence)
+import qualified Bridge.Fence as Fence
 import Bridge.Identity (bearerHash,digest,payInstruction,publicKey)
 import Text.Read (readMaybe)
 import qualified Bridge.Wire as W
@@ -83,13 +84,20 @@ data NativeSettlementCheck = NativeConfirming | NativeUnavailable Text
   | NativeReconfirmed W.PaymentCosts Text
   | NativeWinnerChanged [RecordedAttempt] Text W.PaymentCosts Text deriving (Eq,Show)
 
--- Offline restoration requires database-creation authority, not a Reader or
--- paying Writer. No online handler receives this capability or chooses a target.
+-- Offline recovery uses startup-held credentials, never a Reader/paying Writer.
+-- Restoration needs database-creation authority; fence changes claim the paused
+-- ledger exclusively. No online handler receives these maintenance operations.
 data StoreRestore a where
+  AdoptLedger :: FilePath -> Text -> Int64 -> StoreRestore (Text,Int64)
+  RetireLedger :: FilePath -> Text -> Int64 -> StoreRestore (Text,Int64)
   RestoreLedger :: FilePath -> Text -> Int64 -> StoreRestore (Text,Int64)
   RecoverLedger :: FilePath -> Text -> FilePath -> Text -> Int64 -> StoreRestore (Text,Int64)
 
 evalRestore :: PG.ConnectInfo -> StoreRestore a -> IO a
+evalRestore settings (AdoptLedger directory identity minimumSequence) =
+  changeLedgerFence settings directory identity minimumSequence Fence.adoptFence
+evalRestore settings (RetireLedger directory identity minimumSequence) =
+  changeLedgerFence settings directory identity minimumSequence Fence.retireFence
 evalRestore settings (RecoverLedger configuration snapshot directory identity minimumSequence) = do
   remote<-loadRemoteBackup configuration
   bracket (downloadRemoteArchive remote snapshot identity minimumSequence directory)
@@ -111,6 +119,26 @@ evalRestore settings (RestoreLedger manifest identity minimumSequence) = do
     require (count==1) "corrupt_custody_state"
     audit c "ledger_restored" (archiveHash archive)
     pure (T.pack $ PG.connectDatabase target,S.criticalSequence row)
+
+-- Private implementation of the two closed fence operations above. The row
+-- lock stabilizes pause/sequence through fsync; the session lock excludes a
+-- paying worker even if it is using another filesystem directory.
+changeLedgerFence :: PG.ConnectInfo -> FilePath -> Text -> Int64
+  -> (FilePath -> Text -> Int64 -> IO ()) -> IO (Text,Int64)
+changeLedgerFence settings directory identity minimumSequence change = do
+  require (minimumSequence>=0) "invalid_restore_policy"
+  bracket (PG.connect settings) PG.close $ \c->Tx.withTransaction c $ do
+    claimWorker c >>= flip require "worker_already_running"
+    rows<-O.runSelect c $ Locking.forUpdate $ do
+      row<-O.selectTable S.deployment
+      O.where_ (S.singleton row O..== O.sqlInt8 1)
+      pure (S.singleton row)
+    require (rows==[1::Int64]) "corrupt_deployment"
+    row<-metadata c identity
+    require (S.paused row==1) "pause_before_fence_change"
+    require (S.criticalSequence row>=minimumSequence) "backup_snapshot_too_old"
+    change directory identity (S.criticalSequence row)
+    pure (T.pack $ PG.connectDatabase settings,S.criticalSequence row)
 
 -- Privileged local archive operation, deliberately absent from StoreRead and
 -- customer/signer capabilities. It never acknowledges off-host durability.

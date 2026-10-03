@@ -846,6 +846,7 @@ expectStore expected action = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  SetPause :: Bool -> Fixture ()
   RestoreDatabases :: Fixture [T.Text]
   ArchiveRecords :: Fixture ([S.Deployment],[S.Attempt],[(Int64,T.Text,T.Text,T.Text,Int64)])
   SourceRecipient :: T.Text -> T.Text -> Fixture ()
@@ -893,6 +894,9 @@ data Fixture a where
   ProtectHolds :: T.Text -> Fixture ()
   CheckPhases :: T.Text -> T.Text -> Fixture Bool
 fixture :: PG.Connection -> Fixture a -> IO a
+fixture c (SetPause paused) = void $ O.runUpdate c O.Update {O.uTable=S.deployment,
+  O.uUpdateWith= \row->row {S.paused=O.sqlInt8 (if paused then 1 else 0)},
+  O.uWhere= \row->S.singleton row O..== O.sqlInt8 1,O.uReturning=O.rCount}
 fixture c RestoreDatabases = O.runSelect c $ O.orderBy (O.asc id) $ do
   name<-O.selectTable $ O.tableWithSchema "pg_catalog" "pg_database" (O.requiredTableField "datname")
   O.where_ (O.like name $ O.sqlStrictText "ecx_restore_%")
@@ -1422,13 +1426,40 @@ fenceMain = do
   bracket temporary removeDirectoryRecursive $ \directory->do
     bracket (PG.connect settings) PG.close (\c->fixture c $ InitializeIdentity identity)
     withReader settings {PG.connectUser=role} identity True $ \reader->do
-      Fence.initializeFence directory identity 0
+      let adopt minimumSequence=evalRestore settings (AdoptLedger directory identity minimumSequence)
+          retire minimumSequence=evalRestore settings (RetireLedger directory identity minimumSequence)
+          check ok=unless ok (fail "fence adoption contract failed")
+      expectStore "invalid_restore_policy" (adopt (-1))
+      expectStore "backup_snapshot_too_old" (adopt 1)
+      expectStore "ledger_profile_or_schema_mismatch" (evalRestore settings $ AdoptLedger directory (T.replicate 64 "b") 0)
+      bracket (PG.connect settings) PG.close (\c->fixture c $ SetPause False)
+      expectStore "pause_before_fence_change" (adopt 0)
+      bracket (PG.connect settings) PG.close (\c->fixture c $ SetPause True)
+      adopt 0 >>= check . (==(T.pack database,0))
+      original<-BS.readFile (directory</>"sequence.json")
+      _<-adopt 0
+      BS.readFile (directory</>"sequence.json") >>= check . (==original)
+      Fence.withFence directory identity $ \_->expectStore "worker_fence_locked" (adopt 0)
+      withWriter settings policy (const $ pure ()) $ \_->expectStore "worker_already_running" (adopt 0)
       withFencedWriter settings policy directory $ \writer->do
+        expectStore "worker_already_running" (adopt 0)
+        expectStore "worker_already_running" (retire 0)
         expectStore "worker_fence_locked" (withFencedWriter settings policy directory $ const $ pure ())
         saved<-evalWrite writer (ReserveFees 100 key Native (money 100) "recipient" "fence test")
         unless (withdrawalSequence saved==1) (fail "unexpected fence sequence")
       before<-evalRead reader ReadState
       unless (ledgerSequence before==1) (fail "missing committed sequence")
+      _<-adopt 1
+      let other=directory</>"retired"
+      Fence.initializeFence other identity 0
+      _<-evalRestore settings (AdoptLedger other identity 1)
+      Fence.withFence other identity $ \advance->expectStore "stale_ledger_below_worker_fence" (advance 0)
+      evalRestore settings (RetireLedger other identity 1) >>= check . (==(T.pack database,1))
+      _<-evalRestore settings (RetireLedger other identity 1)
+      expectStore "worker_fence_retired" (evalRestore settings $ AdoptLedger other identity 1)
+      wrong<-pure (directory</>"wrong")
+      Fence.initializeFence wrong (T.replicate 64 "b") 0
+      expectStore "worker_fence_identity_mismatch" (evalRestore settings $ AdoptLedger wrong identity 1)
       Fence.withFence directory identity $ \advance->do
         let uncertain n=advance n >> when (n==2) (reject "injected_uncertain_commit")
         withWriter settings policy uncertain $ \writer->do
@@ -1437,6 +1468,8 @@ fenceMain = do
       after<-evalRead reader ReadState
       unless (ledgerSequence after==1) (fail "uncertain commit changed ledger")
       expectStore "stale_ledger_below_worker_fence" (withFencedWriter settings policy directory $ const $ pure ())
+      expectStore "stale_ledger_below_worker_fence" (adopt 1)
+      expectStore "stale_ledger_below_worker_fence" (retire 1)
       withdrawal<-evalRead reader (ReadWithdrawal key)
       unless (fmap withdrawalCancellation withdrawal==Just Nothing) (fail "uncertain commit changed money")
       Fence.withFence directory identity $ \advance->do
@@ -1444,7 +1477,7 @@ fenceMain = do
         advance 2
       Fence.retireFence directory identity 2
       expectStore "worker_fence_retired" (withFencedWriter settings policy directory $ const $ pure ())
-  putStrLn "PASS: real host fence, exclusive writer, durable uncertain-commit watermark, rollback, stale restart refusal and retirement"
+  putStrLn "PASS: offline adoption/retirement, pause/identity/sequence/ownership checks, real host fence, durable uncertain-commit watermark, rollback, stale restart refusal"
 
 -- Public all-zero seed vector; never used on a chain or with funds.
 withTestSigningKey :: (FilePath -> IO a) -> IO a
@@ -1492,7 +1525,11 @@ serverMain = do
     Config.validateConfig config
     BL.writeFile filename (encode config)
     bracket (PG.connect settings) PG.close $ \connection->fixture connection (InitializeIdentity identity)
-    Fence.initializeFence (Config.fenceDirectory config) identity 0
+    (adopted,output,_)<-Process.readCreateProcessWithExitCode
+      (Process.proc binary ["adopt-ledger",filename,"0"]) {Process.env=Just childEnv} ""
+    check (adopted==ExitSuccess)
+    adoptedState<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ T.pack output)
+    fieldValue "paused" adoptedState >>= check . (==True)
     withReader settings {PG.connectUser=role} identity False $ \reader->do
       before<-evalRead reader ReadBalances
       archive<-evalBackup reader (ExportLedger directory)
@@ -1592,8 +1629,14 @@ serverMain = do
       -- Explicit termination/wait reaped HTTP and worker together, releasing
       -- the real host fence; no daemon or worker is left behind by this check.
       Fence.withFence (Config.fenceDirectory config) identity (const $ pure ())
+      (retired,_,_)<-Process.readCreateProcessWithExitCode
+        (Process.proc binary ["retire-ledger",filename,"0"]) {Process.env=Just childEnv} ""
+      check (retired==ExitSuccess)
+      (readopted,_,problem)<-Process.readCreateProcessWithExitCode
+        (Process.proc binary ["adopt-ledger",filename,"0"]) {Process.env=Just childEnv} ""
+      check (readopted/=ExitSuccess && "worker_fence_retired" `T.isInfixOf` T.pack problem)
       evalRead reader ReadBalances >>= check . (==before)
-  putStrLn "PASS: rebuilt executable, actual HTTP assets/config, paused unavailable-chain startup, unchanged balances and process/fence cleanup"
+  putStrLn "PASS: rebuilt executable, offline adoption/retirement, actual HTTP assets/config, paused unavailable-chain startup, unchanged balances and process/fence cleanup"
 
 refundContract :: PG.Connection -> Reader -> Writer -> IO ()
 refundContract fixtures reader writer=do

@@ -35,9 +35,11 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
  where
   command ["check-config",path]=C.loadConfig path >>= LBS.putStrLn . encode . object . pure . ("fingerprint" .=) . C.fingerprint
   command ["check-signer",path,key]=C.loadConfig path >>= \c->verifySigningKey (C.custodyOwner c) key >> putStrLn "Custody signer valid"
-  command ["restore-ledger",path,manifest,minimumText]=restoreCommand path minimumText (RestoreLedger manifest)
+  command ["restore-ledger",path,manifest,minimumText]=restoreCommand path minimumText (\c->RestoreLedger manifest (C.fingerprint c))
   command ["recover-ledger",path,backup,snapshot,directory,minimumText]=
-    restoreCommand path minimumText (RecoverLedger backup (T.pack snapshot) directory)
+    restoreCommand path minimumText (\c->RecoverLedger backup (T.pack snapshot) directory (C.fingerprint c))
+  command [mode,path,minimumText] | mode `elem` ["adopt-ledger","retire-ledger"] =
+    restoreCommand path minimumText (\c->(if mode=="adopt-ledger" then AdoptLedger else RetireLedger) (C.fenceDirectory c) (C.fingerprint c))
   command ["operator",path]=do
     c<-C.loadConfig path
     bytes<-BS.hGet stdin 4097
@@ -75,12 +77,12 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
             concurrently_
               (runSettings (setHost "127.0.0.1" $ setPort (C.serverPort c) $ setTimeout 65 defaultSettings) app)
               (concurrently_ (runWorkerLoop worker) (runControl (C.fenceDirectory c) operatorControl))
-  command _=die "Usage: ecx-bridge-rebuild recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE | restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE (offline database owner) | check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
+  command _=die "Usage: ecx-bridge-rebuild adopt-ledger CONFIG MINIMUM_SEQUENCE | retire-ledger CONFIG MINIMUM_SEQUENCE | recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE | restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE (offline database owner) | check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
   restoreCommand path minimumText operation=do
     c<-C.loadConfig path
     minimumSequence<-maybe (reject "invalid_restore_policy") pure (readMaybe minimumText)
     database<-databaseSettings
-    (restored,sequenceNo)<-evalRestore database (operation (C.fingerprint c) minimumSequence)
+    (restored,sequenceNo)<-evalRestore database (operation c minimumSequence)
     LBS.putStrLn $ encode $ object ["database" .= restored,"criticalSequence" .= sequenceNo,"paused" .= True]
 
 databaseSettings :: IO PG.ConnectInfo

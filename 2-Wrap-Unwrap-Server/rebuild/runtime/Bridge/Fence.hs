@@ -1,5 +1,5 @@
 {-# LANGUAGE ForeignFunctionInterface,ScopedTypeVariables #-}
-module Bridge.Fence (initializeFence,retireFence,withFence) where
+module Bridge.Fence (initializeFence,adoptFence,retireFence,withFence) where
 
 import Bridge.Error
 import Control.Concurrent.MVar
@@ -89,6 +89,14 @@ writeState directory state=mask_ $ bracketOnError (openBinaryTempFile directory 
 -- and never include this host-local watermark in ledger rollback archives.
 initializeFence :: FilePath -> Text -> Int64 -> IO ()
 initializeFence directory identity sequenceNo=do
+  prepareFence directory identity sequenceNo
+  withLock directory $ do
+    existing <- try(getSymbolicLinkStatus $ directory </> "sequence.json") :: IO(Either IOException FileStatus)
+    require (case existing of Left err->isDoesNotExistError err; _->False) "worker_fence_already_initialized"
+    writeState directory (State identity sequenceNo False)
+
+prepareFence :: FilePath -> Text -> Int64 -> IO ()
+prepareFence directory identity sequenceNo=do
   require (sequenceNo>=0 && T.length identity==64 && T.all (`elem` ("0123456789abcdef"::String)) identity) "invalid_worker_fence_initialization"
   require (isAbsolute directory && normalise directory==directory) "invalid_worker_fence_directory"
   createDirectoryIfMissing True directory
@@ -96,10 +104,22 @@ initializeFence directory identity sequenceNo=do
   uid <- getEffectiveUserID
   require (isDirectory status && fileOwner status==uid) "unsafe_worker_fence_permissions"
   setFileMode directory 0o700
+
+-- Called only after offline ledger validation and exclusive worker ownership.
+-- Replays keep the same watermark; existing identity/retirement/sequence guards
+-- apply before any replacement. A corrupt or inaccessible file is never missing.
+adoptFence :: FilePath -> Text -> Int64 -> IO ()
+adoptFence directory identity sequenceNo=do
+  prepareFence directory identity sequenceNo
   withLock directory $ do
-    existing <- try(getSymbolicLinkStatus $ directory </> "sequence.json") :: IO(Either IOException FileStatus)
-    require (case existing of Left err->isDoesNotExistError err; _->False) "worker_fence_already_initialized"
-    writeState directory (State identity sequenceNo False)
+    existing<-try(getSymbolicLinkStatus $ directory </> "sequence.json") :: IO(Either IOException FileStatus)
+    case existing of
+      Left err | isDoesNotExistError err->writeState directory (State identity sequenceNo False)
+      Left err->throwIO err
+      Right _->do
+        previous<-validateState directory identity
+        require (sequenceNo>=previous) "stale_ledger_below_worker_fence"
+        when (sequenceNo>previous) $ writeState directory (State identity sequenceNo False)
 
 -- Explicit offline retirement. A subsequent initializer cannot erase it.
 -- This disables cooperating paying workers, not other software holding a key.
