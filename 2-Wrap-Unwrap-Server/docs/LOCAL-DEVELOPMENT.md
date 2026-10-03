@@ -146,13 +146,19 @@ above is also signer-owned mode 0600. Shared configuration/token traversal uses
 the `ecx-worker` group; PostgreSQL peer authentication still denies this OS user
 writer access. The signer unit cannot access the worker's private/fence state.
 
-The installer does not yet provision this unit or these credentials. Do not enable
-it against the old worker deployment: first replace the worker's native cookie
-with a separately authenticated, method-restricted credential, remove the worker
-from `ecx-node`, and verify denial of signing/export methods. The signer can use
-the node cookie, but the worker must not read it or the signer-only files. Existing
-installed services still require this coordinated deployment update; this unit
-alone is not evidence of isolation or funded acceptance.
+The managed Signet installer now provisions the signer service, token/TLS identity,
+private signing configuration and a separate `ecx_worker` native RPC credential.
+The node's explicit method allowlist excludes signing and key export. The worker
+loses `ecx-node` group membership and its service hides node state and signing
+files; the signer uses the native cookie. Repeats preserve credentials. Upgrading
+an old managed deployment first stops both authorities and privately snapshots
+state, then changes only the worker credential path (outside the deployment
+fingerprint) and transfers the existing Solana key to the signer OS user.
+
+This implementation still needs Ubuntu installation/restart and funded acceptance.
+External-node signing setup remains manual until its restricted RPC configuration
+is supplied and reviewed; the installer refuses automatic paying setup for it.
+Do not interpret service definitions or local policy checks as OS isolation proof.
 
 New orders charge 1% both ways; saved quotes keep their terms. Check inventory,
 fee budgets, deadlines and exact network/token identities before real tests.

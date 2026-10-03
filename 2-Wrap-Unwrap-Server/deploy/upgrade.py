@@ -1,5 +1,6 @@
 """Offline PostgreSQL release upgrades; preserve keys/state and stop on failure."""
 import hashlib
+import grp
 import json
 import os
 from pathlib import Path
@@ -9,8 +10,16 @@ import tempfile
 import time
 
 SERVICES = ("ecx-bridge-backup.timer", "ecx-bridge-backup.service",
-            "ecx-bridge-web.service", "ecx-bridge-worker.service", "ecx-bridge-node.service")
+            "ecx-bridge-web.service", "ecx-bridge-worker.service", "ecx-bridge-signer.service", "ecx-bridge-node.service")
 PG_ENV = {"PGHOST": "/run/ecx-postgres", "PGPORT": "29436", "PGUSER": "postgres", "PGDATABASE": "ecx_bridge"}
+
+
+def existing_services():
+    # Older releases do not have a signer unit; newer ones have no web proxy.
+    # systemctl stop fails for nonexistent units, even when other units stop.
+    return [unit for unit in SERVICES if subprocess.run(
+        ["systemctl", "show", unit, "--property=LoadState", "--value"],
+        capture_output=True, text=True, check=True).stdout.strip() != "not-found"]
 
 
 def atomic_link(current, target):
@@ -28,8 +37,11 @@ def atomic_link(current, target):
 def managed_files(release):
     result = {Path("/etc/systemd/system") / p.name: p for p in (release / "deploy").glob("ecx-bridge*.service")}
     result.update({Path("/etc/systemd/system") / p.name: p for p in (release / "deploy").glob("ecx-bridge*.timer")})
-    result[Path("/etc/apparmor.d/ecx-bridge-bwrap")] = release / "deploy/ecx-bridge-bwrap.apparmor"
+    if (release / "deploy/ecx-bridge-bwrap.apparmor").exists():
+        result[Path("/etc/apparmor.d/ecx-bridge-bwrap")] = release / "deploy/ecx-bridge-bwrap.apparmor"
     result[Path("/etc/ecx-node.conf")] = release / "deploy/signet.conf"
+    result.update({Path("/etc/ecx-bridge") / name: release / "deploy" / name
+                   for name in ("postgresql.conf", "pg_hba.conf", "pg_ident.conf")})
     return result
 
 
@@ -77,7 +89,9 @@ class Upgrade:
 
     def prepare(self):
         self.node_was_active = subprocess.run(["systemctl", "is-active", "--quiet", "ecx-bridge-node.service"]).returncode == 0
-        self.run("systemctl", "stop", *SERVICES)
+        units = existing_services()
+        if units:
+            self.run("systemctl", "stop", *units)
         for unit in SERVICES:
             if subprocess.run(["systemctl", "is-active", "--quiet", unit]).returncode == 0:
                 raise ValueError("Service still active; upgrade stopped: " + unit)
@@ -100,7 +114,7 @@ class Upgrade:
         # Node stopped before copying wallet databases. Preserve signing material
         # privately; archives never enter a release or the Git repository.
         with tarfile.open(self.backup / "private-state.tar.gz", "w:gz") as saved:
-            for path in (Path("/etc/ecx-bridge"), Path("/etc/ecx-node.conf"), *private_state_paths()):
+            for path in (Path("/etc/ecx-bridge"), Path("/etc/ecx-node.conf"), Path("/etc/ecx-native-rpc.conf"), *private_state_paths()):
                 if path.exists():
                     saved.add(path, arcname=str(path).lstrip("/"))
             for destination in self.old_files:
@@ -140,6 +154,7 @@ class Upgrade:
         try:
             with os.fdopen(descriptor, "wb") as output:
                 os.fchmod(output.fileno(), mode)
+                os.fchown(output.fileno(), 0, grp.getgrnam(group).gr_gid)
                 output.write(content)
                 output.flush()
                 os.fsync(output.fileno())
@@ -150,6 +165,8 @@ class Upgrade:
     def fail(self):
         # Database migrations may already have committed. Do not auto-resume old
         # binaries or restore older financial state over possibly newer decisions.
-        self.run("systemctl", "stop", *SERVICES)
+        units = existing_services()
+        if units:
+            self.run("systemctl", "stop", *units)
         atomic_link(self.current, self.previous)
         print("Upgrade failed; services remain stopped. Previous release selected; inspect backup:", self.backup)

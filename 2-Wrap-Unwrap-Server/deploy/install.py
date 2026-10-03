@@ -4,6 +4,8 @@ import argparse
 import fcntl
 import grp
 import hashlib
+import hmac
+import secrets
 import json
 import os
 from pathlib import Path
@@ -73,25 +75,98 @@ def keep_file(path, content, mode, group="root"):
 
 
 def secure_signer(path):
-    """Tighten only known managed key layouts; never admit a public/link key."""
+    """Retain custody bytes while transferring access from the old worker to signer."""
     path = Path(path)
     info = path.lstat()
-    worker = pwd.getpwnam("ecx-worker")
-    group = grp.getgrnam("ecx-worker").gr_gid
-    mode = stat.S_IMODE(info.st_mode)
-    if not stat.S_ISREG(info.st_mode) or not (
-        (mode == 0o600 and info.st_uid in {0, worker.pw_uid}) or
-        (mode == 0o640 and info.st_uid == 0 and info.st_gid == group)
-    ):
+    owners = {0, pwd.getpwnam("ecx-worker").pw_uid, pwd.getpwnam("ecx-signer").pw_uid}
+    if not stat.S_ISREG(info.st_mode) or info.st_uid not in owners or stat.S_IMODE(info.st_mode) not in {0o600, 0o640}:
+        raise ValueError("Unsafe managed signer ownership or permissions")
+    if stat.S_IMODE(info.st_mode) == 0o640 and (info.st_uid != 0 or info.st_gid != grp.getgrnam("ecx-worker").gr_gid):
         raise ValueError("Unsafe managed signer ownership or permissions")
     path.chmod(0o600)
-    os.chown(path, worker.pw_uid, group)
+    os.chown(path, pwd.getpwnam("ecx-signer").pw_uid, grp.getgrnam("ecx-signer").gr_gid)
+
+
+# Only observation, unsigned construction, input locks and exact-byte broadcast.
+# walletprocesspsbt (even its unsigned mode) belongs exclusively to the signer.
+NATIVE_WORKER_METHODS = (
+    "getblockchaininfo,getblockhash,getconnectioncount,getaddressinfo,decodescript,"
+    "getwalletinfo,getnewaddress,getaddressesbylabel,listsinceblock,listunspent,"
+    "listlockunspent,getbalances,getmempoolentry,gettransaction,getblockheader,"
+    "getrawchangeaddress,gettxout,walletcreatefundedpsbt,decodepsbt,decoderawtransaction,"
+    "lockunspent,testmempoolaccept,gettxspendingprevout,sendrawtransaction"
+)
+
+
+def native_worker_policy(credential, salt):
+    # Bitcoin Core's rpcauth scheme: HMAC-SHA256 keyed by the hexadecimal salt.
+    if len(salt) != 32 or any(c not in "0123456789abcdef" for c in salt):
+        raise ValueError("Invalid managed native RPC salt")
+    username, password = credential.strip().split(":", 1)
+    if username != "ecx_worker" or len(password) != 64 or any(c not in "0123456789abcdef" for c in password):
+        raise ValueError("Invalid managed native worker credential")
+    digest = hmac.new(salt.encode(), password.encode(), hashlib.sha256).hexdigest()
+    return (f"rpcauth={username}:{salt}${digest}\n"
+            "rpcwhitelistdefault=0\n"
+            f"rpcwhitelist={username}:{NATIVE_WORKER_METHODS}\n").encode()
+
+
+def install_native_authority(keep):
+    credential = Path("/etc/ecx-bridge/native-worker.auth")
+    if credential.is_symlink():
+        raise ValueError("Native worker credential cannot be a symlink")
+    content = credential.read_bytes() if credential.exists() else ("ecx_worker:" + secrets.token_hex(32) + "\n").encode()
+    policy = Path("/etc/ecx-native-rpc.conf")
+    if policy.is_symlink():
+        raise ValueError("Native RPC policy cannot be a symlink")
+    # Retain salt and password on repeats; refuse a mismatched existing policy.
+    if policy.exists():
+        first = policy.read_text().splitlines()[0]
+        salt = first.split(":", 1)[1].split("$", 1)[0]
+    else:
+        salt = secrets.token_hex(16)
+    expected = native_worker_policy(content.decode(), salt)
+    keep(credential, content, 0o640, "ecx-worker")
+    keep(policy, expected, 0o640, "ecx-node")
+    credential.chmod(0o640)
+    os.chown(credential, 0, grp.getgrnam("ecx-worker").gr_gid)
+    policy.chmod(0o640)
+    os.chown(policy, 0, grp.getgrnam("ecx-node").gr_gid)
+
+
+def install_signing_authority(keep, native_cookie):
+    # Never rotate an existing key or regenerate an incomplete TLS identity.
+    mkdir("/etc/ecx-bridge/signing", 0o750, group="ecx-signer")
+    private = Path("/etc/ecx-bridge/signing/private.json")
+    content = (json.dumps({"nativeSigningCookie": native_cookie,
+                          "solanaSigningKey": "/etc/ecx-bridge/signer.json"}, sort_keys=True) + "\n").encode()
+    keep(private, content, 0o600)
+    os.chown(private, pwd.getpwnam("ecx-signer").pw_uid, grp.getgrnam("ecx-signer").gr_gid)
+    token = Path("/etc/ecx-bridge/signing.auth")
+    if not token.exists():
+        keep(token, (secrets.token_hex(32) + "\n").encode(), 0o640, "ecx-worker")
+    cert, key = Path(str(token) + ".pem"), Path(str(token) + ".key")
+    if cert.is_symlink() or key.is_symlink() or token.is_symlink():
+        raise ValueError("Signer credential cannot be a symlink")
+    if cert.exists() != key.exists():
+        raise ValueError("Incomplete signer TLS identity; recover it before continuing")
+    if not cert.exists():
+        with tempfile.TemporaryDirectory(prefix="ecx-signer-tls-", dir="/run") as directory:
+            staged = Path(directory)
+            run("openssl", "req", "-x509", "-newkey", "rsa:3072", "-sha256", "-nodes", "-days", "365",
+                "-subj", "/CN=ecx-local-signer", "-addext", "subjectAltName=IP:127.0.0.1",
+                "-keyout", str(staged / "key"), "-out", str(staged / "cert"),
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            keep(key, (staged / "key").read_bytes(), 0o600)
+            keep(cert, (staged / "cert").read_bytes(), 0o644)
+    os.chown(key, pwd.getpwnam("ecx-signer").pw_uid, grp.getgrnam("ecx-signer").gr_gid)
+    key.chmod(0o600)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle", type=Path)
-    parser.add_argument("--config-dir", type=Path, help="private directory containing worker.json, helper.json and optional signer.json")
+    parser.add_argument("--config-dir", type=Path, help="private directory containing worker.json and optional signer.json")
     parser.add_argument("--upgrade", action="store_true", help="stop and privately back up an existing PostgreSQL deployment, then switch verified releases")
     parser.add_argument("--configure", action="store_true", help="interactively collect and validate private Signet/Devnet configuration")
     parser.add_argument("--port", type=int, help="loopback web port (default 8080, or existing configuration)")
@@ -171,24 +246,43 @@ def install(args):
 
 def install_runtime(args, target, release_id, current, keep=keep_file):
     import postgres
-    for name in ("ecx-api", "ecx-worker", "ecx-node"):
+    config = Path("/etc/ecx-bridge/worker.json")
+    # Group changes do not revoke credentials from an already running process.
+    # Upgrade.prepare stops both authorities and snapshots state before we get here.
+    if not Path("/etc/ecx-bridge/signing/private.json").exists():
+        if subprocess.run(["systemctl", "is-active", "--quiet", "ecx-bridge-worker.service"]).returncode == 0:
+            raise ValueError("Stop the existing worker through --upgrade before separating signing authority")
+    args.with_signet = args.with_signet or Path("/etc/ecx-native-rpc.conf").is_file()
+    if args.upgrade and args.with_signet and config.is_file():
+        worker = json.loads(config.read_text())
+        if worker.get("nativeCookie") == "/run/ecx-node/rpc.cookie":
+            # Only the credential location changes; it is outside fingerprint.
+            worker["nativeCookie"] = "/etc/ecx-bridge/native-worker.auth"
+            with tempfile.NamedTemporaryFile(mode="w", dir=config.parent, delete=False) as output:
+                temporary = Path(output.name)
+                try:
+                    json.dump(worker, output, indent=2)
+                    output.write("\n"); output.flush(); os.fsync(output.fileno())
+                    run(str(target / "bin/ecx-bridge"), "check-config", str(temporary), stdout=subprocess.DEVNULL)
+                    os.chown(temporary, 0, grp.getgrnam("ecx-worker").gr_gid)
+                    temporary.chmod(0o640)
+                    temporary.replace(config)
+                finally:
+                    temporary.unlink(missing_ok=True)
+    for name in ("ecx-api", "ecx-worker", "ecx-node", "ecx-signer"):
         try:
             grp.getgrnam(name)
         except KeyError:
             run("groupadd", "--system", name)
-    for name, group in (("ecx-worker", "ecx-api"), ("ecx-node", "ecx-node")):
+    for name, group in (("ecx-worker", "ecx-api"), ("ecx-node", "ecx-node"), ("ecx-signer", "ecx-signer")):
         try:
             pwd.getpwnam(name)
         except KeyError:
             run("useradd", "--system", "--gid", group, "--no-create-home", "--home-dir", "/nonexistent", "--shell", "/usr/sbin/nologin", name)
-    run("usermod", "--append", "--groups", "ecx-worker,ecx-node", "ecx-worker")
+    # Exact supplementary groups remove the old worker's native-cookie access.
+    run("usermod", "--groups", "ecx-worker", "ecx-worker")
+    run("usermod", "--groups", "ecx-worker,ecx-node", "ecx-signer")
     mkdir("/etc/ecx-bridge", 0o750, group="ecx-worker")
-    mkdir("/opt/ecx-bridge/libexec", 0o750, group="ecx-worker")
-    shutil.copy2("/usr/bin/bwrap", "/opt/ecx-bridge/libexec/bwrap")
-    os.chown("/opt/ecx-bridge/libexec/bwrap", 0, grp.getgrnam("ecx-worker").gr_gid)
-    os.chmod("/opt/ecx-bridge/libexec/bwrap", 0o750)
-    keep("/etc/apparmor.d/ecx-bridge-bwrap", (target / "deploy/ecx-bridge-bwrap.apparmor").read_bytes(), 0o644)
-    run("apparmor_parser", "-r", "/etc/apparmor.d/ecx-bridge-bwrap")
     mkdir("/var/lib/ecx-bridge", 0o755)
     mkdir("/var/lib/ecx-bridge/private", 0o700, "ecx-worker", "ecx-worker")
     mkdir("/var/lib/ecx-node", 0o750, "ecx-node", "ecx-node")
@@ -196,20 +290,16 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
     if args.config_dir:
         source = args.config_dir.resolve(strict=True)
         worker = json.loads((source / "worker.json").read_text())
-        helper = json.loads((source / "helper.json").read_text())
+
         required = {"customerSocket": "/run/ecx-bridge/customer/api.sock", "adminSocket": "/run/ecx-bridge/admin/api.sock", "signerPort": 8081, "signerAuthFile": "/etc/ecx-bridge/signing.auth", "solanaSdkLibrary": "/opt/ecx-bridge/current/lib/libecx_solana_sdk.so"}
         if any(worker.get(k) != v for k, v in required.items()):
             raise ValueError("Configuration must use the documented managed paths")
-        if any(helper.get(k) != worker.get(v) for k, v in (("deployment_id", "deploymentId"), ("mint", "mint"), ("custody_owner", "custodyOwner"))):
-            raise ValueError("Helper/worker identity mismatch")
-        signer = helper.get("signer_path")
-        if signer not in (None, "/etc/ecx-bridge/signer.json"):
-            raise ValueError("Signer must use the managed path")
+        signer = (source / "signer.json").is_file()
         run(str(target / "bin/ecx-bridge"), "check-config", str(source / "worker.json"), stdout=subprocess.DEVNULL)
         if signer:
             run(str(target / "bin/ecx-bridge"), "check-signer", str(source / "worker.json"), str(source / "signer.json"), stdout=subprocess.DEVNULL)
         # Check all collisions before writing any config files.
-        incoming = [("worker.json", (source / "worker.json").read_bytes()), ("helper.json", (source / "helper.json").read_bytes())]
+        incoming = [("worker.json", (source / "worker.json").read_bytes())]
         if (source / "interface.json").is_file():
             run(str(target / "bin/ecx-bridge"), "check-interface", str(source / "worker.json"), str(source / "interface.json"), stdout=subprocess.DEVNULL)
             incoming.append(("interface.json", (source / "interface.json").read_bytes()))
@@ -258,13 +348,18 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
             raise ValueError("Payment mode requires the custody signer")
     if args.with_signet and config.exists():
         worker = json.loads(config.read_text())
-        if worker["profile"] != "L2LSignetDevnet" or worker["nativeRpc"] != "http://127.0.0.1:29432" or worker["nativeCookie"] != "/run/ecx-node/rpc.cookie":
-            raise ValueError("Managed Signet requires the matching profile, loopback port 29432 and /run/ecx-node/rpc.cookie")
+        if worker["profile"] != "L2LSignetDevnet" or worker["nativeRpc"] != "http://127.0.0.1:29432" or worker["nativeCookie"] != "/etc/ecx-bridge/native-worker.auth":
+            raise ValueError("Managed Signet requires the matching profile, loopback port 29432 and /etc/ecx-bridge/native-worker.auth")
     if args.with_signet:
+        install_native_authority(keep)
         keep("/etc/ecx-node.conf", (target / "deploy/signet.conf").read_bytes(), 0o644)
-    for name in ("ecx-bridge-worker.service", "ecx-bridge-node.service"):
+    for name in ("ecx-bridge-worker.service", "ecx-bridge-node.service", "ecx-bridge-signer.service"):
         dest = Path("/etc/systemd/system") / name
         keep(dest, (target / "deploy" / name).read_bytes(), 0o644)
+    if managed_signer.is_file():
+        if not args.with_signet:
+            raise ValueError("Automatic signer provisioning currently requires --with-signet; external nodes need reviewed restricted RPC configuration")
+        install_signing_authority(keep, "/run/ecx-node/rpc.cookie")
     postgres.install(target, config, mkdir, keep)
     for name in ("ecx-bridge-backup.service", "ecx-bridge-backup.timer"):
         keep(Path("/etc/systemd/system") / name, (target / "deploy" / name).read_bytes(), 0o644)
@@ -283,8 +378,7 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
         run("systemctl", "disable", "--now", obsolete.name)
         obsolete.unlink()
     run("systemctl", "daemon-reload")
-    run("runuser", "-u", "ecx-worker", "--", "/opt/ecx-bridge/libexec/bwrap", "--unshare-all", "--ro-bind", "/", "/", "--", "/usr/bin/true")
-    run("systemd-analyze", "verify", "/etc/systemd/system/ecx-bridge-worker.service", "/etc/systemd/system/ecx-bridge-node.service")
+    run("systemd-analyze", "verify", "/etc/systemd/system/ecx-bridge-worker.service", "/etc/systemd/system/ecx-bridge-node.service", "/etc/systemd/system/ecx-bridge-signer.service")
     if args.with_signet:
         run("systemctl", "enable", "--now", "ecx-bridge-node.service")
         if config.exists():
@@ -304,6 +398,8 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
                 else:
                     run(*cli, "-named", "createwallet", "wallet_name=" + wallet, "descriptors=true", "load_on_startup=true", stdout=subprocess.DEVNULL)
     if config.exists():
+        if managed_signer.is_file():
+            run("systemctl", "enable", "--now", "ecx-bridge-signer.service")
         run("systemctl", "enable", "--now", "ecx-bridge-backup.timer")
         run("systemctl", "enable", "--now", "ecx-bridge-worker.service")
         if payment_mode_added:
@@ -312,7 +408,7 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
             run("systemctl", "restart", "ecx-bridge-worker.service")
         for _ in range(30):
             try:
-                with urllib.request.urlopen(f"http://127.0.0.1:{port}/healthz", timeout=2) as response:
+                with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/v1/config", timeout=2) as response:
                     if response.status == 200:
                         break
             except (OSError, urllib.error.URLError):
@@ -320,7 +416,7 @@ def install_runtime(args, target, release_id, current, keep=keep_file):
             time.sleep(1)
         else:
             raise ValueError("Installed services failed their liveness check; inspect journalctl -u ecx-bridge-worker")
-        print(f"Installed. Interface: http://127.0.0.1:{port}; check /readyz before use.")
+        print(f"Installed. Interface: http://127.0.0.1:{port}; inspect /api/v1/config availability before use.")
     else:
         print("Installed; awaiting real wallet configuration. See docs/INSTALL.md. Services have not been started.")
     print("Release:", release_id)

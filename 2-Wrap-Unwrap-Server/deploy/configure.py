@@ -86,7 +86,6 @@ def create_setup(binary, template, output, managed_node, ask=prompt):
         "jupiterUrl": None, "orcaUrl": None,
     }
     signer = ask("Custody keypair file; blank for observation, '-' to paste hidden JSON")
-    helper = {"deployment_id": worker["deploymentId"], "mint": worker["mint"], "custody_owner": worker["custodyOwner"], "signer_path": "/etc/ecx-bridge/signer.json" if signer else None}
 
     def write(name, value):
         filename = output / name
@@ -98,7 +97,6 @@ def create_setup(binary, template, output, managed_node, ask=prompt):
             os.fsync(stream.fileno())
 
     write("worker.json", worker)
-    write("helper.json", helper)
     write("interface.json", interface)
     if signer:
         if signer == "-":

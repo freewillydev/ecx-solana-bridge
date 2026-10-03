@@ -40,6 +40,7 @@ def install(target, config, mkdir, keep_file):
     keep_file("/etc/systemd/system/ecx-bridge-postgres.service", (target / "deploy/ecx-bridge-postgres.service").read_bytes(), 0o644)
     run("systemctl", "daemon-reload")
     run("systemctl", "enable", "--now", "ecx-bridge-postgres.service")
+    run("systemctl", "reload", "ecx-bridge-postgres.service")
     for _ in range(30):
         ready = subprocess.run(["runuser", "-u", "postgres", "--", "pg_isready", "-h", ENV["PGHOST"], "-p", ENV["PGPORT"]], capture_output=True)
         if ready.returncode == 0:

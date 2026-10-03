@@ -2,7 +2,7 @@
   "profile": "L2LSignetDevnet",
   "deploymentId": "l2l-devnet-operator",
   "nativeRpc": "http://127.0.0.1:29432",
-  "nativeCookie": "/run/ecx-node/rpc.cookie",
+  "nativeCookie": "/etc/ecx-bridge/native-worker.auth",
   "nativeWallet": "ecx-bridge-test",
   "nativeCheckpointHeight": 16000,
   "nativeCheckpointHash": "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47",

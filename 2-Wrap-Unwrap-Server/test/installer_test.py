@@ -112,7 +112,7 @@ class ReleaseIntegrity(unittest.TestCase):
 
 
 class SignerPermissions(unittest.TestCase):
-    def test_managed_private_and_legacy_group_key_become_worker_only(self):
+    def test_managed_private_and_legacy_group_key_become_signer_only(self):
         import os
         from types import SimpleNamespace
         with tempfile.TemporaryDirectory() as directory:
@@ -121,9 +121,9 @@ class SignerPermissions(unittest.TestCase):
             for mode, owner, group in [(0o600, 0, 4321), (0o600, 1234, 4321), (0o640, 0, 4321)]:
                 key.chmod(mode)
                 values = list(key.stat()); values[4] = owner; values[5] = group
-                with patch.object(Path, "lstat", return_value=os.stat_result(values)), patch.object(installer.pwd, "getpwnam", return_value=SimpleNamespace(pw_uid=1234)), patch.object(installer.grp, "getgrnam", return_value=SimpleNamespace(gr_gid=4321)), patch.object(installer.os, "chown") as ownership:
+                with patch.object(Path, "lstat", return_value=os.stat_result(values)), patch.object(installer.pwd, "getpwnam", side_effect=lambda name: SimpleNamespace(pw_uid={"ecx-worker":1234,"ecx-signer":5678}[name])), patch.object(installer.grp, "getgrnam", side_effect=lambda name: SimpleNamespace(gr_gid={"ecx-worker":4321,"ecx-signer":8765}[name])), patch.object(installer.os, "chown") as ownership:
                     installer.secure_signer(key)
-                    ownership.assert_called_once_with(key, 1234, 4321)
+                    ownership.assert_called_once_with(key, 5678, 8765)
                 self.assertEqual(key.stat().st_mode & 0o777, 0o600)
 
     def test_public_and_symlink_keys_are_refused(self):
@@ -205,7 +205,8 @@ class UpgradeFiles(unittest.TestCase):
         destination.write_bytes(source.read_bytes())
         self.upgrade.old_files[destination] = source
         ordinary = Mock()
-        self.upgrade.keep_file(destination, b"new managed service", 0o644, ordinary=ordinary)
+        with patch.object(self.module.os, "fchown"), patch.object(self.module.grp, "getgrnam", return_value=Mock(gr_gid=0)):
+            self.upgrade.keep_file(destination, b"new managed service", 0o644, ordinary=ordinary)
         self.assertEqual(destination.read_bytes(), b"new managed service")
         ordinary.assert_not_called()
 
@@ -230,7 +231,8 @@ class UpgradeFiles(unittest.TestCase):
         self.module.atomic_link(self.current, self.target)
         self.upgrade.run = Mock()
         self.upgrade.backup = self.root / "private-backup"
-        self.upgrade.fail()
+        with patch.object(self.module, "existing_services", return_value=self.module.SERVICES):
+            self.upgrade.fail()
         self.assertEqual(self.current.resolve(), self.previous)
         self.upgrade.run.assert_called_once_with("systemctl", "stop", *self.module.SERVICES)
 

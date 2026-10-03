@@ -1,5 +1,18 @@
 # Ubuntu installer
 
+Current source status: managed Signet deployment now includes a dedicated signer,
+restricted native worker RPC authentication and signer-only custody/TLS keys.
+The new service layout has not yet passed Ubuntu or funded two-process acceptance;
+older downloadable draft artifacts do not contain these changes. The historical
+procedures below are being reconciled with this layout before a new review package.
+The prepared setup now contains `worker.json`, optional `interface.json` and
+optional mode-0600 `signer.json`; it no longer needs `helper.json` or bubblewrap.
+Use the current Signet template's `/etc/ecx-bridge/native-worker.auth` path.
+The installer generates its random credential and corresponding node allowlist,
+retains them on repeat installation, and uses the full node cookie only in the
+signer. External-node automatic signing setup is not implemented by this change.
+
+
 **Current source checkpoint:** the dedicated Haskell signer and non-HTTP local
 operator protocol replace the older packaged custody/control design. Installer
 units, credentials and restore tooling have not yet been adapted and accepted for

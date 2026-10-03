@@ -1,8 +1,0 @@
-abi <abi/4.0>,
-include <tunables/global>
-
-# Ubuntu 24.04 restricts unprivileged namespaces. Allow only this root-installed,
-# worker-group-only copy to construct the helper's filesystem/network sandbox.
-profile ecx-bridge-bwrap /opt/ecx-bridge/libexec/bwrap flags=(unconfined) {
-  userns,
-}

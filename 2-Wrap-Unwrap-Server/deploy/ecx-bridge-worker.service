@@ -1,6 +1,6 @@
 [Unit]
 Description=ECX bridge HTTP API and payment workflows
-After=network-online.target ecx-bridge-node.service ecx-bridge-postgres.service
+After=network-online.target ecx-bridge-node.service ecx-bridge-postgres.service ecx-bridge-signer.service
 Requires=ecx-bridge-postgres.service
 Wants=network-online.target
 
@@ -8,7 +8,7 @@ Wants=network-online.target
 Type=simple
 User=ecx-worker
 Group=ecx-api
-SupplementaryGroups=ecx-worker ecx-node
+SupplementaryGroups=ecx-worker
 UMask=0077
 Environment=ECX_PORT=8080
 Environment=ECX_ASSETS=/opt/ecx-bridge/current/web
@@ -26,8 +26,8 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/var/lib/ecx-bridge/private /var/lib/ecx-bridge/fence /run/ecx-bridge
-# Bubblewrap needs NETLINK_ROUTE while configuring its isolated network namespace.
-RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+InaccessiblePaths=-/run/ecx-node -/var/lib/ecx-node -/etc/ecx-bridge/signing -/etc/ecx-bridge/signer.json -/etc/ecx-bridge/signing.auth.key
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true

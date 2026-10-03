@@ -20,7 +20,7 @@ def package_release(bundle, cache, arch):
     tail -n +@LINE@ "$0" > "$task_dir/release.tar.gz"
     printf '%s  %s\n' '@HASH@' "$task_dir/release.tar.gz" | sha256sum -c -
     tar -xzf "$task_dir/release.tar.gz" -C "$task_dir"
-    packages="python3 bubblewrap apparmor ca-certificates libgmp10 libnuma1 libffi8 libtinfo6 zlib1g libpq5 postgresql-16 postgresql-client-16 restic"
+    packages="python3 openssl ca-certificates libgmp10 libnuma1 libffi8 libtinfo6 zlib1g libpq5 postgresql-16 postgresql-client-16 restic"
     missing=""
     for package in $packages; do
         [ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)" = 'install ok installed' ] || missing="$missing $package"
