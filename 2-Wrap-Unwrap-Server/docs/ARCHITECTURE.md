@@ -63,7 +63,8 @@ constraints; startup supplies the implementations. Review exports and component
 dependencies as well as types.
 
 All six `Operation` instances live in `Critical.hs`, beside the safe and critical
-evaluators. Their methods contain concrete execution cases. There is no
+evaluators. Their methods implement concrete effects except local signer execution,
+which belongs directly to the gated critical evaluator. There is no
 `Interpreter` class, callback bundle or arbitrary environment/program execution
 instance. The core declares an opaque `Evaluation` data family; only `Critical.hs`
 defines its two concrete severity instances and can construct them. Safe resources
@@ -71,9 +72,13 @@ are a reader and public configuration. Critical resources are either worker
 resources or signer resources, which contain no writer. IO is fixed; polymorphism
 in the result preserves the result selected by the operation's GADT.
 
-The safe and critical evaluators match only `Instruction`, then call
-`authorizeOperation` and `evaluateOperation`. Leaf-specific execution and the
-operation's permissions belong to its concrete `Operation` instance. `runProcess`
+Both evaluators recover `Instruction` and call `authorizeOperation`. Safe evaluation
+then calls `evaluateOperation`. Critical evaluation matches the four `SigningDSL`
+leaves in a signer context, keeping each read/sign/recheck or checkpoint sequence
+inside its held gate; all other cases call `evaluateOperation`. The signer instance's
+method constructs only the worker's HTTPS client and refuses local signer execution.
+There is no signer `run` helper or method that executes keys outside `evalCritical`.
+`runProcess`
 owns the concrete worker or signer service lifetime. After validating that mode's
 resources it allocates one gate and defines the sole `evalCritical` call site.
 It then runs HTTP/worker/control or signer HTTPS with that local dispatch. It does
