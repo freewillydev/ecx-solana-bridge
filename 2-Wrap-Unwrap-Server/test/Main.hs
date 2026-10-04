@@ -1,4 +1,4 @@
-{-# LANGUAGE DataKinds, GADTs, TypeOperators, TypeFamilies #-}
+{-# LANGUAGE DataKinds, GADTs, TypeOperators, TypeFamilies, TypeApplications #-}
 module Main (main) where
 
 import qualified SigningTransportCheck
@@ -12,7 +12,8 @@ import Servant.API ((:<|>)(..))
 import Bridge.Domain
 import Data.Aeson (eitherDecode,encode)
 import Data.Int (Int64)
-import Data.Functor.Const (Const(..))
+import Data.List (nub)
+import Data.Typeable (typeOf,eqT)
 import Data.Type.Equality ((:~:)(Refl))
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
@@ -36,31 +37,40 @@ main = do
     , check "customer handlers preserve request, result type and severity" $ once $ property handlerContract
     , check "signer handler resolves an existential to a signer-only critical operation" $ once $ property $
         let prepared :<|> replacement :<|> draft :<|> checkpoint=signingServer ()
-        in case (resolve $ prepared ("deployment","payment",3),resolve $ replacement ("deployment",7),resolve $ draft ("deployment","parent",good $ amount 2),resolve $ checkpoint ("deployment",9)) of
-          (SigningDSL (PreparedSigning (SignPrepared identity identifier generation)),SigningDSL (ReplacementSigning (SignReplacement other decision)),SigningDSL (DraftSigning (DraftReplacement third parent fee)),SigningDSL (CheckpointSigning (CheckpointCustody fourth sequenceNo)))->
+        in case (checkedRequest $ prepared ("deployment","payment",3),checkedRequest $ replacement ("deployment",7),checkedRequest $ draft ("deployment","parent",good $ amount 2),checkedRequest $ checkpoint ("deployment",9)) of
+          (Right(SigningDSL (PreparedSigning (SignPrepared identity identifier generation))),Right(SigningDSL (ReplacementSigning (SignReplacement other decision))),Right(SigningDSL (DraftSigning (DraftReplacement third parent fee))),Right(SigningDSL (CheckpointSigning (CheckpointCustody fourth sequenceNo))))->
             identity=="deployment" && identifier=="payment" && generation==3 && other==identity && decision==7 && third==identity && parent=="parent" && units fee==2 && fourth==identity && sequenceNo==9
           _->False
-    , check "constrained DSL view selects only its typed interpreter handler" $ once $ property $
-        let safeHandlers=SafeHandlers (const $ Const "customer-read") (const $ Const "operator-read")
-            criticalHandlers=CriticalHandlers (const $ Const "customer-write") (const $ Const "operator-write")
-              (const $ Const "worker") signing
-            signing :: SigningOperation a -> Const T.Text a
-            signing value=Const $ case value of
-              PreparedSigning{} -> "prepared"
-              ReplacementSigning{} -> "replacement"
-              DraftSigning{} -> "draft"
-              CheckpointSigning{} -> "checkpoint"
-            select :: Handlers severity (Const T.Text) -> DSL caller severity a -> T.Text
-            select handlers (Instruction op)=getConst $ interpretOperation handlers op
-        in and [select safeHandlers (command $ CustomerQuery PublicConfig)=="customer-read"
-          ,select safeHandlers (command $ OperatorQuery ServiceState)=="operator-read"
-          ,select criticalHandlers (command $ CustomerChange $ CreateOrder "auth" $ W.OrderRequest NativeToWrapped (good $ amount 100) "dest" "refund" Nothing "key")=="customer-write"
-          ,select criticalHandlers (command $ OperatorChange $ PauseService "reason")=="operator-write"
-          ,select criticalHandlers (command $ WorkerAction RunWorkerCycle)=="worker"
-          ,select criticalHandlers (command $ SignerAction $ PreparedSigning $ SignPrepared "deployment" "payment" 3)=="prepared"
-          ,select criticalHandlers (command $ SignerAction $ ReplacementSigning $ SignReplacement "deployment" 7)=="replacement"
-          ,select criticalHandlers (command $ SignerAction $ DraftSigning $ DraftReplacement "deployment" "parent" (good $ amount 2))=="draft"
-          ,select criticalHandlers (command $ SignerAction $ CheckpointSigning $ CheckpointCustody "deployment" 9)=="checkpoint"]
+    , check "each associated dictionary identity is distinct and survives DSL resolution" $ once $ property $
+        let identities=[typeOf(operationDictionary @'Customer @'Safe @CustomerCommand)
+              ,typeOf(operationDictionary @'Customer @'Critical @CustomerCommand)
+              ,typeOf(operationDictionary @'Operator @'Safe @OperatorCommand)
+              ,typeOf(operationDictionary @'Operator @'Critical @OperatorCommand)
+              ,typeOf(operationDictionary @'Worker @'Critical @WorkerCommand)
+              ,typeOf(operationDictionary @'Signer @'Critical @SignerCommand)]
+            select :: Request caller severity a -> T.Text
+            select request=case checkedRequest request of
+              Left _->"mismatch"
+              Right operation->case operation of
+                ReadCustomer{}->"customer-read"
+                ReadOperator{}->"operator-read"
+                WriteCustomer{}->"customer-write"
+                OperatorDSL{}->"operator-write"
+                WorkerDSL{}->"worker"
+                SigningDSL{}->"signer"
+        in length(nub identities)==6 && and
+          [select(Request $ CustomerQuery PublicConfig)=="customer-read"
+          ,select(Request $ OperatorQuery ServiceState)=="operator-read"
+          ,select(Request $ CustomerChange $ CreateOrder "auth" $ W.OrderRequest NativeToWrapped (good $ amount 100) "dest" "refund" Nothing "key")=="customer-write"
+          ,select(Request $ OperatorChange $ PauseService "reason")=="operator-write"
+          ,select(workerRequest RunWorkerCycle)=="worker"
+          ,select(Request $ SignerAction $ PreparedSigning $ SignPrepared "deployment" "payment" 3)=="signer"]
+    , check "distinct dictionary constraints and signer outputs have no equality witness" $ once $ property $
+        absent(eqT @(OperationContext 'Customer 'Safe CustomerCommand) @(OperationContext 'Customer 'Critical CustomerCommand))
+        && absent(eqT @(OperationContext 'Worker 'Critical WorkerCommand) @(OperationContext 'Signer 'Critical SignerCommand))
+        && absent(eqT @PreparedResult @ReplacementResult) && absent(eqT @PreparedResult @DraftResult)
+        && absent(eqT @PreparedResult @CheckpointResult) && absent(eqT @ReplacementResult @DraftResult)
+        && absent(eqT @ReplacementResult @CheckpointResult) && absent(eqT @DraftResult @CheckpointResult)
     , check "result equality determines both severity and operation" $ once $ property $
         case resultIndices (Refl :: Result 'Critical SignPrepared :~: Result 'Critical SignPrepared) of
           (Refl,Refl)->True
@@ -143,22 +153,29 @@ handlerContract =
   let config :<|> create :<|> status :<|> instructions = customerServer
       inputRequest = W.OrderRequest NativeToWrapped (good $ amount 100) "destination" "refund" Nothing "key"
       configOK = case config of
-        SafePlan req -> case resolve req of ReadCustomer PublicConfig -> True
+        SafePlan req -> case checkedRequest req of Right(ReadCustomer PublicConfig) -> True; _ -> False
         _ -> False
       createOK = case create "auth" inputRequest of
-        CriticalPlan req -> case resolve req of
-          WriteCustomer (CreateOrder auth saved) -> auth=="auth" && saved==inputRequest
+        CriticalPlan req -> case checkedRequest req of
+          Right(WriteCustomer (CreateOrder auth saved)) -> auth=="auth" && saved==inputRequest
+          _ -> False
         _ -> False
       statusOK = case status "order" "auth" of
-        SafePlan req -> case resolve req of
-          ReadCustomer (OrderStatus auth oid) -> auth=="auth" && oid=="order"
+        SafePlan req -> case checkedRequest req of
+          Right(ReadCustomer (OrderStatus auth oid)) -> auth=="auth" && oid=="order"
+          _ -> False
         _ -> False
       instructionsOK = case instructions "order" "auth" of
-        SafePlan req -> case resolve req of
-          ReadCustomer (PaymentInstructions auth oid) -> auth=="auth" && oid=="order"
+        SafePlan req -> case checkedRequest req of
+          Right(ReadCustomer (PaymentInstructions auth oid)) -> auth=="auth" && oid=="order"
+          _ -> False
         _ -> False
   in and [configOK,createOK,statusOK,instructionsOK]
 
 -- GHC must derive both equalities from family-result equality, without casts.
 resultIndices :: Result s op :~: Result t other -> (s :~: t, op :~: other)
 resultIndices Refl = (Refl,Refl)
+
+absent :: Maybe a -> Bool
+absent Nothing=True
+absent Just{}=False

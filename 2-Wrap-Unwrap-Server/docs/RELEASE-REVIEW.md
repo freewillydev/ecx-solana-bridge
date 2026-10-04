@@ -40,6 +40,13 @@ compile contracts preserved the Operation caller/severity boundary. All eight SQ
 migrations and the supplied Main.hs reference retained identical bytes. Temporary
 test resources were removed. This verifies the promotion, not the release gates below.
 
+The associated-constraint interpreter refactor also passed the root build, all three
+Cabal suites and the same PostgreSQL/server/HTTPS/encrypted-wallet contracts.
+One positive and nine rejected compile cases checked caller/severity alignment,
+closed instance heads, injective constraint identity, dictionary coercion, distinct
+signer results and private interpreter environments. `eqT` establishes constraint-type
+equality only; it does not prove dictionary-value identity or custody security.
+
 The PostgreSQL archive contract additionally compares all 22 existing migration
 projections alongside deployment, attempts and postings. A committed recipient
 change with unchanged row counts stays outside the exported snapshot and restored
