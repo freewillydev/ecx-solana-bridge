@@ -62,7 +62,7 @@ artifact.
 | RPC pacing | Tests cover host budgets, idle/late wakeups, cancellation and actual HTTPS accounting of a read retry versus a refused send. Scoped Signet/Devnet operation passed at the default 2 requests/second per process/host. The Mainnet verifier's hourly quota exhausted during recovery; paced request starts do not guarantee hourly capacity or a usable payout window. |
 | Signer model | Bounded two-request TLA+ model: 54,289 distinct states; path/output/dispatch invariants and negative mutations checked. No TLAPS/unbounded Haskell proof. |
 | Token administration | Real Devnet mint/account creation, issuance/burn and metadata readback, preserving signed-attempt replay. Bounded expiry recovery now has a finalized mint-one/burn-one round trip; canonical authority/backing remain open. |
-| Liquidity | Real Devnet pool/position creation, funded deposit/withdrawal and collection replay, plus bounded expiry recovery for an empty-position collection. Collected fees were zero; nonzero yield/reinvestment remains unverified. |
+| Liquidity | Real Devnet pool/position creation, funded deposit/withdrawal and collection replay, plus bounded expiry recovery for an empty-position collection. Subsequent real trades generated 4 units of fees per asset; collection, fee-bounded reinvestment and full withdrawal passed. Unattended compounding is not implemented. |
 | Trading | A real Mainnet SOL→USDC→canonical wrapped ECX purchase used Orca, including the published pool. Two providers confirmed 1,000,000 lamports input, 3,833,230 wrapped base units received and 6,404 lamports transaction fee. This is inventory acquisition, not bridge-conversion or backing evidence. |
 
 Representative funded transactions from the migrated test deployment:
@@ -326,6 +326,14 @@ proof of nonexecution.
 
 ## Gates still open
 
+Real Devnet nonzero fee collection and explicit reinvestment passed after bounded
+trades in the separate test pool. The existing CLI collected 4 units per asset,
+reinvested 3 A / 4 B under receipt-sized caps and withdrew all liquidity. Finalized
+attempt replay and empty-position readback passed; six transactions cost 5,000
+lamports each. No runtime code or custody authority was added. Transaction IDs and
+bounds are in the [pool acceptance](../../3-Create-CPMM-Pool/README.md#nonzero-fees-and-explicit-reinvestment).
+This does not establish unattended compounding, LP locks or canonical use.
+
 The current macOS source/package notice inventory now covers all 358 distinct
 versions across both actual Cabal plans and Cargo.lock. It adds missing notices
 for 41 hash-verified Hackage archives and 18 installed compiler packages, retaining
@@ -404,8 +412,8 @@ review or distribution/license requirements.
    key/full-cookie/unlock access. Restore funded custody on a clean host using a
    real off-host HTTPS repository, separate deletion authority, retained passwords,
    protected retention and explicit old-host exclusion/revocation.
-4. **Administration and canonical use:** finish nonzero LP fees/reinvestment where
-   promised, issuer approval, canonical authority/reserves and funded
+4. **Administration and canonical use:** retain the completed nonzero fee collection
+   and explicit reinvestment evidence; finish issuer approval, canonical authority/reserves and funded
    betanet/canonical acceptance. Extend recovery acceptance where the offline-only
    cases and remaining operation families require it; retain the verified bounds.
    Verify actual token/pool identity and current executable routes before enabling links.

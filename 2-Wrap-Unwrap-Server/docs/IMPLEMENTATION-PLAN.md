@@ -77,7 +77,8 @@ refusals with a failing exit status, preventing scripts from continuing on an er
    evidence. Fix shared-engine failures without introducing parallel payment paths.
 4. **Finish administration and canonical verification.** Extend the existing
    Devnet token/pool recovery acceptance to remaining required action families.
-   Verify nonzero LP fee collection and any promised reinvestment. Preserve bounded
+   Retain the completed nonzero LP collection and explicit fee-bounded reinvestment
+   acceptance. Unattended compounding is not implemented. Preserve bounded
    lineage and complete two-provider evidence; expired-unseen status alone is not
    proof of nonexecution. Confirm issuer-approved canonical identity, authority,
    backing and executable trading routes before public use.

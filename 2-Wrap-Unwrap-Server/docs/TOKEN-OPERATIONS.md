@@ -39,9 +39,10 @@ cannot be repurposed to conceal inventory shortages.
 The pool CLI supports verified full-range Orca pool/position creation, liquidity
 deposit/withdrawal and fee collection with saved-attempt submission. Use a separate
 LP wallet/capital; never give it the bridge custody key. Real Devnet acceptance
-covered funded liquidity, but fees collected were zero. Nonzero yield, reinvestment
-and any LP-lock claim need their own evidence. No automated compounding or locking
-is implied by pool creation.
+now covers nonzero collection (4 units per asset) and an explicit reinvestment
+bounded by those receipts, followed by full withdrawal. See the
+[funded fee evidence](../../3-Create-CPMM-Pool/README.md#nonzero-fees-and-explicit-reinvestment).
+No automated compounding, positive-return guarantee or LP locking is implied.
 
 Jupiter/Orca links provide trading in wrapped tokens; they do not replace native
 wrap/unwrap deposit instructions. Publish the exact configured mint/pool and verify

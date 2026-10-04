@@ -4,8 +4,8 @@ Liquidity uses separate operator capital and keys, outside bridge custody. The
 root-Cabal `ecx-pool` CLI derives canonical addresses and verifies existing
 full-range pools, creates classic Splash pools and prepares full-range positions.
 Position creation, funded liquidity deposit/withdrawal and fee collection now have
-finalized Devnet acceptance and saved-attempt replay. Collection acceptance has
-zero earned fees; actual trading revenue and reinvestment remain unverified.
+finalized Devnet acceptance and saved-attempt replay. Nonzero fee collection and explicitly bounded reinvestment also passed real Devnet
+acceptance below; this is not an unattended auto-compounding service.
 
 ```sh
 cabal run -v0 ecx-pool -- prepare devnet REQUEST.json > prepared.json
@@ -237,7 +237,7 @@ the validated instructions cannot modify them. Results report signed raw-unit
 Empty-position collection passed actual Devnet simulation with zero token movement
 and a 10,000-lamport conservative cost bound. Its captured before/after facts test
 cost, ownership, liquidity and token-conservation refusals. Funded signing and
-submission were subsequently verified below; nonzero earned fees remain unverified.
+submission were subsequently verified below, followed by nonzero fee acceptance.
 
 The separate admin payer's Devnet USDC and test-ECX ATAs were created through
 `ecx-token`, with finalized transactions
@@ -306,6 +306,36 @@ explicit absent-history/expired-blockhash checks were preserved before a new tes
 attempt. The application never auto-replaced it. Private attempts/keys stay outside
 Git. This proves the tested liquidity path, not nonzero fee income or public routes.
 
+## Nonzero fees and explicit reinvestment
+
+On 2026-10-04, the separate Devnet payer deposited 1,000 raw units per asset and
+used a dedicated test client to trade 500 A for 331 B, then 500 B for 635 A.
+The client used the pinned Orca classic Swap instruction, with a 200-unit minimum
+output, simulation, saved signed bytes and a 10,000-lamport fee cap. It is test
+orchestration outside the production application; no swap endpoint or custody
+capability was added. Finalized bytes, payer fees and opposite owner/vault token
+movements were checked. Production `ecx-pool` operations then completed:
+
+| Operation | Finalized signature | Result |
+| --- | --- | --- |
+| Deposit | `3DYEKvqUhGhjzLPcxd2RZbmDr9fJJF4HoesjxUc96jqmwRX7ahDS2wF1nkniDnSVSHJvQ1JF2SYzSUKKWU5NoUzQ` | 1,000 A and 1,000 B deposited |
+| Test A → B swap | `4djTSJB8u2z6ioCPu7aTwzAUoBY4mq59TPpkHAbsBtW8Uyyx8pwuVjXbFmxrQio9Hx4dDNcQk839oAB6szWtLQKu` | 500 A spent, 331 B received |
+| Test B → A swap | `5XeW1jnwWBXXNpa9cSRtTjJUYXPfg1wYXMF1rBNkvtUKQaYDVuGEamM7TK6ES19ZbGoMiZCpJtTQ6LmyeYEMwqhk` | 500 B spent, 635 A received |
+| Collect | `3XrbHwQSwJDGhDsBkFgcZySDUkG2GhZPzKMsXhHgkYzSj7CUgahKCxbHgH214N8TaX2XUdWNRJkhKhwc8Kemaf3z` | 4 A and 4 B fees received |
+| Reinvest | `62wbK5AHtpyKeDo3uLrEpeoYuMpimu65huqMFHZR3ySnSxYsBiZ27NaW6SQA6kuSKo6mCosZmWeSzoRLs2bCbVaY` | 3 A and 4 B spent; liquidity increased by 3 |
+| Withdraw | `2enoUe8qQGw5tPbEK56134Xbg4aitdKjAZWBoXi22eHQjQSGd3vyyxTJqFTwbR9pCogPFiX9whBQB1nsARwVH3hi` | All 1,003 liquidity removed; 861 A and 1,167 B received |
+
+Each transaction cost 5,000 lamports. The four production CLI actions passed exact
+saved-attempt finalized replay. Reinvestment used the existing deposit operation,
+with each token cap equal to that token's collected fees, so it could not consume
+more than the collected amounts. Final readback verified zero pool liquidity;
+the closed empty-position check verified ownership, zero position liquidity and
+zero collectible fees. Vaults retained 4 A and 3 B, matching the test payer's net
+3 A / 2 B cost plus the original one-unit rounding balance in each vault.
+No bridge funds, Mainnet transactions or background compounding process were used.
+This establishes explicit fee collection/reinvestment, not automatic scheduling,
+LP locking, canonical liquidity or positive investment returns.
+
 ## Remaining implementation
 
 Creation preflight now binds the real ordinary tier and explicit price/cost limits.
@@ -318,7 +348,7 @@ Funded Devnet acceptance passes as recorded above; bounded expiry recovery has t
 separate collection acceptance described above. Adaptive-tier initialization can have additional authority
 requirements; do not assume the published tier is permissionless.
 
-LP ownership/lock, fee reinvestment, issuer approval, reserve backing, deployed
+LP-lock claims, unattended compounding, issuer approval, reserve backing, deployed
 program verification and actual Jupiter routes are separate checks. The pool
 snapshot proves none of these. See the existing
 [liquidity guide](../2-Wrap-Unwrap-Server/docs/TOKEN-OPERATIONS.md#treasury-and-market-operations)
