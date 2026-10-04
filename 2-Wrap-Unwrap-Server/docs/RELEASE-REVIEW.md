@@ -380,7 +380,27 @@ float became 35,890 and earned became 20. Repeated observation left the complete
 payment/balance view unchanged. The post-settlement custody export and integrity
 check passed, and all scoped processes stopped. Positive funded replacement,
 exact authorization replay and restart settlement now have live evidence; winner
-changes after reorg and explicit rebroadcast still require separate acceptance.
+changes after reorg still require separate acceptance. Explicit rebroadcast has
+the isolated real-chain evidence below.
+
+A subsequent isolated recovery drill restored that sequence-46 custody snapshot
+into a new PostgreSQL ledger with separate restricted roles and a new fence. The
+production native-wallet restore verified its descriptors. Two Core nodes copied
+from real L2L Signet history connected only over loopback; no signer ran. Invalidating
+the winning transaction's block on both copies, then restarting with empty mempools
+and automatic wallet broadcasting disabled, made the settled payout unavailable.
+The production paused worker recorded recovery review at sequence 47 with
+`custody:native_settlement_requires_review`, preserving all balances and PaymentPaid.
+Explicit `rebroadcast-native` authorization using that review anchor returned the
+same child to the isolated mempool. Reconsidering the original block restored its
+confirmation and cleared the review. Closed Opaleye reads verified identical
+balances, transaction family and customer payment before and after recovery.
+Both nodes and the worker stopped afterward. Evidence is retained privately under
+`native-reorg-acceptance-20261004`; no custody secrets are published. This proves
+restored-ledger detection and explicit saved-transaction rebroadcast against real
+Core behavior, not an observed public-network reorg, a changed winning transaction,
+a clean-host restore or recovery of an in-flight snapshot. Mainnet and the shared
+Signet node were untouched by this drill.
 
 The run exposed an operator CLI error-reporting issue: server refusals were printed
 as successful stdout responses. The CLI now raises returned errors through its
@@ -403,7 +423,7 @@ review or distribution/license requirements.
    verify reference/effects, both directions, saved-order recovery, refunds and
    browser errors. A test client or wallet-opening link does not close this gate.
 2. **Recovery effects:** verify permanent source loss/double spend, coverage/return,
-   native winner changes after reorg, explicit rebroadcast and restoration with in-flight
+   native winner changes after reorg and restoration with in-flight
    signed work. Retain the completed same-host encrypted-wallet drill as regression
    evidence; clean-host funded recovery remains in the following gate.
    Preserve one payout, correct capital/cost accounting and exact saved bytes.
