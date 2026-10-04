@@ -3402,6 +3402,29 @@ tlsMain=do
                 evalRead reader ReadBalances >>= check . (==before)
                 methods<-readIORef calls
                 check ("simulateTransaction" `elem` methods && "sendTransaction" `notElem` methods)
+              -- Rotation requires a restart: old trust and old authentication
+              -- must each fail independently, while saved signing stays refused.
+              withSigningClient endpoint $ \oldClient->do
+                let oldAuth=directory</>"old-auth"
+                writeFile oldAuth (replicate 64 'a'); setFileMode oldAuth 0o600
+                writeFile auth (replicate 64 'b')
+                makeCertificate auth
+                stateBefore<-evalRead reader ReadState
+                pendingBefore<-evalRead reader PendingAttempts
+                callsBefore<-readIORef calls
+                withProcessListening (runProcess manager reader $ SignerProcess
+                  (SignerSettings native solana config sdk keyFile Nothing Nothing) endpoint) (signerPort endpoint) $ do
+                  staleTrust<-try (post oldClient) :: IO (Either HTTP.HttpException (HTTP.Response BL.ByteString))
+                  check (case staleTrust of Left _->True; Right _->False)
+                  withSigningClient endpoint $ \client->do
+                    signerPost client endpoint {signerAuthFile=oldAuth} "/sign-preparation" (identity,identifier,0::Int)
+                      >>= check . (==403) . statusCode . HTTP.responseStatus
+                    current<-post client
+                    check (statusCode(HTTP.responseStatus current)==409 &&
+                      eitherDecodeStrict' (BL.toStrict $ HTTP.responseBody current)==Right (object ["error" .= ("attempt_already_recorded"::T.Text)]))
+                evalRead reader ReadState >>= check . (==stateBefore)
+                evalRead reader PendingAttempts >>= check . (==pendingBefore)
+                readIORef calls >>= check . (==callsBefore)
               -- Recovery is now driven by the actual process loop. A bad native
               -- payment must not hide the later Solana attempt or broadcast it.
               let nativeKey=T.replicate 64 "0"; nativeId="fee:"<>nativeKey
@@ -3519,7 +3542,7 @@ tlsMain=do
         evalWrite writer (RecordSolanaExpiry successor proof)
         pending []
         evalRead reader (ReadAttempt $ signedId $ recordedSigned old) >>= check . (==retired)
-  putStrLn $ "PASS: "<>(if canonical then "canonical Mainnet profile" else "Devnet profile")<>", real process HTTPS signing, auth/certificate refusal, serialized concurrent requests, second-read refusal and gate recovery, exact SDK output, durable ledger replay, pending-payment recovery and HTTP-triggered checkpoint receipt validation/acknowledgment/replay; offline fixtures only"
+  putStrLn $ "PASS: "<>(if canonical then "canonical Mainnet profile" else "Devnet profile")<>", real process HTTPS signing, auth/certificate refusal and rotation, serialized concurrent requests, second-read refusal and gate recovery, exact SDK output, durable ledger replay, pending-payment recovery and HTTP-triggered checkpoint receipt validation/acknowledgment/replay; offline fixtures only"
 
 restorationContract :: PG.Connection -> Reader -> Writer -> IO ()
 restorationContract fixtures reader writer=do

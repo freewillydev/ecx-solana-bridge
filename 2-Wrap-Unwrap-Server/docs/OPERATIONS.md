@@ -87,6 +87,19 @@ all HTTPS attempts consume the budget. Timeouts, other transport failures, unkno
 methods, signing mutations and sends are not automatically retried.
 Pacing does not remove background observation or replace public-facing DDoS controls.
 
+### Rotate signer transport credentials
+
+Pause the worker and stop both services, preserving the ledger and every saved
+attempt. Generate a fresh random 64-hex token and a TLS key/certificate valid for
+127.0.0.1. Replace the signer's token, `.pem` and `.key`, and the worker's matching
+token and `.pem`, under their existing protected paths/ownership. The TLS private
+key stays signer-only. Restart the signer to reload its authentication and TLS
+state; changing files alone does not revoke an already running server's token.
+Verify old certificate trust fails, the old token is rejected, and the worker's
+new credentials reach the evaluator. Then restart the worker paused and use normal
+checked resume. Transport rotation does not change custody keys, ledger identity
+or saved transactions and does not replace custody recovery or key-compromise handling.
+
 For an encrypted native descriptor wallet, set the signer's optional
 `nativeUnlockFile` to a mode-0600 regular file with the exact 1–1024-byte UTF-8
 passphrase, without NUL or line endings. The signer unlocks for at most 120 seconds

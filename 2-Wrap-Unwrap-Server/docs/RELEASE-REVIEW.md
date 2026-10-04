@@ -153,6 +153,17 @@ the supervised native-node tunnel uses the separate administrator and retained
 host-key pinning. This closes the observed account/staging defects, not the wider
 production isolation or independent disaster-recovery review.
 
+Signer transport rotation subsequently passed on the paused VM: a new token and
+TLS key/certificate replaced both services' transport configuration. Old trust
+failed TLS verification; the old token received 403; the actual worker UID's new
+credentials reached the critical evaluator, which rejected an invalid generation
+before chain access. Worker access to the new TLS private key was denied. Custody
+key/unlock material and the sequence-27 ledger were unchanged. Both services were
+stopped afterward. The existing Cabal-built HTTPS/PostgreSQL contract now also
+checks rotation, saved-attempt refusal and unchanged ledger/RPC activity in both
+Devnet and canonical profiles, using offline chain fixtures. No production code
+or new runtime component was added; public-edge TLS and host recovery remain open.
+
 The exact sequence-9 HTTPS snapshot containing the in-flight payout was recovered
 and its full custody/configuration/archive bindings verified. The closed restore
 command produced a distinct paused database at sequence 9, which was then dropped;
