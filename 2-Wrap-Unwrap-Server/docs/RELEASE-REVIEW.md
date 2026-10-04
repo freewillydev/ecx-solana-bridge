@@ -402,6 +402,27 @@ Core behavior, not an observed public-network reorg, a changed winning transacti
 a clean-host restore or recovery of an in-flight snapshot. Mainnet and the shared
 Signet node were untouched by this drill.
 
+The current executable also restored the real sequence-7 in-flight custody backup
+from the earlier funded recovery run into a separate restricted PostgreSQL ledger.
+Its `broadcast_intent` attempt, exact signed bytes and policy matched the saved
+pre-backup evidence. Restoring the wallet against later real Signet history exposed
+a false refusal: Core's rescan advanced address indexes from 1 to 2/3 while retaining
+the same descriptors. Restore validation now permits forward-only allocation indexes
+within the expanded keypool, keeping descriptor identity and all other fields exact;
+shrinking ranges, backward/out-of-range indexes and changed descriptors are rejected.
+The production restore then passed. Without a signer or new broadcast, the paused
+worker recognized confirmed transaction
+`16ef98729d8e739986ef3c0fcae8873ad1d4b1d5d9803cee33a33504c856a24a`
+and settled its saved 990-unit payment with the original 141-unit network cost.
+Wrapped principal became zero, float 990 and earned 10. Repeated observation left
+the entire payment/balance view unchanged. Later deposits absent from this old
+snapshot remained unallocated; unexplained later activity kept intake paused for
+review, rather than automatically resuming stale state. Both isolated nodes and
+worker stopped. Private evidence lives under `inflight-restore-20261004`.
+This closes same-host restoration of this in-flight native attempt against later
+confirmed history; Solana in-flight recovery, changed native winners, lost-host
+uncertainty and physically independent clean-host recovery remain distinct gates.
+
 The run exposed an operator CLI error-reporting issue: server refusals were printed
 as successful stdout responses. The CLI now raises returned errors through its
 existing nonzero-exit/stderr path. Actual executable/PostgreSQL contracts passed
@@ -424,7 +445,7 @@ review or distribution/license requirements.
    browser errors. A test client or wallet-opening link does not close this gate.
 2. **Recovery effects:** verify permanent source loss/double spend, coverage/return,
    native winner changes after reorg and restoration with in-flight
-   signed work. Retain the completed same-host encrypted-wallet drill as regression
+   Solana work. Retain the completed same-host encrypted-wallet drill as regression
    evidence; clean-host funded recovery remains in the following gate.
    Preserve one payout, correct capital/cost accounting and exact saved bytes.
 3. **Isolation and off-host recovery:** exercise the current worker/signer under

@@ -212,7 +212,7 @@ checks = (\deployment native solana identity observation administration common->
   , check "native recovery binds immutable private backup and refuses existing wallets" $ once $ ioProperty $
       bracket (do (file,h)<-openTempFile "/tmp" "ecx-wallet-contract"; hClose h; removeFile file; PD.createDirectory file 0o700; pure file)
         removeDirectoryRecursive $ \directory->do
-        changed<-newIORef False; rangeEnd<-newIORef (999::Int); exists<-newIORef False; backups<-newIORef (0::Int); restores<-newIORef (0::Int)
+        nextIndex<-newIORef (1::Int); changed<-newIORef False; rangeEnd<-newIORef (999::Int); exists<-newIORef False; backups<-newIORef (0::Int); restores<-newIORef (0::Int)
         let path=directory </> "wallet.bak"
             target=settings {nativeWallet="restored"}
             call config _ method args=case method of
@@ -224,7 +224,8 @@ checks = (\deployment native solana identity observation administration common->
                 if args==[Bool False] then pure () else fail "private descriptors requested"
                 altered<-readIORef changed
                 end<-readIORef rangeEnd
-                pure $ object ["wallet_name" .= nativeWallet config,"descriptors" .= [object ["desc" .= ("public-descriptor"::Text),"next" .= (if altered then 2 else 1::Int),"range" .= [0,end]]]]
+                next<-readIORef nextIndex
+                pure $ object ["wallet_name" .= nativeWallet config,"descriptors" .= [object ["desc" .= (if altered then "changed-descriptor" else "public-descriptor"::Text),"next" .= next,"next_index" .= next,"range" .= [0,end]]]]
               "backupwallet"->do
                 if args==[toJSON path] then pure () else fail "unexpected backup destination"
                 BS.writeFile path "private wallet fixture"; setFileMode path 0o600
@@ -268,6 +269,13 @@ checks = (\deployment native solana identity observation administration common->
         writeIORef rangeEnd 998
         shrunk<-rejects "native_restore_descriptors_mismatch" (run target $ RestoreNativeWallet backup)
         writeIORef rangeEnd 1000
+        writeIORef nextIndex 3
+        run target (RestoreNativeWallet backup)
+        writeIORef nextIndex 0
+        backwards<-rejects "native_restore_descriptors_mismatch" (run target $ RestoreNativeWallet backup)
+        writeIORef nextIndex 1002
+        outside<-rejects "native_restore_descriptors_mismatch" (run target $ RestoreNativeWallet backup)
+        writeIORef nextIndex 1
         writeIORef changed True
         mismatch<-rejects "native_restore_descriptors_mismatch" (run target $ RestoreNativeWallet backup)
         removeFile path
@@ -280,8 +288,8 @@ checks = (\deployment native solana identity observation administration common->
               pure result
         race<-rejects "native_wallet_changed_during_backup" (evalNativeRecoveryWith changing settings $ BackupNativeWallet path)
         counts<-(,) <$> readIORef backups <*> readIORef restores
-        pure (and (invalidManifests<>[oversized,exposedManifest,duplicate,existingManifest,exposed,corrupt,occupied,shrunk,mismatch,race])
-          && not ("/unused/credential" `BS.isInfixOf` manifestBytes) && counts==(2,3))
+        pure (and (invalidManifests<>[oversized,exposedManifest,duplicate,existingManifest,exposed,corrupt,occupied,shrunk,backwards,outside,mismatch,race])
+          && not ("/unused/credential" `BS.isInfixOf` manifestBytes) && counts==(2,6))
   , check "locked-wallet allocation never repeats getnewaddress after a lost claim" $ once $ ioProperty $ do
       saved <- newIORef False; allocations <- newIORef (0::Int)
       let label="ecx-bridge:v1:contract:order:known"

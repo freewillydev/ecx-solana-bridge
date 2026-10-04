@@ -279,17 +279,28 @@ evalNativeRecoveryWith call c operation = do
     values<-fieldValue "descriptors" result :: IO [Value]
     require (name==nativeWallet c && not(null values)) "native_backup_descriptors_missing"
     pure values
-  -- Loading a wallet replenishes its lookahead keypool. Only an expanded range
-  -- is allowed; keys, timestamps, allocation indices and other fields stay exact.
+  -- Loading/rescanning replenishes lookahead and advances allocation indexes for
+  -- addresses found on chain. Identity stays exact; neither range nor index may
+  -- retreat, and the next allocation must remain within the restored keypool.
   sameDescriptor (Object before) (Object after)
-    | KM.delete "range" before==KM.delete "range" after = case (KM.lookup "range" before,KM.lookup "range" after) of
-        (Nothing,Nothing)->pure True
+    | identity before==identity after = case (KM.lookup "range" before,KM.lookup "range" after) of
+        (Nothing,Nothing)->pure (before==after)
         (Just old,Just new)->do
           oldRange<-parseValue parseJSON old :: IO [Int64]
           newRange<-parseValue parseJSON new :: IO [Int64]
-          pure $ case (oldRange,newRange) of
-            ([lo,hi],[loNew,hiNew])->0<=lo && lo<=hi && loNew==lo && hiNew>=hi && hiNew<2147483648
-            _->False
+          case (oldRange,newRange) of
+            ([lo,hi],[loNew,hiNew]) | 0<=lo && lo<=hi && loNew==lo && hiNew>=hi && hiNew<2147483648 ->
+              and <$> mapM (indexForward lo hi hiNew) ["next","next_index"]
+            _->pure False
+        _->pure False
+    where
+      identity=KM.delete "next_index" . KM.delete "next" . KM.delete "range"
+      indexForward lo hi hiNew key=case (KM.lookup key before,KM.lookup key after) of
+        (Nothing,Nothing)->pure True
+        (Just old,Just new)->do
+          previous<-parseValue parseJSON old :: IO Int64
+          current<-parseValue parseJSON new :: IO Int64
+          pure (lo<=previous && previous<=hi+1 && previous<=current && current<=hiNew+1)
         _->pure False
   sameDescriptor _ _=pure False
   privateParent path = do
