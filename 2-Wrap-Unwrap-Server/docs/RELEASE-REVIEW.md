@@ -16,10 +16,23 @@ broadcast. Both services are stopped pending sufficient verified capacity;
 no new transaction was broadcast
 by this retry. The private Mac interface at http://127.0.0.1:61992/ is offline.
 
-Generations 0 and 1 are retired with expiry evidence. Generation 2 retains signed
-attempt `4UNYK88afBe6FXDanTNdaAZ6ZWWPFiusYpo7Xys3NiHRDnYqrUpXwXqi1hMUeWMkuY2fSZuhGVR19mQjv4QRFBL7`
-without a broadcast sequence; critical sequence is 26 and backup coverage is 25.
+Generations 0, 1 and 2 are retired with expiry evidence. After partial quota refill,
+the normal paused-worker recovery verified generation 2 through both providers
+and retained proof hash
+`3ec0a47330399736fbbae26f55af6d6fb47fbae3a3ed43c129e0e2fd07e64166`.
+Its signed attempt `4UNYK88afBe6FXDanTNdaAZ6ZWWPFiusYpo7Xys3NiHRDnYqrUpXwXqi1hMUeWMkuY2fSZuhGVR19mQjv4QRFBL7`
+still has no broadcast sequence. The worker stopped after that bounded recovery;
+the signer remained stopped, and no new generation was authorized. Critical
+sequence is 27 and acknowledged backup coverage is 25.
 The 990-unit obligation remains pending, so the Mainnet round trip is incomplete.
+
+Source inspection estimates approximately 26 verifier calls for a fresh payout
+cycle with the pilot's current single-page history, before retries or additional
+refreshes. That exceeds the observed 20-call minute allowance if completed within
+one minute. Signed-to-send work alone needs at least 12 verifier calls and a full
+custody checkpoint. An hourly reset or per-second pacing cannot establish reliable
+completion on this allocation; increase independent-provider capacity before
+authorizing another generation.
 
 Alternative public endpoints were rejected: SolanaTracker initially passed basic
 checks but omitted immutable history origins (`solana_history_gap`); VibeStation
@@ -121,8 +134,24 @@ six signer secret files. Its restricted native credential passed thirteen harmle
 forbidden-method probes; `walletlock` exclusion was inspected rather than called.
 An authenticated invalid-generation signer request passed the current Opaleye
 SELECT-only role check before its expected refusal, without a key operation.
-The signer still shares the VM's administrative login UID; complete production
-isolation review remains open.
+The VM now uses a separate administrative UID. The signer's existing UID and key
+ownership were retained, but its passwordless sudo grant and SSH authorized key
+were removed, its shell disabled, and SSH explicitly denied. Lima/cloud-init now
+provisions only the separate administrator. Fresh connections and reboot checks
+confirmed administrator access, signer SSH/sudo denial, worker secret-file denial,
+valid signer key identity and an unchanged ledger at sequence 26/coverage 25.
+
+Actual directory-open checks exposed caller-dependent ownership on the Mac-shared
+virtiofs staging mount: mode 0700 there did not deny worker access. A root-owned
+guest-native parent directory, mode 0710 with the signer's group, now protects
+traversal; the worker unit also marks staging inaccessible. After reboot, signer
+access succeeded and worker access failed with EACCES. A harmless cross-host file
+probe and the existing native-wallet backup command both passed; the latter
+archived the actual encrypted wallet and verified its manifest without signing.
+Temporary probes were removed. Worker and signer remain disabled and stopped;
+the supervised native-node tunnel uses the separate administrator and retained
+host-key pinning. This closes the observed account/staging defects, not the wider
+production isolation or independent disaster-recovery review.
 
 The exact sequence-9 HTTPS snapshot containing the in-flight payout was recovered
 and its full custody/configuration/archive bindings verified. The closed restore

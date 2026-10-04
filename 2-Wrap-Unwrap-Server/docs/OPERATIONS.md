@@ -19,6 +19,13 @@ signer-only native credential/key. Reader roles need SELECT on tables/sequences,
 without writes or sequence USAGE/UPDATE. Review node and filesystem permissions;
 two processes running as one user do not establish credential isolation.
 
+Use a separate administrative account; service identities must not inherit SSH
+login or sudo access. Verify this after reboot, including cloud-init/Lima account
+provisioning. For a VM sharing native-wallet backup staging with its host, do not
+rely on virtiofs ownership alone. Protect traversal with a root-owned guest-native
+parent accessible only to the signer, exclude staging from the worker's service
+namespace, and test actual worker denial and signer backup success after reboot.
+
 `CONFIG` sets `serverPort`, `fenceDirectory`, `signerPort`, `signerAuthFile` and
 `solanaSdkLibrary`. Optional `ECX_INTERFACE_CONFIG` supplies support/explorer/trading
 links; `ECX_ASSETS` overrides Cabal's generated browser directory. The signer token

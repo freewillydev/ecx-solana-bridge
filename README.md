@@ -24,8 +24,10 @@ the network, token, limits, fee previews and both direction forms. Creating an
 order requires live availability; funding is a separate test step. Existing tester
 orders require their private recovery links. Keep those links private.
 
-The pilot has commit `3e34b01` deployed in an Ubuntu VM with separate worker/signer users
-and restricted database roles. VM restart and recovery of a sequence-9 in-flight
+The pilot has commit `3e34b01` deployed in an Ubuntu VM with separate administrator,
+worker and signer users and restricted database roles. Reboot checks verified
+signer login/sudo denial and worker exclusion from shared backup staging.
+VM restart and recovery of a sequence-9 in-flight
 snapshot passed. Its HTTPS backup receiver is on the same Mac, so independent
 off-host disaster recovery remains unproved. Start the source audit with the
 [server's audit path](2-Wrap-Unwrap-Server/README.md#audit-path).

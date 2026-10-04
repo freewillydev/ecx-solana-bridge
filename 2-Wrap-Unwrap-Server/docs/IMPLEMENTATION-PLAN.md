@@ -11,7 +11,8 @@ The Mainnet pilot has `3e34b01` deployed in the Ubuntu VM. Its native unwrap is
 pending. Alchemy is primary and keyed OnFinality is the verifier. Its observed
 40/minute, 200/hour response-unit quota was exhausted before broadcast; both services
 are stopped pending sufficient verified RPC capacity. Separate users/restricted
-roles, VM restart and sequence-9 snapshot restoration passed. Backup storage is on
+roles, a separate administrative account, reboot-persistent signer login/sudo
+denial, shared-backup access isolation and sequence-9 snapshot restoration passed. Backup storage is on
 the same physical Mac; clean-host recovery and the Mainnet round trip remain open.
 
 ## Required product
