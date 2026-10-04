@@ -73,9 +73,14 @@ in the result preserves the result selected by the operation's GADT.
 
 The safe and critical evaluators match only `Instruction`, then call
 `authorizeOperation` and `evaluateOperation`. Leaf-specific execution and the
-operation's permissions belong to its concrete `Operation` instance. Both process
-startups use the same private critical evaluator through one dispatch call site,
-with a separate gate and resource context for each process. Worker entry refuses
+operation's permissions belong to its concrete `Operation` instance. `runProcess`
+owns the concrete worker or signer service lifetime. After validating that mode's
+resources it allocates one gate and defines the sole `evalCritical` call site.
+It then runs HTTP/worker/control or signer HTTPS with that local dispatch. It does
+not return an evaluator or hand one to a caller-supplied continuation. The CLI
+normalizes both startup modes before its single `runProcess` call; its resource
+bracket passes only resource data, never evaluators. Each process retains its own
+gate and resource context. Worker entry refuses
 signer requests; signer entry refuses customer/operator/worker requests. Internal
 worker and signer instructions pass `checkedRequest` and invoke the concrete method
 inside the already-held gate, without reacquiring it. Only that internal signer

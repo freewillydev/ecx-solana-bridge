@@ -3,17 +3,15 @@
 module Main (main) where
 import qualified Bridge.Config as C
 import Bridge.BrowserBuild (browserAssetsDirectory)
-import Bridge.Critical (CustomerSettings(..),SignerSettings(..),withRuntime,runWorkerLoop,runSigner)
-import Bridge.Control (runControl,callControl)
+import Bridge.Critical (Process(..),runProcess,CustomerSettings(..),SignerSettings(..))
+import Bridge.Control (callControl)
 import Bridge.Error
 import Bridge.RPC (newRpcManager)
 import qualified Bridge.Native as N
 import Bridge.Recovery (CustodyRecovery(..),evalCustodyRecovery)
 import Bridge.Signer
-import Bridge.Store (withReader,withFencedWriter,StoreRestore(..),evalRestore,StoreSetup(..),evalSetup,BackupReceipt(..))
-import Bridge.Web (publicApplication)
+import Bridge.Store (Reader,withReader,withFencedWriter,StoreRestore(..),evalRestore,StoreSetup(..),evalSetup,BackupReceipt(..))
 import Bridge.Wire (Profile(..))
-import Control.Concurrent.Async (concurrently_)
 import Control.Exception (bracket,catch)
 import Data.Aeson (encode,object,(.=),eitherDecodeStrict')
 import qualified Data.ByteString as BS
@@ -22,7 +20,6 @@ import qualified Data.Text as T
 import Data.Maybe (fromMaybe)
 import qualified Database.PostgreSQL.Simple as PG
 import Network.HTTP.Client (closeManager)
-import Network.Wai.Handler.Warp (runSettings,setHost,setPort,setTimeout,defaultSettings)
 import System.Environment (getArgs,lookupEnv)
 import System.Exit (die,exitFailure)
 import System.FilePath (isAbsolute)
@@ -86,41 +83,47 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
     require (BS.length bytes<=4096) "operator_message_too_large"
     value<-either (const $ reject "invalid_operator_request") pure (eitherDecodeStrict' bytes)
     callControl (C.fenceDirectory c) value >>= LBS.putStrLn . encode
-  command ["signer",path,key]=startSigner path key Nothing
-  command ["signer",path,key,backup,parent]=startSigner path key (Just (backup,parent))
-  command [mode,path] | mode `elem` ["serve","observe"] = do
+  command args | Just (path,mode)<-processArguments args = do
     c<-C.loadConfig path
-    require (C.profile c `elem` [L2LSignetDevnet,ECXBetanetDevnet]) "public_test_profile_required"
     database<-databaseSettings
-    readerSettings<-readDatabaseSettings database
-    assets<-fromMaybe browserAssetsDirectory <$> lookupEnv "ECX_ASSETS"
-    links<-lookupEnv "ECX_INTERFACE_CONFIG" >>= C.loadInterface c
-    let policy=C.storePolicy c
-        customer=CustomerSettings (C.publicConfiguration c links (mode=="serve")) policy
-          (C.solanaSdkLibrary c)
-        endpoint=SigningEndpoint (C.signerPort c) (C.signerAuthFile c)
-    withReader readerSettings (C.fingerprint c) (C.backupRequired c) $ \reader->
-      withFencedWriter database policy (C.fenceDirectory c) $ \writer->
-        bracket newRpcManager closeManager $ \manager->
-          withRuntime manager (C.observerSettings c) (C.solanaPolicy c) (Just customer) endpoint reader writer $ \worker evaluate operatorControl->do
-            app<-publicApplication assets evaluate
-            concurrently_
-              (runSettings (setHost "127.0.0.1" $ setPort (C.serverPort c) $ setTimeout 65 defaultSettings) app)
-              (concurrently_ (runWorkerLoop worker) (runControl (C.fenceDirectory c) operatorControl))
+    withProcessResources c database mode $ \reader process->
+      bracket newRpcManager closeManager $ \manager->runProcess manager reader process
   command _=die "Usage: ecx-bridge initialize-ledger CONFIG (fresh migrated database only) | upload-custody CONFIG BACKUP_CONFIG MANIFEST MINIMUM_SEQUENCE | recover-custody CONFIG BACKUP_CONFIG SNAPSHOT DIRECTORY MINIMUM_SEQUENCE | backup-custody CONFIG KEYFILE DIRECTORY (offline custody authority, PG* and PGREADUSER) | check-custody CONFIG MANIFEST MINIMUM_SEQUENCE | backup-native-wallet CONFIG DESTINATION | restore-native-wallet CONFIG MANIFEST (offline custody authority; never overwrites a wallet) | adopt-ledger CONFIG MINIMUM_SEQUENCE | retire-ledger CONFIG MINIMUM_SEQUENCE | recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE | restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE (offline database owner) | check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE [BACKUP_CONFIG STAGING] (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
-  startSigner path key backup=do
-    c<-C.loadConfig path
-    database<-databaseSettings
-    withReader database (C.fingerprint c) (C.backupRequired c) $ \reader->
-      bracket newRpcManager closeManager $ \manager->
-        runSigner manager reader (SignerSettings (C.nativeSettings c) (C.solanaSettings c) (C.solanaPolicy c) (C.solanaSdkLibrary c) key (C.nativeUnlockFile c) ((\(configuration,parent)->(c,configuration,parent)) <$> backup))
-          (SigningEndpoint (C.signerPort c) (C.signerAuthFile c))
   restoreCommand path minimumText operation=do
     c<-C.loadConfig path
     minimumSequence<-maybe (reject "invalid_restore_policy") pure (readMaybe minimumText)
     database<-databaseSettings
     (restored,sequenceNo)<-evalRestore database (operation c minimumSequence)
     LBS.putStrLn $ encode $ object ["database" .= restored,"criticalSequence" .= sequenceNo,"paused" .= True]
+
+data ProcessMode = CustomerMode Bool | SigningMode FilePath (Maybe (FilePath,FilePath))
+
+processArguments :: [String] -> Maybe (FilePath,ProcessMode)
+processArguments ["serve",path]=Just (path,CustomerMode True)
+processArguments ["observe",path]=Just (path,CustomerMode False)
+processArguments ["signer",path,key]=Just (path,SigningMode key Nothing)
+processArguments ["signer",path,key,backup,parent]=Just (path,SigningMode key $ Just (backup,parent))
+processArguments _=Nothing
+
+-- Only resource data crosses this bracket. Evaluators are created and consumed
+-- inside runProcess; no callback here receives execution authority.
+withProcessResources :: C.Config -> PG.ConnectInfo -> ProcessMode -> (Reader -> Process -> IO ()) -> IO ()
+withProcessResources c database mode action=do
+  readerSettings<-case mode of CustomerMode _->readDatabaseSettings database; SigningMode{}->pure database
+  let endpoint=SigningEndpoint (C.signerPort c) (C.signerAuthFile c)
+  withReader readerSettings (C.fingerprint c) (C.backupRequired c) $ \reader->case mode of
+    SigningMode key backup->action reader $ SignerProcess
+      (SignerSettings (C.nativeSettings c) (C.solanaSettings c) (C.solanaPolicy c) (C.solanaSdkLibrary c)
+        key (C.nativeUnlockFile c) ((\(configuration,parent)->(c,configuration,parent)) <$> backup)) endpoint
+    CustomerMode enabled->do
+      require (C.profile c `elem` [L2LSignetDevnet,ECXBetanetDevnet]) "public_test_profile_required"
+      assets<-fromMaybe browserAssetsDirectory <$> lookupEnv "ECX_ASSETS"
+      links<-lookupEnv "ECX_INTERFACE_CONFIG" >>= C.loadInterface c
+      let policy=C.storePolicy c
+          customer=CustomerSettings (C.publicConfiguration c links enabled) policy (C.solanaSdkLibrary c)
+      withFencedWriter database policy (C.fenceDirectory c) $ \writer->action reader $
+        WorkerProcess (C.observerSettings c) (C.solanaPolicy c) (Just customer) endpoint writer
+          (C.serverPort c) assets (C.fenceDirectory c)
 
 databaseSettings :: IO PG.ConnectInfo
 databaseSettings = do

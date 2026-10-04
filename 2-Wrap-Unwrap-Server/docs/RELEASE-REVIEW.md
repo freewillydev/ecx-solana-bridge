@@ -65,6 +65,20 @@ build, all three Cabal suites and server/HTTPS contracts passed. A positive comp
 case constructs all six DSL forms using only their associated contexts; eighteen
 negative cases reject authority/type violations and access to the private view.
 
+Process startup now joins in `runProcess`, which owns the sole critical dispatch
+and never returns an evaluator callback. The former worker/signer factories are
+removed. Root build, all three Cabal suites, PostgreSQL/restic, executable
+HTTP/control and HTTPS contracts passed. Real concurrent HTTPS requests check
+signer serialization, second-read refusal and gate recovery. Customer HTTP also
+exercises the worker's private signer client, rejecting malformed backup receipts
+and preserving acknowledgment/replay behavior. Compile checks reject imports of
+the retired factories and private evaluator resources. The two production files
+change from 1,059 to 1,061 lines; the contract file falls from 3,852 to 3,757.
+Tests use service interfaces instead of acquiring private evaluators. Automatic
+worker sign/persist/replay retains component and historical evidence, but was not
+rerun on funded chains for this startup change; opt-in live migration/observation
+drivers were adapted and compiled, not rerun.
+
 Recovery readiness now refreshes after source/plan reads and permits one additional
 bounded repair if reconciliation ages the scans. Native recovery rereads historical
 receipts outside the incremental cursor, retaining atomic receipt/evidence updates.
@@ -82,9 +96,12 @@ They also exposed a verifier-outage bug: rereading a verified deposit could revo
 its eligibility. Unavailable verification now refuses the scan without changing
 receipts; actual disagreement remains reviewable. Root build, all three suites and
 PostgreSQL/HTTPS contracts passed, including repeated-cursor timeout/rate-limit/
-missing-result regressions. The acceptance driver now includes retired attempt
-history and scan/custody diagnostics; its native replacement stage is compiled
-but has not yet been exercised against funded live transactions.
+missing-result regressions. The funded acceptance inspector retains retired attempt
+history and scan/custody diagnostics. Its direct worker-stage driver has been
+removed with the evaluator factories: funded recovery must now use the real
+service interfaces and durable backup barriers, rather than private evaluator
+callbacks or timing termination to prevent a broadcast. Funded native replacement
+acceptance remains open.
 Readiness is repaired before obtaining a new blockhash; redundant outer worker
 refreshes are removed while leaf checks and both backup barriers remain. This
 reduces `Critical.hs` by three lines; the verifier fix adds no production lines.

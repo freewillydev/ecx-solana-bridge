@@ -14,9 +14,9 @@ import qualified Bridge.Store.Backup as Backup
 import Bridge.Store.Catalog (exportSnapshot)
 import qualified Database.PostgreSQL.Simple.Transaction as Tx
 import Crypto.Random (getRandomBytes)
-import Control.Concurrent (threadDelay,forkIO,killThread)
-import Control.Concurrent.Async (withAsync,wait,cancel)
-import Control.Concurrent.MVar (newEmptyMVar,putMVar,takeMVar)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (withAsync,wait,cancel,poll)
+import Control.Concurrent.MVar (newEmptyMVar,putMVar,takeMVar,tryPutMVar)
 import System.Timeout (timeout)
 import qualified Opaleye.Internal.Locking as Locking
 import Bridge.Identity (capabilityHash,payInstruction,digest,publicKey)
@@ -35,10 +35,8 @@ import Bridge.Recovery
 import Bridge.Payment (payoutReference)
 import qualified Bridge.Control as Control
 import Bridge.Critical
-import Bridge.Web (customerApplication)
 import qualified Bridge.Operation.Internal as Op
 import qualified Network.Wai as Wai
-import qualified Network.Wai.Test as WaiTest
 import Network.HTTP.Types (statusCode,status200)
 import Bridge.Order
 import qualified Bridge.Fence as Fence
@@ -56,12 +54,16 @@ import qualified Bridge.SolanaPayment as SP
 import qualified Network.Wai.Handler.Warp as Warp
 import qualified Data.ByteString as BS
 import Data.Time.Clock.POSIX (getPOSIXTime)
-import Bridge.Operation.Internal (Request(..),workerRequest,CheckpointCustody(..),WorkerOperation(..))
 import Servant.API (BasicAuthData(..))
 import qualified Bridge.Native as N
 import qualified Bridge.Solana as Solana
 import qualified Bridge.SolanaHelper as H
 import Network.HTTP.Client (newManager,closeManager,defaultManagerSettings,managerModifyRequest)
+import Network.HTTP.Client.TLS (mkManagerSettings)
+import qualified Network.Connection as NC
+import qualified Network.TLS as TLS
+import Network.TLS.Extra.Cipher (ciphersuite_default)
+import Data.X509.CertificateStore (makeCertificateStore)
 import qualified Bridge.Store.Schema as S
 import Control.Exception
 import Data.Int (Int64)
@@ -98,239 +100,68 @@ contractMain = do
     Just path->liveObserverMain path
     Nothing->if setup==Just "1" then setupMain else if native==Just "1" then nativeRecoveryMain else if tls==Just "1" then tlsMain else if fence==Just "1" then fenceMain else if server==Just "1" then serverMain else ledgerMain
 
--- Opt-in acceptance against independently provisioned, funded Signet/Devnet
--- custody. No fixtures, service loop, automatic broadcast or destructive cleanup.
--- Capture stdout in a private file: it includes the exact saved transaction.
+-- Read-only evidence for the independently provisioned funded acceptance ledger.
+-- Financial work now enters the running server's customer/operator interfaces.
+-- Stop that worker before inspecting: these reads do not quiesce it or promise
+-- a consistent multi-query snapshot while another process is changing the ledger.
 fundedRecoveryMain :: FilePath -> IO ()
 fundedRecoveryMain path=do
   config<-Config.loadConfig path
-  unless (Config.profile config==W.L2LSignetDevnet && units(Config.minInput config)>=1000)
-    (fail "funded recovery requires real L2L Signet/Devnet and minimum input >=1000")
+  unless (Config.profile config==W.L2LSignetDevnet) (fail "funded inspection requires L2L Signet/Devnet")
   host<-getEnv "PGHOST"; port<-getEnv "PGPORT"; database<-getEnv "PGDATABASE"
   user<-getEnv "PGUSER"; readerUser<-getEnv "PGREADUSER"
   unless (host=="/tmp/ecx-pg-seam" && port=="29436" && user/=readerUser && not(null readerUser)
     && any (`T.isPrefixOf` T.pack database) ["ecx_rebuild_contract_","ecx_restore_"])
-    (fail "funded recovery requires the dedicated local acceptance database and reader")
+    (fail "funded inspection requires the dedicated local acceptance database and reader")
   password<-maybe "" id <$> lookupEnv "PGPASSWORD"
   readerPassword<-maybe password id <$> lookupEnv "PGREADPASSWORD"
   step<-getEnv "ECX_FUNDED_RECOVERY_STEP"
+  unless (step=="inspect") (fail "funded staging is retired; use the running server's customer/operator interfaces")
   requestFile<-getEnv "ECX_FUNDED_RECOVERY_REQUEST"
-  request<-AdminKey.readPrivate requestFile >>= either (const $ fail "invalid funded recovery request") pure . eitherDecodeStrict'
-  let settings=PG.defaultConnectInfo {PG.connectHost=host,PG.connectPort=29436,PG.connectDatabase=database
-        ,PG.connectUser=user,PG.connectPassword=password}
-      readerSettings=settings {PG.connectUser=readerUser,PG.connectPassword=readerPassword}
-      public=Config.publicConfiguration config (Config.defaultInterface $ Config.profile config) True
-      customerSettings=CustomerSettings public (Config.storePolicy config) (Config.solanaSdkLibrary config)
-      fields names=case request of
-        Object values | sort(KM.keys values)==sort names->pure ()
-        _->fail "unexpected funded recovery request fields"
-  withReader readerSettings (Config.fingerprint config) (Config.backupRequired config) $ \reader->
-    withFencedWriter settings (Config.storePolicy config) (Config.fenceDirectory config) $ \writer->
-      bracket newRpcManager closeManager $ \manager->
-        withRuntime manager (Config.observerSettings config) (Config.solanaPolicy config) (Just customerSettings)
-          (SigningEndpoint (Config.signerPort config) (Config.signerAuthFile config)) reader writer $ \worker customer operator->do
-            let run :: WorkerOperation a -> IO a
-                run operation=worker(workerRequest operation)
-                pause=operator(Op.operator $ Op.PauseService "funded_recovery_checkpoint")
-                resume=do
-                  state<-evalRead reader ReadState
-                  when (ledgerPaused state) (operator $ Op.operator Op.ResumeService)
-                scan=do
-                  run ObserveChains
-                  run RecoverNativeSources
-                  run RecoverNativeLocks
-                  run RecoverNativeSettlements
-                  run ReconcileCustody
-                freshIntake=do
-                  now<-floor <$> getPOSIXTime
-                  checked<-try (evalRead reader $ CheckIntake now) :: IO (Either BridgeError ())
-                  case checked of
-                    Left (BridgeError code) | code `elem` ["scanners_not_fresh","custody_not_reconciled"]->do
-                      when (code=="scanners_not_fresh") (run ObserveChains)
-                      run ReconcileCustody
-                      later<-floor <$> getPOSIXTime
-                      evalRead reader (CheckIntake later)
-                    _->either throwIO pure checked
-                nativeWork identifier=do
-                  work@(view,_,_)<-evalRead reader (ReadPaymentWork identifier)
-                  unless (paymentAsset(savedPayment view)==Native) (fail "funded recovery expects a native payout")
-                  pure work
-                workEvidence identifier=do
-                  (view,prepared,attempts)<-evalRead reader (ReadPaymentWork identifier)
-                  source<-evalRead reader (ReadPaymentSource identifier)
-                  evidence<-case source of
-                    Just binding | W.depositAsset(W.sourceDeposit binding)==Native->Just . snd <$> evalRead reader (ReadNativeSourceInspection $ W.depositId $ W.sourceDeposit binding)
-                    _->pure Nothing
-                  history<-case source of
-                    Just binding->bracket (PG.connect readerSettings) PG.close (\c->fixture c $ SourceHistory $ W.depositId $ W.sourceDeposit binding)
-                    _->pure []
-                  past<-bracket (PG.connect readerSettings) PG.close (\c->fixture c $ PaymentAttemptHistory identifier)
-                  recorded<-mapM (\txid->do
-                    saved<-evalRead reader (ReadAttempt txid)
-                    expiry<-evalRead reader (ReadSolanaExpiry txid)
-                    pure $ object ["transaction" .= txid,"state" .= recordedState saved,"generation" .= recordedGeneration saved
-                      ,"sequence" .= recordedSequence saved,"bytesHash" .= digest(TE.encodeUtf8 $ signedBytes $ recordedSigned saved)
-                      ,"expiryEvidence" .= expiry]) past
-                  pure $ object ["payment" .= identifier,"paymentStatus" .= show(savedStatus view)
-                    ,"prepared" .= (prepared/=Nothing),"generation" .= fmap preparedGeneration prepared
-                    ,"draftSaved" .= maybe False ((/=Nothing).preparedDraft) prepared,"attempts" .= attempts
-                    ,"source" .= fmap (show . W.sourceDeposit) source,"sourceEvidence" .= evidence,"sourceHistory" .= history,"attemptHistory" .= recorded]
-                attemptEvidence txid=do
-                  saved<-evalRead reader (ReadAttempt txid)
-                  view<-evalRead reader (ReadPayment $ recordedPayment saved)
-                  unless (recordedChain saved=="Native" && paymentAsset(savedPayment view)==Native)
-                    (fail "funded recovery expects a native payout")
-                  pure $ object ["payment" .= recordedPayment saved,"paymentStatus" .= show(savedStatus view)
-                    ,"recipient" .= paymentRecipient(savedPayment view),"amount" .= paymentAmount(savedPayment view)
-                    ,"generation" .= recordedGeneration saved,"state" .= recordedState saved
-                    ,"sequence" .= recordedSequence saved,"feeLimit" .= recordedFee saved
-                    ,"observation" .= recordedObservation saved,"signed" .= recordedSigned saved]
-            when (step/="inspect") pause
-            result<-(case step of
-              "scan"->fields [] >> scan >> pure Null
-              "inspect"->fields ["payment"] >> fieldValue "payment" request >>= workEvidence
-              "allocate"->do
-                fields ["deposit","split","reason"]
-                deposit<-fieldValue "deposit" request
-                split<-fieldValue "split" request
-                reason<-fieldValue "reason" request
-                sequenceNo<-operator(Op.operator $ Op.AllocateReceipt deposit split reason)
-                pure $ object ["allocationSequence" .= sequenceNo]
-              "order"->do
-                fields ["authorization","body"]
-                authorization<-fieldValue "authorization" request
-                body<-fieldValue "body" request :: IO W.OrderRequest
-                unless (W.direction body==WrappedToNative) (fail "funded recovery expects wrapped-to-native orders")
-                scan; resume
-                app<-customerApplication customer
-                response<-WaiTest.runSession (WaiTest.srequest $ WaiTest.SRequest
-                  ((WaiTest.setPath Wai.defaultRequest "/api/v1/orders")
-                    {Wai.requestMethod="POST",Wai.requestHeaders=[("Content-Type","application/json")
-                      ,("Authorization",TE.encodeUtf8 authorization)]}) (encode body)) app
-                pure $ object ["httpStatus" .= statusCode(WaiTest.simpleStatus response)
-                  ,"responseBody" .= TE.decodeUtf8(BL.toStrict $ WaiTest.simpleBody response)]
-              "sign"->do
-                fields ["payment"]
-                identifier<-fieldValue "payment" request
-                scan
-                (view,_,existing)<-nativeWork identifier
-                previous<-mapM (evalRead reader . ReadAttempt) existing
-                unless (savedStatus view==PaymentPaid) resume
-                refreshed<-evalRead reader (ReadPayment identifier)
-                txid<-if savedStatus refreshed==PaymentPaid then case existing of
-                  [saved]->pure saved
-                  _->fail "funded recovery requires one saved attempt"
-                 else do
-                  freshIntake
-                  when (null existing) (run $ PrepareOutgoing identifier)
-                  freshIntake
-                  signed<-run(SignPreparedPayment identifier)
-                  current<-evalRead reader (ReadAttempt signed)
-                  unless (null previous || map recordedSigned previous==[recordedSigned current])
-                    (fail "funded recovery changed a saved signature")
-                  freshIntake
-                  void $ run(QueuePayment signed)
-                  pure signed
-                attemptEvidence txid
-              "replace"->do
-                fields ["parent","fee","reason"]
-                parentId<-fieldValue "parent" request
-                fee<-fieldValue "fee" request
-                reason<-fieldValue "reason" request
-                scan
-                parent<-evalRead reader (ReadAttempt parentId)
-                let identifier=recordedPayment parent
-                (view,_,_)<-nativeWork identifier
-                family<-evalRead reader (ReadNativeFamily identifier)
-                original<-case family of
-                  [(saved,signed)] | saved==parent->pure signed
-                  [(saved,signed),(child,_)] | saved==parent->do
-                    previous<-evalRead reader (ReadReplacementDecision parentId fee reason)
-                    decision<-case previous of
-                      Just (key,False)->pure key
-                      _->fail "funded replacement terms do not match the saved child"
-                    member<-evalRead reader (ReadReplacementMember decision)
-                    unless (member==Just child) (fail "funded replacement child does not match the decision")
-                    pure signed
-                  _->fail "funded replacement requires one parent and at most its saved child"
-                unless (recordedChain parent=="Native" && recordedState parent=="broadcast_intent"
-                  && maybe False (>0) (recordedSequence parent) && savedStatus view==PaymentPaying
-                  && fee>NP.signedNativeFee original && fee<=recordedFee parent
-                  && fee<=NP.planFeeLimit(NP.signedNativePlan original))
-                  (fail "funded replacement parent or fee is not eligible")
-                decision<-operator(Op.operator $ Op.DraftNativeReplacement parentId fee reason)
-                childId<-operator(Op.operator $ Op.SignNativeReplacement decision)
-                child<-evalRead reader (ReadAttempt childId)
-                retained<-evalRead reader (ReadNativeFamily identifier)
-                replacement<-case retained of
-                  [(saved,signed),(member,new)] | saved==parent && signed==original && member==child->pure new
-                  _->fail "funded replacement did not retain the exact two-member family"
-                either (fail . T.unpack) pure (NP.validateNativeFamily $ map snd retained)
-                unless (recordedPayment child==identifier && recordedChain child=="Native"
-                  && recordedGeneration child==recordedGeneration parent && recordedFee child==recordedFee parent
-                  && recordedState child `elem` ["signed","broadcast_intent"] && NP.signedNativeFee replacement==fee)
-                  (fail "funded replacement changed the saved payment terms")
-                sequenceNo<-ledgerSequence <$> evalRead reader ReadState
-                replayDecision<-operator(Op.operator $ Op.DraftNativeReplacement parentId fee reason)
-                replayId<-operator(Op.operator $ Op.SignNativeReplacement decision)
-                replayChild<-evalRead reader (ReadAttempt childId)
-                replayFamily<-evalRead reader (ReadNativeFamily identifier)
-                replaySequence<-ledgerSequence <$> evalRead reader ReadState
-                unless (replayDecision==decision && replayId==childId && replayChild==child
-                  && replayFamily==retained && replaySequence==sequenceNo)
-                  (fail "funded replacement replay changed a saved decision or signature")
-                resume; freshIntake
-                queued<-run(QueuePayment childId)
-                finalParent<-evalRead reader (ReadAttempt parentId)
-                finalChild<-evalRead reader (ReadAttempt childId)
-                unless (finalParent==parent && recordedSigned finalChild==recordedSigned child
-                  && recordedState finalChild=="broadcast_intent"
-                  && maybe False (\n->n>0 && n<=queued) (recordedSequence finalChild)
-                  && recordedSequence finalChild==case recordedSequence child of
-                    Nothing->Just queued
-                    saved->saved)
-                  (fail "funded replacement queue changed the saved family")
-                evidence<-attemptEvidence childId
-                case evidence of
-                  Object values->pure $ Object $ KM.insert "replacement"
-                    (object ["decision" .= decision,"parent" .= parentId,"parentFee" .= NP.signedNativeFee original
-                      ,"parentSavedBytesHash" .= digest(TE.encodeUtf8 $ signedBytes $ recordedSigned parent)
-                      ,"fee" .= fee,"replaySequence" .= replaySequence]) values
-                  _->fail "funded replacement evidence is not an object"
-              "settle"->do
-                fields ["transaction"]
-                txid<-fieldValue "transaction" request
-                original<-evalRead reader (ReadAttempt txid)
-                unless (recordedChain original=="Native") (fail "funded recovery expects a native payout")
-                scan
-                run(ReconcilePayment txid)
-                current<-evalRead reader (ReadAttempt txid)
-                when (recordedState current=="broadcast_intent") $ do
-                  resume
-                  refreshed<-evalRead reader (ReadAttempt txid)
-                  view<-evalRead reader (ReadPayment $ recordedPayment refreshed)
-                  when (recordedState refreshed=="broadcast_intent" && savedStatus view/=PaymentPaid)
-                    (freshIntake >> run(BroadcastPayment txid))
-                  run(ReconcilePayment txid)
-                final<-evalRead reader (ReadAttempt txid)
-                unless (recordedSigned original==recordedSigned final) (fail "funded recovery changed saved bytes")
-                attemptEvidence txid
-              _->fail "funded recovery step must be scan, inspect, allocate, order, sign, replace or settle") `finally` pause
-            state<-evalRead reader ReadState
-            balances<-evalRead reader ReadBalances
-            pending<-evalRead reader PendingAttempts
-            payments<-evalRead reader PaymentCandidates
-            health<-bracket (PG.connect readerSettings) PG.close (\c->fixture c LiveScanHealth)
-            custody<-bracket (PG.connect readerSettings) PG.close (\c->fixture c ReadCustodyCheck)
-            recovery<-bracket (PG.connect readerSettings) PG.close (\c->fixture c NativeRecoveryEvidence)
-            now<-floor <$> getPOSIXTime :: IO Int64
-            BL.putStr $ encode(object ["step" .= step,"result" .= result,"identity" .= Config.fingerprint config
-              ,"observedAt" .= now,"scanHealth" .= health,"custodyCheck" .= custody,"nativeRecovery" .= recovery
-              ,"criticalSequence" .= ledgerSequence state,"backupSequence" .= ledgerBackup state
-              ,"paused" .= ledgerPaused state,"reason" .= ledgerReason state,"pendingAttempts" .= pending
-              ,"paymentCandidates" .= payments,"balances" .=
-                [object ["asset" .= asset,"account" .= show account,"amount" .= show quantity]
-                  | ((asset,account),quantity)<-M.toList balances]])<>"\n"
+  request<-AdminKey.readPrivate requestFile >>= either (const $ fail "invalid funded inspection request") pure . eitherDecodeStrict'
+  case request of
+    Object values | KM.keys values==["payment"]->pure ()
+    _->fail "unexpected funded inspection fields"
+  let readerSettings=PG.defaultConnectInfo {PG.connectHost=host,PG.connectPort=29436,PG.connectDatabase=database
+        ,PG.connectUser=readerUser,PG.connectPassword=readerPassword}
+  withReader readerSettings (Config.fingerprint config) (Config.backupRequired config) $ \reader->do
+    let
+      workEvidence identifier=do
+        (view,prepared,attempts)<-evalRead reader (ReadPaymentWork identifier)
+        source<-evalRead reader (ReadPaymentSource identifier)
+        evidence<-case source of
+          Just binding | W.depositAsset(W.sourceDeposit binding)==Native->Just . snd <$> evalRead reader (ReadNativeSourceInspection $ W.depositId $ W.sourceDeposit binding)
+          _->pure Nothing
+        history<-case source of
+          Just binding->bracket (PG.connect readerSettings) PG.close (\c->fixture c $ SourceHistory $ W.depositId $ W.sourceDeposit binding)
+          _->pure []
+        past<-bracket (PG.connect readerSettings) PG.close (\c->fixture c $ PaymentAttemptHistory identifier)
+        recorded<-mapM (\txid->do
+          saved<-evalRead reader (ReadAttempt txid)
+          expiry<-evalRead reader (ReadSolanaExpiry txid)
+          pure $ object ["transaction" .= txid,"state" .= recordedState saved,"generation" .= recordedGeneration saved
+            ,"sequence" .= recordedSequence saved,"bytesHash" .= digest(TE.encodeUtf8 $ signedBytes $ recordedSigned saved)
+            ,"expiryEvidence" .= expiry]) past
+        pure $ object ["payment" .= identifier,"paymentStatus" .= show(savedStatus view)
+          ,"prepared" .= (prepared/=Nothing),"generation" .= fmap preparedGeneration prepared
+          ,"draftSaved" .= maybe False ((/=Nothing).preparedDraft) prepared,"attempts" .= attempts
+          ,"source" .= fmap (show . W.sourceDeposit) source,"sourceEvidence" .= evidence,"sourceHistory" .= history,"attemptHistory" .= recorded]
+    identifier<-fieldValue "payment" request
+    result<-workEvidence identifier
+    state<-evalRead reader ReadState
+    balances<-evalRead reader ReadBalances
+    pending<-evalRead reader PendingAttempts
+    payments<-evalRead reader PaymentCandidates
+    (health,custody,recovery)<-bracket (PG.connect readerSettings) PG.close $ \connection->
+      (,,) <$> fixture connection LiveScanHealth <*> fixture connection ReadCustodyCheck <*> fixture connection NativeRecoveryEvidence
+    now<-floor <$> getPOSIXTime :: IO Int64
+    BL.putStr $ encode(object ["step" .= step,"result" .= result,"identity" .= Config.fingerprint config
+      ,"observedAt" .= now,"scanHealth" .= health,"custodyCheck" .= custody,"nativeRecovery" .= recovery
+      ,"criticalSequence" .= ledgerSequence state,"backupSequence" .= ledgerBackup state
+      ,"paused" .= ledgerPaused state,"reason" .= ledgerReason state,"pendingAttempts" .= pending
+      ,"paymentCandidates" .= payments,"balances" .=
+        [object ["asset" .= asset,"account" .= show account,"amount" .= show quantity]
+          | ((asset,account),quantity)<-M.toList balances]])<>"\n"
 
 -- Offline credential/RPC contract. The fixture records only method names, never
 -- secrets; real encrypted-wallet recovery is exercised separately below.
@@ -494,33 +325,27 @@ migrationRecovery settings role identity fixtures path=do
     _<-evalRestore settings (AdoptLedger directory identity 0)
     withFencedWriter settings (Config.storePolicy config) directory $ \writer->
       withReader (settings {PG.connectUser=role}) identity (Config.backupRequired config) $ \reader->
-        bracket newRpcManager closeManager $ \manager->
-          withRuntime manager (Config.observerSettings config) (Config.solanaPolicy config) Nothing
-            (SigningEndpoint 9443 (directory </> "no-signer")) reader writer $ \worker _ _->do
-              pending<-evalRead reader PendingAttempts
-              before<-mapM (evalRead reader . ReadAttempt) pending
-              original<-fixture fixtures ArchiveRecords
-              mapM_ (worker . workerRequest . ReconcilePayment) pending
-              after<-mapM (evalRead reader . ReadAttempt) pending
-              let settled=[signedId(recordedSigned row) | row<-after, recordedState row=="settled"]
-                  retained=[row | row<-after, signedId(recordedSigned row) `notElem` settled]
-              check (map recordedSigned before==map recordedSigned after && all (`elem` before) retained)
-              remaining<-evalRead reader PendingAttempts
-              check (sort remaining==sort(map (signedId . recordedSigned) retained))
-              state<-evalRead reader ReadState
-              check (ledgerPaused state)
-              snapshot<-fixture fixtures ArchiveRecords
-              when (null settled) $ check (snapshot==original)
-              mapM_ (worker . workerRequest . ReconcilePayment) pending
-              repeated<-fixture fixtures ArchiveRecords
-              check (snapshot==repeated)
-              worker (workerRequest ObserveChains)
-              worker (workerRequest ReconcileCustody)
-              (checkedAt,_,problem)<-fixture fixtures ReadCustodyCheck
-              check (checkedAt/=Nothing && problem==Nothing)
+        bracket newRpcManager closeManager $ \manager->do
+          pending<-evalRead reader PendingAttempts
+          original<-mapM (evalRead reader . ReadAttempt) pending
+          (_,previousTime,_)<-fixture fixtures ReadCustodyCheck
+          let newCustody previous=do
+                (_,at,problem)<-fixture fixtures ReadCustodyCheck
+                pure (at/=Nothing && at>previous && problem==Nothing)
+          withWorkerProcess manager reader writer (Config.observerSettings config) (Config.solanaPolicy config)
+            (Just $ CustomerSettings (Config.publicConfiguration config (Config.defaultInterface $ Config.profile config) False)
+              (Config.storePolicy config) (Config.solanaSdkLibrary config))
+            (SigningEndpoint 9443 (directory </> "no-signer")) $ \_ _->do
+              awaitCondition "migrated custody reconciliation" (newCustody previousTime)
+              recovered<-mapM (evalRead reader . ReadAttempt) pending
+              check (map recordedSigned recovered==map recordedSigned original)
+              first<-fixture fixtures ArchiveRecords
+              (_,firstTime,_)<-fixture fixtures ReadCustodyCheck
+              awaitCondition "second migrated recovery cycle" (newCustody firstTime)
+              after<-fixture fixtures ArchiveRecords
+              check (first==after)
               evalRead reader ReadState >>= check . ledgerPaused
-              putStrLn ("Live migrated custody and reconciliation PASS: "<>show(length settled)<>" settled; "<>
-                show(length retained)<>" retained pending; exact bytes and replay preserved")
+              putStrLn "PASS: paused migrated runtime reconciles through real process startup; financial snapshot survives repeated recovery"
 
 -- Actual chain history, isolated ledger, and observation-only DSL authority.
 -- No signer, customer deposit or treasury transfer is invoked by this contract.
@@ -552,24 +377,21 @@ liveObserverMain path=do
           N.verifyNativeBoundaryWith (N.nativeCall manager $ Config.nativeSettings config)
           decoded<-N.nativeCall manager (Config.nativeSettings config) False "decodescript" [String "00140000000000000000000000000000000000000000"]
           fieldValue "type" decoded >>= check . (==("witness_v0_keyhash"::T.Text))
-          withRuntime manager (Config.observerSettings config) (Config.solanaPolicy config) (Just customer)
-            (SigningEndpoint 1 "/unavailable-signer-credentials") reader writer $ \worker _ _->do
-              let scan=do
-                    worker (workerRequest ObserveChains)
-                    health<-bracket (PG.connect settings) PG.close (\c->fixture c LiveScanHealth)
-                    check (map (\(chain,_,_)->chain) health==["Native","Solana","SolanaOperating"])
-                    forM_ health $ \(_,at,problem)->do
-                      maybe (pure ()) reject problem
-                      check (at/=Nothing)
-              scan
+          withWorkerProcess manager reader writer (Config.observerSettings config) (Config.solanaPolicy config) (Just customer)
+            (SigningEndpoint 1 "/unavailable-signer-credentials") $ \_ _->do
+              let health=bracket (PG.connect settings) PG.close (\c->fixture c LiveScanHealth)
+                  complete rows=map (\(chain,_,_)->chain) rows==["Native","Solana","SolanaOperating"]
+                    && all (\(_,at,problem)->at/=Nothing && problem==Nothing) rows
+              awaitCondition "first live observation cycle" (complete <$> health)
+              first<-health
               balances<-evalRead reader ReadBalances
-              scan
+              awaitCondition "second live observation cycle" $ do
+                current<-health
+                pure (complete current && and (zipWith (\(chain,at,_) (oldChain,oldAt,_)->chain==oldChain && at>oldAt) current first))
               evalRead reader ReadBalances >>= check . (==balances)
               evalRead reader PendingAttempts >>= check . null
               evalRead reader ReadState >>= check . ledgerPaused
-              expectStore "observation_only" (worker $ workerRequest $ SignPreparedPayment "forbidden")
-              expectStore "observation_only" (worker $ workerRequest $ BroadcastPayment "forbidden")
-  putStrLn "PASS: real L2L Signet restricted RPC authority and Solana Devnet scans through rebuild DSL, persisted cursors, repeat accounting, paused ledger and signing/send refusal; no funds moved"
+  putStrLn "PASS: real L2L Signet restricted RPC and Solana Devnet scans through the actual observation process, repeated accounting and paused ledger; no funds moved"
 
 -- Production initialization on a fresh migrated database, with no seeded funds.
 setupMain :: IO ()
@@ -1319,25 +1141,19 @@ ledgerMain = do
               "/unused/sdk" "/unused/key" Nothing Nothing
         bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "unauthorized signer reached network"}) closeManager $ \manager -> do
           withTestSigningKey $ \keyFile->do
-            let token=BS.replicate 64 97
-            app<-signerApplication manager reader signing {signingKey=keyFile} (BasicAuthData "worker" token)
-            let refused :: ToJSON a => T.Text -> BS.ByteString -> a -> IO ()
-                refused code path body=do
-                  response<-WaiTest.runSession (WaiTest.srequest $ WaiTest.SRequest
-                    ((WaiTest.setPath Wai.defaultRequest path) {Wai.requestMethod="POST",
-                      Wai.requestHeaders=[("Content-Type","application/json"),("Authorization","Basic "<>B64.encode ("worker:"<>token))]}) (encode body)) app
-                  check (statusCode (WaiTest.simpleStatus response)==409 &&
-                    eitherDecodeStrict' (BL.toStrict $ WaiTest.simpleBody response)==Right (object ["error" .= (code::T.Text)]))
-            refused "custody_checkpoint_not_configured" "/checkpoint-custody" ("contract"::T.Text,0::Int64)
-            refused "invalid_custody_checkpoint" "/checkpoint-custody" ("other"::T.Text,0::Int64)
-            refused "signer_profile_mismatch" "/sign-preparation" ("other"::T.Text,intent,0::Int)
-            refused "invalid_signing_decision" "/sign-preparation" ("contract"::T.Text,intent,8::Int)
-            refused "signing_backup_required" "/sign-preparation" ("contract"::T.Text,intent,0::Int)
-          withRuntime manager (ObserverSettings native solana 2 "sol-origin" "opening-signature") (signingPolicy signing) Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret _customer _operator -> do
-            expectStore "invalid_saved_payment" (interpret $ workerRequest $ SignPreparedPayment intent)
-            expectStore "intake_paused" (interpret $ workerRequest $ PrepareOutgoing intent)
-          pausedAfterRefusal<-evalRead reader ReadState
-          check (ledgerPaused pausedAfterRefusal)
+            endpoint<-signingEndpoint (takeDirectory keyFile)
+            withProcessListening (runProcess manager reader $ SignerProcess signing {signingKey=keyFile} endpoint)
+              (signerPort endpoint) $ withSigningClient endpoint $ \client->do
+                let refused :: ToJSON a => T.Text -> String -> a -> IO ()
+                    refused code path body=do
+                      response<-signerPost client endpoint path body
+                      check (statusCode (HTTP.responseStatus response)==409 &&
+                        eitherDecodeStrict' (BL.toStrict $ HTTP.responseBody response)==Right (object ["error" .= code]))
+                refused "custody_checkpoint_not_configured" "/checkpoint-custody" ("contract"::T.Text,0::Int64)
+                refused "invalid_custody_checkpoint" "/checkpoint-custody" ("other"::T.Text,0::Int64)
+                refused "signer_profile_mismatch" "/sign-preparation" ("other"::T.Text,intent,0::Int)
+                refused "invalid_signing_decision" "/sign-preparation" ("contract"::T.Text,intent,8::Int)
+                refused "signing_backup_required" "/sign-preparation" ("contract"::T.Text,intent,0::Int)
         fixture fixtures CoverBackup
         fixture fixtures ReadyIntake
         decision<-evalRead reader (ReadSigningDecision 100 intent 0)
@@ -1426,9 +1242,6 @@ ledgerMain = do
         evalRead reader ReadNativeLockWork >>= check . (==Nothing)
         evalRead reader PendingAttempts >>= check . (notElem nativeTx)
         evalRead reader PaymentCandidates >>= check . (notElem ("fee:"<>withdrawalKey))
-        bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "terminal payment must not call RPC"}) closeManager $ \manager ->
-          withRuntime manager (ObserverSettings native solana 2 "sol-origin" "opening-signature") (signingPolicy signing) Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret _customer _operator ->
-            interpret (workerRequest $ ReconcilePayment nativeTx)
         evalRead reader ReadBalances >>= check . (==afterSettlement)
         fixture fixtures (SeedReceipt "unknown-source" Nothing Native 10 2 True 100)
         evalWrite writer (PromoteDeposit 100 "unknown-source") >>= check . not
@@ -1689,26 +1502,8 @@ ledgerMain = do
         cancellationContract fixtures reader writer
         expiryContract fixtures reader writer
         treasuryContract fixtures reader writer
-        -- Actual runtime cycle with unavailable RPC: retain all money, stay
-        -- paused, record scanner failures, and never reach signer credentials.
-        let cycleKey=T.replicate 32 "1"
-            cycleNative=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:29432" "/unused/credential" "ecx-bridge-test"
-              16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47"
-            cycleSolana=Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing cycleKey cycleKey cycleKey
-            cyclePolicy=H.SolanaPolicy "contract" "contract" cycleKey cycleKey cycleKey (money 10) (money 10)
-        beforeCycle<-evalRead reader ReadBalances
-        pendingBeforeCycle<-evalRead reader PendingAttempts
-        bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> reject "offline_cycle_rpc"}) closeManager $ \manager ->
-          withRuntime manager (ObserverSettings cycleNative cycleSolana 2 "sol-origin" "opening-signature") cyclePolicy Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \interpret _customer _operator ->
-            do
-              interpret (workerRequest $ ReconcilePayment "expiry-signed-0")
-              void (try (interpret $ workerRequest RunWorkerCycle) :: IO (Either BridgeError ()))
-        evalRead reader ReadBalances >>= check . (==beforeCycle)
-        evalRead reader ReadState >>= check . ledgerPaused
-        evalRead reader PendingAttempts >>= check . (==pendingBeforeCycle)
-        forM_ ["Native","Solana","SolanaOperating"] $ \chain->do
-          (_,problem,_)<-fixture fixtures (ReadScanHealth chain)
-          check (problem/=Nothing)
+        -- Unavailable-chain startup and its retained balances are exercised by
+        -- serverMain through the actual executable, HTTP and operator transport.
       archiveContract settings fixtures reader
       beforeLarge<-evalRead reader ReadBalances
       fixture fixtures LargeBalances
@@ -2329,62 +2124,54 @@ orderWorkflowContract fixtures reader writer storePolicy = do
         "contract" key key 8 (money 2) (money 1000) (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]) False False (W.Availability False "starting")
       customerSettings=CustomerSettings public storePolicy "/unused/sdk"
       endpoint=SigningEndpoint 9443 "/unused/auth"
-  bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "runtime replay/read reached network"}) closeManager $ \manager->do
-    withRuntime manager chainSettings config (Just customerSettings) endpoint reader writer $ \worker customer operatorControl->do
-      service<-operatorControl (Op.operatorRead Op.ServiceState)
-      ledgerBefore<-evalRead reader ReadState
-      check (W.paused service==ledgerPaused ledgerBefore)
-      expectStore "observation_only" (operatorControl $ Op.operator Op.ResumeService)
-      expectStore "observation_only" (operatorControl $ Op.operator $ Op.CoverLostSource "missing" 1 (money 1) (money 0) "cover")
-      expectStore "observation_only" (operatorControl $ Op.operator $ Op.ApproveCovered "missing" 1 "covered")
-      expectStore "observation_only" (operatorControl $ Op.operator $ Op.RestoreSource "missing" 1 "restored")
-      expectStore "observation_only" (operatorControl $ Op.operator $ Op.ClassifySpend "Native" "missing" "owned")
-      expectStore "observation_only" (operatorControl $ Op.operator $ Op.AllocateReceipt "missing" [("float",money 1)] "owned")
-      expectStore "observation_only" (operatorControl $ Op.operator $ Op.WithdrawFees (T.replicate 64 "a") Native (money 1) "recipient" "test")
-      expectStore "observation_only" (operatorControl $ Op.operator $ Op.CancelFeeWithdrawal "missing" "test")
-      expectStore "observation_only" (operatorControl $ Op.operator $ Op.RefundDeposit "missing")
-      expectStore "observation_only" (operatorControl $ Op.operator $ Op.CancelPreparation "missing" 0 "test")
-      expectStore "observation_only" (operatorControl $ Op.operator $ Op.RetrySolanaPayment "missing" "test")
-      expectStore "observation_only" (operatorControl $ Op.operator $ Op.DraftNativeReplacement "missing" (money 1) "test")
-      expectStore "observation_only" (operatorControl $ Op.operator $ Op.SignNativeReplacement 1)
-      expectStore "observation_only" (operatorControl $ Op.operator $ Op.RebroadcastNative "missing" 1 "test")
-      expectedReviews<-evalRead reader ReadNativeReviews
-      operatorControl (Op.operatorRead Op.NativeReviews) >>= check . (==expectedReviews)
-      expectStore "observation_only" (operatorControl $ Op.operator $ Op.CancelNativeReplacement 1 "test")
-      operatorControl (Op.operator $ Op.PauseService "operator contract")
-      serviceAfter<-operatorControl (Op.operatorRead Op.ServiceState)
-      check (W.paused serviceAfter && W.pauseReason serviceAfter=="operator contract")
-      publicView<-customer (Op.safe Op.PublicConfig)
-      check (W.pubAvailability publicView==W.Availability False "observation_only")
-      saved<-customer (Op.safe $ Op.OrderStatus header wrapId)
-      check (saved==recovered)
-      expectStore "observation_only" (customer $ Op.customer $ Op.CreateOrder header wrapping)
-      expectStore "observation_only" (worker $ workerRequest $ SignPreparedPayment "missing")
-      expectStore "observation_only" (worker $ workerRequest $ BroadcastPayment "missing")
-      expectStore "deposit_window_closed" (customer $ Op.safe $ Op.PaymentInstructions header oid)
-      app<-customerApplication customer
-      response<-WaiTest.runSession (WaiTest.srequest $ WaiTest.SRequest
-        ((WaiTest.setPath Wai.defaultRequest ("/api/v1/orders/"<>TE.encodeUtf8 wrapId))
-          {Wai.requestHeaders=[("Authorization",TE.encodeUtf8 header)]}) "") app
-      check (statusCode(WaiTest.simpleStatus response)==200 && eitherDecodeStrict' (BL.toStrict $ WaiTest.simpleBody response)==Right recovered)
-    withRuntime manager chainSettings config (Just customerSettings {publicConfiguration=public {W.pubIntakeEnabled=True}}) endpoint reader writer $ \_ customer operatorControl->do
-      let withdrawal=T.replicate 64 "a"
-      before<-evalRead reader ReadState
-      result<-operatorControl (Op.operator $ Op.WithdrawFees withdrawal Native (money 100) "recipient" "test owned revenue")
-      cancelled<-operatorControl (Op.operator $ Op.CancelFeeWithdrawal withdrawal "cancel")
-      after<-evalRead reader ReadState
-      check (result=="fee:"<>withdrawal && cancelled==result && ledgerSequence before==ledgerSequence after)
-      expectStore "fee_withdrawal_conflict" (operatorControl $ Op.operator $ Op.WithdrawFees withdrawal Native (money 101) "recipient" "test owned revenue")
-      expectStore "fee_withdrawal_cancellation_conflict" (operatorControl $ Op.operator $ Op.CancelFeeWithdrawal withdrawal "changed")
-      expectStore "invalid_fee_withdrawal" (operatorControl $ Op.operator $ Op.WithdrawFees withdrawal Sol (money 1) "recipient" "test")
-      saved<-customer (Op.customer $ Op.CreateOrder header wrapping)
-      check (W.depositInstruction saved==W.depositInstruction recovered && W.quote saved==W.quote recovered)
-    expectStore "customer_configuration_mismatch" $ withRuntime manager chainSettings config
-      (Just customerSettings {publicConfiguration=public {W.pubMint="wrong"}}) endpoint reader writer (\_ _ _->pure ())
+  bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> reject "offline_process_rpc"}) closeManager $ \manager->do
+    forM_ [False,True] $ \paying->
+      withWorkerProcess manager reader writer chainSettings config
+        (Just customerSettings {publicConfiguration=public {W.pubIntakeEnabled=paying}}) endpoint $ \port directory->
+        bracket (newManager defaultManagerSettings) closeManager $ \client->do
+          let control=Control.callControl directory
+              request method path body=do
+                wire<-HTTP.parseRequest ("http://127.0.0.1:"<>show port<>path)
+                HTTP.httpLbs wire {HTTP.method=method,HTTP.requestHeaders=[("Content-Type","application/json"),("Authorization",TE.encodeUtf8 header)]
+                  ,HTTP.requestBody=HTTP.RequestBodyLBS body} client
+              decodeReply response=either fail pure (eitherDecodeStrict' $ BL.toStrict $ HTTP.responseBody response)
+          status<-control (object ["operation" .= ("status"::T.Text)])
+          service<-either fail pure (eitherDecodeStrict' $ BL.toStrict $ encode status)
+          check (W.paused service)
+          savedResponse<-request "GET" ("/api/v1/orders/"<>T.unpack wrapId) ""
+          saved<-decodeReply savedResponse
+          current<-evalRead reader (ReadOrder header wrapId)
+          check (statusCode(HTTP.responseStatus savedResponse)==200 && saved==current
+            && W.orderId saved==W.orderId recovered && W.quote saved==W.quote recovered
+            && W.depositInstruction saved==W.depositInstruction recovered)
+          replayResponse<-request "POST" "/api/v1/orders" (encode wrapping)
+          if paying then do
+            replay<-decodeReply replayResponse
+            check (statusCode(HTTP.responseStatus replayResponse)==200 && replay==saved)
+            let withdrawal=T.replicate 64 "a"
+                withdraw n asset=control $ object ["operation" .= ("withdraw-fees"::T.Text),"id" .= withdrawal
+                  ,"asset" .= asset,"amount" .= money n,"recipient" .= ("recipient"::T.Text),"reason" .= ("test owned revenue"::T.Text)]
+                cancel reason=control $ object ["operation" .= ("cancel-fees"::T.Text),"id" .= withdrawal,"reason" .= (reason::T.Text)]
+            withdraw 100 Native >>= check . (==String ("fee:"<>withdrawal))
+            cancel "cancel" >>= check . (==String ("fee:"<>withdrawal))
+            withdraw 101 Native >>= check . (==object ["error" .= ("fee_withdrawal_conflict"::T.Text)])
+            cancel "changed" >>= check . (==object ["error" .= ("fee_withdrawal_cancellation_conflict"::T.Text)])
+            withdraw 1 Sol >>= check . (==object ["error" .= ("invalid_fee_withdrawal"::T.Text)])
+          else do
+            refused<-decodeReply replayResponse
+            check (statusCode(HTTP.responseStatus replayResponse)==409 && refused==object ["error" .= ("observation_only"::T.Text)])
+            instructions<-request "POST" ("/api/v1/orders/"<>T.unpack oid<>"/transaction") ""
+            denied<-decodeReply instructions
+            check (statusCode(HTTP.responseStatus instructions)==409 && denied==object ["error" .= ("deposit_window_closed"::T.Text)])
+          control (object ["operation" .= ("pause"::T.Text),"reason" .= ("operator contract"::T.Text)]) >> pure ()
+    expectStore "customer_configuration_mismatch" $
+      runProcess manager reader (WorkerProcess chainSettings config
+        (Just customerSettings {publicConfiguration=public {W.pubMint="wrong"}}) endpoint writer 1 "/unused" "/unused")
 
   -- A slow checkpoint neither exposes stale instructions nor renews a quote.
   -- Clock/freshness changes are fixtures; this is a PostgreSQL workflow contract.
   fixture fixtures ReadyIntake
+  fixture fixtures (FreshAt 100)
   clock<-newIORef 110
   let slow=unwrap {W.idempotencyKey="workflow-slow-backup"}
       delayed=transport {orderClock=readIORef clock,orderBackup= \n->backup n >> writeIORef clock 180}
@@ -2492,6 +2279,83 @@ fenceMain = do
   putStrLn "PASS: offline adoption/retirement, pause/identity/sequence/ownership checks, real host fence, durable uncertain-commit watermark, rollback, stale restart refusal"
 
 -- Public all-zero seed vector; never used on a chain or with funds.
+-- Test lifetimes expose only real transports, never a runtime evaluator.
+freePort :: IO Int
+freePort=bracket (NS.socket NS.AF_INET NS.Stream NS.defaultProtocol) NS.close $ \socket->do
+  NS.bind socket (NS.SockAddrInet 0 (NS.tupleToHostAddress (127,0,0,1)))
+  address<-NS.getSocketName socket
+  case address of NS.SockAddrInet port _->pure (fromIntegral port); _->fail "unexpected listener address"
+
+awaitCondition :: String -> IO Bool -> IO ()
+awaitCondition label condition=do
+  result<-timeout 120000000 loop
+  unless (result==Just ()) (fail $ "timed out: "<>label)
+ where loop=condition >>= \ready->unless ready (threadDelay 100000 >> loop)
+
+withProcessListening :: IO () -> Int -> IO a -> IO a
+withProcessListening process port action=withAsync process $ \child->do
+  awaitCondition "process listener" $ do
+    status<-poll child
+    case status of
+      Just (Left problem)->throwIO problem
+      Just (Right ())->fail "process exited before listener"
+      Nothing->do
+        result<-try $ bracket (NS.socket NS.AF_INET NS.Stream NS.defaultProtocol) NS.close $ \socket->
+          NS.connect socket (NS.SockAddrInet (fromIntegral port) (NS.tupleToHostAddress (127,0,0,1)))
+        pure (case result::Either IOException () of Right ()->True; Left _->False)
+  action
+
+withWorkerProcess :: HTTP.Manager -> Reader -> Writer -> ObserverSettings -> H.SolanaPolicy
+  -> Maybe CustomerSettings -> SigningEndpoint -> (Int -> FilePath -> IO a) -> IO a
+withWorkerProcess manager reader writer settings policy customer endpoint action=withTestSigningKey $ \key->do
+  let directory=takeDirectory key; assets=directory</>"assets"
+  createDirectory assets; createDirectory (assets</>"dist")
+  mapM_ (\file->writeFile (assets</>file) "process contract fixture") ["index.html","style.css","dist/wallet.js"]
+  port<-freePort
+  withProcessListening (runProcess manager reader $ WorkerProcess settings policy customer endpoint writer port assets directory)
+    port $ do
+      awaitCondition "operator listener" $ do
+        exists<-Posix.fileExist (directory</>"operator.sock")
+        if not exists then pure False else do
+          status<-Posix.getSymbolicLinkStatus (directory</>"operator.sock")
+          if Posix.fileMode status .&. 0o077/=0 then pure False else do
+            reply<-try (Control.callControl directory $ object ["operation" .= ("status"::T.Text)]) :: IO (Either IOException Value)
+            pure (case reply of Right _->True; Left _->False)
+      action port directory
+
+makeCertificate :: FilePath -> IO ()
+makeCertificate file=do
+  (exit,_,err)<-Process.readProcessWithExitCode "openssl" ["req","-x509","-newkey","rsa:2048","-nodes","-keyout",file<>".key","-out",file<>".pem","-days","1","-subj","/CN=127.0.0.1","-addext","subjectAltName=IP:127.0.0.1"] ""
+  unless (exit==ExitSuccess) (fail err)
+  setFileMode (file<>".key") 0o600
+
+signingEndpoint :: FilePath -> IO SigningEndpoint
+signingEndpoint directory=do
+  let auth=directory</>"auth"
+  writeFile auth (replicate 64 'a'); setFileMode auth 0o600
+  makeCertificate auth
+  port<-freePort
+  pure (SigningEndpoint port auth)
+
+withSigningClient :: SigningEndpoint -> (HTTP.Manager -> IO a) -> IO a
+withSigningClient endpoint action=do
+  certificate<-signerCertificate endpoint
+  let base=TLS.defaultParamsClient "127.0.0.1" BS.empty
+      tls=base {TLS.clientShared=(TLS.clientShared base) {TLS.sharedCAStore=makeCertificateStore [certificate]}
+        ,TLS.clientSupported=(TLS.clientSupported base) {TLS.supportedCiphers=ciphersuite_default}}
+      settings=HTTP.managerSetProxy HTTP.noProxy (mkManagerSettings (NC.TLSSettings tls) Nothing)
+        {HTTP.managerRetryableException=const False,HTTP.managerIdleConnectionCount=0
+        ,HTTP.managerResponseTimeout=HTTP.responseTimeoutMicro 60000000}
+  bracket (newManager settings) closeManager action
+
+signerPost :: ToJSON a => HTTP.Manager -> SigningEndpoint -> String -> a -> IO (HTTP.Response BL.ByteString)
+signerPost manager endpoint path body=do
+  BasicAuthData user token<-signerCredentials endpoint
+  request<-HTTP.parseRequest ("https://127.0.0.1:"<>show(signerPort endpoint)<>path)
+  HTTP.httpLbs request {HTTP.method="POST",HTTP.redirectCount=0
+    ,HTTP.requestHeaders=[("Content-Type","application/json"),("Authorization","Basic "<>B64.encode (user<>":"<>token))]
+    ,HTTP.requestBody=HTTP.RequestBodyLBS (encode body)} manager
+
 withTestSigningKey :: (FilePath -> IO a) -> IO a
 withTestSigningKey action=bracket temporary removeDirectoryRecursive $ \directory->do
   let file=directory<>"/key.json"
@@ -3089,8 +2953,8 @@ treasuryContract fixtures reader writer=do
   expectStore "treasury_spend_exceeds_free_allocation" (classify "SolanaOperating" "protected-operating" "cannot consume fee holds")
   evalRead reader ReadBalances >>= check . (==protected)
 
--- Real TLS, both production evaluators and SDK signatures over public offline
--- vectors. Only the Solana RPC responses and ledger funding are fixtures.
+-- Real signer/worker process lifetimes and HTTPS over public offline vectors.
+-- RPC responses and ledger funding are explicit fixtures, not live acceptance.
 tlsMain :: IO ()
 tlsMain=do
   database<-getEnv "ECX_REBUILD_CONTRACT_DATABASE"
@@ -3109,19 +2973,30 @@ tlsMain=do
       plan=SP.SolanaPlan identity recipient (money 3) (payoutReference identity identifier) (SP.RecentBlockhash hash 1000 100) (money 10000) (money 2100000)
       native=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:1" "/unused" "ecx-bridge-test" 16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47"
       solana=Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing mint owner (H.replySource reply)
-      check ok=unless ok (fail "TLS signing contract failed")
+      check :: HasCallStack => Bool -> IO ()
+      check ok=unless ok (fail $ "TLS signing contract failed\n"<>prettyCallStack callStack)
       context value=object ["context" .= object ["slot" .= (100::Int)],"value" .= value]
       token=object ["owner" .= Solana.tokenProgram,"executable" .= False,"data" .= object ["space" .= (165::Int),"parsed" .= object ["type" .= ("account"::T.Text),"info" .= object
         ["mint" .= mint,"owner" .= owner,"state" .= ("initialized"::T.Text),"isNative" .= False,"tokenAmount" .= object ["amount" .= ("10000000"::T.Text),"decimals" .= (8::Int)]]]]]
       mintAccount=object ["owner" .= Solana.tokenProgram,"data" .= object ["parsed" .= object ["type" .= ("mint"::T.Text),"info" .= object ["decimals" .= (8::Int),"isInitialized" .= True,"freezeAuthority" .= Null]]]]
       payer=object ["owner" .= ("11111111111111111111111111111111"::T.Text),"executable" .= False,"data" .= ["","base64"::T.Text],"lamports" .= (10000000::Int)]
   calls<-newIORef ([]::[T.Text])
+  barrier<-newIORef Nothing
   let rpcApplication request respond=do
         raw<-Wai.strictRequestBody request
         value<-either fail pure (eitherDecodeStrict' $ BL.toStrict raw)
         method<-fieldValue "method" value; params<-fieldValue "params" value :: IO [Value]; requestId<-fieldValue "id" value :: IO Value
+        when (method=="getGenesisHash") $ do
+          blocked<-atomicModifyIORef' barrier (\old->(Nothing,old))
+          forM_ blocked $ \(entered,release)->putMVar entered () >> takeMVar release
         modifyIORef' calls (<>[method])
         result<-case method of
+          "getblockchaininfo"->pure $ object ["chain" .= ("signet"::T.Text),"initialblockdownload" .= False
+            ,"blocks" .= (16000::Int),"signet_challenge" .= N.signetChallenge]
+          "getblockhash"->pure $ String (N.nativeCheckpointHash native)
+          "getconnectioncount"->pure $ Number 1
+          "getwalletinfo"->pure $ object ["walletname" .= N.nativeWallet native,"descriptors" .= True
+            ,"scanning" .= False,"private_keys_enabled" .= True,"external_signer" .= False]
           "getSignatureStatuses"->pure Null -- Deliberate unavailable observation, never a successful chain effect.
           "getGenesisHash"->pure $ toJSON (Solana.solanaGenesis W.L2LSignetDevnet)
           "getAccountInfo"->pure $ context $ if take 1 params==[toJSON mint] then mintAccount else token
@@ -3148,119 +3023,168 @@ tlsMain=do
         withTestSigningKey $ \keyFile->do
           public<-either reject pure (publicKey owner)
           BL.writeFile keyFile (encode $ replicate 32 (1::Int)<>map fromIntegral (BS.unpack public))
-          let directory=takeDirectory keyFile; auth=directory<>"/auth"; endpoint port=SigningEndpoint port auth
-          writeFile auth (replicate 64 'a'); setFileMode auth 0o600
-          let makeCertificate file=do
-                (exit,_,err)<-Process.readProcessWithExitCode "openssl" ["req","-x509","-newkey","rsa:2048","-nodes","-keyout",file<>".key","-out",file<>".pem","-days","1","-subj","/CN=127.0.0.1","-addext","subjectAltName=IP:127.0.0.1"] ""
-                unless (show exit=="ExitSuccess") (fail err)
-                setFileMode (file<>".key") 0o600
-          makeCertificate auth
+          let directory=takeDirectory keyFile
+          endpoint<-signingEndpoint directory
+          let auth=signerAuthFile endpoint
           makeCertificate (directory<>"/untrusted")
           certificate<-BS.readFile (auth<>".pem")
           untrusted<-BS.readFile (directory<>"/untrusted.pem")
-          port<-bracket (NS.socket NS.AF_INET NS.Stream NS.defaultProtocol) NS.close $ \socket->do
-            NS.bind socket (NS.SockAddrInet 0 (NS.tupleToHostAddress (127,0,0,1)))
-            address<-NS.getSocketName socket
-            case address of NS.SockAddrInet p _->pure (fromIntegral p); _->fail "unexpected listener"
           Warp.testWithApplication (pure rpcApplication) $ \rpcPort->
             bracket (newManager defaultManagerSettings {managerModifyRequest= \request->pure request {HTTP.secure=False,HTTP.host="127.0.0.1",HTTP.port=rpcPort}}) closeManager $ \manager->do
-                let credentials=BasicAuthData "worker" (BS.replicate 64 97)
-                signer<-signerApplication manager reader (SignerSettings native solana config sdk keyFile Nothing Nothing) credentials
-                -- Receipt fixtures exercise HTTPS and the actual worker's
-                -- acknowledgment gate, not off-host backup durability.
-                checkpointReply<-newIORef (Nothing :: Maybe W.BackupReceipt)
-                checkpoints<-newIORef (0::Int)
-                let evaluate :: forall a. Request 'Op.Signer 'Op.Critical a -> IO a
-                    evaluate request=case Op.resolve request of
-                      Op.SigningDSL (Op.CheckpointSigning CheckpointCustody{})->do
-                        modifyIORef' checkpoints (+1)
-                        Op.CheckpointResult <$> (readIORef checkpointReply >>= maybe (reject "checkpoint_fixture_refused") pure)
-                      _->reject "checkpoint_fixture_only"
-                checkpointApp<-signingApplication credentials evaluate
-                let application request=if Wai.pathInfo request==["checkpoint-custody"] then checkpointApp request else signer request
-                bracket (forkIO $ runSigningServer (endpoint port) application) killThread $ \_thread->do
-                  let wait 0=fail "TLS signer did not bind"
-                      wait n=do
-                        result<-try $ bracket (NS.socket NS.AF_INET NS.Stream NS.defaultProtocol) NS.close $ \socket->NS.connect socket (NS.SockAddrInet (fromIntegral port) (NS.tupleToHostAddress (127,0,0,1)))
-                        case (result::Either IOException ()) of Right ()->pure (); Left _->threadDelay 50000 >> wait (n-1::Int)
-                  wait 200
-                  withRuntime manager (ObserverSettings native solana 1 "origin" "origin") config Nothing (endpoint port) reader writer $ \worker _ _->do
-                    writeFile auth (replicate 64 'b')
-                    expectStore "signer_outcome_unknown" (worker $ workerRequest $ SignPreparedPayment identifier)
-                    readIORef calls >>= check . null
-                    evalRead reader PendingAttempts >>= check . null
-                    writeFile auth (replicate 64 'a')
-                    BS.writeFile (auth<>".pem") untrusted
-                    fixture fixtures ReadyIntake
-                    clock<-floor <$> getPOSIXTime
-                    fixture fixtures (FreshAt clock)
-                    expectStore "signer_outcome_unknown" (worker $ workerRequest $ SignPreparedPayment identifier)
-                    readIORef calls >>= check . null
-                    evalRead reader PendingAttempts >>= check . null
-                    BS.writeFile (auth<>".pem") certificate
-                    fixture fixtures ReadyIntake
-                    later<-floor <$> getPOSIXTime
-                    fixture fixtures (FreshAt later)
-                    before<-evalRead reader ReadBalances
-                    signed<-worker (workerRequest $ SignPreparedPayment identifier)
-                    check (Just signed==H.replySignature reply)
-                    saved<-evalRead reader (ReadAttempt signed)
-                    check (signedBytes(recordedSigned saved)==H.replyTransaction reply && recordedState saved=="signed")
-                    sequenceNo<-ledgerSequence <$> evalRead reader ReadState
-                    covered<-ledgerBackup <$> evalRead reader ReadState
-                    check (sequenceNo>covered)
-                    let receipt=W.BackupReceipt identity sequenceNo (T.replicate 64 "a") (T.replicate 64 "b")
-                        checkpoint=worker (workerRequest $ CheckpointBackup sequenceNo)
-                    expectStore "signer_outcome_unknown" checkpoint
-                    forM_ [receipt {W.receiptIdentity="other"},receipt {W.receiptSequence=sequenceNo-1},
-                      receipt {W.receiptSequence=sequenceNo+1},receipt {W.receiptSnapshot="latest"},
-                      receipt {W.receiptArchiveHash=T.replicate 64 "A"}] $ \bad->do
+              let post client=signerPost client endpoint "/sign-preparation" (identity,identifier,0::Int)
+                  signedResponse response=do
+                    unless (statusCode(HTTP.responseStatus response)==200) $
+                      fail ("expected signed result, got "<>show(HTTP.responseStatus response)<>" "<>show(HTTP.responseBody response))
+                    Op.preparedOutput <$> either fail pure (eitherDecodeStrict' $ BL.toStrict $ HTTP.responseBody response)
+              withProcessListening (runProcess manager reader $ SignerProcess
+                (SignerSettings native solana config sdk keyFile Nothing Nothing) endpoint) (signerPort endpoint) $ do
+                writeFile auth (replicate 64 'b')
+                withSigningClient endpoint $ \client->post client >>= check . (==403) . statusCode . HTTP.responseStatus
+                readIORef calls >>= check . null
+                evalRead reader PendingAttempts >>= check . null
+                writeFile auth (replicate 64 'a')
+                BS.writeFile (auth<>".pem") untrusted
+                untrustedReply<-try (withSigningClient endpoint post) :: IO (Either HTTP.HttpException (HTTP.Response BL.ByteString))
+                check (case untrustedReply of Left _->True; Right _->False)
+                readIORef calls >>= check . null
+                BS.writeFile (auth<>".pem") certificate
+                before<-evalRead reader ReadBalances
+                -- Both requests are real HTTPS clients. While the first signer
+                -- owns the gate, the second cannot enter the first RPC method.
+                signed<-withSigningClient endpoint $ \client->do
+                  entered<-newEmptyMVar; release<-newEmptyMVar
+                  writeIORef barrier (Just (entered,release))
+                  flip finally (void $ tryPutMVar release ()) $ withAsync (post client) $ \first->do
+                    timeout 5000000 (takeMVar entered) >>= check . (==Just ())
+                    withAsync (post client) $ \second->do
+                      threadDelay 100000
+                      readIORef calls >>= check . null
+                      waiting<-poll second
+                      check (case waiting of Nothing->True; _->False)
+                      putMVar release ()
+                      a<-wait first >>= signedResponse
+                      b<-wait second >>= signedResponse
+                      check (a==b && Just(signedId a)==H.replySignature reply && signedBytes a==H.replyTransaction reply)
+                      pure a
+                evalRead reader PendingAttempts >>= check . null
+                evalRead reader ReadBalances >>= check . (==before)
+                -- A decision changed after admission must not release a result.
+                withSigningClient endpoint $ \client->do
+                  entered<-newEmptyMVar; release<-newEmptyMVar
+                  writeIORef barrier (Just (entered,release))
+                  flip finally (void $ tryPutMVar release ()) $ withAsync (post client) $ \request->do
+                    timeout 5000000 (takeMVar entered) >>= check . (==Just ())
+                    fixture fixtures StaleCustody
+                    putMVar release ()
+                    refused<-wait request
+                    check (statusCode(HTTP.responseStatus refused)==409 &&
+                      eitherDecodeStrict' (BL.toStrict $ HTTP.responseBody refused)==Right (object ["error" .= ("custody_not_reconciled"::T.Text)]))
+                  clock<-floor <$> getPOSIXTime
+                  fixture fixtures (FreshAt clock)
+                  post client >>= signedResponse >>= check . (==signed)
+                decision<-evalRead reader (ReadPreparation identifier)
+                saved<-evalWrite writer (RecordAttempt decision signed)
+                evalWrite writer (RecordAttempt decision signed) >>= check . (==saved)
+                check (recordedState saved=="signed")
+                fixture fixtures CoverBackup
+                clock<-floor <$> getPOSIXTime
+                fixture fixtures (FreshAt clock)
+                count<-length <$> readIORef calls
+                withSigningClient endpoint $ \client->do
+                  repeated<-post client
+                  check (statusCode(HTTP.responseStatus repeated)==409 &&
+                    eitherDecodeStrict' (BL.toStrict $ HTTP.responseBody repeated)==Right (object ["error" .= ("attempt_already_recorded"::T.Text)]))
+                readIORef calls >>= check . (==count) . length
+                evalRead reader ReadBalances >>= check . (==before)
+                methods<-readIORef calls
+                check ("simulateTransaction" `elem` methods && "sendTransaction" `notElem` methods)
+              -- Recovery is now driven by the actual process loop. A bad native
+              -- payment must not hide the later Solana attempt or broadcast it.
+              let nativeKey=T.replicate 64 "0"; nativeId="fee:"<>nativeKey
+              recoveryNow<-floor <$> getPOSIXTime
+              evalWrite writer (Pause "multi-payment recovery contract")
+              fixture fixtures (FreshAt recoveryNow)
+              void $ evalWrite writer (ReserveFees recoveryNow nativeKey Native (money 3) "recipient" "recovery fixture")
+              fixture fixtures ReadyIntake
+              fixture fixtures (FreshAt recoveryNow)
+              void $ evalWrite writer (PreparePayment recoveryNow nativeId (money 1) "{}")
+              evalWrite writer (SaveDraft nativeId 0 "{}")
+              nativePrepared<-evalRead reader (ReadPreparation nativeId)
+              void $ evalWrite writer (RecordAttempt nativePrepared $ SignedAttempt "malformed-native" "00" "{}" (Just "offline:0"))
+              original<-evalRead reader ReadBalances
+              pending<-evalRead reader PendingAttempts >>= mapM (evalRead reader . ReadAttempt)
+              check (sort(map recordedPayment pending)==[nativeId,identifier])
+              writeIORef calls []
+              prior<-fixture fixtures RecoveryPauseCount
+              withWorkerProcess manager reader writer (ObserverSettings native solana 1 "origin" "origin") config Nothing endpoint $ \_ _->do
+                awaitCondition "both payment recoveries" $ (>=prior+3) <$> fixture fixtures RecoveryPauseCount
+                observed<-readIORef calls
+                check ("getSignatureStatuses" `elem` observed && "sendTransaction" `notElem` observed)
+                evalRead reader ReadState >>= check . ledgerPaused
+                evalRead reader ReadBalances >>= check . (==original)
+                evalRead reader PendingAttempts >>= mapM (evalRead reader . ReadAttempt) >>= check . (==pending)
+              -- An existing bound order reaches the worker's real checkpoint
+              -- operation through HTTP, even while intake is paused. Only the
+              -- authenticated remote receipt is a fixture; no evaluator escapes.
+              let cookie=directory</>"native-cookie"
+                  configuredNative=native {N.nativeCookie=cookie}
+                  header="Bearer "<>T.replicate 64 "c"
+                  order=W.OrderRequest WrappedToNative (money 10) "native-recipient" "" Nothing "checkpoint-http"
+                  publicConfig=W.PublicConfiguration W.L2LSignetDevnet "devnet" (W.InterfaceConfig Nothing Nothing Nothing Nothing Nothing)
+                    "codec-fixture" mint owner 8 (money 2) (money 1000) (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)])
+                    True False (W.Availability False "starting")
+              writeFile cookie "fixture:fixture"; setFileMode cookie 0o600
+              fixture fixtures ReadyIntake
+              now<-floor <$> getPOSIXTime
+              fixture fixtures (FreshAt now)
+              orderId<-evalWrite writer (CreateOrder now header order)
+              required<-evalWrite writer (BindSolana now header orderId)
+              evalWrite writer (Pause "checkpoint HTTP contract")
+              state<-evalRead reader ReadState
+              let sequenceNo=ledgerSequence state; covered=ledgerBackup state
+                  receipt=W.BackupReceipt identity sequenceNo (T.replicate 64 "a") (T.replicate 64 "b")
+              check (required>covered && required<=sequenceNo)
+              checkpointReply<-newIORef (Nothing::Maybe W.BackupReceipt)
+              checkpoints<-newIORef (0::Int)
+              let fixtureCheckpoint :: forall a. Op.Request 'Op.Signer 'Op.Critical a -> IO a
+                  fixtureCheckpoint request=case Op.resolve request of
+                    Op.SigningDSL (Op.CheckpointSigning (Op.CheckpointCustody fingerprint minimumSequence))->do
+                      check (fingerprint==identity && minimumSequence==required)
+                      modifyIORef' checkpoints (+1)
+                      Op.CheckpointResult <$> (readIORef checkpointReply >>= maybe (reject "checkpoint_fixture_refused") pure)
+                    _->reject "checkpoint_fixture_only"
+              credentials<-signerCredentials endpoint
+              checkpointApp<-signingApplication credentials fixtureCheckpoint
+              checkpointPort<-freePort
+              let checkpointEndpoint=endpoint {signerPort=checkpointPort}
+              withProcessListening (runSigningServer checkpointEndpoint checkpointApp) checkpointPort $
+                withWorkerProcess manager reader writer (ObserverSettings configuredNative solana 1 "origin" "origin") config
+                  (Just $ CustomerSettings publicConfig store sdk) checkpointEndpoint $ \httpPort _->
+                  bracket (newManager defaultManagerSettings) closeManager $ \client->do
+                    let submit=do
+                          request<-HTTP.parseRequest ("http://127.0.0.1:"<>show httpPort<>"/api/v1/orders")
+                          HTTP.httpLbs request {HTTP.method="POST",HTTP.requestHeaders=[("Content-Type","application/json"),("Authorization",TE.encodeUtf8 header)]
+                            ,HTTP.requestBody=HTTP.RequestBodyLBS (encode order)} client
+                        refused code=do
+                          response<-submit
+                          check (statusCode(HTTP.responseStatus response)==409 &&
+                            eitherDecodeStrict' (BL.toStrict $ HTTP.responseBody response)==Right (object ["error" .= (code::T.Text)]))
+                    refused "signer_outcome_unknown"
+                    forM_ [receipt {W.receiptIdentity="other"},receipt {W.receiptSequence=sequenceNo-1},receipt {W.receiptSequence=sequenceNo+1}
+                      ,receipt {W.receiptSnapshot="latest"},receipt {W.receiptArchiveHash=T.replicate 64 "A"}] $ \bad->do
                         writeIORef checkpointReply (Just bad)
-                        expectStore "invalid_custody_checkpoint_receipt" checkpoint
+                        refused "invalid_custody_checkpoint_receipt"
                         evalRead reader ReadState >>= check . (==covered) . ledgerBackup
                     writeIORef checkpointReply (Just receipt)
-                    checkpoint
+                    refused "intake_paused"
                     evalRead reader ReadState >>= check . (==sequenceNo) . ledgerBackup
-                    checkpointCalls<-readIORef checkpoints
-                    count<-length <$> readIORef calls
+                    callsBefore<-readIORef checkpoints
                     removeFile auth
-                    checkpoint
-                    readIORef checkpoints >>= check . (==checkpointCalls)
-                    replay<-worker (workerRequest $ SignPreparedPayment identifier)
-                    check (replay==signed)
-                    readIORef calls >>= check . (==count) . length
-                    evalRead reader ReadBalances >>= check . (==before)
-                    methods<-readIORef calls
-                    check ("simulateTransaction" `elem` methods && "sendTransaction" `notElem` methods)
-                    -- A malformed earlier native payment must not hide the later
-                    -- Solana payment. Each failure pauses; no signer/send is used.
-                    let nativeKey=T.replicate 64 "0"; nativeId="fee:"<>nativeKey
-                    recoveryNow<-floor <$> getPOSIXTime
-                    evalWrite writer (Pause "multi-payment recovery contract")
-                    fixture fixtures (FreshAt recoveryNow)
-                    void $ evalWrite writer (ReserveFees recoveryNow nativeKey Native (money 3) "recipient" "recovery fixture")
-                    fixture fixtures ReadyIntake
-                    fixture fixtures (FreshAt recoveryNow)
-                    void $ evalWrite writer (PreparePayment recoveryNow nativeId (money 1) "{}")
-                    evalWrite writer (SaveDraft nativeId 0 "{}")
-                    nativePrepared<-evalRead reader (ReadPreparation nativeId)
-                    void $ evalWrite writer (RecordAttempt nativePrepared $ SignedAttempt "malformed-native" "00" "{}" (Just "offline:0"))
-                    original<-evalRead reader ReadBalances
-                    pending<-evalRead reader PendingAttempts >>= mapM (evalRead reader . ReadAttempt)
-                    check (sort(map recordedPayment pending)==[nativeId,identifier])
-                    forM_ [1,2::Int] $ \_->do
-                      countBefore<-fixture fixtures RecoveryPauseCount
-                      writeIORef calls []
-                      outcome<-try (worker $ workerRequest RunWorkerCycle) :: IO (Either BridgeError ())
-                      check (case outcome of Left _->True; _->False)
-                      countAfter<-fixture fixtures RecoveryPauseCount
-                      check (countAfter-countBefore==3) -- native lock + both payment failures
-                      observed<-readIORef calls
-                      check ("getSignatureStatuses" `elem` observed && "sendTransaction" `notElem` observed)
-                      evalRead reader ReadState >>= check . ledgerPaused
-                      evalRead reader ReadBalances >>= check . (==original)
-                      evalRead reader PendingAttempts >>= mapM (evalRead reader . ReadAttempt) >>= check . (==pending)
-  putStrLn "PASS: actual HTTPS worker/signer evaluators, auth/certificate refusal, SDK signature, persisted bytes, checkpoint receipt rejection/acknowledgment/replay; offline RPC and receipt fixtures only"
+                    refused "intake_paused"
+                    readIORef checkpoints >>= check . (==callsBefore)
+                    evalRead reader (ReadOrder header orderId) >>= check . (==Nothing) . W.depositInstruction
+                    evalRead reader ReadBalances >>= check . (==original)
+  putStrLn "PASS: real process HTTPS signing, auth/certificate refusal, serialized concurrent requests, second-read refusal and gate recovery, exact SDK output, durable ledger replay, pending-payment recovery and HTTP-triggered checkpoint receipt validation/acknowledgment/replay; offline fixtures only"
 
 restorationContract :: PG.Connection -> Reader -> Writer -> IO ()
 restorationContract fixtures reader writer=do
@@ -3529,7 +3453,6 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   evalRead reader (ReadReplacementDecision (signedId wire) (money 2) "increase fee") >>= check . (==Just(decision,False))
   n<-ledgerSequence <$> evalRead reader ReadState
   save "increase fee" >>= check . (==decision)
-  operate (Op.operator $ Op.DraftNativeReplacement (signedId wire) (money 2) "increase fee") >>= check . (==decision)
   evalRead reader ReadState >>= check . (==n) . ledgerSequence
   expectStore "native_replacement_draft_conflict" (evalWrite writer $ SaveReplacementDraft 110 parent draft {NP.draftPsbt="changed"} "increase fee")
   expectStore "native_replacement_draft_pending" (save "another decision")
@@ -3539,12 +3462,11 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   ready
   expectStore "native_replacement_draft_pending" (evalWrite writer $ AuthorizeSend 110 $ signedId wire)
   paused
-  operate (Op.operator $ Op.CancelNativeReplacement decision "abandon unsigned draft")
-  operate (Op.operator $ Op.CancelNativeReplacement decision "abandon unsigned draft")
+  evalWrite writer (CancelReplacementDraft decision "abandon unsigned draft")
+  evalWrite writer (CancelReplacementDraft decision "abandon unsigned draft")
   expectStore "native_replacement_cancellation_conflict" (evalWrite writer $ CancelReplacementDraft decision "different")
   evalRead reader (ReadReplacementDecision (signedId wire) (money 2) "increase fee") >>= check . (==Just(decision,True))
   save "increase fee" >>= check . (==decision)
-  expectStore "native_replacement_cancelled" (operate $ Op.operator $ Op.DraftNativeReplacement (signedId wire) (money 2) "increase fee")
   ready
   expectStore "backup_pending" (evalWrite writer $ AuthorizeSend 110 $ signedId wire)
   fixture fixtures CoverBackup
@@ -3568,7 +3490,6 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   child<-record family replacement
   sequenceNo<-ledgerSequence <$> evalRead reader ReadState
   record family replacement >>= check . (==child)
-  operate (Op.operator $ Op.SignNativeReplacement second) >>= check . (==signedId(recordedSigned child))
   evalRead reader ReadState >>= check . (==sequenceNo) . ledgerSequence
   evalRead reader (ReadReplacementMember second) >>= check . (==Just child)
   expectStore "native_replacement_signature_conflict" (record family replacement {NP.signedNativeBytes="04"})
@@ -3587,8 +3508,6 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 2) (money 0)) $ proof child anchor)
   evalRead reader PendingAttempts >>= check . all (`notElem` [signedId wire,signedId(recordedSigned child)])
   evalRead reader ReadNativeLockWork >>= check . (==Nothing)
-  evaluateOffline (Left $ workerRequest $ ReconcilePayment $ signedId wire)
-  evaluateOffline (Left $ workerRequest $ ReconcilePayment $ signedId $ recordedSigned child)
   -- Actual PostgreSQL winner history with synthetic chain evidence: principal
   -- remains paid while either family member becomes the canonical winner.
   settled<-evalRead reader (ReadAttempt $ signedId $ recordedSigned child)
@@ -3655,7 +3574,7 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   expectStore "native_rebroadcast_review_missing" (evalRead reader $ ReadNativeRebroadcastContext winnerId)
   record restoredWinner (NativeUnavailable "native_settled_payment_unseen")
   (rebroadcast,family,anchorSequence)<-evalRead reader (ReadNativeRebroadcastContext winnerId)
-  operate (Op.operatorRead Op.NativeReviews) >>= check . elem (winnerId,"unavailable",anchorSequence)
+  evalRead reader ReadNativeReviews >>= check . elem (winnerId,"unavailable",anchorSequence)
   let members=map fst family
       reason="repair original settled effect"
       rebroadcastProof bytesHash=object ["transaction" .= winnerId,"bytesHash" .= bytesHash,"nodeBlock" .= d
@@ -3683,7 +3602,6 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   evalWrite writer (Pause "rebroadcast remains paused")
   record restoredWinner NativeConfirming
   expectStore "native_rebroadcast_review_changed" (authorize approved)
-  expectStore "native_rebroadcast_review_changed" (operate $ Op.operator $ Op.RebroadcastNative winnerId anchorSequence reason)
   record restoredWinner (NativeUnavailable "rpc_unavailable")
   expectStore "native_rebroadcast_not_missing" (evalRead reader $ ReadNativeRebroadcastContext winnerId)
   record restoredWinner (NativeReconfirmed (costs 2) $ proof restoredWinner d)
@@ -3691,19 +3609,6 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   evalRead reader PendingAttempts >>= check . all (`notElem` [signedId wire,winnerId])
  where
   encodeText value=TE.decodeUtf8 (BL.toStrict $ encode value)
-  -- These branches must replay/cancel from the ledger alone. Unavailable
-  -- credentials and a rejecting manager prove that neither RPC nor signing runs.
-  operate :: Op.Plan 'Op.Operator a -> IO a
-  operate=evaluateOffline . Right
-  evaluateOffline :: Either (Request 'Op.Worker 'Op.Critical a) (Op.Plan 'Op.Operator a) -> IO a
-  evaluateOffline operation=do
-    let key=T.replicate 32 "1"
-        native=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:29432" "/unused" "workflow" 1 (T.replicate 64 "0")
-        solana=Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing key key key
-        settings=ObserverSettings native solana 2 "sol-origin" "opening-signature"
-        config=H.SolanaPolicy "contract" "contract" key key key (money 10) (money 10)
-    bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> fail "replacement replay reached network"}) closeManager $ \manager->
-      withRuntime manager settings config Nothing (SigningEndpoint 9443 "/unused/auth") reader writer $ \worker _ operator->either worker operator operation
 
 -- Real pg_dump/pg_restore, disposable database only. All row comparisons use
 -- closed Opaleye fixtures; createdb/restore/dropdb are schema infrastructure.

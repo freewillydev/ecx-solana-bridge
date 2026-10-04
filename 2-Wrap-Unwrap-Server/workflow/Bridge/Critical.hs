@@ -1,7 +1,7 @@
 {-# LANGUAGE DataKinds, GADTs, RankNTypes, ScopedTypeVariables, TypeFamilies, TypeApplications, ConstraintKinds, PatternSynonyms, ViewPatterns #-}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- The signer ClientM is constructed only inside this critical evaluator.
-module Bridge.Critical (CustomerSettings(..),withRuntime,runWorkerLoop,SignerSettings(..),signerApplication,runSigner) where
+module Bridge.Critical (Process(..),runProcess,CustomerSettings(..),SignerSettings(..),runWorkerLoop) where
 import Bridge.Operation.Internal hiding (customer)
 import Bridge.Domain (Asset(..),gross,paymentAsset,paymentId,units)
 import Bridge.Identity (payURIFor,digest)
@@ -10,7 +10,8 @@ import Bridge.Order (createCustomerOrder)
 import Bridge.Credentials (readNativeUnlock,withNativeUnlock)
 import qualified Bridge.Config as C
 import Bridge.Recovery
-import Data.Int (Int64)
+import Bridge.Control (runControl)
+import Bridge.Web (publicApplication)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import Bridge.Error
@@ -38,6 +39,7 @@ import qualified Bridge.SolanaHelper as H
 import Bridge.RPC (boundedBody,parseValue)
 import qualified Bridge.RPC as RPC
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (concurrently_)
 import System.IO (hPutStrLn,stderr)
 import Control.Concurrent.MVar (MVar,newMVar,withMVar)
 import Control.Exception (bracket,onException,try,catch,throwIO,IOException)
@@ -47,14 +49,14 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import System.Directory (removeDirectoryRecursive)
 import System.FilePath (takeDirectory)
 import System.Timeout (timeout)
-import Network.Wai (Application)
+import Network.Wai.Handler.Warp (runSettings,setHost,setPort,setTimeout,defaultSettings)
 import Network.HTTP.Client hiding (Request)
 import Network.HTTP.Client.TLS (mkManagerSettings)
 import qualified Network.Connection as NC
 import qualified Network.TLS as TLS
 import Network.TLS.Extra.Cipher (ciphersuite_default)
 import Data.X509.CertificateStore (makeCertificateStore)
-import Servant.API ((:<|>)(..),BasicAuthData)
+import Servant.API ((:<|>)(..))
 import qualified Servant.Client as SC
 
 -- Here each filled OperationContext reduces to its ground Operation instance.
@@ -139,66 +141,63 @@ data SignerSettings = SignerSettings
   , signingNativeUnlock :: Maybe FilePath
   , signingBackup :: Maybe (C.Config,FilePath,FilePath) }
 
--- Dedicated process: only read-only ledger access and private signing resources.
--- Authentication remains in the Servant transport; evaluation shares the gate below.
-signerApplication :: Manager -> Reader -> SignerSettings -> BasicAuthData -> IO Application
-signerApplication manager reader settings credentials=do
-  let native=signingNative settings; solana=signingSolana settings; config=signingPolicy settings
-  require (N.profile native `elem` [W.L2LSignetDevnet,W.ECXBetanetDevnet]
-    && S.solanaProfile solana==N.profile native
-    && S.mint solana==H.mint config && S.custodyOwner solana==H.custodyOwner config
-    && S.custodyAta solana==H.custodyAta config) "signer_profile_mismatch"
-  N.validateNativeSettings native
-  S.validateSolanaSettings solana
-  verifySigningKey (S.custodyOwner solana) (signingKey settings)
-  forM_ (signingNativeUnlock settings) $ \path->readNativeUnlock path >> pure ()
-  withCriticalEvaluator (SignerEvaluation manager reader settings) $ \evaluate->
-    signingApplication credentials evaluate
+-- Concrete service lifetimes, never caller-supplied evaluator continuations.
+-- Worker fields end with HTTP port, browser assets and operator-control directory.
+-- Signer startup cannot receive a writer or customer configuration.
+data Process
+  = WorkerProcess ObserverSettings H.SolanaPolicy (Maybe CustomerSettings) SigningEndpoint Writer Int FilePath FilePath
+  | SignerProcess SignerSettings SigningEndpoint
 
-runSigner :: Manager -> Reader -> SignerSettings -> SigningEndpoint -> IO ()
-runSigner manager reader settings endpoint=do
-  credentials<-signerCredentials endpoint
-  app<-signerApplication manager reader settings credentials
-  runSigningServer endpoint app
-
--- Startup supplies capabilities. Customer and worker requests share one dispatch
--- and one gate; safe reads have no writer, signer or network capability.
-withRuntime :: Manager -> ObserverSettings -> H.SolanaPolicy -> Maybe CustomerSettings -> SigningEndpoint -> Reader -> Writer
-  -> ((forall a. Request 'Worker 'Critical a -> IO a) -> (forall a. Plan 'Customer a -> IO a) -> (forall a. Plan 'Operator a -> IO a) -> IO b) -> IO b
-withRuntime rpc settings config customerSettings endpoint reader writer action = do
-  let native=nativeSettings settings; solana=solanaSettings settings
-  require (N.profile native==S.solanaProfile solana && S.mint solana==H.mint config
-    && S.custodyOwner solana==H.custodyOwner config && S.custodyAta solana==H.custodyAta config) "payment_profile_mismatch"
-  N.validateNativeSettings native
-  S.validateSolanaSettings solana
-  forM_ customerSettings $ \configured->do
-    let public=publicConfiguration configured; store=customerPolicy configured
-        policy=W.paymentPolicy(executionTerms store); costs=W.paymentLimits(executionTerms store)
-        limits=admissionLimits store
-    require (W.pubProfile public==N.profile native && W.pubMint public==H.mint config
-      && W.pubCustodyOwner public==H.custodyOwner config && W.pubDeployment public==H.deploymentId config
-      && W.pubDecimals public==8 && W.pubMinInput public==orderMinimum limits && W.pubMaxInput public==orderMaximum limits
-      && W.pubFeesBps public==M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]
-      && W.pubSolanaCluster public==(if N.profile native==W.CanonicalBeta then "mainnet-beta" else "devnet")
-      && W.deploymentFingerprint policy==H.fingerprint config && W.nativeDepth policy==defaultNativeDepth settings
-      && W.savedSolanaFee costs==H.maxSolFee config && W.savedSolanaRent costs==H.maxSolAccountRent config) "customer_configuration_mismatch"
-  let environment=CriticalEnvironment rpc settings config customerSettings endpoint reader writer
-      safeEnvironment=SafeEnvironment reader (publicConfiguration <$> customerSettings)
-  withCriticalEvaluator (WorkerEvaluation environment) $ \interpret->do
-    let customerRequest :: forall caller a. Plan caller a -> IO a
-        customerRequest (SafePlan request)=evalSafe safeEnvironment request
-        customerRequest (CriticalPlan request)=interpret request
-    action interpret customerRequest customerRequest
-
--- Worker and signer startup use the same evaluator, with independent gates and
--- disjoint concrete resources. No real evaluator or environment is exported.
-withCriticalEvaluator :: Evaluation 'Critical
-  -> ((forall caller a. Request caller 'Critical a -> IO a) -> IO b) -> IO b
-withCriticalEvaluator environment action=do
+runProcess :: Manager -> Reader -> Process -> IO ()
+runProcess rpc reader process=do
+  environment<-case process of
+    SignerProcess settings _->do
+      let native=signingNative settings; solana=signingSolana settings; config=signingPolicy settings
+      require (N.profile native `elem` [W.L2LSignetDevnet,W.ECXBetanetDevnet]
+        && S.solanaProfile solana==N.profile native
+        && S.mint solana==H.mint config && S.custodyOwner solana==H.custodyOwner config
+        && S.custodyAta solana==H.custodyAta config) "signer_profile_mismatch"
+      N.validateNativeSettings native
+      S.validateSolanaSettings solana
+      verifySigningKey (S.custodyOwner solana) (signingKey settings)
+      forM_ (signingNativeUnlock settings) $ \path->readNativeUnlock path >> pure ()
+      pure $ SignerEvaluation rpc reader settings
+    WorkerProcess settings config customerSettings endpoint writer _ _ _->do
+      let native=nativeSettings settings; solana=solanaSettings settings
+      require (N.profile native==S.solanaProfile solana && S.mint solana==H.mint config
+        && S.custodyOwner solana==H.custodyOwner config && S.custodyAta solana==H.custodyAta config) "payment_profile_mismatch"
+      N.validateNativeSettings native
+      S.validateSolanaSettings solana
+      forM_ customerSettings $ \configured->do
+        let public=publicConfiguration configured; store=customerPolicy configured
+            policy=W.paymentPolicy(executionTerms store); costs=W.paymentLimits(executionTerms store)
+            limits=admissionLimits store
+        require (W.pubProfile public==N.profile native && W.pubMint public==H.mint config
+          && W.pubCustodyOwner public==H.custodyOwner config && W.pubDeployment public==H.deploymentId config
+          && W.pubDecimals public==8 && W.pubMinInput public==orderMinimum limits && W.pubMaxInput public==orderMaximum limits
+          && W.pubFeesBps public==M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]
+          && W.pubSolanaCluster public==(if N.profile native==W.CanonicalBeta then "mainnet-beta" else "devnet")
+          && W.deploymentFingerprint policy==H.fingerprint config && W.nativeDepth policy==defaultNativeDepth settings
+          && W.savedSolanaFee costs==H.maxSolFee config && W.savedSolanaRent costs==H.maxSolAccountRent config) "customer_configuration_mismatch"
+      pure $ WorkerEvaluation (CriticalEnvironment rpc settings config customerSettings endpoint reader writer)
+  -- The only critical dispatch call site. It cannot escape this service lifetime.
+  -- Each OS process owns its own gate; the two processes share no mutable state.
   gate<-newMVar ()
   let dispatch :: forall caller a. Request caller 'Critical a -> IO a
       dispatch request=either reject (evalCritical gate environment) (checkedRequest request)
-  action dispatch
+  case process of
+    SignerProcess _ endpoint->do
+      credentials<-signerCredentials endpoint
+      signingApplication credentials dispatch >>= runSigningServer endpoint
+    WorkerProcess _ _ customerSettings _ _ port assets directory->do
+      let safeEnvironment=SafeEnvironment reader (publicConfiguration <$> customerSettings)
+          evaluate :: forall caller a. Plan caller a -> IO a
+          evaluate (SafePlan request)=evalSafe safeEnvironment request
+          evaluate (CriticalPlan request)=dispatch request
+      app<-publicApplication assets evaluate
+      concurrently_
+        (runSettings (setHost "127.0.0.1" $ setPort port $ setTimeout 65 defaultSettings) app)
+        (concurrently_ (runWorkerLoop dispatch) (runControl directory evaluate))
 
 evalCritical :: MVar () -> Evaluation 'Critical -> DSL caller 'Critical a -> IO a
 evalCritical gate environment operation=withMVar gate $ \_->case operation of
