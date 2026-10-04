@@ -52,7 +52,7 @@ import qualified Bridge.NativePayment as NP
 import Bridge.Error (BridgeError(..),reject)
 import Bridge.Observer (ObserverSettings(..))
 import Bridge.Reconciliation (inspectCustodyWith,nativeBalance)
-import Bridge.RPC (fieldValue,newRpcManager)
+import Bridge.RPC (fieldValue,newRpcManager,rpcManagerSettings,rpc)
 import qualified Bridge.SolanaPayment as SP
 import qualified Network.Wai.Handler.Warp as Warp
 import qualified Data.ByteString as BS
@@ -2345,7 +2345,10 @@ signingEndpoint directory=do
   pure (SigningEndpoint port auth)
 
 withSigningClient :: SigningEndpoint -> (HTTP.Manager -> IO a) -> IO a
-withSigningClient endpoint action=do
+withSigningClient=withSigningClientSettings id
+
+withSigningClientSettings :: (HTTP.ManagerSettings -> HTTP.ManagerSettings) -> SigningEndpoint -> (HTTP.Manager -> IO a) -> IO a
+withSigningClientSettings configure endpoint action=do
   certificate<-signerCertificate endpoint
   let base=TLS.defaultParamsClient "127.0.0.1" BS.empty
       tls=base {TLS.clientShared=(TLS.clientShared base) {TLS.sharedCAStore=makeCertificateStore [certificate]}
@@ -2353,7 +2356,7 @@ withSigningClient endpoint action=do
       settings=HTTP.managerSetProxy HTTP.noProxy (mkManagerSettings (NC.TLSSettings tls) Nothing)
         {HTTP.managerRetryableException=const False,HTTP.managerIdleConnectionCount=0
         ,HTTP.managerResponseTimeout=HTTP.responseTimeoutMicro 60000000}
-  bracket (newManager settings) closeManager action
+  bracket (newManager $ configure settings) closeManager action
 
 signerPost :: ToJSON a => HTTP.Manager -> SigningEndpoint -> String -> a -> IO (HTTP.Response BL.ByteString)
 signerPost manager endpoint path body=do
@@ -3089,6 +3092,25 @@ tlsMain=do
           makeCertificate (directory<>"/untrusted")
           certificate<-BS.readFile (auth<>".pem")
           untrusted<-BS.readFile (directory<>"/untrusted.pem")
+          -- Actual HTTPS responseOpen/JSON-RPC integration: exactly one pacing
+          -- admission per request, including a retried read but no retry of send.
+          ticks<-newIORef 0; starts<-newIORef []; requests<-newIORef (0::Int)
+          paced<-rpcManagerSettings 2 (readIORef ticks) (\us->modifyIORef' ticks (+toInteger us*1000))
+          let rateApplication request respond=do
+                void (Wai.strictRequestBody request)
+                n<-atomicModifyIORef' requests (\old->(old+1,old+1))
+                let result=if n==2 then ["result" .= ("fixture"::T.Text)] else ["error" .= object ["code" .= (429::Int)]]
+                respond $ Wai.responseLBS status200 [("Content-Type","application/json"),("Retry-After","1")]
+                  (encode $ object $ ["jsonrpc" .= ("2.0"::T.Text),"id" .= (1::Int)]<>result)
+              pacedSettings base=base {HTTP.managerWrapException= \request action->
+                HTTP.managerWrapException paced request (readIORef ticks >>= \now->modifyIORef' starts (<>[now]) >> action)}
+          withProcessListening (runSigningServer endpoint rateApplication) (signerPort endpoint) $
+            withSigningClientSettings pacedSettings endpoint $ \client->do
+              let call=rpc client ("https://127.0.0.1:"<>show(signerPort endpoint)) Nothing
+              call "getGenesisHash" [] >>= check . (==String "fixture")
+              expectStore "rpc_rate_limited" (call "sendTransaction" [])
+              readIORef requests >>= check . (==3)
+              readIORef starts >>= check . (==[0,500000000,1000000000])
           Warp.testWithApplication (pure rpcApplication) $ \rpcPort->
             bracket (newManager defaultManagerSettings {managerModifyRequest= \request->pure request {HTTP.secure=False,HTTP.host="127.0.0.1",HTTP.port=rpcPort}}) closeManager $ \manager->do
               let post client=signerPost client endpoint "/sign-preparation" (identity,identifier,0::Int)

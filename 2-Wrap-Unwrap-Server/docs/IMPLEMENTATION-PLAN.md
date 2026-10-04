@@ -36,8 +36,9 @@ separate explicit tooling and evidence; they are not bridge-custody privileges.
 2. **Close substantive recovery gaps.** Exercise permanent source loss/coverage,
    restored sources, native replacement/winner change/rebroadcast, and restoration
    with in-flight work. Retain exact bytes, one economic settlement and capital
-   accounting. Complete funded encrypted-wallet signing and recovery; scoped
-   wallet/export checks do not establish full funded recovery. Fix concrete
+   accounting. The same-host funded encrypted-wallet drill has now settled its
+   restored native and wrapped payouts; retain it as regression evidence while
+   clean-host funded recovery remains open. Fix concrete
    failures in the shared payment engine rather than adding parallel paths.
 3. **Complete customer acceptance.** Use an actual supported Solana Pay wallet on
    Devnet. Verify its signed transaction/reference, both conversion directions,
@@ -55,7 +56,8 @@ separate explicit tooling and evidence; they are not bridge-custody privileges.
    before activating a funded canonical deployment. Canonical `observe`, `serve`
    and `signer` now use the shared runtime; startup still pauses intake and requires
    pinned identity, independent verification and backup coverage. Local process and
-   protocol contracts do not replace a real Mainnet round trip.
+   protocol contracts do not replace a real Mainnet round trip. RPC pacing is
+   implemented; measure expected-load throughput and combined provider budgets.
 5. **Prove deployment and disaster recovery.** Run worker/signer under separate OS
    identities and database roles; deny worker access to custody keys, native full
    credentials and unlock/lock RPC. Verify the current processes, not only file

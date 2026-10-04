@@ -1,25 +1,57 @@
 {-# LANGUAGE ScopedTypeVariables, LambdaCase #-}
-module Bridge.RPC (newRpcManager, rpc, retryRateLimitedRead, parseValue, fieldValue, boundedBody) where
+module Bridge.RPC (newRpcManager, rpcManagerSettings, rpc, retryRateLimitedRead, parseValue, fieldValue, boundedBody) where
 
 import Bridge.Error
 import Control.Exception (catch)
 import Control.Concurrent (threadDelay)
+import Control.Concurrent.MVar
 import Control.Monad (when)
+import Data.Char (toLower)
 import Data.Aeson
 import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Char8 as BSC
+import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.HTTP.Client
 import Network.HTTP.Client.TLS (tlsManagerSettings)
 import Network.HTTP.Types.Status (statusCode)
+import GHC.Clock (getMonotonicTimeNSec)
+import System.Environment (lookupEnv)
 import Text.Read (readMaybe)
 
 newRpcManager :: IO Manager
-newRpcManager = newManager $ managerSetProxy noProxy tlsManagerSettings
-  { managerRetryableException = const False, managerConnCount = 4
-  , managerResponseTimeout = responseTimeoutMicro 15000000 }
+newRpcManager = do
+  configured<-lookupEnv "ECX_RPC_REQUESTS_PER_SECOND"
+  rate<-maybe (pure 2) (maybe (reject "invalid_rpc_rate") pure . readMaybe) configured
+  rpcManagerSettings rate (toInteger <$> getMonotonicTimeNSec) threadDelay >>= newManager
+
+-- Per-manager HTTPS admission pacing, not a provider-wide or wire-arrival quota.
+-- Worker, signer and administration processes need budgets whose sum fits the
+-- provider plan. Host keys exclude credentials, paths and query strings.
+rpcManagerSettings :: Int -> IO Integer -> (Int -> IO ()) -> IO ManagerSettings
+rpcManagerSettings rate clock wait = do
+  require (rate>=1 && rate<=1000) "invalid_rpc_rate"
+  hosts<-newMVar M.empty
+  let interval=(1000000000+toInteger rate-1) `div` toInteger rate
+      untilTime next=do
+        now<-clock
+        when (now<next) $ wait (fromInteger $ min 1000000 ((next-now+999) `div` 1000)) >> untilTime next
+      pace request=when (secure request) $ do
+        let key=BSC.map toLower $ BSC.dropWhileEnd (=='.') $ host request
+        gate<-modifyMVar hosts $ \known->case M.lookup key known of
+          Just existing->pure (known,existing)
+          Nothing->do fresh<-newMVar 0; pure (M.insert key fresh known,fresh)
+        -- Hold only this host's gate while waiting. A delayed/cancelled caller
+        -- cannot leave reserved future slots that later dispatch in a burst.
+        modifyMVar_ gate $ \next->untilTime next >> ((+interval) <$> clock)
+      base=managerSetProxy noProxy tlsManagerSettings
+        { managerRetryableException = const False, managerConnCount = 4
+        , managerResponseTimeout = responseTimeoutMicro 15000000 }
+  -- http-client calls managerModifyRequest twice. This wrapper is called once
+  -- per responseOpen, including each explicit read retry; RPC redirects are off.
+  pure base {managerWrapException= \request action->managerWrapException base request (pace request >> action)}
 boundedBody :: Int -> BodyReader -> IO BS.ByteString
 boundedBody maximumBytes reader = require (maximumBytes>=0) "invalid_response_bound" >> go 0 []
  where

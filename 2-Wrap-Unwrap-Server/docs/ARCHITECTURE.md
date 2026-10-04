@@ -285,6 +285,13 @@ Read-only RPC retries use a fixed bounded allowlist. Wallet mutations, sends and
 unknown outcomes are not automatically retried. Fixtures are not substitutes for
 real protocol/network acceptance.
 
+The shared RPC manager spaces HTTPS admissions by normalized hostname using a
+monotonic clock and a cancellation-safe per-host gate. It runs once per actual
+HTTP request, including each allowed retry. Waiting for one provider does not block
+another. Worker and signer budgets are separate; deployment must keep their sum
+and other consumers within provider quotas. Pacing neither authorizes a payment nor
+extends its saved deadlines, custody freshness, backup or blockhash checks.
+
 Token and pool administration have their own closed critical evaluators, outside
 custody. `Token.Network` and `Pool.Signing` own private signing helpers and immutable
 attempt families. Shared `Bridge.AdminStatus` collects read-only recovery evidence;

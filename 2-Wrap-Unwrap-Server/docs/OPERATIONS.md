@@ -66,6 +66,18 @@ refusal. Fund and allocate custody through the existing treasury workflow before
 operator resume. Enabling the code path does not establish funded Mainnet acceptance;
 see [release gates](RELEASE-REVIEW.md).
 
+RPC transport defaults to **2 HTTPS request admissions per second per hostname
+per process**. Set `ECX_RPC_REQUESTS_PER_SECOND` (integer 1–1000) separately on the
+worker and signer before startup to change their budgets. Divide a shared provider
+quota between those processes and any token/pool tools or other consumers; the
+default two services can together admit about 4 requests/second to one provider.
+Paths, API keys and ports on the same normalized hostname share a budget. Native
+HTTP RPC is unpaced. This spaces request starts without accumulating idle burst
+credit; it does not guarantee provider arrival times or cover compute-unit,
+method-specific or monthly limits. Keep headroom. Read-only 429 retries also consume
+the budget; signing mutations and sends retain their existing no-retry policy.
+Pacing does not remove background observation or replace public-facing DDoS controls.
+
 For an encrypted native descriptor wallet, set the signer's optional
 `nativeUnlockFile` to a mode-0600 regular file with the exact 1–1024-byte UTF-8
 passphrase, without NUL or line endings. The signer unlocks for at most 120 seconds

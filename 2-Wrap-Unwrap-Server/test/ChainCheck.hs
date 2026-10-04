@@ -29,6 +29,8 @@ import Bridge.Identity (publicKey)
 import Bridge.RPC
 import Bridge.Wire (Profile(..))
 import Control.Exception (try,bracket,SomeException)
+import Control.Concurrent (forkFinally,killThread)
+import Control.Concurrent.MVar
 import Control.Monad (unless)
 import Data.Aeson hiding (Result)
 import Data.Aeson.Types (parseEither)
@@ -42,6 +44,7 @@ import Data.Word (Word64)
 import Data.Scientific (scientific)
 import Data.Text (Text)
 import qualified Data.Text as T
+import qualified Network.HTTP.Client as HTTP
 import Test.QuickCheck hiding (label)
 
 checks :: IO [Result]
@@ -114,6 +117,52 @@ checks = (\deployment native solana identity observation administration common->
       result <- retryRateLimitedRead (\n->modifyIORef' waits (<>[n])) "getTransaction" action
       count <- readIORef calls; delays <- readIORef waits
       pure (result && count==3 && delays==[5000000,8000000])
+  , check "RPC admission shares normalized hosts, isolates providers and permits no idle burst" $ once $ ioProperty $ do
+      clock<-newIORef 0; waits<-newIORef []
+      let wait micros=modifyIORef' waits (<>[micros]) >> modifyIORef' clock (+toInteger micros*1000)
+          request=HTTP.defaultRequest {HTTP.secure=True,HTTP.host="rpc.example"}
+      settings'<-rpcManagerSettings 2 (readIORef clock) wait
+      let admit r=HTTP.managerWrapException settings' r (readIORef clock)
+      first<-admit request
+      alias<-admit request {HTTP.host="RPC.EXAMPLE.",HTTP.path="/other-key",HTTP.queryString="?apikey=private"}
+      verifier<-admit request {HTTP.host="verifier.example"}
+      sameHost<-admit request {HTTP.port=8443}
+      native<-admit request {HTTP.secure=False,HTTP.host="127.0.0.1"}
+      writeIORef clock 20000000000
+      idle<-admit request
+      next<-admit request
+      separate<-rpcManagerSettings 2 (readIORef clock) wait
+      independent<-HTTP.managerWrapException separate request (readIORef clock)
+      delays<-readIORef waits
+      pure ([first,alias,verifier,sameHost,native,idle,next,independent]==
+        [0,500000000,500000000,1000000000,1000000000,20000000000,20500000000,20500000000]
+        && delays==[500000,500000,500000])
+  , check "RPC admission rounds spacing upward and rechecks delayed wakes" $ forAll (chooseInt (1,1000)) $ \rate->ioProperty $ do
+      clock<-newIORef 0
+      let wait micros=modifyIORef' clock (+(toInteger micros*1000+1234567))
+          request=HTTP.defaultRequest {HTTP.secure=True,HTTP.host="rpc.example"}
+          minimumGap=(1000000000+toInteger rate-1) `div` toInteger rate
+      settings'<-rpcManagerSettings rate (readIORef clock) wait
+      times<-sequence $ replicate 5 $ HTTP.managerWrapException settings' request (readIORef clock)
+      pure (head times==0 && all (>=minimumGap) (zipWith (-) (tail times) times))
+  , check "RPC admission rejects invalid limits" $ forAll (elements [minBound,0,1001,maxBound]) $ \rate->ioProperty $
+      rejects "invalid_rpc_rate" (rpcManagerSettings rate (pure 0) (\_->fail "invalid policy waited"))
+  , check "cancelling an RPC waiter releases its host without blocking independent providers" $ once $ ioProperty $ do
+      clock<-newIORef 0; entered<-newEmptyMVar; blocked<-newEmptyMVar; finished<-newEmptyMVar
+      let request=HTTP.defaultRequest {HTTP.secure=True,HTTP.host="rpc.example"}
+      settings'<-rpcManagerSettings 2 (readIORef clock) (\_->putMVar entered () >> takeMVar blocked)
+      let admit r=HTTP.managerWrapException settings' r (readIORef clock)
+      _<-admit request
+      result<-timeout 3000000 $ bracket
+        (forkFinally (admit request) (\_->putMVar finished ())) killThread $ \thread->do
+          takeMVar entered
+          other<-admit request {HTTP.host="verifier.example"}
+          killThread thread
+          takeMVar finished
+          writeIORef clock 1000000000
+          restored<-admit request
+          pure (other==0 && restored==1000000000)
+      pure (result==Just True)
   , check "mutations and unknown methods never retry" $ forAll (elements ["sendTransaction","sendrawtransaction","walletprocesspsbt","walletpassphrase","walletlock","getnewaddress","backupwallet","restorewallet","futureMethod"]) $ \method -> ioProperty $ do
       calls <- newIORef (0::Int); waits <- newIORef (0::Int)
       refused <- rejects "rpc_rate_limited" $ retryRateLimitedRead (\_->modifyIORef' waits (+1)) method

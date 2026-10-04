@@ -61,6 +61,7 @@ invocation needs `ecx_bridge_datadir` pointing to the server package.
 | `ECX_REBUILD_SETUP_ONLY=1` | `ECX_REBUILD_EXECUTABLE`; optional `ECX_REBUILD_SETUP_RESIDUE=1` |
 | `ECX_REBUILD_SERVER_ONLY=1` | `ECX_REBUILD_EXECUTABLE`; process, HTTP and private control |
 | `ECX_REBUILD_TLS_ONLY=1` | `ECX_REBUILD_TEST_SDK`; actual HTTPS saved-decision signing |
+| `ECX_REBUILD_CANONICAL=1` | With server/TLS mode: canonical Mainnet profile using offline RPC fixtures; no Mainnet sends |
 | `ECX_REBUILD_FENCE_ONLY=1` | Database/filesystem ownership and sequence fencing |
 | `ECX_REBUILD_NATIVE_RECOVERY_ONLY=1` | Executable, `ECX_REBUILD_NATIVE_RECOVERY_COOKIE`, `ECX_REBUILD_NATIVE_WALLET_DIRECTORY`; disposable real-node wallet |
 | `ECX_REBUILD_ENCRYPTED_NATIVE_ONLY=1` | Same native recovery inputs; encrypts only its disposable wallet |

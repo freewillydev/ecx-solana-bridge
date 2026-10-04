@@ -17,6 +17,7 @@ a past transfer or installer does not certify later source or a new deployment.
 | Custody restoration | Sequence-98 funded ledger restored into separate same-host staging; 24 projections matched and actual chain reconciliation passed. Minimum sequence 99 refused the archive. This does not prove off-host storage or clean-host wallet activation. |
 | Automated boundaries | Cabal QuickCheck/protocol tests, actual HTTPS tests and PostgreSQL contracts cover typed authority, immutable accounting, fencing, concurrency, cancellation, source/replacement recovery and encrypted restic restoration. Fixtures do not prove all real-chain cases. |
 | Canonical Mainnet mode | `serve` and `signer` accept the canonical profile through the shared order/payment engine. Local contracts verify CLI startup, paused order refusal, observer restrictions, actual HTTPS signing of canonical-mint bytes, concurrent/repeated signing, second-read refusal and customer checkpoint handling. RPC effects are offline fixtures, not a funded Mainnet transfer. |
+| RPC pacing | Root build, all three Cabal suites and server/HTTPS contracts pass. Tests cover host budgets, idle/late wakeups, cancellation and actual HTTPS accounting of a read retry versus a refused send. The local Signet/Devnet deployment resumed at the default 2 requests/second per process/host with fresh chain/custody checks and unchanged paid orders. This is not a Mainnet load test or a provider-wide quota guarantee. |
 | Signer model | Bounded two-request TLA+ model: 54,289 distinct states; path/output/dispatch invariants and negative mutations checked. No TLAPS/unbounded Haskell proof. |
 | Token administration | Real Devnet mint/account creation, issuance/burn and metadata readback, preserving signed-attempt replay. Bounded expiry recovery now has a finalized mint-one/burn-one round trip; canonical authority/backing remain open. |
 | Liquidity | Real Devnet pool/position creation, funded deposit/withdrawal and collection replay, plus bounded expiry recovery for an empty-position collection. Collected fees were zero; nonzero yield/reinvestment remains unverified. |
@@ -101,10 +102,17 @@ These regressions do not close the remaining funded recovery acceptance gates.
 
 The funded encrypted-wallet drill restored an already signed native payout and
 completed it using unchanged bytes, then signed and settled a new native payout
-with the recovered wallet. Its restored HTTP wrap remains unfinished: generation
-zero expired before broadcast authorization; verified expiry and explicit retry
-approval are saved. RPC rate limits currently prevent fresh scans and resume.
-They also exposed a verifier-outage bug: rereading a verified deposit could revoke
+with the recovered wallet. Its restored HTTP wrap subsequently settled as
+`PaymentPaid`, with payout
+`896KTxnzFQQZ6tJMK143tUhKhbE6fuAtiraJQfDJqv6V3vVf38wQBjWdFMikq1LYEmFu3dxLzEDJhuhHFsihVoc`.
+The expired generation remains in history; verified expiry and explicit retry
+approval preceded its successor. A later real Solana Pay tester deposit also
+settled native payout `f2376847434952256d7426cfef5a6f3dd58870e6caa80da3309e73148f753e8b`
+for 990 net from 1,000 gross, with the 10-unit bridge fee and separate operator
+network cost. Current ledger checks confirm both paid states, no pending attempts
+or payment candidates, and fresh scans/custody. This is same-host Signet/Devnet
+recovery evidence, not clean-host or Mainnet acceptance.
+Earlier rate limits exposed a verifier-outage bug: rereading a verified deposit could revoke
 its eligibility. Unavailable verification now refuses the scan without changing
 receipts; actual disagreement remains reviewable. Root build, all three suites and
 PostgreSQL/HTTPS contracts passed, including repeated-cursor timeout/rate-limit/
@@ -157,7 +165,8 @@ proof of nonexecution.
    browser errors. A test client or wallet-opening link does not close this gate.
 2. **Recovery effects:** verify permanent source loss/double spend, coverage/return,
    native replacement/winner change/rebroadcast and restoration with in-flight
-   signed work. Complete funded encrypted-wallet signing and restored operation.
+   signed work. Retain the completed same-host encrypted-wallet drill as regression
+   evidence; clean-host funded recovery remains in the following gate.
    Preserve one payout, correct capital/cost accounting and exact saved bytes.
 3. **Isolation and off-host recovery:** exercise the current worker/signer under
    separate OS and PostgreSQL identities, actual restricted native RPC, and denied
