@@ -88,6 +88,8 @@ inspectCustodyWith clock identity native solana verifier settings config reader 
     txid<-fieldValue "txid" entry
     confirmations<-fieldValue "confirmations" entry :: IO Int
     anchor<-parseValue (withObject "transaction" (.:? "blockhash")) entry
+    known<-evalRead reader (HasCustodyEvent "Native" txid)
+    require known "custody_native_history_advanced"
     (_,savedAnchor,proof)<-evalRead reader (ReadCustodyEvent "Native" txid)
     old<-fieldValue "confirmations" proof
     require (old==confirmations && savedAnchor==maybe "unconfirmed" id anchor) "custody_native_history_changed"

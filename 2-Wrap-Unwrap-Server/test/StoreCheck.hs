@@ -916,6 +916,13 @@ ledgerMain = do
         fixture fixtures ReadyIntake
         evalWrite writer (RecordCustody revision 100 (Just "custody_native_history_advanced") Nothing)
         evalRead reader ReadState >>= check . not . ledgerPaused
+        invalidated<-fixture fixtures ReadCustodyCheck
+        check (invalidated==(Nothing,Just 100,Just "custody_native_history_advanced"))
+        expectStore "custody_not_reconciled" (evalRead reader $ CheckIntake 100)
+        forM_ ["custody_history_not_current","custody_native_history_changed"] $ \code->do
+          fixture fixtures ReadyIntake
+          evalWrite writer (RecordCustody revision 100 (Just code) Nothing)
+          evalRead reader ReadState >>= check . ledgerPaused
         evalWrite writer (RecordCustody revision 100 (Just "balance_mismatch") (Just $ object ["matches" .= False]))
         evalRead reader ReadState >>= check . ledgerPaused
         evalWrite writer (RecordCustody revision 100 Nothing good)
@@ -2054,6 +2061,22 @@ custodyContract database store fixtures reader = do
     settings {solanaSettings=solana {Solana.solanaVerifierRpc=Just "https://independent.example"}})
   let advanced wallet method params=if method=="listsinceblock" then pure $ object ["lastblock" .= ("advanced"::T.Text)] else nativeCall wallet method params
   expectStore "custody_native_history_advanced" (inspect (pure 100) (pure ()) advanced good Nothing settings)
+  -- A new mempool receipt can appear after scanning without advancing the tip.
+  -- Absence defers custody; an existing reviewed or changed event stays strict.
+  let newTx=T.replicate 64 "2"
+      proof=object ["confirmations" .= (0::Int)]
+      seed review=fixture fixtures $ SeedTreasuryEvidence "Native" newTx "unconfirmed" "reference" review proof
+      appeared action confirmations wallet method params=if method=="listsinceblock" then do
+        action
+        pure $ object ["lastblock" .= ("fixture-anchor"::T.Text)
+          ,"transactions" .= [object ["txid" .= newTx,"confirmations" .= (confirmations::Int)]]
+          ,"removed" .= ([]::[Value])]
+       else nativeCall wallet method params
+      inspectAppeared action confirmations=inspect (pure 100) (pure ()) (appeared action confirmations) good Nothing settings
+  expectStore "custody_native_history_advanced" (inspectAppeared (pure ()) 0)
+  seed 0
+  expectStore "custody_native_history_changed" (inspectAppeared (pure ()) 1)
+  expectStore "custody_history_not_current" (inspectAppeared (seed 1) 0) `finally` seed 0
   samples<-newIORef (0::Int)
   let unstable wallet method params=if method=="getbalances" then do
         count<-atomicModifyIORef' samples (\n->(n+1,n))
@@ -2193,6 +2216,11 @@ nativeCustodyFamilies fixtures reader writer settings config base solana=do
           && difference==T.pack(show $ corrected-2100-delta))
   first<-seed parent
   recorded<-evalRead reader (ReadAttempt $ txid parent)
+  revision<-evalRead reader ReadCustodyRevision
+  evalWrite writer (RecordCustody revision 100 (Just "custody_native_history_advanced") Nothing)
+  evalRead reader ReadState >>= check . not . ledgerPaused
+  expectStore "custody_not_reconciled" (evalWrite writer $ AuthorizeSend 100 $ txid parent)
+  evalRead reader (ReadAttempt $ txid parent) >>= check . (==recorded)
   paused
   decision<-evalWrite writer (SaveReplacementDraft 100 recorded (draft child) "custody replacement")
   fixture fixtures CoverBackup

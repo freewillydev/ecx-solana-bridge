@@ -211,6 +211,14 @@ replacement fees, retained/abandoned/missing families, exact correction and rema
 mismatch, pending-credit refusal, unchanged-balance mempool transitions and the existing
 single-family constraint. No schema or settlement rule changed. Funded eviction,
 replacement and rebroadcast acceptance remain open; these fixtures do not close them.
+
+The real Mainnet return deposit also exposed an unconfirmed arrival between native
+scanning and custody inspection. An unknown history entry now invalidates custody
+with the existing history-advanced condition so the next scan can catch up; a known
+reviewed or changed entry retains its strict refusal. The two-line guard passed the
+root build, bridge suite and PostgreSQL/HTTPS contracts. Regressions prove that this
+deferral removes certification, does not authorize intake, and never clears an
+existing pause. The deployed pilot required a normal checked resume before the fix.
 Readiness is repaired before obtaining a new blockhash; redundant outer worker
 refreshes are removed while leaf checks and both backup barriers remain. This
 reduces `Critical.hs` by three lines; the verifier fix adds no production lines.
