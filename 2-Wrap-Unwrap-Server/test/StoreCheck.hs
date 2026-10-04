@@ -3187,6 +3187,37 @@ tlsMain=do
                     readIORef checkpoints >>= check . (==callsBefore)
                     evalRead reader (ReadOrder header orderId) >>= check . (==Nothing) . W.depositInstruction
                     evalRead reader ReadBalances >>= check . (==original)
+        -- Retrying reopens the same intent. Proved expired signatures remain
+        -- history, not a second live transaction or a native replacement family.
+        fixture fixtures SeedCustodyHeads
+        let origins=[("Native","scan-origin"),("Solana","sol-origin"),("SolanaOperating","opening-signature")]
+            proof="{\"expiry\":\"offline custody selection contract\"}"
+            pending expected=do
+              clock<-floor <$> getPOSIXTime
+              fixture fixtures (FreshAt clock)
+              snapshot<-evalRead reader (ReadCustodySnapshot clock origins False)
+              check (filter ((==identifier).recordedPayment) (custodyPending snapshot)==expected)
+              check ("malformed-native" `elem` map (signedId.recordedSigned) (custodyPending snapshot))
+        old<-evalRead reader (ReadAttempt $ maybe "" id $ H.replySignature reply)
+        pending [old]
+        evalWrite writer (RecordSolanaExpiry old proof)
+        pending []
+        retired<-evalRead reader (ReadAttempt $ signedId $ recordedSigned old)
+        clock<-floor <$> getPOSIXTime
+        evalWrite writer (ApproveSolanaRetry clock retired "custody retry contract" proof)
+        original<-evalRead reader (ReadRecordedPreparation $ signedId $ recordedSigned old)
+        fixture fixtures ReadyIntake
+        fixture fixtures (FreshAt clock)
+        next<-evalWrite writer (PreparePayment clock identifier (preparedFee original) (preparedPolicy original))
+        evalWrite writer (SaveDraft identifier (preparedGeneration next) (maybe "" id $ preparedDraft original))
+        pending []
+        fixture fixtures CoverBackup
+        prepared<-evalRead reader (ReadPreparation identifier)
+        successor<-evalWrite writer (RecordAttempt prepared (recordedSigned old) {signedId="offline-custody-successor"})
+        pending [successor]
+        evalWrite writer (RecordSolanaExpiry successor proof)
+        pending []
+        evalRead reader (ReadAttempt $ signedId $ recordedSigned old) >>= check . (==retired)
   putStrLn "PASS: real process HTTPS signing, auth/certificate refusal, serialized concurrent requests, second-read refusal and gate recovery, exact SDK output, durable ledger replay, pending-payment recovery and HTTP-triggered checkpoint receipt validation/acknowledgment/replay; offline fixtures only"
 
 restorationContract :: PG.Connection -> Reader -> Writer -> IO ()

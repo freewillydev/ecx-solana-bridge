@@ -2061,7 +2061,11 @@ custodySnapshot c now expectedOrigins inspectLosses = do
   pendingIds<-O.runSelect c $ O.limit 1001 $ do
     a<-O.selectTable S.attempts
     i<-O.selectTable S.intents
-    O.where_ (S.attemptIntent a O..== S.intentId i O..&& S.intentResolved i O..== O.sqlInt8 0)
+    expired<-Exists.exists $ do
+      (key,_,_)<-O.selectTable S.solanaExpiries
+      O.where_ (key O..== S.attemptId a O..&& S.intentChain i O..== O.sqlStrictText "Solana")
+      pure ()
+    O.where_ (S.attemptIntent a O..== S.intentId i O..&& S.intentResolved i O..== O.sqlInt8 0 O..&& O.not expired)
     pure (S.attemptId a)
     :: IO [Text]
   require (length pendingIds<=1000) "custody_attempt_bounds"
