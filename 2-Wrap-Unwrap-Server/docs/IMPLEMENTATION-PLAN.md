@@ -1,10 +1,18 @@
 # Remaining implementation plan
 
-The replacement is now the sole server application. The duplicate server,
-obsolete Python acceptance harnesses and incompatible installer have been removed.
-Historical implementations and evidence remain in Git. Current source ownership
-is in [ARCHITECTURE.md](ARCHITECTURE.md); acceptance scope is in
-[RELEASE-REVIEW.md](RELEASE-REVIEW.md).
+The sole server application is available for source review; the pilot interface is
+currently offline. Prioritize a usable testing handoff and substantive runtime
+findings; leave installer work last.
+Source ownership is in [ARCHITECTURE.md](ARCHITECTURE.md); verified evidence and
+remaining release gates are in [RELEASE-REVIEW.md](RELEASE-REVIEW.md).
+
+The Mainnet pilot has `3e34b01` deployed in the Ubuntu VM. Its native unwrap is
+`Paid` (3,000 gross → 2,970 net base units); the return wrap (1,000 → 990) remains
+pending. Alchemy is primary and keyed OnFinality is the verifier. Its observed
+40/minute, 200/hour response-unit quota was exhausted before broadcast; both services
+are stopped pending sufficient verified RPC capacity. Separate users/restricted
+roles, VM restart and sequence-9 snapshot restoration passed. Backup storage is on
+the same physical Mac; clean-host recovery and the Mainnet round trip remain open.
 
 ## Required product
 
@@ -27,60 +35,55 @@ separate explicit tooling and evidence; they are not bridge-custody privileges.
 
 ## Sequence
 
-1. **Promoted whole: verified.** Root Cabal build, bridge/token/pool suites,
-   PostgreSQL/restic contracts, server/control, HTTPS signing and encrypted native
-   wallet recovery passed using canonical targets. Migration bytes and the exact
-   architectural reference are unchanged. Archive contracts now compare the existing
-   financial projections, exclude a concurrent same-count record change and reject
-   same-length archive corruption. Protected retention and clean-host recovery remain open.
-2. **Close substantive recovery gaps.** Exercise permanent source loss/coverage,
+1. **Hand over the product for review now.** Identify the review commit and built
+   artifact. Begin source review while the pilot is stopped. After service restart,
+   use http://127.0.0.1:61992/ on its host Mac for interface review; this is a
+   forwarded pilot address, not a standard deployment port. Check network/token
+   identity, limits, 1% previews and both forms without automatically creating or
+   funding orders. Trace the existing audit path
+   from pure Servant requests through authorization, closed Opaleye operations,
+   chain validation, signing and settlement. Record concrete findings against the
+   same candidate; keep private order capabilities and custody material outside Git.
+2. **Restore RPC capacity and complete customer acceptance.** Obtain sufficient
+   keyed independent-provider capacity and verify exact required history,
+   not just basic RPC responses. SolanaTracker's missing origins and VibeStation's
+   rate limits ruled them out. Recheck the saved 990-unit payout and use the closed
+   recovery/resume workflow; retain every expired attempt and approval. A quota
+   reset alone does not establish sustained capacity or an SLA.
+   Complete a real supported Solana Pay wallet flow on Devnet, including reference
+   and effects, both conversion directions, refund ownership, saved-order reload
+   and actionable browser errors. A tester client or rendered QR is partial
+   evidence. Measure both required checkpoints and combined worker/signer RPC
+   budgets inside the Solana blockhash window; preserve expiry and backup barriers.
+3. **Close substantive recovery gaps.** Exercise permanent source loss/coverage,
    restored sources, native replacement/winner change/rebroadcast, and restoration
    with in-flight work. Retain exact bytes, one economic settlement and capital
-   accounting. The same-host funded encrypted-wallet drill has now settled its
-   restored native and wrapped payouts; retain it as regression evidence while
-   clean-host funded recovery remains open. Fix concrete
-   failures in the shared payment engine rather than adding parallel paths.
-3. **Complete customer acceptance.** Use an actual supported Solana Pay wallet on
-   Devnet. Verify its signed transaction/reference, both conversion directions,
-   refund ownership, saved-order reload and actionable errors in the current
-   browser. Dedicated tester clients and QR/link rendering are partial evidence.
-4. **Finish liquidity and canonical acceptance.** Bounded token/pool recovery is
-   implemented; real Devnet expiry-to-successor mint and empty-position collection,
-   idempotence, retired-parent refusal and finalized replay passed. A checked burn
-   restored the tester's original supply/balance. Offline tests cover failed-chain
-   evidence and other action families; these are not live acceptance of every case.
-   Preserve lineage and complete two-provider evidence: ordinary expired-unseen
-   status is not proof of nonexecution. Verify nonzero fee collection and any
-   promised reinvestment separately. Confirm
-   issuer-approved canonical identity, authority, backing and executable routes
-   before activating a funded canonical deployment. Canonical `observe`, `serve`
-   and `signer` now use the shared runtime; startup still pauses intake and requires
-   pinned identity, independent verification and backup coverage. Local process and
-   protocol contracts do not replace a real Mainnet round trip. The paused canonical
-   pilot now runs in the Ubuntu VM with verified required checkpoints on the Mac.
-   Its real canonical-token customer deposit was accepted and the native payout
-   broadcast; both confirmed conversion directions remain required. Current process,
-   credential and read-role checks passed. A sequence-9 in-flight custody snapshot
-   was recovered over HTTPS and restored into a separate paused database, then that
-   disposable database was removed. This is one physical host, not disaster isolation.
-   RPC pacing and bounded closed-read retries are implemented; measure expected-load
-   throughput and combined provider budgets.
-5. **Prove deployment and disaster recovery.** Run worker/signer under separate OS
-   identities and database roles; deny worker access to custody keys, native full
-   credentials and unlock/lock RPC. Verify the current processes, not only file
-   permissions. Use a real off-host HTTPS restic repository with separate upload
-   and operator deletion authority. Restore funded custody plus in-flight work on
-   a clean host, revoke old authority, adopt the fence, reconcile and resume.
-   Add restricted retention that preserves required recovery snapshots.
-6. **Reintroduce one-command installation last.** Implement against the sole
+   accounting. Keep the completed same-host encrypted-wallet drill as regression
+   evidence. Fix shared-engine failures without introducing parallel payment paths.
+4. **Finish administration and canonical verification.** Extend the existing
+   Devnet token/pool recovery acceptance to remaining required action families.
+   Verify nonzero LP fee collection and any promised reinvestment. Preserve bounded
+   lineage and complete two-provider evidence; expired-unseen status alone is not
+   proof of nonexecution. Confirm issuer-approved canonical identity, authority,
+   backing and executable trading routes before public use.
+5. **Prove independent recovery and complete isolation review.** Retain the VM's
+   separate OS/database identities and actual denied-key/RPC checks. Finish review
+   of administrative access and service policies. Use a physically independent
+   HTTPS restic repository with separate upload/deletion authority and protected
+   retention. Restore funded custody plus in-flight work on a clean host, revoke
+   old authority, adopt the fence, reconcile and resume. Verify host/node reboot
+   and unattended VM startup as well as the completed VM restart.
+6. **Complete independent release review.** Review source, deployment, dependency
+   applicability and licenses against the tested candidate. Resolve substantive
+   findings and preserve evidence for each remaining release gate. Local tests and
+   the bounded TLA+ model do not replace independent review.
+7. **Reintroduce one-command installation last.** Implement against the sole
    current executable/configuration and complete migration chain. Never revive
    the old helper or command protocol. Verify fresh install, repeat install,
    upgrade, reboot and restored operation on Ubuntu 24.04 ARM64 and x86-64.
    Reuse expensive builds; run packaging acceptance after runtime changes settle.
-7. **Release review.** Review dependency/license applicability and the complete
-   trust boundary independently. Authenticate a review artifact tied to the tested
-   commit. Public publication and valuable-fund activation remain explicit
-   operator decisions after all required gates close.
+   Authenticate the final release artifact. Public publication and valuable-fund
+   activation remain explicit operator decisions after the required gates close.
 
 ## Clean reinstall contract
 

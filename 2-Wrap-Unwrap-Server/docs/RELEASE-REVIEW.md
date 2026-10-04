@@ -1,10 +1,38 @@
 # Release review
 
-The current implementation supports test-network and canonical Mainnet operation,
-with funded bridge-conversion acceptance recorded only on test networks; it is not a completed
-public release. Historical checks are regression evidence within their recorded
-scope. Every release result must identify the exact source, artifact and environment;
-a past transfer or installer does not certify later source or a new deployment.
+The application is available for source review; the pilot interface is currently
+offline and public release remains open. The Ubuntu ARM64 pilot has `3e34b01`
+deployed, executable SHA-256
+`67beccef91cd7d6e61ab35dc5e6be63fd435d2845b137fbf167f9d4f4939ec37`.
+Its real canonical Mainnet unwrap is paid: 3,000 wrapped base units in, 30 fee,
+2,970 native units out, with a separate 141-unit network cost. The 1,000-unit native
+return deposit is confirmed; its saved 990-unit wrapped payout remains pending.
+Alchemy is the primary RPC; a keyed OnFinality endpoint is the independent verifier.
+Observed headers reported limits of 40/minute and 200/hour. OnFinality assigns the
+relevant [Solana methods two response units each](https://documentation.onfinality.io/support/solana),
+so these limits allow roughly 20 calls/minute and 100/hour, not 200 requests/hour.
+Closed retry and resume passed, but recovery exhausted that hourly quota before
+broadcast. Both services are stopped pending sufficient verified capacity;
+no new transaction was broadcast
+by this retry. The private Mac interface at http://127.0.0.1:61992/ is offline.
+
+Generations 0 and 1 are retired with expiry evidence. Generation 2 retains signed
+attempt `4UNYK88afBe6FXDanTNdaAZ6ZWWPFiusYpo7Xys3NiHRDnYqrUpXwXqi1hMUeWMkuY2fSZuhGVR19mQjv4QRFBL7`
+without a broadcast sequence; critical sequence is 26 and backup coverage is 25.
+The 990-unit obligation remains pending, so the Mainnet round trip is incomplete.
+
+Alternative public endpoints were rejected: SolanaTracker initially passed basic
+checks but omitted immutable history origins (`solana_history_gap`); VibeStation
+rate-limited history reads. The keyed OnFinality endpoint was restored. These probes
+establish neither production provider capacity nor an SLA, and do not complete
+blockhash-window acceptance.
+
+The full macOS root build passed on `3b1b3ba`; all three macOS Cabal suites passed
+on `3e34b01`. Linux ARM64 passed the full root build and bridge suite on `3e34b01`;
+its all-three-suite result is from `3b1b3ba`. The native-accounting changes also
+passed disposable PostgreSQL/restic and actual HTTPS contracts. Subsequent sections
+retain historical evidence within its recorded scope; they do not certify a later
+artifact.
 
 ## Evidence already obtained
 
@@ -16,8 +44,9 @@ a past transfer or installer does not certify later source or a new deployment.
 | Browser | GHC-JavaScript fee previews, paused intake, private-link recovery/reload, preserved payout links and network-error/restart behavior checked against the actual server. Actual wallet signing remains open. |
 | Custody restoration | Sequence-98 funded ledger restored into separate same-host staging; 24 projections matched and actual chain reconciliation passed. Minimum sequence 99 refused the archive. This does not prove off-host storage or clean-host wallet activation. |
 | Automated boundaries | Cabal QuickCheck/protocol tests, actual HTTPS tests and PostgreSQL contracts cover typed authority, immutable accounting, fencing, concurrency, cancellation, source/replacement recovery and encrypted restic restoration. Fixtures do not prove all real-chain cases. |
-| Canonical Mainnet mode | `serve` and `signer` accept the canonical profile through the shared order/payment engine. Local contracts verify CLI startup, paused order refusal, observer restrictions, actual HTTPS signing of canonical-mint bytes, concurrent/repeated signing, second-read refusal and customer checkpoint handling. RPC effects are offline fixtures, not a funded Mainnet transfer. |
-| RPC pacing | Root build, all three Cabal suites and server/HTTPS contracts pass. Tests cover host budgets, idle/late wakeups, cancellation and actual HTTPS accounting of a read retry versus a refused send. The local Signet/Devnet deployment resumed at the default 2 requests/second per process/host with fresh chain/custody checks and unchanged paid orders. This is not a Mainnet load test or a provider-wide quota guarantee. |
+| Canonical Mainnet mode | The VM accepted a real canonical-token customer deposit and completed its native payout. The return native deposit is confirmed; wrapped payout/recovery remains pending. Earlier local canonical process/signing contracts use offline RPC fixtures. |
+| Current VM deployment | Separate worker/signer UIDs and restricted PostgreSQL/native credentials passed live denial checks. Required HTTPS backups, an in-flight sequence-9 restore into a separate paused database, and a VM restart passed. The backup receiver shares the physical Mac; clean-host activation and disaster isolation remain open. |
+| RPC pacing | Tests cover host budgets, idle/late wakeups, cancellation and actual HTTPS accounting of a read retry versus a refused send. Scoped Signet/Devnet operation passed at the default 2 requests/second per process/host. The Mainnet verifier's hourly quota exhausted during recovery; paced request starts do not guarantee hourly capacity or a usable payout window. |
 | Signer model | Bounded two-request TLA+ model: 54,289 distinct states; path/output/dispatch invariants and negative mutations checked. No TLAPS/unbounded Haskell proof. |
 | Token administration | Real Devnet mint/account creation, issuance/burn and metadata readback, preserving signed-attempt replay. Bounded expiry recovery now has a finalized mint-one/burn-one round trip; canonical authority/backing remain open. |
 | Liquidity | Real Devnet pool/position creation, funded deposit/withdrawal and collection replay, plus bounded expiry recovery for an empty-position collection. Collected fees were zero; nonzero yield/reinvestment remains unverified. |
@@ -83,8 +112,8 @@ completed its full checkpoint/readback and chain/custody checks; the first unfun
 customer order advanced both critical and backup coverage to 4. No backup barrier
 was waived. A real customer then deposited 3,000 canonical wrapped units on Mainnet;
 the bridge accepted the 30-unit fee quote and broadcast its 2,970-unit ECX payout.
-Confirmation and the return wrapping leg are pending, so this is not a completed
-round trip. Required backup coverage reached sequence 9.
+At that checkpoint, confirmation and the return wrapping leg were pending; it did
+not establish a completed round trip. Required backup coverage reached sequence 9.
 
 Current runtime checks verified separate worker/signer UIDs, NoNewPrivileges,
 seccomp and no effective/permitted/ambient capabilities. The worker could not open
