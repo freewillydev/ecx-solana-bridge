@@ -151,6 +151,15 @@ removed with the evaluator factories: funded recovery must now use the real
 service interfaces and durable backup barriers, rather than private evaluator
 callbacks or timing termination to prevent a broadcast. Funded native replacement
 acceptance remains open.
+Singleton native payouts now share the replacement-family evidence reader for
+observation, custody and lock recovery, removing 88 production lines across four
+existing files. Root build, all three Cabal suites and the existing PostgreSQL/HTTPS
+contract pass. Offline regressions distinguish retained-but-evicted wallet records
+from active spenders and reject changed bytes, foreign spends, unavailable or
+unstable evidence. These do not establish funded eviction recovery: daemon wallet
+balances can still exclude inputs reserved by inactive wallet transactions, and
+custody mismatches continue to refuse readiness. The live balance/recovery case
+and full operator replacement/rebroadcast acceptance remain open.
 Readiness is repaired before obtaining a new blockhash; redundant outer worker
 refreshes are removed while leaf checks and both backup barriers remain. This
 reduces `Critical.hs` by three lines; the verifier fix adds no production lines.

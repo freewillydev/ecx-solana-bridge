@@ -6,7 +6,6 @@ import Bridge.Error
 import Bridge.Store
 import Bridge.Observer (ObserverSettings(..))
 import Bridge.Payment
-import Bridge.PaymentObservation (readNativePayment)
 import Bridge.NativePayment
 import Bridge.SolanaPayment
 import qualified Bridge.Native as N
@@ -15,7 +14,7 @@ import qualified Bridge.SolanaHelper as H
 import Bridge.RPC (fieldValue,parseValue,rpc)
 import Bridge.Wire (Profile(..))
 import Control.Exception (IOException,catch,try)
-import Control.Monad (forM_,when)
+import Control.Monad (forM_)
 import Data.Aeson hiding (decode)
 import Data.Int (Int64)
 import Data.List (sortOn)
@@ -143,7 +142,8 @@ solanaBalances call config view evidence = do
 -- One verified spender contributes one adjustment, irrespective of how many
 -- signed replacement alternatives share its inputs. The Store proves lineage.
 pendingFamilyEffect :: NativeRPC -> SolanaRPC -> N.NativeSettings -> H.SolanaPolicy -> Reader -> [RecordedAttempt] -> IO [(Text,Asset,Integer)]
-pendingFamilyEffect native solana settings config reader [saved]=pendingEffect native solana (N.profile settings) config reader saved
+pendingFamilyEffect native solana settings config reader [saved]
+  | recordedChain saved=="Solana"=pendingSolanaEffect native solana (N.profile settings) config reader saved
 pendingFamilyEffect native _ settings config reader attempts=do
   first<-case attempts of a:_->pure a; _->reject "native_replacement_family_bounds"
   (members,view)<-readSavedNativeFamily native settings config reader (recordedPayment first)
@@ -168,8 +168,8 @@ nativeObservedEffect reader saved signed depth value=do
     && net==T.pack(show $ negate n) && fee==signedNativeFee signed) "custody_payment_observation_mismatch"
   pure [(txid,Native,negate $ n+cost)]
 
-pendingEffect :: NativeRPC -> SolanaRPC -> Profile -> H.SolanaPolicy -> Reader -> RecordedAttempt -> IO [(Text,Asset,Integer)]
-pendingEffect native solana profile config reader saved = do
+pendingSolanaEffect :: NativeRPC -> SolanaRPC -> Profile -> H.SolanaPolicy -> Reader -> RecordedAttempt -> IO [(Text,Asset,Integer)]
+pendingSolanaEffect native solana profile config reader saved = do
   prepared<-evalRead reader (ReadPreparation $ recordedPayment saved)
   require (recordedGeneration saved==preparedGeneration prepared) "payment_requires_recovery"
   verifySignedAttempt native profile config prepared (recordedSigned saved)
@@ -179,35 +179,18 @@ pendingEffect native solana profile config reader saved = do
         seen<-evalRead reader (HasCustodyEvent (recordedChain saved) txid)
         require (not seen) "custody_payment_evidence_unavailable"
         pure []
-      decode :: FromJSON a => IO a
-      decode=either (const $ reject "invalid_saved_payment") pure (eitherDecodeStrict' $ TE.encodeUtf8 $ signedPolicy $ recordedSigned saved)
-  case recordedChain saved of
-    "Native"->do
-      signed<-decode
-      found<-readNativePayment native signed
-      case found of
-        Nothing->unseen
-        Just (depth,value)->do
-          recorded
-          when (depth==0) $ do
-            mempool<-native False "getmempoolentry" [toJSON txid]
-            size<-fieldValue "vsize" mempool :: IO Int
-            require (size>0) "native_mempool_evidence_invalid"
-          nativeObservedEffect reader saved signed depth value
-    "Solana"->do
-      signed<-decode
-      proof<-solana "getTransaction" [toJSON txid,object
-        ["commitment" .= ("finalized"::Text),"encoding" .= ("json"::Text),"maxSupportedTransactionVersion" .= (0::Int)]]
-      if proof==Null then unseen else do
-        recorded
-        outcome<-either reject pure (verifySolanaOutcome config signed proof)
-        let n=if outcomeSucceeded outcome then toInteger(units $ solPlanAmount $ signedSolanaPlan signed) else 0
-            cost=toInteger(units $ outcomeFee outcome)+toInteger(units $ outcomeRent outcome)
-            anchor=T.pack(show $ outcomeSlot outcome)
-        forM_ [("Solana",negate n),("SolanaOperating",negate cost)] $ \(stream,delta)->do
-          (kind,actualAnchor,evidence)<-evalRead reader (ReadCustodyEvent stream txid)
-          actual<-fieldValue "delta" evidence
-          require (actualAnchor==anchor && actual==T.pack(show delta)
-            && kind==(if stream=="Solana" && n==0 then "failed" else "outgoing")) "custody_payment_observation_mismatch"
-        pure [(txid,Wrapped,negate n),(txid,Sol,negate cost)]
-    _->reject "invalid_payout_asset"
+  signed<-either (const $ reject "invalid_saved_payment") pure (eitherDecodeStrict' $ TE.encodeUtf8 $ signedPolicy $ recordedSigned saved)
+  proof<-solana "getTransaction" [toJSON txid,object
+    ["commitment" .= ("finalized"::Text),"encoding" .= ("json"::Text),"maxSupportedTransactionVersion" .= (0::Int)]]
+  if proof==Null then unseen else do
+    recorded
+    outcome<-either reject pure (verifySolanaOutcome config signed proof)
+    let n=if outcomeSucceeded outcome then toInteger(units $ solPlanAmount $ signedSolanaPlan signed) else 0
+        cost=toInteger(units $ outcomeFee outcome)+toInteger(units $ outcomeRent outcome)
+        anchor=T.pack(show $ outcomeSlot outcome)
+    forM_ [("Solana",negate n),("SolanaOperating",negate cost)] $ \(stream,delta)->do
+      (kind,actualAnchor,evidence)<-evalRead reader (ReadCustodyEvent stream txid)
+      actual<-fieldValue "delta" evidence
+      require (actualAnchor==anchor && actual==T.pack(show delta)
+        && kind==(if stream=="Solana" && n==0 then "failed" else "outgoing")) "custody_payment_observation_mismatch"
+    pure [(txid,Wrapped,negate n),(txid,Sol,negate cost)]

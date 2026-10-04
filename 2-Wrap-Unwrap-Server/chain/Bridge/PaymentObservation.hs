@@ -1,17 +1,15 @@
 module Bridge.PaymentObservation
-  ( PaymentObservation(..), observeNativePayment, nativeConfirmation, readNativePayment, activeNativeBlock
+  ( PaymentObservation(..), nativeConfirmation, activeNativeBlock
   , observeSolanaPayment, solanaExpiryEvidence ) where
 import Bridge.Domain (Amount,amount)
 import Bridge.Error
 import Bridge.Identity (digest)
-import Bridge.Native (nativeAmount)
 import Bridge.NativePayment
 import Bridge.Solana (solanaGenesis,collectSignatures,SignatureInfo(..))
 import Bridge.SolanaHelper
 import Bridge.SolanaPayment
 import Bridge.Wire (PaymentCosts(..),Profile(..))
 import Bridge.RPC (fieldValue,parseValue)
-import Control.Exception (try)
 import Data.Aeson
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
@@ -22,15 +20,7 @@ import qualified Data.Text.Encoding as TE
 data PaymentObservation = PaymentUnseen | PaymentWaiting
   | PaymentConfirmed PaymentCosts Text | PaymentFailed Amount Text deriving (Eq,Show)
 
-observeNativePayment :: NativeRPC -> NativeSigned -> IO PaymentObservation
-observeNativePayment call signed = do
-  found<-readNativePayment call signed
-  case found of
-    Nothing->pure PaymentUnseen
-    Just (confirmations,value)->nativeConfirmation call signed confirmations value
-
--- Both singleton and replacement-family readers first verify the transaction's
--- actual effects. They share the same depth/canonical-block settlement proof.
+-- The family reader verifies effects and active spenders before this depth proof.
 nativeConfirmation :: NativeRPC -> NativeSigned -> Int -> Value -> IO PaymentObservation
 nativeConfirmation call signed confirmations value
   | confirmations<planDepth(signedNativePlan signed)=pure PaymentWaiting
@@ -41,27 +31,6 @@ nativeConfirmation call signed confirmations value
       pure $ PaymentConfirmed (PaymentCosts (signedNativeFee signed) zero) $ encoded $ object
         ["txid" .= nativeTxid(signedNativeTransaction signed),"blockhash" .= anchor
         ,"height" .= height,"requiredDepth" .= planDepth(signedNativePlan signed)]
-
--- Wallet effects must match the saved bytes, even before sufficient depth.
--- Only the node's explicit missing-transaction result means unseen.
-readNativePayment :: NativeRPC -> NativeSigned -> IO (Maybe (Int,Value))
-readNativePayment call signed = do
-  let tx=signedNativeTransaction signed; plan=signedNativePlan signed
-  found<-try (call True "gettransaction" [toJSON $ nativeTxid tx,Bool False,Bool True])
-  case found of
-    Left (BridgeError "rpc_error_-5")->pure Nothing
-    Left (BridgeError code)->reject code
-    Right value->do
-      raw<-fieldValue "hex" value
-      actual<-fieldValue "decoded" value >>= either reject pure . decodeNativeTx
-      actualId<-fieldValue "txid" value
-      fee<-fieldValue "fee" value >>= either reject pure . nativeAmount . negate
-      require (raw==signedNativeBytes signed && actual==tx && actualId==nativeTxid tx && fee==signedNativeFee signed) "native_settlement_evidence_mismatch"
-      either reject pure (validateNativeTx plan (signedNativePrevouts signed) fee actual)
-      conflicts<-fieldValue "walletconflicts" value :: IO [Text]
-      confirmations<-fieldValue "confirmations" value :: IO Int
-      require (confirmations>=0 && null conflicts) "native_conflict_requires_review"
-      pure (Just (confirmations,value))
 
 activeNativeBlock :: NativeRPC -> Text -> Int -> IO Int64
 activeNativeBlock call anchor depth = do

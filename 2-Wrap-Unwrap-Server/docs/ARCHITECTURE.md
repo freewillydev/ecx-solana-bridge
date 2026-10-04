@@ -270,6 +270,11 @@ change address and fee ceiling; only change decreases to fund the added fee. Kee
 all bounded family members and immutable decisions observable. Foreign spenders,
 conflicting drafts and ambiguous winners require review. Observe the sole actual
 winner; a proven later winner change adjusts only costs, never principal again.
+Singleton and replacement payouts share the same verified family reader for
+observation, custody effects and input-lock recovery. A retained zero-confirmation
+wallet record alone does not establish an active spend; absence requires stable
+chain/wallet views and unchanged unspent inputs. A wallet balance mismatch still
+refuses custody readiness, including after eviction.
 Rebroadcast requires explicit saved approval, current source proof and backup and
 uses identical bytes. It does not grant replacement authority.
 

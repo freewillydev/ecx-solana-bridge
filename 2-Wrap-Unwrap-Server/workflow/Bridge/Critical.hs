@@ -833,23 +833,15 @@ loadActive (CriticalEnvironment rpc settings config _ _ reader _) txid = do
 
 observeAttempt :: CriticalEnvironment -> RecordedAttempt -> SigningReply -> IO (RecordedAttempt,PaymentObservation)
 observeAttempt (CriticalEnvironment rpc settings config _ _ reader _) recorded reply=case reply of
-  NativeReply signed->do
-    family<-evalRead reader (ReadNativeFamily $ recordedPayment recorded)
-    if length family==1 then do
-      _<-N.nativeIdentity rpc native
-      result<-observeNativePayment (N.nativeCall rpc native) signed
-      pure (recorded,result)
-    else do
-      (members,view)<-readSavedNativeFamily (N.nativeCall rpc native) native config reader (recordedPayment recorded)
-      require (recorded `elem` map fst members) "native_replacement_family_changed"
-      active<-activeNativeMember members view
-      case active of
-        Just (winner,payment,depth,value)->do
-          if depth>0 || winner==recorded then do
-            result<-nativeConfirmation (N.nativeCall rpc native) payment depth value
-            pure (winner,result)
-          else pure (recorded,if recorded==fst(last members) then PaymentUnseen else PaymentWaiting)
-        Nothing->pure (recorded,if recorded==fst(last members) then PaymentUnseen else PaymentWaiting)
+  NativeReply _->do
+    (members,view)<-readSavedNativeFamily (N.nativeCall rpc native) native config reader (recordedPayment recorded)
+    require (recorded `elem` map fst members) "native_replacement_family_changed"
+    active<-activeNativeMember members view
+    case active of
+      Just (winner,payment,depth,value) | depth>0 || winner==recorded->do
+        result<-nativeConfirmation (N.nativeCall rpc native) payment depth value
+        pure (winner,result)
+      _->pure (recorded,if recorded==fst(last members) then PaymentUnseen else PaymentWaiting)
   SolanaReply signed->do
     _<-S.solanaIdentity rpc solana
     result<-observeSolanaPayment (S.solanaCall rpc solana) config signed

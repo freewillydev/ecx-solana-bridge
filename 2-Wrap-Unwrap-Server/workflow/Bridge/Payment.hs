@@ -9,13 +9,11 @@ import Bridge.Error
 import Bridge.Identity (digest)
 import qualified Bridge.Native as N
 import Bridge.NativePayment
-import Bridge.PaymentObservation (readNativePayment,activeNativeBlock)
-import Bridge.RPC (fieldValue)
 import Bridge.SolanaPayment
 import qualified Bridge.SolanaHelper as H
 import Bridge.Store
 import Bridge.Wire (Profile,PaymentTerms(..),CostLimits(..),PolicySnapshot(..))
-import Control.Exception (onException,try)
+import Control.Exception (onException)
 import Control.Monad (forM,forM_,when)
 import Data.Aeson (Value,FromJSON,ToJSON,encode,eitherDecodeStrict',toJSON,object,(.=))
 import qualified Data.ByteString.Lazy as BL
@@ -200,17 +198,7 @@ restoreNativeWork call settings config work = case work of
         tx<-checkNativeDraft call plan unsigned
         if lockCancelling saved then verifyOnly (points tx)
           else restore plan tx (draftPrevouts unsigned)
-      (Just _,[attempt])->do
-        require (not(lockCancelling saved) && recordedChain attempt=="Native"
-          && recordedPayment attempt==paymentId(savedPayment $ preparedView prepared)
-          && recordedGeneration attempt==preparedGeneration prepared && recordedFee attempt==preparedFee prepared
-          && recordedState attempt `elem` ["signed","broadcast_intent"]) "native_lock_work_changed"
-        verifySignedAttempt call profile config prepared (recordedSigned attempt)
-        signed<-decodeSaved (signedPolicy $ recordedSigned attempt)
-        spent<-recordedSpend attempt signed
-        if spent then verifyOnly (points $ signedNativeTransaction signed)
-          else restore plan (signedNativeTransaction signed) (signedNativePrevouts signed)
-      (Just _,attempts@(_:_:_))->do
+      (Just _,attempts@(_:_))->do
         require (not $ lockCancelling saved) "native_lock_work_changed"
         (family,view)<-verifyNativeFamily call settings config prepared attempts
         let signed=snd $ last family
@@ -226,26 +214,6 @@ restoreNativeWork call settings config work = case work of
     current<-readNativePrevoutsWith True call (planDepth plan) (nativeInputs tx)
     require (sameNativePrevouts current previous) "native_previous_output_changed"
     restoreNativeInputLocks call (points tx)
-  recordedSpend attempt signed=do
-    found<-readNativePayment call signed
-    case found of
-      Nothing->pure False
-      Just (depth,value)->do
-        require (recordedState attempt=="broadcast_intent" && recordedSequence attempt/=Nothing) "unrecorded_broadcast_observed"
-        if depth>0 then do
-          anchor<-fieldValue "blockhash" value
-          _<-activeNativeBlock call anchor 1
-          pure True
-        else do
-          mempool<-try (call False "getmempoolentry" [toJSON $ signedId $ recordedSigned attempt]) :: IO (Either BridgeError Value)
-          case mempool of
-            Left (BridgeError "rpc_error_-5")->pure False
-            Left (BridgeError code)->reject code
-            Right entry->do
-              size<-fieldValue "vsize" entry :: IO Int
-              require (size>0) "native_mempool_evidence_invalid"
-              pure True
-
 -- Reconstruct cleanup solely from the saved policy/draft; never accept outpoints
 -- from the operator. Signing validation also applies when the draft is absent.
 cancellationPlan :: NativeRPC -> Profile -> H.SolanaPolicy -> PreparedPayment -> IO ([Outpoint],Text)

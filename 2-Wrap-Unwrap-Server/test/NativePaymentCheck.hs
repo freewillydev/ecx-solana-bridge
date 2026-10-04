@@ -50,13 +50,24 @@ checks = do
         tx {nativeOutputs=map (\o->o {nativeOutputAmount=amt 0}) (nativeOutputs tx)}]
   let contract tweak action=do
         locks <- newIORef ([]::[Outpoint]); calls <- newIORef ([]::[Text])
-        let base _ method args=case (method,args) of
+        let tip=T.replicate 64 "b"
+            anchor=if planDepth plan==1 then tip else T.replicate 64 "e"
+            position=object ["hash" .= tip,"height" .= (16010::Int)]
+            base _ method args=case (method,args) of
+              ("getblockchaininfo",[])->pure $ object ["chain" .= ("signet"::Text),"initialblockdownload" .= False
+                ,"blocks" .= (16010::Int),"bestblockhash" .= tip,"signet_challenge" .= signetChallenge]
+              ("getconnectioncount",[])->pure $ toJSON (1::Int)
+              ("getwalletinfo",[])->pure $ object ["walletname" .= nativeWallet recoverySettings,"descriptors" .= True
+                ,"scanning" .= False,"lastprocessedblock" .= position]
               ("gettransaction",[String ident,Bool False,Bool True]) | ident==nativeTxid tx->pure $ object
                 ["hex" .= (raw::Text),"decoded" .= decoded,"txid" .= nativeTxid tx,"fee" .= Number (negate $ fromIntegral(units fee)/100000000)
-                ,"confirmations" .= planDepth plan,"walletconflicts" .= ([]::[Text]),"blockhash" .= T.replicate 64 "e"]
+                ,"confirmations" .= planDepth plan,"walletconflicts" .= ([]::[Text]),"blockhash" .= anchor,"lastprocessedblock" .= position]
+              ("gettxspendingprevout",_)->pure $ toJSON $ map nativeOutpoint $ nativeInputs tx
               ("getmempoolentry",_)->pure $ object ["vsize" .= (140::Int)]
-              ("getblockheader",[String anchor])->pure $ object ["hash" .= anchor,"height" .= (16001::Int),"confirmations" .= planDepth plan]
-              ("getblockhash",[Number 16001])->pure $ String $ T.replicate 64 "e"
+              ("getblockheader",[String block])->pure $ object ["hash" .= block,"height" .= (16011-planDepth plan),"confirmations" .= planDepth plan]
+              ("getblockhash",[height]) | height==toJSON(nativeCheckpointHeight recoverySettings)->pure $ toJSON $ nativeCheckpointHash recoverySettings
+              ("getblockhash",[Number 16010])->pure $ String tip
+              ("getblockhash",[height]) | height==toJSON(16011-planDepth plan)->pure $ String anchor
               ("listunspent",[_,_,_,Bool False,_])->pure $ toJSON [object ["safe" .= True,"spendable" .= True,
                 "solvable" .= True,"confirmations" .= planDepth plan,"address" .= planChange plan]]
               ("listlockunspent",[])->toJSON <$> readIORef locks
@@ -68,7 +79,7 @@ checks = do
                 require (not locksInputs) "preparation_must_not_lock"
                 pure $ object ["psbt" .= ("offline-psbt"::Text),"fee" .= nativeNumber fee,"changepos" .= (0::Int)]
               ("decodepsbt",_)->pure $ object ["tx" .= decoded,"fee" .= nativeNumber fee]
-              ("gettxout",[String txid,vout,Bool True])->case [p | p<-previous,toJSON(outpointVout $ prevout p)==vout,outpointTxid(prevout p)==txid] of
+              ("gettxout",[String txid,vout,Bool _])->case [p | p<-previous,toJSON(outpointVout $ prevout p)==vout,outpointTxid(prevout p)==txid] of
                 [p]->pure $ object ["value" .= nativeNumber(prevoutAmount p),"confirmations" .= prevoutDepth p,
                   "coinbase" .= prevoutCoinbase p,"scriptPubKey" .= object ["hex" .= prevoutScript p,"address" .= ("offline-prevout"::Text)]]
                 _->fail "unexpected prevout"
@@ -94,6 +105,17 @@ checks = do
       terms=W.PaymentTerms (W.PolicySnapshot (planDepth plan) "finalized" "workflow") (W.CostLimits (planFeeLimit plan) (amt 1) (amt 0))
       prepared=PreparedPayment (PaymentView outgoing terms PaymentPaying) 0 (encoded plan) (Just $ encoded draft) (planFeeLimit plan)
       boundSigned=NativeSigned raw tx plan previous fee
+      observe call=do
+        view<-readNativeFamily call recoverySettings [boundSigned]
+        case familyActive view of
+          Nothing->pure PaymentUnseen
+          Just (_,depth,value)->nativeConfirmation call boundSigned depth value
+      unconfirmed method (Object fields) | method=="gettransaction"=pure $ Object $ KM.delete "blockhash" $ KM.insert "confirmations" (Number 0) fields
+      unconfirmed _ value=pure value
+      mempool method _ | method=="gettxspendingprevout"=pure $ toJSON
+        [object ["txid" .= outpointTxid point,"vout" .= outpointVout point,"spendingtxid" .= nativeTxid tx]
+          | point<-map nativeOutpoint $ nativeInputs tx]
+      mempool method value=unconfirmed method value
   sequence
     [ check "native admission previews actual policy without allocating locking signing or sending" $ once $ ioProperty $ do
         (_,methods)<-contract (\_ v->pure v) $ \call->previewNativePayment call (planProfile plan) (planDepth plan) (planFeeLimit plan) (planRecipient plan) (planAmount plan)
@@ -102,22 +124,25 @@ checks = do
         pure (empty && "walletcreatefundedpsbt" `elem` methods && "gettxout" `elem` methods
           && all (`notElem` methods) ["getnewaddress","getrawchangeaddress","lockunspent","walletprocesspsbt","sendrawtransaction"])
     , check "native settlement requires exact wallet effect and canonical confirmation depth" $ once $ ioProperty $ do
-        (observed,methods)<-contract (\_ v->pure v) $ \call->observeNativePayment call boundSigned
-        let change method (Object fields) | method=="gettransaction"=pure $ Object $ KM.insert "confirmations" (Number 0) fields
-            change _ value=pure value
-        (waiting,waitMethods)<-contract change $ \call->observeNativePayment call boundSigned
-        (forked,_)<-contract (\method value->pure $ if method=="getblockhash" then String(T.replicate 64 "a") else value) $ \call->
-          rejects "native_settlement_not_canonical" (observeNativePayment call boundSigned)
-        unseen<-observeNativePayment (\_ _ _->reject "rpc_error_-5") boundSigned
-        unavailable<-rejects "rpc_transport_unknown_outcome" (observeNativePayment (\_ _ _->reject "rpc_transport_unknown_outcome") boundSigned)
-        pure $ methods==["gettransaction","getblockheader","getblockhash"] && waitMethods==["gettransaction"]
+        (observed,methods)<-contract (\_ v->pure v) observe
+        (waiting,waitMethods)<-contract mempool observe
+        (forked,_)<-contract (\_ v->pure v) $ \call->do
+          view<-readNativeFamily call recoverySettings [boundSigned]
+          let changed wallet method args=if method=="getblockhash" then pure $ String(T.replicate 64 "a") else call wallet method args
+          case familyActive view of
+            Just (_,depth,value)->rejects "native_settlement_not_canonical" (nativeConfirmation changed boundSigned depth value)
+            Nothing->pure False
+        (unseen,_)<-contract (\method value->if method=="gettransaction" then reject "rpc_error_-5" else pure value) observe
+        (unavailable,_)<-contract (\method value->if method=="gettransaction" then reject "rpc_transport_unknown_outcome" else pure value) $ \call->
+          rejects "rpc_transport_unknown_outcome" (observe call)
+        pure $ "getblockheader" `elem` methods && "getmempoolentry" `elem` waitMethods && "getblockheader" `notElem` waitMethods
           && waiting==PaymentWaiting && unseen==PaymentUnseen && forked && unavailable
           && case observed of PaymentConfirmed costs proof->costs==W.PaymentCosts fee (amt 0) && not(T.null proof); _->False
     , check "native outcome refuses changed bytes and wallet conflict evidence" $ once $ ioProperty $ do
         let corrupt key value method (Object fields) | method=="gettransaction"=pure $ Object $ KM.insert key value fields
             corrupt _ _ _ value=pure value
-        (bytes,_)<-contract (corrupt "hex" $ String "changed") $ \call->rejects "native_settlement_evidence_mismatch" (observeNativePayment call boundSigned)
-        (conflict,_)<-contract (corrupt "walletconflicts" $ toJSON ["other"::Text]) $ \call->rejects "native_conflict_requires_review" (observeNativePayment call boundSigned)
+        (bytes,_)<-contract (corrupt "hex" $ String "changed") $ \call->rejects "native_family_member_changed" (observe call)
+        (conflict,_)<-contract (corrupt "walletconflicts" $ toJSON ["other"::Text]) $ \call->rejects "native_family_unknown_conflict" (observe call)
         pure (bytes && conflict)
     , check "worker independently decodes returned native bytes against the durable draft" $ once $ ioProperty $ do
         (attempt,methods)<-contract (\_ v->pure v) $ \call->verifySigningReply call L2LSignetDevnet config prepared (NativeReply boundSigned)
@@ -193,6 +218,58 @@ checks = do
           refused<-rejects "native_replacement_member_not_pending" (draftNativeReplacement confirmed c [original] $ draftFee expected)
           methods<-map fst <$> readIORef calls
           pure (refused && "createpsbt" `notElem` methods)
+    , check "singleton family distinguishes a retained evicted wallet record from an active spender" $ once $ ioProperty $
+        withNativeReplacementContract $ \c original _ call calls->do
+          let txid=nativeTxid $ signedNativeTransaction original
+              points=map nativeOutpoint $ nativeInputs $ signedNativeTransaction original
+              evicted wallet method args=case method of
+                "gettxspendingprevout"->pure (toJSON points)
+                "getmempoolentry"->reject "rpc_error_-5"
+                _->call wallet method args
+              unseen wallet method args=if method=="gettransaction" then reject "rpc_error_-5" else evicted wallet method args
+          active<-readNativeFamily call c [original]
+          writeIORef calls []
+          retained<-readNativeFamily evicted c [original]
+          missing<-readNativeFamily unseen c [original]
+          methods<-map fst <$> readIORef calls
+          let activeId=fmap (\(key,depth,_)->(key,depth)) $ familyActive active
+              retainedRecord=case familyWallet retained of [(key,Just (0,_))]->key==txid; _->False
+          pure (activeId==Just(txid,0) && retainedRecord && familyActive retained==Nothing
+            && familyWallet missing==[(txid,Nothing)] && familyActive missing==Nothing
+            && "gettxout" `elem` methods && all (`notElem` methods)
+              ["getmempoolentry","walletprocesspsbt","lockunspent","sendrawtransaction"])
+    , check "singleton absence requires stable owned inputs and rejects missing or conflicting evidence" $ once $ ioProperty $
+        withNativeReplacementContract $ \c original _ call calls->do
+          let points=map nativeOutpoint $ nativeInputs $ signedNativeTransaction original
+              absent wallet method args=if method=="gettxspendingprevout" then pure (toJSON points) else call wallet method args
+              inspect rpc=readNativeFamily rpc c [original]
+              unavailable wallet method args=if method=="gettxspendingprevout" then reject "rpc_transport_unknown_outcome" else call wallet method args
+              spent wallet method args=if method=="gettxout" then pure Null else absent wallet method args
+              missingEntry wallet method args=if method=="getmempoolentry" then reject "rpc_error_-5" else call wallet method args
+              conflict wallet method args=do
+                value<-absent wallet method args
+                pure $ case value of
+                  Object fields | method=="gettransaction"->Object $ KM.insert "walletconflicts" (toJSON [T.replicate 64 "f"]) fields
+                  _->value
+              foreignSpender wallet method args=if method=="gettxspendingprevout" then pure $ toJSON
+                [object ["txid" .= outpointTxid point,"vout" .= outpointVout point,"spendingtxid" .= T.replicate 64 "f"] | point<-points]
+                else call wallet method args
+          unknown<-rejects "rpc_transport_unknown_outcome" (inspect unavailable)
+          unavailableInput<-rejects "native_input_unavailable" (inspect spent)
+          unavailableEntry<-rejects "rpc_error_-5" (inspect missingEntry)
+          walletConflict<-rejects "native_family_unknown_conflict" (inspect conflict)
+          foreignSpend<-rejects "native_family_unknown_spender" (inspect foreignSpender)
+          reads<-newIORef (0::Int)
+          let changed wallet method args
+                | method=="gettxspendingprevout"=do
+                    n<-readIORef reads
+                    modifyIORef' reads (+1)
+                    if n==0 then pure (toJSON points) else call wallet method args
+                | otherwise=call wallet method args
+          unstable<-rejects "native_family_view_changed" (inspect changed)
+          methods<-map fst <$> readIORef calls
+          pure (and [unknown,unavailableInput,unavailableEntry,walletConflict,foreignSpend,unstable]
+            && all (`notElem` methods) ["walletprocesspsbt","lockunspent","sendrawtransaction"])
     , check "replacement signer checks the captured draft and never broadcasts" $ once $ ioProperty $
         withNativeReplacementContract $ \c original expected call calls->do
           signed<-signNativeReplacement call c [original] expected
@@ -352,14 +429,16 @@ checks = do
           (Just $ NativeLockWork prepared True [])
         pure (empty==0 && undrafted==0 && cancelled==0 && emptyCalls==["listlockunspent"]
           && undraftedCalls==emptyCalls && cancelCalls==["decodepsbt","listlockunspent"])
-    , check "saved native attempts restore unseen inputs but not confirmed or mempool spends" $ once $ ioProperty $ do
+    , check "saved native attempts restore unseen or evicted inputs but not active spends" $ once $ ioProperty $ do
         (signed,_)<-contract (\_ v->pure v) $ \call->verifySigningReply call L2LSignetDevnet config prepared (NativeReply boundSigned)
         let recorded=RecordedAttempt "refund:order" "Native" 0 (planFeeLimit plan) "broadcast_intent" (Just 1) Nothing signed
             work attempt=Just $ NativeLockWork prepared False [attempt]
             missing method value=if method=="gettransaction" then reject "rpc_error_-5" else pure value
-            mempool method (Object fields) | method=="gettransaction"=pure $ Object $ KM.insert "confirmations" (Number 0) fields
-            mempool _ value=pure value
         (unseen,unseenCalls)<-contract missing $ \call->restoreNativeWork call recoverySettings config (work recorded {recordedState="signed",recordedSequence=Nothing})
+        ((evicted,repeated),evictedCalls)<-contract unconfirmed $ \call->do
+          first<-restoreNativeWork call recoverySettings config (work recorded)
+          second<-restoreNativeWork call recoverySettings config (work recorded)
+          pure (first,second)
         (confirmed,confirmedCalls)<-contract (\_ v->pure v) $ \call->restoreNativeWork call recoverySettings config (work recorded)
         (pending,pendingCalls)<-contract mempool $ \call->restoreNativeWork call recoverySettings config (work recorded)
         (unauthorized,_)<-contract (\_ v->pure v) $ \call->rejects "unrecorded_broadcast_observed"
@@ -368,7 +447,10 @@ checks = do
           (restoreNativeWork call recoverySettings config $ work recorded {recordedGeneration=1})
         family<-rejects "native_replacement_duplicate_member" (restoreNativeWork (\_ _ _->fail "family reached RPC") recoverySettings config (Just $ NativeLockWork prepared False [recorded,recorded]))
         pure (unseen==length(nativeInputs tx) && "lockunspent" `elem` unseenCalls && confirmed==0 && pending==0
-          && all (`notElem` (confirmedCalls<>pendingCalls)) ["gettxout","lockunspent","walletprocesspsbt"]
+          && evicted==length(nativeInputs tx) && repeated==0 && length(filter (=="lockunspent") evictedCalls)==1
+          && "getmempoolentry" `notElem` evictedCalls && "gettxout" `notElem` confirmedCalls
+          && all (`notElem` (confirmedCalls<>pendingCalls)) ["lockunspent","walletprocesspsbt"]
+          && all (`notElem` evictedCalls) ["walletprocesspsbt","sendrawtransaction"]
           && "getmempoolentry" `elem` pendingCalls && unauthorized && changed && family)
     , check "native recovery rejects changed PSBT fees and owned prevouts before locking" $ once $ ioProperty $ do
         let altered key method (Object fields) | method==key=pure $ Object $ KM.insert (if key=="decodepsbt" then "fee" else "value") (nativeNumber $ amt 1) fields
