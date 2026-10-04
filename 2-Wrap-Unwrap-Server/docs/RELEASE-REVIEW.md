@@ -71,14 +71,18 @@ also passed. The sequence-3 custody bundle was inspected, its ledger restored
 through the closed recovery command, the Mac fence retired and the VM fence adopted.
 Worker and signer now run as separate OS users with separate peer-authenticated
 PostgreSQL roles; the worker cannot read the signer key, native credential or unlock
-file. Both systemd services start successfully and intake remains paused.
+file. Both systemd services start successfully.
 The Mac runs an authenticated append-only HTTPS restic receiver: a VM probe was
 uploaded, restored byte for byte, and deletion/overwrite attempts were refused.
 This is the same physical host, and the existing ECX node remains on the Mac via
-an SSH tunnel. It is not independent disaster protection. The application's first
-custody checkpoint still returns `signer_outcome_unknown`, leaving backup coverage
-at zero; it must be diagnosed before intake or funded bridge acceptance. Reboot/
-tunnel recovery and independent clean-host restoration remain unverified.
+an SSH tunnel. It is not independent disaster protection. The first checkpoint
+uploaded successfully but could not verify recovery because Ubuntu's restic 0.16.4
+lacks `dump --target`. Installing checksum-verified upstream 0.19.1 allowed the exact
+snapshot to pass `recover-custody` at sequence 3. The normal operator resume then
+completed its full checkpoint/readback and chain/custody checks; the first unfunded
+customer order advanced both critical and backup coverage to 4. No backup barrier
+was waived. Reboot/tunnel recovery and independent clean-host restoration remain
+unverified; funded Mainnet conversion evidence is still pending.
 
 Live observation exposed a verifier closing an idle HTTPS connection without a
 response. The RPC read allowlist now shares at most two retries across that failure

@@ -42,10 +42,17 @@ These responsibilities remain required for a deployed server.
   mint, an independent HTTPS verifier and backups; follow [operations](OPERATIONS.md).
   Funded Mainnet acceptance and the other release gates remain separate requirements.
 - Protect the local operator/fence directory, signer token/certificate and key paths.
+  The worker verifies the signer's TLS hostname as `127.0.0.1`; issue its certificate
+  with `CN=127.0.0.1` and `subjectAltName=IP:127.0.0.1`, matching the existing transport
+  fixture. Keep certificate and hostname verification enabled.
   Use HTTPS for customer exposure through a reviewed local reverse proxy; the
   application and signer bind loopback. No public operator route exists.
 - Provision off-host HTTPS restic storage and retain recovery credentials separately
   before enabling required backup. Automatic repository provisioning is unfinished.
+  Use the tested [restic 0.19.1](https://github.com/restic/restic/releases/tag/v0.19.1)
+  client at the absolute `restic` path in `BACKUP_CONFIG`. Ubuntu 24.04's distro
+  restic 0.16.4 lacks `dump --target`, which complete backup readback and recovery
+  require; a successful upload alone does not complete a custody checkpoint.
 
 Use the current examples under `config/` as templates, replacing every placeholder
 with reviewed values. The native wallet must have the expected local descriptor
