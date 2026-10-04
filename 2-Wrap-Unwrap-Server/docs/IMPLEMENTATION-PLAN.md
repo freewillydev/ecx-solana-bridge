@@ -29,8 +29,9 @@ separate explicit tooling and evidence; they are not bridge-custody privileges.
 1. **Promoted whole: verified.** Root Cabal build, bridge/token/pool suites,
    PostgreSQL/restic contracts, server/control, HTTPS signing and encrypted native
    wallet recovery passed using canonical targets. Migration bytes and the exact
-   architectural reference are unchanged. Removing legacy harnesses does not waive
-   outstanding same-count record-corruption, retention or clean-host recovery checks.
+   architectural reference are unchanged. Archive contracts now compare the existing
+   financial projections, exclude a concurrent same-count record change and reject
+   same-length archive corruption. Protected retention and clean-host recovery remain open.
 2. **Close substantive recovery gaps.** Exercise permanent source loss/coverage,
    restored sources, native replacement/winner change/rebroadcast, and restoration
    with in-flight work. Retain exact bytes, one economic settlement and capital

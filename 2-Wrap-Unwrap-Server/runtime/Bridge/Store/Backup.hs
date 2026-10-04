@@ -62,6 +62,7 @@ archiveLedger settings directory identity version sequenceNo snapshot = do
   bracketOnError (openBinaryTempFile directory "ledger.dump-") cleanup $ \(path,handle) -> do
     setFileMode path 0o600
     run "pg_dump" ["--format=custom","--no-owner","--no-privileges","--no-password","--snapshot="<>T.unpack snapshot] (UseHandle handle)
+    hClose handle
     syncFile path
     withBinaryFile "/dev/null" WriteMode $ \sink->run "pg_restore" ["--list",path] (UseHandle sink)
     checksum <- withBinaryFile path ReadMode (hashChunks hashInit)

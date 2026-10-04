@@ -40,6 +40,13 @@ compile contracts preserved the Operation caller/severity boundary. All eight SQ
 migrations and the supplied Main.hs reference retained identical bytes. Temporary
 test resources were removed. This verifies the promotion, not the release gates below.
 
+The PostgreSQL archive contract additionally compares all 22 existing migration
+projections alongside deployment, attempts and postings. A committed recipient
+change with unchanged row counts stays outside the exported snapshot and restored
+records; same-length dump-byte corruption is rejected. These assertions reuse the
+existing backup/restore cycles. Successful dump handles now close explicitly before
+validation and hashing. This does not establish protected remote retention.
+
 Administration recovery subsequently passed the root build and all three Cabal
 suites, followed by real Devnet acceptance through Solana's public RPC and
 OnFinality. Signed mint and empty-position collection attempts were deliberately

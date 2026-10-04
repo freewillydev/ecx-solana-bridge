@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds, GADTs, ScopedTypeVariables #-}
 module Main (main) where
 import qualified Bridge.Config as Config
+import qualified Bridge.AdminKey as AdminKey
 import qualified Bridge.Credentials as Credentials
 import Paths_ecx_bridge (getDataFileName)
 import qualified Network.HTTP.Client as HTTP
@@ -77,7 +78,10 @@ import System.Exit (ExitCode(..))
 import System.Environment (getEnv,lookupEnv,getEnvironment)
 
 main :: IO ()
-main = do
+main=lookupEnv "ECX_FUNDED_RECOVERY_CONFIG" >>= maybe contractMain fundedRecoveryMain
+
+contractMain :: IO ()
+contractMain = do
   credentialsContract
   migration<-lookupEnv "ECX_REBUILD_MIGRATION_ONLY"
   live<-lookupEnv "ECX_REBUILD_LIVE_OBSERVER_CONFIG"
@@ -93,6 +97,155 @@ main = do
   if migration==Just "1" then migrationMain else case live of
     Just path->liveObserverMain path
     Nothing->if setup==Just "1" then setupMain else if native==Just "1" then nativeRecoveryMain else if tls==Just "1" then tlsMain else if fence==Just "1" then fenceMain else if server==Just "1" then serverMain else ledgerMain
+
+-- Opt-in acceptance against independently provisioned, funded Signet/Devnet
+-- custody. No fixtures, service loop, automatic broadcast or destructive cleanup.
+-- Capture stdout in a private file: it includes the exact saved transaction.
+fundedRecoveryMain :: FilePath -> IO ()
+fundedRecoveryMain path=do
+  config<-Config.loadConfig path
+  unless (Config.profile config==W.L2LSignetDevnet && units(Config.minInput config)>=1000)
+    (fail "funded recovery requires real L2L Signet/Devnet and minimum input >=1000")
+  host<-getEnv "PGHOST"; port<-getEnv "PGPORT"; database<-getEnv "PGDATABASE"
+  user<-getEnv "PGUSER"; readerUser<-getEnv "PGREADUSER"
+  unless (host=="/tmp/ecx-pg-seam" && port=="29436" && user/=readerUser && not(null readerUser)
+    && any (`T.isPrefixOf` T.pack database) ["ecx_rebuild_contract_","ecx_restore_"])
+    (fail "funded recovery requires the dedicated local acceptance database and reader")
+  password<-maybe "" id <$> lookupEnv "PGPASSWORD"
+  readerPassword<-maybe password id <$> lookupEnv "PGREADPASSWORD"
+  step<-getEnv "ECX_FUNDED_RECOVERY_STEP"
+  requestFile<-getEnv "ECX_FUNDED_RECOVERY_REQUEST"
+  request<-AdminKey.readPrivate requestFile >>= either (const $ fail "invalid funded recovery request") pure . eitherDecodeStrict'
+  let settings=PG.defaultConnectInfo {PG.connectHost=host,PG.connectPort=29436,PG.connectDatabase=database
+        ,PG.connectUser=user,PG.connectPassword=password}
+      readerSettings=settings {PG.connectUser=readerUser,PG.connectPassword=readerPassword}
+      public=Config.publicConfiguration config (Config.defaultInterface $ Config.profile config) True
+      customerSettings=CustomerSettings public (Config.storePolicy config) (Config.solanaSdkLibrary config)
+      fields names=case request of
+        Object values | sort(KM.keys values)==sort names->pure ()
+        _->fail "unexpected funded recovery request fields"
+  withReader readerSettings (Config.fingerprint config) (Config.backupRequired config) $ \reader->
+    withFencedWriter settings (Config.storePolicy config) (Config.fenceDirectory config) $ \writer->
+      bracket newRpcManager closeManager $ \manager->
+        withRuntime manager (Config.observerSettings config) (Config.solanaPolicy config) (Just customerSettings)
+          (SigningEndpoint (Config.signerPort config) (Config.signerAuthFile config)) reader writer $ \worker customer operator->do
+            let run :: WorkerOperation a -> IO a
+                run operation=worker(workerRequest operation)
+                pause=operator(Op.operator $ Op.PauseService "funded_recovery_checkpoint")
+                resume=do
+                  state<-evalRead reader ReadState
+                  when (ledgerPaused state) (operator $ Op.operator Op.ResumeService)
+                scan=do
+                  run ObserveChains
+                  run RecoverNativeSources
+                  run RecoverNativeLocks
+                  run RecoverNativeSettlements
+                  run ReconcileCustody
+                freshIntake=do
+                  now<-floor <$> getPOSIXTime
+                  checked<-try (evalRead reader $ CheckIntake now) :: IO (Either BridgeError ())
+                  case checked of
+                    Left (BridgeError code) | code `elem` ["scanners_not_fresh","custody_not_reconciled"]->do
+                      when (code=="scanners_not_fresh") (run ObserveChains)
+                      run ReconcileCustody
+                      later<-floor <$> getPOSIXTime
+                      evalRead reader (CheckIntake later)
+                    _->either throwIO pure checked
+                nativeWork identifier=do
+                  work@(view,_,_)<-evalRead reader (ReadPaymentWork identifier)
+                  unless (paymentAsset(savedPayment view)==Native) (fail "funded recovery expects a native payout")
+                  pure work
+                workEvidence identifier=do
+                  (view,prepared,attempts)<-nativeWork identifier
+                  pure $ object ["payment" .= identifier,"paymentStatus" .= show(savedStatus view)
+                    ,"prepared" .= (prepared/=Nothing),"generation" .= fmap preparedGeneration prepared
+                    ,"draftSaved" .= maybe False ((/=Nothing).preparedDraft) prepared,"attempts" .= attempts]
+                attemptEvidence txid=do
+                  saved<-evalRead reader (ReadAttempt txid)
+                  view<-evalRead reader (ReadPayment $ recordedPayment saved)
+                  unless (recordedChain saved=="Native" && paymentAsset(savedPayment view)==Native)
+                    (fail "funded recovery expects a native payout")
+                  pure $ object ["payment" .= recordedPayment saved,"paymentStatus" .= show(savedStatus view)
+                    ,"recipient" .= paymentRecipient(savedPayment view),"amount" .= paymentAmount(savedPayment view)
+                    ,"generation" .= recordedGeneration saved,"state" .= recordedState saved
+                    ,"sequence" .= recordedSequence saved,"feeLimit" .= recordedFee saved
+                    ,"observation" .= recordedObservation saved,"signed" .= recordedSigned saved]
+            when (step/="inspect") pause
+            result<-(case step of
+              "scan"->fields [] >> scan >> pure Null
+              "inspect"->fields ["payment"] >> fieldValue "payment" request >>= workEvidence
+              "allocate"->do
+                fields ["deposit","split","reason"]
+                deposit<-fieldValue "deposit" request
+                split<-fieldValue "split" request
+                reason<-fieldValue "reason" request
+                sequenceNo<-operator(Op.operator $ Op.AllocateReceipt deposit split reason)
+                pure $ object ["allocationSequence" .= sequenceNo]
+              "order"->do
+                fields ["authorization","body"]
+                authorization<-fieldValue "authorization" request
+                body<-fieldValue "body" request :: IO W.OrderRequest
+                unless (W.direction body==WrappedToNative) (fail "funded recovery expects wrapped-to-native orders")
+                scan; resume
+                app<-customerApplication customer
+                response<-WaiTest.runSession (WaiTest.srequest $ WaiTest.SRequest
+                  ((WaiTest.setPath Wai.defaultRequest "/api/v1/orders")
+                    {Wai.requestMethod="POST",Wai.requestHeaders=[("Content-Type","application/json")
+                      ,("Authorization",TE.encodeUtf8 authorization)]}) (encode body)) app
+                pure $ object ["httpStatus" .= statusCode(WaiTest.simpleStatus response)
+                  ,"responseBody" .= TE.decodeUtf8(BL.toStrict $ WaiTest.simpleBody response)]
+              "sign"->do
+                fields ["payment"]
+                identifier<-fieldValue "payment" request
+                scan
+                (view,_,existing)<-nativeWork identifier
+                previous<-mapM (evalRead reader . ReadAttempt) existing
+                unless (savedStatus view==PaymentPaid) resume
+                refreshed<-evalRead reader (ReadPayment identifier)
+                txid<-if savedStatus refreshed==PaymentPaid then case existing of
+                  [saved]->pure saved
+                  _->fail "funded recovery requires one saved attempt"
+                 else do
+                  freshIntake
+                  when (null existing) (run $ PrepareOutgoing identifier)
+                  freshIntake
+                  signed<-run(SignPreparedPayment identifier)
+                  current<-evalRead reader (ReadAttempt signed)
+                  unless (null previous || map recordedSigned previous==[recordedSigned current])
+                    (fail "funded recovery changed a saved signature")
+                  freshIntake
+                  void $ run(QueuePayment signed)
+                  pure signed
+                attemptEvidence txid
+              "settle"->do
+                fields ["transaction"]
+                txid<-fieldValue "transaction" request
+                original<-evalRead reader (ReadAttempt txid)
+                unless (recordedChain original=="Native") (fail "funded recovery expects a native payout")
+                scan
+                run(ReconcilePayment txid)
+                current<-evalRead reader (ReadAttempt txid)
+                when (recordedState current=="broadcast_intent") $ do
+                  resume
+                  refreshed<-evalRead reader (ReadAttempt txid)
+                  view<-evalRead reader (ReadPayment $ recordedPayment refreshed)
+                  when (recordedState refreshed=="broadcast_intent" && savedStatus view/=PaymentPaid)
+                    (freshIntake >> run(BroadcastPayment txid))
+                  run(ReconcilePayment txid)
+                final<-evalRead reader (ReadAttempt txid)
+                unless (recordedSigned original==recordedSigned final) (fail "funded recovery changed saved bytes")
+                attemptEvidence txid
+              _->fail "funded recovery step must be scan, inspect, allocate, order, sign or settle") `finally` pause
+            state<-evalRead reader ReadState
+            balances<-evalRead reader ReadBalances
+            pending<-evalRead reader PendingAttempts
+            payments<-evalRead reader PaymentCandidates
+            BL.putStr $ encode(object ["step" .= step,"result" .= result,"identity" .= Config.fingerprint config
+              ,"criticalSequence" .= ledgerSequence state,"backupSequence" .= ledgerBackup state
+              ,"paused" .= ledgerPaused state,"reason" .= ledgerReason state,"pendingAttempts" .= pending
+              ,"paymentCandidates" .= payments,"balances" .=
+                [object ["asset" .= asset,"account" .= show account,"amount" .= show quantity]
+                  | ((asset,account),quantity)<-M.toList balances]])<>"\n"
 
 -- Offline credential/RPC contract. The fixture records only method names, never
 -- secrets; real encrypted-wallet recovery is exercised separately below.
@@ -3455,6 +3608,7 @@ archiveContract settings fixtures reader = do
   bracket temporary removeDirectoryRecursive $ \directory->do
     before<-evalRead reader ReadState
     records<-fixture fixtures ArchiveRecords
+    history<-fixture fixtures MigrationRecords
     expectStore "invalid_backup_directory" (evalBackup reader $ ExportLedger "relative")
     setFileMode directory 0o755
     expectStore "unsafe_backup_directory" (evalBackup reader $ ExportLedger directory)
@@ -3483,6 +3637,7 @@ archiveContract settings fixtures reader = do
                 paused=[row {S.paused=1,S.pauseReason="restored_requires_reconciliation"} | row<-rows]
             bracket (PG.connect target) PG.close $ \connection->do
               fixture connection ArchiveRecords >>= check . (==(paused,attempts,postings))
+              fixture connection MigrationRecords >>= check . (==history)
               fixture connection ReadCustodyCheck >>= check . (==(Nothing,Nothing,Just "restored_requires_reconciliation"))
             denied<-try (bracket (PG.connect target {PG.connectUser=role}) PG.close (const $ pure ())) :: IO (Either SomeException ())
             check (case denied of Left err->"permission denied for database" `T.isInfixOf` T.pack(show err); Right ()->False)
@@ -3492,19 +3647,27 @@ archiveContract settings fixtures reader = do
     expectStore "backup_snapshot_too_old" (evalRestore settings $ RestoreLedger (manifestPath archive) "contract" (archiveSequence archive+1))
     restore (manifestPath archive)
     -- Pin the real read-only snapshot, then commit a separate writer before
-    -- production pg_dump starts. Omitting --snapshot would capture the new
-    -- sequence and fail the actual restored-ledger comparison below.
+    -- production pg_dump starts. A recipient changes without changing row counts;
+    -- both metadata and complete financial records must retain the old snapshot.
     let snapshotSettings=settings {PG.connectUser=role}
         originalSequence=ledgerSequence before
+        payment="convert:historical-promotion"
+        changeSource n recipient=PG.withTransaction fixtures $ do
+          fixture fixtures (SetArchiveSequence n)
+          fixture fixtures (SourceRecipient payment recipient)
+    recipient<-paymentRecipient . savedPayment <$> evalRead reader (ReadPayment payment)
     snapshotArchive<-bracket (PG.connect snapshotSettings) PG.close $ \connection->
       Tx.withTransactionMode (Tx.TransactionMode Tx.RepeatableRead Tx.ReadOnly) connection $ do
         original<-fixture connection ArchiveRecords
         check (original==records)
+        fixture connection MigrationRecords >>= check . (==history)
         snapshot<-fixture connection ExportArchiveSnapshot
-        bracket_ (fixture fixtures $ SetArchiveSequence $ originalSequence+1)
-          (fixture fixtures $ SetArchiveSequence originalSequence) $ do
+        bracket_ (changeSource (originalSequence+1) "archive-same-count-change")
+          (changeSource originalSequence recipient) $ do
             evalRead reader ReadState >>= check . (==(originalSequence+1)) . ledgerSequence
+            fixture fixtures MigrationRecords >>= check . (/=history)
             fixture connection ArchiveRecords >>= check . (==records)
+            fixture connection MigrationRecords >>= check . (==history)
             let (rows,_,_)=records
             row<-case rows of [value]->pure value; _->fail "deployment row missing"
             Backup.archiveLedger snapshotSettings directory "contract" (S.schemaVersion row) originalSequence snapshot
@@ -3520,6 +3683,12 @@ archiveContract settings fixtures reader = do
     expectStore "invalid_backup_manifest" (evalRestore settings $ RestoreLedger tampered "contract" 0)
     change "sha256" (toJSON $ T.replicate 64 "0")
     expectStore "backup_archive_mismatch" (evalRestore settings $ RestoreLedger tampered "contract" 0)
+    -- Corrupt bytes, not just a manifest field; retain the same file length.
+    let corrupted=BS.snoc (BS.init bytes) (BS.last bytes+1)
+    check (BS.length corrupted==BS.length bytes && corrupted/=bytes)
+    bracket_ (BS.writeFile (archivePath archive) corrupted)
+      (BS.writeFile (archivePath archive) bytes) $
+        expectStore "backup_archive_mismatch" (evalRestore settings $ RestoreLedger (manifestPath archive) "contract" 0)
     fixture fixtures RestoreDatabases >>= check . (==databasesBefore)
     (program,repository,password,configuration)<-testRepository directory
     let protected path contents=BS.writeFile path contents >> setFileMode path 0o600
@@ -3567,4 +3736,5 @@ archiveContract settings fixtures reader = do
     (sort <$> listDirectory directory) >>= check . (==filesBefore)
     evalRead reader ReadState >>= check . (==before)
     fixture fixtures ArchiveRecords >>= check . (==records)
-    putStrLn "PASS: committed concurrent write excluded by exported snapshot, authenticated download, restricted paused restore, stale/identity/schema/hash refusal, failed-stage cleanup, private snapshot, real restic encryption/readback/restore, repository/permission/integrity/password refusal, unchanged coverage, exact signed attempts and every ledger posting"
+    fixture fixtures MigrationRecords >>= check . (==history)
+    putStrLn "PASS: same-count financial change excluded by exported snapshot, complete financial records restored, same-length archive corruption refused, authenticated download, restricted paused restore, stale/identity/schema/hash refusal, failed-stage cleanup, private snapshot, real restic encryption/readback/restore, repository/permission/integrity/password refusal, unchanged coverage, exact signed attempts and every ledger posting"
