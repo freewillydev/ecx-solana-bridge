@@ -429,8 +429,8 @@ solanaIdentityReply :: S.SolanaSettings -> Text -> [Value] -> IO Value
 solanaIdentityReply c method params=case (method,params) of
   ("getGenesisHash",[])->pure $ toJSON (S.solanaGenesis $ S.solanaProfile c)
   ("getAccountInfo",String address:_) | address==S.mint c->pure $ object ["value" .= object
-    ["owner" .= tokenProgram,"data" .= object ["parsed" .= object ["type" .= ("mint"::Text),"info" .= object
-      ["decimals" .= (8::Int),"isInitialized" .= True,"freezeAuthority" .= Null]]]]]
+    ["owner" .= tokenProgram,"executable" .= False,"data" .= object ["space" .= (82::Int),"parsed" .= object ["type" .= ("mint"::Text),"info" .= object
+      ["decimals" .= (8::Int),"isInitialized" .= True,"freezeAuthority" .= Null,"mintAuthority" .= Null,"supply" .= ("1000000"::Text)]]]]]
   ("getAccountInfo",String address:_) | address==S.custodyAta c->pure $ object ["value" .= object
     ["owner" .= tokenProgram,"executable" .= False,"data" .= object ["space" .= (165::Int),"parsed" .= object
       ["type" .= ("account"::Text),"info" .= object ["owner" .= S.custodyOwner c,"mint" .= S.mint c,"state" .= ("initialized"::Text),

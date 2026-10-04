@@ -31,19 +31,21 @@ import Bridge.Wire (Profile(..))
 import Control.Exception (try,bracket,SomeException)
 import Control.Monad (unless)
 import Data.Aeson hiding (Result)
+import Data.Aeson.Types (parseEither)
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Aeson.Key as K
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as BS
 import Data.IORef
 import Data.Int (Int64)
+import Data.Word (Word64)
 import Data.Scientific (scientific)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Test.QuickCheck hiding (label)
 
 checks :: IO [Result]
-checks = (\deployment native solana observation administration common->deployment<>native<>solana<>observation<>administration<>common) <$> deploymentChecks <*> NativePaymentCheck.checks <*> SolanaPaymentCheck.checks <*> ObservationCheck.checks <*> administrationChecks <*> sequence
+checks = (\deployment native solana identity observation administration common->deployment<>native<>solana<>identity<>observation<>administration<>common) <$> deploymentChecks <*> NativePaymentCheck.checks <*> SolanaPaymentCheck.checks <*> solanaIdentityChecks <*> ObservationCheck.checks <*> administrationChecks <*> sequence
   [ check "native observation requires the correct ready descriptor wallet, without signing authority" $ \(sameName::Bool) (descriptors::Bool) (scanning::Bool)->ioProperty $ do
       let wallet=object ["walletname" .= (if sameName then nativeWallet settings else "other"),"descriptors" .= descriptors,"scanning" .= scanning]
           call scoped method args=if (scoped,method,args)==(True,"getwalletinfo",[]) then pure wallet else fail "unexpected wallet RPC"
@@ -248,6 +250,70 @@ replace [] replacement _=replacement
 replace (key:rest) replacement (Object fields)=Object $ KM.insert key
   (replace rest replacement $ maybe Null id $ KM.lookup key fields) fields
 replace _ _ value=value
+
+solanaIdentityChecks :: IO [Result]
+solanaIdentityChecks=sequence
+  [ check "classic SPL mint policy validates optional authority and the full unsigned supply range" $
+      forAll (chooseInteger (0,toInteger(maxBound::Word64))) $ \quantity->
+        let withSupply=replace ["data","parsed","info","supply"] (String $ T.pack $ show quantity)
+            parse=parseEither (Solana.inspectMint $ Just 8)
+            revoked=replace ["data","parsed","info","mintAuthority"] Null
+            otherDecimals=replace ["data","parsed","info","decimals"] (Number 6) mintAccount
+        in parse(withSupply mintAccount)==Right(Just owner,fromInteger quantity)
+          && parse(revoked $ withSupply mintAccount)==Right(Nothing,fromInteger quantity)
+          && parse(replace ["data","parsed","info","supply"] (String "0") mintAccount)==Right(Just owner,0)
+          && parseEither (Solana.inspectMint Nothing) otherDecimals==Right(Just owner,100)
+          && all (isLeft . parseEither (Solana.inspectMint Nothing))
+            [replace ["data","parsed","info","decimals"] (Number n) mintAccount | n<-[-1,256]]
+  , check "both Solana providers must supply the supported mint layout and canonical policy fields" $ once $ ioProperty $ do
+      primary<-mapM (\bad->rejects "unsupported_mint_policy" $ inspect bad mintAccount) badMints
+      secondary<-mapM (\bad->rejects "unsupported_mint_policy" $ inspect mintAccount bad) badMints
+      missing<-rejects "mint_not_found" $ inspect mintAccount Null
+      wrongProgram<-rejects "wrong_token_program" $ inspect mintAccount (replace ["owner"] (String owner) mintAccount)
+      pure (and primary && and secondary && missing && wrongProgram)
+  , check "Solana identity corroborates authority while allowing supply movement and preserving primary info" $ once $ ioProperty $ do
+      let changed field=replace ["data","parsed","info",field]
+          revoked=changed "mintAuthority" Null mintAccount
+      original<-inspect mintAccount (changed "supply" (String "18446744073709551615") mintAccount)
+      absentAuthority<-inspect revoked revoked
+      changedAuthority<-rejects "mint_verifier_policy_mismatch" $
+        inspect mintAccount (changed "mintAuthority" (String Solana.tokenProgram) mintAccount)
+      revokedAuthority<-rejects "mint_verifier_policy_mismatch" $ inspect mintAccount revoked
+      wrongGenesis<-rejects "verifier_wrong_genesis" $ Solana.solanaIdentityWith (reply mintAccount)
+        (Just $ \method args->if method=="getGenesisHash" then pure(String "wrong") else reply mintAccount method args) config
+      unavailable<-rejects "rpc_unavailable" $ Solana.solanaIdentityWith (reply mintAccount)
+        (Just $ \method args->if method=="getAccountInfo" then reject "rpc_unavailable" else reply mintAccount method args) config
+      pure (original==mintInfo && absentAuthority==replace ["mintAuthority"] Null mintInfo
+        && changedAuthority && revokedAuthority && wrongGenesis && unavailable)
+  ]
+ where
+  check description p=putStrLn description >> quickCheckWithResult stdArgs p
+  owner=T.replicate 32 "1"
+  config=Solana.SolanaSettings CanonicalBeta "https://primary.example" (Just "https://verifier.example")
+    "EVHqNdzjCupKi4rQkbuYw52sa1m8A7jeUAMP23S9AVVq" owner owner
+  mintInfo=object ["decimals" .= (8::Int),"isInitialized" .= True,"freezeAuthority" .= Null
+    ,"mintAuthority" .= owner,"supply" .= ("100"::Text)]
+  mintAccount=object ["owner" .= Solana.tokenProgram,"executable" .= False,"data" .= object
+    ["space" .= (82::Int),"parsed" .= object ["type" .= ("mint"::Text),"info" .= mintInfo]]]
+  tokenAccount=object ["owner" .= Solana.tokenProgram,"executable" .= False,"data" .= object
+    ["space" .= (165::Int),"parsed" .= object ["type" .= ("account"::Text),"info" .= object
+      ["owner" .= owner,"mint" .= Solana.mint config,"state" .= ("initialized"::Text),"isNative" .= False
+      ,"tokenAmount" .= object ["decimals" .= (8::Int),"amount" .= ("10"::Text)]]]]]
+  badMints=[replace path value mintAccount | (path,value)<-
+    [(["executable"],Bool True),(["data","space"],Number 83),(["data","parsed","type"],String "account")]
+    <>[(["data","parsed","info",field],value) | (field,value)<-
+      [("decimals",Number 9),("isInitialized",Bool False),("freezeAuthority",String owner)
+      ,("mintAuthority",String "invalid"),("supply",Number 100),("supply",Null)]
+      <>[("supply",String n) | n<-["","-1","+1","01","1.0","18446744073709551616"]]]]
+    <>[replace ["data","parsed","info"] (Object $ KM.delete field fields) mintAccount
+      | Object fields<-[mintInfo],field<-["mintAuthority","supply","freezeAuthority"]]
+  inspect primary secondary=Solana.solanaIdentityWith (reply primary) (Just $ reply secondary) config
+  reply value method args=case (method,args) of
+    ("getGenesisHash",[])->pure $ toJSON $ Solana.solanaGenesis CanonicalBeta
+    ("getAccountInfo",[String address,options])
+      | options==object ["commitment" .= ("finalized"::Text),"encoding" .= ("jsonParsed"::Text)]
+        && address `elem` [Solana.mint config,owner]->pure $ object ["value" .= if address==Solana.mint config then value else tokenAccount]
+    _->fail "unexpected Solana mint identity RPC"
 
 -- Scripted RPC responses exercise the production evidence collector. They are
 -- deliberately offline and make no assertion about real provider completeness.
@@ -458,7 +524,13 @@ deploymentChecks = do
         Config.validateConfig beta
         refused<-rejects "canonical_backup_required" (Config.validateConfig canonical)
         Config.validateConfig canonical {Config.backupRequired=True}
-        pure refused
+        missingVerifier<-rejects "canonical_identity_or_verifier_required" $
+          Config.validateConfig canonical {Config.backupRequired=True,Config.solanaVerifierRpc=Nothing}
+        wrongMint<-rejects "canonical_identity_or_verifier_required" $
+          Config.validateConfig canonical {Config.backupRequired=True,Config.mint=Config.mint config}
+        let public=Config.publicConfiguration canonical (Config.defaultInterface CanonicalBeta) True
+        pure (refused && missingVerifier && wrongMint && W.pubIntakeEnabled public
+          && W.pubProfile public==CanonicalBeta && W.pubSolanaCluster public=="mainnet-beta")
     , check "presentation rejects unsafe URLs and mainnet trading links on devnet" $ once $ ioProperty $ do
         Config.validateInterface config links
         script<-rejects "invalid_support_url" (Config.validateInterface config links {W.supportUrl=Just "javascript:alert(1)"})

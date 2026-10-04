@@ -11,7 +11,6 @@ import qualified Bridge.Native as N
 import Bridge.Recovery (CustodyRecovery(..),evalCustodyRecovery)
 import Bridge.Signer
 import Bridge.Store (Reader,withReader,withFencedWriter,StoreRestore(..),evalRestore,StoreSetup(..),evalSetup,BackupReceipt(..))
-import Bridge.Wire (Profile(..))
 import Control.Exception (bracket,catch)
 import Data.Aeson (encode,object,(.=),eitherDecodeStrict')
 import qualified Data.ByteString as BS
@@ -116,7 +115,6 @@ withProcessResources c database mode action=do
       (SignerSettings (C.nativeSettings c) (C.solanaSettings c) (C.solanaPolicy c) (C.solanaSdkLibrary c)
         key (C.nativeUnlockFile c) ((\(configuration,parent)->(c,configuration,parent)) <$> backup)) endpoint
     CustomerMode enabled->do
-      require (C.profile c `elem` [L2LSignetDevnet,ECXBetanetDevnet]) "public_test_profile_required"
       assets<-fromMaybe browserAssetsDirectory <$> lookupEnv "ECX_ASSETS"
       links<-lookupEnv "ECX_INTERFACE_CONFIG" >>= C.loadInterface c
       let policy=C.storePolicy c

@@ -37,8 +37,10 @@ These responsibilities remain required for a deployed server.
   native RPC methods according to `chain/Bridge/Native.hs`; signing/key export,
   wallet unlock and wallet lock must be denied. Signer-only credentials must be
   protected by the filesystem as well as by RPC policy.
-- Configure real Solana Devnet genesis/mint/custody identities and complete token/SOL
-  history origins. Canonical profile startup is not enabled for public operation.
+- Configure real Solana Devnet or canonical Mainnet identities and complete token/SOL
+  history origins. `CanonicalBeta` supports orders and payouts, requires the pinned
+  mint, an independent HTTPS verifier and backups; follow [operations](OPERATIONS.md).
+  Funded Mainnet acceptance and the other release gates remain separate requirements.
 - Protect the local operator/fence directory, signer token/certificate and key paths.
   Use HTTPS for customer exposure through a reviewed local reverse proxy; the
   application and signer bind loopback. No public operator route exists.

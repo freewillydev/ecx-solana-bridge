@@ -319,10 +319,10 @@ checks = do
         validate plan (map (\p->p {prevoutDepth=0}) previous) fee tx==Left "native_input_not_confirmed" &&
         validate plan (map (\p->p {prevoutDepth=100,prevoutCoinbase=True}) previous) fee tx==Left "native_input_not_confirmed" &&
         validate plan (map (\p->p {prevoutDepth=101,prevoutCoinbase=True}) previous) fee tx==Right ()
-    , check "native replay policy separates Signet and ECX" $ once $
+    , check "native replay policy separates Signet from both ECX profiles" $ forAll (elements [ECXBetanetDevnet,CanonicalBeta]) $ \profile ->
         valid tx {nativeLocktime=499999999}==Left "native_replay_policy_mismatch" &&
-        validate plan {planProfile=ECXBetanetDevnet} previous fee tx==Left "native_replay_policy_mismatch" &&
-        validate plan {planProfile=ECXBetanetDevnet} previous fee tx {nativeLocktime=499999999}==Right ()
+        validate plan {planProfile=profile} previous fee tx==Left "native_replay_policy_mismatch" &&
+        validate plan {planProfile=profile} previous fee tx {nativeLocktime=499999999}==Right ()
     , check "native PSBT mismatch refuses signing" $ once $ ioProperty $ do
         calls <- newIORef ([]::[Text])
         let call _ method _=modifyIORef' calls (<>[method]) >> pure (object ["tx" .= changedVersion decoded])

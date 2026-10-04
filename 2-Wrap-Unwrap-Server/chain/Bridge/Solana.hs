@@ -1,6 +1,6 @@
 module Bridge.Solana
   ( SolanaSettings(..),validateSolanaSettings,solanaCall,solanaIdentity,solanaIdentityWith,tokenAccount
-  , inspectTokenAccount,finalizedTransaction,finalizedTransactionWith,solanaHistory,solanaAddressHistory,solanaAddressHistoryWith
+  , inspectMint,inspectTokenAccount,finalizedTransaction,finalizedTransactionWith,solanaHistory,solanaAddressHistory,solanaAddressHistoryWith
   , SignatureInfo(..), collectSignatures, tokenProgram,solanaGenesis ) where
 
 import Bridge.Wire (Profile(..))
@@ -10,6 +10,7 @@ import Bridge.Domain
 import Bridge.Identity (publicKey)
 import Bridge.SolanaMessage (signatureBytes)
 import Data.Int (Int64)
+import Data.Word (Word64)
 import qualified Data.Set as Set
 import Control.Monad (unless)
 import Data.Aeson
@@ -18,6 +19,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Network.HTTP.Client (Manager,parseRequest,secure,host)
 import qualified Data.ByteString as BS
+import Text.Read (readMaybe)
 
 data SolanaSettings = SolanaSettings
   { solanaProfile :: Profile, solanaRpc :: String, solanaVerifierRpc :: Maybe String
@@ -51,27 +53,58 @@ solanaIdentityWith call verifier c = do
   require (maybe False (const True) verifier==maybe False (const True) (solanaVerifierRpc c)) "verifier_configuration_mismatch"
   genesis <- call "getGenesisHash" [] >>= parseValue parseJSON
   require (genesis==solanaGenesis (solanaProfile c)) "wrong_solana_genesis"
-  let opts=object ["commitment" .= ("finalized"::Text),"encoding" .= ("jsonParsed"::Text)]
-  response <- call "getAccountInfo" [toJSON (mint c),opts]
-  account <- fieldValue "value" response
-  require (account/=Null) "mint_not_found"
-  program <- fieldValue "owner" account
-  require (program==tokenProgram) "wrong_token_program"
-  dataValue <- fieldValue "data" account
-  parsed <- fieldValue "parsed" dataValue
-  kind <- fieldValue "type" parsed :: IO Text
-  info <- fieldValue "info" parsed
-  decimals <- fieldValue "decimals" info :: IO Int
-  initialized <- fieldValue "isInitialized" info :: IO Bool
-  freeze <- fieldValue "freezeAuthority" info :: IO (Maybe Text)
-  require (kind=="mint" && decimals==8 && initialized && freeze==Nothing) "unsupported_mint_policy"
+  (authority,info) <- readMint call
   _ <- tokenAccountWith call c (custodyAta c) (custodyOwner c)
   case verifier of
     Just verify -> do
       independent <- verify "getGenesisHash" [] >>= parseValue parseJSON
       require (independent==genesis) "verifier_wrong_genesis"
+      (otherAuthority,_) <- readMint verify
+      -- Both reads enforce the same fixed mint policy. Supply can change between
+      -- finalized provider views; only issuance authority must also agree.
+      require (otherAuthority==authority) "mint_verifier_policy_mismatch"
     Nothing -> require (solanaProfile c/=CanonicalBeta) "verifier_required"
   pure info
+ where
+  readMint :: (Text -> [Value] -> IO Value) -> IO (Maybe Text,Value)
+  readMint request=do
+    response <- request "getAccountInfo" [toJSON (mint c),object
+      ["commitment" .= ("finalized"::Text),"encoding" .= ("jsonParsed"::Text)]]
+    account <- fieldValue "value" response
+    require (account/=Null) "mint_not_found"
+    program <- fieldValue "owner" account
+    require (program==tokenProgram) "wrong_token_program"
+    (authority,_) <- either (const $ reject "unsupported_mint_policy") pure (parseEither (inspectMint $ Just 8) account)
+    info <- fieldValue "data" account >>= fieldValue "parsed" >>= fieldValue "info"
+    pure (authority,info)
+
+-- Shared with token administration; accepting other decimals is explicit there.
+-- Supply uses the SPL u64 range, independent of the bridge's signed ledger range.
+inspectMint :: Maybe Int -> Value -> Parser (Maybe Text,Word64)
+inspectMint expectedDecimals value=do
+  program<-field "owner" value
+  executable<-field "executable" value
+  dat<-field "data" value
+  space<-field "space" dat :: Parser Int
+  parsed<-field "parsed" dat
+  kind<-field "type" parsed :: Parser Text
+  info<-field "info" parsed
+  initialized<-field "isInitialized" info
+  decimals<-field "decimals" info :: Parser Int
+  freeze<-field "freezeAuthority" info :: Parser (Maybe Text)
+  unless (program==tokenProgram && not executable && space==82 && kind=="mint" && initialized
+    && decimals>=0 && decimals<=255 && maybe True (==decimals) expectedDecimals && freeze==Nothing) (fail "unsupported mint")
+  authority<-field "mintAuthority" info
+  mapM_ (either (fail . T.unpack) (const $ pure ()) . publicKey) authority
+  supply<-field "supply" info
+  unless (not(T.null supply) && T.length supply<=20) (fail "invalid mint supply")
+  quantity<-case readMaybe (T.unpack supply) :: Maybe Integer of
+    Just n | n>=0 && n<=toInteger(maxBound::Word64) && T.pack(show n)==supply->pure(fromInteger n)
+    _->fail "invalid mint supply"
+  pure (authority,quantity)
+ where
+  field :: FromJSON a => Key -> Value -> Parser a
+  field key=withObject "mint field" (.: key)
 
 tokenAccount :: Manager -> SolanaSettings -> Text -> Text -> IO Value
 tokenAccount manager c = tokenAccountWith (solanaCall manager c) c

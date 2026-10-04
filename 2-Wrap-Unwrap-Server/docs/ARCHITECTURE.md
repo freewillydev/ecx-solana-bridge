@@ -196,9 +196,21 @@ Wrapping binds an external Solana recipient and native refund address. Unwrappin
 binds a native recipient and Solana Pay reference, then verifies the actual sender
 for refunds. Native admission checks the real checkpoint/network, supported scripts,
 ownership, dust and fee policy. Solana admission checks genesis, classic SPL program,
-mint/ATA identity, decimals, ownership, balances and fee/rent limits. Unsupported
+mint/ATA identity, initialized mint layout, decimals, absent freeze authority,
+ownership, balances and fee/rent limits. The shared mint parser also validates
+issuance authority and bounded supply; configured providers must agree on authority,
+while differing supply snapshots are allowed. This does not pin an issuer-approved
+authority. Unsupported
 extensions, delegates, close authorities and account forms are refused. Simulation
 success does not guarantee later execution.
+
+All three profiles use this same order/payment path. `CanonicalBeta` binds the
+ECX checkpoint and canonical mint to Solana Mainnet genesis, requires an independent
+HTTPS verifier and requires backup coverage in the deployment configuration.
+The CLI validates that configuration before creating reader/writer/signer resources;
+`runProcess` checks their chain and customer identity alignment. Mainnet has no
+separate evaluator or manual payout shortcut. Observation mode still refuses paying
+operations; paying mode starts paused and must pass operator resume checks.
 
 Native provisioning saves a unique claim before allocating an address. Only the
 claim creator allocates; retries recover the exact labeled owned, solvable,

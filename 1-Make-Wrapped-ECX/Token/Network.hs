@@ -14,7 +14,7 @@ import qualified Crypto.PubKey.Ed25519 as Ed
 import Token (Request(..),Action(..),validate)
 import Bridge.Error (require,reject)
 import Bridge.RPC
-import Bridge.Solana (tokenProgram)
+import Bridge.Solana (tokenProgram,inspectMint)
 import Bridge.SolanaMessage (Transaction(..),publicKey,base58)
 import Control.Exception (bracket)
 import Control.Monad (unless,forM_)
@@ -297,16 +297,6 @@ submitSaved network endpoint feeLimit saved=do
 
 -- Strict classic SPL policies: no extensions, frozen/delegated/native accounts,
 -- or hidden close/freeze authority. JSON amounts are canonical unsigned integers.
-inspectMint :: Maybe Int -> Value -> Parser (Maybe Text,Word64)
-inspectMint expectedDecimals value=do
-  info<-accountFields 82 "mint" value
-  initialized<-field "isInitialized" info
-  decimals<-field "decimals" info :: Parser Int
-  freeze<-field "freezeAuthority" info :: Parser (Maybe Text)
-  unless (initialized && decimals>=0 && decimals<=255 && maybe True (==decimals) expectedDecimals && freeze==Nothing) (fail "unsupported mint")
-  authority<-field "mintAuthority" info
-  supply<-field "supply" info >>= units
-  pure (authority,supply)
 inspectAccount :: Value -> Parser (Text,Word64,Text)
 inspectAccount value=do
   info<-accountFields 165 "account" value

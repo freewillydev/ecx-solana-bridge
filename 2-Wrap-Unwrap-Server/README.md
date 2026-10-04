@@ -23,7 +23,8 @@ cabal run exe:ecx-bridge -- observe /absolute/private/config.json
 
 Startup requires a reviewed deployment configuration, migrated PostgreSQL ledger,
 distinct writer/reader roles, and an adopted host fence. `observe` cannot create
-orders or send payouts. `serve` permits paying workflows but starts paused; a
+orders or send payouts. All three profiles, including `CanonicalBeta` on Solana
+Mainnet, support `serve` and `signer`. `serve` permits paying workflows but starts paused; a
 separate signer and guarded operator resume are required. Follow [installation
 prerequisites](docs/INSTALL.md) and [operations](docs/OPERATIONS.md), not a test fixture.
 There is currently **no automated installer**. The incompatible old installer,

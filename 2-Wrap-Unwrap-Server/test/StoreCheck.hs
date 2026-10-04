@@ -14,6 +14,9 @@ import qualified Bridge.Store.Backup as Backup
 import Bridge.Store.Catalog (exportSnapshot)
 import qualified Database.PostgreSQL.Simple.Transaction as Tx
 import Crypto.Random (getRandomBytes)
+import Crypto.Error (CryptoFailable(..))
+import qualified Crypto.PubKey.Ed25519 as Ed
+import qualified Data.ByteArray as BA
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (withAsync,wait,cancel,poll)
 import Control.Concurrent.MVar (newEmptyMVar,putMVar,takeMVar,tryPutMVar)
@@ -58,6 +61,7 @@ import Servant.API (BasicAuthData(..))
 import qualified Bridge.Native as N
 import qualified Bridge.Solana as Solana
 import qualified Bridge.SolanaHelper as H
+import qualified Bridge.SolanaMessage as SolanaMessage
 import Network.HTTP.Client (newManager,closeManager,defaultManagerSettings,managerModifyRequest)
 import Network.HTTP.Client.TLS (mkManagerSettings)
 import qualified Network.Connection as NC
@@ -2384,6 +2388,7 @@ serverMain = do
   role<-getEnv "ECX_REBUILD_CONTRACT_READER"
   binary<-getEnv "ECX_REBUILD_EXECUTABLE"
   environment<-getEnvironment
+  canonical<-(==Just "1") <$> lookupEnv "ECX_REBUILD_CANONICAL"
   base<-getDataFileName "test/fixtures/deployment-config.json" >>= Config.loadConfig
   let settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
       check ok=unless ok (fail "server process contract failed")
@@ -2394,7 +2399,10 @@ serverMain = do
       NS.bind sock (NS.SockAddrInet 0 (NS.tupleToHostAddress (127,0,0,1)))
       address<-NS.getSocketName sock
       case address of NS.SockAddrInet n _->pure (fromIntegral n); _->fail "unexpected listener address"
-    let config=base {Config.serverPort=port,Config.fenceDirectory=directory<>"/fence",
+    let network=if canonical then base {Config.profile=W.CanonicalBeta,Config.backupRequired=True,
+          Config.nativeCheckpointHeight=967680,Config.nativeCheckpointHash="00000000000000030101ba5cfea54b22becc79f95dc6040beb76e01dd9d04042",
+          Config.mint="EVHqNdzjCupKi4rQkbuYw52sa1m8A7jeUAMP23S9AVVq",Config.solanaVerifierRpc=Just "https://localhost:1"} else base
+        config=network {Config.serverPort=port,Config.fenceDirectory=directory<>"/fence",
           Config.nativeCookie=directory<>"/missing-cookie",Config.solanaRpc="https://127.0.0.1:1"}
         identity=Config.fingerprint config
         filename=directory<>"/config.json"
@@ -2409,7 +2417,7 @@ serverMain = do
     check (adopted==ExitSuccess)
     adoptedState<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ T.pack output)
     fieldValue "paused" adoptedState >>= check . (==True)
-    withReader settings {PG.connectUser=role} identity False $ \reader->do
+    withReader settings {PG.connectUser=role} identity (Config.backupRequired config) $ \reader->do
       before<-evalRead reader ReadBalances
       archive<-evalBackup reader (ExportLedger directory)
       let runRestore minimumSequence=Process.readCreateProcessWithExitCode
@@ -2453,6 +2461,8 @@ serverMain = do
               check (statusCode(HTTP.responseStatus public)==200)
               decoded<-either fail pure (eitherDecodeStrict' $ BL.toStrict $ HTTP.responseBody public)
               check (W.pubDeployment decoded==Config.deploymentId config && not(W.pubIntakeEnabled decoded)
+                && W.pubProfile decoded==Config.profile config && W.pubMint decoded==Config.mint config
+                && W.pubSolanaCluster decoded==(if canonical then "mainnet-beta" else "devnet")
                 && W.pubAvailability decoded==W.Availability False "observation_only")
               orderRequest<-HTTP.parseRequest ("http://127.0.0.1:"<>show port<>"/api/v1/orders")
               deniedOrder<-HTTP.httpLbs orderRequest {HTTP.method="POST"
@@ -2517,6 +2527,31 @@ serverMain = do
               cliStatus<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ T.pack out)
               check (W.paused cliStatus)
               evalRead reader ReadBalances >>= check . (==before)
+      -- Mainnet paying mode uses the same CLI/resource assembly. Unavailable
+      -- chains still leave it paused and unable to create a fresh order.
+      when canonical $ bracket (newManager defaultManagerSettings) closeManager $ \manager->
+        withFile (directory<>"/paying.log") WriteMode $ \logFile->
+          Process.withCreateProcess (Process.proc binary ["serve",filename])
+            {Process.env=Just childEnv,Process.std_out=Process.UseHandle logFile,Process.std_err=Process.UseHandle logFile} $ \_ _ _ process->
+            flip finally (Process.terminateProcess process >> void (Process.waitForProcess process)) $ do
+              let request path=HTTP.parseRequest ("http://127.0.0.1:"<>show port<>path)
+              awaitCondition "canonical paying server" $ do
+                alive<-Process.getProcessExitCode process
+                check (alive==Nothing)
+                result<-try (request "/api/v1/config" >>= flip HTTP.httpLbs manager) :: IO (Either HTTP.HttpException (HTTP.Response BL.ByteString))
+                pure $ case result of Right _->True; _->False
+              reply<-request "/api/v1/config" >>= flip HTTP.httpLbs manager
+              public<-either fail pure (eitherDecodeStrict' $ BL.toStrict $ HTTP.responseBody reply)
+              check (W.pubIntakeEnabled public && W.pubProfile public==W.CanonicalBeta
+                && W.pubSolanaCluster public=="mainnet-beta" && not(W.available $ W.pubAvailability public))
+              wire<-request "/api/v1/orders"
+              denied<-HTTP.httpLbs wire {HTTP.method="POST",HTTP.requestHeaders=[("Content-Type","application/json"),("Authorization","Bearer "<>BS.replicate 64 97)]
+                ,HTTP.requestBody=HTTP.RequestBodyLBS $ encode $
+                  W.OrderRequest WrappedToNative (money 10000) "recipient" "" Nothing "canonical-paused"} manager
+              check (statusCode(HTTP.responseStatus denied)==409 && eitherDecodeStrict' (BL.toStrict $ HTTP.responseBody denied)
+                ==Right (object ["error" .= ("intake_paused"::T.Text)]))
+              evalRead reader ReadBalances >>= check . (==before)
+              evalRead reader PendingAttempts >>= check . null
       -- Explicit termination/wait reaped HTTP and worker together, releasing
       -- the real host fence; no daemon or worker is left behind by this check.
       Fence.withFence (Config.fenceDirectory config) identity (const $ pure ())
@@ -2960,29 +2995,51 @@ treasuryContract fixtures reader writer=do
 -- RPC responses and ledger funding are explicit fixtures, not live acceptance.
 tlsMain :: IO ()
 tlsMain=do
+  canonical<-(==Just "1") <$> lookupEnv "ECX_REBUILD_CANONICAL"
   database<-getEnv "ECX_REBUILD_CONTRACT_DATABASE"
   unless ("ecx_rebuild_contract_" `T.isPrefixOf` T.pack database) (fail "disposable database required")
   user<-getEnv "USER"; role<-getEnv "ECX_REBUILD_CONTRACT_READER"; sdk<-getEnv "ECX_REBUILD_TEST_SDK"
   vector<-getDataFileName "test/fixtures/signed-three-units.json" >>= BS.readFile >>= either fail pure . eitherDecodeStrict'
   workflow<-getDataFileName "test/fixtures/signed-payment-workflow.json" >>= BS.readFile >>= either fail pure . eitherDecodeStrict'
-  owner<-fieldValue "owner" vector; recipient<-fieldValue "recipient" vector; mint<-fieldValue "mint" vector; hash<-fieldValue "blockhash" vector
-  reply<-fieldValue "reply" workflow :: IO H.HelperReply
+  owner<-fieldValue "owner" vector; recipient<-fieldValue "recipient" vector; vectorMint<-fieldValue "mint" vector; hash<-fieldValue "blockhash" vector
+  vectorReply<-fieldValue "reply" workflow :: IO H.HelperReply
   identifier<-fieldValue "paymentId" workflow
-  let identity="offline-policy"; encoded value=TE.decodeUtf8 (BL.toStrict $ encode value)
+  let profile=if canonical then W.CanonicalBeta else W.L2LSignetDevnet
+      cluster=if canonical then "mainnet-beta" else "devnet"
+      mint=if canonical then "EVHqNdzjCupKi4rQkbuYw52sa1m8A7jeUAMP23S9AVVq" else vectorMint
+      -- Classic SPL ATA for the public fixture owner and canonical mint, derived
+      -- by the token tool. The SDK independently derives and checks it below.
+      custody=if canonical then "Jon9rntk6G8BftwW1nRqkSf54iqXaqDD6a2ZSky2bWW" else H.replySource vectorReply
+      identity="offline-policy"; encoded value=TE.decodeUtf8 (BL.toStrict $ encode value)
       settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
       policy=PaymentTerms (PolicySnapshot 1 "finalized" identity) (CostLimits (money 1) (money 10000) (money 2100000))
       store=StorePolicy policy (OrderLimits (money 2) (money 1000) 100 100 100 (money 10000000) (money 10000000)) "codec-fixture" True
-      config=H.SolanaPolicy "codec-fixture" identity mint owner (H.replySource reply) (money 10000) (money 2100000)
+      config=H.SolanaPolicy "codec-fixture" identity mint owner custody (money 10000) (money 2100000)
       plan=SP.SolanaPlan identity recipient (money 3) (payoutReference identity identifier) (SP.RecentBlockhash hash 1000 100) (money 10000) (money 2100000)
-      native=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:1" "/unused" "ecx-bridge-test" 16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47"
-      solana=Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing mint owner (H.replySource reply)
+      native=N.NativeSettings profile "http://127.0.0.1:1" "/unused" "ecx-bridge-test"
+        (if canonical then 967680 else 16000)
+        (if canonical then "00000000000000030101ba5cfea54b22becc79f95dc6040beb76e01dd9d04042" else "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47")
+      solana=Solana.SolanaSettings profile "https://primary.example" (if canonical then Just "https://verifier.example" else Nothing) mint owner custody
       check :: HasCallStack => Bool -> IO ()
       check ok=unless ok (fail $ "TLS signing contract failed\n"<>prettyCallStack callStack)
       context value=object ["context" .= object ["slot" .= (100::Int)],"value" .= value]
       token=object ["owner" .= Solana.tokenProgram,"executable" .= False,"data" .= object ["space" .= (165::Int),"parsed" .= object ["type" .= ("account"::T.Text),"info" .= object
         ["mint" .= mint,"owner" .= owner,"state" .= ("initialized"::T.Text),"isNative" .= False,"tokenAmount" .= object ["amount" .= ("10000000"::T.Text),"decimals" .= (8::Int)]]]]]
-      mintAccount=object ["owner" .= Solana.tokenProgram,"data" .= object ["parsed" .= object ["type" .= ("mint"::T.Text),"info" .= object ["decimals" .= (8::Int),"isInitialized" .= True,"freezeAuthority" .= Null]]]]
+      mintAccount=object ["owner" .= Solana.tokenProgram,"executable" .= False,"data" .= object ["space" .= (82::Int),"parsed" .= object ["type" .= ("mint"::T.Text),"info" .= object
+        ["decimals" .= (8::Int),"isInitialized" .= True,"freezeAuthority" .= Null,"mintAuthority" .= Null,"supply" .= ("10000000"::T.Text)]]]]
       payer=object ["owner" .= ("11111111111111111111111111111111"::T.Text),"executable" .= False,"data" .= ["","base64"::T.Text],"lamports" .= (10000000::Int)]
+  reply<-if not canonical then pure vectorReply else do
+    -- The expected signature is computed independently from the unsigned SDK
+    -- message with the public fixture seed. Actual signing must still traverse
+    -- HTTPS and the gated critical evaluator below. No transaction is submitted.
+    preview<-H.invokeUnsignedHelper sdk config (SP.solanaPayoutRequest config plan)
+    message<-either fail pure (B64.decode $ TE.encodeUtf8 $ H.replyMessage preview)
+    secret<-case Ed.secretKey (BS.replicate 32 1) of CryptoPassed key->pure key; CryptoFailed _->fail "invalid public fixture seed"
+    let signature=BA.convert (Ed.sign secret (Ed.toPublic secret) message) :: BS.ByteString
+        expected=preview {H.replySignature=Just $ SolanaMessage.base58 signature,
+          H.replyTransaction=TE.decodeUtf8 $ B64.encode $ BS.singleton 1<>signature<>message}
+    _<-either reject pure (H.validateHelperReply config (SP.solanaPayoutRequest config plan) expected)
+    pure expected
   calls<-newIORef ([]::[T.Text])
   barrier<-newIORef Nothing
   let rpcApplication request respond=do
@@ -2994,14 +3051,14 @@ tlsMain=do
           forM_ blocked $ \(entered,release)->putMVar entered () >> takeMVar release
         modifyIORef' calls (<>[method])
         result<-case method of
-          "getblockchaininfo"->pure $ object ["chain" .= ("signet"::T.Text),"initialblockdownload" .= False
-            ,"blocks" .= (16000::Int),"signet_challenge" .= N.signetChallenge]
+          "getblockchaininfo"->pure $ object $ ["chain" .= (if canonical then "main" else "signet"::T.Text),"initialblockdownload" .= False
+            ,"blocks" .= N.nativeCheckpointHeight native] <> if canonical then [] else ["signet_challenge" .= N.signetChallenge]
           "getblockhash"->pure $ String (N.nativeCheckpointHash native)
           "getconnectioncount"->pure $ Number 1
           "getwalletinfo"->pure $ object ["walletname" .= N.nativeWallet native,"descriptors" .= True
             ,"scanning" .= False,"private_keys_enabled" .= True,"external_signer" .= False]
           "getSignatureStatuses"->pure Null -- Deliberate unavailable observation, never a successful chain effect.
-          "getGenesisHash"->pure $ toJSON (Solana.solanaGenesis W.L2LSignetDevnet)
+          "getGenesisHash"->pure $ toJSON (Solana.solanaGenesis profile)
           "getAccountInfo"->pure $ context $ if take 1 params==[toJSON mint] then mintAccount else token
           "getBlockHeight"->pure $ Number 900
           "getMultipleAccounts"->pure $ context $ toJSON [token,Null,payer]
@@ -3039,6 +3096,16 @@ tlsMain=do
                     unless (statusCode(HTTP.responseStatus response)==200) $
                       fail ("expected signed result, got "<>show(HTTP.responseStatus response)<>" "<>show(HTTP.responseBody response))
                     Op.preparedOutput <$> either fail pure (eitherDecodeStrict' $ BL.toStrict $ HTTP.responseBody response)
+              when canonical $ do
+                let signing=SignerSettings native solana config sdk keyFile Nothing Nothing
+                    start configured=runProcess manager reader (SignerProcess configured endpoint)
+                expectStore "canonical_identity_or_verifier_required" $
+                  start signing {signingSolana=solana {Solana.solanaVerifierRpc=Nothing}}
+                expectStore "independent_rpc_required" $
+                  start signing {signingSolana=solana {Solana.solanaVerifierRpc=Just $ Solana.solanaRpc solana}}
+                expectStore "signer_profile_mismatch" $
+                  start signing {signingNative=native {N.profile=W.ECXBetanetDevnet}}
+                readIORef calls >>= check . null
               withProcessListening (runProcess manager reader $ SignerProcess
                 (SignerSettings native solana config sdk keyFile Nothing Nothing) endpoint) (signerPort endpoint) $ do
                 writeFile auth (replicate 64 'b')
@@ -3133,7 +3200,7 @@ tlsMain=do
                   configuredNative=native {N.nativeCookie=cookie}
                   header="Bearer "<>T.replicate 64 "c"
                   order=W.OrderRequest WrappedToNative (money 10) "native-recipient" "" Nothing "checkpoint-http"
-                  publicConfig=W.PublicConfiguration W.L2LSignetDevnet "devnet" (W.InterfaceConfig Nothing Nothing Nothing Nothing Nothing)
+                  publicConfig=W.PublicConfiguration profile cluster (W.InterfaceConfig Nothing Nothing Nothing Nothing Nothing)
                     "codec-fixture" mint owner 8 (money 2) (money 1000) (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)])
                     True False (W.Availability False "starting")
               writeFile cookie "fixture:fixture"; setFileMode cookie 0o600
@@ -3218,7 +3285,7 @@ tlsMain=do
         evalWrite writer (RecordSolanaExpiry successor proof)
         pending []
         evalRead reader (ReadAttempt $ signedId $ recordedSigned old) >>= check . (==retired)
-  putStrLn "PASS: real process HTTPS signing, auth/certificate refusal, serialized concurrent requests, second-read refusal and gate recovery, exact SDK output, durable ledger replay, pending-payment recovery and HTTP-triggered checkpoint receipt validation/acknowledgment/replay; offline fixtures only"
+  putStrLn $ "PASS: "<>(if canonical then "canonical Mainnet profile" else "Devnet profile")<>", real process HTTPS signing, auth/certificate refusal, serialized concurrent requests, second-read refusal and gate recovery, exact SDK output, durable ledger replay, pending-payment recovery and HTTP-triggered checkpoint receipt validation/acknowledgment/replay; offline fixtures only"
 
 restorationContract :: PG.Connection -> Reader -> Writer -> IO ()
 restorationContract fixtures reader writer=do

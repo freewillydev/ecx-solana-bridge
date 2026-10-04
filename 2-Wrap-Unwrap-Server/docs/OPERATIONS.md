@@ -38,12 +38,33 @@ bridge signer SIGNER_CONFIG KEYFILE
 bridge signer SIGNER_CONFIG KEYFILE BACKUP_CONFIG STAGING
 ```
 
-`observe` refuses order creation and outgoing payments. `serve` starts paused;
-explicit resume performs recovery/readiness checks. Both modes currently accept
-L2L Signet/Devnet or ECX betanet/Devnet profiles; canonical activation is not enabled.
+`observe` accepts all three configured profiles, including canonical ECX/Solana
+Mainnet, and refuses order creation, resume and outgoing payments. It still writes
+verified observations and reconciliation evidence to the deployment ledger; use
+its matching ledger/fence and restricted native credentials, not a copied Devnet
+configuration. Canonical observation retains the pinned mint/checkpoint, independent
+verifier and required-backup configuration checks. It needs no signing process.
+`serve` and `signer` also accept all three profiles. `serve` starts paused;
+explicit resume performs recovery/readiness checks. Canonical mode uses the same
+order, refund and payout engine, with no separate signing or broadcast path.
 Both server ports bind loopback. Keep the operator/fence directory mode 0700 and
 short enough for the Unix-socket path limit. The operator socket is mode 0600 and
 is separate from signer HTTPS.
+
+For canonical ECX/Solana Mainnet, adapt the ECX betanet example with reviewed
+deployment values. Set `profile` to `CanonicalBeta`, `mint` to
+`EVHqNdzjCupKi4rQkbuYw52sa1m8A7jeUAMP23S9AVVq`, and `backupRequired` to `true`.
+Retain the pinned ECX checkpoint at height 967680. Both Solana RPC endpoints must
+use HTTPS, have different hostnames and report Mainnet genesis; configure an
+independent provider, not two URLs for one service. Use the actual Mainnet custody
+owner/ATA and token/SOL history origins, matching native wallet and deployment
+ledger, and reviewed limits/confirmation policy. Changing profile changes the
+fingerprint: an existing Devnet ledger cannot be reused as a Mainnet ledger.
+Run the signer with `BACKUP_CONFIG STAGING`; required checkpoints cover orders and
+outgoing work before instructions/signing/broadcast. Missing coverage remains a
+refusal. Fund and allocate custody through the existing treasury workflow before
+operator resume. Enabling the code path does not establish funded Mainnet acceptance;
+see [release gates](RELEASE-REVIEW.md).
 
 For an encrypted native descriptor wallet, set the signer's optional
 `nativeUnlockFile` to a mode-0600 regular file with the exact 1–1024-byte UTF-8

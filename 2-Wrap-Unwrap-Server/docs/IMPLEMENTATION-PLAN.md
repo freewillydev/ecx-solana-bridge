@@ -13,7 +13,8 @@ connection-free wrapping/unwrapping, 1% new fees both ways, immutable quotes,
 native deposit addresses, Solana Pay references, QR/payment links, saved-order
 recovery, refunds, explorer/trading links and support. Retain bounded treasury and
 earned-fee operations, reconciliation, cancellation, replacement and recovery.
-Use real L2L Signet/Solana Devnet; canonical deployment needs its own acceptance.
+Use real L2L Signet/Solana Devnet for funded development. Canonical ECX/Solana Mainnet
+supports the same order/payout engine; its deployment needs separate funded acceptance.
 
 Preserve the supplied [Main.hs](reference/Main.hs) unmodified and outside builds.
 Keep its typeclass/constrained-existential/GADT intent, specific caller/severity
@@ -51,7 +52,10 @@ separate explicit tooling and evidence; they are not bridge-custody privileges.
    status is not proof of nonexecution. Verify nonzero fee collection and any
    promised reinvestment separately. Confirm
    issuer-approved canonical identity, authority, backing and executable routes
-   before enabling canonical trading/customer flows.
+   before activating a funded canonical deployment. Canonical `observe`, `serve`
+   and `signer` now use the shared runtime; startup still pauses intake and requires
+   pinned identity, independent verification and backup coverage. Local process and
+   protocol contracts do not replace a real Mainnet round trip.
 5. **Prove deployment and disaster recovery.** Run worker/signer under separate OS
    identities and database roles; deny worker access to custody keys, native full
    credentials and unlock/lock RPC. Verify the current processes, not only file

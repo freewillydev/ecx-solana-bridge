@@ -154,8 +154,7 @@ runProcess rpc reader process=do
   environment<-case process of
     SignerProcess settings _->do
       let native=signingNative settings; solana=signingSolana settings; config=signingPolicy settings
-      require (N.profile native `elem` [W.L2LSignetDevnet,W.ECXBetanetDevnet]
-        && S.solanaProfile solana==N.profile native
+      require (S.solanaProfile solana==N.profile native
         && S.mint solana==H.mint config && S.custodyOwner solana==H.custodyOwner config
         && S.custodyAta solana==H.custodyAta config) "signer_profile_mismatch"
       N.validateNativeSettings native

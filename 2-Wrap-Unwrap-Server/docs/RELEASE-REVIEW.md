@@ -1,6 +1,7 @@
 # Release review
 
-The current implementation is a reviewable test-network product, not a completed
+The current implementation supports test-network and canonical Mainnet operation,
+with funded acceptance recorded only on test networks; it is not a completed
 public release. Historical checks are regression evidence within their recorded
 scope. Every release result must identify the exact source, artifact and environment;
 a past transfer or installer does not certify later source or a new deployment.
@@ -15,6 +16,7 @@ a past transfer or installer does not certify later source or a new deployment.
 | Browser | GHC-JavaScript fee previews, paused intake, private-link recovery/reload, preserved payout links and network-error/restart behavior checked against the actual server. Actual wallet signing remains open. |
 | Custody restoration | Sequence-98 funded ledger restored into separate same-host staging; 24 projections matched and actual chain reconciliation passed. Minimum sequence 99 refused the archive. This does not prove off-host storage or clean-host wallet activation. |
 | Automated boundaries | Cabal QuickCheck/protocol tests, actual HTTPS tests and PostgreSQL contracts cover typed authority, immutable accounting, fencing, concurrency, cancellation, source/replacement recovery and encrypted restic restoration. Fixtures do not prove all real-chain cases. |
+| Canonical Mainnet mode | `serve` and `signer` accept the canonical profile through the shared order/payment engine. Local contracts verify CLI startup, paused order refusal, observer restrictions, actual HTTPS signing of canonical-mint bytes, concurrent/repeated signing, second-read refusal and customer checkpoint handling. RPC effects are offline fixtures, not a funded Mainnet transfer. |
 | Signer model | Bounded two-request TLA+ model: 54,289 distinct states; path/output/dispatch invariants and negative mutations checked. No TLAPS/unbounded Haskell proof. |
 | Token administration | Real Devnet mint/account creation, issuance/burn and metadata readback, preserving signed-attempt replay. Bounded expiry recovery now has a finalized mint-one/burn-one round trip; canonical authority/backing remain open. |
 | Liquidity | Real Devnet pool/position creation, funded deposit/withdrawal and collection replay, plus bounded expiry recovery for an empty-position collection. Collected fees were zero; nonzero yield/reinvestment remains unverified. |
@@ -39,6 +41,16 @@ contracts. The configuration CLI and both example shapes were checked; six
 compile contracts preserved the Operation caller/severity boundary. All eight SQL
 migrations and the supplied Main.hs reference retained identical bytes. Temporary
 test resources were removed. This verifies the promotion, not the release gates below.
+
+Mainnet enablement and the shared strict SPL mint parser passed the root build,
+all three Cabal suites, PostgreSQL/restic contracts and both Devnet and canonical
+server/HTTPS variants. Tests retain pinned mint/checkpoint, independent-provider,
+backup, profile-alignment and native replay-policy refusals. Mint validation now
+checks the full classic layout and unsigned supply range on both providers and
+requires matching mint authorities; it does not establish issuer approval or pin
+an expected authority. The running funded deployment remains Signet/Devnet.
+No Mainnet transaction was broadcast, no new runtime component/file was added,
+and disposable databases, roles and processes were removed after testing.
 
 The associated-constraint interpreter refactor also passed the root build, all three
 Cabal suites and the same PostgreSQL/server/HTTPS/encrypted-wallet contracts.
