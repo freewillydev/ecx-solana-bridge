@@ -156,10 +156,18 @@ fundedRecoveryMain path=do
                   unless (paymentAsset(savedPayment view)==Native) (fail "funded recovery expects a native payout")
                   pure work
                 workEvidence identifier=do
-                  (view,prepared,attempts)<-nativeWork identifier
+                  (view,prepared,attempts)<-evalRead reader (ReadPaymentWork identifier)
+                  source<-evalRead reader (ReadPaymentSource identifier)
+                  evidence<-case source of
+                    Just binding | W.depositAsset(W.sourceDeposit binding)==Native->Just . snd <$> evalRead reader (ReadNativeSourceInspection $ W.depositId $ W.sourceDeposit binding)
+                    _->pure Nothing
+                  history<-case source of
+                    Just binding->bracket (PG.connect readerSettings) PG.close (\c->fixture c $ SourceHistory $ W.depositId $ W.sourceDeposit binding)
+                    _->pure []
                   pure $ object ["payment" .= identifier,"paymentStatus" .= show(savedStatus view)
                     ,"prepared" .= (prepared/=Nothing),"generation" .= fmap preparedGeneration prepared
-                    ,"draftSaved" .= maybe False ((/=Nothing).preparedDraft) prepared,"attempts" .= attempts]
+                    ,"draftSaved" .= maybe False ((/=Nothing).preparedDraft) prepared,"attempts" .= attempts
+                    ,"source" .= fmap (show . W.sourceDeposit) source,"sourceEvidence" .= evidence,"sourceHistory" .= history]
                 attemptEvidence txid=do
                   saved<-evalRead reader (ReadAttempt txid)
                   view<-evalRead reader (ReadPayment $ recordedPayment saved)
@@ -1187,6 +1195,18 @@ ledgerMain = do
         let intent="convert:"<>historical
         (readyWork,noPreparation,noAttempts)<-evalRead reader (ReadPaymentWork intent)
         check (savedStatus readyWork==PaymentReady && noPreparation==Nothing && null noAttempts)
+        -- More confirmations change the observation revision, not customer value.
+        source<-evalRead reader (ReadSource "historical-fee")
+        revisionBefore<-evalRead reader ReadCustodyRevision
+        stateBefore<-evalRead reader ReadState
+        balancesBefore<-evalRead reader ReadBalances
+        evalWrite writer (RefreshPaymentSource source source {W.depositConfirmations=W.depositConfirmations source+1})
+        evalRead reader ReadCustodyRevision >>= check . (>revisionBefore)
+        evalRead reader ReadState >>= check . (==stateBefore)
+        evalRead reader ReadBalances >>= check . (==balancesBefore)
+        expectStore "custody_not_reconciled" (evalWrite writer $ PreparePayment 100 intent (money 10) "{}")
+        evalRead reader (ReadPaymentWork intent) >>= check . (==(readyWork,Nothing,[]))
+        fixture fixtures RefreshCustody
         prepared<-evalWrite writer (PreparePayment 100 intent (money 10) "{}")
         selected<-evalRead reader PaymentCandidates
         check (intent `elem` selected && length selected<=2)
@@ -1660,6 +1680,7 @@ data Fixture a where
   CheckFundingBinding :: T.Text -> T.Text -> Fixture Bool
   ResetOperatingScan :: Fixture ()
   LatestSourceState :: T.Text -> Fixture T.Text
+  SourceHistory :: T.Text -> Fixture [(T.Text,Int64,T.Text,Int64)]
   ReadScanHealth :: T.Text -> Fixture (Maybe Int64,Maybe T.Text,Int64)
   ReadEventReview :: T.Text -> T.Text -> Fixture Int64
   CheckSuspended :: T.Text -> T.Text -> T.Text -> Fixture Bool
@@ -2043,6 +2064,10 @@ fixture c (LatestSourceState did) = do
     O.where_ (source O..== O.sqlStrictText did)
     pure (key,state)
   case rows of [state]->pure state; _->fail "missing source recovery"
+fixture c (SourceHistory did) = O.runSelect c $ O.limit 1000 $ O.orderBy (O.desc $ \(_,_,_,n)->n) $ do
+  (_,source,state,loss,proof,n)<-O.selectTable S.sourceChecks
+  O.where_ (source O..== O.sqlStrictText did)
+  pure (state,loss,proof,n)
 
 fixture c (CheckFundingBinding identifier withdrawal) = do
   rows<-O.runSelect c $ do

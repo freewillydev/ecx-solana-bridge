@@ -663,13 +663,15 @@ instance Operation 'Worker 'Critical WorkerCommand where
       _<-N.nativeIdentity rpc native
       _<-S.solanaIdentity rpc solana
       refreshSource environment identifier
-      _<-prepareUnsigned (floor <$> getPOSIXTime) (N.nativeCall rpc native) (S.solanaCall rpc solana)
+      -- Plan RPC and source updates may age or invalidate custody before commit.
+      _<-prepareUnsigned (freshIntake environment >> floor <$> getPOSIXTime) (N.nativeCall rpc native) (S.solanaCall rpc solana)
         (N.profile native) config reader writer identifier
       pure ()
     run ReconcileCustody = reconcileCustody rpc settings config reader writer
     run (QueuePayment txid) = guarded environment $ do
       (recorded,_)<-loadActive environment txid
       refreshSource environment (recordedPayment recorded)
+      freshIntake environment
       now<-floor <$> getPOSIXTime
       evalWrite writer (MarkBroadcast now txid)
     run (BroadcastPayment txid) = guarded environment $ do
@@ -679,6 +681,7 @@ instance Operation 'Worker 'Critical WorkerCommand where
       case observed of
         PaymentUnseen->do
           refreshSource environment (recordedPayment recorded)
+          freshIntake environment
           case reply of
             NativeReply signed->checkNativeAcceptance (N.nativeCall rpc native) signed
             SolanaReply signed->checkBlockhashWindow (S.solanaCall rpc solana) (solPlanRecent $ signedSolanaPlan signed)
@@ -715,6 +718,7 @@ instance Operation 'Worker 'Critical WorkerCommand where
       issue prepared = do
         _<-resolveSigningPlan (N.profile native) config prepared
         refreshSource environment identifier
+        freshIntake environment
         now<-floor <$> getPOSIXTime
         decision<-evalRead reader (ReadSigningDecision now identifier $ preparedGeneration prepared)
         require (decision==prepared) "preparation_changed"
@@ -723,7 +727,10 @@ instance Operation 'Worker 'Critical WorkerCommand where
         recorded<-evalWrite writer (RecordAttempt prepared signed)
         pure (signedId $ recordedSigned recorded)
     run RunWorkerCycle = cycleWork `catch` (\(BridgeError code)->
-      if code=="custody_not_reconciled" then pure () else evalWrite writer (Pause code) >> reject code)
+      if code=="custody_not_reconciled" then do
+        paused<-ledgerPaused <$> evalRead reader ReadState
+        when paused (reject code)
+      else evalWrite writer (Pause code) >> reject code)
      where
       cycleWork = do
         recoverPending environment
@@ -753,16 +760,19 @@ instance Operation 'Worker 'Critical WorkerCommand where
 -- Shared workflows take only the private resource context.
 -- Refresh stale evidence after slow checkpoints; never extend quote/backup terms.
 freshIntake :: CriticalEnvironment -> IO ()
-freshIntake environment@(CriticalEnvironment _ _ _ _ _ reader _)=do
-  now<-floor <$> getPOSIXTime
-  result<-tryBridge (evalRead reader $ CheckIntake now)
-  case result of
-    Left (BridgeError code) | code `elem` ["scanners_not_fresh","custody_not_reconciled"]->do
-      when (code=="scanners_not_fresh") (evalWorker environment ObserveChains)
-      evalWorker environment ReconcileCustody
-      later<-floor <$> getPOSIXTime
-      evalRead reader (CheckIntake later)
-    _->either throwIO pure result
+freshIntake environment@(CriticalEnvironment _ _ _ _ _ reader _)=refresh 2
+ where
+  -- Custody RPC can age previously fresh scans; permit one further refresh.
+  refresh :: Int -> IO ()
+  refresh remaining=do
+    now<-floor <$> getPOSIXTime
+    result<-tryBridge (evalRead reader $ CheckIntake now)
+    case result of
+      Left (BridgeError code) | remaining>0 && code `elem` ["scanners_not_fresh","custody_not_reconciled"]->do
+        when (code=="scanners_not_fresh") (evalWorker environment ObserveChains)
+        evalWorker environment ReconcileCustody
+        refresh (remaining-1)
+      _->either throwIO pure result
 
 backupDecisions :: CriticalEnvironment -> IO ()
 backupDecisions environment@(CriticalEnvironment _ _ _ _ _ reader _)=do

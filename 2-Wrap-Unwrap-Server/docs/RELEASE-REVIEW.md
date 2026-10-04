@@ -65,6 +65,14 @@ build, all three Cabal suites and server/HTTPS contracts passed. A positive comp
 case constructs all six DSL forms using only their associated contexts; eighteen
 negative cases reject authority/type violations and access to the private view.
 
+Recovery readiness now refreshes after source/plan reads and permits one additional
+bounded repair if reconciliation ages the scans. Native recovery rereads historical
+receipts outside the incremental cursor, retaining atomic receipt/evidence updates.
+QuickCheck covers historical recovery, deduplication and batch limits; PostgreSQL
+checks that a confirmation-only update invalidates custody without changing balances
+or creating work. Root build, all suites and SOURCE/server/HTTPS contracts passed.
+These regressions do not close the remaining funded recovery acceptance gates.
+
 The PostgreSQL archive contract additionally compares all 22 existing migration
 projections alongside deployment, attempts and postings. A committed recipient
 change with unchanged row counts stays outside the exported snapshot and restored

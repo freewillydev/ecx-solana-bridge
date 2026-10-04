@@ -13,6 +13,7 @@ import Data.Int (Int64)
 import Data.List (nub)
 import Data.Text (Text)
 import qualified Data.Text as T
+import Text.Read (readMaybe)
 
 optionalField :: FromJSON a => Key -> Value -> IO (Maybe a)
 optionalField key = parseValue (withObject "RPC object" (.:? key))
@@ -20,14 +21,19 @@ optionalField key = parseValue (withObject "RPC object" (.:? key))
 isHash :: Text -> Bool
 isHash value = T.length value==64 && T.all (`elem` ("0123456789abcdef"::String)) value
 
--- Read-only evidence gathering. The runtime supplies closed instruction lookup
--- and historical depth reads; only CommitScan may persist the returned batch.
+-- Recovering receipts are reread even outside the incremental history window.
+-- Only CommitScan persists their fresh receipts and matching evidence together.
 scanNativeWith :: (Bool -> Text -> [Value] -> IO Value) -> NativeSettings
-  -> Int -> Int -> Maybe Text -> Int64
+  -> Int -> Int -> Maybe Text -> Int64 -> [Deposit]
   -> (Text -> IO (Maybe (Text,OrderRequest,PolicySnapshot))) -> IO ScanBatch
-scanNativeWith call c defaultDepth depth previous now lookupInstruction = do
+scanNativeWith call c defaultDepth depth previous now recovering lookupInstruction = do
   require (defaultDepth>=1 && depth>=defaultDepth && now>=0) "invalid_native_scan_policy"
   require (maybe True isHash previous) "invalid_native_scan_cursor"
+  require (length recovering<=1000) "native_history_batch_too_large"
+  recoveryIds<-forM recovering $ \source->case T.splitOn ":" (depositId source) of
+    ["native",tx,n] | depositAsset source==Native,isHash tx,
+      Just index<-(readMaybe (T.unpack n)::Maybe Int),index>=0->pure tx
+    _->reject "invalid_native_deposit_id"
   info <- nativeIdentityWith call c
   wallet <- nativeWalletInfoWith call c
   tip <- fieldValue "blocks" info :: IO Int64
@@ -46,7 +52,9 @@ scanNativeWith call c defaultDepth depth previous now lookupInstruction = do
   removed <- fieldValue "removed" history :: IO [Value]
   next <- fieldValue "lastblock" history
   require (isHash next && length current+length removed<=1000) "native_history_batch_too_large"
-  txids <- nub <$> mapM (fieldValue "txid") (removed<>current)
+  historyIds <- mapM (fieldValue "txid") (removed<>current)
+  let txids=nub (historyIds<>recoveryIds)
+  require (length txids<=1000) "native_history_batch_too_large"
   require (all isHash txids) "invalid_native_transaction_id"
   -- gettransaction supplies current canonical status, including transactions
   -- that appear in both lists after being re-added on the active branch.

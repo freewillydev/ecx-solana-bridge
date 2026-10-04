@@ -221,7 +221,12 @@ signed/unseen bytes do not explain spent funds. Errors preserve cursors. Custody
 compares actual balances with journal balances and only verified observed unbooked
 effects. A revision fences the snapshot; financial changes invalidate it. First
 intake/exposure requires scans/custody no older than 60 seconds. Checks never resume
-the service by themselves.
+the service by themselves. Source updates and slow plan RPC can invalidate readiness;
+refresh it before preparation, signing, queuing and send authorization. Keep the
+final transaction-acceptance/blockhash check after that refresh. Refresh is bounded;
+if custody reads age the scans, recheck and refresh again without extending their
+60-second validity. Recovering native receipts are reread beyond the incremental
+cursor so their deposit state and matching evidence are committed together.
 
 Paused recovery can record observed effects and recover owned input locks, but
 cannot prepare/broadcast new payments. Foreign locks stay untouched. Cancellation

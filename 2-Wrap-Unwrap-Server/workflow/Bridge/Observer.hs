@@ -28,8 +28,9 @@ observeOnce manager settings reader writer = do
       nativeScan = do
         previous<-evalRead reader (ReadCheckpoint "Native")
         depth<-evalRead reader (MaximumNativeDepth $ defaultNativeDepth settings)
+        recovering<-evalRead reader NativeSourceCandidates
         now<-epoch
-        scanNativeWith (nativeCall manager native) native (defaultNativeDepth settings) depth previous now lookupInstruction
+        scanNativeWith (nativeCall manager native) native (defaultNativeDepth settings) depth previous now recovering lookupInstruction
       tokenScan = do
         previous<-evalRead reader (ReadCheckpoint "Solana")
         pending<-evalRead reader PendingVerification
