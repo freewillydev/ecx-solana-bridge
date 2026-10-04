@@ -1,4 +1,4 @@
-{-# LANGUAGE DataKinds, GADTs, RankNTypes, ScopedTypeVariables, TypeFamilies, TypeApplications, ConstraintKinds #-}
+{-# LANGUAGE DataKinds, GADTs, RankNTypes, ScopedTypeVariables, TypeFamilies, TypeApplications, ConstraintKinds, PatternSynonyms, ViewPatterns #-}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- The signer ClientM is constructed only inside this critical evaluator.
 module Bridge.Critical (CustomerSettings(..),withRuntime,runWorkerLoop,SignerSettings(..),signerApplication,runSigner) where
@@ -56,6 +56,21 @@ import Network.TLS.Extra.Cipher (ciphersuite_default)
 import Data.X509.CertificateStore (makeCertificateStore)
 import Servant.API ((:<|>)(..),BasicAuthData)
 import qualified Servant.Client as SC
+
+-- Here each filled OperationContext reduces to its ground Operation instance.
+-- Recover the dictionary from the closed DSL, never an unchecked request.
+pattern Instruction :: forall caller severity a. ()
+  => forall op. Operation caller severity op => op severity a -> DSL caller severity a
+pattern Instruction op <- (instruction -> Request op)
+{-# COMPLETE Instruction #-}
+
+instruction :: DSL caller severity a -> Request caller severity a
+instruction (ReadOperator op) = Request (OperatorQuery op)
+instruction (OperatorDSL op) = Request (OperatorChange op)
+instruction (WorkerDSL op) = Request (WorkerAction op)
+instruction (ReadCustomer op) = Request (CustomerQuery op)
+instruction (WriteCustomer op) = Request (CustomerChange op)
+instruction (SigningDSL op) = Request (SignerAction op)
 
 -- Safe interpretation has no writer, signer transport, keys or RPC manager.
 data instance Evaluation 'Safe = SafeEnvironment Reader (Maybe W.PublicConfiguration)

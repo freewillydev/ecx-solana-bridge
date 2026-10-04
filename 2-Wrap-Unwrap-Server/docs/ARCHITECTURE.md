@@ -40,10 +40,10 @@ safe and critical work, and worker/signer critical work. Functional dependencies
 fix each caller's family; severity-indexed GADTs fix its executable instructions.
 The associated `OperationContext` family returns an injective constraint type;
 each instance defines it as its fully specified `Operation` constraint.
-DSL constructors retain both that associated constraint and the explicit, fully
-specified `Operation` dictionary. The latter lets the core recover an instance
-without importing its workflow implementation. The matching-only `Instruction`
-view recovers it from the closed grammar without admitting arbitrary instructions.
+DSL constructors retain only that fully specified associated constraint. The private
+matching-only `Instruction` view lives beside the ground instances in `Critical.hs`,
+where their type equations reduce it to the exact `Operation` dictionary. It recovers
+that dictionary from the closed grammar without admitting arbitrary instructions.
 
 `checkedRequest` constructs the DSL from the original existential request and
 selects that request's `interpretOperation` instance explicitly. That pure method

@@ -1,4 +1,4 @@
-{-# LANGUAGE DataKinds, FunctionalDependencies, RoleAnnotations, TypeFamilies, TypeFamilyDependencies, ConstraintKinds, UndecidableSuperClasses, TypeApplications, ScopedTypeVariables, PatternSynonyms, ViewPatterns, RankNTypes #-}
+{-# LANGUAGE DataKinds, FunctionalDependencies, RoleAnnotations, TypeFamilies, TypeFamilyDependencies, ConstraintKinds, UndecidableSuperClasses, TypeApplications, ScopedTypeVariables #-}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- Closed grammar and evaluation contract. Requests carry data, never IO callbacks.
 module Bridge.Operation.Internal where
@@ -132,12 +132,12 @@ data SignerCommand severity a where
 -- Each constructor stores the SAME filled-in class context as its Request.
 -- Caller/severity cannot be weakened when command constructs the DSL.
 data DSL (caller :: Caller) (severity :: Severity) a where
-  ReadOperator :: (Operation 'Operator 'Safe OperatorCommand, OperationContext 'Operator 'Safe OperatorCommand) => OperatorRead a -> DSL 'Operator 'Safe a
-  OperatorDSL :: (Operation 'Operator 'Critical OperatorCommand, OperationContext 'Operator 'Critical OperatorCommand) => OperatorWrite a -> DSL 'Operator 'Critical a
-  WorkerDSL :: (Operation 'Worker 'Critical WorkerCommand, OperationContext 'Worker 'Critical WorkerCommand) => WorkerOperation a -> DSL 'Worker 'Critical a
-  SigningDSL :: (Operation 'Signer 'Critical SignerCommand, OperationContext 'Signer 'Critical SignerCommand) => SigningOperation a -> DSL 'Signer 'Critical a
-  ReadCustomer :: (Operation 'Customer 'Safe CustomerCommand, OperationContext 'Customer 'Safe CustomerCommand) => CustomerRead a -> DSL 'Customer 'Safe a
-  WriteCustomer :: (Operation 'Customer 'Critical CustomerCommand, OperationContext 'Customer 'Critical CustomerCommand) => CustomerWrite a -> DSL 'Customer 'Critical a
+  ReadOperator :: OperationContext 'Operator 'Safe OperatorCommand => OperatorRead a -> DSL 'Operator 'Safe a
+  OperatorDSL :: OperationContext 'Operator 'Critical OperatorCommand => OperatorWrite a -> DSL 'Operator 'Critical a
+  WorkerDSL :: OperationContext 'Worker 'Critical WorkerCommand => WorkerOperation a -> DSL 'Worker 'Critical a
+  SigningDSL :: OperationContext 'Signer 'Critical SignerCommand => SigningOperation a -> DSL 'Signer 'Critical a
+  ReadCustomer :: OperationContext 'Customer 'Safe CustomerCommand => CustomerRead a -> DSL 'Customer 'Safe a
+  WriteCustomer :: OperationContext 'Customer 'Critical CustomerCommand => CustomerWrite a -> DSL 'Customer 'Critical a
 
 -- The existential hides the caller's family (e.g. SignerCommand). Its result a
 -- still retains the leaf's Result indices (e.g. Result 'Critical SignPrepared).
@@ -153,23 +153,6 @@ resolve (Request op) = command op
 checkedRequest :: forall caller severity a. Request caller severity a -> Either Text (DSL caller severity a)
 checkedRequest (Request (op :: requested severity a)) =
   interpretOperation @caller @severity @requested (command op)
-
--- A matching-only view recovers dictionaries from the CLOSED DSL constructors.
--- It cannot package an arbitrary Operation instance into an executable DSL.
--- Always resolve a Request first; interpreting its original dictionary directly
--- would bypass this closed vocabulary.
-pattern Instruction :: forall caller severity a. ()
-  => forall op. Operation caller severity op => op severity a -> DSL caller severity a
-pattern Instruction op <- (instruction -> Request op)
-{-# COMPLETE Instruction #-}
-
-instruction :: DSL caller severity a -> Request caller severity a
-instruction (ReadOperator op) = Request (OperatorQuery op)
-instruction (OperatorDSL op) = Request (OperatorChange op)
-instruction (WorkerDSL op) = Request (WorkerAction op)
-instruction (ReadCustomer op) = Request (CustomerQuery op)
-instruction (WriteCustomer op) = Request (CustomerChange op)
-instruction (SigningDSL op) = Request (SignerAction op)
 
 -- Retain caller identity through dispatch; a critical customer operation cannot
 -- be substituted with a critical operator or signer operation as grammar grows.

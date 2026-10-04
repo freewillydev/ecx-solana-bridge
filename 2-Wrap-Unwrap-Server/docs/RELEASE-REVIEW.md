@@ -57,6 +57,14 @@ execution. `Interpreter` and the explicit dictionary method are removed. The thr
 central files decreased from 1,193 to 1,176 lines. These checks do not establish
 completion of the funded recovery and release gates below.
 
+DSL constructors now retain only their fully specified `OperationContext`.
+The matching view is private to `Critical.hs`, where the ground instance equations
+resolve that constraint to `Operation`. Six duplicate constraints were removed;
+the relocation reduces the two affected code files by two lines overall. The root
+build, all three Cabal suites and server/HTTPS contracts passed. A positive compile
+case constructs all six DSL forms using only their associated contexts; eighteen
+negative cases reject authority/type violations and access to the private view.
+
 The PostgreSQL archive contract additionally compares all 22 existing migration
 projections alongside deployment, attempts and postings. A committed recipient
 change with unchanged row counts stays outside the exported snapshot and restored
