@@ -309,6 +309,9 @@ checks = do
     , check "native fee is recomputed from actual prevouts" $ forAll (chooseInteger (1,100000)) $ \delta ->
         validate plan previous (amt $ 282+delta) tx==Left "native_fee_mismatch" &&
         validate plan (map (\p->p {prevoutAmount=amt $ toInteger(units $ prevoutAmount p)+delta}) previous) fee tx==Left "native_fee_mismatch"
+    , check "valid native fees respect the saved ceiling with a distinct budget error" $ forAll (chooseInteger (1,281)) $ \delta ->
+        let capped n=validate plan {planFeeLimit=amt n} previous fee tx
+        in capped (282-delta)==Left "native_fee_budget_exceeded" && capped 282==Right () && capped (282+delta)==Right ()
     , check "native malformed saved transaction is rejected before any wallet RPC" $ forAll (elements badTransactions) $ \t -> ioProperty $ do
         result <- try (signNativeDraft (\_ _ _->fail "unexpected wallet RPC") plan draft {draftTransaction=t})
         pure $ case result of Left (BridgeError _)->True; Right _->False

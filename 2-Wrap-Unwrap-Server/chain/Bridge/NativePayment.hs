@@ -76,7 +76,8 @@ validateNativeTx NativePlan{..} previous fee tx = do
   check (not (null points) && length points<=100 && length points==length (nub points) && all validPoint points && map prevout previous==points) "native_input_mismatch"
   check (all (\p->prevoutDepth p>=max planDepth (if prevoutCoinbase p then 101 else 1) && units (prevoutAmount p)>0 && validScript (prevoutScript p)) previous) "native_input_not_confirmed"
   check (all ((>0) . units . nativeOutputAmount) outputs && length (filter (==expected) outputs)==1 && (outputs==[expected] || length outputs==2 && length change==1 && all (\o->o==expected || nativeOutputScript o==planChangeScript) outputs)) "native_output_mismatch"
-  check (units fee>0 && fee<=planFeeLimit && totalInputs-totalOutputs==toInteger (units fee)) "native_fee_mismatch"
+  check (units fee>0 && totalInputs-totalOutputs==toInteger (units fee)) "native_fee_mismatch"
+  check (fee<=planFeeLimit) "native_fee_budget_exceeded"
 
  where
   validScript s=hexText s && T.length s<=200
