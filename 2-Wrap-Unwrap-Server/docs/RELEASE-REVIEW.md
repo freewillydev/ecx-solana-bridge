@@ -423,6 +423,14 @@ This closes same-host restoration of this in-flight native attempt against later
 confirmed history; Solana in-flight recovery, changed native winners, lost-host
 uncertainty and physically independent clean-host recovery remain distinct gates.
 
+Restoring the same deployment's sequence-23 backup also preserved its retired
+Solana attempt `32RKrYFti4fHFN5xTZJfS8hzRwof3cpDne7NYBao9HUKCkW4tzZDjUaNcFDdjeC45bhnJsqeWWziuxpPLF7raVYQ`
+byte-for-byte in review. Paused observation retained 1,000 native units of customer
+principal and produced no successor attempt; later unallocated activity required
+review. The snapshot was taken after expiry retirement, with no current signed
+attempt, so it does **not** close pending-Solana restoration. Private evidence is
+under `solana-inflight-restore-20261004`; all scoped processes stopped.
+
 The run exposed an operator CLI error-reporting issue: server refusals were printed
 as successful stdout responses. The CLI now raises returned errors through its
 existing nonzero-exit/stderr path. Actual executable/PostgreSQL contracts passed
