@@ -326,6 +326,31 @@ proof of nonexecution.
 
 ## Gates still open
 
+The funded Signet additional-deposit refund on 2026-10-04 settled through the
+normal worker, HTTPS signer and payment engine. Transaction
+`1c015cf15eb5e6f075442beb99037404c4aa53bdd53411a881f6ac2d25375303`
+returned 1,000 base units to the original order's immutable refund address.
+Paused observation recorded `PaymentPaid`, released principal and booked the
+actual 1,000-unit native network fee against operating funds. Remaining native
+ledger holdings are 1,090 float, 10 earned and 900 operating; the original
+990-unit wrapped conversion remains paid with its original transaction.
+An offline custody archive and integrity check passed at critical sequence 37.
+The scoped worker/signer were stopped; Mainnet was untouched.
+
+This run did **not** complete positive replacement acceptance: Core selected a
+transaction without change and consumed its entire saved 1,000-unit fee ceiling.
+No replacement decision or child was created. A subsequent replacement test needs
+sufficient change and fee headroom under a newly saved policy; never modify an
+existing payment's ceiling to make a test pass.
+
+The run exposed an operator CLI error-reporting issue: server refusals were printed
+as successful stdout responses. The CLI now raises returned errors through its
+existing nonzero-exit/stderr path. Actual executable/PostgreSQL contracts passed
+for both development and canonical configurations, checking successful status and
+rejected resume, unchanged balances and process cleanup. This adds six application
+lines and five assertions/runner lines in the existing test file, with no new files
+or authority paths. These contracts do not send chain transactions.
+
 The 2026-10-04 dependency refresh replaced the browser's affected Aeson 2.2.3.0 pin
 with patched 2.2.5.1. Root build (also with a fresh browser build directory), all
 three Cabal suites, served-asset hash comparison and saved paid-order reload passed.

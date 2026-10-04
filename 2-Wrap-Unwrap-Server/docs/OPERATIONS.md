@@ -117,6 +117,10 @@ printf '%s\n' '{"operation":"pause","reason":"operator review"}' | bridge operat
 printf '%s\n' '{"operation":"resume"}' | bridge operator CONFIG
 ```
 
+Successful commands emit JSON on stdout and exit zero. A rejected command emits
+its JSON error on stderr and exits nonzero; scripts must stop on that failure.
+An unknown outcome is not permission to retry a transfer or change its parameters.
+
 The table lists fields **in addition to** `operation`. Required fields and their
 types are enforced by `workflow/Bridge/Control.hs`; unknown fields are rejected.
 Amounts are canonical base-unit strings, while recovery/decision/generation values

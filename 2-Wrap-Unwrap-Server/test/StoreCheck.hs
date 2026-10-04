@@ -2726,6 +2726,11 @@ serverMain = do
               check (show exit=="ExitSuccess")
               cliStatus<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ T.pack out)
               check (W.paused cliStatus)
+              (denied,empty,diagnostic)<-Process.readCreateProcessWithExitCode (Process.proc binary ["operator",filename])
+                "{\"operation\":\"resume\"}"
+              check (denied/=ExitSuccess && null empty)
+              cliError<-either fail pure (eitherDecodeStrict' $ TE.encodeUtf8 $ T.pack diagnostic)
+              check (cliError==object ["error" .= ("observation_only"::T.Text)])
               evalRead reader ReadBalances >>= check . (==before)
       -- Mainnet paying mode uses the same CLI/resource assembly. Unavailable
       -- chains still leave it paused and unable to create a fresh order.

@@ -12,7 +12,8 @@ import Bridge.Recovery (CustodyRecovery(..),evalCustodyRecovery)
 import Bridge.Signer
 import Bridge.Store (Reader,withReader,withFencedWriter,StoreRestore(..),evalRestore,StoreSetup(..),evalSetup,BackupReceipt(..))
 import Control.Exception (bracket,catch)
-import Data.Aeson (encode,object,(.=),eitherDecodeStrict')
+import Data.Aeson (Value(..),encode,object,(.=),eitherDecodeStrict')
+import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import qualified Data.Text as T
@@ -81,7 +82,12 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
     bytes<-BS.hGet stdin 4097
     require (BS.length bytes<=4096) "operator_message_too_large"
     value<-either (const $ reject "invalid_operator_request") pure (eitherDecodeStrict' bytes)
-    callControl (C.fenceDirectory c) value >>= LBS.putStrLn . encode
+    reply<-callControl (C.fenceDirectory c) value
+    case reply of
+      Object fields | Just failure<-KM.lookup "error" fields -> case failure of
+        String code->reject code
+        _->reject "invalid_operator_reply"
+      _->LBS.putStrLn (encode reply)
   command args | Just (path,mode)<-processArguments args = do
     c<-C.loadConfig path
     database<-databaseSettings

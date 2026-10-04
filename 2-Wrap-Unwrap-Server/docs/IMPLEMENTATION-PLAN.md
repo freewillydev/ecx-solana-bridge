@@ -36,6 +36,19 @@ separate explicit tooling and evidence; they are not bridge-custody privileges.
 
 ## Sequence
 
+While the independent Mainnet RPC is quota-blocked, do not repeatedly resume the
+pilot or create fresh signed generations. Advance the independent recovery and
+administration work below, using existing builds and grouped acceptance runs;
+keep packaging last. Revisit the pending Mainnet payout only when capacity is
+usable. A refreshed hourly allowance alone does not resolve the minute limit.
+
+The latest local checkpoint is a confirmed additional-deposit Signet refund with
+correct principal/cost settlement, the original conversion still paid, and a
+verified offline custody snapshot. Positive native replacement remains open:
+the tested parent had no change and no fee headroom. Establish those prerequisites
+before another funded replacement attempt. The operator CLI now reports server
+refusals with a failing exit status, preventing scripts from continuing on an error.
+
 1. **Hand over the product for review now.** Identify the review commit and built
    artifact. Begin source review while the pilot is stopped. After service restart,
    use http://127.0.0.1:61992/ on its host Mac for interface review; this is a
