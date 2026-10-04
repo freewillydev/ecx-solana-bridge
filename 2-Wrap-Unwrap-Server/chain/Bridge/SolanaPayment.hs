@@ -51,7 +51,8 @@ checkBlockhashWindow call RecentBlockhash{..} = do
 
 getRecentBlockhash :: SolanaRPC -> IO RecentBlockhash
 getRecentBlockhash call = do
-  (slot,value) <- call "getLatestBlockhash" [object ["commitment" .= ("finalized"::Text)]] >>= contextValue 0
+  -- Match simulation/preflight while retaining finalized settlement and expiry.
+  (slot,value) <- call "getLatestBlockhash" [object ["commitment" .= ("confirmed"::Text)]] >>= contextValue 0
   recent <- RecentBlockhash <$> fieldValue "blockhash" value <*> fieldValue "lastValidBlockHeight" value <*> pure slot
   checkBlockhashWindow call recent
   pure recent

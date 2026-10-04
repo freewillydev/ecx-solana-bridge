@@ -93,6 +93,25 @@ checks=do
            ("getTransaction",object [],"expired_transaction_observed"),
            ("getSignatureStatuses",response $ toJSON [object []],"expired_signature_observed")]
         pure (valid/=Nothing && waiting==Nothing && absentVerifier && and failures)
+    , check "Solana uses confirmed blockhashes and retains the 40-block window through preparation" $ once $ ioProperty $ do
+        let recentRPC height method args=case method of
+              "getLatestBlockhash"->do
+                require (args==[object ["commitment" .= ("confirmed"::Text)]]) "wrong_blockhash_commitment"
+                pure $ context $ object ["blockhash" .= hash,"lastValidBlockHeight" .= (1000::Int)]
+              "getBlockHeight"->do
+                require (args==[object ["commitment" .= ("confirmed"::Text),"minContextSlot" .= (100::Int)]]) "wrong_blockhash_window_context"
+                pure $ toJSON (height::Int)
+              _->fail "unexpected blockhash RPC"
+        recent<-getRecentBlockhash (recentRPC 960)
+        tooShort<-rejects "solana_blockhash_window_too_short" (getRecentBlockhash $ recentRPC 961)
+        height<-newIORef (960::Int)
+        aged<-rejects "solana_blockhash_window_too_short" $ prepare plan $ \method args->
+          if method=="getBlockHeight" then do
+            current<-atomicModifyIORef' height (\n->(n+1,n))
+            recentRPC current method args
+          else call Null method args
+        after<-readIORef height
+        pure (recent==solPlanRecent plan && tooShort && aged && after==962)
     , check "unsigned Solana cancellation validates saved policy without RPC or a draft" $ once $ ioProperty $ do
         let noRPC _ _ _=fail "Solana cancellation reached native RPC"
         (points,cleanup)<-cancellationPlan noRPC W.L2LSignetDevnet config prepared
