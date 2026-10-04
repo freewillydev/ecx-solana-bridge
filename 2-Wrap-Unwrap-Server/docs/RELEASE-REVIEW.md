@@ -1,7 +1,7 @@
 # Release review
 
 The current implementation supports test-network and canonical Mainnet operation,
-with funded acceptance recorded only on test networks; it is not a completed
+with funded bridge-conversion acceptance recorded only on test networks; it is not a completed
 public release. Historical checks are regression evidence within their recorded
 scope. Every release result must identify the exact source, artifact and environment;
 a past transfer or installer does not certify later source or a new deployment.
@@ -21,7 +21,7 @@ a past transfer or installer does not certify later source or a new deployment.
 | Signer model | Bounded two-request TLA+ model: 54,289 distinct states; path/output/dispatch invariants and negative mutations checked. No TLAPS/unbounded Haskell proof. |
 | Token administration | Real Devnet mint/account creation, issuance/burn and metadata readback, preserving signed-attempt replay. Bounded expiry recovery now has a finalized mint-one/burn-one round trip; canonical authority/backing remain open. |
 | Liquidity | Real Devnet pool/position creation, funded deposit/withdrawal and collection replay, plus bounded expiry recovery for an empty-position collection. Collected fees were zero; nonzero yield/reinvestment remains unverified. |
-| Trading | Read-only Jupiter quotes used the expected published Orca pool in both directions. Quotes do not prove executed swaps, current route availability or backing. |
+| Trading | A real Mainnet SOL→USDC→canonical wrapped ECX purchase used Orca, including the published pool. Two providers confirmed 1,000,000 lamports input, 3,833,230 wrapped base units received and 6,404 lamports transaction fee. This is inventory acquisition, not bridge-conversion or backing evidence. |
 
 Representative funded transactions from the migrated test deployment:
 
@@ -49,9 +49,38 @@ server/HTTPS variants. Tests retain pinned mint/checkpoint, independent-provider
 backup, profile-alignment and native replay-policy refusals. Mint validation now
 checks the full classic layout and unsigned supply range on both providers and
 requires matching mint authorities; it does not establish issuer approval or pin
-an expected authority. The running funded deployment remains Signet/Devnet.
-No Mainnet transaction was broadcast, no new runtime component/file was added,
+an expected authority. At that checkpoint, the running funded deployment remained
+Signet/Devnet. No Mainnet transaction was broadcast by those tests, no new runtime component/file was added,
 and disposable databases, roles and processes were removed after testing.
+
+The subsequent Mainnet pilot acquired canonical inventory in transaction
+`4ACeCJBRbMDhUsQSuf8u5VW8tboLVw4QtiW5oZzj3UKjJg7rs64WmYPKUSBJa7YPH9bH228wmMLHx4PftCReFQ1K`.
+The route used published Orca pool `nNKg814Wq3uTkoG4fM8LzvBQv4Fu2iCgKFmK2YmPQzM`
+with a 1% slippage bound. Separate custody then received 0.03 wrapped ECX and 0.005 SOL;
+its native wallet received 100,000 ECX base units. Account creation was externally paid,
+and full custody history was retained. The worker's restricted native RPC credential
+passed all fourteen forbidden-method checks, while the wallet stayed locked.
+The separate canonical ledger starts paused with required backups enabled; off-host
+checkpoints and a funded bridge round trip remain outstanding. Same-user local
+processes do not prove production credential isolation.
+
+Live observation exposed a verifier closing an idle HTTPS connection without a
+response. The RPC read allowlist now shares at most two retries across that failure
+and rate limits; sends, signing mutations, unknown methods and timeouts do not retry.
+Root build, all three Cabal suites and the actual HTTPS/PostgreSQL signer contract
+passed, including request counts and pacing for a closed read versus refused sends.
+The paused pilot subsequently reconciled all three real custody balances with zero
+differences and no pending attempts or payment candidates. Its independent readback
+ran while the worker was stopped to exclude concurrent ledger changes. This closes
+the observed read-transport failure, not the remaining deployment/release gates.
+The existing operator DSL allocated the three verified receipts at critical sequence
+3: native float 75,000 plus operating 25,000; wrapped float 3,000,000; SOL operating
+5,000,000, all in base units. A second independent readback matched every chain
+balance after allocation. Offline `backup-custody` and `check-custody` then verified
+the sequence-3 ledger, encrypted native wallet/unlock material, Solana key and
+configuration bundle. This is a protected same-host copy, not an off-host checkpoint
+or restore test. The temporary Mainnet worker was stopped; no Mainnet bridge order
+or payout was created, and required backup coverage remains at sequence 0.
 
 The associated-constraint interpreter refactor also passed the root build, all three
 Cabal suites and the same PostgreSQL/server/HTTPS/encrypted-wallet contracts.

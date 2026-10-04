@@ -40,7 +40,7 @@ import qualified Bridge.Control as Control
 import Bridge.Critical
 import qualified Bridge.Operation.Internal as Op
 import qualified Network.Wai as Wai
-import Network.HTTP.Types (statusCode,status200)
+import Network.HTTP.Types (statusCode,status200,status500)
 import Bridge.Order
 import qualified Bridge.Fence as Fence
 import System.Directory (createDirectory,removeDirectoryRecursive,removeFile,findExecutable,listDirectory,renameFile,renameDirectory)
@@ -3111,6 +3111,21 @@ tlsMain=do
               expectStore "rpc_rate_limited" (call "sendTransaction" [])
               readIORef requests >>= check . (==3)
               readIORef starts >>= check . (==[0,500000000,1000000000])
+          writeIORef starts []; writeIORef requests 0
+          let closingApplication request respond=do
+                void (Wai.strictRequestBody request)
+                n<-atomicModifyIORef' requests (\old->(old+1,old+1))
+                respond $ if n==2 then Wai.responseLBS status200 [("Content-Type","application/json")]
+                  (encode $ object ["jsonrpc" .= ("2.0"::T.Text),"id" .= (1::Int),"result" .= ("fixture"::T.Text)])
+                  else Wai.responseRaw (\_ _->pure ()) (Wai.responseLBS status500 [] "raw transport required")
+          withProcessListening (runSigningServer endpoint closingApplication) (signerPort endpoint) $
+            withSigningClientSettings pacedSettings endpoint $ \client->do
+              let call=rpc client ("https://127.0.0.1:"<>show(signerPort endpoint)) Nothing
+              call "getGenesisHash" [] >>= check . (==String "fixture")
+              expectStore "rpc_transport_unknown_outcome" (call "sendTransaction" [])
+              expectStore "rpc_transport_unknown_outcome" (call "futureMethod" [])
+              readIORef requests >>= check . (==4)
+              readIORef starts >>= check . (==[1500000000,2000000000,2500000000,3000000000])
           Warp.testWithApplication (pure rpcApplication) $ \rpcPort->
             bracket (newManager defaultManagerSettings {managerModifyRequest= \request->pure request {HTTP.secure=False,HTTP.host="127.0.0.1",HTTP.port=rpcPort}}) closeManager $ \manager->do
               let post client=signerPost client endpoint "/sign-preparation" (identity,identifier,0::Int)

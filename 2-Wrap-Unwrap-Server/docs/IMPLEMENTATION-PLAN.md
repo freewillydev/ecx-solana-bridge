@@ -56,8 +56,11 @@ separate explicit tooling and evidence; they are not bridge-custody privileges.
    before activating a funded canonical deployment. Canonical `observe`, `serve`
    and `signer` now use the shared runtime; startup still pauses intake and requires
    pinned identity, independent verification and backup coverage. Local process and
-   protocol contracts do not replace a real Mainnet round trip. RPC pacing is
-   implemented; measure expected-load throughput and combined provider budgets.
+   protocol contracts do not replace a real Mainnet round trip. The paused canonical
+   pilot now has real native/wrapped inventory and SOL, matching custody readback
+   and restricted native worker RPC. Off-host checkpoints still block activation.
+   RPC pacing and bounded closed-read retries are implemented; measure expected-load
+   throughput and combined provider budgets.
 5. **Prove deployment and disaster recovery.** Run worker/signer under separate OS
    identities and database roles; deny worker access to custody keys, native full
    credentials and unlock/lock RPC. Verify the current processes, not only file

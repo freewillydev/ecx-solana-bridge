@@ -1,8 +1,8 @@
 {-# LANGUAGE ScopedTypeVariables, LambdaCase #-}
-module Bridge.RPC (newRpcManager, rpcManagerSettings, rpc, retryRateLimitedRead, parseValue, fieldValue, boundedBody) where
+module Bridge.RPC (newRpcManager, rpcManagerSettings, rpc, retryRpcRead, parseValue, fieldValue, boundedBody) where
 
 import Bridge.Error
-import Control.Exception (catch)
+import Control.Exception (catch, try, throwIO)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
 import Control.Monad (when)
@@ -64,7 +64,7 @@ parseValue p v = either (const $ reject "unexpected_rpc_schema") pure (parseEith
 fieldValue :: FromJSON a => Key -> Value -> IO a
 fieldValue k = parseValue (withObject "object" (.: k))
 rpc :: Manager -> String -> Maybe (BS.ByteString,BS.ByteString) -> Text -> [Value] -> IO Value
-rpc manager url auth methodName params = retryRateLimitedRead threadDelay methodName run
+rpc manager url auth methodName params = retryRpcRead threadDelay methodName run
   `catch` (\(_ :: HttpException) -> reject "rpc_transport_unknown_outcome")
  where
   run = do
@@ -76,7 +76,7 @@ rpc manager url auth methodName params = retryRateLimitedRead threadDelay method
     withResponse req manager $ \response -> do
       bytes <- boundedBody (4*1024*1024) (responseBody response)
       -- An unsupported Retry-After form is a stop, never permission to retry
-      -- sooner. Neither transport errors nor mutating calls are retried here.
+      -- sooner. Mutating calls are never retried.
       require (statusCode (responseStatus response)/=403) "rpc_method_forbidden"
       let delay=case lookup "Retry-After" (responseHeaders response) of
             Nothing -> Nothing
@@ -95,9 +95,11 @@ rpc manager url auth methodName params = retryRateLimitedRead threadDelay method
             Right <$> fieldValue "result" value
 
 -- Explicit allowlist: a typo/new method cannot accidentally retry a wallet
--- mutation. At most two bounded waits; callers still recheck time and blockhash.
-retryRateLimitedRead :: (Int -> IO ()) -> Text -> IO (Either (Maybe Int) a) -> IO a
-retryRateLimitedRead wait methodName action = go (0::Int)
+-- mutation. Closed read connections and rate limits share at most two retries;
+-- timeouts and other transport failures remain unknown. HTTPS retries are paced
+-- by the manager, and callers still recheck time and blockhash.
+retryRpcRead :: (Int -> IO ()) -> Text -> IO (Either (Maybe Int) a) -> IO a
+retryRpcRead wait methodName action = go (0::Int)
  where
   readsOnly=methodName `elem`
     ["getGenesisHash","getAccountInfo","getMultipleAccounts","getLatestBlockhash","getBlock"
@@ -106,9 +108,16 @@ retryRateLimitedRead wait methodName action = go (0::Int)
     ,"getblockchaininfo","getblockhash","getblockheader","getwalletinfo","getbalances"
     ,"getaddressinfo","getaddressesbylabel","gettransaction","listsinceblock","gettxout","listlockunspent","listunspent","decodescript"
     ,"decoderawtransaction","decodepsbt","estimatesmartfee","getmempoolinfo","getmempoolentry"]
-  go tries=action >>= \case
-    Right result -> pure result
-    Left requested -> do
+  closed NoResponseDataReceived=True
+  closed ConnectionClosed=True
+  closed _=False
+  go tries=try action >>= \case
+    Left e@(HttpExceptionRequest _ failure)
+      | readsOnly && tries<2 && closed failure -> wait 250000 >> go (tries+1)
+      | otherwise -> throwIO e
+    Left e -> throwIO e
+    Right (Right result) -> pure result
+    Right (Left requested) -> do
       let seconds=maybe (4*(tries+1)) id requested
       require (readsOnly && tries<2 && seconds>=0 && seconds<=15) "rpc_rate_limited"
       wait (max 1 seconds*1000000)

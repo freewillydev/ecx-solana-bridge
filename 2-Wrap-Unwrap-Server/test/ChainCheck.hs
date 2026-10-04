@@ -28,7 +28,7 @@ import qualified Bridge.Solana as Solana
 import Bridge.Identity (publicKey)
 import Bridge.RPC
 import Bridge.Wire (Profile(..))
-import Control.Exception (try,bracket,SomeException)
+import Control.Exception (try,bracket,SomeException,throwIO)
 import Control.Concurrent (forkFinally,killThread)
 import Control.Concurrent.MVar
 import Control.Monad (unless)
@@ -114,9 +114,27 @@ checks = (\deployment native solana identity observation administration common->
       let action=do
             n<-atomicModifyIORef' calls (\i->(i+1,i))
             pure $ case n of 0->Left(Just 5); 1->Left Nothing; _->Right True
-      result <- retryRateLimitedRead (\n->modifyIORef' waits (<>[n])) "getTransaction" action
+      result <- retryRpcRead (\n->modifyIORef' waits (<>[n])) "getTransaction" action
       count <- readIORef calls; delays <- readIORef waits
       pure (result && count==3 && delays==[5000000,8000000])
+  , check "closed read connections and rate limits share one retry budget" $ forAll (elements [HTTP.NoResponseDataReceived,HTTP.ConnectionClosed]) $ \failure->ioProperty $ do
+      calls<-newIORef (0::Int); waits<-newIORef []
+      let action=do
+            n<-atomicModifyIORef' calls (\i->(i+1,i))
+            case n of
+              0->throwIO (HTTP.HttpExceptionRequest HTTP.defaultRequest failure)
+              1->pure (Left $ Just 1)
+              _->pure (Right True)
+      result<-retryRpcRead (\n->modifyIORef' waits (<>[n])) "getTransaction" action
+      count<-readIORef calls; delays<-readIORef waits
+      pure (result && count==3 && delays==[250000,1000000])
+  , check "repeated closed reads stop; timeouts never retry" $ forAll (elements
+      [(HTTP.NoResponseDataReceived,3),(HTTP.ConnectionClosed,3),(HTTP.ResponseTimeout,1),(HTTP.ConnectionTimeout,1)]) $ \(failure,expected)->ioProperty $ do
+      calls<-newIORef (0::Int); waits<-newIORef (0::Int)
+      result<-try $ retryRpcRead (\_->modifyIORef' waits (+1)) "getTransaction"
+        (modifyIORef' calls (+1) >> throwIO (HTTP.HttpExceptionRequest HTTP.defaultRequest failure)) :: IO (Either HTTP.HttpException ())
+      count<-readIORef calls; delays<-readIORef waits
+      pure (either (const True) (const False) result && count==expected && delays==expected-1)
   , check "RPC admission shares normalized hosts, isolates providers and permits no idle burst" $ once $ ioProperty $ do
       clock<-newIORef 0; waits<-newIORef []
       let wait micros=modifyIORef' waits (<>[micros]) >> modifyIORef' clock (+toInteger micros*1000)
@@ -165,12 +183,14 @@ checks = (\deployment native solana identity observation administration common->
       pure (result==Just True)
   , check "mutations and unknown methods never retry" $ forAll (elements ["sendTransaction","sendrawtransaction","walletprocesspsbt","walletpassphrase","walletlock","getnewaddress","backupwallet","restorewallet","futureMethod"]) $ \method -> ioProperty $ do
       calls <- newIORef (0::Int); waits <- newIORef (0::Int)
-      refused <- rejects "rpc_rate_limited" $ retryRateLimitedRead (\_->modifyIORef' waits (+1)) method
+      refused <- rejects "rpc_rate_limited" $ retryRpcRead (\_->modifyIORef' waits (+1)) method
         (modifyIORef' calls (+1) >> pure (Left Nothing :: Either (Maybe Int) ()))
+      closed<-try $ retryRpcRead (\_->modifyIORef' waits (+1)) method
+        (modifyIORef' calls (+1) >> throwIO (HTTP.HttpExceptionRequest HTTP.defaultRequest HTTP.NoResponseDataReceived)) :: IO (Either HTTP.HttpException ())
       count <- readIORef calls; delays <- readIORef waits
-      pure (refused && count==1 && delays==0)
+      pure (refused && either (const True) (const False) closed && count==2 && delays==0)
   , check "invalid Retry-After values refuse immediate retry" $ forAll (elements [-1,16,maxBound]) $ \delay -> ioProperty $
-      rejects "rpc_rate_limited" (retryRateLimitedRead (\_->fail "unexpected wait") "getTransaction" (pure $ Left $ Just delay) :: IO ())
+      rejects "rpc_rate_limited" (retryRpcRead (\_->fail "unexpected wait") "getTransaction" (pure $ Left $ Just delay) :: IO ())
   , check "native settings bind loopback wallet and checkpoint" $ once $ ioProperty $ do
       validateNativeSettings settings
       badHost <- rejects "invalid_native_rpc_endpoint" $ validateNativeSettings settings {nativeRpc="http://example.com:29432"}

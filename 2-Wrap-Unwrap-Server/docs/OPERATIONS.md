@@ -74,8 +74,10 @@ default two services can together admit about 4 requests/second to one provider.
 Paths, API keys and ports on the same normalized hostname share a budget. Native
 HTTP RPC is unpaced. This spaces request starts without accumulating idle burst
 credit; it does not guarantee provider arrival times or cover compute-unit,
-method-specific or monthly limits. Keep headroom. Read-only 429 retries also consume
-the budget; signing mutations and sends retain their existing no-retry policy.
+method-specific or monthly limits. Keep headroom. Allowlisted reads share at most
+two retries for 429 replies and closed connections without a complete response;
+all HTTPS attempts consume the budget. Timeouts, other transport failures, unknown
+methods, signing mutations and sends are not automatically retried.
 Pacing does not remove background observation or replace public-facing DDoS controls.
 
 For an encrypted native descriptor wallet, set the signer's optional
@@ -126,6 +128,14 @@ each eligible unbound receipt completely. `split` is an array of account/amount
 pairs, for example `[["float","90000"],["operating","10000"]]` for a matching
 100000-unit native receipt. SOL may only fund operating. The recorded attestation
 and reconciliation are required; balance alone is not allocation authority.
+
+Start new custody with a dedicated wallet. Pay its associated-token-account setup
+from a separate funding wallet, and acquire trading inventory outside custody before
+transferring it in. Retain complete token and SOL history, including account creation
+and funding. Spending from an unallocated custody wallet can prevent its opening
+reconciliation: allocation requires reconciliation, while classifying a spend requires
+allocated capital. Do not work around this by skipping history or inventing an opening
+balance. Existing custody with financial history requires migration or recovery.
 
 Earned withdrawal uses a fresh 64-lowercase-hex `id`, asset `Native` or `Wrapped`,
 amount and external recipient. Its reservations, preparation, signing and settlement
