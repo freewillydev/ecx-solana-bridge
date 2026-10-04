@@ -355,8 +355,16 @@ preserved inputs, sequences, version, locktime and the 1,980-unit recipient outp
 reducing only owned change by 100. The first draft request correctly refused stale
 custody immediately after the parent broadcast; paused observation restored custody
 before the same terms were accepted. Both services stopped after child broadcast
-at critical sequence 46. Confirmation and one-time settlement remain pending;
-this does not establish winner changes after reorg or rebroadcast acceptance.
+at critical sequence 46. The child subsequently confirmed, and a paused worker
+restart settled the order once with that child as the customer-visible payout.
+The recipient received exactly 1,980 units; the ledger booked 20 wrapped units of
+bridge revenue and only the winning 847-unit native network cost. Native float
+became 1,110 and operating became 1,553; wrapped principal returned to zero,
+float became 35,890 and earned became 20. Repeated observation left the complete
+payment/balance view unchanged. The post-settlement custody export and integrity
+check passed, and all scoped processes stopped. Positive funded replacement,
+exact authorization replay and restart settlement now have live evidence; winner
+changes after reorg and explicit rebroadcast still require separate acceptance.
 
 The run exposed an operator CLI error-reporting issue: server refusals were printed
 as successful stdout responses. The CLI now raises returned errors through its
@@ -379,7 +387,7 @@ review or distribution/license requirements.
    verify reference/effects, both directions, saved-order recovery, refunds and
    browser errors. A test client or wallet-opening link does not close this gate.
 2. **Recovery effects:** verify permanent source loss/double spend, coverage/return,
-   native replacement/winner change/rebroadcast and restoration with in-flight
+   native winner changes after reorg, explicit rebroadcast and restoration with in-flight
    signed work. Retain the completed same-host encrypted-wallet drill as regression
    evidence; clean-host funded recovery remains in the following gate.
    Preserve one payout, correct capital/cost accounting and exact saved bytes.

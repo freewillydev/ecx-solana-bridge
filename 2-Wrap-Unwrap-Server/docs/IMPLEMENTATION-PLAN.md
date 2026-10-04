@@ -44,9 +44,9 @@ usable. A refreshed hourly allowance alone does not resolve the minute limit.
 
 The latest local checkpoint is a confirmed additional-deposit Signet refund with
 correct principal/cost settlement, the original conversion still paid, and a
-verified offline custody snapshot. A subsequent funded replacement has been signed,
-replayed and broadcast with verified change/fee headroom; await its confirmation and
-verify one economic settlement before closing that part of native acceptance.
+verified offline custody snapshot. A subsequent funded native replacement is confirmed:
+draft/sign replay returned the same child, a paused restart settled it once, repeated
+observation preserved accounting, and its custody backup passed integrity checks.
 Winner-change/reorg and rebroadcast acceptance remain separate. The operator CLI now reports server
 refusals with a failing exit status, preventing scripts from continuing on an error.
 
@@ -71,7 +71,7 @@ refusals with a failing exit status, preventing scripts from continuing on an er
    evidence. Measure both required checkpoints and combined worker/signer RPC
    budgets inside the Solana blockhash window; preserve expiry and backup barriers.
 3. **Close substantive recovery gaps.** Exercise permanent source loss/coverage,
-   restored sources, native replacement/winner change/rebroadcast, and restoration
+   restored sources, native winner changes after reorg, explicit rebroadcast, and restoration
    with in-flight work. Retain exact bytes, one economic settlement and capital
    accounting. Keep the completed same-host encrypted-wallet drill as regression
    evidence. Fix shared-engine failures without introducing parallel payment paths.
