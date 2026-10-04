@@ -64,6 +64,22 @@ The separate canonical ledger starts paused with required backups enabled; off-h
 checkpoints and a funded bridge round trip remain outstanding. Same-user local
 processes do not prove production credential isolation.
 
+A later Ubuntu 24.04 ARM64 VM rehearsal built current source with root Cabal and
+passed all three suites. The Linux build reused the Mac's GHC-JavaScript bundle
+only after checking its source/artifact manifest; stale and corrupt bundle tests
+also passed. The sequence-3 custody bundle was inspected, its ledger restored
+through the closed recovery command, the Mac fence retired and the VM fence adopted.
+Worker and signer now run as separate OS users with separate peer-authenticated
+PostgreSQL roles; the worker cannot read the signer key, native credential or unlock
+file. Both systemd services start successfully and intake remains paused.
+The Mac runs an authenticated append-only HTTPS restic receiver: a VM probe was
+uploaded, restored byte for byte, and deletion/overwrite attempts were refused.
+This is the same physical host, and the existing ECX node remains on the Mac via
+an SSH tunnel. It is not independent disaster protection. The application's first
+custody checkpoint still returns `signer_outcome_unknown`, leaving backup coverage
+at zero; it must be diagnosed before intake or funded bridge acceptance. Reboot/
+tunnel recovery and independent clean-host restoration remain unverified.
+
 Live observation exposed a verifier closing an idle HTTPS connection without a
 response. The RPC read allowlist now shares at most two retries across that failure
 and rate limits; sends, signing mutations, unknown methods and timeouts do not retry.
