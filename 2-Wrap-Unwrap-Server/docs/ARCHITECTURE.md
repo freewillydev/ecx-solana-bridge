@@ -273,8 +273,15 @@ winner; a proven later winner change adjusts only costs, never principal again.
 Singleton and replacement payouts share the same verified family reader for
 observation, custody effects and input-lock recovery. A retained zero-confirmation
 wallet record alone does not establish an active spend; absence requires stable
-chain/wallet views and unchanged unspent inputs. A wallet balance mismatch still
-refuses custody readiness, including after eviction.
+chain/wallet views and unchanged unspent inputs. For a retained non-abandoned,
+non-conflicted inactive transaction, custody adds back the verified shared inputs
+excluded by Core's wallet balance, once per family. This reporting correction is
+separate from economic in-flight effects; missing or abandoned records add nothing.
+It requires explicit untrusted wallet records, disabled address-reuse avoidance,
+and zero wallet pending credit: even unrelated unconfirmed pending balance defers
+normalization, so asynchronous wallet mempool updates cannot double-count change. Family
+classification and balance anchors are rechecked together; unexplained mismatches,
+overlapping families and changing or unavailable evidence still refuse readiness.
 Rebroadcast requires explicit saved approval, current source proof and backup and
 uses identical bytes. It does not grant replacement authority.
 

@@ -99,8 +99,13 @@ The exact sequence-9 HTTPS snapshot containing the in-flight payout was recovere
 and its full custody/configuration/archive bindings verified. The closed restore
 command produced a distinct paused database at sequence 9, which was then dropped;
 no fence was adopted and no recovered signer activated. This verifies in-flight
-snapshot recovery on the existing VM. Reboot/tunnel recovery and independent
-clean-host activation remain unverified.
+snapshot recovery on the existing VM. The VM was then restarted with that payment
+still pending. Services returned paused, the supervised loopback-only SSH tunnel
+reconnected using a persistent pinned host key, and normal resume restored readiness
+with sequence/coverage 9 unchanged. Tunnel runtime credentials now live in a protected
+local directory, avoiding background access to the removable build disk. This covers
+VM restart; Mac/node reboot, unattended VM startup and independent clean-host
+activation remain unverified.
 
 Live observation exposed a verifier closing an idle HTTPS connection without a
 response. The RPC read allowlist now shares at most two retries across that failure
@@ -195,10 +200,17 @@ observation, custody and lock recovery, removing 88 production lines across four
 existing files. Root build, all three Cabal suites and the existing PostgreSQL/HTTPS
 contract pass. Offline regressions distinguish retained-but-evicted wallet records
 from active spenders and reject changed bytes, foreign spends, unavailable or
-unstable evidence. These do not establish funded eviction recovery: daemon wallet
-balances can still exclude inputs reserved by inactive wallet transactions, and
-custody mismatches continue to refuse readiness. The live balance/recovery case
-and full operator replacement/rebroadcast acceptance remain open.
+unstable evidence. Custody now separately reports and normalizes proved inputs
+excluded by retained inactive wallet transactions, counting a replacement family's
+shared inputs once. It requires explicit non-abandoned/conflict/trust evidence,
+`avoid_reuse=false`, zero pending wallet credit and stable family/balance anchors.
+Missing/all-abandoned families add nothing; unexplained differences still refuse
+readiness. Root build and all three Cabal suites passed, followed by PostgreSQL/restic
+and actual HTTPS contracts. The isolated restored-ledger cases cover both active
+replacement fees, retained/abandoned/missing families, exact correction and remaining
+mismatch, pending-credit refusal, unchanged-balance mempool transitions and the existing
+single-family constraint. No schema or settlement rule changed. Funded eviction,
+replacement and rebroadcast acceptance remain open; these fixtures do not close them.
 Readiness is repaired before obtaining a new blockhash; redundant outer worker
 refreshes are removed while leaf checks and both backup barriers remain. This
 reduces `Critical.hs` by three lines; the verifier fix adds no production lines.

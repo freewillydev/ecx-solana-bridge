@@ -75,10 +75,11 @@ import Data.List (sort)
 import Data.IORef
 import GHC.Stack (HasCallStack,callStack,prettyCallStack)
 import Test.QuickCheck (quickCheckWithResult,stdArgs,maxSuccess,forAll,chooseInteger,ioProperty,isSuccess)
-import Control.Monad (unless,void,when,forM_)
+import Control.Monad (unless,void,when,forM_,filterM)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Database.PostgreSQL.Simple as PG
+import Database.PostgreSQL.Simple.Types (Identifier(..))
 import qualified Opaleye as O
 import System.Exit (ExitCode(..))
 import System.Environment (getEnv,lookupEnv,getEnvironment)
@@ -896,7 +897,7 @@ ledgerMain = do
       expectStore "chain_observations_require_review" (evalRead reader $ ReadCustodySnapshot 100 origins False)
       expectStore "custody_history_not_current" (evalRead reader $ ReadCustodyEvent "Solana" (T.replicate 64 "1"))
       fixture fixtures (CustodyHeadReview 0)
-      custodyContract fixtures reader
+      custodyContract settings (store policy limits) fixtures reader
       let newRequest=W.OrderRequest NativeToWrapped (money 100) "recipient" "refund" Nothing "new-wrap"
           create request=CreateOrder 100 auth request
       withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
@@ -1554,6 +1555,7 @@ data Fixture a where
   LockRestoreAudits :: Fixture [T.Text]
   OrderWorkflowFunds :: Fixture ()
   CustodyHeadReview :: Int64 -> Fixture ()
+  CustodyFamilyResolved :: T.Text -> Bool -> Fixture ()
   SeedCustodyHeads :: Fixture ()
   ReadCustodyCheck :: Fixture (Maybe Int64,Maybe Int64,Maybe T.Text)
   ImmutableAttempt :: T.Text -> Fixture Bool
@@ -1596,6 +1598,13 @@ fixture :: PG.Connection -> Fixture a -> IO a
 fixture c (SetPause paused) = void $ O.runUpdate c O.Update {O.uTable=S.deployment,
   O.uUpdateWith= \row->row {S.paused=O.sqlInt8 (if paused then 1 else 0)},
   O.uWhere= \row->S.singleton row O..== O.sqlInt8 1,O.uReturning=O.rCount}
+-- Isolate pending families inside the disposable custody snapshot. The schema
+-- must still reject exposing two native families at the same time.
+fixture c (CustodyFamilyResolved identifier resolved) = do
+  n<-O.runUpdate c O.Update {O.uTable=S.intents,
+    O.uUpdateWith= \row->row {S.intentResolved=O.sqlInt8 (if resolved then 1 else 0)},
+    O.uWhere= \row->S.intentId row O..== O.sqlStrictText identifier,O.uReturning=O.rCount}
+  unless (n==1) (fail "custody family fixture missing")
 fixture c RestoreDatabases = O.runSelect c $ O.orderBy (O.asc id) $ do
   name<-O.selectTable $ O.tableWithSchema "pg_catalog" "pg_database" (O.requiredTableField "datname")
   O.where_ (O.like name $ O.sqlStrictText "ecx_restore_%")
@@ -2000,8 +2009,8 @@ fixture c OrderWorkflowFunds = PG.withTransaction c $ do
   fixture c RefreshCustody
 
 -- Offline RPC contracts over an actual PostgreSQL snapshot. No live-chain claim.
-custodyContract :: PG.Connection -> Reader -> IO ()
-custodyContract fixtures reader = do
+custodyContract :: PG.ConnectInfo -> StorePolicy -> PG.Connection -> Reader -> IO ()
+custodyContract database store fixtures reader = do
   let key=T.replicate 32 "1"; signature=T.replicate 64 "1"; block=T.replicate 64 "a"
       config=H.SolanaPolicy "contract" "contract" key key key (money 10) (money 10)
       native=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:29432" "/unused" "test" 1 "scan-origin"
@@ -2063,6 +2072,166 @@ custodyContract fixtures reader = do
   expectStore "custody_ledger_changed" (inspect (pure 100) (pure ()) changed good Nothing settings)
   expectStore "native_reused_balance_requires_review" (nativeBalance $ \_ _ _->pure $ object
     ["mine" .= object ["trusted" .= (0::Int),"untrusted_pending" .= (0::Int),"immature" .= (0::Int),"used" .= (1::Int)]])
+  -- Keep pending-family fixtures out of the shared ledger contract. Restore
+  -- one real archive and use the same restricted reader and closed Store DSL.
+  withTestSigningKey $ \temporary->do
+    archive<-evalBackup reader (ExportLedger $ takeDirectory temporary)
+    role<-getEnv "ECX_REBUILD_CONTRACT_READER"
+    bracket (evalRestore database $ RestoreLedger (manifestPath archive) "contract" (archiveSequence archive))
+      (\(name,_)->Backup.discardRestore database {PG.connectDatabase=T.unpack name}) $ \(name,_)->do
+        let target=database {PG.connectDatabase=T.unpack name}
+        bracket (PG.connect target) PG.close $ \connection->do
+          -- Privilege DDL only; all application rows use closed Opaleye operations.
+          void $ PG.execute connection "GRANT CONNECT ON DATABASE ? TO ?" (Identifier name,Identifier $ T.pack role)
+          void $ PG.execute connection "GRANT USAGE ON SCHEMA public TO ?" (PG.Only $ Identifier $ T.pack role)
+          void $ PG.execute connection "GRANT SELECT ON ALL TABLES IN SCHEMA public TO ?" (PG.Only $ Identifier $ T.pack role)
+          void $ PG.execute connection "GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO ?" (PG.Only $ Identifier $ T.pack role)
+          withReader target {PG.connectUser=role} "contract" True $ \isolated->
+            withWriter target store (const $ pure ()) $ \writer->
+              nativeCustodyFamilies connection isolated writer settings config nativeCall good
+
+-- Synthetic RPC replies over a real ledger: no live-chain acceptance claim.
+nativeCustodyFamilies :: PG.Connection -> Reader -> Writer -> ObserverSettings -> H.SolanaPolicy
+  -> NP.NativeRPC -> SP.SolanaRPC -> IO ()
+nativeCustodyFamilies fixtures reader writer settings config base solana=do
+  captured<-getDataFileName "test/fixtures/native-signet-payment.json" >>= BS.readFile >>= either fail pure . eitherDecodeStrict'
+  originalPlan<-fieldValue "plan" captured
+  let check :: HasCallStack => Bool -> IO ()
+      check ok=unless ok (fail $ "native custody family contract: "<>prettyCallStack callStack)
+      encodeText :: ToJSON a => a -> T.Text
+      encodeText=TE.decodeUtf8 . BL.toStrict . encode
+      block=T.replicate 64 "a"
+      position=object ["hash" .= block,"height" .= (100::Int)]
+      plan=originalPlan {NP.planAmount=money 10,NP.planDepth=2,NP.planFeeLimit=money 5}
+      previous key n=NP.NativePrevout (NP.Outpoint (T.replicate 64 key) 0) (money n) (NP.planChangeScript plan) 2 False
+      shared=[previous "b" 60,previous "c" 40]
+      member key raw inputs fee=NP.NativeSigned raw
+        (NP.NativeTx (T.replicate 64 key) 2 0 [NP.NativeInput (NP.prevout p) 4294967294|p<-inputs]
+          ([NP.NativeOutput (NP.planChangeScript plan) (money change)|change>0]
+            <>[NP.NativeOutput (NP.planRecipientScript plan) (money 10)])) plan inputs (money fee)
+        where change=sum(map (toInteger.units.NP.prevoutAmount) inputs)-10-fee
+      parent=member "d" "70" shared 1
+      child=member "e" "80" shared 2
+      noChange=member "f" "90" [previous "9" 11] 1
+      overlap=member "8" "a0" shared 1
+      txid=NP.nativeTxid.NP.signedNativeTransaction
+      draft s=NP.NativeDraft "offline-custody" (NP.signedNativeTransaction s) (NP.signedNativePrevouts s) (NP.signedNativeFee s)
+      wire s=let p=NP.prevout $ head $ NP.signedNativePrevouts s in
+        SignedAttempt (txid s) (NP.signedNativeBytes s) (encodeText s) (Just $ NP.outpointTxid p<>":"<>T.pack(show $ NP.outpointVout p))
+      ready=fixture fixtures ReadyIntake
+      paused=evalWrite writer (Pause "custody fixture") >> fixture fixtures RefreshCustody
+      seed s=do
+        paused
+        void $ evalWrite writer (ReserveFees 100 (txid s) Native (money 10) (NP.planRecipient plan) "custody fixture")
+        let identifier="fee:"<>txid s
+        ready
+        void $ evalWrite writer (PreparePayment 100 identifier (money 5) $ encodeText plan)
+        evalWrite writer (SaveDraft identifier 0 $ encodeText $ draft s)
+        prepared<-evalRead reader (ReadPreparation identifier)
+        void $ evalWrite writer (RecordAttempt prepared $ wire s)
+        ready
+        void $ evalWrite writer (MarkBroadcast 100 $ txid s)
+        pure identifier
+      evidence s=fixture fixtures $ SeedTreasuryEvidence "Native" (txid s) "unconfirmed" "outgoing" 0
+        (object ["confirmations" .= (0::Int),"walletNetUnits" .= ("-10"::T.Text),"feeUnits" .= NP.signedNativeFee s])
+      decoded s=let tx=NP.signedNativeTransaction s in object
+        ["txid" .= txid s,"version" .= NP.nativeVersion tx,"locktime" .= NP.nativeLocktime tx
+        ,"vin" .= [object ["txid" .= NP.outpointTxid p,"vout" .= NP.outpointVout p,"sequence" .= NP.nativeSequence i]
+          |i<-NP.nativeInputs tx,let p=NP.nativeOutpoint i]
+        ,"vout" .= [object ["n" .= i,"value" .= N.nativeNumber (NP.nativeOutputAmount o)
+          ,"scriptPubKey" .= object ["hex" .= NP.nativeOutputScript o]]| (i,o)<-zip [0::Int ..] $ NP.nativeOutputs tx]]
+      -- Retained members can be inactive, abandoned, or absent. The optional
+      -- spender is independently read from gettxspendingprevout.
+      call members retained abandoned active raw pending wallet method params=case (wallet,method,params) of
+        (True,"getbalances",[])->pure $ object ["mine" .= object
+          ["trusted" .= N.nativeNumber(money $ raw-pending),"untrusted_pending" .= N.nativeNumber(money pending)
+          ,"immature" .= (0::Int)],"lastprocessedblock" .= position]
+        (False,"getblockchaininfo",[])->pure $ object ["chain" .= ("signet"::T.Text),"initialblockdownload" .= False
+          ,"blocks" .= (100::Int),"bestblockhash" .= block,"signet_challenge" .= N.signetChallenge]
+        (False,"getblockhash",[Number 1])->pure $ String "scan-origin"
+        (False,"getconnectioncount",[])->pure $ Number 1
+        (True,"getwalletinfo",[])->pure $ object ["walletname" .= ("test"::T.Text),"descriptors" .= True
+          ,"scanning" .= False,"avoid_reuse" .= False,"lastprocessedblock" .= position]
+        (False,"decoderawtransaction",[String bytes])->case [s|s<-members,NP.signedNativeBytes s==bytes] of
+          [s]->pure (decoded s); _->fail "unknown custody transaction bytes"
+        (True,"gettransaction",[String identifier,Bool False,Bool True])->case [s|s<-members,txid s==identifier] of
+          [s] | retained->pure $ object ["txid" .= identifier,"hex" .= NP.signedNativeBytes s,"decoded" .= decoded s
+            ,"fee" .= Number (negate(fromIntegral $ units $ NP.signedNativeFee s)/100000000),"confirmations" .= (0::Int)
+            ,"lastprocessedblock" .= position,"walletconflicts" .= ([]::[T.Text]),"mempoolconflicts" .= ([]::[T.Text])
+            ,"trusted" .= False,"details" .= [object ["category" .= ("send"::T.Text),"abandoned" .= abandoned]]]
+          [_]->reject "rpc_error_-5"
+          _->fail "unknown custody transaction"
+        (False,"gettxspendingprevout",[points])->do
+          requested<-either fail pure $ eitherDecodeStrict' $ BL.toStrict $ encode points
+          pure $ toJSON [object $ ["txid" .= NP.outpointTxid p,"vout" .= NP.outpointVout p]
+            <>maybe [] (\identifier->["spendingtxid" .= identifier]) active | p<-(requested::[NP.Outpoint])]
+        (False,"gettxout",[String identifier,Number index,Bool False])->case
+          [p|s<-members,p<-NP.signedNativePrevouts s,NP.outpointTxid(NP.prevout p)==identifier
+            ,toInteger(NP.outpointVout $ NP.prevout p)==round index] of
+          p:_->pure $ object ["value" .= N.nativeNumber(NP.prevoutAmount p),"confirmations" .= (2::Int),"coinbase" .= False
+            ,"scriptPubKey" .= object ["hex" .= NP.prevoutScript p,"address" .= NP.planChange plan]]
+          _->fail "unknown custody prevout"
+        (True,"getaddressinfo",[String address]) | address==NP.planChange plan->pure $ object
+          ["ismine" .= True,"scriptPubKey" .= NP.planChangeScript plan]
+        (False,"getmempoolentry",[String identifier]) | active==Just identifier->pure $ object ["vsize" .= (100::Int)]
+        _->base wallet method params
+      inspect native=inspectCustodyWith (pure 100) (pure ()) native solana Nothing settings config reader False
+      assertReport members retained abandoned active raw pending excluded delta matches=do
+        (_,_,actual,report)<-inspect $ call members retained abandoned active raw pending
+        reported<-fieldValue "nativeWalletReported" report
+        removed<-fieldValue "nativeWalletExcludedInputs" report
+        assets<-fieldValue "assets" report :: IO [Value]
+        nativeRows<-filterM (fmap (==Native) . fieldValue "asset") assets
+        row<-case nativeRows of [r]->pure r; _->fail "native custody report row missing"
+        inFlight<-fieldValue "inFlight" row
+        observed<-fieldValue "observed" row
+        difference<-fieldValue "difference" row
+        let corrected=raw+sum(map (toInteger.units.NP.prevoutAmount) excluded)
+        check (actual==matches && reported==T.pack(show raw)
+          && removed==[object ["outpoint" .= NP.prevout p,"units" .= NP.prevoutAmount p]|p<-excluded]
+          && inFlight==T.pack(show delta) && observed==T.pack(show corrected)
+          && difference==T.pack(show $ corrected-2100-delta))
+  first<-seed parent
+  recorded<-evalRead reader (ReadAttempt $ txid parent)
+  paused
+  decision<-evalWrite writer (SaveReplacementDraft 100 recorded (draft child) "custody replacement")
+  fixture fixtures CoverBackup
+  fixture fixtures RefreshCustody
+  void $ evalWrite writer (RecordReplacement 100 decision [(recorded,parent)] child)
+  ready
+  void $ evalWrite writer (MarkBroadcast 100 $ txid child)
+  mapM_ evidence [parent,child]
+  fixture fixtures (FreshAt 100)
+  assertReport [parent,child] True False (Just $ txid parent) 2089 0 [] (-11) True
+  assertReport [parent,child] True False (Just $ txid child) 2088 0 [] (-12) True
+  -- Both replacement alternatives exclude the same two whole prevouts once.
+  assertReport [parent,child] True False Nothing 2000 0 shared 0 True
+  assertReport [parent,child] False False Nothing 2100 0 [] 0 True
+  assertReport [parent,child] True True Nothing 2100 0 [] 0 True
+  -- Never fit the correction to a balance gap: unexplained excess/deficit stays.
+  assertReport [parent,child] True False Nothing 2100 0 shared 0 False
+  assertReport [parent,child] True False Nothing 1999 0 shared 0 False
+  expectStore "custody_native_pending_credit_unresolved" $ inspect $ call [parent,child] True False Nothing 2000 1
+  fixture fixtures (CustodyFamilyResolved first True)
+  second<-seed noChange
+  evidence noChange
+  fixture fixtures (FreshAt 100)
+  samples<-newIORef (0::Int)
+  let transition wallet method params=do
+        when (method=="getbalances") (modifyIORef' samples (+1))
+        count<-readIORef samples
+        call [noChange] True False (if count>=2 then Just $ txid noChange else Nothing) 2089 0 wallet method params
+  -- An exact-output spend has no change: raw balance is identical before and
+  -- after mempool admission, yet the accounting evidence must be rejected.
+  expectStore "custody_native_view_changed" (inspect transition)
+  fixture fixtures (CustodyFamilyResolved second True)
+  _<-seed overlap
+  -- The intact schema rejects a second pending native family before the
+  -- reconciliation overlap guard can run; do not weaken it for branch coverage.
+  conflicting<-try (fixture fixtures $ CustodyFamilyResolved first False) :: IO (Either PG.SqlError ())
+  check (case conflicting of
+    Left problem->PG.sqlState problem=="23505" && "one_unresolved_chain_intent" `BS.isInfixOf` PG.sqlErrorMsg problem
+    Right ()->False)
 
 orderWorkflowContract :: PG.Connection -> Reader -> Writer -> StorePolicy -> IO ()
 orderWorkflowContract fixtures reader writer storePolicy = do

@@ -354,6 +354,7 @@ data NativeFamilyView = NativeFamilyView
   { familyPosition :: !Value
   , familyWallet :: ![(Text,Maybe (Int,Value))]
   , familyActive :: !(Maybe (Text,Int,Value))
+  , familyExcludedInputs :: ![NativePrevout]
   } deriving (Eq,Show)
 
 readNativeFamily :: NativeRPC -> NativeSettings -> [NativeSigned] -> IO NativeFamilyView
@@ -440,11 +441,37 @@ readNativeFamily call c family=do
             require (size>0) "native_mempool_evidence_invalid"
             pure (Just (txid,0,value))
       _->reject "native_family_multiple_winners"
+    excluded<-case selected of
+      Just _->pure []
+      Nothing->do
+        -- Core's IsSpent retains every input of an inactive, non-abandoned
+        -- wallet transaction; GetBalance also omits its inactive change. This
+        -- is a wallet reporting omission, not an executed payment or fee.
+        retained<-forM observations $ \(_,seen)->case seen of
+          Nothing->pure False
+          Just (_,value)->do
+            details<-fieldValue "details" value :: IO [Value]
+            require (not(null details) && length details<=4) "native_family_wallet_accounting_unavailable"
+            abandoned<-concat <$> forM details (\entry->do
+              category<-fieldValue "category" entry :: IO Text
+              if category=="send" then (:[]) <$> (fieldValue "abandoned" entry :: IO Bool) else pure [])
+            require (not(null abandoned) && length(nub abandoned)==1) "native_family_wallet_accounting_unavailable"
+            conflicts<-fieldValue "mempoolconflicts" value :: IO [Text]
+            require (and abandoned || null conflicts) "native_family_inactive_conflict"
+            pure (not $ and abandoned)
+        if or retained then do
+          avoidReuse<-fieldValue "avoid_reuse" wallet
+          require (not avoidReuse) "native_family_reused_inputs_require_review"
+          forM_ observations $ \(_,seen)->forM_ seen $ \(_,value)->do
+            trusted<-fieldValue "trusted" value
+            require (not trusted) "native_family_inactive_trusted"
+          pure (signedNativePrevouts first)
+        else pure []
     -- Fence both the wallet's view and the node's active tip after all reads.
     end <- call True "getwalletinfo" [] >>= fieldValue "lastprocessedblock"
     tip <- call False "getblockchaininfo" [] >>= fieldValue "bestblockhash"
     require (end==position && tip==block) "native_family_view_changed"
-    pure (position,NativeFamilyView position observations selected)
+    pure (position,NativeFamilyView position observations selected excluded)
 
 -- Unsigned construction reuses the same family reader as signing/settlement.
 -- It allocates no keys, changes no locks and never supplies signing=true.

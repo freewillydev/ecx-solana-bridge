@@ -17,7 +17,8 @@ import Control.Exception (IOException,catch,try)
 import Control.Monad (forM_)
 import Data.Aeson hiding (decode)
 import Data.Int (Int64)
-import Data.List (sortOn)
+import Data.List (nub,sortOn)
+import Data.Maybe (mapMaybe)
 import qualified Data.Map.Strict as M
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -62,7 +63,12 @@ inspectCustodyWith clock identity native solana verifier settings config reader 
   identity
   before<-nativeBalance native
   let groups=M.elems $ M.fromListWith (<>) [(recordedPayment a,[a])|a<-custodyPending view]
-  effects<-concat <$> mapM (pendingFamilyEffect native solana n config reader) groups
+  pending<-mapM (pendingFamilyEffect native solana n config reader) groups
+  let effects=concatMap fst pending
+      families=mapMaybe snd pending
+      excluded=concatMap (familyExcludedInputs.snd) families
+      points=[nativeOutpoint input | (first:_,_)<-families,input<-nativeInputs $ signedNativeTransaction first]
+  require (length points==length(nub points)) "custody_native_family_input_overlap"
   (slot,wrapped,sol)<-solanaBalances solana config view (\chain txid->evalRead reader $ ReadCustodyEvent chain txid)
   case verifier of
     Nothing->require (N.profile n/=CanonicalBeta) "independent_rpc_required"
@@ -87,16 +93,26 @@ inspectCustodyWith clock identity native solana verifier settings config reader 
     require (old==confirmations && savedAnchor==maybe "unconfirmed" id anchor) "custody_native_history_changed"
   after<-nativeBalance native
   require (before==after) "custody_native_view_changed"
-  let (nativeUnits,block,height)=after
+  let (nativeUnits,pendingUnits,block,height)=after
+  -- An asynchronously evicted wallet transaction can retain pending change
+  -- when spendzeroconfchange is disabled. Defer normalization even if unrelated
+  -- pending credit is the cause; trusted=false alone cannot exclude this case.
+  require (null excluded || pendingUnits==0) "custody_native_pending_credit_unresolved"
+  forM_ families $ \(members,saved)->do
+    currentFamily<-readNativeFamily native n members
+    require (currentFamily==saved && familyPosition saved==object ["hash" .= block,"height" .= height]) "custody_native_view_changed"
   active<-native False "getblockhash" [toJSON height] >>= parseValue parseJSON
   require (active==block) "custody_native_view_changed"
   end<-clock
   require (end>=at && toInteger end-toInteger at<=60) "custody_check_timed_out"
-  let observed=M.fromList [(Native,nativeUnits),(Wrapped,wrapped),(Sol,sol)]
+  let walletExcluded=sum (map (toInteger.units.prevoutAmount) excluded)
+      observed=M.fromList [(Native,nativeUnits+walletExcluded),(Wrapped,wrapped),(Sol,sol)]
       adjustments=M.fromListWith (+) [(asset,delta)|(_,asset,delta)<-effects]
       rows=[(asset,n,M.findWithDefault 0 asset adjustments,M.findWithDefault 0 asset observed)|(asset,n)<-M.toList $ custodyTotals view]
       matches=all (\(_,booked,delta,actual)->booked+delta>=0 && booked+delta==actual) rows
       report=object ["matches" .= matches,"nativeBlock" .= block,"nativeHeight" .= height,"solanaSlot" .= slot
+        ,"nativeWalletReported" .= T.pack(show nativeUnits)
+        ,"nativeWalletExcludedInputs" .= [object ["outpoint" .= prevout p,"units" .= prevoutAmount p]|p<-excluded]
         ,"assets" .= [object ["asset" .= asset,"booked" .= T.pack(show booked),"inFlight" .= T.pack(show delta)
           ,"expected" .= T.pack(show $ booked+delta),"observed" .= T.pack(show actual),"difference" .= T.pack(show $ actual-booked-delta)]|(asset,booked,delta,actual)<-rows]
         ,"inFlightEffects" .= [object ["transaction" .= txid,"asset" .= asset,"units" .= T.pack(show delta)]|(txid,asset,delta)<-effects]]
@@ -104,11 +120,12 @@ inspectCustodyWith clock identity native solana verifier settings config reader 
   require (revision==custodyRevision view) "custody_ledger_changed"
   pure (revision,at,matches,report)
 
-nativeBalance :: NativeRPC -> IO (Integer,Text,Int64)
+nativeBalance :: NativeRPC -> IO (Integer,Integer,Text,Int64)
 nativeBalance call = do
   value<-call True "getbalances" []
   mine<-fieldValue "mine" value
-  amounts<-mapM (\key->fieldValue key mine >>= either reject pure . N.nativeAmount) ["trusted","untrusted_pending","immature"]
+  amounts<-mapM (\key->fieldValue key mine >>= either reject pure . N.nativeAmount) ["trusted","immature"]
+  pending<-fieldValue "untrusted_pending" mine >>= either reject pure . N.nativeAmount
   reused<-parseValue (withObject "balance" (.:? "used")) mine
   reusedAmount<-mapM (either reject pure . N.nativeAmount) reused
   require (maybe True ((==0).units) reusedAmount) "native_reused_balance_requires_review"
@@ -116,7 +133,8 @@ nativeBalance call = do
   hash<-fieldValue "hash" block
   height<-fieldValue "height" block
   require (T.length hash==64 && T.all (`elem` ("0123456789abcdef"::String)) hash && height>=0) "custody_native_anchor_missing"
-  pure (sum $ map (toInteger.units) amounts,hash,height)
+  let pendingUnits=toInteger(units pending)
+  pure (pendingUnits+sum(map (toInteger.units) amounts),pendingUnits,hash,height)
 
 headFor :: CustodySnapshot -> Text -> IO Text
 headFor view stream=maybe (reject "custody_history_anchor_missing") pure (lookup stream $ custodyHeads view)
@@ -141,17 +159,21 @@ solanaBalances call config view evidence = do
 
 -- One verified spender contributes one adjustment, irrespective of how many
 -- signed replacement alternatives share its inputs. The Store proves lineage.
-pendingFamilyEffect :: NativeRPC -> SolanaRPC -> N.NativeSettings -> H.SolanaPolicy -> Reader -> [RecordedAttempt] -> IO [(Text,Asset,Integer)]
+pendingFamilyEffect :: NativeRPC -> SolanaRPC -> N.NativeSettings -> H.SolanaPolicy -> Reader -> [RecordedAttempt]
+  -> IO ([(Text,Asset,Integer)],Maybe ([NativeSigned],NativeFamilyView))
 pendingFamilyEffect native solana settings config reader [saved]
-  | recordedChain saved=="Solana"=pendingSolanaEffect native solana (N.profile settings) config reader saved
+  | recordedChain saved=="Solana"=do
+      effects<-pendingSolanaEffect native solana (N.profile settings) config reader saved
+      pure (effects,Nothing)
 pendingFamilyEffect native _ settings config reader attempts=do
   first<-case attempts of a:_->pure a; _->reject "native_replacement_family_bounds"
   (members,view)<-readSavedNativeFamily native settings config reader (recordedPayment first)
   require (sortOn (signedId.recordedSigned) attempts==sortOn (signedId.recordedSigned) (map fst members)) "native_replacement_family_changed"
   active<-activeNativeMember members view
-  case active of
+  effects<-case active of
     Nothing->pure []
     Just (saved,signed,depth,value)->nativeObservedEffect reader saved signed depth value
+  pure (effects,Just(map snd members,view))
 
 nativeObservedEffect :: Reader -> RecordedAttempt -> NativeSigned -> Int -> Value -> IO [(Text,Asset,Integer)]
 nativeObservedEffect reader saved signed depth value=do

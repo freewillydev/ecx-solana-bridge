@@ -58,10 +58,11 @@ checks = do
                 ,"blocks" .= (16010::Int),"bestblockhash" .= tip,"signet_challenge" .= signetChallenge]
               ("getconnectioncount",[])->pure $ toJSON (1::Int)
               ("getwalletinfo",[])->pure $ object ["walletname" .= nativeWallet recoverySettings,"descriptors" .= True
-                ,"scanning" .= False,"lastprocessedblock" .= position]
+                ,"scanning" .= False,"lastprocessedblock" .= position,"avoid_reuse" .= False]
               ("gettransaction",[String ident,Bool False,Bool True]) | ident==nativeTxid tx->pure $ object
                 ["hex" .= (raw::Text),"decoded" .= decoded,"txid" .= nativeTxid tx,"fee" .= Number (negate $ fromIntegral(units fee)/100000000)
-                ,"confirmations" .= planDepth plan,"walletconflicts" .= ([]::[Text]),"blockhash" .= anchor,"lastprocessedblock" .= position]
+                ,"confirmations" .= planDepth plan,"walletconflicts" .= ([]::[Text]),"blockhash" .= anchor,"lastprocessedblock" .= position
+                ,"trusted" .= False,"mempoolconflicts" .= ([]::[Text]),"details" .= [object ["category" .= ("send"::Text),"abandoned" .= False]]]
               ("gettxspendingprevout",_)->pure $ toJSON $ map nativeOutpoint $ nativeInputs tx
               ("getmempoolentry",_)->pure $ object ["vsize" .= (140::Int)]
               ("getblockheader",[String block])->pure $ object ["hash" .= block,"height" .= (16011-planDepth plan),"confirmations" .= planDepth plan]
@@ -236,8 +237,70 @@ checks = do
               retainedRecord=case familyWallet retained of [(key,Just (0,_))]->key==txid; _->False
           pure (activeId==Just(txid,0) && retainedRecord && familyActive retained==Nothing
             && familyWallet missing==[(txid,Nothing)] && familyActive missing==Nothing
+            && null(familyExcludedInputs active) && null(familyExcludedInputs missing)
+            && familyExcludedInputs retained==signedNativePrevouts original
             && "gettxout" `elem` methods && all (`notElem` methods)
               ["getmempoolentry","walletprocesspsbt","lockunspent","sendrawtransaction"])
+    , check "inactive wallet accounting requires explicit stable non-abandoned evidence" $ once $ ioProperty $
+        withNativeReplacementContract $ \c original _ call _->do
+          let points=map nativeOutpoint $ nativeInputs $ signedNativeTransaction original
+              details abandoned=toJSON [object ["category" .= ("send"::Text),"abandoned" .= abandoned]]
+              change method edit wallet name args=do
+                value<-if name=="gettxspendingprevout" then pure(toJSON points) else call wallet name args
+                pure $ case value of Object fields | name==method->Object(edit fields); _->value
+              inspect rpc=readNativeFamily rpc c [original]
+              mutate=change "gettransaction"
+          abandoned<-inspect (mutate $ KM.insert "details" $ details True)
+          missingDetails<-rejects "unexpected_rpc_schema" (inspect $ mutate $ KM.delete "details")
+          missingFlag<-rejects "unexpected_rpc_schema" (inspect $ mutate $ KM.insert "details"
+            $ toJSON [object ["category" .= ("send"::Text)]])
+          missingConflicts<-rejects "unexpected_rpc_schema" (inspect $ mutate $ KM.delete "mempoolconflicts")
+          missingReuse<-rejects "unexpected_rpc_schema" (inspect $ change "getwalletinfo" $ KM.delete "avoid_reuse")
+          missingTrust<-rejects "unexpected_rpc_schema" (inspect $ mutate $ KM.delete "trusted")
+          trusted<-rejects "native_family_inactive_trusted" (inspect $ mutate $ KM.insert "trusted" $ Bool True)
+          reused<-rejects "native_family_reused_inputs_require_review" (inspect $ change "getwalletinfo" $ KM.insert "avoid_reuse" $ Bool True)
+          empty<-rejects "native_family_wallet_accounting_unavailable" (inspect $ mutate $ KM.insert "details" $ toJSON ([]::[Value]))
+          inconsistent<-rejects "native_family_wallet_accounting_unavailable" (inspect $ mutate $ KM.insert "details"
+            $ toJSON [object ["category" .= ("send"::Text),"abandoned" .= flag]|flag<-[False,True]])
+          reads<-newIORef (0::Int)
+          let moving wallet method args=do
+                value<-change "gettransaction" id wallet method args
+                if method/="gettransaction" then pure value else do
+                  count<-atomicModifyIORef' reads (\n->(n+1,n))
+                  pure $ case value of Object fields | count>0->Object(KM.insert "details" (details True) fields); _->value
+          unstable<-rejects "native_family_view_changed" (inspect moving)
+          pure (null(familyExcludedInputs abandoned) && and [missingDetails,missingFlag,missingConflicts,missingReuse,missingTrust,trusted,reused,empty,inconsistent,unstable])
+    , check "inactive replacement alternatives exclude shared inputs once and keep conflicts closed" $ once $ ioProperty $
+        withNativeReplacementContract $ \c original draft call _->do
+          let newer=NativeSigned "00" (draftTransaction draft) (signedNativePlan original) (draftPrevouts draft) (draftFee draft)
+              family=[original,newer]
+              points=map nativeOutpoint $ nativeInputs $ signedNativeTransaction original
+              oldId=nativeTxid(signedNativeTransaction original)
+              newId=nativeTxid(signedNativeTransaction newer)
+              retained flags wallet method args=case (method,args) of
+                ("gettxspendingprevout",_)->pure (toJSON points)
+                ("gettransaction",[String txid,Bool False,Bool True])->do
+                  member<-case filter ((==txid).nativeTxid.signedNativeTransaction) family of [one]->pure one; _->reject "unexpected_fixture_member"
+                  decodedMember<-call False "decoderawtransaction" [toJSON $ signedNativeBytes member]
+                  value<-call True "gettransaction" [toJSON oldId,Bool False,Bool True]
+                  case value of
+                    Object fields->pure $ Object $ KM.union (KM.fromList
+                      [("txid",toJSON txid),("hex",toJSON $ signedNativeBytes member),("decoded",decodedMember)
+                      ,("fee",Number $ negate(fromIntegral $ units $ signedNativeFee member)/100000000)
+                      ,("details",toJSON [object ["category" .= ("send"::Text),"abandoned" .= (txid `elem` flags)]])]) fields
+                    _->reject "unexpected_fixture_member"
+                _->call wallet method args
+          both<-readNativeFamily (retained []) c family
+          mixed<-readNativeFamily (retained [oldId]) c family
+          abandoned<-readNativeFamily (retained [oldId,newId]) c family
+          let conflicting wallet method args=do
+                value<-retained [] wallet method args
+                pure $ case value of
+                  Object fields | method=="gettransaction",args==[String oldId,Bool False,Bool True]->Object(KM.insert "mempoolconflicts" (toJSON [newId]) fields)
+                  _->value
+          conflict<-rejects "native_family_inactive_conflict" (readNativeFamily conflicting c family)
+          pure (familyExcludedInputs both==signedNativePrevouts original && familyExcludedInputs mixed==familyExcludedInputs both
+            && null(familyExcludedInputs abandoned) && conflict)
     , check "singleton absence requires stable owned inputs and rejects missing or conflicting evidence" $ once $ ioProperty $
         withNativeReplacementContract $ \c original _ call calls->do
           let points=map nativeOutpoint $ nativeInputs $ signedNativeTransaction original
@@ -540,7 +603,7 @@ withNativeReplacementContract action=do
           ("getblockhash",[Number 16010])->pure $ toJSON custodyNativeTip
           ("getconnectioncount",[])->pure $ toJSON (1::Int)
           ("getwalletinfo",[])->pure $ object ["walletname" .= nativeWallet c,"descriptors" .= True,"private_keys_enabled" .= True
-            ,"external_signer" .= False,"scanning" .= False,"lastprocessedblock" .= position]
+            ,"external_signer" .= False,"scanning" .= False,"lastprocessedblock" .= position,"avoid_reuse" .= False]
           ("decoderawtransaction",[raw]) | raw==toJSON (signedNativeBytes original)->pure oldDecoded
           ("getaddressinfo",[address]) | address==toJSON (planRecipient plan)->pure $ object ["ismine" .= False,"scriptPubKey" .= planRecipientScript plan]
           ("getaddressinfo",[address]) | address==toJSON (planChange plan)->pure $ object ["ismine" .= True,"scriptPubKey" .= planChangeScript plan]
@@ -548,7 +611,8 @@ withNativeReplacementContract action=do
           ("gettransaction",[txid,Bool False,Bool True]) | txid==toJSON (nativeTxid tx)->pure $ object
             ["txid" .= nativeTxid tx,"hex" .= signedNativeBytes original,"decoded" .= oldDecoded
             ,"fee" .= Number (negate(fromIntegral $ units $ signedNativeFee original)/100000000),"confirmations" .= (0::Int)
-            ,"walletconflicts" .= ([]::[Text]),"lastprocessedblock" .= position]
+            ,"walletconflicts" .= ([]::[Text]),"lastprocessedblock" .= position,"trusted" .= False,"mempoolconflicts" .= ([]::[Text])
+            ,"details" .= [object ["category" .= ("send"::Text),"abandoned" .= False]]]
           ("gettxout",[txid,index,Bool False])->case [p | p<-signedNativePrevouts original
               ,txid==toJSON (outpointTxid $ prevout p),index==toJSON (outpointVout $ prevout p)] of
             [p]->pure $ object ["bestblock" .= custodyNativeTip,"value" .= nativeNumber (prevoutAmount p)
