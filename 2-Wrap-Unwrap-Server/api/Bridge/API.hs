@@ -1,8 +1,8 @@
-{-# LANGUAGE DataKinds, TypeOperators #-}
+{-# LANGUAGE ConstraintKinds, DataKinds, TypeOperators #-}
 module Bridge.API (CustomerAPI, customerAPI, customerServer, PublicConfiguration(..), PaymentInstruction(..)) where
 import Bridge.Wire (OrderRequest, OrderView)
 import Bridge.Wire (PublicConfiguration(..), PaymentInstruction(..))
-import Bridge.Operation (Caller(Customer), Plan, CustomerRead(PublicConfig,OrderStatus,PaymentInstructions), CustomerWrite(CreateOrder), safe, customer)
+import Bridge.Operation (Caller(Customer), Plan, CustomerOperations, CustomerRead(PublicConfig,OrderStatus,PaymentInstructions), CustomerWrite(CreateOrder), safe, customer)
 import Data.Text (Text)
 import Servant
 
@@ -18,7 +18,7 @@ customerAPI = Proxy
 
 -- Each endpoint returns an existential operation dictionary. Runtime resolves
 -- it into the severity-indexed DSL at the evaluator boundary.
-customerServer :: ServerT CustomerAPI (Plan 'Customer)
+customerServer :: CustomerOperations => ServerT CustomerAPI (Plan 'Customer)
 customerServer = safe PublicConfig
   :<|> (\header request -> customer (CreateOrder header request))
   :<|> (\oid header -> safe (OrderStatus header oid))

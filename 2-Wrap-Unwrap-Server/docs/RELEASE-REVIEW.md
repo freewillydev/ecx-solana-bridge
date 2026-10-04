@@ -47,6 +47,16 @@ closed instance heads, injective constraint identity, dictionary coercion, disti
 signer results and private interpreter environments. `eqT` establishes constraint-type
 equality only; it does not prove dictionary-value identity or custody security.
 
+The subsequent evaluator consolidation passed the root build, all three Cabal
+suites and the PostgreSQL/server/HTTPS/encrypted-wallet contracts. One positive
+and seventeen rejected compile cases checked the assembled program's ground
+instances, constraint injectivity, caller/severity/result separation, private
+evaluation resources and customer-facade restrictions. Both process startups now
+share one critical evaluator; `Operation` methods implement authorization and
+execution. `Interpreter` and the explicit dictionary method are removed. The three
+central files decreased from 1,193 to 1,176 lines. These checks do not establish
+completion of the funded recovery and release gates below.
+
 The PostgreSQL archive contract additionally compares all 22 existing migration
 projections alongside deployment, attempts and postings. A committed recipient
 change with unchanged row counts stays outside the exported snapshot and restored

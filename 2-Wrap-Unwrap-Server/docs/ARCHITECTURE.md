@@ -14,14 +14,16 @@ Read it before changing the operation boundary. The production grammar corrects
 its permissive/incomplete sketch types while retaining its constrained design:
 
 ```haskell
+data family Evaluation (severity :: Severity)
+
 class Typeable (OperationContext caller severity op)
     => Operation caller severity op | caller -> op, op -> caller where
   type OperationContext caller severity op = (context :: Constraint)
     | context -> caller severity op
-  operationDictionary :: Dictionary (OperationContext caller severity op)
   command :: op severity a -> DSL caller severity a
-  interpretOperation :: Dictionary (OperationContext caller severity op)
-    -> DSL caller severity a -> Either Text (DSL caller severity a)
+  interpretOperation :: DSL caller severity a -> Either Text (DSL caller severity a)
+  authorizeOperation :: Evaluation severity -> op severity a -> IO ()
+  evaluateOperation :: Evaluation severity -> op severity a -> IO a
 
 data Request caller severity a where
   Request :: Operation caller severity op
@@ -30,10 +32,7 @@ data Request caller severity a where
 checkedRequest :: forall caller severity a.
   Request caller severity a -> Either Text (DSL caller severity a)
 checkedRequest (Request (op :: requested severity a)) =
-  interpretOperation (operationDictionary @caller @severity @requested) (command op)
-
-class Interpreter environment (program :: Type -> Type) where
-  execute :: environment -> program a -> IO a
+  interpretOperation @caller @severity @requested (command op)
 ```
 
 Four closed caller families and six ground instances cover customer/operator
@@ -41,42 +40,55 @@ safe and critical work, and worker/signer critical work. Functional dependencies
 fix each caller's family; severity-indexed GADTs fix its executable instructions.
 The associated `OperationContext` family returns an injective constraint type;
 each instance defines it as its fully specified `Operation` constraint.
-`operationDictionary` supplies a witness of that constraint. DSL constructors
-retain it, and the matching-only `Instruction` view recovers it from the closed
-grammar without admitting arbitrary instructions.
+DSL constructors retain both that associated constraint and the explicit, fully
+specified `Operation` dictionary. The latter lets the core recover an instance
+without importing its workflow implementation. The matching-only `Instruction`
+view recovers it from the closed grammar without admitting arbitrary instructions.
 
-`checkedRequest` constructs the DSL from the original existential request, keeping
-its dictionary witness through `interpretOperation`. That pure method uses `eqT`
-and `Refl` to establish equality of the request and DSL's **constraint types**.
-It does not compare dictionary values, leaf constructors or payloads. Coherent
-closed instance heads, construction from the original request and the typed leaf
-results remain essential; reflection does not replace authorization.
+`checkedRequest` constructs the DSL from the original existential request and
+selects that request's `interpretOperation` instance explicitly. That pure method
+uses `eqT` and `Refl` to establish equality of the request and DSL's **constraint
+types**. There is no `operationDictionary` method or explicit dictionary argument.
+This check does not compare dictionary values, leaf constructors or payloads.
+Coherent ground instance heads, construction from the original request and the
+typed leaf results remain essential; reflection does not replace authorization.
 
 `Plan caller a` contains a safe or critical existential request. Customer handlers
 have `ServerT CustomerAPI (Plan 'Customer)` and contain no effects. Servant's hoist
 checks and evaluates the request; only its concrete result is serialized.
 Order creation being critical does not confer operator or signer authority.
 Cabal's customer-api component hides `Operation.Internal` and has no runtime,
-store or chain dependency. Review exports and component dependencies as well as types.
+store or chain dependency. Pure HTTP/control assembly carries concrete instance
+constraints; startup supplies the implementations. Review exports and component
+dependencies as well as types.
 
-Private resource environments replace callback bundles. Ground `Interpreter`
-instances match concrete DSL output types. `SafeEnvironment` contains only a reader
-and public configuration; `CriticalEnvironment` holds worker resources;
-`SignerEnvironment` holds the signing process's manager, reader and settings.
-Environment types and constructors stay private; startup exposes restricted entry
-points. Requests carry neither environments nor executable callbacks.
+All six `Operation` instances live in `Critical.hs`, beside the safe and critical
+evaluators. Their methods contain concrete execution cases. There is no
+`Interpreter` class, callback bundle or arbitrary environment/program execution
+instance. The core declares an opaque `Evaluation` data family; only `Critical.hs`
+defines its two concrete severity instances and can construct them. Safe resources
+are a reader and public configuration. Critical resources are either worker
+resources or signer resources, which contain no writer. IO is fixed; polymorphism
+in the result preserves the result selected by the operation's GADT.
 
-External critical requests pass `checkedRequest` and reach the sole `evalCritical`
-call through `dispatch`. Authorization and the worker's gate precede execution.
-Internal worker/signer instructions also pass `checkedRequest`, inside the held
-gate, without reacquiring it. Distinct instances implement signer transport and
-signer-side key operations. Incomplete grammar/interpreter matches are compilation
-errors; a new signer leaf requires both interpretations and its unique result.
+The safe and critical evaluators match only `Instruction`, then call
+`authorizeOperation` and `evaluateOperation`. Leaf-specific execution and the
+operation's permissions belong to its concrete `Operation` instance. Both process
+startups use the same private critical evaluator through one dispatch call site,
+with a separate gate and resource context for each process. Worker entry refuses
+signer requests; signer entry refuses customer/operator/worker requests. Internal
+worker and signer instructions pass `checkedRequest` and invoke the concrete method
+inside the already-held gate, without reacquiring it. Only that internal signer
+method constructs the HTTPS client; the signer context executes local signing.
 
-The signer independently authenticates requests and holds its own process-local
-gate across validation, signing and the second durable-decision read. These gates
-serialize workflows; types do not replace concurrency control. Safe reads remain
-concurrent. No database transaction spans RPC, signing or remote backup.
+`Signer.hs` owns Servant routes, authentication and TLS transport. Signer startup
+and key operations live in `Critical.hs`. The dedicated signer independently
+authenticates requests and holds its gate across validation, signing and the
+second durable-decision read. Sharing evaluator code does not merge processes,
+credentials or gates. Safe reads remain concurrent. No database transaction spans
+RPC, signing or remote backup. The workflow instances are intentionally orphan
+instances: final-program coherence checks must import `Bridge.Critical`, rather
+than testing the grammar component alone.
 
 Do not add arbitrary IO/SQL operations, severity casts, incoherent authorization
 instances or generic connection callbacks. The reference's weekly limit/multisig

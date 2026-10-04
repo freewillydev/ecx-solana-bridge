@@ -1,8 +1,8 @@
-{-# LANGUAGE DataKinds, GADTs, RankNTypes, ScopedTypeVariables #-}
+{-# LANGUAGE ConstraintKinds, DataKinds, GADTs, RankNTypes, ScopedTypeVariables #-}
 -- Private operator transport: a closed command becomes a typed DSL plan.
 module Bridge.Control (runControl,callControl) where
 import Bridge.Error
-import Bridge.Operation.Internal (Plan,Caller(Operator),OperatorRead(..),OperatorWrite(..),operator,operatorRead)
+import Bridge.Operation.Internal (Plan,Caller(Operator),OperatorOperations,OperatorRead(..),OperatorWrite(..),operator,operatorRead)
 import Control.Exception (bracket,catch,IOException)
 import Control.Monad (forever)
 import Data.Aeson
@@ -26,7 +26,7 @@ import System.Timeout (timeout)
 data ControlPlan where
   ControlPlan :: ToJSON a => Plan Operator a -> ControlPlan
 
-controlPlan :: Value -> Parser ControlPlan
+controlPlan :: OperatorOperations => Value -> Parser ControlPlan
 controlPlan=withObject "operator command" $ \o->do
   command<-o .: "operation" :: Parser Text
   let fields expected=if all (`elem` expected) (KM.keys o) then pure () else fail "unknown field"
@@ -92,7 +92,7 @@ controlPath directory=do
   pure (directory </> "operator.sock")
 
 -- Caller holds the writer's host fence for this listener's entire lifetime.
-runControl :: FilePath -> (forall a. Plan Operator a -> IO a) -> IO ()
+runControl :: OperatorOperations => FilePath -> (forall a. Plan Operator a -> IO a) -> IO ()
 runControl directory evaluate=do
   path<-controlPath directory
   (privatePath False path >> removeFile path) `catch` (\(e::IOException)->
@@ -112,7 +112,7 @@ runControl directory evaluate=do
             send 524288 socket (L.toStrict $ encode reply)
           pure ()) `catch` (\(_::IOException)->pure ())
 
-callControl :: FilePath -> Value -> IO Value
+callControl :: OperatorOperations => FilePath -> Value -> IO Value
 callControl directory command=do
   _<-either (const $ reject "invalid_operator_operation") pure (parseEither controlPlan command)
   path<-controlPath directory

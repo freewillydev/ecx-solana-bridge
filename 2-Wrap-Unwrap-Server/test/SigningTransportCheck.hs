@@ -28,6 +28,7 @@ import qualified Bridge.Wire as W
 import qualified Bridge.Domain as D
 import qualified Data.Map.Strict as M
 import Bridge.Operation.Internal hiding (Result)
+import Bridge.Critical ()
 import Bridge.Error
 import Bridge.Wire (SignedAttempt(..))
 import Control.Exception (bracket,try,throwIO,AsyncException(..))

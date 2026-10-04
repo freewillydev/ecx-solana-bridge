@@ -3,7 +3,7 @@
 module Main (main) where
 import qualified Bridge.Config as C
 import Bridge.BrowserBuild (browserAssetsDirectory)
-import Bridge.Critical (CustomerSettings(..),withRuntime,runWorkerLoop)
+import Bridge.Critical (CustomerSettings(..),SignerSettings(..),withRuntime,runWorkerLoop,runSigner)
 import Bridge.Control (runControl,callControl)
 import Bridge.Error
 import Bridge.RPC (newRpcManager)

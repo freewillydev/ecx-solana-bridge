@@ -1,7 +1,7 @@
-{-# LANGUAGE DataKinds, RankNTypes #-}
+{-# LANGUAGE ConstraintKinds, DataKinds, RankNTypes #-}
 module Bridge.Web (customerApplication,publicApplication,boundedApplication) where
 import Bridge.API
-import Bridge.Operation (Plan,Caller(Customer))
+import Bridge.Operation (Plan,Caller(Customer),CustomerOperations)
 import Bridge.Error
 import Control.Concurrent.STM
 import Control.Exception (bracket,catch)
@@ -17,10 +17,10 @@ import Servant
 import System.Directory (doesFileExist)
 import System.FilePath ((</>))
 
-customerApplication :: (forall a. Plan 'Customer a -> IO a) -> IO Application
+customerApplication :: CustomerOperations => (forall a. Plan 'Customer a -> IO a) -> IO Application
 customerApplication evaluate = boundedApplication 32 "server_busy" (customerRoutes evaluate)
 
-customerRoutes :: (forall a. Plan 'Customer a -> IO a) -> Application
+customerRoutes :: CustomerOperations => (forall a. Plan 'Customer a -> IO a) -> Application
 customerRoutes evaluate = serve customerAPI (hoistServer customerAPI interpret customerServer)
  where
   interpret :: forall a. Plan 'Customer a -> Handler a
@@ -30,7 +30,7 @@ customerRoutes evaluate = serve customerAPI (hoistServer customerAPI interpret c
 
 -- Exactly three static resources, built from Haskell/HTML/CSS by root Cabal.
 -- A requested path is never joined to a filesystem path.
-publicApplication :: FilePath -> (forall a. Plan 'Customer a -> IO a) -> IO Application
+publicApplication :: CustomerOperations => FilePath -> (forall a. Plan 'Customer a -> IO a) -> IO Application
 publicApplication assets evaluate = do
   let files=[([],"index.html","text/html; charset=utf-8"),(["style.css"],"style.css","text/css; charset=utf-8"),
              (["wallet.js"],"dist/wallet.js","text/javascript; charset=utf-8")]

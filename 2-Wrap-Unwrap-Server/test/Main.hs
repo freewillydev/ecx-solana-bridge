@@ -7,13 +7,15 @@ import Bridge.Identity (bearerHash,capabilityHash,payInstruction,payURIFor)
 import Bridge.API (customerServer)
 import Bridge.Signer (signingServer)
 import Bridge.Operation.Internal
+import Bridge.Critical ()
 import qualified Bridge.Wire as W
 import Servant.API ((:<|>)(..))
 import Bridge.Domain
 import Data.Aeson (eitherDecode,encode)
 import Data.Int (Int64)
 import Data.List (nub)
-import Data.Typeable (typeOf,eqT)
+import Data.Typeable (typeRep,eqT)
+import Data.Proxy (Proxy(..))
 import Data.Type.Equality ((:~:)(Refl))
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
@@ -41,13 +43,13 @@ main = do
           (Right(SigningDSL (PreparedSigning (SignPrepared identity identifier generation))),Right(SigningDSL (ReplacementSigning (SignReplacement other decision))),Right(SigningDSL (DraftSigning (DraftReplacement third parent fee))),Right(SigningDSL (CheckpointSigning (CheckpointCustody fourth sequenceNo))))->
             identity=="deployment" && identifier=="payment" && generation==3 && other==identity && decision==7 && third==identity && parent=="parent" && units fee==2 && fourth==identity && sequenceNo==9
           _->False
-    , check "each associated dictionary identity is distinct and survives DSL resolution" $ once $ property $
-        let identities=[typeOf(operationDictionary @'Customer @'Safe @CustomerCommand)
-              ,typeOf(operationDictionary @'Customer @'Critical @CustomerCommand)
-              ,typeOf(operationDictionary @'Operator @'Safe @OperatorCommand)
-              ,typeOf(operationDictionary @'Operator @'Critical @OperatorCommand)
-              ,typeOf(operationDictionary @'Worker @'Critical @WorkerCommand)
-              ,typeOf(operationDictionary @'Signer @'Critical @SignerCommand)]
+    , check "each associated constraint type is distinct and survives DSL resolution" $ once $ property $
+        let identities=[typeRep(Proxy @(OperationContext 'Customer 'Safe CustomerCommand))
+              ,typeRep(Proxy @(OperationContext 'Customer 'Critical CustomerCommand))
+              ,typeRep(Proxy @(OperationContext 'Operator 'Safe OperatorCommand))
+              ,typeRep(Proxy @(OperationContext 'Operator 'Critical OperatorCommand))
+              ,typeRep(Proxy @(OperationContext 'Worker 'Critical WorkerCommand))
+              ,typeRep(Proxy @(OperationContext 'Signer 'Critical SignerCommand))]
             select :: Request caller severity a -> T.Text
             select request=case checkedRequest request of
               Left _->"mismatch"

@@ -36,12 +36,12 @@ server and deployment harnesses have been removed.
 | Amounts, quotes, funding and wire records | `src/Bridge/{Domain,Wire}.hs` |
 | Caller/severity GADTs and existential requests | `src/Bridge/Operation/Internal.hs` |
 | Four pure Servant handlers | `api/Bridge/API.hs` |
-| Authorization, safe/critical evaluation and workflows | `workflow/Bridge/Critical.hs` |
+| Operation instances, shared critical evaluator and signing | `workflow/Bridge/Critical.hs` |
 | Admission, orders and payment validation | `workflow/Bridge/{Admission,Order,Payment}.hs` |
 | Observation and custody reconciliation | `workflow/Bridge/{Observer,Reconciliation}.hs` |
 | Closed Opaleye operations and transactions | `runtime/Bridge/Store.hs`, `Store/{Schema,Catalog}.hs` |
 | Native/Solana adapters and protocol codecs | `chain/Bridge/` |
-| Dedicated HTTPS signer and protected credentials | `workflow/Bridge/{Signer,Credentials}.hs` |
+| Signer HTTPS transport and protected credentials | `workflow/Bridge/{Signer,Credentials}.hs` |
 | Local operator control and custody recovery | `workflow/Bridge/{Control,Recovery}.hs` |
 | Host fence and encrypted archives | `runtime/Bridge/{Fence,Store/Backup}.hs` |
 | Startup, configuration and browser serving | `app/Main.hs`, `workflow/Bridge/{Config,Web}.hs` |

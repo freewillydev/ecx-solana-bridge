@@ -1,12 +1,15 @@
-{-# LANGUAGE DataKinds, GADTs, RankNTypes, ScopedTypeVariables #-}
+{-# LANGUAGE DataKinds, GADTs, RankNTypes, ScopedTypeVariables, TypeFamilies, TypeApplications, ConstraintKinds #-}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- The signer ClientM is constructed only inside this critical evaluator.
-module Bridge.Critical (CustomerSettings(..),withRuntime,runWorkerLoop) where
+module Bridge.Critical (CustomerSettings(..),withRuntime,runWorkerLoop,SignerSettings(..),signerApplication,runSigner) where
 import Bridge.Operation.Internal hiding (customer)
 import Bridge.Domain (Asset(..),gross,paymentAsset,paymentId,units)
 import Bridge.Identity (payURIFor,digest)
 import Bridge.Admission (checkSolanaPayoutWith)
 import Bridge.Order (createCustomerOrder)
+import Bridge.Credentials (readNativeUnlock,withNativeUnlock)
+import qualified Bridge.Config as C
+import Bridge.Recovery
 import Data.Int (Int64)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
@@ -19,13 +22,16 @@ import qualified Bridge.Wire as W
 import Control.Monad (forM,forM_,when,forever)
 import qualified Bridge.NativePayment as NP
 import Bridge.NativePayment (NativeSigned,previewNativePayment,checkNativeAcceptance,releaseNativeInputLocks)
-import Bridge.SolanaPayment (SolanaSigned,signedSolanaPlan,solPlanRecent,checkBlockhashWindow)
+import Bridge.SolanaPayment (SolanaSigned,signedSolanaPlan,solPlanRecent,solPlanFeeLimit,solPlanRentLimit,checkBlockhashWindow,prepareSolanaSigned)
 import Data.Text (Text)
 import Bridge.PaymentObservation
 import qualified Bridge.Solana as S
-import Data.Aeson (Value,eitherDecodeStrict',FromJSON,toJSON,object,(.=),parseJSON)
+import Data.Aeson (Value,eitherDecodeStrict',FromJSON,toJSON,object,(.=),parseJSON,encode)
 import qualified Data.Text.Encoding as TE
-import Bridge.Signer (signingAPI,SigningEndpoint(..),signerCredentials,signerCertificate)
+import qualified Data.ByteString.Lazy as BL
+import Data.Typeable (eqT)
+import Data.Type.Equality ((:~:)(Refl))
+import Bridge.Signer (signingAPI,SigningEndpoint(..),signerCredentials,signerCertificate,verifySigningKey,signingApplication,runSigningServer)
 import Bridge.Store
 import qualified Bridge.Native as N
 import qualified Bridge.SolanaHelper as H
@@ -33,32 +39,44 @@ import Bridge.RPC (boundedBody,parseValue)
 import qualified Bridge.RPC as RPC
 import Control.Concurrent (threadDelay)
 import System.IO (hPutStrLn,stderr)
-import Control.Concurrent.MVar (newMVar,withMVar)
+import Control.Concurrent.MVar (MVar,newMVar,withMVar)
 import Control.Exception (bracket,onException,try,catch,throwIO,IOException)
 import Data.IORef (newIORef,atomicModifyIORef')
 import qualified Data.ByteString as BS
 import Data.Time.Clock.POSIX (getPOSIXTime)
+import System.Directory (removeDirectoryRecursive)
+import System.FilePath (takeDirectory)
+import System.Timeout (timeout)
+import Network.Wai (Application)
 import Network.HTTP.Client hiding (Request)
 import Network.HTTP.Client.TLS (mkManagerSettings)
 import qualified Network.Connection as NC
 import qualified Network.TLS as TLS
 import Network.TLS.Extra.Cipher (ciphersuite_default)
 import Data.X509.CertificateStore (makeCertificateStore)
-import Servant.API ((:<|>)(..))
+import Servant.API ((:<|>)(..),BasicAuthData)
 import qualified Servant.Client as SC
 
 -- Safe interpretation has no writer, signer transport, keys or RPC manager.
-data SafeEnvironment = SafeEnvironment Reader (Maybe W.PublicConfiguration)
+data instance Evaluation 'Safe = SafeEnvironment Reader (Maybe W.PublicConfiguration)
 
-evalSafe :: SafeEnvironment -> Request caller 'Safe a -> IO a
+evalSafe :: Evaluation 'Safe -> Request caller 'Safe a -> IO a
 evalSafe environment request=do
   program<-either reject pure (checkedRequest request)
   case program of
-    value@ReadCustomer{}->execute environment value
-    value@ReadOperator{}->execute environment value
+    Instruction op->authorizeOperation environment op >> evaluateOperation environment op
 
-instance Interpreter SafeEnvironment (DSL 'Customer 'Safe) where
-  execute (SafeEnvironment reader public) (ReadCustomer operation)=run operation
+-- Ground instances own grammar checks and concrete effects in one place. eqT
+-- proves context-type alignment; it does not compare dictionary values.
+instance Operation 'Customer 'Safe CustomerCommand where
+  type OperationContext 'Customer 'Safe CustomerCommand = Operation 'Customer 'Safe CustomerCommand
+  command (CustomerQuery op)=ReadCustomer op
+  interpretOperation dsl@(Instruction (_ :: actual 'Safe a))=
+    case eqT @(OperationContext 'Customer 'Safe CustomerCommand) @(OperationContext 'Customer 'Safe actual) of
+      Just Refl->Right dsl
+      Nothing->Left "operation_dictionary_mismatch"
+  authorizeOperation _ _=pure ()
+  evaluateOperation (SafeEnvironment reader public) (CustomerQuery operation)=run operation
    where
     run :: CustomerRead a -> IO a
     run PublicConfig=do
@@ -80,8 +98,15 @@ instance Interpreter SafeEnvironment (DSL 'Customer 'Safe) where
       pure $ W.PaymentInstruction uri (T.drop 11 instruction) mint (gross $ W.quote view) "verified_source_owner"
     configured=maybe (reject "customer_configuration_unavailable") pure public
 
-instance Interpreter SafeEnvironment (DSL 'Operator 'Safe) where
-  execute (SafeEnvironment reader _) (ReadOperator operation)=run operation
+instance Operation 'Operator 'Safe OperatorCommand where
+  type OperationContext 'Operator 'Safe OperatorCommand = Operation 'Operator 'Safe OperatorCommand
+  command (OperatorQuery op)=ReadOperator op
+  interpretOperation dsl@(Instruction (_ :: actual 'Safe a))=
+    case eqT @(OperationContext 'Operator 'Safe OperatorCommand) @(OperationContext 'Operator 'Safe actual) of
+      Just Refl->Right dsl
+      Nothing->Left "operation_dictionary_mismatch"
+  authorizeOperation _ _=pure ()
+  evaluateOperation (SafeEnvironment reader _) (OperatorQuery operation)=run operation
    where
     run :: OperatorRead a -> IO a
     run NativeReviews=evalRead reader ReadNativeReviews
@@ -92,6 +117,34 @@ instance Interpreter SafeEnvironment (DSL 'Operator 'Safe) where
 data CustomerSettings = CustomerSettings
   { publicConfiguration :: W.PublicConfiguration, customerPolicy :: StorePolicy
   , unsignedSdk :: FilePath }
+
+data SignerSettings = SignerSettings
+  { signingNative :: N.NativeSettings, signingSolana :: S.SolanaSettings
+  , signingPolicy :: H.SolanaPolicy, signingLibrary :: FilePath, signingKey :: FilePath
+  , signingNativeUnlock :: Maybe FilePath
+  , signingBackup :: Maybe (C.Config,FilePath,FilePath) }
+
+-- Dedicated process: only read-only ledger access and private signing resources.
+-- Authentication remains in the Servant transport; evaluation shares the gate below.
+signerApplication :: Manager -> Reader -> SignerSettings -> BasicAuthData -> IO Application
+signerApplication manager reader settings credentials=do
+  let native=signingNative settings; solana=signingSolana settings; config=signingPolicy settings
+  require (N.profile native `elem` [W.L2LSignetDevnet,W.ECXBetanetDevnet]
+    && S.solanaProfile solana==N.profile native
+    && S.mint solana==H.mint config && S.custodyOwner solana==H.custodyOwner config
+    && S.custodyAta solana==H.custodyAta config) "signer_profile_mismatch"
+  N.validateNativeSettings native
+  S.validateSolanaSettings solana
+  verifySigningKey (S.custodyOwner solana) (signingKey settings)
+  forM_ (signingNativeUnlock settings) $ \path->readNativeUnlock path >> pure ()
+  withCriticalEvaluator (SignerEvaluation manager reader settings) $ \evaluate->
+    signingApplication credentials evaluate
+
+runSigner :: Manager -> Reader -> SignerSettings -> SigningEndpoint -> IO ()
+runSigner manager reader settings endpoint=do
+  credentials<-signerCredentials endpoint
+  app<-signerApplication manager reader settings credentials
+  runSigningServer endpoint app
 
 -- Startup supplies capabilities. Customer and worker requests share one dispatch
 -- and one gate; safe reads have no writer, signer or network capability.
@@ -114,41 +167,35 @@ withRuntime rpc settings config customerSettings endpoint reader writer action =
       && W.pubSolanaCluster public==(if N.profile native==W.CanonicalBeta then "mainnet-beta" else "devnet")
       && W.deploymentFingerprint policy==H.fingerprint config && W.nativeDepth policy==defaultNativeDepth settings
       && W.savedSolanaFee costs==H.maxSolFee config && W.savedSolanaRent costs==H.maxSolAccountRent config) "customer_configuration_mismatch"
-  gate<-newMVar ()
   let environment=CriticalEnvironment rpc settings config customerSettings endpoint reader writer
       safeEnvironment=SafeEnvironment reader (publicConfiguration <$> customerSettings)
-      interpret :: forall caller a. Request caller 'Critical a -> IO a
-      interpret request=either reject dispatch (checkedRequest request)
-      customerRequest :: forall caller a. Plan caller a -> IO a
-      customerRequest (SafePlan request)=evalSafe safeEnvironment request
-      customerRequest (CriticalPlan request)=interpret request
-      -- Only this dispatch invokes the critical evaluator. Instances receive
-      -- resources after authorization and while this process-local gate is held.
-      dispatch :: forall caller a. DSL caller 'Critical a -> IO a
-      dispatch operation=evalCritical operation
-      evalCritical :: forall caller a. DSL caller 'Critical a -> IO a
-      evalCritical operation=do
-        case operation of
-          OperatorDSL PauseService{}->pure ()
-          SigningDSL _->reject "signer_operation_forbidden"
-          WorkerDSL RecoverNativeSources->pure ()
-          WorkerDSL RecoverNativeSettlements->pure ()
-          WorkerDSL RecoverNativeLocks->pure ()
-          WorkerDSL RunWorkerCycle->pure ()
-          WorkerDSL ObserveChains->pure ()
-          WorkerDSL ReconcileCustody->pure ()
-          WorkerDSL ReconcilePayment{}->pure ()
-          _->require (paying environment) "observation_only"
-        withMVar gate $ \_ -> case operation of
-          value@WriteCustomer{}->execute environment value
-          value@OperatorDSL{}->execute environment value
-          value@WorkerDSL{}->execute environment value
-          SigningDSL _->reject "signer_operation_forbidden"
-  action interpret customerRequest customerRequest
+  withCriticalEvaluator (WorkerEvaluation environment) $ \interpret->do
+    let customerRequest :: forall caller a. Plan caller a -> IO a
+        customerRequest (SafePlan request)=evalSafe safeEnvironment request
+        customerRequest (CriticalPlan request)=interpret request
+    action interpret customerRequest customerRequest
+
+-- Worker and signer startup use the same evaluator, with independent gates and
+-- disjoint concrete resources. No real evaluator or environment is exported.
+withCriticalEvaluator :: Evaluation 'Critical
+  -> ((forall caller a. Request caller 'Critical a -> IO a) -> IO b) -> IO b
+withCriticalEvaluator environment action=do
+  gate<-newMVar ()
+  let dispatch :: forall caller a. Request caller 'Critical a -> IO a
+      dispatch request=either reject (evalCritical gate environment) (checkedRequest request)
+  action dispatch
+
+evalCritical :: MVar () -> Evaluation 'Critical -> DSL caller 'Critical a -> IO a
+evalCritical gate environment operation=withMVar gate $ \_->case operation of
+  Instruction op->authorizeOperation environment op >> evaluateOperation environment op
 
 -- Private resources, never callbacks or operations supplied by a caller.
 data CriticalEnvironment = CriticalEnvironment
   Manager ObserverSettings H.SolanaPolicy (Maybe CustomerSettings) SigningEndpoint Reader Writer
+
+data instance Evaluation 'Critical
+  = WorkerEvaluation CriticalEnvironment
+  | SignerEvaluation Manager Reader SignerSettings
 
 paying :: CriticalEnvironment -> Bool
 paying (CriticalEnvironment _ _ _ configured _ _ _)=maybe True (W.pubIntakeEnabled . publicConfiguration) configured
@@ -159,14 +206,25 @@ customer (CriticalEnvironment _ _ _ configured _ _ _)=maybe (reject "customer_co
 -- Internal instructions are already authorized under the caller's held gate.
 -- They pass through the checked grammar without reacquiring that gate.
 evalWorker :: CriticalEnvironment -> WorkerOperation a -> IO a
-evalWorker environment operation=either reject (execute environment) (checkedRequest $ workerRequest operation)
+evalWorker environment operation=do
+  program<-either reject pure (checkedRequest $ workerRequest operation)
+  case program of Instruction op->evaluateOperation (WorkerEvaluation environment) op
 
 evaluateSigning :: CriticalEnvironment -> SigningOperation a -> IO a
-evaluateSigning environment operation=either reject (execute environment)
-  (checkedRequest $ Request $ SignerAction operation)
+evaluateSigning environment operation=do
+  program<-either reject pure (checkedRequest $ Request $ SignerAction operation)
+  case program of Instruction op->evaluateOperation (WorkerEvaluation environment) op
 
-instance Interpreter CriticalEnvironment (DSL 'Signer 'Critical) where
-  execute environment@(CriticalEnvironment _ _ _ _ endpoint _ _) (SigningDSL operation)=do
+instance Operation 'Signer 'Critical SignerCommand where
+  type OperationContext 'Signer 'Critical SignerCommand = Operation 'Signer 'Critical SignerCommand
+  command (SignerAction op)=SigningDSL op
+  interpretOperation dsl@(Instruction (_ :: actual 'Critical a))=
+    case eqT @(OperationContext 'Signer 'Critical SignerCommand) @(OperationContext 'Signer 'Critical actual) of
+      Just Refl->Right dsl
+      Nothing->Left "operation_dictionary_mismatch"
+  authorizeOperation WorkerEvaluation{} _=reject "signer_operation_forbidden"
+  authorizeOperation SignerEvaluation{} _=pure ()
+  evaluateOperation (WorkerEvaluation environment@(CriticalEnvironment _ _ _ _ endpoint _ _)) (SignerAction operation)=do
     require (paying environment) "observation_only"
     credentials<-signerCredentials endpoint
     certificate<-signerCertificate endpoint
@@ -193,15 +251,100 @@ instance Interpreter CriticalEnvironment (DSL 'Signer 'Critical) where
       -- Even an HTTP failure may follow signing. Retain the preparation;
       -- never automatically retry or pretend the outcome is known.
       either (const $ reject "signer_outcome_unknown") pure result
+  evaluateOperation (SignerEvaluation manager reader settings) (SignerAction operation)=run operation
+   where
+    native=signingNative settings
+    solana=signingSolana settings
+    config=signingPolicy settings
+    run :: forall a. SigningOperation a -> IO a
+    run (CheckpointSigning (CheckpointCustody identity minimumSequence))=do
+      require (identity==H.fingerprint config && minimumSequence>=0) "invalid_custody_checkpoint"
+      (deployment,backup,parent)<-maybe (reject "custody_checkpoint_not_configured") pure (signingBackup settings)
+      require (C.fingerprint deployment==identity && C.nativeSettings deployment==native
+        && C.solanaSettings deployment==solana && C.nativeUnlockFile deployment==signingNativeUnlock settings) "signer_profile_mismatch"
+      result<-timeout 300000000 $ bracket
+        (evalCustodyRecovery manager deployment $ ExportCheckpoint reader (signingKey settings) parent minimumSequence)
+        (removeDirectoryRecursive . takeDirectory . fst) $ \(manifest,sequenceNo)->do
+          receipt<-evalCustodyRecovery manager deployment (UploadCustody backup manifest sequenceNo)
+          after<-evalRead reader ReadState
+          require (ledgerSequence after==sequenceNo) "custody_backup_changed"
+          pure receipt
+      CheckpointResult <$> maybe (reject "custody_checkpoint_timeout") pure result
+    run (DraftSigning (DraftReplacement identity parent fee))=do
+      require (identity==H.fingerprint config) "signer_profile_mismatch"
+      let readDecision=do
+            now<-floor <$> getPOSIXTime
+            evalRead reader (ReadReplacementDraftContext now parent fee)
+      before<-readDecision
+      draft<-NP.draftNativeReplacement (N.nativeCall manager native) native (map snd before) fee
+      after<-readDecision
+      require (before==after) "signing_decision_changed"
+      pure $ DraftResult draft
+    run (ReplacementSigning (SignReplacement identity decision))=do
+      require (identity==H.fingerprint config) "signer_profile_mismatch"
+      let readDecision=do
+            now<-floor <$> getPOSIXTime
+            evalRead reader (ReadReplacementSigning now decision)
+      before@(family,draft)<-readDecision
+      signed<-withNativeUnlock (N.nativeCall manager native) native (signingNativeUnlock settings) $
+        NP.signNativeReplacement (N.nativeCall manager native) native (map snd family) draft
+      after<-readDecision
+      require (before==after) "signing_decision_changed"
+      parent<-case reverse family of (saved,_):_->pure saved; _->reject "native_replacement_family_bounds"
+      pure $ ReplacementResult $ SignedAttempt (NP.nativeTxid $ NP.signedNativeTransaction signed) (NP.signedNativeBytes signed)
+        (TE.decodeUtf8 $ BL.toStrict $ encode signed) (commonInput $ recordedSigned parent)
+    run (PreparedSigning (SignPrepared identity identifier generation))=do
+      require (identity==H.fingerprint config) "signer_profile_mismatch"
+      let readDecision=do
+            now<-floor <$> getPOSIXTime
+            evalRead reader (ReadSigningDecision now identifier generation)
+      before<-readDecision
+      plan<-resolveSigningPlan (N.profile native) config before
+      reply<-case plan of
+        NativeAuthorization saved draft->do
+          _<-N.nativeIdentity manager native
+          withNativeUnlock (N.nativeCall manager native) native (signingNativeUnlock settings) $
+            NativeReply <$> NP.signNativeDraft (N.nativeCall manager native) saved draft
+        SolanaAuthorization saved expected->do
+          _<-S.solanaIdentity manager solana
+          let limits=config {H.maxSolFee=solPlanFeeLimit saved,H.maxSolAccountRent=solPlanRentLimit saved}
+              sign actual=do
+                require (actual==expected) "saved_solana_request_mismatch"
+                H.signSolanaSdk (signingLibrary settings) limits (signingKey settings) actual
+          SolanaReply <$> prepareSolanaSigned (S.solanaCall manager solana) sign limits saved
+      verified<-verifySigningReply (N.nativeCall manager native) (N.profile native) config before reply
+      after<-readDecision
+      require (before==after) "signing_decision_changed"
+      pure $ PreparedResult verified
 
-instance Interpreter CriticalEnvironment (DSL 'Customer 'Critical) where
-  execute environment@(CriticalEnvironment rpc settings config _ _ reader writer)
-      (WriteCustomer (Bridge.Operation.Internal.CreateOrder header request))=do
+instance Operation 'Customer 'Critical CustomerCommand where
+  type OperationContext 'Customer 'Critical CustomerCommand = Operation 'Customer 'Critical CustomerCommand
+  command (CustomerChange op)=WriteCustomer op
+  interpretOperation dsl@(Instruction (_ :: actual 'Critical a))=
+    case eqT @(OperationContext 'Customer 'Critical CustomerCommand) @(OperationContext 'Customer 'Critical actual) of
+      Just Refl->Right dsl
+      Nothing->Left "operation_dictionary_mismatch"
+  authorizeOperation (WorkerEvaluation environment) _=require (paying environment) "observation_only"
+  authorizeOperation SignerEvaluation{} _=reject "signer_context_forbidden"
+  evaluateOperation SignerEvaluation{} _=reject "signer_context_forbidden"
+  evaluateOperation (WorkerEvaluation environment@(CriticalEnvironment rpc settings config _ _ reader writer))
+      (CustomerChange (Bridge.Operation.Internal.CreateOrder header request))=do
     c<-customer environment
     createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (\n->evalWorker environment (CheckpointBackup n) >> freshIntake environment) reader writer header request
 
-instance Interpreter CriticalEnvironment (DSL 'Operator 'Critical) where
-  execute environment@(CriticalEnvironment rpc settings config _ _ reader writer) (OperatorDSL operation)=run operation
+instance Operation 'Operator 'Critical OperatorCommand where
+  type OperationContext 'Operator 'Critical OperatorCommand = Operation 'Operator 'Critical OperatorCommand
+  command (OperatorChange op)=OperatorDSL op
+  interpretOperation dsl@(Instruction (_ :: actual 'Critical a))=
+    case eqT @(OperationContext 'Operator 'Critical OperatorCommand) @(OperationContext 'Operator 'Critical actual) of
+      Just Refl->Right dsl
+      Nothing->Left "operation_dictionary_mismatch"
+  authorizeOperation SignerEvaluation{} _=reject "signer_context_forbidden"
+  authorizeOperation (WorkerEvaluation environment) (OperatorChange operation)=case operation of
+    PauseService{}->pure ()
+    _->require (paying environment) "observation_only"
+  evaluateOperation SignerEvaluation{} _=reject "signer_context_forbidden"
+  evaluateOperation (WorkerEvaluation environment@(CriticalEnvironment rpc settings config _ _ reader writer)) (OperatorChange operation)=run operation
    where
     native=nativeSettings settings
     solana=solanaSettings settings
@@ -420,8 +563,25 @@ instance Interpreter CriticalEnvironment (DSL 'Operator 'Critical) where
       now<-floor <$> getPOSIXTime
       evalWrite writer (ResumeLedger now [("Native",N.nativeCheckpointHash native),("Solana",tokenOrigin settings),("SolanaOperating",operatingOrigin settings)] reviewed)
 
-instance Interpreter CriticalEnvironment (DSL 'Worker 'Critical) where
-  execute environment@(CriticalEnvironment rpc settings config _ _ reader writer) (WorkerDSL operation)=run operation
+instance Operation 'Worker 'Critical WorkerCommand where
+  type OperationContext 'Worker 'Critical WorkerCommand = Operation 'Worker 'Critical WorkerCommand
+  command (WorkerAction op)=WorkerDSL op
+  interpretOperation dsl@(Instruction (_ :: actual 'Critical a))=
+    case eqT @(OperationContext 'Worker 'Critical WorkerCommand) @(OperationContext 'Worker 'Critical actual) of
+      Just Refl->Right dsl
+      Nothing->Left "operation_dictionary_mismatch"
+  authorizeOperation SignerEvaluation{} _=reject "signer_context_forbidden"
+  authorizeOperation (WorkerEvaluation environment) (WorkerAction operation)=case operation of
+    RecoverNativeSources->pure ()
+    RecoverNativeSettlements->pure ()
+    RecoverNativeLocks->pure ()
+    RunWorkerCycle->pure ()
+    ObserveChains->pure ()
+    ReconcileCustody->pure ()
+    ReconcilePayment{}->pure ()
+    _->require (paying environment) "observation_only"
+  evaluateOperation SignerEvaluation{} _=reject "signer_context_forbidden"
+  evaluateOperation (WorkerEvaluation environment@(CriticalEnvironment rpc settings config _ _ reader writer)) (WorkerAction operation)=run operation
    where
     native=nativeSettings settings
     solana=solanaSettings settings
