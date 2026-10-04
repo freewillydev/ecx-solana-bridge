@@ -58,6 +58,7 @@ From the repository root (use the browser plan and its explicit `--freeze` for J
 `--download` retrieves checksum-verified Hackage archives. Optional `--ghc-source`
 checks the matching pinned native compiler archive; it is not a call-graph proof.
 Recheck both compiler graphs, FFI and actual platform/node binaries for the release
-artifact. License/notice regeneration and independent application review remain
-open; see [THIRD-PARTY.md](THIRD-PARTY.md). Historical Linux results do not certify
+artifact. Current package-notice collection covers all 358 package versions;
+distribution/license obligations and independent application review remain open;
+see [THIRD-PARTY.md](THIRD-PARTY.md). Historical Linux results do not certify
 this macOS build or a future installer.

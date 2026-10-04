@@ -1,5 +1,5 @@
 {
-  "scope": "Actual Linux build plan, complete Cargo lock graph, installed npm graph, bundled toolchain notices. Includes build/test dependencies conservatively; not a legal opinion or completed distribution audit.",
+  "scope": "Historical Linux build/source notice inventory; currentSourceGraph separately records current macOS graph coverage. Includes build/test dependencies; not a legal opinion or completed distribution audit.",
   "buildPlanSha256": "175883f33b2a348709f732bfe32b83da137e57f95896d2d1bdfa44032cb9a4e3",
   "lockfileSha256": {
     "cabal.project.freeze": "cde083acd9508e07cbacc5fe32bb960a00b29079f6eaabd636e74a4d29a213a6",
@@ -6185,6 +6185,974 @@
           "gzip": false
         }
       ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "Cabal-hooks",
+      "version": "3.16",
+      "source": "https://hackage.haskell.org/package/Cabal-hooks-3.16",
+      "sourceSha256": "59ba20b258fad4a3621c9c7f5513ba052667d091bb674b3829cc131de4df48e8",
+      "status": "collected",
+      "files": [
+        {
+          "path": "Cabal-hooks-3.16/LICENSE",
+          "sha256": "153694f0baac3e44f1ada3e44ea179396601434b0e8c9b371083307bd4a100c2",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "base16",
+      "version": "1.0",
+      "source": "https://hackage.haskell.org/package/base16-1.0",
+      "sourceSha256": "86366364910b78609677817cf3f987bf1690e1f75bba04bc91a5ed993d619cde",
+      "status": "collected",
+      "files": [
+        {
+          "path": "base16-1.0/LICENSE",
+          "sha256": "8ad3f5c1ec2f8e3c930759043f788fee06bfc1b9fc9f629b6456cd59fe5bfe28",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "base64",
+      "version": "1.0",
+      "source": "https://hackage.haskell.org/package/base64-1.0",
+      "sourceSha256": "7942239f1804945fd6d319a953f26c53b64518076cd294141fda983f2ff1b2b6",
+      "status": "collected",
+      "files": [
+        {
+          "path": "base64-1.0/LICENSE",
+          "sha256": "96f38a760ee077da519a6f3f9a94c5d3249bfd8d9cb6ab8ebf153c795fe768db",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "cborg",
+      "version": "0.2.10.0",
+      "source": "https://hackage.haskell.org/package/cborg-0.2.10.0",
+      "sourceSha256": "17fe070c38fc498cab49bcb9d6215b7747d53bedf96502e9bcce9cad73b9c797",
+      "status": "collected",
+      "files": [
+        {
+          "path": "cborg-0.2.10.0/LICENSE.txt",
+          "sha256": "590f07e7e19122174e3656e38176a659a7c5d0ab1cb1bdc3d8044accc594323f",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "ech-config",
+      "version": "0.0.1",
+      "source": "https://hackage.haskell.org/package/ech-config-0.0.1",
+      "sourceSha256": "b236b6d7ea1385c280b76051edc7d8f6db31c9cb7b35df5c06f5a0bd75b4feba",
+      "status": "collected",
+      "files": [
+        {
+          "path": "ech-config-0.0.1/LICENSE",
+          "sha256": "a4f3fc7ef38bd28410306197fc706b720c2252c69e02a5b4c47084ef1547ae10",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "clock",
+      "version": "0.8.4",
+      "source": "https://hackage.haskell.org/package/clock-0.8.4",
+      "sourceSha256": "6ae9898afe788a5e334cd5fad5d18a3c2e8e59fa09aaf7b957dbb38a4767df2e",
+      "status": "collected",
+      "files": [
+        {
+          "path": "clock-0.8.4/LICENSE",
+          "sha256": "825aa93c70e68e17dce4ab3aa2c9a4a25885b0890770bb8a2dfeee45436b601b",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "crypto-token",
+      "version": "0.2.0",
+      "source": "https://hackage.haskell.org/package/crypto-token-0.2.0",
+      "sourceSha256": "007948e56e6dce41a66a653a7f175a1fc3138f88e8035cc8c13a743a9921e552",
+      "status": "collected",
+      "files": [
+        {
+          "path": "crypto-token-0.2.0/LICENSE",
+          "sha256": "4f5a1c50fca43451300d69fb94d03e962e553f8027d37d0cfccbf5d85567bbe8",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "crypton",
+      "version": "1.1.5",
+      "source": "https://hackage.haskell.org/package/crypton-1.1.5",
+      "sourceSha256": "bcff846a537429eaa3d64c1ea888c2dfb24805cb3ad9ce6c57b1ae0f39462394",
+      "status": "collected",
+      "files": [
+        {
+          "path": "crypton-1.1.5/LICENSE",
+          "sha256": "a9554df9870ec3e4c0bdd98013c93d54c9159b250aeae43b0c26033a4c7fac0a",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "crypton-connection",
+      "version": "0.4.6",
+      "source": "https://hackage.haskell.org/package/crypton-connection-0.4.6",
+      "sourceSha256": "d686b7855817ea8c4bc8def79b78bc24aef725973e82a8afd109d528c9c54034",
+      "status": "collected",
+      "files": [
+        {
+          "path": "crypton-connection-0.4.6/LICENSE",
+          "sha256": "17aef7950e0378b00f6c5cf1a9957e3c19d0d67803b13c9f1938f626b1cd3fc5",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "crypton-pem",
+      "version": "0.3.0",
+      "source": "https://hackage.haskell.org/package/crypton-pem-0.3.0",
+      "sourceSha256": "1fadab8cba74c6acd74873f06415b4a2a7c84b16b43425217a7beb0ec5830540",
+      "status": "collected",
+      "files": [
+        {
+          "path": "crypton-pem-0.3.0/LICENSE",
+          "sha256": "9c541692934041d86bb01350fb225958b8a9ba450b108293c3c0c7b00b19c2f0",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "crypton-asn1-encoding",
+      "version": "0.10.0",
+      "source": "https://hackage.haskell.org/package/crypton-asn1-encoding-0.10.0",
+      "sourceSha256": "49813a0ee253f628cb8102dd6857905609b52e490c73c554d7cdf0cbce2926d2",
+      "status": "collected",
+      "files": [
+        {
+          "path": "crypton-asn1-encoding-0.10.0/LICENSE",
+          "sha256": "ef71826759279830b01eb726f702fa0fdc3c787fdf452eaec2e345afbc7cbb0e",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "crypton-asn1-parse",
+      "version": "0.10.0",
+      "source": "https://hackage.haskell.org/package/crypton-asn1-parse-0.10.0",
+      "sourceSha256": "35c0f278d8fcb720b4ad89c2a7f256f7fb098b9f71a0aeb493a4c3c0fe7728d9",
+      "status": "collected",
+      "files": [
+        {
+          "path": "crypton-asn1-parse-0.10.0/LICENSE",
+          "sha256": "ef71826759279830b01eb726f702fa0fdc3c787fdf452eaec2e345afbc7cbb0e",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "crypton-asn1-types",
+      "version": "0.4.1",
+      "source": "https://hackage.haskell.org/package/crypton-asn1-types-0.4.1",
+      "sourceSha256": "61efc63877a0d3ddb992a793839d9427c1597e095a6e1f63c04e05fd3e4e302d",
+      "status": "collected",
+      "files": [
+        {
+          "path": "crypton-asn1-types-0.4.1/LICENSE",
+          "sha256": "ef71826759279830b01eb726f702fa0fdc3c787fdf452eaec2e345afbc7cbb0e",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "crypton-x509",
+      "version": "1.9.1",
+      "source": "https://hackage.haskell.org/package/crypton-x509-1.9.1",
+      "sourceSha256": "55260290338272562b7b1452002e1ad0d9b6b92fb31dc25f6115f5d2da3cbc0e",
+      "status": "collected",
+      "files": [
+        {
+          "path": "crypton-x509-1.9.1/LICENSE",
+          "sha256": "43d820ad7c467c6c9cd6eedb385cfe89d1545a48eca4d40bfe3b7bcd80c298cb",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "crypton-x509-store",
+      "version": "1.9.0",
+      "source": "https://hackage.haskell.org/package/crypton-x509-store-1.9.0",
+      "sourceSha256": "de9193403c11d1fb090083382646be6f6cf68ed984f475d1a0e142f77efb8766",
+      "status": "collected",
+      "files": [
+        {
+          "path": "crypton-x509-store-1.9.0/LICENSE",
+          "sha256": "43d820ad7c467c6c9cd6eedb385cfe89d1545a48eca4d40bfe3b7bcd80c298cb",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "crypton-x509-system",
+      "version": "1.9.0",
+      "source": "https://hackage.haskell.org/package/crypton-x509-system-1.9.0",
+      "sourceSha256": "89ee819b78963a5c925fdaad80e2e64be6c0fedf4f24fc2b95eddb649b86cefe",
+      "status": "collected",
+      "files": [
+        {
+          "path": "crypton-x509-system-1.9.0/LICENSE",
+          "sha256": "43d820ad7c467c6c9cd6eedb385cfe89d1545a48eca4d40bfe3b7bcd80c298cb",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "crypton-x509-validation",
+      "version": "1.9.1",
+      "source": "https://hackage.haskell.org/package/crypton-x509-validation-1.9.1",
+      "sourceSha256": "8fcb83401114c7f694d84c543e8f7f96cea60c543a30a770903741d336eece3d",
+      "status": "collected",
+      "files": [
+        {
+          "path": "crypton-x509-validation-1.9.1/LICENSE",
+          "sha256": "43d820ad7c467c6c9cd6eedb385cfe89d1545a48eca4d40bfe3b7bcd80c298cb",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "half",
+      "version": "0.3.3",
+      "source": "https://hackage.haskell.org/package/half-0.3.3",
+      "sourceSha256": "f476049628d6ff79722fb073c01e85f2a11b2ef3835fdc3fc21a61f05d17ab02",
+      "status": "collected",
+      "files": [
+        {
+          "path": "half-0.3.3/LICENSE",
+          "sha256": "e88324bd9fbac9824509574224eadb9dbf5e978492565ea820dc063fa99ab197",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "hpke",
+      "version": "0.1.0",
+      "source": "https://hackage.haskell.org/package/hpke-0.1.0",
+      "sourceSha256": "1a00e05c344b17f7d2b28ae19576c2aec348d71c995583f8588264a59dc87fa2",
+      "status": "collected",
+      "files": [
+        {
+          "path": "hpke-0.1.0/LICENSE",
+          "sha256": "a4f3fc7ef38bd28410306197fc706b720c2252c69e02a5b4c47084ef1547ae10",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "http-client-tls",
+      "version": "0.4.0",
+      "source": "https://hackage.haskell.org/package/http-client-tls-0.4.0",
+      "sourceSha256": "611cf14cf046657bb1788a4dac09710b4b104c037d42b189148c02e6dd84ae3c",
+      "status": "collected",
+      "files": [
+        {
+          "path": "http-client-tls-0.4.0/LICENSE",
+          "sha256": "b986b1413f8388c5729491f607f2869e139f19228e76117875980cb3ec9fa8ef",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "mlkem",
+      "version": "0.2.3.0",
+      "source": "https://hackage.haskell.org/package/mlkem-0.2.3.0",
+      "sourceSha256": "bb6b24fcf337d0480a64c8b5152d97ecf2820872824d792ab46a9fb45acb0829",
+      "status": "collected",
+      "files": [
+        {
+          "path": "mlkem-0.2.3.0/LICENSE",
+          "sha256": "ae71259e895f3f96aed4df75ffef2eee636b0ec5d918e1bb9e23ff46769948a5",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "opaleye",
+      "version": "0.10.8.0",
+      "source": "https://hackage.haskell.org/package/opaleye-0.10.8.0",
+      "sourceSha256": "f9be887c7c10c35b25faf3e8f5144b574b071f507f40b3696b700aa1e16ea7fb",
+      "status": "collected",
+      "files": [
+        {
+          "path": "opaleye-0.10.8.0/LICENSE",
+          "sha256": "13c29e6fca025bea28e705db0d09785c06c9704c043a2ca40a0ec62a7b438c53",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "product-profunctors",
+      "version": "0.11.1.1",
+      "source": "https://hackage.haskell.org/package/product-profunctors-0.11.1.1",
+      "sourceSha256": "3fbe8621294d0431a0a1ab72e358ddd563bc228580b4831104e347f2a5bb1cda",
+      "status": "collected",
+      "files": [
+        {
+          "path": "product-profunctors-0.11.1.1/LICENSE",
+          "sha256": "86edf89bea666066bb4f201e82eeb162ac820a49957fb6c0070756704f3d62f3",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "postgresql-libpq",
+      "version": "0.11.0.0",
+      "source": "https://hackage.haskell.org/package/postgresql-libpq-0.11.0.0",
+      "sourceSha256": "034ab1208fe6bb33009b3c7c75a06dfea5b306e289a013fff2e2e450d63ed2a3",
+      "status": "collected",
+      "files": [
+        {
+          "path": "postgresql-libpq-0.11.0.0/LICENSE",
+          "sha256": "91db6c61ac7722ae9292064691521d71adb0d101034ee04a1fc02bc807ba375b",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "postgresql-libpq-configure",
+      "version": "0.11",
+      "source": "https://hackage.haskell.org/package/postgresql-libpq-configure-0.11",
+      "sourceSha256": "8d4fe34b5475dd0c8339b5c05506111a10214ea18a10cd366e5440eaac95b2d8",
+      "status": "collected",
+      "files": [
+        {
+          "path": "postgresql-libpq-configure-0.11/LICENSE",
+          "sha256": "91db6c61ac7722ae9292064691521d71adb0d101034ee04a1fc02bc807ba375b",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "postgresql-simple",
+      "version": "0.7.0.1",
+      "source": "https://hackage.haskell.org/package/postgresql-simple-0.7.0.1",
+      "sourceSha256": "597cf320650318d6033ee538b19eb28e43f02b88590baae7272bc21275f3ab99",
+      "status": "collected",
+      "files": [
+        {
+          "path": "postgresql-simple-0.7.0.1/LICENSE",
+          "sha256": "c2fa93069fa34353ba9d4debc8765fe1ff538ffe1fa52fed9a9c02bb1beb7cc1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "ram",
+      "version": "0.22.1",
+      "source": "https://hackage.haskell.org/package/ram-0.22.1",
+      "sourceSha256": "72474962349dd101b970cc46bcc06c799f7311d228e7b59f1a44f81427159f70",
+      "status": "collected",
+      "files": [
+        {
+          "path": "ram-0.22.1/LICENSE",
+          "sha256": "3c884b61cafcadb60def61d439681ddb17d5f492d82d3ba9f870faf403814da8",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "semigroups",
+      "version": "0.20.1",
+      "source": "https://hackage.haskell.org/package/semigroups-0.20.1",
+      "sourceSha256": "bf4c71224397c3777e6a79145f5c9c31d5a13f27548345e55138461d87348ffe",
+      "status": "collected",
+      "files": [
+        {
+          "path": "semigroups-0.20.1/LICENSE",
+          "sha256": "c9ed0c32e5332899f31bfad68cdb6e949a712a155318a0eb4872cc8f5bf4c95b",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "serialise",
+      "version": "0.2.6.1",
+      "source": "https://hackage.haskell.org/package/serialise-0.2.6.1",
+      "sourceSha256": "63949799ffd10675ef70ea701c1eb63e618629b3b2f7b25f07c5a966e24e77f4",
+      "status": "collected",
+      "files": [
+        {
+          "path": "serialise-0.2.6.1/LICENSE.txt",
+          "sha256": "e5971d8d28565ed5ce43a1c4539f58456d74c11e6a9fab91d5e2d7e41798fca5",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "tls",
+      "version": "2.4.4",
+      "source": "https://hackage.haskell.org/package/tls-2.4.4",
+      "sourceSha256": "f2d2ba9aeca038447fb49b5fe0d7a05ef31ef97bca8d9e13825b96e91361b6fc",
+      "status": "collected",
+      "files": [
+        {
+          "path": "tls-2.4.4/LICENSE",
+          "sha256": "3fe741bf922f037e71e35d0b30d113d93131435d05623bc04ba69a426259424d",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "tls-session-manager",
+      "version": "0.1.0",
+      "source": "https://hackage.haskell.org/package/tls-session-manager-0.1.0",
+      "sourceSha256": "29a71456f8d33a1c2236b52dd8031f09d80912617cc5f0073d951c98136fbd1e",
+      "status": "collected",
+      "files": [
+        {
+          "path": "tls-session-manager-0.1.0/LICENSE",
+          "sha256": "1ec989338a45985941cf4e5b775f62e883935b9a0391ebfc536997ade6079d92",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "time-hourglass",
+      "version": "0.3.0",
+      "source": "https://hackage.haskell.org/package/time-hourglass-0.3.0",
+      "sourceSha256": "9c7c7c74dda5033160328606cb3e8724201abadf9a140271c73c89a2612b9d22",
+      "status": "collected",
+      "files": [
+        {
+          "path": "time-hourglass-0.3.0/LICENSE",
+          "sha256": "50abbf454b50e9cd41241c6d8b272e1a598e11c1ed34dbf839f93b0736c6dfd4",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "time-locale-compat",
+      "version": "0.1.1.5",
+      "source": "https://hackage.haskell.org/package/time-locale-compat-0.1.1.5",
+      "sourceSha256": "07ff1566de7d851423a843b2de385442319348c621d4f779b3d365ce91ac502c",
+      "status": "collected",
+      "files": [
+        {
+          "path": "time-locale-compat-0.1.1.5/LICENSE",
+          "sha256": "770b7dea4e3bea3d0178c2ced665b3344bea020014e701a39950b24d70f67265",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "void",
+      "version": "0.7.4",
+      "source": "https://hackage.haskell.org/package/void-0.7.4",
+      "sourceSha256": "61ff790961edb34fd653e62f9f37020792f416f329b12e87549169e7f624fdf9",
+      "status": "collected",
+      "files": [
+        {
+          "path": "void-0.7.4/LICENSE",
+          "sha256": "10ac24a5b2cf6030c03353cad293a019d0343a1bd3a60592dc8a6c7834b948b3",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "warp-tls",
+      "version": "3.4.14",
+      "source": "https://hackage.haskell.org/package/warp-tls-3.4.14",
+      "sourceSha256": "9554c08c45091b0da85364d30f30b13f333afce9e146a7d3559db0dbaab9b713",
+      "status": "collected",
+      "files": [
+        {
+          "path": "warp-tls-3.4.14/LICENSE",
+          "sha256": "bebc00cb81ab4a16c3f27768fad205a203d0d7b56944299808dc3c35b53e198d",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "QuickCheck",
+      "version": "2.16.0.0",
+      "source": "https://hackage.haskell.org/package/QuickCheck-2.16.0.0",
+      "sourceSha256": "0b563fa6ea11653d76d57e96625f4a476e02b9fdaeba9c05d2ccc10d8da802c0",
+      "status": "collected",
+      "files": [
+        {
+          "path": "QuickCheck-2.16.0.0/LICENSE",
+          "sha256": "17035f93180f20bc9c9eb2fd5e0c8836c699b6dedae654b3f2a7a76e737bf2b9",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "unbounded-delays",
+      "version": "0.1.1.1",
+      "source": "https://hackage.haskell.org/package/unbounded-delays-0.1.1.1",
+      "sourceSha256": "59ad7e53bfe32ffbf0e703b31490d41d14c70e4745ed49e8adf592ed68dd6185",
+      "status": "collected",
+      "files": [
+        {
+          "path": "unbounded-delays-0.1.1.1/LICENSE",
+          "sha256": "f111cfe3888ef8720fe413a854d8acc3bd5d92e999f8be8cc0e079481c5566fa",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "qrcode-core",
+      "version": "0.9.11",
+      "source": "https://hackage.haskell.org/package/qrcode-core-0.9.11",
+      "sourceSha256": "6d86ec84e2ddf176ab346cc86e8a452e673fdca01d6241c31fefa5d1c9b689a2",
+      "status": "collected",
+      "files": [
+        {
+          "path": "qrcode-core-0.9.11/LICENSE",
+          "sha256": "50219488a83ee76b3a21dccb726b0c511bb471eaabeaa6793911c4ff79f5d6d9",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "semialign",
+      "version": "1.3.1.1",
+      "source": "https://hackage.haskell.org/package/semialign-1.3.1.1",
+      "sourceSha256": "8ce1f72e7f259422c3af72996e2656ca4a5d69828cad9005ba571b9447607a08",
+      "status": "collected",
+      "files": [
+        {
+          "path": "semialign-1.3.1.1/LICENSE",
+          "sha256": "ac2ed60fbb868f568b86a26cfe93b608359decaf125f506bd5fdf04975fb35f8",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "aeson",
+      "version": "2.2.5.1",
+      "source": "https://hackage.haskell.org/package/aeson-2.2.5.1",
+      "sourceSha256": "ea82d650c0bbd8877dbf13a03b9baae3be7ed4a65f4e8cfe5b4eacb4f5beae75",
+      "status": "collected",
+      "files": [
+        {
+          "path": "aeson-2.2.5.1/LICENSE",
+          "sha256": "0447823bc7935d43958ae6fe9a779b7f78cac08df3b4f6a89b61b80d3af1cca0",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "Haskell",
+      "name": "transformers-compat",
+      "version": "0.8",
+      "source": "https://hackage.haskell.org/package/transformers-compat-0.8",
+      "sourceSha256": "f05c2145ee8d77ed773908d27a77c7f8be4d9419af90a757076b799c4a194da8",
+      "status": "collected",
+      "files": [
+        {
+          "path": "transformers-compat-0.8/LICENSE",
+          "sha256": "bbb4823c79bfc2d482513e9f7020d63bf490b91639cc5812a8500c5cbe167618",
+          "encoding": "utf-8",
+          "gzip": false
+        },
+        {
+          "path": "transformers-compat-0.8/tests/LICENSE",
+          "sha256": "bbb4823c79bfc2d482513e9f7020d63bf490b91639cc5812a8500c5cbe167618",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "GHC bundled library",
+      "name": "Cabal",
+      "version": "3.16.0.0",
+      "source": "Installed macOS GHC 9.14.1 distribution",
+      "status": "collected",
+      "noticeLocation": "Installed compiler package documentation; review redistributed artifact separately",
+      "installedPackageMetadataSha256": "eb3dddf8abb048b83f3bcbae368e4027d38a8d8fc5af7bc5b146068a207b7f11",
+      "files": [
+        {
+          "path": "share/doc/aarch64-osx-ghc-9.14.1-7dd5/Cabal-3.16.0.0/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "GHC bundled library",
+      "name": "Cabal-syntax",
+      "version": "3.16.0.0",
+      "source": "Installed macOS GHC 9.14.1 distribution",
+      "status": "collected",
+      "noticeLocation": "Installed compiler package documentation; review redistributed artifact separately",
+      "installedPackageMetadataSha256": "c88903adb514f86510c6f68b6f08a8ef953eec939fee606bdc905c2b730bc950",
+      "files": [
+        {
+          "path": "share/doc/aarch64-osx-ghc-9.14.1-7dd5/Cabal-syntax-3.16.0.0/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "GHC bundled library",
+      "name": "ghc-bignum",
+      "version": "1.4",
+      "source": "Installed macOS GHC 9.14.1 distribution",
+      "status": "collected",
+      "noticeLocation": "Installed compiler package documentation; review redistributed artifact separately",
+      "installedPackageMetadataSha256": "51c1c8d8132d006c5409a66c5225875a7867d6b1c34272279c1ca81390d984c7",
+      "files": [
+        {
+          "path": "share/doc/aarch64-osx-ghc-9.14.1-7dd5/ghc-bignum-1.4/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "GHC bundled library",
+      "name": "base",
+      "version": "4.21.0.0",
+      "source": "Installed macOS GHC JavaScript 9.12.2 distribution",
+      "status": "collected",
+      "noticeLocation": "Installed compiler package documentation; review redistributed artifact separately",
+      "installedPackageMetadataSha256": "f1c629612174a68109c0004bcc25462bc448a95e5da13149d058594a308dc471",
+      "files": [
+        {
+          "path": "share/doc/javascript-ghcjs-ghc-9.12.2-inplace/base-4.21.0.0/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "GHC bundled library",
+      "name": "containers",
+      "version": "0.7",
+      "source": "Installed macOS GHC JavaScript 9.12.2 distribution",
+      "status": "collected",
+      "noticeLocation": "Installed compiler package documentation; review redistributed artifact separately",
+      "installedPackageMetadataSha256": "06e2a785c88a57c5fc87ce1ada151cd633d9d851424c3372daa539f505bb9e21",
+      "files": [
+        {
+          "path": "share/doc/javascript-ghcjs-ghc-9.12.2-inplace/containers-0.7/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "GHC bundled library",
+      "name": "directory",
+      "version": "1.3.9.0",
+      "source": "Installed macOS GHC JavaScript 9.12.2 distribution",
+      "status": "collected",
+      "noticeLocation": "Installed compiler package documentation; review redistributed artifact separately",
+      "installedPackageMetadataSha256": "9684bd15768f46b3a45e8e8a8d6949b1c792a011d23fc112dd20a0452c3abf13",
+      "files": [
+        {
+          "path": "share/doc/javascript-ghcjs-ghc-9.12.2-inplace/directory-1.3.9.0/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "GHC bundled library",
+      "name": "exceptions",
+      "version": "0.10.9",
+      "source": "Installed macOS GHC JavaScript 9.12.2 distribution",
+      "status": "collected",
+      "noticeLocation": "Installed compiler package documentation; review redistributed artifact separately",
+      "installedPackageMetadataSha256": "125142675d99f5c12215a1947db16560cec02ccf9f86e9a7bdbebe9b1f491009",
+      "files": [
+        {
+          "path": "share/doc/javascript-ghcjs-ghc-9.12.2-inplace/exceptions-0.10.9/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "GHC bundled library",
+      "name": "ghc-bignum",
+      "version": "1.3",
+      "source": "Installed macOS GHC JavaScript 9.12.2 distribution",
+      "status": "collected",
+      "noticeLocation": "Installed compiler package documentation; review redistributed artifact separately",
+      "installedPackageMetadataSha256": "c9b85b0d68c6a716c689b529c1f2e6c733b2969830f9b376fe1a97f9ea560c91",
+      "files": [
+        {
+          "path": "share/doc/javascript-ghcjs-ghc-9.12.2-inplace/ghc-bignum-1.3/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "GHC bundled library",
+      "name": "ghc-boot-th",
+      "version": "9.12.2",
+      "source": "Installed macOS GHC JavaScript 9.12.2 distribution",
+      "status": "collected",
+      "noticeLocation": "Installed compiler package documentation; review redistributed artifact separately",
+      "installedPackageMetadataSha256": "a473f1362cc6f82277ba4205e3f8d82fd3a33ca2239e4df167d66abc524d5582",
+      "files": [
+        {
+          "path": "share/doc/javascript-ghcjs-ghc-9.12.2-inplace/ghc-boot-th-9.12.2/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "GHC bundled library",
+      "name": "ghc-internal",
+      "version": "9.1202.0",
+      "source": "Installed macOS GHC JavaScript 9.12.2 distribution",
+      "status": "collected",
+      "noticeLocation": "Installed compiler package documentation; review redistributed artifact separately",
+      "installedPackageMetadataSha256": "5b9afbc16024905c7e88fe74d53015c36a4fc8989c2ad8deb9c9c671cd5a1b2b",
+      "files": [
+        {
+          "path": "share/doc/javascript-ghcjs-ghc-9.12.2-inplace/ghc-internal-9.1202.0/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "GHC bundled library",
+      "name": "ghc-prim",
+      "version": "0.13.0",
+      "source": "Installed macOS GHC JavaScript 9.12.2 distribution",
+      "status": "collected",
+      "noticeLocation": "Installed compiler package documentation; review redistributed artifact separately",
+      "installedPackageMetadataSha256": "e8b6f94d527b6fe8dadb5fa11b881b84f3612390eac7acd6cb80c52de09e0ac6",
+      "files": [
+        {
+          "path": "share/doc/javascript-ghcjs-ghc-9.12.2-inplace/ghc-prim-0.13.0/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "GHC bundled library",
+      "name": "os-string",
+      "version": "2.0.7",
+      "source": "Installed macOS GHC JavaScript 9.12.2 distribution",
+      "status": "collected",
+      "noticeLocation": "Installed compiler package documentation; review redistributed artifact separately",
+      "installedPackageMetadataSha256": "f2187a38fecaa39ef7311f88fc4cfba80ec493f143898cc9acd0cf4b462048ca",
+      "files": [
+        {
+          "path": "share/doc/javascript-ghcjs-ghc-9.12.2-inplace/os-string-2.0.7/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "GHC bundled library",
+      "name": "process",
+      "version": "1.6.25.0",
+      "source": "Installed macOS GHC JavaScript 9.12.2 distribution",
+      "status": "collected",
+      "noticeLocation": "Installed compiler package documentation; review redistributed artifact separately",
+      "installedPackageMetadataSha256": "221367b1e226aee58d609c7c33e09b0a877df945bd859b80f1beb0d42581ff03",
+      "files": [
+        {
+          "path": "share/doc/javascript-ghcjs-ghc-9.12.2-inplace/process-1.6.25.0/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "GHC bundled library",
+      "name": "rts",
+      "version": "1.0.2",
+      "source": "Installed macOS GHC JavaScript 9.12.2 distribution",
+      "status": "collected",
+      "noticeLocation": "Installed GHC distribution license; installed RTS metadata declares BSD-3-Clause. Review bundled runtime components separately.",
+      "installedPackageMetadataSha256": "612320a0ca81e66ee6efeb3827c20b473f25b49d1d218da46f8b6f950851d20f",
+      "files": [
+        {
+          "path": "share/doc/javascript-ghcjs-ghc-9.12.2-inplace/ghc-9.12.2/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "GHC bundled library",
+      "name": "template-haskell",
+      "version": "2.23.0.0",
+      "source": "Installed macOS GHC JavaScript 9.12.2 distribution",
+      "status": "collected",
+      "noticeLocation": "Installed compiler package documentation; review redistributed artifact separately",
+      "installedPackageMetadataSha256": "9785ba8d589702af9d4e576ba55fbba6a071c8910d6152bd7d078919daaefbd9",
+      "files": [
+        {
+          "path": "share/doc/javascript-ghcjs-ghc-9.12.2-inplace/template-haskell-2.23.0.0/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "GHC bundled library",
+      "name": "text",
+      "version": "2.1.2",
+      "source": "Installed macOS GHC JavaScript 9.12.2 distribution",
+      "status": "collected",
+      "noticeLocation": "Installed compiler package documentation; review redistributed artifact separately",
+      "installedPackageMetadataSha256": "2898dadc0a0928fb603070654df267d5d8e74ced10f707a6c8b68997739ebd50",
+      "files": [
+        {
+          "path": "share/doc/javascript-ghcjs-ghc-9.12.2-inplace/text-2.1.2/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "GHC bundled library",
+      "name": "time",
+      "version": "1.14",
+      "source": "Installed macOS GHC JavaScript 9.12.2 distribution",
+      "status": "collected",
+      "noticeLocation": "Installed compiler package documentation; review redistributed artifact separately",
+      "installedPackageMetadataSha256": "a0906ea7d8f7ffa0bc199431fc89e918cd0ad2e5515c3d3c80c6b5fbdff606d4",
+      "files": [
+        {
+          "path": "share/doc/javascript-ghcjs-ghc-9.12.2-inplace/time-1.14/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
+    },
+    {
+      "ecosystem": "GHC bundled library",
+      "name": "unix",
+      "version": "2.8.6.0",
+      "source": "Installed macOS GHC JavaScript 9.12.2 distribution",
+      "status": "collected",
+      "noticeLocation": "Installed compiler package documentation; review redistributed artifact separately",
+      "installedPackageMetadataSha256": "5499f10ae61b465cc73c4fc147537caed7890a63f5d6a4ad86c63c47035c7b81",
+      "files": [
+        {
+          "path": "share/doc/javascript-ghcjs-ghc-9.12.2-inplace/unix-2.8.6.0/LICENSE",
+          "sha256": "e06c13b8a117652621781c15d622bd4c62c568307954f7136955b4b656d14ec1",
+          "encoding": "utf-8",
+          "gzip": false
+        }
+      ]
     }
   ],
   "absentOptionalNpmPackages": [
@@ -6221,5 +7189,17 @@
     "SQLite amalgamation notices",
     "System libraries supplied by Ubuntu",
     "License obligations beyond presence of a license text"
-  ]
+  ],
+  "currentSourceGraph": {
+    "reviewDate": "2026-10-04",
+    "scope": "Current macOS native/browser Cabal graphs and complete Cargo lock. Hackage/Cargo sources match plan/lock hashes; newly collected boot notices come from the installed compiler package documentation and are identified separately. Historical notices retained. Notice presence does not complete compiler/runtime, platform or distribution-license review.",
+    "buildPlanSha256": {
+      "native": "37a3f6a7321f33534de3a12231b7710ce06cf43b71cbc5678086c494442c085e",
+      "browser": "f9077bd601338cb9634a6d66b8907d7cefc768c78e5df63ba27385828a9e435e"
+    },
+    "cargoLockSha256": "3ff96fe01dfc96435aa8d3a7601da3d78dfd09053fc855ab11d0e6eb98e9c7a9",
+    "requiredPackageVersions": 358,
+    "collectedPackageVersions": 358,
+    "missing": []
+  }
 }

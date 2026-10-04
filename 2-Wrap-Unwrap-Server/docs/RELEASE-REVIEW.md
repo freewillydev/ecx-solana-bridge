@@ -326,6 +326,14 @@ proof of nonexecution.
 
 ## Gates still open
 
+The current macOS source/package notice inventory now covers all 358 distinct
+versions across both actual Cabal plans and Cargo.lock. It adds missing notices
+for 41 hash-verified Hackage archives and 18 installed compiler packages, retaining
+the original historical notice bytes. Graph membership, source hashes and retained
+text headers were independently cross-checked. This closes package-text collection
+for these graphs, not final-binary platform, runtime or redistribution review; see
+[THIRD-PARTY.md](THIRD-PARTY.md). No runtime code or services were added.
+
 The funded Signet additional-deposit refund on 2026-10-04 settled through the
 normal worker, HTTPS signer and payment engine. Transaction
 `1c015cf15eb5e6f075442beb99037404c4aa53bdd53411a881f6ac2d25375303`

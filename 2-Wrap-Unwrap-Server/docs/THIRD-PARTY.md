@@ -1,10 +1,17 @@
 # Dependency notices
 
 `third-party/THIRD_PARTY_NOTICES.txt` preserves original upstream license texts.
-`third-party/coverage.json` records the historical build-plan/lock hashes, source
-checksums, individual notice hashes and collection scope. These retained notices
-cover a previous Linux build graph, including build/test dependencies. They are
-not a complete inventory or license approval for the current application.
+`third-party/coverage.json` records build-plan/lock hashes, source checksums,
+individual notice hashes and collection scope. Its `currentSourceGraph` section
+covers all 358 distinct package versions in the 2026-10-04 macOS native/browser
+Cabal plans and complete Cargo lock, including build/test dependencies.
+The refresh added 41 Hackage package versions from hash-verified source archives
+and 18 compiler-bundled versions from installed compiler documentation. Boot
+records identify that provenance and hash their installed package metadata;
+the JavaScript RTS uses its distribution license and declared BSD-3-Clause license.
+Historical Linux records and notice bytes remain intact. Presence of these texts
+does not complete review of compiler/runtime components, platform libraries or
+redistribution obligations, and does not certify a future Linux release artifact.
 
 `third-party/bitcoin-core` retains the original Bitcoin Core 30.2 notices and
 source/checksum provenance. `third-party/sqlite` retains the pinned SQLite source
@@ -15,9 +22,9 @@ The old release builder, notice collector and installed-library inventory wrappe
 were removed with the superseded deployment. Their source and prior reports remain
 in Git history at `eaf8358`. The current toolchain pins are in
 `../build/toolchains.json`; native/browser Cabal freeze files and Cargo.lock retain
-application dependency selections. Before distributing binaries, regenerate
-notices from both actual Cabal compiler graphs, the complete Cargo graph, bundled
-native node and actual platform libraries. Review attribution, license choices,
+application dependency selections. Before distributing binaries, verify the
+retained notices against that artifact's actual compiler/Cargo graphs, bundled
+native node and platform libraries. Review attribution, license choices,
 redistribution and embedded-component obligations independently of collection.
 
 ## Open dependency findings
