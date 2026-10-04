@@ -23,6 +23,29 @@ package tool is selected explicitly. If `emcc` is absent, `ECX_EMSDK` defaults t
 `CARGO_TARGET_DIR` for caches on another disk. Do not delete shared caches to force
 recompilation. Native and browser wire/amount types share `src/Bridge`.
 
+A native deployment host without GHC JavaScript can reuse a browser bundle from
+a trusted source build of the same browser inputs. The normal root Cabal build
+writes `manifest.sha256` beside its generated `web/index.html`, `web/style.css`
+and `web/dist/wallet.js` under the `ecx-build-assets` component's autogen directory.
+Copy that complete `web` directory to the deployment host, then build from the
+repository root:
+
+```sh
+ECX_BROWSER_PREBUILT=/absolute/ecx-browser-bundle cabal build all -j1 --offline --builddir=dist-prebuilt
+```
+
+OpenSSL supplies SHA-256 on both build hosts. Before copying any assets, the hook
+checks the manifest against all nine tracked browser inputs, including the browser
+project/freeze files and shared `Domain.hs`/`Wire.hs`, and against all three artifact
+files. It rechecks sources and copied artifacts before recording the manifest as
+a Cabal output. Missing, changed or malformed bundles fail the build; the manifest
+is data and supplies no executable commands or file paths. Keep the bundle intact
+and obtain it from your trusted build host; hashes bind contents, not builder identity.
+Use a distinct Cabal build directory when selecting a different bundle or switching
+between prebuilt and source mode, because environment changes alone need not
+invalidate Cabal's cache. The bundle files are tracked dependencies once selected.
+Without `ECX_BROWSER_PREBUILT`, Cabal retains the full GHC JavaScript source build.
+
 ## Running
 
 With reviewed private configuration, migrated ledger, host fence and database
