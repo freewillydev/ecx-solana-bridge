@@ -8,5 +8,5 @@ tests: True
 -- serialise/time uses the already selected modern time API (+newtime15).
 allow-newer: opaleye:base, postgresql-simple:base, postgresql-simple:template-haskell, postgresql-simple:containers, postgresql-simple:aeson, serialise:base, serialise:time, serialise:containers, cborg:base, cborg:containers
 
--- HTTPS RPC trust must include the X.509 Name Constraints fix (HSEC-2026-0008).
-constraints: crypton-x509 >=1.9.1, crypton-x509-validation >=1.9.1
+-- Retain the Aeson exponent and X.509 Name Constraints security fixes.
+constraints: aeson >=2.2.5.1, crypton-x509 >=1.9.1, crypton-x509-validation >=1.9.1

@@ -189,6 +189,15 @@ proof of nonexecution.
 
 ## Gates still open
 
+The 2026-10-04 dependency refresh replaced the browser's affected Aeson 2.2.3.0 pin
+with patched 2.2.5.1. Root build (also with a fresh browser build directory), all
+three Cabal suites, served-asset hash comparison and saved paid-order reload passed.
+No application-code lines or runtime files were added. The actual native/browser
+plans and Cargo lock were checked against current advisories; generic readFloat,
+build-time Cabal header deletion and bincode maintenance findings remain explicitly
+scoped in [DEPENDENCY-REVIEW.md](DEPENDENCY-REVIEW.md). This does not close independent
+review or distribution/license requirements.
+
 1. **Customer wallet:** sign a real Devnet Solana Pay deposit in a supported wallet;
    verify reference/effects, both directions, saved-order recovery, refunds and
    browser errors. A test client or wallet-opening link does not close this gate.

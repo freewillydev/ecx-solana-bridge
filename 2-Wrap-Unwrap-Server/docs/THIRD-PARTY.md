@@ -22,18 +22,17 @@ redistribution and embedded-component obligations independently of collection.
 
 ## Open dependency findings
 
-The previous review identified unmaintained bincode 1.3.3
+The 2026-10-04 advisory refresh still identifies unmaintained bincode 1.3.3
 ([RUSTSEC-2025-0141](https://rustsec.org/advisories/RUSTSEC-2025-0141.html)).
-It is retained for Solana SDK wire compatibility. Haskell independently validates
-bounded SDK output; this does not resolve the maintenance finding. The old review
-predates expanded token/pool FFI operations and must be refreshed against the
-current source before release.
+It is retained for Solana SDK wire compatibility. The refreshed source-path review
+includes all six token/pool/bridge FFI entries; Haskell independently validates
+bounded SDK output. This does not resolve the maintenance finding.
 
 The earlier source and installed-symbol inventories also retained the generic
 `Numeric.readFloat` finding for independent reachability review. Its symbols in
 an old binary neither establish an attacker-controlled path nor prove absence in
 the current binary. See [DEPENDENCY-REVIEW.md](DEPENDENCY-REVIEW.md).
 
-Previous Linux notice and loader checks are historical evidence, not acceptance
-of the current server or its future installer. No new distribution audit was
-performed as part of removing the legacy implementation.
+The current advisory review also retains a build-time Cabal source-header deletion
+finding. Previous Linux notice and loader checks remain historical evidence;
+the advisory refresh does not replace a distribution/license audit.
