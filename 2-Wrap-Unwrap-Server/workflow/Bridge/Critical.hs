@@ -12,6 +12,7 @@ import qualified Bridge.Config as C
 import Bridge.Recovery
 import Bridge.Control (runControl)
 import Bridge.Web (publicApplication)
+import Data.Int (Int64)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import Bridge.Error
@@ -270,6 +271,17 @@ instance Operation 'Signer 'Critical SignerCommand where
     native=signingNative settings
     solana=signingSolana settings
     config=signingPolicy settings
+    -- The signer gate is already held; each closed read gets a fresh timestamp.
+    withStableDecision :: Eq decision => (Int64 -> StoreRead decision) -> (decision -> IO a) -> IO a
+    withStableDecision query work=do
+      let readDecision=do
+            now<-floor <$> getPOSIXTime
+            evalRead reader (query now)
+      before<-readDecision
+      result<-work before
+      after<-readDecision
+      require (before==after) "signing_decision_changed"
+      pure result
     run :: forall a. SigningOperation a -> IO a
     run (CheckpointSigning (CheckpointCustody identity minimumSequence))=do
       require (identity==H.fingerprint config && minimumSequence>=0) "invalid_custody_checkpoint"
@@ -286,50 +298,34 @@ instance Operation 'Signer 'Critical SignerCommand where
       CheckpointResult <$> maybe (reject "custody_checkpoint_timeout") pure result
     run (DraftSigning (DraftReplacement identity parent fee))=do
       require (identity==H.fingerprint config) "signer_profile_mismatch"
-      let readDecision=do
-            now<-floor <$> getPOSIXTime
-            evalRead reader (ReadReplacementDraftContext now parent fee)
-      before<-readDecision
-      draft<-NP.draftNativeReplacement (N.nativeCall manager native) native (map snd before) fee
-      after<-readDecision
-      require (before==after) "signing_decision_changed"
-      pure $ DraftResult draft
+      DraftResult <$> withStableDecision (\now->ReadReplacementDraftContext now parent fee)
+        (\family->NP.draftNativeReplacement (N.nativeCall manager native) native (map snd family) fee)
     run (ReplacementSigning (SignReplacement identity decision))=do
       require (identity==H.fingerprint config) "signer_profile_mismatch"
-      let readDecision=do
-            now<-floor <$> getPOSIXTime
-            evalRead reader (ReadReplacementSigning now decision)
-      before@(family,draft)<-readDecision
-      signed<-withNativeUnlock (N.nativeCall manager native) native (signingNativeUnlock settings) $
-        NP.signNativeReplacement (N.nativeCall manager native) native (map snd family) draft
-      after<-readDecision
-      require (before==after) "signing_decision_changed"
+      (family,signed)<-withStableDecision (\now->ReadReplacementSigning now decision) $ \(family,draft)->do
+        signed<-withNativeUnlock (N.nativeCall manager native) native (signingNativeUnlock settings) $
+          NP.signNativeReplacement (N.nativeCall manager native) native (map snd family) draft
+        pure (family,signed)
       parent<-case reverse family of (saved,_):_->pure saved; _->reject "native_replacement_family_bounds"
       pure $ ReplacementResult $ SignedAttempt (NP.nativeTxid $ NP.signedNativeTransaction signed) (NP.signedNativeBytes signed)
         (TE.decodeUtf8 $ BL.toStrict $ encode signed) (commonInput $ recordedSigned parent)
     run (PreparedSigning (SignPrepared identity identifier generation))=do
       require (identity==H.fingerprint config) "signer_profile_mismatch"
-      let readDecision=do
-            now<-floor <$> getPOSIXTime
-            evalRead reader (ReadSigningDecision now identifier generation)
-      before<-readDecision
-      plan<-resolveSigningPlan (N.profile native) config before
-      reply<-case plan of
-        NativeAuthorization saved draft->do
-          _<-N.nativeIdentity manager native
-          withNativeUnlock (N.nativeCall manager native) native (signingNativeUnlock settings) $
-            NativeReply <$> NP.signNativeDraft (N.nativeCall manager native) saved draft
-        SolanaAuthorization saved expected->do
-          _<-S.solanaIdentity manager solana
-          let limits=config {H.maxSolFee=solPlanFeeLimit saved,H.maxSolAccountRent=solPlanRentLimit saved}
-              sign actual=do
-                require (actual==expected) "saved_solana_request_mismatch"
-                H.signSolanaSdk (signingLibrary settings) limits (signingKey settings) actual
-          SolanaReply <$> prepareSolanaSigned (S.solanaCall manager solana) sign limits saved
-      verified<-verifySigningReply (N.nativeCall manager native) (N.profile native) config before reply
-      after<-readDecision
-      require (before==after) "signing_decision_changed"
-      pure $ PreparedResult verified
+      PreparedResult <$> withStableDecision (\now->ReadSigningDecision now identifier generation) (\before->do
+        plan<-resolveSigningPlan (N.profile native) config before
+        reply<-case plan of
+          NativeAuthorization saved draft->do
+            _<-N.nativeIdentity manager native
+            withNativeUnlock (N.nativeCall manager native) native (signingNativeUnlock settings) $
+              NativeReply <$> NP.signNativeDraft (N.nativeCall manager native) saved draft
+          SolanaAuthorization saved expected->do
+            _<-S.solanaIdentity manager solana
+            let limits=config {H.maxSolFee=solPlanFeeLimit saved,H.maxSolAccountRent=solPlanRentLimit saved}
+                sign actual=do
+                  require (actual==expected) "saved_solana_request_mismatch"
+                  H.signSolanaSdk (signingLibrary settings) limits (signingKey settings) actual
+            SolanaReply <$> prepareSolanaSigned (S.solanaCall manager solana) sign limits saved
+        verifySigningReply (N.nativeCall manager native) (N.profile native) config before reply)
 
 instance Operation 'Customer 'Critical CustomerCommand where
   type OperationContext 'Customer 'Critical CustomerCommand = Operation 'Customer 'Critical CustomerCommand
