@@ -386,13 +386,17 @@ solanaScanChecks bound proof payProof reference=do
         owners<-mapM (fieldValue "verifiedOwner" . W.chainEventEvidence) (W.scanEvents payBatch) :: IO [Text]
         pure (status payBatch==["incoming"] && owners==[boundOwner bound] && status ambiguous==["unmatched_incoming"] &&
           map W.depositOrder (W.scanDeposits ambiguous)==[Nothing])
-    , check "independent proof agreement failure and disagreement remain distinct" $ once $ ioProperty $ do
+    , check "unavailable independent verification refuses the scan while disagreement remains disputed" $ once $ ioProperty $ do
         agreed<-verified withVerifier (Just $ secondary proof) proof
-        unavailable<-verified withVerifier (Just $ secondary Null) proof
-        disputed<-verified withVerifier (Just $ secondary $ replace ["slot"] (toJSON $ slot+1) proof) proof
+        let repeated verifierCall=scanSolanaWith (call proof) (Just verifierCall) withVerifier sig (Just sig) 501 [] legacy noReference
+        unavailable<-rejects "solana_verifier_transaction_unavailable" (repeated $ secondary Null)
+        failures<-mapM (\code->rejects code $ repeated $ \method params->
+          if method=="getTransaction" then reject code else solanaIdentityReply c method params)
+          ["rpc_transport_unknown_outcome","rpc_rate_limited"]
+        disputed<-repeated $ secondary $ replace ["slot"] (toJSON $ slot+1) proof
         absent<-rejects "verifier_configuration_mismatch" (verified withVerifier Nothing proof)
-        pure (status agreed==["incoming"] && eligible agreed==[True] && status unavailable==["awaiting_verifier"] &&
-          eligible unavailable==[False] && status disputed==["disputed"] && eligible disputed==[False] && absent)
+        pure (status agreed==["incoming"] && eligible agreed==[True] && unavailable && and failures &&
+          status disputed==["disputed"] && eligible disputed==[False] && absent)
     , check "Solana scans refuse missing transactions wrong slots and incomplete history" $ once $ ioProperty $ do
         absent<-rejects "solana_history_transaction_unavailable" (verified c Nothing Null)
         wrongSlot<-rejects "solana_history_slot_mismatch" (verified c Nothing $ replace ["slot"] (toJSON $ slot+1) proof)

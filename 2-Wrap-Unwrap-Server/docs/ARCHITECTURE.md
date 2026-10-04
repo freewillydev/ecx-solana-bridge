@@ -217,8 +217,11 @@ payout link. Old unfinished records without saved executable policy require revi
 
 Observers atomically commit pages with their previous cursor. Native, custody-token
 and SOL histories retain immutable origins. Unknown outflows are quarantined;
-signed/unseen bytes do not explain spent funds. Errors preserve cursors. Custody
-compares actual balances with journal balances and only verified observed unbooked
+signed/unseen bytes do not explain spent funds. Errors preserve cursors.
+An unavailable Solana verifier refuses the whole token scan, preserving existing
+receipt eligibility; contradictory finalized evidence still enters review. New
+receipts wait for successful verification, and scanner failure pauses intake.
+Custody compares actual balances with journal balances and only verified observed unbooked
 effects. A revision fences the snapshot; financial changes invalidate it. First
 intake/exposure requires scans/custody no older than 60 seconds. Checks never resume
 the service by themselves. Source updates and slow plan RPC can invalidate readiness;

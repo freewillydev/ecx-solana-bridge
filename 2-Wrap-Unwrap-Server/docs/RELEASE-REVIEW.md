@@ -73,6 +73,22 @@ checks that a confirmation-only update invalidates custody without changing bala
 or creating work. Root build, all suites and SOURCE/server/HTTPS contracts passed.
 These regressions do not close the remaining funded recovery acceptance gates.
 
+The funded encrypted-wallet drill restored an already signed native payout and
+completed it using unchanged bytes, then signed and settled a new native payout
+with the recovered wallet. Its restored HTTP wrap remains unfinished: generation
+zero expired before broadcast authorization; verified expiry and explicit retry
+approval are saved. RPC rate limits currently prevent fresh scans and resume.
+They also exposed a verifier-outage bug: rereading a verified deposit could revoke
+its eligibility. Unavailable verification now refuses the scan without changing
+receipts; actual disagreement remains reviewable. Root build, all three suites and
+PostgreSQL/HTTPS contracts passed, including repeated-cursor timeout/rate-limit/
+missing-result regressions. The acceptance driver now includes retired attempt
+history and scan/custody diagnostics; its native replacement stage is compiled
+but has not yet been exercised against funded live transactions.
+Readiness is repaired before obtaining a new blockhash; redundant outer worker
+refreshes are removed while leaf checks and both backup barriers remain. This
+reduces `Critical.hs` by three lines; the verifier fix adds no production lines.
+
 The PostgreSQL archive contract additionally compares all 22 existing migration
 projections alongside deployment, attempts and postings. A committed recipient
 change with unchanged row counts stays outside the exported snapshot and restored

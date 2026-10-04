@@ -663,6 +663,7 @@ instance Operation 'Worker 'Critical WorkerCommand where
       _<-N.nativeIdentity rpc native
       _<-S.solanaIdentity rpc solana
       refreshSource environment identifier
+      freshIntake environment
       -- Plan RPC and source updates may age or invalidate custody before commit.
       _<-prepareUnsigned (freshIntake environment >> floor <$> getPOSIXTime) (N.nativeCall rpc native) (S.solanaCall rpc solana)
         (N.profile native) config reader writer identifier
@@ -743,18 +744,14 @@ instance Operation 'Worker 'Critical WorkerCommand where
             txid<-case attempts of
               []->do
                 evalWorker environment (PrepareOutgoing identifier)
-                freshIntake environment
                 backupDecisions environment
-                freshIntake environment
                 evalWorker environment (SignPreparedPayment identifier)
               [saved]->pure saved
               _->do
                 family<-evalRead reader (ReadNativeFamily identifier)
                 pure (signedId $ recordedSigned $ fst $ last family)
-            freshIntake environment
             _<-evalWorker environment (QueuePayment txid)
             backupDecisions environment
-            freshIntake environment
             evalWorker environment (BroadcastPayment txid)
 
 -- Shared workflows take only the private resource context.

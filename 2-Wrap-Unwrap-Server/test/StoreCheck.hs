@@ -164,10 +164,17 @@ fundedRecoveryMain path=do
                   history<-case source of
                     Just binding->bracket (PG.connect readerSettings) PG.close (\c->fixture c $ SourceHistory $ W.depositId $ W.sourceDeposit binding)
                     _->pure []
+                  past<-bracket (PG.connect readerSettings) PG.close (\c->fixture c $ PaymentAttemptHistory identifier)
+                  recorded<-mapM (\txid->do
+                    saved<-evalRead reader (ReadAttempt txid)
+                    expiry<-evalRead reader (ReadSolanaExpiry txid)
+                    pure $ object ["transaction" .= txid,"state" .= recordedState saved,"generation" .= recordedGeneration saved
+                      ,"sequence" .= recordedSequence saved,"bytesHash" .= digest(TE.encodeUtf8 $ signedBytes $ recordedSigned saved)
+                      ,"expiryEvidence" .= expiry]) past
                   pure $ object ["payment" .= identifier,"paymentStatus" .= show(savedStatus view)
                     ,"prepared" .= (prepared/=Nothing),"generation" .= fmap preparedGeneration prepared
                     ,"draftSaved" .= maybe False ((/=Nothing).preparedDraft) prepared,"attempts" .= attempts
-                    ,"source" .= fmap (show . W.sourceDeposit) source,"sourceEvidence" .= evidence,"sourceHistory" .= history]
+                    ,"source" .= fmap (show . W.sourceDeposit) source,"sourceEvidence" .= evidence,"sourceHistory" .= history,"attemptHistory" .= recorded]
                 attemptEvidence txid=do
                   saved<-evalRead reader (ReadAttempt txid)
                   view<-evalRead reader (ReadPayment $ recordedPayment saved)
@@ -225,6 +232,71 @@ fundedRecoveryMain path=do
                   void $ run(QueuePayment signed)
                   pure signed
                 attemptEvidence txid
+              "replace"->do
+                fields ["parent","fee","reason"]
+                parentId<-fieldValue "parent" request
+                fee<-fieldValue "fee" request
+                reason<-fieldValue "reason" request
+                scan
+                parent<-evalRead reader (ReadAttempt parentId)
+                let identifier=recordedPayment parent
+                (view,_,_)<-nativeWork identifier
+                family<-evalRead reader (ReadNativeFamily identifier)
+                original<-case family of
+                  [(saved,signed)] | saved==parent->pure signed
+                  [(saved,signed),(child,_)] | saved==parent->do
+                    previous<-evalRead reader (ReadReplacementDecision parentId fee reason)
+                    decision<-case previous of
+                      Just (key,False)->pure key
+                      _->fail "funded replacement terms do not match the saved child"
+                    member<-evalRead reader (ReadReplacementMember decision)
+                    unless (member==Just child) (fail "funded replacement child does not match the decision")
+                    pure signed
+                  _->fail "funded replacement requires one parent and at most its saved child"
+                unless (recordedChain parent=="Native" && recordedState parent=="broadcast_intent"
+                  && maybe False (>0) (recordedSequence parent) && savedStatus view==PaymentPaying
+                  && fee>NP.signedNativeFee original && fee<=recordedFee parent
+                  && fee<=NP.planFeeLimit(NP.signedNativePlan original))
+                  (fail "funded replacement parent or fee is not eligible")
+                decision<-operator(Op.operator $ Op.DraftNativeReplacement parentId fee reason)
+                childId<-operator(Op.operator $ Op.SignNativeReplacement decision)
+                child<-evalRead reader (ReadAttempt childId)
+                retained<-evalRead reader (ReadNativeFamily identifier)
+                replacement<-case retained of
+                  [(saved,signed),(member,new)] | saved==parent && signed==original && member==child->pure new
+                  _->fail "funded replacement did not retain the exact two-member family"
+                either (fail . T.unpack) pure (NP.validateNativeFamily $ map snd retained)
+                unless (recordedPayment child==identifier && recordedChain child=="Native"
+                  && recordedGeneration child==recordedGeneration parent && recordedFee child==recordedFee parent
+                  && recordedState child `elem` ["signed","broadcast_intent"] && NP.signedNativeFee replacement==fee)
+                  (fail "funded replacement changed the saved payment terms")
+                sequenceNo<-ledgerSequence <$> evalRead reader ReadState
+                replayDecision<-operator(Op.operator $ Op.DraftNativeReplacement parentId fee reason)
+                replayId<-operator(Op.operator $ Op.SignNativeReplacement decision)
+                replayChild<-evalRead reader (ReadAttempt childId)
+                replayFamily<-evalRead reader (ReadNativeFamily identifier)
+                replaySequence<-ledgerSequence <$> evalRead reader ReadState
+                unless (replayDecision==decision && replayId==childId && replayChild==child
+                  && replayFamily==retained && replaySequence==sequenceNo)
+                  (fail "funded replacement replay changed a saved decision or signature")
+                resume; freshIntake
+                queued<-run(QueuePayment childId)
+                finalParent<-evalRead reader (ReadAttempt parentId)
+                finalChild<-evalRead reader (ReadAttempt childId)
+                unless (finalParent==parent && recordedSigned finalChild==recordedSigned child
+                  && recordedState finalChild=="broadcast_intent"
+                  && maybe False (\n->n>0 && n<=queued) (recordedSequence finalChild)
+                  && recordedSequence finalChild==case recordedSequence child of
+                    Nothing->Just queued
+                    saved->saved)
+                  (fail "funded replacement queue changed the saved family")
+                evidence<-attemptEvidence childId
+                case evidence of
+                  Object values->pure $ Object $ KM.insert "replacement"
+                    (object ["decision" .= decision,"parent" .= parentId,"parentFee" .= NP.signedNativeFee original
+                      ,"parentSavedBytesHash" .= digest(TE.encodeUtf8 $ signedBytes $ recordedSigned parent)
+                      ,"fee" .= fee,"replaySequence" .= replaySequence]) values
+                  _->fail "funded replacement evidence is not an object"
               "settle"->do
                 fields ["transaction"]
                 txid<-fieldValue "transaction" request
@@ -243,12 +315,17 @@ fundedRecoveryMain path=do
                 final<-evalRead reader (ReadAttempt txid)
                 unless (recordedSigned original==recordedSigned final) (fail "funded recovery changed saved bytes")
                 attemptEvidence txid
-              _->fail "funded recovery step must be scan, inspect, allocate, order, sign or settle") `finally` pause
+              _->fail "funded recovery step must be scan, inspect, allocate, order, sign, replace or settle") `finally` pause
             state<-evalRead reader ReadState
             balances<-evalRead reader ReadBalances
             pending<-evalRead reader PendingAttempts
             payments<-evalRead reader PaymentCandidates
+            health<-bracket (PG.connect readerSettings) PG.close (\c->fixture c LiveScanHealth)
+            custody<-bracket (PG.connect readerSettings) PG.close (\c->fixture c ReadCustodyCheck)
+            recovery<-bracket (PG.connect readerSettings) PG.close (\c->fixture c NativeRecoveryEvidence)
+            now<-floor <$> getPOSIXTime :: IO Int64
             BL.putStr $ encode(object ["step" .= step,"result" .= result,"identity" .= Config.fingerprint config
+              ,"observedAt" .= now,"scanHealth" .= health,"custodyCheck" .= custody,"nativeRecovery" .= recovery
               ,"criticalSequence" .= ledgerSequence state,"backupSequence" .= ledgerBackup state
               ,"paused" .= ledgerPaused state,"reason" .= ledgerReason state,"pendingAttempts" .= pending
               ,"paymentCandidates" .= payments,"balances" .=
@@ -1655,6 +1732,7 @@ data Fixture a where
   PrimaryLink :: T.Text -> T.Text -> Fixture ()
   HistoricalRefundView :: T.Text -> T.Text -> Fixture ()
   LiveScanHealth :: Fixture [(T.Text,Maybe Int64,Maybe T.Text)]
+  NativeRecoveryEvidence :: Fixture [(T.Text,T.Text,T.Text,T.Text,Int64)]
   SetupResidue :: Fixture ()
   SetPause :: Bool -> Fixture ()
   RestoreDatabases :: Fixture [T.Text]
@@ -1681,6 +1759,7 @@ data Fixture a where
   ResetOperatingScan :: Fixture ()
   LatestSourceState :: T.Text -> Fixture T.Text
   SourceHistory :: T.Text -> Fixture [(T.Text,Int64,T.Text,Int64)]
+  PaymentAttemptHistory :: T.Text -> Fixture [T.Text]
   ReadScanHealth :: T.Text -> Fixture (Maybe Int64,Maybe T.Text,Int64)
   ReadEventReview :: T.Text -> T.Text -> Fixture Int64
   CheckSuspended :: T.Text -> T.Text -> T.Text -> Fixture Bool
@@ -1722,6 +1801,7 @@ fixture c RestoreDatabases = O.runSelect c $ O.orderBy (O.asc id) $ do
 fixture c LiveScanHealth = O.runSelect c $ O.orderBy (O.asc $ \(chain,_,_)->chain) $ do
   (chain,at,problem,_)<-O.selectTable S.scanHealth
   pure (chain,at,problem)
+fixture c NativeRecoveryEvidence = O.runSelect c S.nativeRecoveryDetails
 fixture c SetupResidue = void $ O.runInsert c O.Insert {O.iTable=S.events,
   O.iRows=[(O.sqlStrictText "orphaned-ledger-event",O.sqlStrictText "initialization must refuse surviving history")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
 fixture c MigrationLegacyPayments = do
@@ -2068,6 +2148,13 @@ fixture c (SourceHistory did) = O.runSelect c $ O.limit 1000 $ O.orderBy (O.desc
   (_,source,state,loss,proof,n)<-O.selectTable S.sourceChecks
   O.where_ (source O..== O.sqlStrictText did)
   pure (state,loss,proof,n)
+fixture c (PaymentAttemptHistory identifier) = do
+  rows<-O.runSelect c $ O.limit 1001 $ O.orderBy (O.asc id) $ do
+    (tx,key,_,_,_,_)<-S.workAttempts
+    O.where_ (key O..== O.sqlStrictText identifier)
+    pure tx
+  unless (length rows<=1000) (fail "payment history too large")
+  pure rows
 
 fixture c (CheckFundingBinding identifier withdrawal) = do
   rows<-O.runSelect c $ do

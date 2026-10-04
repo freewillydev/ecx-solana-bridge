@@ -88,13 +88,13 @@ scanSolanaWith call verifier c origin previous now pending lookupInstruction loo
   verifyIndependent signature verify primary = case verifier of
     Nothing -> require (solanaProfile c/=CanonicalBeta) "independent_rpc_required" >> pure "verified"
     Just verifyCall -> do
-      result <- try (finalizedTransactionWith verifyCall signature) :: IO (Either BridgeError Value)
-      pure $ case result of
-        Left _ -> "awaiting_verifier"
-        Right Null -> "awaiting_verifier"
-        Right value -> case verify value of
-          Right secondary | secondary==primary -> "verified"
-          _ -> "disputed"
+      -- An unavailable reread must not revoke an already verified receipt.
+      -- Refuse the batch; only actual contradictory evidence is disputed.
+      value <- finalizedTransactionWith verifyCall signature
+      require (value/=Null) "solana_verifier_transaction_unavailable"
+      pure $ case verify value of
+        Right secondary | secondary==primary -> "verified"
+        _ -> "disputed"
 
 scanSolanaOperatingWith :: Call -> Maybe Call -> SolanaSettings -> Text -> Maybe Text -> Int64 -> IO ScanBatch
 scanSolanaOperatingWith call verifier c origin previous now = do
