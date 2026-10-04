@@ -343,6 +343,21 @@ No replacement decision or child was created. A subsequent replacement test need
 sufficient change and fee headroom under a newly saved policy; never modify an
 existing payment's ceiling to make a test pass.
 
+A subsequent real Signet/Devnet run established replacement headroom before taking
+payment. A 2,000-unit wrapped deposit authorized the normal 1,980-unit native payout.
+Parent `a20ad3fe2218247c3674fa2f93882a81a205edc7990bbb4c9c1cb6d7798758f3`
+paid a 747-unit network fee; the closed operator draft/sign workflow produced child
+`028d2d471d90c38ad73ddb3ce6f37f55a0861ac25fd92abfa986713041e5cb8f`
+with an 847-unit fee under the immutable 1,000-unit ceiling. Draft/sign replay
+returned decision 44 and the identical child without changing ledger state.
+The native node retained only the child in its mempool; decoded transactions
+preserved inputs, sequences, version, locktime and the 1,980-unit recipient output,
+reducing only owned change by 100. The first draft request correctly refused stale
+custody immediately after the parent broadcast; paused observation restored custody
+before the same terms were accepted. Both services stopped after child broadcast
+at critical sequence 46. Confirmation and one-time settlement remain pending;
+this does not establish winner changes after reorg or rebroadcast acceptance.
+
 The run exposed an operator CLI error-reporting issue: server refusals were printed
 as successful stdout responses. The CLI now raises returned errors through its
 existing nonzero-exit/stderr path. Actual executable/PostgreSQL contracts passed
