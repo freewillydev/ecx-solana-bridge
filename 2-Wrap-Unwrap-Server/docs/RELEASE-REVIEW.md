@@ -81,8 +81,26 @@ lacks `dump --target`. Installing checksum-verified upstream 0.19.1 allowed the 
 snapshot to pass `recover-custody` at sequence 3. The normal operator resume then
 completed its full checkpoint/readback and chain/custody checks; the first unfunded
 customer order advanced both critical and backup coverage to 4. No backup barrier
-was waived. Reboot/tunnel recovery and independent clean-host restoration remain
-unverified; funded Mainnet conversion evidence is still pending.
+was waived. A real customer then deposited 3,000 canonical wrapped units on Mainnet;
+the bridge accepted the 30-unit fee quote and broadcast its 2,970-unit ECX payout.
+Confirmation and the return wrapping leg are pending, so this is not a completed
+round trip. Required backup coverage reached sequence 9.
+
+Current runtime checks verified separate worker/signer UIDs, NoNewPrivileges,
+seccomp and no effective/permitted/ambient capabilities. The worker could not open
+six signer secret files. Its restricted native credential passed thirteen harmless
+forbidden-method probes; `walletlock` exclusion was inspected rather than called.
+An authenticated invalid-generation signer request passed the current Opaleye
+SELECT-only role check before its expected refusal, without a key operation.
+The signer still shares the VM's administrative login UID; complete production
+isolation review remains open.
+
+The exact sequence-9 HTTPS snapshot containing the in-flight payout was recovered
+and its full custody/configuration/archive bindings verified. The closed restore
+command produced a distinct paused database at sequence 9, which was then dropped;
+no fence was adopted and no recovered signer activated. This verifies in-flight
+snapshot recovery on the existing VM. Reboot/tunnel recovery and independent
+clean-host activation remain unverified.
 
 Live observation exposed a verifier closing an idle HTTPS connection without a
 response. The RPC read allowlist now shares at most two retries across that failure
@@ -99,8 +117,9 @@ The existing operator DSL allocated the three verified receipts at critical sequ
 balance after allocation. Offline `backup-custody` and `check-custody` then verified
 the sequence-3 ledger, encrypted native wallet/unlock material, Solana key and
 configuration bundle. This is a protected same-host copy, not an off-host checkpoint
-or restore test. The temporary Mainnet worker was stopped; no Mainnet bridge order
-or payout was created, and required backup coverage remains at sequence 0.
+or restore test. At that earlier checkpoint the temporary Mainnet worker was stopped,
+no bridge order or payout existed, and required backup coverage was still zero.
+The later VM rehearsal above supersedes that runtime state.
 
 The associated-constraint interpreter refactor also passed the root build, all three
 Cabal suites and the same PostgreSQL/server/HTTPS/encrypted-wallet contracts.

@@ -57,8 +57,12 @@ separate explicit tooling and evidence; they are not bridge-custody privileges.
    and `signer` now use the shared runtime; startup still pauses intake and requires
    pinned identity, independent verification and backup coverage. Local process and
    protocol contracts do not replace a real Mainnet round trip. The paused canonical
-   pilot now has real native/wrapped inventory and SOL, matching custody readback
-   and restricted native worker RPC. Off-host checkpoints still block activation.
+   pilot now runs in the Ubuntu VM with verified required checkpoints on the Mac.
+   Its real canonical-token customer deposit was accepted and the native payout
+   broadcast; both confirmed conversion directions remain required. Current process,
+   credential and read-role checks passed. A sequence-9 in-flight custody snapshot
+   was recovered over HTTPS and restored into a separate paused database, then that
+   disposable database was removed. This is one physical host, not disaster isolation.
    RPC pacing and bounded closed-read retries are implemented; measure expected-load
    throughput and combined provider budgets.
 5. **Prove deployment and disaster recovery.** Run worker/signer under separate OS
