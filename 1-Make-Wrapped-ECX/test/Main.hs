@@ -1,6 +1,9 @@
 module Main (main) where
 import Token
 import qualified Bridge.AdminStatus as Status
+import qualified Bridge.AdminKey as Key
+import Bridge.Error (BridgeError(..))
+import Bridge.Identity (digest)
 import qualified Token.Network as N
 import qualified Data.Aeson.KeyMap as KM
 import qualified Token.Operation as O
@@ -11,6 +14,7 @@ import qualified Data.Text.Encoding as TE
 import Crypto.Error (CryptoFailable(..))
 import qualified Crypto.PubKey.Ed25519 as Ed
 import qualified Data.ByteArray as BA
+import qualified Data.ByteArray.Encoding as Encoding
 import qualified Data.ByteString.Lazy as L
 import System.IO (openTempFile,hClose)
 import System.Directory (removeDirectoryRecursive,removeFile)
@@ -20,7 +24,7 @@ import System.FilePath ((</>))
 import qualified Bridge.SolanaHelper as H
 import Bridge.Domain (amount)
 import Data.Word (Word64)
-import Data.Aeson (Value(..),encode,eitherDecode,object,(.=),withObject,(.:))
+import Data.Aeson (Value(..),encode,eitherDecode,object,(.=),withObject,(.:),toJSON)
 import Data.Aeson.Types (parseEither)
 import Bridge.SDKBuild (sdkLibraryPath)
 import Bridge.SolanaMessage (Transaction(..),decodeTransaction,base58)
@@ -152,7 +156,12 @@ signingCheck=bracket temporary removeDirectoryRecursive $ \directory->do
       keyfile=directory </> "authority.json"
       output=directory </> "attempt.json"
       original=(request Mint 7) {authority=base58 public}
-      refuse action= isLeft <$> (try action :: IO (Either SomeException Text))
+      refuse action= isLeft <$> (try (action >> pure ()) :: IO (Either SomeException ()))
+      -- Explicit offline fixture context: this is not fetched chain evidence.
+      context path operation=Status.Recovery "EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"
+        (authority operation) 10000 path 0 Nothing (blockhash operation)
+        (base58 $ B.replicate 64 1) 90 100 200 Nothing
+      fixture path operation unsigned=saveFixture secret operation unsigned (context path operation)
   L.writeFile keyfile (encode $ B.unpack $ seed<>public)
   setFileMode keyfile 0o600
   let generatedPath=directory </> "generated.json"
@@ -160,27 +169,92 @@ signingCheck=bracket temporary removeDirectoryRecursive $ \directory->do
   generatedBytes<-B.readFile generatedPath
   generatedRefusal<-refuse $ (O.runCritical . O.Request) (GenerateKey generatedPath)
   generatedUnchanged<-(==generatedBytes) <$> B.readFile generatedPath
-  let generatedOperation=(request Mint 1) {authority=generatedOwner}
-  generatedUnsigned<-(O.runSafe . O.Request) (Prepare sdkLibraryPath generatedOperation)
-  _<-(O.runCritical . O.Request) (Sign generatedPath (directory </> "generated-attempt.json") generatedOperation generatedUnsigned)
+  generatedSecret<-Key.readKey generatedOwner generatedPath
+  let generatedValid=base58 (BA.convert $ Ed.toPublic generatedSecret)==generatedOwner
   unsigned<-(O.runSafe . O.Request) (Prepare sdkLibraryPath original)
-  mismatch<-refuse $ (O.runCritical . O.Request) (Sign keyfile output original {quantity=8} unsigned)
-  identifier<-(O.runCritical . O.Request) (Sign keyfile output original unsigned)
+  let mismatch=isLeft(validate original {quantity=8} unsigned)
+  _<-Key.readKey (authority original) keyfile
+  identifier<-fixture output original unsigned
   saved<-B.readFile output
-  duplicate<-refuse $ (O.runCritical . O.Request) (Sign keyfile output original unsigned)
+  duplicate<-refuse $ fixture output original unsigned
   unchanged<-(==saved) <$> B.readFile output
   createSymbolicLink keyfile (directory </> "linked.json")
-  symlink<-refuse $ (O.runCritical . O.Request) (Sign (directory </> "linked.json") (directory </> "other.json") original unsigned)
+  symlink<-refuse $ Key.readKey (authority original) (directory </> "linked.json")
   setFileMode keyfile 0o644
-  permissions<-refuse $ (O.runCritical . O.Request) (Sign keyfile (directory </> "other.json") original unsigned)
+  permissions<-refuse $ Key.readKey (authority original) keyfile
   setFileMode keyfile 0o600
   let wrong=(request Mint 7) {authority="9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu"}
-  altered<-(O.runSafe . O.Request) (Prepare sdkLibraryPath wrong)
-  wrongAuthority<-refuse $ (O.runCritical . O.Request) (Sign keyfile (directory </> "other.json") wrong altered)
+  wrongAuthority<-refuse $ Key.readKey (authority wrong) keyfile
+  lineage<-case eitherDecode (L.fromStrict saved) of
+    Left _->pure False
+    Right parent->do
+      let parentHash=digest saved
+          childRequest=original {blockhash=mint original}
+          childContext=(context output childRequest) {Status.recoveryGeneration=1,Status.recoveryParent=Just parentHash,
+            Status.recoverySlot=101,Status.recoveryEvidence=Just $ object ["offlineFixture" .= True]}
+          childPath=Status.attemptPath childContext
+          recover path=(O.runCritical . O.Request) (N.Recover sdkLibraryPath "https://unused.invalid" "https://other.invalid" path keyfile)
+      childUnsigned<-(O.runSafe . O.Request) (Prepare sdkLibraryPath childRequest)
+      childId<-saveFixture secret childRequest childUnsigned childContext
+      childBytes<-B.readFile childPath
+      child<-either fail pure (eitherDecode $ L.fromStrict childBytes)
+      let changedRequest=childRequest {quantity=8}
+          changedContext=childContext {Status.recoveryRoot=directory </> "changed.json"}
+      changedUnsigned<-(O.runSafe . O.Request) (Prepare sdkLibraryPath changedRequest)
+      _<-saveFixture secret changedRequest changedUnsigned changedContext
+      changedBytes<-B.readFile (Status.attemptPath changedContext)
+      changed<-either fail pure (eitherDecode $ L.fromStrict changedBytes)
+      let changedIntent=changed {savedRecovery=Just childContext}
+      replay<-recover output
+      superseded<-refuseCode "token_attempt_superseded" ((O.runCritical . O.Request) $ N.Submit N.Devnet "http://unused.invalid" 10000 output)
+      let copied=directory </> "copied.json"
+          legacyPath=directory </> "legacy.json"
+          legacy=parent {savedRecovery=Nothing}
+      B.writeFile copied childBytes; setFileMode copied 0o600
+      copiedRefusal<-refuseCode "token_attempt_path_mismatch" (recover copied)
+      L.writeFile legacyPath (encode legacy); setFileMode legacyPath 0o600
+      legacyRefusal<-refuseCode "token_recovery_context_required" (recover legacyPath)
+      feeRefusal<-refuseCode "invalid_administration_recovery_context"
+        ((O.runCritical . O.Request) $ N.Submit N.Devnet "http://unused.invalid" 9999 childPath)
+      networkRefusal<-refuseCode "invalid_administration_recovery_context"
+        ((O.runCritical . O.Request) $ N.Submit N.Mainnet "http://unused.invalid" 10000 childPath)
+      statusNetworkRefusal<-refuseCode "invalid_administration_recovery_context"
+        ((O.runSafe . O.Request) $ N.InspectSaved N.Mainnet "http://unused.invalid" childPath)
+      -- Both archives are individually valid and at their claimed paths, but
+      -- repeat generation 1 across different roots. Reject the direct relation
+      -- before attempting to read the deliberately absent jump.json ancestor.
+      let jumpRoot=directory </> "jump.json"
+          badParentContext=(context jumpRoot original) {Status.recoveryGeneration=1,
+            Status.recoveryParent=Just(T.replicate 64 "0"),Status.recoveryEvidence=Just $ object ["offlineFixture" .= True]}
+          badParent=parent {savedRecovery=Just badParentContext}
+          badParentBytes=L.toStrict $ encode badParent
+          badChildContext=childContext {Status.recoveryRoot=Status.attemptPath badParentContext,
+            Status.recoveryParent=Just(digest badParentBytes)}
+          badChild=child {savedRecovery=Just badChildContext}
+      Key.savePrivate (Status.attemptPath badParentContext) badParentBytes
+      Key.savePrivate (Status.attemptPath badChildContext) (L.toStrict $ encode badChild)
+      jumpedParentRefusal<-refuseCode "administration_successor_mismatch" (recover $ Status.attemptPath badChildContext)
+      B.appendFile output " "
+      parentHashRefusal<-refuseCode "administration_successor_mismatch" (recover childPath)
+      B.writeFile output saved
+      let malformed=case toJSON parent of Object value->[Object $ KM.insert "extra" Null value,Object $ KM.insert "recovery" Null value]; _->[]
+          otherContext c=child {savedRecovery=Just c}
+          mutations=[childContext {Status.recoveryFeeLimit=10001},childContext {Status.recoveryRoot=copied},
+            childContext {Status.recoveryGeneration=2},childContext {Status.recoveryParent=Just $ T.replicate 64 "0"},
+            childContext {Status.recoverySlot=100},childContext {Status.recoveryGeneration=8}]
+      pure (Status.attemptPath childContext==output<>".retry" && replay==childId
+        && all id [superseded,copiedRefusal,legacyRefusal,feeRefusal,networkRefusal,statusNetworkRefusal,parentHashRefusal,jumpedParentRefusal]
+        && validateSuccessorSaved parent parentHash child==Right ()
+        && not(isLeft $ validateSaved changedIntent)
+        && validateSuccessorSaved parent parentHash changedIntent==Left "token_recovery_intent_mismatch"
+        && all (isLeft . validateSuccessorSaved parent parentHash . otherContext) mutations
+        && validateSaved legacy==Right unsigned && eitherDecode(encode legacy)==Right legacy
+        && eitherDecode(encode parent)==Right parent
+        && all (\value->isLeft(eitherDecode(encode value)::Either String Saved)) malformed)
   L.writeFile keyfile (encode $ replicate 64 (256::Integer))
-  wrappedBytes<-refuse $ (O.runCritical . O.Request) (Sign keyfile (directory </> "other.json") original unsigned)
+  wrappedBytes<-refuse $ Key.readKey (authority original) keyfile
   L.writeFile keyfile (encode $ B.unpack $ seed<>B.replicate 32 0)
-  wrongPublicHalf<-refuse $ (O.runCritical . O.Request) (Sign keyfile (directory </> "other.json") original unsigned)
+  wrongPublicHalf<-refuse $ Key.readKey (authority original) keyfile
   validated<-case eitherDecode (L.fromStrict saved) of
     Right record->pure $ validateSaved record==Right unsigned
       && isLeft(validateSaved record {savedId="wrong"})
@@ -192,7 +266,7 @@ signingCheck=bracket temporary removeDirectoryRecursive $ \directory->do
     Left _->pure False
     Right record->case parseEither (withObject "attempt" (.: "transaction")) record >>= either (Left . show) Right . decodeTransaction of
       Right (Transaction [bytes] _ body)->case Ed.signature bytes of
-        CryptoPassed signature->pure (all id [mismatch,duplicate,unchanged,symlink,permissions,wrongAuthority,wrappedBytes,wrongPublicHalf,validated,generatedRefusal,generatedUnchanged]
+        CryptoPassed signature->pure (all id [mismatch,duplicate,unchanged,symlink,permissions,wrongAuthority,wrappedBytes,wrongPublicHalf,validated,generatedRefusal,generatedUnchanged,generatedValid,lineage]
           && base58 bytes==identifier && Ed.verify (Ed.toPublic secret) body signature)
         _->pure False
       _->pure False
@@ -201,6 +275,25 @@ signingCheck=bracket temporary removeDirectoryRecursive $ \directory->do
     (path,handle)<-openTempFile "/tmp" "ecx-token-sign"
     hClose handle; removeFile path; PD.createDirectory path 0o700
     pure path
+
+
+-- Deterministic offline codec fixtures are constructed independently of the
+-- production signer. Their Recovery metadata is deliberately not chain evidence.
+saveFixture :: Ed.SecretKey -> Request -> Text -> Status.Recovery -> IO Text
+saveFixture secret operation unsigned context=do
+  Transaction _ _ message<-either (fail . show) pure (validate operation unsigned)
+  let signature=BA.convert(Ed.sign secret (Ed.toPublic secret) message) :: B.ByteString
+      identifier=base58 signature
+      raw=B.singleton 1<>signature<>message
+      transaction=TE.decodeUtf8 (Encoding.convertToBase Encoding.Base64 raw :: B.ByteString)
+      saved=Saved operation identifier transaction (Just context)
+  Key.savePrivate (Status.attemptPath context) (L.toStrict $ encode saved)
+  pure identifier
+
+refuseCode :: Text -> IO a -> IO Bool
+refuseCode expected action=do
+  result<-try (action >> pure ()) :: IO (Either BridgeError ())
+  pure $ case result of Left (BridgeError actual)->actual==expected; Right ()->False
 
 -- Actual classic SPL response shape; mutations are parser contracts, not a network.
 policyCheck :: Word64 -> Bool -> Bool

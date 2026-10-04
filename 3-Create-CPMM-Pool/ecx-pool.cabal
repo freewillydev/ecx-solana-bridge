@@ -32,4 +32,4 @@ test-suite pool-test
   main-is: Main.hs
   autogen-modules: Paths_ecx_pool
   other-modules: Paths_ecx_pool
-  build-depends: base, ecx-pool, ecx-bridge:chain, ecx-build-assets, QuickCheck, aeson, bytestring, text, base64-bytestring, crypton, ram
+  build-depends: base, ecx-pool, ecx-bridge, ecx-bridge:chain, ecx-build-assets, QuickCheck, aeson, bytestring, text, base64-bytestring, crypton, ram

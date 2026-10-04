@@ -220,6 +220,17 @@ Read-only RPC retries use a fixed bounded allowlist. Wallet mutations, sends and
 unknown outcomes are not automatically retried. Fixtures are not substitutes for
 real protocol/network acceptance.
 
+Token and pool administration have their own closed critical evaluators, outside
+custody. `Token.Network` and `Pool.Signing` own private signing helpers and immutable
+attempt families. Shared `Bridge.AdminStatus` collects read-only recovery evidence;
+it cannot sign or broadcast. Recovery binds a payer-history anchor to the actual
+block that produced the saved blockhash, then requires two providers to establish
+finalized failure or expiry with complete anchored absence. The sole successor
+changes only the blockhash, retains its predecessor hash and limits, and is saved
+before any submission. Protected files and process locks prevent local branching;
+RPC completeness and exclusion of other hosts holding keys remain trust assumptions.
+See the token/pool READMEs for commands, bounds and publication-crash handling.
+
 ## Backup boundary
 
 Required instruction/sign/send coverage acknowledges the exact durable sequence.

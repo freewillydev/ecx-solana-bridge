@@ -1,18 +1,24 @@
 {-# LANGUAGE GADTs #-}
 -- Read-only preflight; simulation always contains zero signatures.
 module Token.Network (Network(..),Safe(..),Critical(..),evalSafe,evalCritical,inspectPolicy) where
-import Bridge.AdminStatus (Status,inspectStatus)
+import Bridge.AdminStatus (Status,inspectStatus,Recovery(..),newRecovery,renewRecovery,validateRecovery,attemptPath)
+import Bridge.AdminKey (readPrivate,readKey,savePrivate,newPrivatePath,withFamily)
+import Bridge.Identity (digest)
 import qualified Token.Metadata as M
-import Token.Signing (Saved(..),validateSaved)
+import Token.Signing (Saved(..),validateSaved,validateSuccessorSaved)
+import qualified Token
 import qualified Data.ByteString as BS
-import System.IO (withBinaryFile,IOMode(ReadMode))
+import qualified Data.ByteString.Lazy as L
+import qualified Data.ByteArray as BA
+import qualified Crypto.PubKey.Ed25519 as Ed
 import Token (Request(..),Action(..),validate)
 import Bridge.Error (require,reject)
 import Bridge.RPC
 import Bridge.Solana (tokenProgram)
-import Bridge.SolanaMessage (Transaction(..),publicKey)
+import Bridge.SolanaMessage (Transaction(..),publicKey,base58)
 import Control.Exception (bracket)
-import Control.Monad (unless)
+import Control.Monad (unless,forM_)
+import System.Posix.Files (fileExist)
 import Data.Aeson
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Base64 as B64
@@ -33,10 +39,10 @@ data Safe a where
 
 evalSafe :: Safe a -> IO a
 evalSafe (InspectSaved network endpoint path)=do
-  bytes<-withBinaryFile path ReadMode (`BS.hGet` 8193)
-  require (BS.length bytes<=8192) "token_attempt_too_large"
-  saved<-either (const $ reject "invalid_token_attempt") pure (eitherDecodeStrict' bytes)
-  _<-either reject pure (validateSaved saved)
+  (saved,_)<-loadFamily path
+  forM_ (savedRecovery saved) $ \context->either reject pure $
+    validateRecovery (genesis network) (authority $ savedRequest saved)
+      (recoveryFeeLimit context) (blockhash $ savedRequest saved) context
   inspectStatus (genesis network) endpoint (savedId saved) (savedTransaction saved) (blockhash $ savedRequest saved)
 evalSafe (InspectPolicy network primary verifier key owner custody issuer)=do
   mapM_ (either reject (const $ pure ()) . publicKey) ([key,owner,custody]<>maybe [] pure issuer)
@@ -138,15 +144,115 @@ metadataState Metadata{authority=owner,mint=key} value=do
   either reject pure (M.inspect owner key raw)
 metadataState _ _=reject "metadata_operation_required"
 
--- Submission has no signing capability: retries can only send the saved bytes.
+-- Fresh signing and expiry recovery are explicit critical operations. Submission
+-- can only send saved bytes; all three serialize on the same durable family root.
 data Critical a where
+  Sign :: FilePath -> Network -> String -> Word64 -> Request -> Text -> FilePath -> FilePath -> Critical Text
+  Recover :: FilePath -> String -> String -> FilePath -> FilePath -> Critical Text
   Submit :: Network -> String -> Word64 -> FilePath -> Critical Value
 
 evalCritical :: Critical a -> IO a
-evalCritical (Submit network endpoint feeLimit path)=do
-  bytes<-withBinaryFile path ReadMode (`BS.hGet` 8193)
-  require (BS.length bytes<=8192) "token_attempt_too_large"
+evalCritical (Sign library network endpoint feeLimit request unsigned key output)=withFamily output $ do
+  _<-either reject pure (validate request unsigned)
+  newPrivatePath output
+  _<-readKey (authority request) key
+  recovery<-newRecovery (genesis network) endpoint (authority request) feeLimit output
+  prepareAndSign library network endpoint key request recovery
+evalCritical (Recover library primary verifier path key)=withSavedFamily path $ \saved bytes->do
+  before<-maybe (reject "token_recovery_context_required") pure (savedRecovery saved)
+  network<-networkFor (recoveryGenesis before)
+  require (recoveryGeneration before<7) "administration_recovery_limit"
+  let child=attemptPath (before {recoveryGeneration=recoveryGeneration before+1})
+  exists<-fileExist child
+  if exists then do
+    (next,_)<-loadFamily child
+    either reject pure (validateSuccessorSaved saved (digest bytes) next)
+    pure (savedId next)
+  else do
+    _<-readKey (authority $ savedRequest saved) key
+    after<-renewRecovery primary verifier (savedId saved) (savedTransaction saved) (digest bytes) before
+    prepareAndSign library network primary key (savedRequest saved) after
+evalCritical (Submit network endpoint feeLimit path)=withSavedFamily path $ \saved _->do
+  forM_ (savedRecovery saved) $ \context->do
+    either reject pure $ validateRecovery (genesis network) (authority $ savedRequest saved)
+      feeLimit (blockhash $ savedRequest saved) context
+    whenSuccessor context $ \child->do
+      _<-loadFamily child
+      reject "token_attempt_superseded"
+  submitSaved network endpoint feeLimit saved
+
+prepareAndSign :: FilePath -> Network -> String -> FilePath -> Request -> Recovery -> IO Text
+prepareAndSign library network endpoint key original context=do
+  let request=original {blockhash=recoveryBlockhash context}
+  unsigned<-Token.evalSafe (Token.Prepare library request)
+  _<-evalSafe (Check network endpoint (recoveryFeeLimit context) request unsigned)
+  signPrepared key request unsigned context
+
+
+-- Private to the critical network interpreter: callers cannot supply fabricated
+-- recovery context to a separately exported signing function.
+signPrepared :: FilePath -> Request -> Text -> Recovery -> IO Text
+signPrepared keyfile request unsigned recovery=do
+  either reject pure $ validateRecovery (recoveryGenesis recovery) (authority request)
+    (recoveryFeeLimit recovery) (blockhash request) recovery
+  Transaction _ _ message<-either reject pure (validate request unsigned)
+  let output=attemptPath recovery
+  newPrivatePath output
+  secret<-readKey (authority request) keyfile
+  let signature=Ed.sign secret (Ed.toPublic secret) message
+      signatureBytes=BA.convert signature :: BS.ByteString
+      identifier=base58 signatureBytes
+      transaction=TE.decodeUtf8 $ B64.encode (BS.singleton 1<>signatureBytes<>message)
+      record=L.toStrict $ encode $ Saved request identifier transaction (Just recovery)
+  require (Ed.verify (Ed.toPublic secret) message signature) "token_signature_invalid"
+  savePrivate output record
+  pure identifier
+
+readSaved :: FilePath -> IO (Saved,BS.ByteString)
+readSaved path=do
+  bytes<-readPrivate path
   saved<-either (const $ reject "invalid_token_attempt") pure (eitherDecodeStrict' bytes)
+  _<-either reject pure (validateSaved saved)
+  forM_ (savedRecovery saved) $ \context->require (path==attemptPath context) "token_attempt_path_mismatch"
+  pure (saved,bytes)
+
+-- Verify the direct parent before following it. The checked generation then
+-- decreases on every read, bounding the complete family to eight archives.
+loadFamily :: FilePath -> IO (Saved,BS.ByteString)
+loadFamily path=do
+  current<-readSaved path
+  ancestors current
+  pure current
+ where
+  ancestors (saved,_)=forM_ (savedRecovery saved) $ \context->
+    unless (recoveryGeneration context==0) $ do
+      parent@(before,bytes)<-readSaved (attemptPath (context {recoveryGeneration=recoveryGeneration context-1}))
+      either reject pure (validateSuccessorSaved before (digest bytes) saved)
+      ancestors parent
+
+withSavedFamily :: FilePath -> (Saved -> BS.ByteString -> IO a) -> IO a
+withSavedFamily path action=do
+  (initial,_)<-readSaved path
+  let root=maybe path recoveryRoot (savedRecovery initial)
+  withFamily root $ do
+    (saved,bytes)<-loadFamily path
+    require (maybe path recoveryRoot (savedRecovery saved)==root) "token_attempt_family_changed"
+    action saved bytes
+
+whenSuccessor :: Recovery -> (FilePath -> IO ()) -> IO ()
+whenSuccessor context action=unless (recoveryGeneration context>=7) $ do
+  let child=attemptPath (context {recoveryGeneration=recoveryGeneration context+1})
+  exists<-fileExist child
+  if exists then action child else pure ()
+
+networkFor :: Text -> IO Network
+networkFor value
+  | value==genesis Devnet=pure Devnet
+  | value==genesis Mainnet=pure Mainnet
+  | otherwise=reject "wrong_token_network"
+
+submitSaved :: Network -> String -> Word64 -> Saved -> IO Value
+submitSaved network endpoint feeLimit saved=do
   unsigned<-either reject pure (validateSaved saved)
   transport<-parseRequest endpoint
   require (secure transport && feeLimit>0) "invalid_token_rpc_policy"

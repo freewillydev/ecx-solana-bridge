@@ -11,10 +11,13 @@ import Bridge.SolanaMessage (decodeTransaction,decodePoolTransaction,decodePosit
 import Data.Bits (xor)
 import Data.Word (Word64)
 import Bridge.SDKBuild (sdkLibraryPath)
+import Bridge.AdminStatus (Recovery(..),attemptPath)
+import Bridge.Identity (digest)
 import Paths_ecx_pool (getDataFileName)
 import Data.Aeson
 import Data.Aeson.Types (parseEither,Parser)
 import qualified Data.Aeson.KeyMap as KM
+import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.Text.Encoding as TE
@@ -62,7 +65,7 @@ main=do
     Nothing->fail "test signer") (take 3 signingKeys)
   first<-case signatures of sig:_->pure sig; _->fail "test signature"
   let signedBytes=B.singleton 3<>B.concat signatures<>message
-      saved=S.Saved Devnet (S.Creation signingRequest signingPrepared) 20000 20000000 (base58 first) (TE.decodeUtf8 $ B64.encode signedBytes)
+      saved=S.Saved Devnet (S.Creation signingRequest signingPrepared) 20000 20000000 (base58 first) (TE.decodeUtf8 $ B64.encode signedBytes) Nothing
   openingRequest<-case publics of
     owner:mint:_->pure positionRequest {P.payer=owner,P.positionMint=mint}
     _->fail "position test keys"
@@ -71,7 +74,7 @@ main=do
   let openingSignatures=[BA.convert(Ed.sign secret (Ed.toPublic secret) openingMessage) :: B.ByteString | secret<-take 2 secrets]
   openingFirst<-case openingSignatures of first:_->pure first; _->fail "position signature"
   let openingBytes=B.singleton 2<>B.concat openingSignatures<>openingMessage
-      openingSaved=S.Saved Devnet (S.Opening openingRequest openingPrepared) 20000 20000000 (base58 openingFirst) (TE.decodeUtf8 $ B64.encode openingBytes)
+      openingSaved=S.Saved Devnet (S.Opening openingRequest openingPrepared) 20000 20000000 (base58 openingFirst) (TE.decodeUtf8 $ B64.encode openingBytes) Nothing
   let liquidityRequests=[Q.Request action positionRequest quantity
         (if action==Q.Collect then 0 else 1000) (if action==Q.Collect then 0 else 1000)
         (createVaultA creation) (createVaultB creation) | (action,quantity)<-[(Q.Deposit,1000),(Q.Withdraw,1000),(Q.Collect,0),(Q.Collect,1000)]]
@@ -83,9 +86,40 @@ main=do
     secret<-case secrets of key:_->pure key; _->fail "liquidity key"
     let sig=BA.convert(Ed.sign secret (Ed.toPublic secret) msg) :: B.ByteString
         tx=TE.decodeUtf8 $ B64.encode $ B.singleton 1<>sig<>msg
-    pure(S.Saved Devnet (S.Liquidity r p) 20000 20000000 (base58 sig) tx)) liquidityRequests
+    pure(S.Saved Devnet (S.Liquidity r p) 20000 20000000 (base58 sig) tx Nothing)) liquidityRequests
+  let tracked=map withRecovery (saved:openingSaved:liquiditySigned)
+  children<-mapM (successor secrets) tracked
+  changed<-mapM (successor secrets . changeIntent (last publics)) tracked
+  let divergent=zipWith (\old child->child {S.savedRecovery=(\r->r {recoveryParent=Just(digest $ L.toStrict $ encode old)}) <$> S.savedRecovery child}) tracked changed
   results<-sequence
-    [ quickCheckResult $ quoteContract expected
+    [ quickCheckResult $ once $ property $ and
+        [not(isLeft $ S.validateSaved child) && isLeft(S.validateChild old (digest $ L.toStrict $ encode old) child)
+        | (old,child)<-zip tracked divergent]
+    , quickCheckResult $ once $ property $ and [
+        let parentHash=digest (L.toStrict $ encode old)
+            valid candidate=not(isLeft $ S.validateChild old parentHash candidate)
+        in valid child && (eitherDecode(encode child) :: Either String S.Saved)==Right child
+          && B.length (L.toStrict $ encode child)<=8192
+          && not(valid child {S.feeLimit=S.feeLimit child+1})
+          && not(valid child {S.costLimit=S.costLimit child+1})
+          && not(valid child {S.network=Mainnet})
+          && not(valid child {S.action=S.action old})
+          && not(valid child {S.savedRecovery=Nothing})
+          && isLeft(S.validateChild old "incorrect-file-hash" child)
+          && isLeft(S.validateChild old {S.savedRecovery=Nothing} parentHash child)
+          && all (\change->not(valid child {S.savedRecovery=change <$> S.savedRecovery child}))
+            [\r->r {recoveryGeneration=0},\r->r {recoveryGeneration=2}
+            ,\r->r {recoveryGeneration=8},\r->r {recoveryRoot="/tmp/copied-pool.json"}
+            ,\r->r {recoveryBlockhash=recoveryOrigin r},\r->r {recoveryEvidence=Nothing}
+            ,\r->r {recoverySlot=0}]
+        | (old,child)<-zip tracked children]
+    , quickCheckResult $ once $ property $ all (\record->
+        not(isLeft $ S.validateSaved record) && (eitherDecode(encode record) :: Either String S.Saved)==Right record
+        && case toJSON record of
+          Object fields->all (\bad->case fromJSON(Object bad) :: Result S.Saved of Error _->True; _->False)
+            [KM.insert "recovery" Null fields,KM.insert "unexpected" Null fields]
+          _->False) tracked
+    , quickCheckResult $ quoteContract expected
     , quickCheckResult $ once $ property $ all (\record->
         not(isLeft $ S.validateSaved record) && (eitherDecode(encode record) :: Either String S.Saved)==Right record
         && isLeft(S.validateSaved record {S.identifier=S.identifier openingSaved})
@@ -187,6 +221,56 @@ main=do
           ,corrupt 4 72 1,corrupt 5 108 2,corrupt 5 129 1]
     ]
   if all isSuccess results then pure () else exitFailure
+
+
+-- These pure archives exercise all closed pool actions; no RPC or key-file IO.
+withRecovery :: S.Saved -> S.Saved
+withRecovery saved=saved {S.savedRecovery=Just $ Recovery (networkGenesis $ S.network saved)
+  owner (S.feeLimit saved) "/tmp/ecx-pool-test.json" 0 Nothing recent
+  (S.identifier saved) 90 100 200 Nothing}
+ where
+  (owner,recent)=case S.action saved of
+    S.Creation r _->(payer r,recentBlockhash r)
+    S.Opening r _->(P.payer r,P.blockhash r)
+    S.Liquidity r _->let p=Q.positionRequest r in (P.payer p,P.blockhash p)
+
+
+-- Independently valid signatures must not authorize changed economic intent.
+changeIntent :: Text -> S.Saved -> S.Saved
+changeIntent replacement saved=saved {S.action=case S.action saved of
+  S.Creation r p->S.Creation r {initialPrice=initialPrice r+1} p
+  S.Opening r p->S.Opening r {P.positionMint=replacement} p
+  S.Liquidity r p->S.Liquidity r {Q.liquidity=Q.liquidity r+1} p}
+
+successor :: [Ed.SecretKey] -> S.Saved -> IO S.Saved
+successor secrets old=do
+  before<-maybe (fail "test recovery") pure (S.savedRecovery old)
+  let recent=base58 (B.replicate 32 7)
+      context=before {recoveryGeneration=1,recoveryParent=Just(digest $ L.toStrict $ encode old)
+        ,recoveryBlockhash=recent,recoverySlot=101,recoveryLastHeight=201
+        ,recoveryEvidence=Just $ object ["outcome" .= ("expired-unseen"::Text)]}
+  (operation,decode)<-case S.action old of
+    S.Creation r _->do
+      let next=r {recentBlockhash=recent}
+      p<-(O.runSafe . O.Request) (Prepare sdkLibraryPath (S.network old) next)
+      pure(S.Creation next p,decodePoolTransaction $ unsignedTransaction p)
+    S.Opening r _->do
+      let next=r {P.blockhash=recent}
+      p<-(O.runSafe . O.Request) (P.Prepare sdkLibraryPath next)
+      pure(S.Opening next p,decodePositionTransaction $ P.transaction p)
+    S.Liquidity r _->do
+      let next=r {Q.positionRequest=(Q.positionRequest r) {P.blockhash=recent}}
+      p<-(O.runSafe . O.Request) (Q.Prepare sdkLibraryPath next)
+      pure(S.Liquidity next p,decodeLiquidityTransaction $ Q.transaction p)
+  Transaction empty (Message _ _ _ keys _ _) message<-either (fail . show) pure decode
+  let sources=[(base58 $ BA.convert $ Ed.toPublic key,key) | key<-secrets]
+  signatures<-mapM (\key->case lookup (base58 key) sources of
+    Nothing->fail "test successor signer"
+    Just secret->pure(BA.convert(Ed.sign secret (Ed.toPublic secret) message) :: B.ByteString)) (take (length empty) keys)
+  first<-case signatures of sig:_->pure sig; _->fail "test successor signature"
+  let child=old {S.action=operation,S.identifier=base58 first,S.savedRecovery=Just context
+        ,S.transaction=TE.decodeUtf8 $ B64.encode $ B.singleton (fromIntegral $ length signatures)<>B.concat signatures<>message}
+  if attemptPath context=="/tmp/ecx-pool-test.json.retry" then pure child else fail "test successor path"
 
 -- Change one byte of a captured account without inventing another chain response.
 mutateByte :: Snapshot -> Int -> Int -> Snapshot

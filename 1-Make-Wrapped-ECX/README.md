@@ -2,8 +2,9 @@
 
 Token administration stays outside bridge custody. The bridge transfers existing
 inventory; its signer API cannot mint or burn. This Cabal package creates classic SPL mints and creates/updates fungible Metaplex metadata. It prepares
-`MintToChecked` and `BurnChecked` transactions with eight decimals. Its separate offline signing command saves validated signed bytes using
-a dedicated authority key. `check` performs read-only chain preflight; `submit`
+`MintToChecked` and `BurnChecked` transactions with eight decimals. Its checked
+signing command saves validated signed bytes using a dedicated authority key.
+`check` performs read-only chain preflight; `submit`
 broadcasts only a saved, validated attempt and reconciles it on repeat invocation.
 
 From the repository root:
@@ -11,7 +12,7 @@ From the repository root:
 ```sh
 cabal run -v0 ecx-token -- prepare /absolute/path/request.json > /absolute/path/prepared.json
 cabal run -v0 ecx-token -- check devnet https://api.devnet.solana.com 10000 /absolute/path/prepared.json
-cabal run -v0 ecx-token -- sign /absolute/path/prepared.json /private/authority.json /private/new-attempt.json
+cabal run -v0 ecx-token -- sign devnet https://api.devnet.solana.com 10000 /absolute/path/prepared.json /private/authority.json /private/new-attempt.json
 cabal run -v0 ecx-token -- submit devnet https://api.devnet.solana.com 10000 /private/new-attempt.json
 cabal test ecx-token:token-test --test-show-details=direct -j1
 ```
@@ -109,19 +110,20 @@ builders; no second Solana SDK or Metaplex runtime dependency is added.
 
 Output contains the request and `unsignedTransaction` as base64. A transaction
 preview does not prove account ownership, available funds, reserves or network
-identity; independently verify those on the intended chain before offline signing.
+identity; signing repeats those checks on the selected chain.
 Do not use custody keys for administration.
 
-`sign` takes the exact output of `prepare`, validates its entire message again,
+`sign` takes the exact output of `prepare` and validates its entire message again.
+It then captures a finalized payer-history anchor and fresh blockhash on the selected
+network, changes only the request's blockhash, rebuilds and preflights the message,
 and checks the standard 64-byte Solana CLI keypair against the requested authority.
 The key must be an owned regular mode-0600 file; key and output directories must
 be owned, private directories. The critical evaluator signs with Ed25519, verifies
-the signature, exclusively creates the output at mode 0600, and synchronizes both
-file and directory before returning its transaction ID. Existing files are refused;
-a failed write is retained for inspection. This record is not proof of submission
-or finalization. Do not regenerate an attempt to retry a future uncertain send.
-Offline signatures do not bind a genesis hash; intended-chain validation remains
-required at submission. `check` and `submit` verify the selected Devnet/mainnet genesis
+the signature, and atomically publishes the complete mode-0600 record after syncing
+its bytes. The file and parent directory are synchronized before its transaction ID
+is returned. Existing files are refused. The record retains the genesis, fee cap,
+canonical absolute path, history anchor and validity window; it is not proof of
+submission or finalization. `check`, signing and `submit` verify the selected Devnet/mainnet genesis
 through HTTPS, classic SPL layouts, decimals, freeze/delegate/close authorities,
 issuance authority or burn ownership/balance, fee payer, supply bounds, current fee
 against the explicit lamport ceiling, and unsigned simulation. Minting does not
@@ -132,9 +134,48 @@ signature status. Existing pending work is reported without sending; finalized w
 must match the exact saved transaction bytes and fee ceiling. Otherwise it repeats
 preflight and sends those bytes with RPC retries disabled. A transport error is an
 unknown outcome: retain the file and rerun `submit` with that same file. `submitted`
-is not finality. An expired blockhash is not permission to regenerate an attempt;
-expiry/absence review and a new approval are still manual. State is the immutable
-signed attempt plus the real chain, not a mutable local success flag.
+is not finality. State is the immutable signed attempt family plus the real chain,
+not a mutable local success flag. Tracked submission requires the saved network and
+fee cap and refuses an ancestor that already has a valid successor.
+
+For a tracked attempt whose outcome needs recovery:
+
+```sh
+cabal run -v0 ecx-token -- recover HTTPS_RPC INDEPENDENT_HTTPS_RPC /private/new-attempt.json /private/authority.json
+cabal run -v0 ecx-token -- submit devnet HTTPS_RPC 10000 /private/new-attempt.json.retry
+```
+
+`recover` never broadcasts. Two independently operated HTTPS providers must establish
+either the same finalized failed transaction or expiry and complete absence through
+the saved history origin. Distinct hostnames are enforced; choosing independent
+operators remains your responsibility. Unavailable, truncated, pending, successful
+or disagreeing evidence is refused. Recovery preserves every operation field and
+the original fee cap; it changes only the blockhash after collecting a new context
+and repeating preflight. It saves the direct child as `ATTEMPT.retry`. Repeating
+recovery returns that same validated child's ID without creating another attempt.
+There are at most eight generations, including the original.
+
+All ancestors must remain at their saved paths. Each child binds the raw predecessor
+file hash, immutable intent and root. A protected OS family lock serializes signing,
+recovery and submission across CLI processes. Copying an attempt elsewhere cannot
+start another branch. Preserve the `.lock` file; never delete it while a process may
+be active. These files and locks do not exclude a second host holding copied keys;
+keep one administration authority active.
+
+A crash during exclusive publication can leave the complete attempt and its
+`.pending-*` staging name as two links to the same inode. Reads refuse that state.
+With all family processes stopped, inspect the owned mode-0600 files and confirm
+the identical inode before removing only its staging link; retain the attempt and
+lock file. A partial staging file alone grants no submission authority. Preserve
+uncertain files for inspection; do not sign the same intent into a new family.
+The two-provider checks rely on honest, complete RPC history; they are not a
+cryptographic proof of nonexecution. Fee caps apply to each attempt, so failed
+generations can incur additional fees.
+
+Legacy three-field saved attempts remain readable by `status` and usable for exact
+`submit`. Automatic recovery refuses them because their original history and
+validity context was not recorded. The old offline `sign PREPARED KEY OUTPUT` CLI
+form is removed. New signing requires network, HTTPS RPC and a fee ceiling.
 
 For inspection without any possibility of sending, use
 `cabal run -v0 ecx-token -- status devnet HTTPS_RPC ATTEMPT.json`.
@@ -156,9 +197,11 @@ type boundary does not replace separate OS credentials.
 Trace [Token.hs](Token.hs): a closed `Safe` operation invokes the pinned SDK through
 `ecx_token_prepare_v1`, then Haskell independently validates the complete message.
 The safe FFI entry point accepts no keys or generic instructions.
-[Token/Signing.hs](Token/Signing.hs) owns the separate closed critical evaluator;
-[Token/Network.hs](Token/Network.hs) separates safe preflight from critical
-submission. SDK buffers are bounded and caller-owned. The separate custody transfer entry point retains its old protocol.
+[Token/Signing.hs](Token/Signing.hs) owns key generation and pure archive validation.
+[Token/Network.hs](Token/Network.hs)'s critical interpreter owns the private signing
+helper, reached after network preflight and recovery validation. Signing is not a
+public offline operation. SDK buffers are bounded and caller-owned.
+The separate custody transfer entry point retains its old protocol.
 The shared chain library is reused by this package; customer handlers still have no
 chain, store or signer dependency.
 
@@ -214,7 +257,13 @@ No canonical administration acceptance is claimed.
 Protocol references: [Solana minting](https://solana.com/docs/tokens/basics/mint-tokens)
 and [burning](https://solana.com/docs/tokens/basics/burn-tokens).
 
-Remaining: automatic bounded expiry recovery and canonical administration acceptance.
+Bounded recovery has offline codec, signature, lineage, idempotence and refusal
+tests. Real Devnet expiry recovery also passed using Solana's public RPC and
+OnFinality: one saved successor, idempotent recovery, superseded-parent refusal,
+finalized mint of one base unit and exact replay. A subsequent checked burn restored
+the original supply and tester balance. The finalized-failure branch has offline
+evidence; this run does not establish canonical administration acceptance. See the
+[release review](../2-Wrap-Unwrap-Server/docs/RELEASE-REVIEW.md) for transaction IDs.
 Canonical issuance additionally requires actual issuer authority and reserve records;
 see the [token operations guide](../2-Wrap-Unwrap-Server/docs/TOKEN-OPERATIONS.md).
 

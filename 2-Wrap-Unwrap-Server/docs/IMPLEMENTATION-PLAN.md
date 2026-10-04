@@ -41,11 +41,14 @@ separate explicit tooling and evidence; they are not bridge-custody privileges.
    Devnet. Verify its signed transaction/reference, both conversion directions,
    refund ownership, saved-order reload and actionable errors in the current
    browser. Dedicated tester clients and QR/link rendering are partial evidence.
-4. **Finish administration recovery and liquidity acceptance.** Add bounded
-   token/pool attempt recovery without duplicating mint/burn/deposit effects.
-   Expired-unseen status is not proof of nonexecution. Preserve attempt lineage
-   and require sufficient chain evidence before replacing an uncertain attempt.
-   Verify nonzero fee collection and any promised reinvestment separately. Confirm
+4. **Finish liquidity and canonical acceptance.** Bounded token/pool recovery is
+   implemented; real Devnet expiry-to-successor mint and empty-position collection,
+   idempotence, retired-parent refusal and finalized replay passed. A checked burn
+   restored the tester's original supply/balance. Offline tests cover failed-chain
+   evidence and other action families; these are not live acceptance of every case.
+   Preserve lineage and complete two-provider evidence: ordinary expired-unseen
+   status is not proof of nonexecution. Verify nonzero fee collection and any
+   promised reinvestment separately. Confirm
    issuer-approved canonical identity, authority, backing and executable routes
    before enabling canonical trading/customer flows.
 5. **Prove deployment and disaster recovery.** Run worker/signer under separate OS

@@ -16,13 +16,13 @@ data Request (s :: Severity) a where
 data DSL (s :: Severity) a where
   Prepare :: Token.Safe a -> DSL 'Safe a
   Inspect :: Network.Safe a -> DSL 'Safe a
-  Sign :: Signing.Critical a -> DSL 'Critical a
-  Submit :: Network.Critical a -> DSL 'Critical a
+  Key :: Signing.Critical a -> DSL 'Critical a
+  Network :: Network.Critical a -> DSL 'Critical a
 
 instance Operation 'Safe Token.Safe where command = Prepare
 instance Operation 'Safe Network.Safe where command = Inspect
-instance Operation 'Critical Signing.Critical where command = Sign
-instance Operation 'Critical Network.Critical where command = Submit
+instance Operation 'Critical Signing.Critical where command = Key
+instance Operation 'Critical Network.Critical where command = Network
 
 resolve :: Request s a -> DSL s a
 resolve (Request operation) = command operation
@@ -38,5 +38,5 @@ evalSafe (Prepare operation) = Token.evalSafe operation
 evalSafe (Inspect operation) = Network.evalSafe operation
 
 evalCritical :: DSL 'Critical a -> IO a
-evalCritical (Sign operation) = Signing.evalCritical operation
-evalCritical (Submit operation) = Network.evalCritical operation
+evalCritical (Key operation) = Signing.evalCritical operation
+evalCritical (Network operation) = Network.evalCritical operation

@@ -5,10 +5,17 @@ import qualified Bridge.Config as Config
 import qualified Bridge.Store as Store
 import qualified Bridge.SolanaHelper as Helper
 import qualified Bridge.Wire as W
+import qualified Bridge.AdminKey as AdminKey
+import qualified Bridge.AdminStatus as Admin
+import qualified Bridge.SolanaMessage as Message
 import Paths_ecx_bridge (getDataFileName)
-import System.Directory (removeFile,removeDirectoryRecursive)
+import System.Directory (removeFile,removeDirectoryRecursive,listDirectory)
 import qualified System.Posix.Directory as PD
-import System.Posix.Files (setFileMode)
+import System.Posix.Files (setFileMode,createSymbolicLink,createLink)
+import System.Posix.Process (forkProcess,getProcessStatus,exitImmediately,ProcessStatus(..))
+import System.Posix.Signals (signalProcess,sigKILL)
+import System.Exit (ExitCode(..))
+import System.Timeout (timeout)
 import System.FilePath ((</>))
 import System.IO (openTempFile,hClose)
 import qualified ObservationCheck
@@ -21,7 +28,8 @@ import qualified Bridge.Solana as Solana
 import Bridge.Identity (publicKey)
 import Bridge.RPC
 import Bridge.Wire (Profile(..))
-import Control.Exception (try,bracket)
+import Control.Exception (try,bracket,SomeException)
+import Control.Monad (unless)
 import Data.Aeson hiding (Result)
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Aeson.Key as K
@@ -35,7 +43,7 @@ import qualified Data.Text as T
 import Test.QuickCheck hiding (label)
 
 checks :: IO [Result]
-checks = (\deployment native solana observation common->deployment<>native<>solana<>observation<>common) <$> deploymentChecks <*> NativePaymentCheck.checks <*> SolanaPaymentCheck.checks <*> ObservationCheck.checks <*> sequence
+checks = (\deployment native solana observation administration common->deployment<>native<>solana<>observation<>administration<>common) <$> deploymentChecks <*> NativePaymentCheck.checks <*> SolanaPaymentCheck.checks <*> ObservationCheck.checks <*> administrationChecks <*> sequence
   [ check "native observation requires the correct ready descriptor wallet, without signing authority" $ \(sameName::Bool) (descriptors::Bool) (scanning::Bool)->ioProperty $ do
       let wallet=object ["walletname" .= (if sameName then nativeWallet settings else "other"),"descriptors" .= descriptors,"scanning" .= scanning]
           call scoped method args=if (scoped,method,args)==(True,"getwalletinfo",[]) then pure wallet else fail "unexpected wallet RPC"
@@ -240,6 +248,167 @@ replace [] replacement _=replacement
 replace (key:rest) replacement (Object fields)=Object $ KM.insert key
   (replace rest replacement $ maybe Null id $ KM.lookup key fields) fields
 replace _ _ value=value
+
+-- Scripted RPC responses exercise the production evidence collector. They are
+-- deliberately offline and make no assertion about real provider completeness.
+administrationChecks :: IO [Result]
+administrationChecks=sequence
+  [ check "administration anchors finalized history before acquiring and verifying its exact fresh blockhash" $ once $ ioProperty $ do
+      actual<-adminScript fresh $ \call->Admin.newRecoveryWith call genesis payer 50 root
+      badBlock<-rejects "administration_blockhash_origin_mismatch" $ adminScript
+        (take 3 fresh<>[("getBlock",blockArgs,replace ["blockhash"] (String otherHash) block)]) $ \call->
+          Admin.newRecoveryWith call genesis payer 50 root
+      wrongGenesis<-rejects "wrong_administration_network" $ adminScript
+        [("getGenesisHash",[],String "another genesis")] $ \call->Admin.newRecoveryWith call genesis payer 50 root
+      missingOrigin<-rejects "administration_history_origin_required" $ adminScript
+        [head fresh,("getSignaturesForAddress",originArgs,toJSON ([]::[Value]))] $ \call->
+          Admin.newRecoveryWith call genesis payer 50 root
+      staleOrigin<-rejects "invalid_administration_recovery_context" $ adminScript
+        (take 2 fresh<>[let (method,args,value)=fresh!!2 in (method,args,replace ["context","slot"] (Number 89) value)]) $ \call->
+          Admin.newRecoveryWith call genesis payer 50 root
+      pure (actual==recovery && badBlock && wrongGenesis && missingOrigin && staleOrigin)
+  , check "administration replacement requires exact finalized failure and a bounded verified fee" $ once $ ioProperty $ do
+      proof<-adminScript (prefix<>terminal failedStatus failedTransaction) $ \call->Admin.retirementWith call signature bytes recovery
+      let mutations=
+            [("administration_attempt_not_retryable",pending,Null)
+            ,("administration_attempt_not_retryable",replace ["err"] Null failedStatus,replace ["meta","err"] Null failedTransaction)
+            ,("administration_status_mismatch",failedStatus,replace ["transaction"] (toJSON ["different"::Text,"base64"]) failedTransaction)
+            ,("administration_status_mismatch",failedStatus,replace ["meta","err"] Null failedTransaction)
+            ,("administration_failed_evidence_mismatch",failedStatus,replace ["slot"] (Number 109) failedTransaction)
+            ,("administration_failed_evidence_mismatch",replace ["slot"] (Number 100) failedStatus,replace ["slot"] (Number 100) failedTransaction)
+            ,("administration_failed_evidence_mismatch",failedStatus,replace ["meta","fee"] (Number 0) failedTransaction)
+            ,("administration_failed_evidence_mismatch",failedStatus,replace ["meta","fee"] (Number 51) failedTransaction)]
+      refused<-mapM (\(code,status,transaction)->rejects code $ adminScript (prefix<>terminal status transaction) $ \call->
+        Admin.retirementWith call signature bytes recovery) mutations
+      outcome<-fieldValue "outcome" proof :: IO Text
+      pure (outcome=="failed" && and refused)
+  , check "expired administration attempts require finalized expiry, complete anchored history and a final absence recheck" $ once $ ioProperty $ do
+      proof<-adminScript expired $ \call->Admin.retirementWith call signature bytes recovery
+      outcome<-fieldValue "outcome" proof :: IO Text
+      invalidExpiry<-mapM (\(valid,slot,height)->rejects "administration_attempt_not_expired" $
+        adminScript (prefix<>terminal Null Null<>expiry valid slot height) $ \call->Admin.retirementWith call signature bytes recovery)
+        [(True,120,200),(False,100,200),(False,120,160)]
+      invalidHistory<-mapM (\(code,values)->rejects code $ adminScript (beforeHistory<>[("getSignaturesForAddress",historyArgs,toJSON values)]) $ \call->
+        Admin.retirementWith call signature bytes recovery)
+        [("solana_history_gap",[])
+        ,("solana_history_repeated_page",[history otherSignature 110,history otherSignature 110,history origin 90])
+        ,("solana_history_order_invalid",[history otherSignature 80,history origin 90])
+        ,("administration_history_disagrees",[history signature 110,history origin 90])
+        ,("administration_history_disagrees",[history origin 89])]
+      gap<-rejects "solana_history_gap" $ adminScript (beforeHistory<>
+        [("getSignaturesForAddress",historyArgs,toJSON [history otherSignature 110])
+        ,("getSignaturesForAddress",[toJSON payer,object ["commitment" .= ("finalized"::Text),"minContextSlot" .= (120::Int)
+          ,"limit" .= (100::Int),"before" .= otherSignature]],toJSON ([]::[Value]))]) $ \call->Admin.retirementWith call signature bytes recovery
+      changed<-rejects "administration_history_changed" $ adminScript (take (length expired-2) expired<>terminal pending Null) $ \call->
+        Admin.retirementWith call signature bytes recovery
+      pure (outcome=="expired-unseen" && and invalidExpiry && and invalidHistory && gap && changed)
+  , check "administration recovery bounds generations and binds root, parent, payer, fee cap and fresh hash" $
+      forAll (chooseInt (0,8)) $ \generation->
+        let child=recovery {Admin.recoveryGeneration=generation,Admin.recoveryParent=Just parent
+              ,Admin.recoveryEvidence=Just(object []),Admin.recoveryBlockhash=otherHash,Admin.recoverySlot=101}
+            valid=Admin.validateRecovery genesis payer 50 otherHash child
+            wrong=[child {Admin.recoveryRoot="relative"},child {Admin.recoveryParent=Nothing},child {Admin.recoveryParent=Just "invalid"}
+              ,child {Admin.recoveryEvidence=Nothing},child {Admin.recoveryFeeLimit=51}
+              ,child {Admin.recoveryPayer=otherHash},child {Admin.recoveryGenesis="wrong"}
+              ,child {Admin.recoveryBlockhash=recent},child {Admin.recoveryOriginSlot=102}]
+            successor=child {Admin.recoveryGeneration=1}
+        in (not(isLeft valid)==(generation>0 && generation<8))
+          && all (isLeft . Admin.validateRecovery genesis payer 50 otherHash) wrong
+          && Admin.validateSuccessor recovery parent successor==Right ()
+          && all (isLeft . Admin.validateSuccessor recovery parent)
+            [successor {Admin.recoveryRoot="/tmp/other-attempt"},successor {Admin.recoveryParent=Just(T.replicate 64 "b")}
+            ,successor {Admin.recoveryGeneration=2},successor {Admin.recoveryBlockhash=recent},successor {Admin.recoverySlot=100}]
+          && Admin.attemptPath successor==root<>".retry"
+  , check "private administration records publish exclusively and survive refused writes unchanged" $ once $ ioProperty $
+      withPrivateDirectory $ \directory->do
+        let path=directory </> "attempt"; symbolic=directory </> "symbolic"; hard=directory </> "hard"
+        AdminKey.savePrivate path "saved exact transaction bytes"
+        duplicate<-failsIO (AdminKey.savePrivate path "overwrite")
+        createSymbolicLink path symbolic
+        symlinkRead<-failsIO (AdminKey.readPrivate symbolic)
+        symlinkWrite<-failsIO (AdminKey.savePrivate symbolic "overwrite")
+        createLink path hard
+        hardlinkRead<-rejects "unsafe_administration_file" (AdminKey.readPrivate path)
+        hardlinkWrite<-failsIO (AdminKey.savePrivate hard "overwrite")
+        removeFile hard
+        setFileMode path 0o644
+        permission<-rejects "unsafe_administration_file" (AdminKey.readPrivate path)
+        setFileMode path 0o600
+        saved<-AdminKey.readPrivate path
+        writeBound<-rejects "administration_attempt_too_large" (AdminKey.savePrivate (directory </> "oversized") (BS.replicate 8193 32))
+        BS.writeFile (directory </> "oversized") (BS.replicate 8193 32)
+        setFileMode (directory </> "oversized") 0o600
+        bound<-rejects "administration_attempt_too_large" (AdminKey.readPrivate $ directory </> "oversized")
+        names<-listDirectory directory
+        pure (and [duplicate,symlinkRead,symlinkWrite,hardlinkRead,hardlinkWrite,permission,writeBound,bound]
+          && saved=="saved exact transaction bytes" && all (not . T.isInfixOf ".pending-" . T.pack) names)
+  , check "administration family locks exclude another process and release after failure" $ once $ ioProperty $
+      withPrivateDirectory $ \directory->do
+        let path=directory </> "attempt"
+        excluded<-AdminKey.withFamily path $ do
+          child<-forkProcess $ do
+            refused<-failsIO (AdminKey.withFamily path $ pure ())
+            exitImmediately (if refused then ExitSuccess else ExitFailure 1)
+          status<-timeout 5000000 (getProcessStatus True False child)
+          case status of
+            Just result->pure (result==Just(Exited ExitSuccess))
+            Nothing->signalProcess sigKILL child >> getProcessStatus True False child >> pure False
+        failed<-failsIO (AdminKey.withFamily path $ fail "interrupted administration operation")
+        released<-AdminKey.withFamily path (pure True)
+        pure (excluded && failed && released)
+  ]
+ where
+  check description p=putStrLn description >> quickCheckWithResult stdArgs p
+  genesis="fixture genesis"; root="/tmp/ecx-administration-contract/attempt"
+  payer=Message.base58(BS.replicate 32 1); recent=Message.base58(BS.replicate 32 2); otherHash=Message.base58(BS.replicate 32 3)
+  origin=Message.base58(BS.replicate 64 1); signature=Message.base58(BS.replicate 64 2); otherSignature=Message.base58(BS.replicate 64 3)
+  bytes="archived base64 transaction"; parent=T.replicate 64 "a"
+  recovery=Admin.Recovery genesis payer 50 root 0 Nothing recent origin 90 100 160 Nothing
+  history sig slot=object ["signature" .= sig,"slot" .= (slot::Int),"confirmationStatus" .= ("finalized"::Text),"err" .= Null]
+  originArgs=[toJSON payer,object ["commitment" .= ("finalized"::Text),"limit" .= (1::Int)]]
+  blockArgs=[Number 100,object ["commitment" .= ("finalized"::Text),"transactionDetails" .= ("none"::Text),"rewards" .= False]]
+  block=object ["blockhash" .= recent,"blockHeight" .= (100::Int)]
+  fresh=[("getGenesisHash",[],String genesis),("getSignaturesForAddress",originArgs,toJSON [history origin 90])
+    ,("getLatestBlockhash",[object ["commitment" .= ("finalized"::Text),"minContextSlot" .= (90::Int)]],
+      object ["context" .= object ["slot" .= (100::Int)],"value" .= object ["blockhash" .= recent,"lastValidBlockHeight" .= (160::Int)]])
+    ,("getBlock",blockArgs,block)]
+  prefix=[head fresh,last fresh]
+  terminal status transaction=
+    [("getSignatureStatuses",[toJSON [signature],object ["searchTransactionHistory" .= True]],object ["value" .= [status]])
+    ,("getTransaction",[toJSON signature,object ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text),"maxSupportedTransactionVersion" .= (0::Int)]],transaction)]
+  failure=object ["InstructionError" .= [Number 0,String "InsufficientFunds"]]
+  pending=object ["confirmationStatus" .= ("confirmed"::Text),"err" .= Null,"slot" .= (110::Int)]
+  failedStatus=object ["confirmationStatus" .= ("finalized"::Text),"err" .= failure,"slot" .= (110::Int)]
+  failedTransaction=object ["transaction" .= [bytes,"base64"],"slot" .= (110::Int),"meta" .= object ["err" .= failure,"fee" .= (5::Int)]]
+  validity valid slot=object ["value" .= valid,"context" .= object ["slot" .= (slot::Int)]]
+  expiry valid slot height=
+    [("isBlockhashValid",[toJSON recent,object ["commitment" .= ("finalized"::Text),"minContextSlot" .= (100::Int)]],validity valid slot)
+    ,("getBlockHeight",[object ["commitment" .= ("finalized"::Text),"minContextSlot" .= slot]],toJSON (height::Int))]
+  beforeHistory=prefix<>terminal Null Null<>expiry False 120 200
+  historyArgs=[toJSON payer,object ["commitment" .= ("finalized"::Text),"minContextSlot" .= (120::Int),"limit" .= (100::Int)]]
+  expired=beforeHistory<>[("getSignaturesForAddress",historyArgs,toJSON [history otherSignature 110,history origin 90])]<>terminal Null Null
+
+adminScript :: [(Text,[Value],Value)] -> ((Text -> [Value] -> IO Value) -> IO a) -> IO a
+adminScript responses action=do
+  remaining<-newIORef responses
+  result<-action $ \method arguments->do
+    pending<-readIORef remaining
+    case pending of
+      (expected,args,value):rest | method==expected && arguments==args->writeIORef remaining rest >> pure value
+      _->fail ("unexpected administration RPC: "<>T.unpack method<>" "<>show arguments)
+  pending<-readIORef remaining
+  unless (null pending) (fail "administration evidence skipped a required read")
+  pure result
+
+withPrivateDirectory :: (FilePath -> IO a) -> IO a
+withPrivateDirectory=bracket (do
+  (path,handle)<-openTempFile "/tmp" "ecx-admin-contract"; hClose handle; removeFile path
+  PD.createDirectory path 0o700; pure path) removeDirectoryRecursive
+
+failsIO :: IO a -> IO Bool
+failsIO action=do
+  outcome<-try (action >> pure ()) :: IO (Either SomeException ())
+  pure (isLeft outcome)
 
 -- Public configuration vector matches the retained executable's check-config
 -- output and captured Devnet payment identity. No RPC or keys are used here.

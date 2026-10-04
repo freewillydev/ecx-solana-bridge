@@ -16,8 +16,8 @@ a past transfer or installer does not certify later source or a new deployment.
 | Custody restoration | Sequence-98 funded ledger restored into separate same-host staging; 24 projections matched and actual chain reconciliation passed. Minimum sequence 99 refused the archive. This does not prove off-host storage or clean-host wallet activation. |
 | Automated boundaries | Cabal QuickCheck/protocol tests, actual HTTPS tests and PostgreSQL contracts cover typed authority, immutable accounting, fencing, concurrency, cancellation, source/replacement recovery and encrypted restic restoration. Fixtures do not prove all real-chain cases. |
 | Signer model | Bounded two-request TLA+ model: 54,289 distinct states; path/output/dispatch invariants and negative mutations checked. No TLAPS/unbounded Haskell proof. |
-| Token administration | Real Devnet mint/account creation, issuance/burn and metadata readback, preserving signed-attempt replay. Canonical authority/backing and bounded uncertain-attempt recovery remain open. |
-| Liquidity | Real Devnet pool/position creation, funded deposit/withdrawal and collection replay. Collected fees were zero; nonzero yield/reinvestment remains unverified. |
+| Token administration | Real Devnet mint/account creation, issuance/burn and metadata readback, preserving signed-attempt replay. Bounded expiry recovery now has a finalized mint-one/burn-one round trip; canonical authority/backing remain open. |
+| Liquidity | Real Devnet pool/position creation, funded deposit/withdrawal and collection replay, plus bounded expiry recovery for an empty-position collection. Collected fees were zero; nonzero yield/reinvestment remains unverified. |
 | Trading | Read-only Jupiter quotes used the expected published Orca pool in both directions. Quotes do not prove executed swaps, current route availability or backing. |
 
 Representative funded transactions from the migrated test deployment:
@@ -40,6 +40,31 @@ compile contracts preserved the Operation caller/severity boundary. All eight SQ
 migrations and the supplied Main.hs reference retained identical bytes. Temporary
 test resources were removed. This verifies the promotion, not the release gates below.
 
+Administration recovery subsequently passed the root build and all three Cabal
+suites, followed by real Devnet acceptance through Solana's public RPC and
+OnFinality. Signed mint and empty-position collection attempts were deliberately
+left unsubmitted until expiry. Both providers supplied finalized expiry and complete
+history through the saved blockhash origins. Each recovery saved one direct child;
+repeating recovery returned the same bytes, parent submission was refused, and
+finalized child submission replay produced no additional effect. A one-base-unit
+mint followed by a checked burn restored supply to 200,000,000,000 and the tester's
+balance to 99,997,925,053. Pool owner/vault token balances were unchanged; each of
+the three submitted transactions charged 5,000 lamports.
+
+- Recovered mint: `6295tzQeV9Zquqe94hGJGBCn68fZQeJwGv3AeovgQtRVjXs41VoFW2QgTi6humaHUX6iXYKUZb1oMw9Z3dtfujju`.
+- Recovered collection: `44sFY6S7mkN3bZKUdw7C5EKxEH3EQdQewdqEC9ZRo9DhjnV8uMFpqgD5pZNPfg8dFWhHTjvnEnSQqguPB8GL9Fiu`.
+- Restoring burn: `GAEbjW9S465r362gnprkwh37LUtnk6RkgJAFLTysNPE8t2ju34TQZCw2DwGBQncs5W16Yutv4tY9grTtywvMBJV`.
+
+The live run also exposed stale pooled connections after verifier throttling;
+separate read sessions fixed the recovery run without retrying sends. RPC failures
+before recovery left no successor or send authority. Private attempts, provider
+evidence and tested binary hashes are retained outside Git. The failed-transaction
+recovery branch has offline evidence, not a deliberately failed live transfer;
+nonzero LP fees, other live recovery action families and canonical use are not
+established by this run. Publication-crash hardlinks require the documented manual
+inspection; two-provider history remains a trust assumption, not cryptographic
+proof of nonexecution.
+
 ## Gates still open
 
 1. **Customer wallet:** sign a real Devnet Solana Pay deposit in a supported wallet;
@@ -54,9 +79,10 @@ test resources were removed. This verifies the promotion, not the release gates 
    key/full-cookie/unlock access. Restore funded custody on a clean host using a
    real off-host HTTPS repository, separate deletion authority, retained passwords,
    protected retention and explicit old-host exclusion/revocation.
-4. **Administration and canonical use:** finish bounded token/pool expiry recovery
-   without duplicate effects, nonzero LP fees/reinvestment where promised, issuer
-   approval, canonical authority/reserves and funded betanet/canonical acceptance.
+4. **Administration and canonical use:** finish nonzero LP fees/reinvestment where
+   promised, issuer approval, canonical authority/reserves and funded
+   betanet/canonical acceptance. Extend recovery acceptance where the offline-only
+   cases and remaining operation families require it; retain the verified bounds.
    Verify actual token/pool identity and current executable routes before enabling links.
 5. **Dependencies and independent review:** resolve applicability/reachability and
    license questions recorded in [DEPENDENCY-REVIEW.md](DEPENDENCY-REVIEW.md) and

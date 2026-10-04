@@ -12,6 +12,8 @@ cabal run -v0 ecx-pool -- prepare devnet REQUEST.json > prepared.json
 cabal run -v0 ecx-pool -- check HTTPS_RPC MAX_FEE MAX_COST prepared.json
 cabal run -v0 ecx-pool -- sign HTTPS_RPC MAX_FEE MAX_COST prepared.json PAYER_KEY VAULT_A_KEY VAULT_B_KEY NEW_ATTEMPT.json
 cabal run -v0 ecx-pool -- submit HTTPS_RPC ATTEMPT.json
+cabal run -v0 ecx-pool -- recover HTTPS_RPC INDEPENDENT_HTTPS_RPC PREDECESSOR.json KEY...
+cabal run -v0 ecx-pool -- status HTTPS_RPC ATTEMPT.json
 cabal run -v0 ecx-pool -- address devnet MINT_A MINT_B FEE_TIER_INDEX
 cabal run -v0 ecx-pool -- inspect devnet HTTPS_RPC POOL MINT_A MINT_B
 cabal run -v0 ecx-pool -- quote-mainnet POOL MINT_A MINT_B AMOUNT_A AMOUNT_B
@@ -72,7 +74,7 @@ than a 100% direct route through that pool. HTTPS has no redirects or retries;
 responses are bounded to 1 MiB. Output includes the response hash and observation time.
 It is a closed safe operation, with no signing or execution path. A successful quote
 does not prove an executed trade, issuer approval or reserve backing. See the
-[published-pool command and acceptance](../2-Wrap-Unwrap-Server/docs/TOKEN-OPERATIONS.md#published-jupiter-routes).
+[published-pool command and acceptance](../2-Wrap-Unwrap-Server/docs/TOKEN-OPERATIONS.md#treasury-and-market-operations).
 The endpoint currently accepts unauthenticated quote reads; an authentication
 refusal is an API-access problem, not evidence that liquidity is missing.
 
@@ -101,26 +103,67 @@ integer lamports. The reported maximum debit conservatively adds the network fee
 even if simulation already deducted it. Quote/simulation success is not a future
 execution guarantee.
 
-`Pool.Signing` owns two closed critical operations. Signing repeats preflight,
-checks each protected key against its message signer, verifies every signature,
-and exclusively saves a mode-0600 attempt with file/directory fsync before returning.
-Key and output directories must be private and paths absolute. Token and pool
-administration share these file protections through `Bridge.AdminKey`; neither
-gets bridge custody authority. New vault keys can be generated with `ecx-token keygen`.
+`Pool.Signing` owns three closed critical operations: sign, recover and submit.
+Signing first captures a finalized payer-history anchor and a fresh blockhash,
+then rebuilds the preparation with only that hash changed. The operation, accounts,
+amounts, price, liquidity and slippage limits remain fixed. It repeats preflight,
+checks each protected key against its message signer and verifies every signature.
+The exact attempt is atomically published mode 0600, exclusively, with file and
+directory fsync before its identifier is returned. No signature leaves memory
+before publication. Key and attempt directories must be private and paths absolute.
+These protections are shared through `Bridge.AdminKey`; they grant no bridge
+custody authority. `ecx-token keygen` can generate separate vault/position keys.
 
-Submission verifies the saved message/signatures and rederives its PDAs. It checks
-historical status before any send, repeats preflight only for an unseen attempt,
-and sends exactly the archived bytes. A finalized result must match those exact
-bytes and the saved fee/total-debit limits. A timeout retains the attempt; run
-`submit` again. No command refreshes its blockhash, overwrites an attempt, or
-silently signs a replacement. Expired/unresolved attempts require review.
+Submission validates the archived signatures, full predecessor chain and canonical
+path, then rederives the PDAs. It checks historical status before sending, repeats
+preflight only for an unseen attempt, and sends exactly the archived bytes. A
+finalized result must match those bytes and the saved fee/total-debit limits. A
+parent with a saved successor is retired from submission. A submission timeout retains the attempt; repeat `submit` or inspect `status`.
 
-`cabal run -v0 ecx-pool -- status HTTPS_RPC ATTEMPT.json` inspects through the safe
-DSL without signing or sending. It validates the saved action/signatures and
-network and reports `pending`, `finalized`, `failed`, `unseen` or `expired-unseen`.
-Finalized evidence must match the archived bytes. Absence can reflect unavailable
-history: `expired-unseen` does not authorize a replacement. Fee/debit limits and
-PDA rederivation remain submission checks, not guarantees of this status report.
+`recover` requires two HTTPS RPC providers with different hostnames, the saved
+predecessor and the original operation's signing keys: payer/vault-A/vault-B for
+creation, payer/position-mint for opening, or owner for liquidity. It accepts no
+replacement request, limits or output path. Both providers must prove either an
+exact finalized failed transaction or finalized expiry with absent transaction/
+status and complete payer history back to the saved pre-signing anchor. A missing,
+truncated or inconsistent history is refused. Ordinary `expired-unseen` status is
+insufficient. Distinct hostnames alone do not establish independent operators;
+choose independently operated providers whose retained history covers the anchor.
+
+The successor changes only its blockhash and derived bytes, rechecks current
+preflight, and retains the original network and limits. Its fixed filename appends
+`.retry` to the predecessor: `/private/attempt.json.retry`, then
+`/private/attempt.json.retry.retry`, up to eight total generations. Each links the
+exact predecessor file hash and retains the retirement evidence. Repeat recovery
+of a parent returns the same already-published child identifier. To renew an
+expired child, explicitly recover that child; existing files are never overwritten.
+Limits apply per attempt; failed transactions can consume fees across generations.
+
+Signing, recovery and submission serialize on the original family's filesystem
+lock. Retain every ancestor, the original absolute paths and protected permissions.
+Copying an attempt to a new filename cannot branch its family. Separate copies of
+keys/journals on another host still require operator exclusion; provider honesty
+and protected local storage remain trust assumptions. Legacy attempts lacking a
+pre-signing history anchor remain readable, inspectable and exactly resubmittable;
+the application refuses to renew them or invent a retrospective anchor.
+
+A publication crash can leave a complete attempt hard-linked to a `.pending-*`
+staging name. Reads refuse this state. Stop all family processes, inspect ownership,
+mode and matching inode, then remove only the matching staging link; retain the
+attempt and lock. An incomplete staging file alone cannot be submitted. Preserve
+uncertain files instead of signing into another family. RPC history checks depend
+on honest, complete providers; they are not cryptographic nonexecution proofs.
+
+`status` uses the safe DSL without signing or sending. It validates saved action,
+signatures, lineage and network, then reports `pending`, `finalized`, `failed`,
+`unseen` or `expired-unseen`. Finalized evidence must match archived bytes. Current
+fee/debit limits and PDA rederivation remain submission checks, not guarantees of
+this status report. Real Devnet expiry recovery passed for an empty-position
+collection using Solana's public RPC and OnFinality: one successor, idempotent
+recovery, superseded-parent refusal and finalized saved-byte replay. Token balances
+were unchanged and the payer paid only the 5,000-lamport fee. This does not verify
+nonzero yield. Transaction evidence is in the
+[release review](../2-Wrap-Unwrap-Server/docs/RELEASE-REVIEW.md).
 
 ## Full-range position preparation
 
@@ -140,8 +183,8 @@ freeze authority and no token-account delegate/close authority. The conservative
 simulated debit must fit `MAX_COST`. `sign-position` repeats those checks and then
 uses the same protected signing, exclusive durable save and exact-byte submission
 path as pool creation. The closed action distinguishes the two-signature position
-transaction from the three-signature pool transaction. Existing pool-attempt files
-retain their original format; position attempts carry an explicit operation tag.
+transaction from the three-signature pool transaction. Legacy pool-attempt files remain readable; new attempts add recovery context,
+and position attempts carry an explicit operation tag.
 
 Actual Devnet simulation at slot 507074039 passed with conservative debit 8,264,840
 lamports; fee limit 1 and cost limit 20,000 were refused. The public simulation is
@@ -193,17 +236,16 @@ the validated instructions cannot modify them. Results report signed raw-unit
 `spentA`/`spentB` (negative means received), liquidity delta and maximum SOL debit.
 Empty-position collection passed actual Devnet simulation with zero token movement
 and a 10,000-lamport conservative cost bound. Its captured before/after facts test
-cost, ownership, liquidity and token-conservation refusals. This is not evidence of
-funded deposit/withdrawal or nonzero earned fees. Signing/submission remains disabled
-for these liquidity operations until that integration is completed.
+cost, ownership, liquidity and token-conservation refusals. Funded signing and
+submission were subsequently verified below; nonzero earned fees remain unverified.
 
 The separate admin payer's Devnet USDC and test-ECX ATAs were created through
 `ecx-token`, with finalized transactions
 `3XuypwYj5XcWRFjKYvc5b9yganU38ckbrbd7CqugCZWsSn9gtogHwxPU3BY3xk1of4ZHMeAVnjghf7ptZb7jE5CE`
 and `aHSsU7auhryY2KuymGupifAe5Rkhoj56yux3vCjZ8dYkVeXMvYWrSLRWcebYrVNRAS25nY3FmV7HY3QknyCF8Zj`.
 ATA provisioning supports classic mints with other decimal counts (USDC has six);
-the token mint/burn policy remains eight decimals. Both accounts still need test
-capital for the funded liquidity run.
+the token mint/burn policy remains eight decimals. These accounts then received
+separate test capital for the funded liquidity run below.
 
 ## Verified checkpoint
 
@@ -272,11 +314,12 @@ keeping the bridge's one-signature custody protocol unchanged. Full-range positi
 and boundary-array preparation/preflight, signing/submission and finalized ownership readback now pass Devnet
 acceptance. Liquidity deposit/withdrawal and fee-collection wire preparation is
 implemented with actual-account/effect preflight and shared saved signing/submission.
-Funded Devnet acceptance passes as recorded below. Adaptive-tier initialization can have additional authority
+Funded Devnet acceptance passes as recorded above; bounded expiry recovery has the
+separate collection acceptance described above. Adaptive-tier initialization can have additional authority
 requirements; do not assume the published tier is permissionless.
 
 LP ownership/lock, fee reinvestment, issuer approval, reserve backing, deployed
 program verification and actual Jupiter routes are separate checks. The pool
 snapshot proves none of these. See the existing
-[liquidity guide](../2-Wrap-Unwrap-Server/docs/TOKEN-OPERATIONS.md#configure-trading-separately)
+[liquidity guide](../2-Wrap-Unwrap-Server/docs/TOKEN-OPERATIONS.md#treasury-and-market-operations)
 for the broader operator requirements.

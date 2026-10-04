@@ -46,11 +46,16 @@ main=getArgs >>= \args->case args of
     feeLimit<-readFee limit
     result<-(O.runCritical . O.Request) (Network.Submit selected endpoint feeLimit attempt)
     L.putStrLn (encode result)
-  ["sign",prepared,keyfile,output]->do
+  ["sign",network,endpoint,limit,prepared,keyfile,output]->do
+    selected<-choose network
+    feeLimit<-readFee limit
     (request,unsigned)<-readPrepared prepared
-    identifier<-(O.runCritical . O.Request) (Sign keyfile output request unsigned)
+    identifier<-(O.runCritical . O.Request) (Network.Sign sdkLibraryPath selected endpoint feeLimit request unsigned keyfile output)
     L.putStrLn $ encode $ object ["signature" .= identifier,"saved" .= output]
-  _->die "Usage: ecx-token status devnet|mainnet HTTPS_RPC ATTEMPT.json | inspect-policy devnet|mainnet HTTPS_RPC INDEPENDENT_HTTPS_RPC MINT CUSTODY_OWNER CUSTODY_ATA EXPECTED_AUTHORITY|revoked | keygen NEW_PRIVATE_KEY.json | associated-address OWNER MINT | metadata-address MINT | address AUTHORITY SEED | prepare REQUEST.json | check devnet|mainnet HTTPS_RPC MAX_FEE PREPARED.json | submit devnet|mainnet HTTPS_RPC MAX_FEE ATTEMPT.json | sign PREPARED.json AUTHORITY_KEY.json NEW_ATTEMPT.json (prepare/check/sign never broadcast; submit sends saved bytes)"
+  ["recover",primary,verifier,attempt,keyfile]->do
+    identifier<-(O.runCritical . O.Request) (Network.Recover sdkLibraryPath primary verifier attempt keyfile)
+    L.putStrLn $ encode $ object ["signature" .= identifier,"saved" .= (attempt<>".retry")]
+  _->die "Usage: ecx-token status devnet|mainnet HTTPS_RPC ATTEMPT.json | inspect-policy devnet|mainnet HTTPS_RPC INDEPENDENT_HTTPS_RPC MINT CUSTODY_OWNER CUSTODY_ATA EXPECTED_AUTHORITY|revoked | keygen NEW_PRIVATE_KEY.json | associated-address OWNER MINT | metadata-address MINT | address AUTHORITY SEED | prepare REQUEST.json | check devnet|mainnet HTTPS_RPC MAX_FEE PREPARED.json | submit devnet|mainnet HTTPS_RPC MAX_FEE ATTEMPT.json | sign devnet|mainnet HTTPS_RPC MAX_FEE PREPARED.json AUTHORITY_KEY.json NEW_ATTEMPT.json | recover HTTPS_RPC INDEPENDENT_HTTPS_RPC ATTEMPT.json AUTHORITY_KEY.json (prepare/check/sign/recover never broadcast; submit sends saved bytes)"
 
 readFee :: String -> IO Word64
 readFee raw=case readMaybe raw :: Maybe Integer of

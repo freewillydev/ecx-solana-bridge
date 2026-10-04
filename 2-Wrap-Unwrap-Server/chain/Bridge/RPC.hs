@@ -68,7 +68,7 @@ retryRateLimitedRead :: (Int -> IO ()) -> Text -> IO (Either (Maybe Int) a) -> I
 retryRateLimitedRead wait methodName action = go (0::Int)
  where
   readsOnly=methodName `elem`
-    ["getGenesisHash","getAccountInfo","getMultipleAccounts","getLatestBlockhash"
+    ["getGenesisHash","getAccountInfo","getMultipleAccounts","getLatestBlockhash","getBlock"
     ,"getBlockHeight","getSlot","isBlockhashValid","getFeeForMessage","getMinimumBalanceForRentExemption"
     ,"getSignatureStatuses","getTransaction","getSignaturesForAddress"
     ,"getblockchaininfo","getblockhash","getblockheader","getwalletinfo","getbalances"
