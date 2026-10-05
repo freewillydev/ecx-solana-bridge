@@ -95,10 +95,10 @@ refusals with a failing exit status, preventing scripts from continuing on an er
    findings and preserve evidence for each remaining release gate. Local tests and
    the bounded TLA+ model do not replace independent review.
 7. **Finish one-command installation against the freeze.** The candidate installer
-   now targets the sole executable and complete migration chain; its ARM64 body
-   passed fresh/repeat/upgrade and refusal checks on an existing VM. Finish the
-   actual authenticated package and clean-host acceptance. Verify fresh install, repeat install,
-   upgrade, reboot and restored operation on Ubuntu 24.04 ARM64 and x86-64.
+   targets the sole executable and complete migration chain. The hardened ARM64
+   signed package passed clean fresh installation, repeat/upgrade, cold boot, TLS
+   authentication and actual service-account SSH denials. Finish x86-64 acceptance,
+   native-node/backup integration and funded clean-host restoration.
    Reuse expensive builds; run packaging acceptance after runtime changes settle.
    Authenticate the final release artifact. Public publication and valuable-fund
    activation remain explicit operator decisions after the required gates close.

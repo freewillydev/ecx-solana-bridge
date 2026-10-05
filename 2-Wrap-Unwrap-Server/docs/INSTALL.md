@@ -2,8 +2,9 @@
 
 The current server is built through Cabal. The candidate installer under `install/`
 targets the rebuilt server; it is **not yet a certified release**. Do not use an old
-release built for the retired server. ARM64 packaged fresh-install and reboot checks have passed on a clean Ubuntu VM.
-The final hardened package, x86-64 and funded restored-operation gates remain open.
+release built for the retired server. The hardened ARM64 signed package passed clean
+fresh installation, repeat/upgrade, cold boot and service isolation checks.
+x86-64 and funded restored-operation gates remain open.
 
 ## Candidate installation and upgrade
 

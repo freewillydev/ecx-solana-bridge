@@ -169,10 +169,23 @@ This inspection reproduced a real SSH policy gap: a service-owned authorized key
 could forward HTTP through SSH despite the account's `nologin` shell. Explicit
 `DenyUsers ecxbridgew ecxbridges` blocked both service accounts with those keys.
 The installer now writes and checks that effective policy and reloads SSH when it
-is installed. Final packaged-upgrade acceptance of this hardening remains next;
-do not treat the earlier `18cb881` installer as the completed release. The payment
-runtime remains frozen. Private `clean-*`, `package-*` and `ssh-service-*` evidence
-is under `installer-acceptance-20261004`.
+is installed. The hardened artifact from `8db99c8` then passed authenticated upgrade
+and repeat upgrade, preserving every recorded configuration, credential and fence
+file hash, with the ledger still paused at sequence zero. Both services restarted
+and both service accounts were denied real SSH forwarding with valid test keys.
+
+That exact hardened artifact also passed authenticated fresh installation on a
+second clean Ubuntu VM, followed by a cold boot. Both services started automatically,
+the public configuration was unchanged, signer TLS returned 401 without credentials,
+and both SSH denials passed again. Artifact SHA-256:
+`4d1d1a86bebadb9f2dc4b8e54d0f7bdfabae38b4d0ae9a6a28080d86adcbc241`
+(33,748,134 bytes). Its executable is byte-identical to the frozen Mainnet runtime.
+These are unfunded, loopback-only provisioning checks, not chain or backup acceptance.
+Do not use the earlier `18cb881` installer with the SSH gap. x86-64, native-node and
+backup integration, funded clean-host restoration, distribution review and independent
+security review remain open. The disposable acceptance VM was deleted; the builder
+and funded pilot VMs are stopped. Private `clean-*`, `hardened-*`, `package-*` and
+`ssh-service-*` evidence is under `installer-acceptance-20261004`.
 
 ## Evidence already obtained
 
@@ -597,10 +610,11 @@ review or distribution/license requirements.
    license questions recorded in [DEPENDENCY-REVIEW.md](DEPENDENCY-REVIEW.md) and
    [THIRD-PARTY.md](THIRD-PARTY.md); obtain independent review of source and deployment.
    Earlier dependency inventories are not a clean bill of health for a new artifact.
-6. **Installation/release:** finish authenticated packaging and test the candidate
-   installer/service policies on Ubuntu 24.04 ARM64/x86-64, including repeat install,
-   upgrade, reboot and restore. The old installer/release workflow was removed.
-   Authenticate a review candidate only after substantive runtime work settles.
+6. **Installation/release:** retain the hardened signed ARM64 package's clean
+   fresh/repeat/upgrade, cold-boot and service-isolation evidence. Finish x86-64
+   acceptance, native-node/backup integration and funded clean-host restoration.
+   Review distribution notices and the public release trust-key procedure before
+   publishing. The acceptance-test signing key does not establish public trust.
 
 Audit from the operation grammar/API through critical authorization, durable store,
 chain validators, signer, settlement and recovery. Review exports, OS credentials,

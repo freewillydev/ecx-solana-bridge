@@ -46,8 +46,8 @@ application build or WebAssembly backend. See [local development](2-Wrap-Unwrap-
 `ecx-bridge` is the sole server executable. Actual customer-wallet acceptance,
 remaining recovery cases, canonical authority/backing checks and independent
 review remain. A candidate installer now targets the frozen runtime; its ARM64
-installer body has local PostgreSQL acceptance, while packaged/clean-host, x86-64
-and restore acceptance remain open. This is not a public or valuable-fund release.
+signed package passed clean installation, repeat/upgrade, cold boot and service
+isolation checks. x86-64 and funded restore acceptance remain open. This is not a public or valuable-fund release.
 
 [Architecture](2-Wrap-Unwrap-Server/docs/ARCHITECTURE.md) ·
 [Operations](2-Wrap-Unwrap-Server/docs/OPERATIONS.md) ·
