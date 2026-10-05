@@ -187,6 +187,13 @@ security review remain open. The disposable acceptance VM was deleted; the build
 and funded pilot VMs are stopped. Private `clean-*`, `hardened-*`, `package-*` and
 `ssh-service-*` evidence is under `installer-acceptance-20261004`.
 
+A subsequent numeric-parser review checked the frozen application's input types
+against hash-verified GHC/Aeson/scientific sources. Hostile exponent tests through
+actual order/policy codecs passed in the Cabal bridge suite, including a valid-order
+control and a one-second deadline. No runtime change was required. This strengthens
+boundary evidence for HSEC-2023-0007 but does not close transitive reachability or
+independent review; see [dependency review](DEPENDENCY-REVIEW.md).
+
 ## Evidence already obtained
 
 | Area | Evidence and limit |

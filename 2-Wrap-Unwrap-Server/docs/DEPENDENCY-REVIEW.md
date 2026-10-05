@@ -38,6 +38,23 @@ These are version/source checks, not independent security certification.
   evidence of an attacker-reachable call, but excludes treating the source grep
   as proof that these routines are absent from the executable. Keep this finding
   open for input-path analysis and independent review.
+  The subsequent input-path review verified the pinned GHC 9.14.1, Aeson 2.3.2.0
+  and scientific 0.3.8.1 source archives. No application `readFloat` call was found.
+  `Domain` parses amounts from at most 19 ASCII unit digits (or 11 whole/8 fractional
+  coin digits). `Native.nativeAmount` checks exponent and coefficient bounds before
+  exponentiation. Aeson's bounded integer instances use `toBoundedInteger`, which
+  rejects excessive magnitude before constructing the integer. The store's direct
+  `floatingOrInteger` input comes from PostgreSQL SUM over bigint journal entries,
+  not a customer/RPC JSON number. Browser `Double` values are clock/date FFI values.
+  A Cabal QuickCheck contract now decodes actual order/policy wire records with
+  positive/negative billion-scale and machine-limit exponents under a one-second
+  deadline, rejects numeric and string amount forms, and retains a valid-order
+  control. It passed with the bridge suite. Existing native amount checks cover
+  minimum/maximum scientific exponents. These tests cover the named boundaries;
+  they do not waive the generic library finding, establish a compiled call graph,
+  or certify all transitive HTTP/TLS/database/browser parser paths. Source hashes
+  and scope are recorded in private `numeric-input-boundaries.json` beside the
+  existing source inventories. The deployed runtime remains unchanged.
 - [HSEC-2026-0006](https://github.com/haskell/security-advisories/blob/main/advisories/published/2026/HSEC-2026-0006.md):
   Cabal 3.16.0.0 can delete duplicate source headers during configure. It belongs
   to the native build-hook dependency closure, not the server's linked-library

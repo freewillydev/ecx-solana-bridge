@@ -13,6 +13,7 @@ import Servant.API ((:<|>)(..))
 import Bridge.Domain
 import Data.Aeson (eitherDecode,encode)
 import Data.Int (Int64)
+import qualified Data.ByteString.Lazy.Char8 as BL
 import Data.List (nub)
 import Data.Typeable (typeRep,eqT)
 import Data.Proxy (Proxy(..))
@@ -87,6 +88,17 @@ main = do
         let a=good (amount n)
         in conjoin [parseUnits (T.pack $ show n)===Right a,parseCoins (renderCoins a)===Right a,
                     eitherDecode (encode a)===Right a]
+    , check "wire amounts and integer policy reject hostile exponent notation promptly" $ within 1000000 $ once $ property $
+        all (\raw ->
+          let text=T.pack raw
+              order input="{\"direction\":\"NativeToWrapped\",\"input\":"<>input<>
+                ",\"recipient\":\"dest\",\"refund\":\"refund\",\"sourceOwner\":null,\"idempotencyKey\":\"key\"}"
+              rejected bytes=isLeft (eitherDecode bytes :: Either String W.OrderRequest)
+          in not(rejected $ order "\"100\"") && isLeft(parseUnits text) && isLeft(parseCoins text)
+            && rejected(order $ BL.pack raw) && rejected(order $ encode text)
+            && isLeft(eitherDecode ("{\"nativeDepth\":"<>BL.pack raw<>
+              ",\"solanaCommitment\":\"finalized\",\"deploymentFingerprint\":\"id\"}") :: Either String W.PolicySnapshot))
+          ["1e1000000000","1e-1000000000","1e9223372036854775807","1e-9223372036854775808"]
     , check "new fee rounds upward without overflow" $ forAll (chooseInteger (2,toInteger(maxBound::Int64))) $ \n ->
         let q=good (quote $ good $ amount n); f=toInteger (units $ fee q)
         in conjoin [f*100>=n,(f-1)*100<n,toInteger(units(net q))+f==n]
