@@ -19,6 +19,8 @@ cd "$HOME/.local/share/ecx-emsdk"
 source ./emsdk_env.sh
 emconfigure ghcup install ghc --set javascript-unknown-ghcjs-9.12.2
 
+cd ~/ecash/ecx-solana-bridge/
+
 ghcup install cabal
 cabal update
 ghcup run --install --ghc 9.14.1 --cabal 3.16.1.0
