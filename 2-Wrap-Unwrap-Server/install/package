@@ -45,7 +45,7 @@ cp 2-Wrap-Unwrap-Server/docs/THIRD-PARTY.md "$staging/share/notices/"
 # Keep collected notices at their repository paths (including license subtrees).
 cp -R 2-Wrap-Unwrap-Server/docs/third-party "$staging/share/notices/"
 (cd "$staging/share" && sha256sum migrations/*.sql) > "$staging/migrations.sha256"
-(cd "$staging" && find . -type f ! -name manifest.sha256 -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$staging/manifest.sha256"
+(cd "$staging" && find . -type f ! -path ./manifest.sha256 -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$staging/manifest.sha256"
 name=ecx-bridge-ubuntu-24.04-$arch.run
 cat > "$output/$name" <<'HEADER'
 #!/bin/sh
