@@ -3,6 +3,7 @@
 Build from the repository root, then put the executable on this shell's PATH:
 
 ```sh
+cabal update
 cabal build exe:ecx-token -j1
 export PATH="$(dirname "$(cabal list-bin exe:ecx-token)"):$PATH"
 cd 1-Make-Wrapped-ECX
