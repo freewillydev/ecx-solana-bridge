@@ -838,6 +838,26 @@ review or distribution/license requirements.
    Review distribution notices and the public release trust-key procedure before
    publishing. The acceptance-test signing key does not establish public trust.
 
+### Real-network fixture limitation (2026-10-05)
+
+The remaining native conflict/winner-change drill cannot be closed by mining the
+upstream enforcer's throwaway integration network. The public
+[LayerTwo-Labs integration chain parameters](https://github.com/LayerTwo-Labs/bip300301_enforcer/blob/master/integration_tests/signet_chain_params.rs)
+(blob `2c4b54644bad6a251e3c1578b692344a954c958a`) explicitly use a public test key.
+Deriving its compressed secp256k1 public key and P2WPKH challenge yields
+`001420dcc9d1afdbed0f9cf088eb28c755323536ffb5`, which differs from the real
+[L2L Signet configuration](https://drivechain.info/dev.txt),
+`00148835832e28c816b7acd8fdb19772ab2199603a56`. No challenge signing authority
+for that live network has been established in this test environment.
+
+The completed invalidate/reconsider drill proves confirmation loss and return;
+it does not create a confirmed conflicting spend or alternate confirmed winner.
+The outstanding acceptance needs valid alternate blocks containing the controlled
+conflict, supplied as a reproducible real-chain fixture or with the network miner's
+cooperation. Do not change the network challenge, fabricate wallet confirmations,
+or relabel an unconfirmed transaction as permanent source loss. No funded retry
+or VM startup was needed to establish this limitation.
+
 Audit from the operation grammar/API through critical authorization, durable store,
 chain validators, signer, settlement and recovery. Review exports, OS credentials,
 transaction boundaries, backup acknowledgements and fence/old-key assumptions together.

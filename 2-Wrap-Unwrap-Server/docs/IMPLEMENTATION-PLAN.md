@@ -135,6 +135,27 @@ and node-integration VMs have been deleted. Retain the funded pilot and evidence
 | Production operation | Operator supplies independent RPC capacity, host/domain/support details and confirms issuer/reserve arrangements. |
 | Public release | Independent security/distribution review, operator-controlled public signing key and explicit publication/activation decision. |
 
+## Local checklist accounting (2026-10-05)
+
+The latest agreed autonomous-work list contains eight items, not nine. Keep these
+identities stable instead of treating the seven broad sequence headings above as
+an interchangeable completion count. Six are complete; two retain open work.
+
+| Item | Status | Evidence or remaining condition |
+| --- | --- | --- |
+| 1. Token CLI | Complete | Configuration/signing contract and 10,000-lamport default committed and tested. |
+| 2. Administration acceptance | Complete for agreed cases | Token metadata/creation/expiry and token/pool finalized-failure recovery have live two-provider evidence; replay and superseded-parent rejection passed. |
+| 3. Native recovery cases | Open | Confirmation loss/return, rebroadcast and same-host restoration passed. Permanent confirmed source loss, backing coverage/return and changed confirmed winner still need valid alternate L2L history. |
+| 4. Automated interface checks | Complete | Saved-order reload, instructions, status/refund presentation and network-error checks recorded in release evidence. Actual wallet approval remains an external gate. |
+| 5. Builds/installations | Complete locally | Both Linux architectures passed build/tests and clean install/upgrade/reboot; installer native-node, HTTPS backup and locked-wallet restoration passed. |
+| 6. Deployment isolation | Complete locally | Separate service/database identities, denied key access and restricted native RPC checked under actual installed accounts. |
+| 7. Internal review follow-through | Open | Input-boundary tests and dependency/source inventories are complete; remaining parser reachability and distribution obligations are explicitly unresolved in DEPENDENCY-REVIEW.md. |
+| 8. Review candidate/handoff | Complete | Frozen funded runtime, committed source, artifact identities, operating/recovery instructions and external gates are recorded. This is not public-release approval. |
+
+Do not repeat completed builds, installation drills or the Mainnet round trip
+without a relevant source change. Next work is a valid native reorg fixture and
+resolution of specific review findings, followed by the external gates above.
+
 ## Clean reinstall contract
 
 Recovery parameters identify the deployment and the off-host encrypted repository,
