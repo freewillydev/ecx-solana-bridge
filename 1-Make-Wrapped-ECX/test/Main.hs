@@ -17,7 +17,7 @@ import qualified Data.ByteArray as BA
 import qualified Data.ByteArray.Encoding as Encoding
 import qualified Data.ByteString.Lazy as L
 import System.IO (openTempFile,hClose)
-import System.Directory (removeDirectoryRecursive,removeFile)
+import System.Directory (removeDirectoryRecursive,removeFile,canonicalizePath)
 import qualified System.Posix.Directory as PD
 import System.Posix.Files (setFileMode,createSymbolicLink,getFileStatus,fileMode)
 import qualified Data.Bits as Bits
@@ -350,9 +350,10 @@ statusContract failed valid=
 
 -- Exercise the real executable: configuration is key-free and never executes work.
 cliContract :: IO Bool
-cliContract=bracket temporary removeDirectoryRecursive $ \directory->do
+cliContract=bracket temporary removeDirectoryRecursive $ \temporaryDirectory->do
+  directory<-canonicalizePath temporaryDirectory
   let run args input=readCreateProcessWithExitCode ((proc "ecx-token" args) {cwd=Just directory}) input
-      config=directory</>"ecx-token.json"
+      config=directory</>".ecx-token"</>"ecx-token.json"
       original=request Mint 1
       owner=T.unpack(authority original)
   (generated,_,_)<-run ["keygen","secretKey"] ""
@@ -367,10 +368,11 @@ cliContract=bracket temporary removeDirectoryRecursive $ \directory->do
   (badNetwork,_,_)<-run ["configure"] "sign\nnot-a-network\n"
   (badFee,_,_)<-run ["configure"] "sign\ndevnet\nhttps://rpc.example.invalid\n1e9\n"
   unchanged<-B.readFile config
-  (signConfig,_,_)<-run ["configure"] "sign\ndevnet\nhttps://rpc.example.invalid\n\nattempt.json\n"
+  (signConfig,_,_)<-run ["configure"] "\ninvalid-command\nsign\nnot-a-network\ndevnet\n\nhttps://rpc.example.invalid\n1e9\n\n\n"
   feeConfig<-B.readFile config
   let defaultFee=case eitherDecode (L.fromStrict feeConfig) of
         Right(Object values)->KM.lookup "maxFeeLamports" values==Just(String "10000")
+          && KM.lookup "attemptFile" values==Just(String $ T.pack $ directory</>".ecx-token"</>"token-transaction.json")
         _->False
   (noInput,_,_)<-run ["sign","nonexistent-key"] ""
   (missingTransaction,_,_)<-run ["sign","nonexistent-key","missing-transaction.json"] ""
@@ -394,7 +396,12 @@ cliContract=bracket temporary removeDirectoryRecursive $ \directory->do
     pure(and checks)
   keyAfter<-B.readFile (directory</>"secretKey")
   permissions<-fileMode <$> getFileStatus config
+  directoryMode<-fileMode <$> getFileStatus (directory</>".ecx-token")
+  setFileMode (directory</>".ecx-token") 0o755
+  (unsafeDirectory,_,_)<-run ["configure"] ""
+  setFileMode (directory</>".ecx-token") 0o700
   pure (generated==ExitSuccess && keyBefore==keyAfter && permissions Bits..&. 0o777==0o600
+    && directoryMode Bits..&. 0o777==0o700 && unsafeDirectory/=ExitSuccess
     && configured==ExitSuccess && derived==ExitSuccess && actual==expected
     && all (/=ExitSuccess) [extra,missing,badNetwork,badFee,noInput,missingTransaction,unknown]
     && before==unchanged && signConfig==ExitSuccess && defaultFee && transport)

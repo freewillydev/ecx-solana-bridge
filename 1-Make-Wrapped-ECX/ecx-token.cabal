@@ -31,4 +31,4 @@ executable ecx-token
   ghc-options: -Wall
   hs-source-dirs: app
   main-is: Main.hs
-  build-depends: base, ecx-token, ecx-build-assets, ecx-bridge, http-client, aeson, bytestring, text, directory
+  build-depends: base, ecx-token, ecx-build-assets, ecx-bridge, ecx-bridge:chain, http-client, aeson, bytestring, text, directory, filepath, unix

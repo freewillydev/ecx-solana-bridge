@@ -44,16 +44,21 @@ control the mint and have SOL for transaction fees.
 
    Choose `sign`. Enter `network` (`devnet` or `mainnet`), your HTTPS `rpc`,
    `maxFeeLamports` (press Enter for `10000`, or retain your saved value) and
-   `Transaction record file` (default `token-transaction.json`). This stores the
-   signed transaction and recovery information, not your private key. The default
-   is relative to the directory where you run the commands; that directory must
-   be owned by you with mode `0700`. When running from this repository, instead
-   enter an absolute path inside your existing private directory, for example
-   `/private/token-transaction.json`. Use the same file for submit/status/recover;
-   choose a new filename for each new transaction. Existing records are not
-   overwritten. The configuration field remains `attemptFile` for compatibility.
-   Settings are saved in `ecx-token.json`.
-   Configuration does not need or read your key.
+   `Transaction record file` (press Enter for `.ecx-token/token-transaction.json`).
+   Configure creates `.ecx-token/` in your current directory with owner-only
+   permissions (`0700`), saves its configuration there with mode `0600`, and stores
+   the default transaction path as an absolute path. An existing unsafe directory
+   or symlink is refused. This directory is ignored by Git.
+
+   The transaction record contains signed bytes and recovery information, not your
+   private key. Use the same file for submit/status/recover; choose a new filename
+   for each new transaction. Existing records are not moved or overwritten.
+   The field remains `attemptFile` for compatibility. Existing settings are retained;
+   a legacy `./ecx-token.json` is read if no private configuration exists, and the
+   next configure saves a private copy (the legacy file is left untouched).
+   Invalid input displays a message and repeats the prompt. Enter keeps a shown
+   default; empty required fields are requested again. Configuration does not need
+   or read your key.
 
 3. Sign the mint request:
 

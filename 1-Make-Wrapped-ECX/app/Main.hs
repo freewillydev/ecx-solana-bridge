@@ -7,11 +7,13 @@ import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Aeson.Key as K
 import Text.Read (readMaybe)
 import Data.Word (Word64)
+import Data.Char (isSpace)
 import Token.Signing
 import Control.Monad (unless,foldM)
-import Control.Exception (bracketOnError,finally,catches,Handler(..))
+import Control.Exception (bracketOnError,finally,catches,Handler(..),catch,IOException)
 import Bridge.SDKBuild (sdkLibraryPath)
 import Bridge.Error (BridgeError(..))
+import Bridge.AdminKey (privateParent)
 import Network.HTTP.Client (HttpException)
 import Data.Aeson (FromJSON,Key,Object,Value(..),eitherDecodeStrict',encode,object,(.=),withObject,(.:))
 import Data.Aeson.Types (parseEither)
@@ -19,6 +21,9 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy.Char8 as L
 import System.Directory (makeAbsolute,doesFileExist,renameFile,removeFile)
 import System.Environment (getArgs)
+import System.FilePath ((</>))
+import qualified System.Posix.Directory as PD
+import System.IO.Error (isAlreadyExistsError)
 import System.Exit (die)
 import System.IO (withBinaryFile,IOMode(ReadMode),stdout,hFlush,openBinaryTempFile,hClose)
 
@@ -37,7 +42,7 @@ run=getArgs >>= \args->case args of
     input<-makeAbsolute transaction
     dispatch "sign" keyfile (Just input)
   [command,key] | command/="sign" && command `elem` map fst commands->makeAbsolute key >>= \keyfile->dispatch command keyfile Nothing
-  _->die "Usage: ecx-token configure | ecx-token sign KEYFILE TRANSACTION.json | ecx-token COMMAND KEYFILE (commands: keygen, prepare, check, submit, recover, status, inspect-policy, address, associated-address, metadata-address; settings: ./ecx-token.json)"
+  _->die "Usage: ecx-token configure | ecx-token sign KEYFILE TRANSACTION.json | ecx-token COMMAND KEYFILE (commands: keygen, prepare, check, submit, recover, status, inspect-policy, address, associated-address, metadata-address; settings: ./.ecx-token/ecx-token.json)"
 
 commands :: [(String,[Key])]
 commands=
@@ -50,46 +55,64 @@ commands=
 
 configure :: IO ()
 configure=do
-  exists<-doesFileExist "ecx-token.json"
+  saved<-configurationPath
+  exists<-doesFileExist saved
   previous<-if exists then readConfiguration else pure KM.empty
+  directory<-makeAbsolute ".ecx-token"
+  PD.createDirectory directory 0o700 `catch` (\(err::IOException)->
+    unless (isAlreadyExistsError err) (ioError err))
+  let config=directory</>"ecx-token.json"
+      defaultRecord=directory</>"token-transaction.json"
+  privateParent config
+  oldDefaultExists<-doesFileExist "token-transaction.json"
   putStrLn "Configure an operation; existing settings are retained. No keys or transactions are used."
   putStrLn $ "Commands: "<>unwords(map fst commands)
-  selected<-prompt "Command" ""
-  fields<-maybe (die "Unknown token command") pure (lookup selected commands)
+  fields<-prompt "Command" "" $ \selected->
+    maybe (Left "Choose one of the commands listed above.") Right (lookup selected commands)
   settings<-foldM (\current name->do
     let old=case KM.lookup name current of
+          Just(String "token-transaction.json") | name=="attemptFile" && not oldDefaultExists->defaultRecord
           Just(String text)->T.unpack text
           _->case name of
             "maxFeeLamports"->"10000"
-            "attemptFile"->"token-transaction.json"
+            "attemptFile"->defaultRecord
             _->""
     let label=case name of
           "network"->"network (devnet = test coins, mainnet = real SOL/tokens)"
           "attemptFile"->"Transaction record file (inside a private directory)"
           _->K.toString name
-    raw<-prompt label old
-    unless (not(null raw)) (die "A value is required")
-    case name of
-      "network"->choose raw >> pure ()
-      "maxFeeLamports"->readFee raw >> pure ()
-      _->pure ()
+    raw<-prompt label old $ \value->case name of
+      "network"->parseNetwork value >> Right value
+      "maxFeeLamports"->parseFee value >> Right value
+      _->Right value
     pure (KM.insert name (String $ T.pack raw) current)) previous fields
   let bytes=encode (Object settings)
   unless (L.length bytes<=8192) (die "Configuration exceeds 8192 bytes")
-  bracketOnError (openBinaryTempFile "." ".ecx-token-")
+  bracketOnError (openBinaryTempFile directory ".ecx-token-")
     (\(path,handle)->hClose handle `finally` removeFile path) $ \(path,handle)->do
-      L.hPut handle bytes; hClose handle; renameFile path "ecx-token.json"
-  putStrLn "Saved ecx-token.json. No transaction was signed or submitted."
+      L.hPut handle bytes; hClose handle; renameFile path config
+  putStrLn $ "Saved "<>config<>". No transaction was signed or submitted."
   where
-    prompt label old=do
+    prompt label old validate=do
       putStr (label<>(if null old then "" else " ["<>old<>"]")<>": ")
       hFlush stdout
       value<-getLine
-      pure (if null value then old else value)
+      let chosen=if null value then old else value
+          result=if all isSpace chosen then Left "A value is required." else validate chosen
+      case result of
+        Right answer->pure answer
+        Left message->putStrLn message >> prompt label old validate
+
+configurationPath :: IO FilePath
+configurationPath=do
+  let path=".ecx-token"</>"ecx-token.json"
+  exists<-doesFileExist path
+  if exists then makeAbsolute path >>= \absolute->privateParent absolute >> pure absolute
+    else pure "ecx-token.json"
 
 readConfiguration :: IO Object
 readConfiguration=do
-  bytes<-readBounded "ecx-token.json"
+  bytes<-configurationPath >>= readBounded
   value<-either die pure (eitherDecodeStrict' bytes)
   either die pure $ parseEither (withObject "ecx-token configuration" $ \o->do
     unless (all (`elem` concatMap snd commands) (KM.keys o))
@@ -153,9 +176,12 @@ dispatch command key transactionFile=do
     _->die "Unknown token command"
 
 readFee :: String -> IO Word64
-readFee raw=case readMaybe raw :: Maybe Integer of
-  Just n | n>0 && n<=toInteger(maxBound::Word64) && show n==raw->pure(fromInteger n)
-  _->die "Invalid fee ceiling"
+readFee=either die pure . parseFee
+
+parseFee :: String -> Either String Word64
+parseFee raw=case readMaybe raw :: Maybe Integer of
+  Just n | n>0 && n<=toInteger(maxBound::Word64) && show n==raw->Right(fromInteger n)
+  _->Left "Enter a positive whole number of lamports (at most 18446744073709551615)."
 
 readBounded :: FilePath -> IO B.ByteString
 readBounded path=do
@@ -171,6 +197,9 @@ readPrepared path=do
     (,) <$> o .: "request" <*> o .: "unsignedTransaction") value
 
 choose :: String -> IO Network.Network
-choose "devnet"=pure Network.Devnet
-choose "mainnet"=pure Network.Mainnet
-choose _=die "Choose devnet or mainnet"
+choose=either die pure . parseNetwork
+
+parseNetwork :: String -> Either String Network.Network
+parseNetwork "devnet"=Right Network.Devnet
+parseNetwork "mainnet"=Right Network.Mainnet
+parseNetwork _=Left "Choose devnet or mainnet."
