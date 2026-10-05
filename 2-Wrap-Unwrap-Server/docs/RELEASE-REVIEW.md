@@ -89,7 +89,7 @@ The format-2 release index was signed with the retained **acceptance-only key**;
 and the test signer, not public-release authorization. Final payload inspection
 and authentication are new; clean/repeat installation and cold-boot evidence remain
 bound to the earlier candidates above. The installer/browser source is unchanged;
-no new installation or funded transfer is claimed for these final packages.
+the funded ARM64 upgrade and recovery checks below extend that evidence.
 
 Artifacts, index and `final-artifact-review.json` are in private
 `installer-acceptance-20261004/candidate-548c509/`. Build/install/upgrade commands are
@@ -99,6 +99,59 @@ backup client. Token/pool administration remains separately Cabal-built using it
 own README; no mint authority is installed into the custody server. All temporary
 build VMs were stopped after verification. Later evidence-only documentation commits
 do not require rebuilding these immutable artifacts.
+
+## Frozen ARM64 funded deployment (2026-10-05)
+
+The existing funded VM was upgraded to the `548c509` artifact above (implementation
+`ba5c0f1`). Its installed bridge SHA-256 is
+`2d2dd1f9772ac2284d4a1d75ebda764a0b215562f5a68813c2d70b74f983f757`.
+All payload hashes and unchanged schema-21 migrations matched. A stopped-ledger
+backup and the previous runtime were retained; configuration, custody keys and
+fence were preserved. Saved paid orders remained readable. Paused intake,
+unauthenticated signer rejection and worker denial of signer-key access passed.
+
+The existing betanet node had a corrupt undo file. An APFS clone of the retained
+September 25 node snapshot caught up through normal network validation, then
+passed `verifychain 4 144`. The original node and snapshot were retained. Removing
+only regenerable Cargo intermediates recovered approximately 13 GiB; no wallets,
+source or backup archives were deleted. The recovered node uses the existing
+wallet directory, a 550 MiB prune target and bounded memory. Its fallback fee is
+1 base unit/vbyte; the bridge's 500-unit native transaction cap is unchanged.
+The signer's persistent, restricted RPC credential survives node restarts;
+`sendrawtransaction` remains forbidden for that credential.
+
+The new wrapped-to-native order paid 2,970 native base units from 3,000 wrapped
+units (30-unit bridge fee; 141-unit native network fee). Native payout:
+`9ba36852f5a4bbc9c189a1db2e2a18d0b66b01d12de106c5cecfe9345883df5a`.
+Restarting the worker, signer and native node while this payout was unconfirmed
+retained that exact generation-0 attempt, which subsequently confirmed in block
+971186 without a replacement payout.
+
+The encrypted sequence-60 custody snapshot was downloaded, integrity-checked and
+restored into a separate PostgreSQL database using the frozen runtime. It retained
+the same in-flight attempt and restored paused. A requested minimum sequence of
+61 was rejected. No restored signer or fence was activated; the staging database
+and temporary plaintext were removed after inspection. This is same-Mac recovery,
+not physically independent disaster recovery.
+
+The return order received 1,000 native base units and paid 990 wrapped units
+(10-unit bridge fee; 5,000-lamport network fee). Finalized Solana payout at slot
+453690143:
+`2sKESTDE76hyN7oLSChYTHWzznpkVkcWAstfUJkR1p11X9iwXrES5YaVjbS4jw5Kw9c6HszaE5vQWggjLGqBLc29`.
+Both independent providers returned identical finalized transaction contents and
+metadata, including the exact 990-unit customer credit. An initial attempt expired
+without executing; its saved nonexecution proof gated the successful generation-1
+retry. This was one economic payment, not two funded orders.
+
+Final custody balances were 95,778 native units, 3,004,020 wrapped units and
+4,990,000 lamports. All matched the ledger exactly, with no in-flight effects.
+Critical sequence and verified backup coverage both reached 76. A final service
+restart preserved both paid orders, their original quotes and payout IDs. The VM
+is running with intake paused for review; other test/build VMs remain stopped.
+Private evidence is under `mainnet-pilot-20261004/current-review-20261005/` in the
+retained secrets directory. These transfers used dedicated customer clients;
+real-wallet UI approval, independent-host recovery and independent security review
+remain separate release gates.
 
 ## Durable offline mint acceptance (2026-10-05)
 
