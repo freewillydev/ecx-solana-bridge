@@ -33,11 +33,22 @@ import Text.Read (readMaybe)
 
 data Network = Devnet | Mainnet deriving (Eq,Show)
 data Safe a where
+  RecentBlockhash :: Network -> String -> Safe Text
   InspectSaved :: Network -> String -> FilePath -> Safe Status
   Check :: Network -> String -> Word64 -> Request -> Text -> Safe Word64
   InspectPolicy :: Network -> String -> String -> Text -> Text -> Text -> Maybe Text -> Safe [(Word64,Word64,Word64)]
 
 evalSafe :: Safe a -> IO a
+evalSafe (RecentBlockhash network endpoint)=do
+  transport<-parseRequest endpoint
+  require (secure transport) "invalid_token_rpc_policy"
+  bracket newRpcManager closeManager $ \manager->do
+    let call=rpc manager endpoint Nothing
+    actual<-call "getGenesisHash" [] >>= parseValue parseJSON
+    require (actual==genesis network) "wrong_token_network"
+    recent<-call "getLatestBlockhash" [object ["commitment" .= ("finalized"::Text)]]
+      >>= fieldValue "value" >>= fieldValue "blockhash" >>= parseValue parseJSON
+    either reject (const $ pure recent) (publicKey recent)
 evalSafe (InspectSaved network endpoint path)=do
   (saved,_)<-loadFamily path
   forM_ (savedRecovery saved) $ \context->either reject pure $

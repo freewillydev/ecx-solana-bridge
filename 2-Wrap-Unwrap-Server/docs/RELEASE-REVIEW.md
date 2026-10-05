@@ -500,6 +500,24 @@ observations, binary hashes, immutable attempts and finalized effects. This adds
 live burn-family expiry acceptance; it does not establish finalized-failure,
 metadata/account-creation recovery or canonical issuance authority.
 
+Mint-creation expiry recovery also passed through the simplified token CLI on real
+Devnet. Two-provider absence/expiry evidence produced one saved successor; repeated
+recovery preserved its bytes, the parent was refused, and finalized replay did not
+create another account. Mint `ETvbGEEV8h1xLoDS24zCXebgp2qrNYdwvSMBacZAKCuT`
+has zero supply, eight decimals, the expected test authority and no freeze authority.
+Transaction `2qYrNaBUGJXxPfjQnxcTbCji7xqS1dRwno7268Kz85U82mMz89QraL5hP2LLjEkpH3TYb1FqCRhFqscj4XwGj9p6`
+charged 5,000 Devnet lamports in network fees. Private evidence is retained under
+`admin-recovery-families-20261004`; this does not close other creation/metadata
+families or canonical issuance approval.
+
+The token CLI now accepts a mint intent without a blockhash. Its closed safe
+operation checks HTTPS and network genesis before retrieving a finalized blockhash;
+existing critical signing and recovery still refresh and validate their own context.
+Signed archives retain their strict blockhash field. The token Cabal suite passed,
+including parser rejection of caller-supplied hashes, and a real Devnet sign-only
+check preserved the intent with a matching saved recovery blockhash. That attempt
+was not submitted. Its private evidence is under `token-auto-blockhash-xojgw2g6`.
+
 ## Gates still open
 
 Real Devnet nonzero fee collection and explicit reinvestment passed after bounded

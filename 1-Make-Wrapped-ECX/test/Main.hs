@@ -46,6 +46,11 @@ main :: IO ()
 main=do
   results<-sequence
     [ quickCheckResult $ once $ ioProperty cliContract
+    , quickCheckResult $ \positive->let
+        original=request Mint (getPositive positive)
+        withoutHash=case toJSON original of Object o->Object(KM.delete "blockhash" o); other->other
+        parse=parseEither (parseIntent $ blockhash original)
+        in parse withoutHash==Right original && isLeft(parse $ toJSON original)
     , quickCheckResult $ statusContract
     , quickCheckResult $ \n revoked->policyCheck n revoked
     , quickCheckResult $ once $ ioProperty $ do

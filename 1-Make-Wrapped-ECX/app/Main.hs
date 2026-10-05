@@ -120,7 +120,9 @@ dispatch command key transactionFile=do
       selected<-network; endpoint<-field "rpc"; limit<-fee
       input<-maybe (die "sign requires TRANSACTION.json") pure transactionFile
       requestBytes<-readBounded input
-      request<-either die pure (eitherDecodeStrict' requestBytes)
+      intent<-either die pure (eitherDecodeStrict' requestBytes)
+      recent<-(O.runSafe . O.Request) (Network.RecentBlockhash selected endpoint)
+      request<-either die pure (parseEither (parseIntent recent) intent)
       unsigned<-(O.runSafe . O.Request) (Prepare sdkLibraryPath request)
       output<-path "attemptFile"
       identifier<-(O.runCritical . O.Request) (Network.Sign sdkLibraryPath selected endpoint limit request unsigned key output)

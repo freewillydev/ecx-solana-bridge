@@ -1,6 +1,6 @@
 {-# LANGUAGE GADTs, ForeignFunctionInterface #-}
 -- Administration has no custody credential, database or generic instruction input.
-module Token (Action(..),Request(..),Safe(..),evalSafe,validate,mintAddress) where
+module Token (Action(..),Request(..),Safe(..),evalSafe,validate,mintAddress,parseIntent) where
 import qualified Token.Metadata as M
 import Bridge.Error (require,reject)
 import Bridge.Solana (tokenProgram)
@@ -8,6 +8,8 @@ import Bridge.SolanaMessage
 import Control.Exception (bracket)
 import Control.Monad (unless)
 import Data.Aeson
+import qualified Data.Aeson.KeyMap as KM
+import Data.Aeson.Types (Parser)
 import Data.List (nub,sort)
 import Crypto.Hash (hash,Digest,SHA256)
 import qualified Data.ByteArray as BA
@@ -65,6 +67,13 @@ instance FromJSON Request where
         _->do
           operation<-case verb of "mint"->pure Mint; "burn"->pure Burn; _->fail "invalid_token_operation"
           Request operation <$> o .: "authority" <*> o .: "mint" <*> o .: "account" <*> pure n <*> o .: "blockhash"
+
+-- Only the selected network supplies freshness; signed archives keep Request's
+-- strict blockhash field and retain their existing immutable format.
+parseIntent :: Text -> Value -> Parser Request
+parseIntent recent=withObject "token signing input" $ \o->do
+  unless (not $ KM.member "blockhash" o) (fail "Remove blockhash; signing obtains it from the network")
+  parseJSON (Object $ KM.insert "blockhash" (String recent) o)
 
 data Safe a where
   MintAddress :: Text -> Text -> Safe Text

@@ -6,8 +6,8 @@ outside Git, with mode `0600` in an owned `0700` directory. The authority must
 control the mint and have SOL for transaction fees.
 
 1. Fill in [inputs/mint.json](inputs/mint.json): mint-authority public key, wrapped
-   ECX mint, destination **token account**, amount and a recent blockhash from the
-   intended Solana network. Amounts use eight decimals: `100000000` means one token.
+   ECX mint, destination **token account** and amount. The signer obtains the
+   blockhash automatically. Amounts use eight decimals: `100000000` means one token.
 
 2. Configure signing:
 
