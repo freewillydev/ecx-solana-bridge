@@ -483,6 +483,23 @@ established by this run. Publication-crash hardlinks require the documented manu
 inspection; two-provider history remains a trust assumption, not cryptographic
 proof of nonexecution.
 
+The separate 2026-10-04 burn-expiry drill used the existing tester owner's key,
+not the mint-authority key. Both Devnet providers established expiry and absence;
+the production CLI saved generation 1, repeated recovery returned identical bytes,
+and submission refused the superseded parent. The recovered burn finalized with
+exactly one base unit removed; finalized saved-byte replay caused no further burn.
+A separate authorized mint restored supply to 200,000,000,000 and tester balance
+to 99,997,921,043, exactly matching this drill's starting values. Each transaction
+charged 5,000 Devnet lamports. No Mainnet or bridge-custody transaction was made.
+
+- Recovered burn: `5nPsLh5ECxjYMzgkKbidsVtwc1PCFxFVxP2WPUWHao5RrTh2zEaUPb7T17LBecv1REWeewwGq1qAzB9earEDYc8D`.
+- Restoring mint: `5qQzMZgv4WNdMxAyyshbRM9hHGdQoaUMuzw887XW6xBD68NyNs7TJsMo1ULu3R8wvmCYiaFwyxaqzSJy74senAnv`.
+
+Private `admin-recovery-burn-20261004` evidence retains the requests, provider
+observations, binary hashes, immutable attempts and finalized effects. This adds
+live burn-family expiry acceptance; it does not establish finalized-failure,
+metadata/account-creation recovery or canonical issuance authority.
+
 ## Gates still open
 
 Real Devnet nonzero fee collection and explicit reinvestment passed after bounded

@@ -264,6 +264,10 @@ finalized mint of one base unit and exact replay. A subsequent checked burn rest
 the original supply and tester balance. The finalized-failure branch has offline
 evidence; this run does not establish canonical administration acceptance. See the
 [release review](../2-Wrap-Unwrap-Server/docs/RELEASE-REVIEW.md) for transaction IDs.
+Burn expiry recovery subsequently passed against the same two Devnet providers:
+one saved successor, identical repeated recovery, refused parent and finalized
+saved-byte replay. A separate checked mint restored the single burned base unit;
+ending supply and tester balance matched their initial values exactly.
 Canonical issuance additionally requires actual issuer authority and reserve records;
 see the [token operations guide](../2-Wrap-Unwrap-Server/docs/TOKEN-OPERATIONS.md).
 
