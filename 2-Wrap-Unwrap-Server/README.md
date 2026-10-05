@@ -18,10 +18,30 @@ Requires **GHC 9.14.1 and Cabal 3.16.1.0**. Select the pinned tools using the
 From the repository root:
 
 ```sh
-cabal build all -j1
-cabal test all -j1 --test-show-details=direct
-cabal run exe:ecx-bridge -- check-config /absolute/private/config.json
-cabal run exe:ecx-bridge -- observe /absolute/private/config.json
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
+
+git clone https://github.com/emscripten-core/emsdk.git \
+  "$HOME/.local/share/ecx-emsdk"
+
+cd "$HOME/.local/share/ecx-emsdk"
+./emsdk install 3.1.74
+./emsdk activate 3.1.74
+source ./emsdk_env.sh
+emconfigure ghcup install ghc --set javascript-unknown-ghcjs-9.12.2
+
+cd ~/ecash/ecx-solana-bridge/
+
+ghcup install cabal
+cabal update
+ghcup run --install --ghc 9.14.1 --cabal 3.16.1.0
+ghcup run --ghc 9.14.1 -- cabal build exe:ecx-bridge -j1
+export PATH="$(dirname "$(ghcup run --install --ghc 9.14.1 --cabal 3.16.1.0 -- cabal list-bin exe:ecx-bridge)"):$PATH"
+cd 2-Wrap-Unwrap-Server
+
+ecx-bridge -- check-config /absolute/private/config.json
+ecx-bridge -- observe /absolute/private/config.json
 ```
 
 Startup requires a reviewed deployment configuration, migrated PostgreSQL ledger,
