@@ -38,6 +38,14 @@ build/unit-suite acceptance, not fresh installation, browser compiler reproducti
 funded operation or clean-host recovery. The test log is retained privately as
 `installer-acceptance-20261004/x86-tests-7805c02.log`.
 
+The x86-64 package builder then produced a 28,414,439-byte candidate at `fb2cb84`
+(only release-evidence documentation changed after the tested source). Artifact
+SHA-256: `a3646e2141cfd3720413fa01c12f3d2e7a03e14f5040946fe6980cd5d78e0f58`.
+Host readback verified every payload-manifest entry, all eight migrations, the
+reviewed x86-64 restic hash and absence of links/traversal entries. This is package
+construction/integrity evidence; authentication and clean installation remain open.
+Private evidence is `package-inspection-x86-fb2cb84.json` in the same directory.
+
 ## Mainnet blocker history and closure
 
 The documented public endpoint `https://api.mainnet.solana.com` passed two read-only
