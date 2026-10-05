@@ -53,6 +53,7 @@
     "go": "go1.26.8",
     "tags": "disable_grpc_modules",
     "patchSha256": "8bc7a3ec39fa617917b567c7da93f2275c21d8ce3616093022612269f099f0f5",
-    "aarch64": "f5fdb349699c6b0a82a3c5bf4b92e94769842ae909f5ffb010dc694b668740bf"
+    "aarch64": "f5fdb349699c6b0a82a3c5bf4b92e94769842ae909f5ffb010dc694b668740bf",
+    "x86_64": "da56dd1231ddabe0930e8635dda573d144286ebc66f822488bb19d85f723ca99"
   }
 }

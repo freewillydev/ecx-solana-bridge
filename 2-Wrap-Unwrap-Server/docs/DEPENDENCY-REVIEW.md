@@ -116,7 +116,7 @@ binary after the bridge integration check below.
 
 `build/toolchains.json` pins the upstream module checksum, compiler, patch and
 reviewed candidate hash. Packaging now rejects the old binary before building.
-There is no reviewed x86-64 hash yet. Go/restic notice-file collection now matches
+The x86-64 backup-tool candidate is also pinned (acceptance below). Go/restic notice-file collection now matches
 the actual ARM64 graph (118 files, 81 components); legal/platform distribution
 review remains. Remaining work includes independent applicability review, x86-64 acceptance and
 regeneration/authentication of the final artifact. Private `restic-*` source,
@@ -142,3 +142,15 @@ and contained no matching module record on 2026-10-04. This addresses the scanne
 missing main-module version only as published-database evidence, not a source audit
 or guarantee that restic has no unknown vulnerabilities. Private integration,
 deployment and module-index records accompany the earlier scans.
+
+The Linux x86-64 restic candidate was cross-built with the same source patch,
+Go 1.26.8, tags and flags (`GOARCH=amd64`). Its SHA-256 is
+`da56dd1231ddabe0930e8635dda573d144286ebc66f822488bb19d85f723ca99`.
+All 79 embedded module path/version/checksum triples exactly match ARM64, so the
+collected module and compiler notices cover both candidates. Its binary advisory
+scan retains the same OpenPGP wildcard finding. On Ubuntu 24.04 x86-64 under QEMU,
+it restored a backup made by the installed restic 0.16.4, and 0.16.4 restored its
+new backup; both full data checks and wrong-password rejection passed. Fixtures
+were deleted. This is backup-tool acceptance, not the complete x86-64 bridge build,
+installer or funded-chain acceptance. Retired bridge services and their backup
+timer were stopped/disabled on that test VM, with their data retained.

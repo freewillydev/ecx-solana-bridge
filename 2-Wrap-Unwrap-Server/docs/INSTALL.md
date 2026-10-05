@@ -83,7 +83,8 @@ candidate was built with:
 GOTOOLCHAIN=go1.26.8 GOMAXPROCS=1 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -p=1 -mod=readonly -trimpath -tags=disable_grpc_modules -ldflags='-s -w' -o restic-patched ./cmd/restic
 ```
 
-Check the output against the pinned `restic-reviewed.aarch64` SHA-256. Self-update
+For x86-64 use `GOARCH=amd64`. Check the output against the matching pinned
+`restic-reviewed.aarch64` or `restic-reviewed.x86_64` SHA-256. Self-update
 is deliberately not compiled into this managed deployment tool. The module patch
 and checksums preserve the exact dependency choices; do not substitute an arbitrary
 binary that prints the same version. This candidate passed local repository compatibility and the frozen bridge
