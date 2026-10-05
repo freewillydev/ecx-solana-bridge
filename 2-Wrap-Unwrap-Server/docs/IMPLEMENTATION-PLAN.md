@@ -71,8 +71,8 @@ refusals with a failing exit status, preventing scripts from continuing on an er
    evidence. Measure both required checkpoints and combined worker/signer RPC
    budgets inside the Solana blockhash window; preserve expiry and backup barriers.
 3. **Close substantive recovery gaps.** Exercise permanent source loss/coverage,
-   restored sources, native winner changes after reorg, explicit rebroadcast, and restoration
-   with in-flight Solana work. Retain the completed isolated native rebroadcast and
+   restored sources and native winner changes after reorg. Retain the completed
+   explicit rebroadcast and same-host in-flight Solana restoration/replay evidence. Retain the completed isolated native rebroadcast and
    in-flight restore acceptance. Retain exact bytes, one economic settlement and capital
    accounting. Keep the completed same-host encrypted-wallet drill as regression
    evidence. Fix shared-engine failures without introducing parallel payment paths.

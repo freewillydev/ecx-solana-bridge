@@ -99,6 +99,21 @@ no deadline or generation cap was increased. The pre-fix refusals above are reta
 as historical evidence, not current unpaid obligations. Private `rescan-mainnet-*`
 artifacts hold final ledger, transaction, timing and snapshot evidence.
 
+
+The frozen candidate also passed in-flight Solana restoration from the real
+sequence-55 HTTPS/restic custody snapshot. Verified download and ledger restore
+created a separate paused database/fence containing generation 7 in
+`broadcast_intent`, with its original signature and backup coverage 53 (the
+snapshot predates its acknowledgement). With the signer stopped, the production
+observation-only worker recovered `PaymentPaid` from the actual finalized Mainnet
+transaction. All three assets matched the settled live deployment; a subsequent
+observation preserved balances, payment and network cost. No replacement signature
+or payment was needed. The test fence was retired; the disposable database, peer
+rule, observer and recovered secret copies were removed. Private `sequence55-*`
+evidence retains before/after/repeat/cleanup results. This closes the same-host
+in-flight Solana ledger-recovery case, not independent-host activation, restored
+native-wallet use, backup deletion separation or disaster recovery.
+
 ## Evidence already obtained
 
 | Area | Evidence and limit |
@@ -504,8 +519,8 @@ review or distribution/license requirements.
    verify reference/effects, both directions, saved-order recovery, refunds and
    browser errors. A test client or wallet-opening link does not close this gate.
 2. **Recovery effects:** verify permanent source loss/double spend, coverage/return,
-   native winner changes after reorg and restoration with in-flight
-   Solana work. Retain the completed same-host encrypted-wallet drill as regression
+   native winner changes after reorg. Retain the completed same-host in-flight
+   Solana restore/reconciliation evidence. Retain the completed same-host encrypted-wallet drill as regression
    evidence; clean-host funded recovery remains in the following gate.
    Preserve one payout, correct capital/cost accounting and exact saved bytes.
 3. **Isolation and off-host recovery:** exercise the current worker/signer under
