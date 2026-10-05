@@ -21,6 +21,21 @@ PostgreSQL contracts cover interruption before commit, rollback and permanent
 connection fencing, and the worker contract checks shutdown propagation. This is
 a source/contract review of the lifetime boundary, not a new funded crash drill.
 
+Updated Ubuntu candidate packages were assembled from `509f617` using the
+verified ARM64/x86-64 build caches and hash-pinned reviewed restic binaries. Both
+archives bind that exact source, contain no links/traversal or duplicate file
+entries, and cover all 40 payload files in their manifests. Packaging now excludes
+only the top-level manifest from self-hashing, so the nested browser manifest is
+also covered. A local **test** release index was signed and both architectures
+passed signature and installer-checksum verification; this is not a public trust key
+or installation acceptance of these new artifacts. Retained candidates are in
+private `installer-acceptance-20261004/candidate-509f617/`.
+
+| Architecture | Artifact SHA-256 | Bytes |
+| --- | --- | ---: |
+| ARM64 | `5b89ceaeda28a4d52a32a10daf62f27351f4e218877d28e8207cf90a35d3a072` | 33,698,373 |
+| x86-64 | `5a3dec48318d8226eb564807d73dff15cc7ba562a88c17e19bb367ae426decc4` | 28,421,166 |
+
 The Mainnet round trip passed on frozen review candidate `54c2bfd`, deployed in
 the Ubuntu ARM64 VM. Executable SHA-256:
 `2ce848b303104209bc1bdb5828237db98b613b9c7a32f1a449a4ec93d3c13cbe`.
