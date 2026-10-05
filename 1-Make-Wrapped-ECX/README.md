@@ -1,6 +1,14 @@
 # Mint wrapped ECX
 
-Run these commands from `1-Make-Wrapped-ECX` with `ecx-token` on your PATH.
+Build from the repository root, then put the executable on this shell's PATH:
+
+```sh
+cabal build exe:ecx-token -j1
+export PATH="$(dirname "$(cabal list-bin exe:ecx-token)"):$PATH"
+cd 1-Make-Wrapped-ECX
+```
+
+Run the commands below from `1-Make-Wrapped-ECX`.
 `secretKey` is your existing mint-authority keypair file; keep it private and
 outside Git, with mode `0600` in an owned `0700` directory. The authority must
 control the mint and have SOL for transaction fees.
