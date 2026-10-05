@@ -108,8 +108,8 @@ refusals with a failing exit status, preventing scripts from continuing on an er
    signed package passed clean fresh installation, repeat/upgrade, cold boot, TLS
    authentication and actual service-account SSH denials. The reviewed x86-64
    package now also passes clean installation, upgrade, repeat-fresh refusal,
-   cold boot and service isolation. Finish updated ARM64 installed-package acceptance,
-   native-node/backup integration and funded clean-host restoration.
+   cold boot and service isolation. The updated ARM64 package passes the same
+   installed checks. Finish native-node/backup integration and funded clean-host restoration.
    Reuse expensive builds; run packaging acceptance after runtime changes settle.
    Authenticate the final release artifact. Public publication and valuable-fund
    activation remain explicit operator decisions after the required gates close.

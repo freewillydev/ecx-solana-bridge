@@ -73,6 +73,16 @@ upgrade and cold-boot acceptance. Loopback-only service policy deliberately excl
 chain/backup traffic; native-node integration and funded independent restoration
 remain separate gates. The acceptance key is not a public release trust key.
 
+The updated ARM64 package at `0a545ba` passed the same clean-host exercise on a
+fresh pinned Ubuntu VM: authenticated installation, both actual services,
+signer TLS/401, 35 filesystem/database isolation checks, both real SSH denials,
+upgrade preservation and repeat-fresh refusal. A full shutdown/start preserved the
+paused sequence-zero ledger and public configuration; services started at boot,
+and authentication, isolation and SSH checks passed again. Private `arm-final-*`
+results retain evidence for this exact artifact with the reviewed restic binary.
+This completes unfunded installed-package acceptance on both architectures; it
+does not establish funded restoration, native-node integration or remote retention.
+
 ## Mainnet blocker history and closure
 
 The documented public endpoint `https://api.mainnet.solana.com` passed two read-only
@@ -743,8 +753,8 @@ review or distribution/license requirements.
    Earlier dependency inventories are not a clean bill of health for a new artifact.
 6. **Installation/release:** retain the hardened signed ARM64 package's clean
    fresh/repeat/upgrade, cold-boot and service-isolation evidence and the reviewed
-   x86-64 package's completed installation acceptance. Finish installed acceptance
-   of the updated ARM64 package, native-node/backup integration and funded clean-host restoration.
+   x86-64 and updated ARM64 packages' completed installation acceptance. Finish
+   native-node/backup integration and funded clean-host restoration.
    Review distribution notices and the public release trust-key procedure before
    publishing. The acceptance-test signing key does not establish public trust.
 

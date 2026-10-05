@@ -4,7 +4,8 @@ The current server is built through Cabal. The candidate installer under `instal
 targets the rebuilt server; it is **not yet a certified release**. Do not use an old
 release built for the retired server. The hardened ARM64 signed package passed clean
 fresh installation, repeat/upgrade, cold boot and service isolation checks.
-x86-64 and funded restored-operation gates remain open.
+The reviewed x86-64 package now passes those checks too. Funded clean-host
+restoration and native-node/backup integration remain open.
 
 ## Candidate installation and upgrade
 
@@ -134,8 +135,9 @@ backup-destination and public HTTPS provisioning remain required.
   application and signer bind loopback. No public operator route exists.
 - Provision off-host HTTPS restic storage and retain recovery credentials separately
   before enabling required backup. Automatic repository provisioning is unfinished.
-  Use the tested [restic 0.19.1](https://github.com/restic/restic/releases/tag/v0.19.1)
-  client at the absolute `restic` path in `BACKUP_CONFIG`. Ubuntu 24.04's distro
+  Use the reviewed, hash-pinned restic build described above at the absolute
+  `restic` path in `BACKUP_CONFIG`. The version number alone is insufficient.
+  Ubuntu 24.04's distro
   restic 0.16.4 lacks `dump --target`, which complete backup readback and recovery
   require; a successful upload alone does not complete a custody checkpoint.
 

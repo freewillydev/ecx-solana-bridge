@@ -45,9 +45,10 @@ application build or WebAssembly backend. See [local development](2-Wrap-Unwrap-
 
 `ecx-bridge` is the sole server executable. Actual customer-wallet acceptance,
 remaining recovery cases, canonical authority/backing checks and independent
-review remain. A candidate installer now targets the frozen runtime; its ARM64
-signed package passed clean installation, repeat/upgrade, cold boot and service
-isolation checks. x86-64 and funded restore acceptance remain open. This is not a public or valuable-fund release.
+review remain. Signed ARM64 and x86-64 candidate packages passed clean installation,
+repeat-fresh refusal, upgrade preservation, cold boot and service isolation checks.
+Funded clean-host restoration and native-node/backup integration remain open.
+This is not a public or valuable-fund release.
 
 [Architecture](2-Wrap-Unwrap-Server/docs/ARCHITECTURE.md) ·
 [Operations](2-Wrap-Unwrap-Server/docs/OPERATIONS.md) ·
