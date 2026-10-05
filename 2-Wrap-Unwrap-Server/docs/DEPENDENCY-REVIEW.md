@@ -116,8 +116,9 @@ binary after the bridge integration check below.
 
 `build/toolchains.json` pins the upstream module checksum, compiler, patch and
 reviewed candidate hash. Packaging now rejects the old binary before building.
-There is no reviewed x86-64 hash yet. Remaining work is updated Go/restic notices,
-independent applicability review, x86-64 acceptance and
+There is no reviewed x86-64 hash yet. Go/restic notice-file collection now matches
+the actual ARM64 graph (118 files, 81 components); legal/platform distribution
+review remains. Remaining work includes independent applicability review, x86-64 acceptance and
 regeneration/authentication of the final artifact. Private `restic-*` source,
 scan, import and compatibility evidence is in `security-audit/current-20261004`.
 

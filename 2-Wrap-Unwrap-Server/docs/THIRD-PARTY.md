@@ -44,9 +44,19 @@ The current advisory review also retains a build-time Cabal source-header deleti
 finding. Previous Linux notice and loader checks remain historical evidence;
 the advisory refresh does not replace a distribution/license audit.
 
-The ARM64 restic binary's 79 Go module dependencies are a separate inventory; they
-are **not** included in the 358 Cabal/Cargo versions above. The security candidate
-also updates that Go graph. Restic, Go runtime and transitive notice collection
-must follow the final binary metadata before distribution; retain the upstream
-restic source license and embedded-component notices. See the candidate hashes
-and remaining checks in [DEPENDENCY-REVIEW.md](DEPENDENCY-REVIEW.md).
+The patched ARM64 restic candidate has a separate `resticCandidate` inventory in
+`coverage.json`; it is **not** included in the 358 Cabal/Cargo versions above.
+All 79 module source checksums matched its embedded build metadata. The collection
+preserves 118 notice files across those modules, upstream restic and the Go 1.26.8
+compiler/runtime archive, including nested notices. Each entry records source and
+notice hashes. Identical license texts share one retained body; all 118 original
+byte sequences were verified against the combined notice text. Existing notices
+were preserved byte-for-byte. This adds 58 distinct text blocks to the existing
+bundle without adding notice files or application code.
+
+This closes notice-file collection for that candidate, not review of license
+choices, embedded source-header obligations, platform libraries, or the final
+artifact's distribution obligations. Go archive collection includes compiler
+notices as well as runtime notices. Recheck the exact binary and graph if either
+changes. See the candidate hashes and remaining checks in
+[DEPENDENCY-REVIEW.md](DEPENDENCY-REVIEW.md).

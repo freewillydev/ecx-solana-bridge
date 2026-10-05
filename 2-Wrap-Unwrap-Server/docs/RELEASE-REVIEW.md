@@ -203,8 +203,8 @@ binary. The frozen bridge executable is unchanged. The candidate then passed the
 bridge custody download, inspection, upload and mandatory full readback using the
 real sequence-55 bundle and existing HTTPS repository. Its manifest hash was unchanged.
 The paused VM now uses the patched tool; recovered key files were removed and the
-VM stopped. The signed package has not been replaced. Refreshed notices, x86-64 and
-final artifact acceptance remain required. Independent-host recovery is still open. See [dependency review](DEPENDENCY-REVIEW.md).
+VM stopped. The signed package has not been replaced. Notice-file collection now covers the exact Go/restic graph; distribution review,
+x86-64 and final artifact acceptance remain required. Independent-host recovery is still open. See [dependency review](DEPENDENCY-REVIEW.md).
 
 ## Evidence already obtained
 

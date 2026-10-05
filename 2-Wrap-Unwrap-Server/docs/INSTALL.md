@@ -87,8 +87,7 @@ Check the output against the pinned `restic-reviewed.aarch64` SHA-256. Self-upda
 is deliberately not compiled into this managed deployment tool. The module patch
 and checksums preserve the exact dependency choices; do not substitute an arbitrary
 binary that prints the same version. This candidate passed local repository compatibility and the frozen bridge
-custody upload/download/readback path. It still needs notice review and final
-artifact acceptance.
+custody upload/download/readback path. Its notices are collected; distribution review and final artifact acceptance remain.
 The earlier signed installer remains historical acceptance evidence, not a public
 release candidate with these security changes. See [dependency review](DEPENDENCY-REVIEW.md).
 
