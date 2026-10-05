@@ -9,8 +9,8 @@ Build from the repository root, then put the executable on this shell's PATH:
 curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
 ghcup install cabal
 cabal update
-ghcup run --install --ghc 9.14.1 --cabal 3.16.1.0 -- bash cabal build exe:ecx-token -j1
-export PATH="$(dirname "$(cabal list-bin exe:ecx-token)"):$PATH"
+ghcup run --install --ghc 9.14.1 --cabal 3.16.1.0 -- cabal build exe:ecx-token -j1
+export PATH="$(dirname "$(ghcup run --install --ghc 9.14.1 --cabal 3.16.1.0 -- cabal list-bin exe:ecx-token)"):$PATH"
 cd 1-Make-Wrapped-ECX
 ```
 
