@@ -12,6 +12,8 @@ recovery checks. It is not yet a public or valuable-fund release. See the precis
 
 ## Build and run
 
+clone this repo into a folder ecash so the command cd ~/ecash works
+
 Requires **GHC 9.14.1 and Cabal 3.16.1.0**. Select the pinned tools using the
 [compiler setup instructions](docs/LOCAL-DEVELOPMENT.md) before building.
 
