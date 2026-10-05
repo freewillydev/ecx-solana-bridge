@@ -1,61 +1,138 @@
 module Main (main) where
 import Token
 import qualified Token.Operation as O
-import Data.Text (Text)
-import qualified Data.Text as T
 import qualified Token.Network as Network
+import qualified Data.Text as T
+import qualified Data.Aeson.KeyMap as KM
+import qualified Data.Aeson.Key as K
 import Text.Read (readMaybe)
 import Data.Word (Word64)
 import Token.Signing
-import Control.Monad (unless)
+import Control.Monad (unless,foldM)
+import Control.Exception (bracketOnError,finally)
 import Bridge.SDKBuild (sdkLibraryPath)
-import Data.Aeson (eitherDecodeStrict',encode,object,(.=),withObject,(.:))
+import Data.Aeson (FromJSON,Key,Object,Value(..),eitherDecodeStrict',encode,object,(.=),withObject,(.:))
 import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy.Char8 as L
+import System.Directory (makeAbsolute,doesFileExist,renameFile,removeFile)
 import System.Environment (getArgs)
 import System.Exit (die)
-import System.IO (withBinaryFile,IOMode(ReadMode))
+import System.IO (withBinaryFile,IOMode(ReadMode),stdout,hFlush,openBinaryTempFile,hClose)
 
 main :: IO ()
 main=getArgs >>= \args->case args of
-  ["status",network,endpoint,path]->choose network >>= \selected->(O.runSafe . O.Request) (Network.InspectSaved selected endpoint path) >>= L.putStrLn . encode
-  ["inspect-policy",network,primary,verifier,key,owner,custody,issuer]->do
-    selected<-choose network
-    let expected=if issuer=="revoked" then Nothing else Just(T.pack issuer)
-    readings<-(O.runSafe . O.Request) (Network.InspectPolicy selected primary verifier (T.pack key) (T.pack owner) (T.pack custody) expected)
-    L.putStrLn $ encode $ object ["network" .= network,"mint" .= key,"custodyOwner" .= owner,"custodyAta" .= custody,"mintAuthority" .= expected,
-      "readings" .= [object ["finalizedSlot" .= slot,"supplyBaseUnits" .= show supply,"custodyBaseUnits" .= show balance] | (slot,supply,balance)<-readings]]
-  ["keygen",output]->(O.runCritical . O.Request) (GenerateKey output) >>= L.putStrLn . encode
-  ["associated-address",recipient,key]->(O.runSafe . O.Request) (AssociatedAddress sdkLibraryPath (T.pack recipient) (T.pack key)) >>= L.putStrLn . encode
-  ["metadata-address",key]->(O.runSafe . O.Request) (MetadataAddress sdkLibraryPath $ T.pack key) >>= L.putStrLn . encode
-  ["address",owner,label]->(O.runSafe . O.Request) (MintAddress (T.pack owner) (T.pack label)) >>= L.putStrLn . encode
-  ["prepare",path]->do
-    bytes<-readBounded path
-    request<-either die pure (eitherDecodeStrict' bytes)
-    transaction<-(O.runSafe . O.Request) (Prepare sdkLibraryPath request)
-    L.putStrLn $ encode $ object ["request" .= request,"unsignedTransaction" .= transaction]
-  ["check",network,endpoint,limit,prepared]->do
-    selected<-choose network
-    feeLimit<-readFee limit
-    (request,unsigned)<-readPrepared prepared
-    fee<-(O.runSafe . O.Request) (Network.Check selected endpoint feeLimit request unsigned)
-    L.putStrLn $ encode $ object ["feeLamports" .= fee,"simulationOnly" .= True]
-  ["submit",network,endpoint,limit,attempt]->do
-    selected<-choose network
-    feeLimit<-readFee limit
-    result<-(O.runCritical . O.Request) (Network.Submit selected endpoint feeLimit attempt)
-    L.putStrLn (encode result)
-  ["sign",network,endpoint,limit,prepared,keyfile,output]->do
-    selected<-choose network
-    feeLimit<-readFee limit
-    (request,unsigned)<-readPrepared prepared
-    identifier<-(O.runCritical . O.Request) (Network.Sign sdkLibraryPath selected endpoint feeLimit request unsigned keyfile output)
-    L.putStrLn $ encode $ object ["signature" .= identifier,"saved" .= output]
-  ["recover",primary,verifier,attempt,keyfile]->do
-    identifier<-(O.runCritical . O.Request) (Network.Recover sdkLibraryPath primary verifier attempt keyfile)
-    L.putStrLn $ encode $ object ["signature" .= identifier,"saved" .= (attempt<>".retry")]
-  _->die "Usage: ecx-token status devnet|mainnet HTTPS_RPC ATTEMPT.json | inspect-policy devnet|mainnet HTTPS_RPC INDEPENDENT_HTTPS_RPC MINT CUSTODY_OWNER CUSTODY_ATA EXPECTED_AUTHORITY|revoked | keygen NEW_PRIVATE_KEY.json | associated-address OWNER MINT | metadata-address MINT | address AUTHORITY SEED | prepare REQUEST.json | check devnet|mainnet HTTPS_RPC MAX_FEE PREPARED.json | submit devnet|mainnet HTTPS_RPC MAX_FEE ATTEMPT.json | sign devnet|mainnet HTTPS_RPC MAX_FEE PREPARED.json AUTHORITY_KEY.json NEW_ATTEMPT.json | recover HTTPS_RPC INDEPENDENT_HTTPS_RPC ATTEMPT.json AUTHORITY_KEY.json (prepare/check/sign/recover never broadcast; submit sends saved bytes)"
+  ["configure"]->configure
+  ["keygen",key]->makeAbsolute key >>= \output->
+    (O.runCritical . O.Request) (GenerateKey output) >>= L.putStrLn . encode
+  ["sign",key,transaction]->do
+    keyfile<-makeAbsolute key
+    input<-makeAbsolute transaction
+    dispatch "sign" keyfile (Just input)
+  [command,key] | command/="sign" && command `elem` map fst commands->makeAbsolute key >>= \keyfile->dispatch command keyfile Nothing
+  _->die "Usage: ecx-token configure | ecx-token sign KEYFILE TRANSACTION.json | ecx-token COMMAND KEYFILE (commands: keygen, prepare, check, submit, recover, status, inspect-policy, address, associated-address, metadata-address; settings: ./ecx-token.json)"
+
+commands :: [(String,[Key])]
+commands=
+  [("prepare",["requestFile"]),("check",["network","rpc","maxFeeLamports","preparedFile"])
+  ,("sign",["network","rpc","maxFeeLamports","attemptFile"])
+  ,("submit",["network","rpc","maxFeeLamports","attemptFile"])
+  ,("recover",["rpc","verifierRpc","attemptFile"]),("status",["network","rpc","attemptFile"])
+  ,("inspect-policy",["network","rpc","verifierRpc","mint","owner","custodyAta","mintAuthority"])
+  ,("address",["owner","seed"]),("associated-address",["owner","mint"]),("metadata-address",["mint"])]
+
+configure :: IO ()
+configure=do
+  exists<-doesFileExist "ecx-token.json"
+  previous<-if exists then readConfiguration else pure KM.empty
+  putStrLn "Configure an operation; existing settings are retained. No keys or transactions are used."
+  putStrLn $ "Commands: "<>unwords(map fst commands)
+  selected<-prompt "Command" ""
+  fields<-maybe (die "Unknown token command") pure (lookup selected commands)
+  settings<-foldM (\current name->do
+    let old=case KM.lookup name current of Just(String text)->T.unpack text; _->""
+    raw<-prompt (K.toString name) old
+    unless (not(null raw)) (die "A value is required")
+    case name of
+      "network"->choose raw >> pure ()
+      "maxFeeLamports"->readFee raw >> pure ()
+      _->pure ()
+    pure (KM.insert name (String $ T.pack raw) current)) previous fields
+  let bytes=encode (Object settings)
+  unless (L.length bytes<=8192) (die "Configuration exceeds 8192 bytes")
+  bracketOnError (openBinaryTempFile "." ".ecx-token-")
+    (\(path,handle)->hClose handle `finally` removeFile path) $ \(path,handle)->do
+      L.hPut handle bytes; hClose handle; renameFile path "ecx-token.json"
+  putStrLn "Saved ecx-token.json. No transaction was signed or submitted."
+  where
+    prompt label old=do
+      putStr (label<>(if null old then "" else " ["<>old<>"]")<>": ")
+      hFlush stdout
+      value<-getLine
+      pure (if null value then old else value)
+
+readConfiguration :: IO Object
+readConfiguration=do
+  bytes<-readBounded "ecx-token.json"
+  value<-either die pure (eitherDecodeStrict' bytes)
+  either die pure $ parseEither (withObject "ecx-token configuration" $ \o->do
+    unless (all (`elem` concatMap snd commands) (KM.keys o))
+      (fail "Unexpected configuration field; keep the key in KEYFILE")
+    pure o) value
+
+dispatch :: String -> FilePath -> Maybe FilePath -> IO ()
+dispatch command key transactionFile=do
+  config<-readConfiguration
+  let field :: FromJSON a => Key -> IO a
+      field name=either die pure (parseEither (.: name) config)
+      path name=field name >>= makeAbsolute
+      network=field "network" >>= choose
+      fee=field "maxFeeLamports" >>= readFee
+  case command of
+    "status"->do
+      operation<-Network.InspectSaved <$> network <*> field "rpc" <*> path "attemptFile"
+      (O.runSafe . O.Request) operation >>= L.putStrLn . encode
+    "inspect-policy"->do
+      selected<-network; primary<-field "rpc"; verifier<-field "verifierRpc"
+      mintKey<-field "mint"; owner<-field "owner"; custody<-field "custodyAta"; issuer<-field "mintAuthority"
+      let expected=if issuer=="revoked" then Nothing else Just issuer
+      readings<-(O.runSafe . O.Request) (Network.InspectPolicy selected primary verifier mintKey owner custody expected)
+      L.putStrLn $ encode $ object ["network" .= (if selected==Network.Devnet then "devnet"::String else "mainnet"),"mint" .= mintKey,"custodyOwner" .= owner,"custodyAta" .= custody,"mintAuthority" .= expected,
+        "readings" .= [object ["finalizedSlot" .= slot,"supplyBaseUnits" .= show supply,"custodyBaseUnits" .= show balance] | (slot,supply,balance)<-readings]]
+    "associated-address"->do
+      operation<-AssociatedAddress sdkLibraryPath <$> field "owner" <*> field "mint"
+      (O.runSafe . O.Request) operation >>= L.putStrLn . encode
+    "metadata-address"->field "mint" >>= \mintKey->(O.runSafe . O.Request) (MetadataAddress sdkLibraryPath mintKey) >>= L.putStrLn . encode
+    "address"->do
+      operation<-MintAddress <$> field "owner" <*> field "seed"
+      (O.runSafe . O.Request) operation >>= L.putStrLn . encode
+    "prepare"->do
+      input<-path "requestFile" >>= readBounded
+      request<-either die pure (eitherDecodeStrict' input)
+      transaction<-(O.runSafe . O.Request) (Prepare sdkLibraryPath request)
+      L.putStrLn $ encode $ object ["request" .= request,"unsignedTransaction" .= transaction]
+    "check"->do
+      selected<-network; endpoint<-field "rpc"; limit<-fee
+      (request,unsigned)<-path "preparedFile" >>= readPrepared
+      cost<-(O.runSafe . O.Request) (Network.Check selected endpoint limit request unsigned)
+      L.putStrLn $ encode $ object ["feeLamports" .= cost,"simulationOnly" .= True]
+    "sign"->do
+      selected<-network; endpoint<-field "rpc"; limit<-fee
+      input<-maybe (die "sign requires TRANSACTION.json") pure transactionFile
+      requestBytes<-readBounded input
+      request<-either die pure (eitherDecodeStrict' requestBytes)
+      unsigned<-(O.runSafe . O.Request) (Prepare sdkLibraryPath request)
+      output<-path "attemptFile"
+      identifier<-(O.runCritical . O.Request) (Network.Sign sdkLibraryPath selected endpoint limit request unsigned key output)
+      L.putStrLn $ encode $ object ["signature" .= identifier,"saved" .= output]
+    "submit"->do
+      operation<-Network.Submit <$> network <*> field "rpc" <*> fee <*> path "attemptFile"
+      (O.runCritical . O.Request) operation >>= L.putStrLn . encode
+    "recover"->do
+      primary<-field "rpc"; verifier<-field "verifierRpc"; attempt<-path "attemptFile"
+      identifier<-(O.runCritical . O.Request) (Network.Recover sdkLibraryPath primary verifier attempt key)
+      L.putStrLn $ encode $ object ["signature" .= identifier,"saved" .= (attempt<>".retry")]
+    _->die "Unknown token command"
 
 readFee :: String -> IO Word64
 readFee raw=case readMaybe raw :: Maybe Integer of
@@ -67,7 +144,7 @@ readBounded path=do
   bytes<-withBinaryFile path ReadMode (`B.hGet` 8193)
   if B.length bytes>8192 then die "Request exceeds 8192 bytes" else pure bytes
 
-readPrepared :: FilePath -> IO (Request,Text)
+readPrepared :: FilePath -> IO (Request,T.Text)
 readPrepared path=do
   bytes<-readBounded path
   value<-either die pure (eitherDecodeStrict' bytes)

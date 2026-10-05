@@ -10,12 +10,42 @@ broadcasts only a saved, validated attempt and reconciles it on repeat invocatio
 From the repository root:
 
 ```sh
-cabal run -v0 ecx-token -- prepare /absolute/path/request.json > /absolute/path/prepared.json
-cabal run -v0 ecx-token -- check devnet https://api.devnet.solana.com 10000 /absolute/path/prepared.json
-cabal run -v0 ecx-token -- sign devnet https://api.devnet.solana.com 10000 /absolute/path/prepared.json /private/authority.json /private/new-attempt.json
-cabal run -v0 ecx-token -- submit devnet https://api.devnet.solana.com 10000 /private/new-attempt.json
+cabal run -v0 ecx-token -- configure
+# Choose sign; enter network, rpc, maxFeeLamports and attemptFile.
+# Fill the placeholders in inputs/mint.json before signing.
+cabal run -v0 ecx-token -- sign /private/authority.json 1-Make-Wrapped-ECX/inputs/mint.json
+cabal run -v0 ecx-token -- submit /private/authority.json
 cabal test ecx-token:token-test --test-show-details=direct -j1
 ```
+
+The installed executable uses the same interface: `ecx-token configure` takes no
+key; `ecx-token sign secretKey inputs/mint.json` takes the key and transaction
+request explicitly. Other operations take `COMMAND KEYFILE`.
+Configuration prompts save `ecx-token.json` in the working directory, retaining
+settings for other commands. Enter accepts an existing value. Setup does not read
+a key, contact RPC, sign or broadcast. The file is atomically replaced with private
+permissions; protect it because RPC URLs may contain credentials. The key file
+remains a separate standard 64-byte Solana keypair JSON array, with no settings.
+Paths resolve from the working directory. The key argument is used only by
+`sign`, `recover` and `keygen`; other commands do not open it. `keygen` treats it
+as the new output path and does not need configuration.
+
+Configure each command before its first use when its required fields are missing.
+The sign settings also cover submit and status; no network or fee ceiling
+is silently selected. `maxFeeLamports` is a canonical positive integer string,
+for example `10000`. Request/prepared/signed-attempt files retain their existing
+formats and validation. To submit a recovered child, configure `attemptFile` to
+the saved `.retry` path. Configuration never changes an already signed attempt.
+
+[inputs/mint.json](inputs/mint.json) is a mint-request template. Replace its public
+authority, mint, destination **token account** and blockhash placeholders with
+values from the intended network. The supplied key must control that mint.
+`100000000` base units means one wrapped ECX with eight decimals. The template is
+deliberately not executable until filled in; it grants no canonical mint authority.
+`sign` builds and validates the unsigned transaction through the safe DSL before
+the critical signing operation performs live checks and saves it. It never broadcasts.
+Optional `prepare` and `check` still support inspecting an unsigned transaction:
+configure `requestFile` for prepare and `preparedFile` for check.
 
 Mint/burn requests have exactly seven fields:
 
@@ -32,7 +62,8 @@ Mint/burn requests have exactly seven fields:
 Mint creation uses `verb: "create"` with exactly `protocol`, `verb`, `authority`,
 `mint`, `seed`, `rent` and `blockhash`. `rent` is a positive decimal string of
 lamports, equal to the actual RPC rent exemption for an 82-byte mint. Derive the
-mint address with `cabal run -v0 ecx-token -- address AUTHORITY SEED`. The seed is a
+mint address with `cabal run -v0 ecx-token -- address KEYFILE` after configuring
+`owner` (the authority) and `seed`. The seed is a
 public nonempty UTF-8 string of at most 32 bytes. This is Solana's standard System
 Program `CreateAccountWithSeed` address, not a new private key or custody recovery
 scheme. The same authority, seed and Token Program always identify the same mint.
@@ -55,7 +86,8 @@ Keep issuance, custody and tester/LP identities separate. Fund each required fee
 payer explicitly from your wallet or the real Devnet faucet.
 
 Derive a classic associated token account with
-`cabal run -v0 ecx-token -- associated-address OWNER MINT`. To provision it, use a
+`cabal run -v0 ecx-token -- associated-address KEYFILE` after configuring `owner`
+and `mint`. To provision it, use a
 request with exactly `protocol: 1`, `verb: "associated"`, `authority` (fee payer),
 `mint`, `account` (derived address), `owner`, `rent` and `blockhash`. `rent` is the
 positive decimal lamport result of `getMinimumBalanceForRentExemption(165)` on the
@@ -69,7 +101,8 @@ checks that payer debit is at most the saved rent allowance plus the network fee
 No account is closed, reassigned or funded through an arbitrary transfer operation.
 
 Metadata uses the same prepare/check/sign/submit sequence. Derive its standard
-Metaplex PDA with `cabal run -v0 ecx-token -- metadata-address MINT`. The request has
+Metaplex PDA with `cabal run -v0 ecx-token -- metadata-address KEYFILE` after
+configuring `mint`. The request has
 exactly `protocol: 1`, `verb: "metadata"`, `authority`, `mint`, `blockhash` and:
 
 ```json
@@ -113,7 +146,8 @@ preview does not prove account ownership, available funds, reserves or network
 identity; signing repeats those checks on the selected chain.
 Do not use custody keys for administration.
 
-`sign` takes the exact output of `prepare` and validates its entire message again.
+`sign` takes the transaction-request JSON file, builds its unsigned transaction
+through the safe evaluator, and validates its entire message again.
 It then captures a finalized payer-history anchor and fresh blockhash on the selected
 network, changes only the request's blockhash, rebuilds and preflights the message,
 and checks the standard 64-byte Solana CLI keypair against the requested authority.
@@ -141,8 +175,12 @@ fee cap and refuses an ancestor that already has a valid successor.
 For a tracked attempt whose outcome needs recovery:
 
 ```sh
-cabal run -v0 ecx-token -- recover HTTPS_RPC INDEPENDENT_HTTPS_RPC /private/new-attempt.json /private/authority.json
-cabal run -v0 ecx-token -- submit devnet HTTPS_RPC 10000 /private/new-attempt.json.retry
+cabal run -v0 ecx-token -- configure
+# Choose recover; enter rpc, verifierRpc and the parent attemptFile.
+cabal run -v0 ecx-token -- recover /private/authority.json
+cabal run -v0 ecx-token -- configure
+# Choose submit; set attemptFile to the saved child (new-attempt.json.retry).
+cabal run -v0 ecx-token -- submit /private/authority.json
 ```
 
 `recover` never broadcasts. Two independently operated HTTPS providers must establish
@@ -178,7 +216,8 @@ validity context was not recorded. The old offline `sign PREPARED KEY OUTPUT` CL
 form is removed. New signing requires network, HTTPS RPC and a fee ceiling.
 
 For inspection without any possibility of sending, use
-`cabal run -v0 ecx-token -- status devnet HTTPS_RPC ATTEMPT.json`.
+`cabal run -v0 ecx-token -- status KEYFILE` with configured `network`, `rpc` and
+`attemptFile`.
 The safe DSL verifies the archived signature/request and network, then reports
 `pending`, `finalized`, `failed`, `unseen` or `expired-unseen`. Finalized results
 must match the archived bytes. Missing history, even with an expired blockhash,
@@ -281,7 +320,9 @@ identifiers and the separately funded liquidity workflow.
 ## Read-only token policy
 
 ```sh
-cabal run ecx-token:exe:ecx-token -- inspect-policy devnet HTTPS_RPC INDEPENDENT_HTTPS_RPC MINT CUSTODY_OWNER CUSTODY_ATA EXPECTED_AUTHORITY
+cabal run ecx-token:exe:ecx-token -- configure
+# Choose inspect-policy and enter the network, RPCs, mint and expected authorities.
+cabal run ecx-token:exe:ecx-token -- inspect-policy KEYFILE
 ```
 
 Use `mainnet` explicitly for a mainnet read, or `revoked` for an approved absent

@@ -37,6 +37,15 @@ separate explicit tooling and evidence; they are not bridge-custody privileges.
 
 ## Sequence
 
+The requested token CLI simplification uses `ecx-token COMMAND KEYFILE`, with
+an explicit transaction-request file for `sign KEYFILE TRANSACTION.json`, and
+non-secret inputs in a separate `ecx-token.json`; `ecx-token configure` prompts
+for those inputs without a key argument. The existing closed operations and key-only
+files are preserved. The token Cabal suite verifies the new argument/configuration
+contract; real Devnet status readback and sign-only acceptance passed. The mint
+request template is in `1-Make-Wrapped-ECX/inputs/mint.json`. This changes token
+administration ergonomics, not the frozen custody server.
+
 The observed payout blockers are fixed and the existing Mainnet obligation is paid.
 Do not create additional Mainnet orders for routine regression. Use the saved
 pre-broadcast snapshot for in-flight restoration and existing Signet/Devnet fixtures

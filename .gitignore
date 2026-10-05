@@ -5,6 +5,9 @@ web/node_modules
 web/dist/
 *.sqlite*
 *.keypair.json
+secretKey
+ecx-token.json
+.ecx-token-*
 .env
 config/local.json
 run/

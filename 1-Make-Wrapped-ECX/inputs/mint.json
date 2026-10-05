@@ -1,0 +1,9 @@
+{
+  "protocol": 1,
+  "verb": "mint",
+  "authority": "REPLACE_WITH_MINT_AUTHORITY_PUBLIC_KEY",
+  "mint": "REPLACE_WITH_WRAPPED_ECX_MINT_PUBLIC_KEY",
+  "account": "REPLACE_WITH_DESTINATION_TOKEN_ACCOUNT_PUBLIC_KEY",
+  "amount": "100000000",
+  "blockhash": "REPLACE_WITH_RECENT_NETWORK_BLOCKHASH"
+}

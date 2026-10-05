@@ -19,7 +19,8 @@ import qualified Data.ByteString.Lazy as L
 import System.IO (openTempFile,hClose)
 import System.Directory (removeDirectoryRecursive,removeFile)
 import qualified System.Posix.Directory as PD
-import System.Posix.Files (setFileMode,createSymbolicLink)
+import System.Posix.Files (setFileMode,createSymbolicLink,getFileStatus,fileMode)
+import qualified Data.Bits as Bits
 import System.FilePath ((</>))
 import qualified Bridge.SolanaHelper as H
 import Bridge.Domain (amount)
@@ -33,7 +34,8 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Either (isLeft)
 import Control.Exception (SomeException,try,bracket)
-import System.Exit (exitFailure)
+import System.Exit (exitFailure,ExitCode(..))
+import System.Process (proc,cwd,readCreateProcessWithExitCode)
 import Test.QuickCheck
 
 request :: Action -> Word64 -> Request
@@ -43,7 +45,8 @@ request operation n=Request operation "AKnL4NNf3DGWZJS6cPknBuEGnVsV4A4m5tgebLHaR
 main :: IO ()
 main=do
   results<-sequence
-    [ quickCheckResult $ statusContract
+    [ quickCheckResult $ once $ ioProperty cliContract
+    , quickCheckResult $ statusContract
     , quickCheckResult $ \n revoked->policyCheck n revoked
     , quickCheckResult $ once $ ioProperty $ do
         let original=request Mint 1
@@ -337,3 +340,39 @@ statusContract failed valid=
       ,classify (status "finalized") (transaction "different-bytes" failure) valid
       ,classify (status "finalized") (transaction "saved-bytes" $ if failed then Null else Number 1) valid
       ,classify (status "unknown") Null valid]
+
+-- Exercise the real executable: configuration is key-free and never executes work.
+cliContract :: IO Bool
+cliContract=bracket temporary removeDirectoryRecursive $ \directory->do
+  let run args input=readCreateProcessWithExitCode ((proc "ecx-token" args) {cwd=Just directory}) input
+      config=directory</>"ecx-token.json"
+      original=request Mint 1
+      owner=T.unpack(authority original)
+  (generated,_,_)<-run ["keygen","secretKey"] ""
+  keyBefore<-B.readFile (directory</>"secretKey")
+  (configured,_,_)<-run ["configure"] (unlines ["address",owner,"test-seed"])
+  before<-B.readFile config
+  (derived,answer,_)<-run ["address","nonexistent-key"] ""
+  let expected=either (Left . T.unpack) Right $ mintAddress (authority original) "test-seed"
+      actual=eitherDecode (L.fromStrict $ TE.encodeUtf8 $ T.pack answer) :: Either String Text
+  (extra,_,_)<-run ["configure","unneeded-key"] ""
+  (missing,_,_)<-run ["sign"] ""
+  (badNetwork,_,_)<-run ["configure"] "sign\nnot-a-network\n"
+  (badFee,_,_)<-run ["configure"] "sign\ndevnet\nhttps://rpc.example.invalid\n1e9\n"
+  unchanged<-B.readFile config
+  (signConfig,_,_)<-run ["configure"] "sign\ndevnet\nhttps://rpc.example.invalid\n10000\nattempt.json\n"
+  (noInput,_,_)<-run ["sign","nonexistent-key"] ""
+  (missingTransaction,_,_)<-run ["sign","nonexistent-key","missing-transaction.json"] ""
+  L.writeFile config $ encode $ object ["secretKey" .= ("never-read"::Text)]
+  (unknown,_,_)<-run ["address","nonexistent-key"] ""
+  keyAfter<-B.readFile (directory</>"secretKey")
+  permissions<-fileMode <$> getFileStatus config
+  pure (generated==ExitSuccess && keyBefore==keyAfter && permissions Bits..&. 0o777==0o600
+    && configured==ExitSuccess && derived==ExitSuccess && actual==expected
+    && all (/=ExitSuccess) [extra,missing,badNetwork,badFee,noInput,missingTransaction,unknown]
+    && before==unchanged && signConfig==ExitSuccess)
+ where
+  temporary=do
+    (path,handle)<-openTempFile "/tmp" "ecx-token-cli"
+    hClose handle; removeFile path; PD.createDirectory path 0o700
+    pure path
