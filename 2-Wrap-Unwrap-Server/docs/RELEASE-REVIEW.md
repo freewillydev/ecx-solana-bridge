@@ -838,6 +838,23 @@ review or distribution/license requirements.
    Review distribution notices and the public release trust-key procedure before
    publishing. The acceptance-test signing key does not establish public trust.
 
+### Current local contract rerun (2026-10-05)
+
+At source `3b13abf`, all three Cabal suites passed (the bridge suite used the
+retained Cargo cache after the empty default cache refused offline resolution).
+The separate root-Cabal ecx-store-check run also passed on a newly created database
+with all eight migrations and a distinct SELECT-only reader. It exercised refund,
+source-loss/coverage/return, changed-winner ledger fixtures, exclusive writer,
+concurrency, authorization, cancellation, custody freshness, fence/rollback and
+backup gating contracts. Its actual encrypted restic exercise verified exported
+snapshot consistency, corruption/wrong-password refusal, restoration of exact
+attempts/postings, staging cleanup and unchanged coverage. These use synthetic
+chain evidence where noted in the tests; they do not close real-chain reorg or
+physically independent recovery acceptance. The disposable database and role were
+dropped after success. No funded chain operation or VM startup occurred. Private
+logs: ecx-ten-item-tests.log, ecx-ten-item-bridge-tests-cached.log and
+ecx-ten-item-ledger.log. Root README now matches the completed Mainnet evidence.
+
 ### Real-network fixture limitation (2026-10-05)
 
 The remaining native conflict/winner-change drill cannot be closed by mining the

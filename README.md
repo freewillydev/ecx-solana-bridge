@@ -5,13 +5,12 @@ administration. New conversions charge 1% in each direction. The implementation
 uses Haskell, Servant and PostgreSQL/Opaleye; its browser uses GHC's JavaScript
 backend and HTML/CSS. The Solana Rust SDK is called through bounded Haskell FFI.
 
-The main application is available for source review. Scoped funded L2L
-Signet/Solana Devnet flows passed. In the current Mainnet pilot, the unwrap is
-`Paid` (3,000 gross → 2,970 net base units); the return wrap (1,000 → 990) remains
-pending. The worker and signer are stopped after the keyed OnFinality verifier
-exhausted its hourly quota. Alchemy remains the primary RPC. Recovery needs
-sufficient verified RPC capacity; the Mainnet round
-trip is not complete. See [evidence and release gates](2-Wrap-Unwrap-Server/docs/RELEASE-REVIEW.md).
+The main application is available for source review. Funded L2L Signet/Solana
+Devnet flows and the canonical Mainnet round trip passed: 3,000 wrapped → 2,970
+native, followed by 1,000 native → 990 wrapped base units. Both providers agreed
+on the finalized Solana payout and custody reconciliation had zero differences.
+The pilot is stopped. Public release still requires the remaining acceptance and
+external operating prerequisites; see [evidence and release gates](2-Wrap-Unwrap-Server/docs/RELEASE-REVIEW.md).
 
 1. [Make Wrapped ECX](1-Make-Wrapped-ECX/README.md): mint, token-account and metadata operations.
 2. [Wrap/Unwrap Server](2-Wrap-Unwrap-Server/README.md): customer orders, custody, payments and recovery.
@@ -24,12 +23,11 @@ the network, token, limits, fee previews and both direction forms. Creating an
 order requires live availability; funding is a separate test step. Existing tester
 orders require their private recovery links. Keep those links private.
 
-The pilot has commit `3e34b01` deployed in an Ubuntu VM with separate administrator,
-worker and signer users and restricted database roles. Reboot checks verified
-signer login/sudo denial and worker exclusion from shared backup staging.
-VM restart and recovery of a sequence-9 in-flight
-snapshot passed. Its HTTPS backup receiver is on the same Mac, so independent
-off-host disaster recovery remains unproved. Start the source audit with the
+The funded runtime is frozen at `54c2bfd` in an Ubuntu VM with separate
+administrator, worker and signer users and restricted database roles. Same-host
+in-flight restoration passed using the sequence-55 custody snapshot. Its HTTPS
+backup receiver remains on the same Mac, so physically independent disaster
+recovery is still unproved. Start the source audit with the
 [server's audit path](2-Wrap-Unwrap-Server/README.md#audit-path).
 
 Requires **GHC 9.14.1 and Cabal 3.16.1.0**. Select the pinned tools using the
