@@ -1,10 +1,67 @@
 # Installation prerequisites
 
-The current server is built through Cabal. **An automated installer is not yet
-available.** The removed installer and Linux release workflow targeted the retired
-server, configuration and backup protocol. Do not use an old release to deploy the
-current source. Fresh/repeat installation, upgrade, reboot and clean restoration
-on Ubuntu 24.04 ARM64/x86-64 remain acceptance gates.
+The current server is built through Cabal. The candidate installer under `install/`
+targets the rebuilt server; it is **not yet a certified release**. Do not use an old
+release built for the retired server. Clean-host ARM64/x86-64, authenticated package,
+reboot and restored-operation acceptance remain open.
+
+## Candidate installation and upgrade
+
+Build from a clean reviewed Git checkout on Ubuntu 24.04, as an unprivileged user:
+
+```sh
+2-Wrap-Unwrap-Server/install/package /absolute/new-candidate /absolute/restic-0.19.1
+```
+
+This invokes the existing Cabal build, packages its executable, SDK, GHC-JavaScript
+assets, all migrations, retained notices and the supplied restic 0.19.1 client.
+It creates a self-contained `.run` artifact and checksum. Artifact authentication
+uses the retained Ed25519 `scripts/release-auth` protocol; the trust key must arrive
+through a separate reviewed channel. Both architectures must be built and reviewed
+before signing the release index. Final restic/platform notice coverage remains a
+distribution gate. The candidate builder itself still needs end-to-end acceptance.
+
+Prepare `/root/ecx-material` as root-owned mode 0700, with regular mode-0600 files:
+
+- `worker.json`, `signer.json`: complete reviewed configurations using the existing
+  examples. Policies must agree except credential/unlock paths. Installed local
+  credential, SDK and fence paths are substituted; financial identity is retained.
+- `solana.keypair.json`: the dedicated new custody key matching the configurations.
+- `native-worker.auth`, `native-signer.auth`: distinct native RPC credentials;
+  enforce the worker method restrictions on the actual native daemon first.
+- When backups are required: `backup.repository`, `backup.password`, pointing at an
+  initialized off-host HTTPS restic repository with the required access separation.
+- For an encrypted native wallet: `native-unlock`, containing the exact passphrase
+  without a newline. Omit it only for an unencrypted wallet.
+
+For **genuinely new, unfunded custody only**, the authenticated one-command path is:
+
+```sh
+sudo 2-Wrap-Unwrap-Server/scripts/release-auth install /trusted/release-public.pem /reviewed/candidate aarch64 -- fresh /root/ecx-material
+```
+
+Use `x86_64` on that architecture. Installation provisions PostgreSQL 16, separate
+non-login worker/signer users, restricted database roles, signer TLS/authentication,
+all eight schema migrations, a fresh paused ledger/fence and systemd units. It leaves
+services stopped, enabled for boot; every worker startup requires checked resume.
+It does not create chain assets, provision the native daemon, initialize remote
+storage or configure public HTTPS. These are real deployment prerequisites, not
+simulated networks. In particular, the native daemon must be able to produce wallet
+backups in the signer's private staging path with the ownership required by the
+backup validator; verify this integration before enabling required checkpoints.
+A domain/reverse proxy and reviewed interface links remain operator configuration.
+
+For a completed installation, replace the final arguments with `-- upgrade`.
+Upgrade stops both services, switches the verified release atomically and preserves
+keys, configuration, database and fence. It refuses changed migration bytes: schema
+upgrades require the explicit offline procedure below. Repeating `fresh` refuses
+existing state; repeating `upgrade` preserves it. Interrupted installation leaves
+its state for inspection, never automatically erases or recreates custody. This is
+not a wipe/restore command. Existing funded custody must follow [recovery](OPERATIONS.md#restore-or-upgrade).
+
+The installer body has been exercised against actual PostgreSQL in the existing
+Ubuntu ARM64 VM with a newly generated unfunded key. This is narrower than a
+clean-host install or a funded restoration; see [release evidence](RELEASE-REVIEW.md).
 
 ## Build
 
@@ -24,9 +81,8 @@ that file is not an installation command or release certificate.
 ## Required host configuration
 
 Building source does not provision database roles/ACLs, native RPC restrictions,
-signer TLS/authentication files, service supervision or reverse-proxy HTTPS. The
-old systemd/provisioning templates were removed with the incompatible installer.
-These responsibilities remain required for a deployed server.
+signer TLS/authentication files, service supervision or reverse-proxy HTTPS. The candidate installer supplies local service/database policy; native-node,
+backup-destination and public HTTPS provisioning remain required.
 
 - Run the HTTP/worker and signer as separate OS users. Only the signer may read the
   custody key, full native credential, TLS private key and optional wallet passphrase.

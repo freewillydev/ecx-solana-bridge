@@ -94,9 +94,10 @@ refusals with a failing exit status, preventing scripts from continuing on an er
    applicability and licenses against the tested candidate. Resolve substantive
    findings and preserve evidence for each remaining release gate. Local tests and
    the bounded TLA+ model do not replace independent review.
-7. **Reintroduce one-command installation last.** Implement against the sole
-   current executable/configuration and complete migration chain. Never revive
-   the old helper or command protocol. Verify fresh install, repeat install,
+7. **Finish one-command installation against the freeze.** The candidate installer
+   now targets the sole executable and complete migration chain; its ARM64 body
+   passed fresh/repeat/upgrade and refusal checks on an existing VM. Finish the
+   actual authenticated package and clean-host acceptance. Verify fresh install, repeat install,
    upgrade, reboot and restored operation on Ubuntu 24.04 ARM64 and x86-64.
    Reuse expensive builds; run packaging acceptance after runtime changes settle.
    Authenticate the final release artifact. Public publication and valuable-fund

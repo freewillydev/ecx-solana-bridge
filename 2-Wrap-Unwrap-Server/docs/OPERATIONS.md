@@ -7,8 +7,8 @@ bridge() { cabal run -v0 exe:ecx-bridge -- "$@"; }
 ```
 
 `CONFIG`, `SIGNER_CONFIG`, `KEYFILE`, `BACKUP_CONFIG` and staging paths refer to
-reviewed private files/directories. Read [INSTALL.md](INSTALL.md) first. There is
-no current automated installer or wipe/reinstall command.
+reviewed private files/directories. Read [INSTALL.md](INSTALL.md) first. The candidate installer supports fresh installation and code-only upgrade; it
+does not provide an automatic wipe/reinstall recovery command.
 
 ## Credentials and startup
 

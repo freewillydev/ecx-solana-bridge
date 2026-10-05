@@ -1,0 +1,67 @@
+#!/bin/sh
+# Assemble a Cabal-built Ubuntu artifact. Sign both architectures with release-auth.
+set -eu
+umask 077
+fail() { echo "Packaging refused: $*" >&2; exit 1; }
+[ "$#" = 2 ] || fail 'usage: package NEW_OUTPUT_DIRECTORY RESTIC_0_19_1_BINARY'
+output=$1; restic=$2
+for path in "$output" "$restic"; do
+  case "$path" in /*) ;; *) fail 'absolute output/restic paths required';; esac
+done
+[ ! -e "$output" ] || fail 'output already exists'
+[ "$(uname -s)" = Linux ] || fail 'build the native artifact on Ubuntu 24.04'
+# shellcheck source=/dev/null
+. /etc/os-release
+[ "$ID:$VERSION_ID" = ubuntu:24.04 ] || fail 'Ubuntu 24.04 required'
+arch=$(uname -m)
+case "$arch" in aarch64|x86_64) ;; *) fail 'unsupported architecture';; esac
+root=$(git rev-parse --show-toplevel)
+cd "$root"
+[ -z "$(git status --porcelain)" ] || fail 'commit/review the exact source before packaging'
+# Compilation stays under the caller, through the existing sole Cabal entry point.
+cabal build exe:ecx-bridge -j1
+binary=$(cabal list-bin exe:ecx-bridge)
+assets=$(jq -er '[."install-plan"[] | select(."pkg-name"=="ecx-build-assets" and .style=="local") | ."dist-dir"] | unique | if length==1 then .[0] else error("ambiguous assets") end' dist-newstyle/cache/plan.json)/build/autogen
+[ -f "$assets/libecx_solana_sdk.so" ] || fail 'missing Cabal SDK'
+"$restic" version | grep -q '^restic 0.19.1 ' || fail 'restic 0.19.1 required'
+mkdir -m 0700 "$output"
+staging=$(mktemp -d "$output/.bundle-XXXXXXXX")
+trap 'rm -rf -- "$staging"' EXIT
+trap 'exit 1' HUP INT TERM
+mkdir -p "$staging/bin" "$staging/lib" "$staging/share/web" "$staging/share/migrations" "$staging/share/notices"
+cp "$binary" "$staging/bin/ecx-bridge"
+cp "$restic" "$staging/bin/restic"
+cp "$assets/libecx_solana_sdk.so" "$staging/lib/"
+cp -R "$assets/web/." "$staging/share/web/"
+cp 2-Wrap-Unwrap-Server/migrations/*.sql "$staging/share/migrations/"
+cp 2-Wrap-Unwrap-Server/install/install "$staging/install"
+printf '%s\n' "$arch" > "$staging/architecture"
+git rev-parse HEAD > "$staging/source-commit"
+cp 2-Wrap-Unwrap-Server/LICENSE "$staging/share/notices/LICENSE"
+cp 2-Wrap-Unwrap-Server/docs/THIRD-PARTY.md "$staging/share/notices/"
+# Keep collected notices at their repository paths (including license subtrees).
+cp -R 2-Wrap-Unwrap-Server/docs/third-party "$staging/share/notices/"
+(cd "$staging/share" && sha256sum migrations/*.sql) > "$staging/migrations.sha256"
+(cd "$staging" && find . -type f ! -name manifest.sha256 -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$staging/manifest.sha256"
+name=ecx-bridge-ubuntu-24.04-$arch.run
+cat > "$output/$name" <<'HEADER'
+#!/bin/sh
+# Authenticate this complete artifact with release-auth and a separately trusted key.
+set -eu
+umask 077
+[ "$(id -u)" = 0 ] || { echo 'root required' >&2; exit 1; }
+staging=$(mktemp -d /tmp/ecx-install-XXXXXXXX)
+trap 'rm -rf -- "$staging"' EXIT
+trap 'exit 1' HUP INT TERM
+line=$(awk '/^__ECX_PAYLOAD__$/ { print NR+1; exit }' "$0")
+[ -n "$line" ]
+tail -n +"$line" "$0" | tar -xz -C "$staging" --no-same-owner
+sh "$staging/install" "$@"
+exit
+__ECX_PAYLOAD__
+HEADER
+tar -czf "$output/payload.tar.gz" -C "$staging" .
+cat "$output/payload.tar.gz" >> "$output/$name"
+rm "$output/payload.tar.gz"
+(cd "$output" && sha256sum "$name") > "$output/$name.sha256"
+printf 'Candidate: %s/%s\nAuthenticate and review before installation.\n' "$output" "$name"

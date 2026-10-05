@@ -129,6 +129,23 @@ hash. Both services stayed inactive/disabled throughout. Private evidence is
 boundaries after boot; it does not close independent security review, native RPC
 policy beyond the earlier checks, or disaster-independent backup/restore.
 
+The new installer body passed 23 provisioning/preservation checks in the existing
+Ubuntu ARM64 VM with a fresh, unfunded Solana key and a separate disposable database.
+It applied all eight migrations, initialized/adopted a paused ledger, refused repeat
+fresh installation, preserved all configuration/fence files and closed-DSL ledger
+state on upgrade, and enforced separate PostgreSQL/OS credentials. The required-backup
+and native-unlock input branch installed signer-private files with mode 0600.
+The backup destination/passphrase in this fixture are deliberately non-operational:
+these checks prove provisioning/permissions, not wallet unlocking or backup delivery.
+Five further checks covered wrong architecture, altered artifact bytes and changed
+migration-manifest refusal before release switching, successful final upgrade and
+exact installer-source hash. Shell syntax and ShellCheck passed. The frozen server
+binary remained unchanged. Observation-only processes used the actual operator DSL
+with all IP networking denied; no signer or paying worker ran for this acceptance.
+Private evidence is under `installer-acceptance-20261004`. The existing funded pilot
+was not replaced. This is installer-body evidence, not a clean-host, authenticated
+package-builder, x86-64, reboot or funded restore result. Those gates stay open.
+
 ## Evidence already obtained
 
 | Area | Evidence and limit |
@@ -552,8 +569,8 @@ review or distribution/license requirements.
    license questions recorded in [DEPENDENCY-REVIEW.md](DEPENDENCY-REVIEW.md) and
    [THIRD-PARTY.md](THIRD-PARTY.md); obtain independent review of source and deployment.
    Earlier dependency inventories are not a clean bill of health for a new artifact.
-6. **Installation/release:** implement and test the new one-command installer and
-   current service policies on Ubuntu 24.04 ARM64/x86-64, including repeat install,
+6. **Installation/release:** finish authenticated packaging and test the candidate
+   installer/service policies on Ubuntu 24.04 ARM64/x86-64, including repeat install,
    upgrade, reboot and restore. The old installer/release workflow was removed.
    Authenticate a review candidate only after substantive runtime work settles.
 

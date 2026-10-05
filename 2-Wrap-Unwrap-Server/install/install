@@ -1,0 +1,227 @@
+#!/bin/sh
+# Run only from an authenticated, root-private release snapshot.
+# Guard chains intentionally fail if any check fails.
+# shellcheck disable=SC2015
+set -eu
+umask 077
+fail() { echo "Installation refused: $*" >&2; exit 1; }
+absent() { [ ! -e "$1" ] && [ ! -L "$1" ]; }
+[ "$(id -u)" = 0 ] || fail 'root required'
+[ "$(uname -s)" = Linux ] || fail 'Ubuntu 24.04 required'
+# shellcheck source=/dev/null
+. /etc/os-release
+[ "$ID:$VERSION_ID" = ubuntu:24.04 ] || fail 'Ubuntu 24.04 required'
+mode=${1:-}; material=${2:-}
+case "$mode" in fresh) [ "$#" = 2 ] || fail 'fresh requires a private material directory';;
+  upgrade) [ "$#" = 1 ] || fail 'upgrade takes no material; existing custody is retained';;
+  *) fail 'usage: fresh PRIVATE_MATERIAL_DIRECTORY | upgrade';;
+esac
+bundle=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+[ "$(cat "$bundle/architecture")" = "$(uname -m)" ] || fail 'wrong architecture'
+(cd "$bundle" && sha256sum -c manifest.sha256 >/dev/null) || fail 'bundle changed'
+release=$(sha256sum "$bundle/manifest.sha256" | cut -d' ' -f1)
+prefix=/opt/ecx-bridge
+config=/etc/ecx-bridge
+state=/var/lib/ecx-bridge
+worker=ecxbridgew
+signer=ecxbridges
+reader=ecxbridger
+if [ "$mode" = fresh ]; then
+  case "$material" in /*) ;; *) fail 'material directory must be absolute';; esac
+  [ -d "$material" ] && [ ! -L "$material" ] || fail 'material directory required'
+  material=$(realpath -e -- "$material")
+  parent=$material
+  while :; do
+    [ "$(stat -c %u "$parent")" = 0 ] || fail 'material ancestors must be root-owned'
+    permissions=$(stat -c %a "$parent")
+    [ "$((0$permissions & 022))" = 0 ] || fail 'material ancestors must not be group/other writable'
+    [ "$parent" != / ] || break
+    parent=$(dirname -- "$parent")
+  done
+  absent "$config" && absent "$state" && absent "$prefix" || fail 'existing deployment: use upgrade or explicit recovery'
+  ! getent passwd "$worker" >/dev/null && ! getent passwd "$signer" >/dev/null || fail 'service identities already exist'
+else
+  [ -f "$config/installed" ] && [ -L "$prefix/current" ] || fail 'no completed installation'
+  cmp "$bundle/migrations.sha256" "$prefix/current/migrations.sha256" >/dev/null || fail 'schema change requires reviewed offline migration before upgrade'
+fi
+# No source compilation or unpinned application download occurs under root.
+export DEBIAN_FRONTEND=noninteractive
+packages='postgresql-16 postgresql-client-16 libpq5 libgmp10 libffi8 zlib1g libssl3t64 ca-certificates openssl jq'
+missing=false
+for package in $packages; do
+  [ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)" = 'install ok installed' ] || missing=true
+done
+if [ "$missing" = true ]; then
+  apt-get update -qq
+  # Fixed package names, deliberately split.
+  # shellcheck disable=SC2086
+  apt-get install -y --no-install-recommends $packages
+fi
+command -v flock >/dev/null || fail 'flock required'
+exec 9>/run/lock/ecx-bridge-install.lock
+flock -n 9 || fail 'another installation is running'
+# Recheck after acquiring the lock, before any deployment mutation.
+if [ "$mode" = fresh ]; then
+  absent "$config" && absent "$state" && absent "$prefix" || fail 'deployment appeared during preflight'
+fi
+install -d -m 0755 "$prefix" "$prefix/releases"
+target=$prefix/releases/$release
+if [ ! -e "$target" ]; then
+  staging=$(mktemp -d "$prefix/releases/.install-XXXXXXXX")
+  trap 'rm -rf -- "${staging:-}"' EXIT
+  trap 'exit 1' HUP INT TERM
+  cp -R "$bundle/." "$staging/"
+  chown -R root:root "$staging"
+  chmod -R go-w "$staging"
+  chmod 0755 "$staging" "$staging/bin" "$staging/lib" "$staging/share" "$staging/share/web" "$staging/share/web/dist" "$staging/share/migrations"
+  chmod 0755 "$staging/bin/"* "$staging/lib/"*
+  find "$staging/share" -type f -exec chmod 0644 '{}' +
+  (cd "$staging" && sha256sum -c manifest.sha256 >/dev/null)
+  mv "$staging" "$target"
+  staging=
+fi
+(cd "$target" && sha256sum -c manifest.sha256 >/dev/null) || fail 'installed release changed'
+"$target/bin/restic" version | grep -q '^restic 0.19.1 ' || fail 'tested restic 0.19.1 required'
+if [ "$mode" = fresh ]; then
+  # Inputs are data, never sourced shell. Refuse symlinks and exposed material.
+  [ "$(stat -c '%u:%a' "$material")" = 0:700 ] || fail 'material must be root-owned mode 0700'
+  for name in worker.json signer.json solana.keypair.json native-worker.auth native-signer.auth; do
+    [ -f "$material/$name" ] && [ ! -L "$material/$name" ] || fail "missing regular $name"
+    [ "$(stat -c '%u:%a' "$material/$name")" = 0:600 ] || fail "protect $name as root:0600"
+  done
+  # Validate supplied identity/key/policy before creating accounts or databases.
+  "$target/bin/ecx-bridge" check-config "$material/worker.json" >/dev/null
+  "$target/bin/ecx-bridge" check-signer "$material/signer.json" "$material/solana.keypair.json" >/dev/null
+  [ "$(jq -Sc 'del(.nativeCookie,.nativeUnlockFile,.signerAuthFile)' "$material/worker.json")" = "$(jq -Sc 'del(.nativeCookie,.nativeUnlockFile,.signerAuthFile)' "$material/signer.json")" ] || fail 'worker/signer policies differ'
+  ! cmp -s "$material/native-worker.auth" "$material/native-signer.auth" || fail 'worker needs distinct restricted native credentials'
+  useradd --system --user-group --home-dir "$state/worker" --shell /usr/sbin/nologin "$worker"
+  useradd --system --user-group --home-dir "$state/signer" --shell /usr/sbin/nologin "$signer"
+  install -d -m 0755 "$config" "$state"
+  for role in worker signer; do
+    if [ "$role" = worker ]; then account=$worker; else account=$signer; fi
+    install -d -m 0750 -o root -g "$account" "$config/$role"
+    install -d -m 0700 -o "$account" -g "$account" "$state/$role"
+    jq --arg root "$config/$role" --arg sdk "$prefix/current/lib/libecx_solana_sdk.so" --arg fence "$state/worker/fence" \
+      '.nativeCookie=($root+"/native.auth") | .signerAuthFile=($root+"/signer.auth") | .solanaSdkLibrary=$sdk | .fenceDirectory=$fence | .nativeUnlockFile=null' \
+      "$material/$role.json" > "$config/$role/config.json"
+    chown root:"$account" "$config/$role/config.json"
+    chmod 0640 "$config/$role/config.json"
+    install -o "$account" -g "$account" -m 0600 "$material/native-$role.auth" "$config/$role/native.auth"
+  done
+  install -o "$signer" -g "$signer" -m 0600 "$material/solana.keypair.json" "$config/signer/solana.keypair.json"
+  if [ -e "$material/native-unlock" ]; then
+    [ -f "$material/native-unlock" ] && [ ! -L "$material/native-unlock" ] && [ "$(stat -c '%u:%a' "$material/native-unlock")" = 0:600 ] || fail 'protect native-unlock as root:0600'
+    install -o "$signer" -g "$signer" -m 0600 "$material/native-unlock" "$config/signer/native-unlock"
+    jq --arg path "$config/signer/native-unlock" '.nativeUnlockFile=$path' "$config/signer/config.json" > "$config/signer/config.new"
+    chown root:"$signer" "$config/signer/config.new"; chmod 0640 "$config/signer/config.new"
+    mv "$config/signer/config.new" "$config/signer/config.json"
+  fi
+  openssl rand -hex 32 | tr -d '\n' > "$config/signer/signer.auth"
+  openssl req -x509 -newkey ed25519 -nodes -keyout "$config/signer/signer.auth.key" -out "$config/signer/signer.auth.pem" -days 365 \
+    -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 >/dev/null 2>&1
+  for name in signer.auth signer.auth.pem; do
+    install -o root -g "$worker" -m 0640 "$config/signer/$name" "$config/worker/$name"
+  done
+  chown "$signer:$signer" "$config/signer/signer.auth" "$config/signer/signer.auth.key" "$config/signer/signer.auth.pem"
+  chmod 0600 "$config/signer/signer.auth" "$config/signer/signer.auth.key" "$config/signer/signer.auth.pem"
+  backup=$(jq -r .backupRequired "$config/signer/config.json")
+  [ "$backup" = "$(jq -r .backupRequired "$config/worker/config.json")" ] || fail 'backup policies differ'
+  if [ "$backup" = true ]; then
+    for name in backup.repository backup.password; do
+      [ -f "$material/$name" ] && [ ! -L "$material/$name" ] && [ "$(stat -c '%u:%a' "$material/$name")" = 0:600 ] || fail "protect $name as root:0600"
+      install -o "$signer" -g "$signer" -m 0600 "$material/$name" "$config/signer/$name"
+    done
+    jq -n --arg restic "$prefix/current/bin/restic" --arg repositoryFile "$config/signer/backup.repository" --arg passwordFile "$config/signer/backup.password" \
+      '{restic:$restic,repositoryFile:$repositoryFile,passwordFile:$passwordFile}' > "$config/signer/backup.json"
+    chown "$signer:$signer" "$config/signer/backup.json"; chmod 0600 "$config/signer/backup.json"
+  fi
+  # Both configurations must describe exactly the same deployment and transport.
+  first=$("$target/bin/ecx-bridge" check-config "$config/worker/config.json")
+  [ "$first" = "$("$target/bin/ecx-bridge" check-config "$config/signer/config.json")" ] || fail 'deployment identities differ'
+  for field in serverPort signerPort; do
+    [ "$(jq -r .$field "$config/worker/config.json")" = "$(jq -r .$field "$config/signer/config.json")" ] || fail 'service ports differ'
+  done
+  runuser -u "$signer" -- "$target/bin/ecx-bridge" check-signer "$config/signer/config.json" "$config/signer/solana.keypair.json"
+  systemctl start postgresql
+  runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d postgres <<'SQL'
+CREATE ROLE ecxbridgew LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+CREATE ROLE ecxbridger LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+CREATE ROLE ecxbridges LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
+SQL
+  runuser -u postgres -- createdb ecx_bridge
+  for migration in "$target/share/migrations/"*.sql; do
+    runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -d ecx_bridge -f "$migration"
+  done
+  runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d ecx_bridge <<'SQL'
+REVOKE ALL ON DATABASE ecx_bridge FROM PUBLIC;
+REVOKE ALL ON SCHEMA public FROM PUBLIC;
+REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
+REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
+GRANT CONNECT ON DATABASE ecx_bridge TO ecxbridgew,ecxbridger,ecxbridges;
+GRANT USAGE ON SCHEMA public TO ecxbridgew,ecxbridger,ecxbridges;
+GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO ecxbridgew;
+GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO ecxbridgew;
+GRANT SELECT ON ALL TABLES IN SCHEMA public TO ecxbridger,ecxbridges;
+GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO ecxbridger,ecxbridges;
+SQL
+  # Ordered, database-specific peer rules. No password or broad trust rule.
+  sed -i '1i local ecx_bridge all peer map=ecx_bridge_install' /etc/postgresql/16/main/pg_hba.conf
+  printf '%s\n' 'ecx_bridge_install postgres postgres' 'ecx_bridge_install ecxbridgew ecxbridgew' 'ecx_bridge_install ecxbridgew ecxbridger' 'ecx_bridge_install ecxbridges ecxbridges' >> /etc/postgresql/16/main/pg_ident.conf
+  pg_ctlcluster 16 main reload
+else
+  systemctl stop ecx-bridge-worker ecx-bridge-signer
+fi
+# Publishing a release never changes keys, configuration, ledger or saved attempts.
+ln -s "$target" "$prefix/current.new"
+mv -Tf "$prefix/current.new" "$prefix/current"
+if [ "$mode" = fresh ]; then
+  runuser -u "$worker" -- env PGHOST=/var/run/postgresql PGPORT=5432 PGDATABASE=ecx_bridge PGUSER="$worker" \
+    "$prefix/current/bin/ecx-bridge" initialize-ledger "$config/worker/config.json"
+  runuser -u "$worker" -- env PGHOST=/var/run/postgresql PGPORT=5432 PGDATABASE=ecx_bridge PGUSER="$worker" \
+    "$prefix/current/bin/ecx-bridge" adopt-ledger "$config/worker/config.json" 0
+fi
+for role in worker signer; do
+  if [ "$role" = worker ]; then
+    account=$worker; args="serve $config/worker/config.json"; extra="Environment=PGREADUSER=$reader"
+  else
+    account=$signer; args="signer $config/signer/config.json $config/signer/solana.keypair.json"; extra=
+    if [ -f "$config/signer/backup.json" ]; then args="$args $config/signer/backup.json $state/signer"; fi
+  fi
+  cat > "/etc/systemd/system/ecx-bridge-$role.service" <<UNIT
+[Unit]
+Description=ECX bridge $role
+After=postgresql.service network-online.target
+Requires=postgresql.service
+Wants=network-online.target
+[Service]
+User=$account
+Group=$account
+UMask=0077
+Environment=PGHOST=/var/run/postgresql
+Environment=PGPORT=5432
+Environment=PGDATABASE=ecx_bridge
+Environment=PGUSER=$account
+Environment=ECX_ASSETS=$prefix/current/share/web
+Environment=ecx_bridge_datadir=$prefix/current/share
+$extra
+ExecStart=$prefix/current/bin/ecx-bridge $args
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=45
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=$state/$role
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+MemoryMax=512M
+TasksMax=64
+[Install]
+WantedBy=multi-user.target
+UNIT
+  chmod 0644 "/etc/systemd/system/ecx-bridge-$role.service"
+done
+systemctl daemon-reload
+systemctl enable ecx-bridge-worker ecx-bridge-signer
+printf '%s\n' "$release" > "$config/installed"
+echo 'Installed. Services are STOPPED. Configure native wallet backup staging/HTTPS, verify backup and isolation, then start services; the worker starts paused. Explicit checked resume is required.'

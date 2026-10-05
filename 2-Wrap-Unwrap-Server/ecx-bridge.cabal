@@ -6,7 +6,7 @@ license: MIT
 license-file: LICENSE
 build-type: Simple
 data-files: test/fixtures/*.json, migrations/*.sql
-extra-source-files: test/formal/*.tla, test/formal/*.cfg
+extra-source-files: test/formal/*.tla, test/formal/*.cfg, install/install, install/package
 
 common settings
   default-language: GHC2021
