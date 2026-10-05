@@ -1,16 +1,25 @@
 # Release review
 
 The latest source adds direct public WarpTLS in the existing worker, replacing the
-optional Nginx example. The macOS and Ubuntu 24.04 ARM64 root builds and bridge Cabal suites pass actual
+optional Nginx example. The macOS and Ubuntu 24.04 ARM64/x86-64 root builds and bridge Cabal suites pass actual
 HTTPS, plaintext rejection, oversized-body rejection, incomplete TLS configuration
 and unsafe-key refusal, plus concurrent global admission/refill checks. Temporary
 listeners and certificates are cleaned up. The Linux fixture explicitly sets its
 certificate permissions instead of inheriting a group-writable umask; startup
-exceptions now propagate into the test. The Ubuntu build reused its dependency
+exceptions now propagate into the test. Both Ubuntu builds reused their dependency
 cache and prebuilt GHC-JavaScript browser assets. These are local transport checks, not
 public-domain/certificate-renewal or load acceptance. The historical funded runtime
 and Linux packages below predate this addition and must not be described as testing
 it. The separate signer and financial evaluator paths are retained.
+
+The public-listener lifetime was also traced through `runProcess`: nested
+`concurrently_` scopes cancel worker/control siblings when the listener fails.
+`withWriter` pauses the ledger before starting those services, while its bracket
+closes the database connection and releases worker ownership on exit. The worker
+loop catches only policy errors; asynchronous cancellation escapes. Existing
+PostgreSQL contracts cover interruption before commit, rollback and permanent
+connection fencing, and the worker contract checks shutdown propagation. This is
+a source/contract review of the lifetime boundary, not a new funded crash drill.
 
 The Mainnet round trip passed on frozen review candidate `54c2bfd`, deployed in
 the Ubuntu ARM64 VM. Executable SHA-256:
