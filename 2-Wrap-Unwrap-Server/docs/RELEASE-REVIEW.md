@@ -1,13 +1,81 @@
 # Release review
 
+The bridge has completed funded development tests and a canonical betanet/Solana
+Mainnet round trip. It is ready for source review, **not public-release approval**.
+The active work is the [nine-step completion plan](IMPLEMENTATION-PLAN.md). Passing
+an older candidate's tests does not certify later source or packages.
+
+## Source and evidence boundaries
+
+| Version | Verified scope | Not established by that evidence |
+| --- | --- | --- |
+| `54c2bfd` | Funded canonical wrap/unwrap, exact finalized bytes, reconciliation; same-host in-flight Solana recovery | New public TLS, later token changes, independent-host recovery |
+| `509f617` | Ubuntu ARM64/x86-64 signed test packages, clean installation, repeat upgrade preserving custody/configuration, installed public HTTPS and paused intake | Public-domain renewal, funded clean-host restore, public release signing |
+| `ba5c0f1` | Durable offline token minting: macOS and Ubuntu ARM64/x86-64 token suites; real Devnet delayed signing/submission and refusal checks below | Final distribution artifacts (in progress); independent release gates below |
+
+Detailed historical transaction IDs, source hashes, snapshots, test scope and
+private evidence locations remain in the immutable
+[pre-consolidation record](https://github.com/freewillydev/ecx-solana-bridge/blob/ba5c0f1/2-Wrap-Unwrap-Server/docs/RELEASE-REVIEW.md).
+Resolved RPC, freshness, unpaid-payout and installer blockers in that history are
+**not current blockers**. There is no new funded Mainnet retry to perform merely
+to reproduce the already settled round trip.
+
+## Completed acceptance retained
+
+| Area | Evidence | Limit |
+| --- | --- | --- |
+| Customer conversions | Real L2L Signet/Solana Devnet conversions with immutable 1% fees; canonical Mainnet round trip | Deposits used tester clients; actual customer-wallet approval remains open |
+| Refunds/revenue | Verified-owner refunds, additional-deposit refund preserving the original payout, native/wrapped earned-fee withdrawal, replay/restart | Scoped funded cases, not all possible chain histories |
+| PostgreSQL ledger | Schema 18 → 21 migration; 24 projections, exact attempts and financial history compared; QuickCheck and real PostgreSQL transaction/fencing/concurrency contracts | Synthetic source-loss/winner-change evidence is not a real-chain reorg |
+| Browser | GHC-JavaScript forms, fee previews, paused intake, saved-order reload, payout links and error behavior | No completed real Solana Pay wallet signing flow |
+| Recovery | Native replacement/rebroadcast and same-host in-flight restoration; Solana in-flight restoration; encrypted native-wallet restoration | Physically independent funded disaster recovery remains open |
+| Native source changes | Real Signet confirmation rollback/return observed by the paused worker without duplicated settlement | No confirmed double spend, permanent source loss or alternate winning payout |
+| Isolation | Separate service identities, read-only signer database role, denied custody/native key access, native unlock/sign/backup RPC restrictions, service-account SSH denials | Independent whole-system security review remains open |
+| TLS and admission | Real WarpTLS HTTPS, plaintext/body rejection, private-key checks, bounded concurrency and atomic global request/order limits | Not network-level DDoS protection or production load/renewal evidence |
+| Signer model | Two-request TLA+ model: 54,289 states, unique output/path/dispatch invariants and negative mutations | Not a TLAPS/unbounded proof or automatic Haskell refinement |
+| Token administration | Devnet mint/account creation, mint/burn, metadata, exact replay, expiry and finalized-failure recovery | Issuer approval and canonical backing remain external |
+| Liquidity | Devnet pool/position creation, deposit/withdrawal, nonzero collection, explicit fee-bounded reinvestment and failure recovery | No unattended compounding or LP-lock claim |
+| Trading | Real Mainnet SOL→USDC→canonical wrapped ECX acquisition via Orca; two-provider effects checked | No guarantee of ongoing routes, liquidity or reserve backing |
+| Installation | Both Linux architectures: authenticated installation/upgrade, cold boot and isolation on recorded candidates; unfunded native/HTTPS-backup integration | Final-source packaging and funded independent restoration remain separate |
+
+### Canonical funded checkpoint
+
+On `54c2bfd`, 3,000 wrapped base units paid 2,970 native units; 1,000 native units
+then paid 990 wrapped units. Fees were 30 and 10 units respectively, with network
+costs booked separately. Alchemy and the independent verifier returned identical
+finalized Solana payout bytes at slot 453424255:
+`569aQRwy8WE9KcMpL2DD8XiANbxquwakX864JEfKnKSFPg5KssVg41TDsh9cpcBg8QQrBh12HgQXA3U9ZfyfL2Xy`.
+All three custody assets reconciled without differences; sequence/backup coverage
+was 55. Restoration of its pre-broadcast snapshot recovered the settled payout
+from the real chain without another signature or payment. Backup storage still
+shares this physical Mac.
+
+### Retained package identities
+
+The exact `509f617` test-signed packages passed installed HTTPS/upgrade checks:
+
+| Architecture | SHA-256 |
+| --- | --- |
+| ARM64 | `5b89ceaeda28a4d52a32a10daf62f27351f4e218877d28e8207cf90a35d3a072` |
+| x86-64 | `5a3dec48318d8226eb564807d73dff15cc7ba562a88c17e19bb367ae426decc4` |
+
+They include the reviewed restic build and all 40 payload-manifest entries,
+including the nested browser manifest. The acceptance signing key is not a public
+release trust key. Private artifacts/evidence are in
+`installer-acceptance-20261004/candidate-509f617/` under the retained secrets directory.
+Do not label them as containing later token changes.
+
 ## Durable offline mint acceptance (2026-10-05)
 
 The new `CreateNonce` and `NonceMint` token operations passed the local Cabal token
 suite, including independent exact instruction/account validation, changed intent
 refusal, nonce-state/version/authority parsing, imported-key identity, offline CLI
 confirmation, private-file permissions and no-overwrite checks. Ordinary token
-recovery contracts still pass. Native/Linux acceptance of this change is tracked
-separately from historical bridge packages below.
+recovery contracts still pass. Linux token acceptance also passed on Ubuntu ARM64
+and x86-64 at `ba5c0f1`, with one build job and actual platform SDK libraries.
+Private logs are `token-nonce-{arm,x86}-ba5c0f1.log` in the retained
+`installer-acceptance-20261004` directory. This does not update the older bridge
+packages or prove installation of the final version.
 
 Real Devnet acceptance used the retained disposable test authority and a separate
 test payer, not Mainnet or bridge custody. The payer created nonce account
@@ -32,933 +100,83 @@ replacement signature was generated. Private evidence is
 build root. This establishes the tested Devnet token path, not customer-wallet,
 Mainnet nonce, physically separate-device or independent-security acceptance.
 
-The latest source adds direct public WarpTLS in the existing worker, replacing the
-optional Nginx example. The macOS and Ubuntu 24.04 ARM64/x86-64 root builds and bridge Cabal suites pass actual
-HTTPS, plaintext rejection, oversized-body rejection, incomplete TLS configuration
-and unsafe-key refusal, plus concurrent global admission/refill checks. Temporary
-listeners and certificates are cleaned up. The Linux fixture explicitly sets its
-certificate permissions instead of inheriting a group-writable umask; startup
-exceptions now propagate into the test. Both Ubuntu builds reused their dependency
-cache and prebuilt GHC-JavaScript browser assets. These are local transport checks, not
-public-domain/certificate-renewal or load acceptance. The historical funded runtime
-and Linux packages below predate this addition and must not be described as testing
-it. The separate signer and financial evaluator paths are retained.
 
-The public-listener lifetime was also traced through `runProcess`: nested
-`concurrently_` scopes cancel worker/control siblings when the listener fails.
-`withWriter` pauses the ledger before starting those services, while its bracket
-closes the database connection and releases worker ownership on exit. The worker
-loop catches only policy errors; asynchronous cancellation escapes. Existing
-PostgreSQL contracts cover interruption before commit, rollback and permanent
-connection fencing, and the worker contract checks shutdown propagation. This is
-a source/contract review of the lifetime boundary, not a new funded crash drill.
-
-Updated Ubuntu candidate packages were assembled from `509f617` using the
-verified ARM64/x86-64 build caches and hash-pinned reviewed restic binaries. Both
-archives bind that exact source, contain no links/traversal or duplicate file
-entries, and cover all 40 payload files in their manifests. Packaging now excludes
-only the top-level manifest from self-hashing, so the nested browser manifest is
-also covered. A local **test** release index was signed and both architectures
-passed signature and installer-checksum verification; this is not a public trust key
-or installation acceptance of these new artifacts. Retained candidates are in
-private `installer-acceptance-20261004/candidate-509f617/`.
-
-| Architecture | Artifact SHA-256 | Bytes |
-| --- | --- | ---: |
-| ARM64 | `5b89ceaeda28a4d52a32a10daf62f27351f4e218877d28e8207cf90a35d3a072` | 33,698,373 |
-| x86-64 | `5a3dec48318d8226eb564807d73dff15cc7ba562a88c17e19bb367ae426decc4` | 28,421,166 |
-
-Both exact `509f617` candidates subsequently passed authenticated fresh install
-and repeat upgrade in disposable Ubuntu 24.04 ARM64/x86-64 VMs. Hashes of all
-configuration/custody files were unchanged across upgrade, which left both services
-stopped. With a separate test certificate and the documented systemd environment,
-the installed worker served HTTPS, refused plaintext, reported unavailable/paused
-intake and could not read the signer custody key. External traffic was denied for
-that worker; no chain transfers occurred. Private evidence is retained in
-`tls-{arm,x86}-{fresh-install.log,upgrade-install.log,installed-review.json}` under
-the existing installer evidence directory. Both disposable VMs were stopped and
-deleted. This closes this candidate's installation/HTTPS smoke check, not public
-certificate renewal, a new cold-boot drill or funded independent restoration.
-
-The Mainnet round trip passed on frozen review candidate `54c2bfd`, deployed in
-the Ubuntu ARM64 VM. Executable SHA-256:
-`2ce848b303104209bc1bdb5828237db98b613b9c7a32f1a449a4ec93d3c13cbe`.
-The canonical unwrap paid 2,970 native units from 3,000 wrapped units, with a
-30-unit bridge fee and 141-unit network cost. The return wrap paid 990 wrapped
-units from 1,000 native units, with a 10-unit bridge fee and 5,000-lamport network
-cost. Finalized Solana transaction:
-`569aQRwy8WE9KcMpL2DD8XiANbxquwakX864JEfKnKSFPg5KssVg41TDsh9cpcBg8QQrBh12HgQXA3U9ZfyfL2Xy`.
-Alchemy and the independent public Mainnet endpoint returned identical finalized
-transaction bodies at slot 453424255, with custody debited 990 and recipient
-credited 990 canonical token units. The ledger records `PaymentPaid`; reconciliation
-matches Native 97,889, Wrapped 3,002,010 and SOL 4,995,000 base units, all differences
-zero. Critical sequence and backup coverage are 55. The remote snapshot at that
-sequence retains the exact pre-broadcast attempt for an in-flight recovery drill.
-Services are stopped; backup storage remains on the physical Mac. This completes
-the funded round trip, not all public-release gates below.
-
-Earlier keyed OnFinality attempts exhausted its observed 40/minute and 200/hour
-response-unit limits. Relevant methods cost two response units. Alternative
-SolanaTracker history omitted immutable origins and VibeStation rate-limited reads.
-The current public verifier passed exact anchored history checks; this does not
-establish production capacity or an SLA.
-
-The full macOS root build passed on `3b1b3ba`; all three macOS Cabal suites passed
-on `3e34b01`. Linux ARM64 passed the full root build and bridge suite on `3e34b01`;
-its all-three-suite result is from `3b1b3ba`. The native-accounting changes also
-passed disposable PostgreSQL/restic and actual HTTPS contracts. Subsequent sections
-retain historical evidence within its recorded scope; they do not certify a later
-artifact.
-
-Ubuntu 24.04 x86-64 subsequently passed the full root `cabal build all -j1`
-and all three Cabal suites (`bridge-test`, `pool-test`, `token-test`) at `7805c02`,
-including the simplified token CLI and default fee cap. The build used the actual
-x86-64 SDK and prebuilt GHC-JavaScript browser assets. This closes native x86-64
-build/unit-suite acceptance, not fresh installation, browser compiler reproduction,
-funded operation or clean-host recovery. The test log is retained privately as
-`installer-acceptance-20261004/x86-tests-7805c02.log`.
-
-The x86-64 package builder then produced a 28,414,439-byte candidate at `fb2cb84`
-(only release-evidence documentation changed after the tested source). Artifact
-SHA-256: `a3646e2141cfd3720413fa01c12f3d2e7a03e14f5040946fe6980cd5d78e0f58`.
-Host readback verified every payload-manifest entry, all eight migrations, the
-reviewed x86-64 restic hash and absence of links/traversal entries. This is package
-construction/integrity evidence; subsequent authentication and installation
-results appear below.
-Private evidence is `package-inspection-x86-fb2cb84.json` in the same directory.
-
-Ubuntu ARM64 also passed the full root build and all three Cabal suites at
-`0a545ba`. Its updated package includes the reviewed restic binary and retained
-dependency notices; the bridge executable remains byte-identical to the frozen
-Mainnet-tested runtime. Artifact SHA-256:
-`8367706c2b409fded8772cced812ac67a17ff4b3ac006841afd355ad439978c8`
-(33,688,971 bytes). Both new architecture packages passed Ed25519 index and
-artifact verification with the existing acceptance-only key. This is not the
-public release trust key. Final installed-package acceptance remains separate.
-Private evidence includes `arm-tests-0a545ba.log` and
-`package-inspection-0a545ba.json`; the build VM was stopped after export.
-
-The exact signed x86-64 candidate then passed fresh installation on a new pinned
-Ubuntu 24.04 VM with no PostgreSQL, bridge configuration or service accounts.
-Both installed services started, the customer configuration endpoint responded,
-and signer HTTPS verified its certificate and rejected unauthenticated requests
-with 401. All 35 filesystem/PostgreSQL identity checks passed; actual SSH forwarding
-with service-owned authorized keys was denied for both service accounts. A signed
-upgrade preserved all configuration, credential and fence hashes and the paused
-sequence-zero ledger. Repeated fresh installation was refused without altering
-those files. Following a complete shutdown/start, both services started
-automatically; public configuration, paused ledger, signer authentication, all 35
-isolation checks and both SSH denials passed again. Private `x86-final-*` evidence
-is retained in `installer-acceptance-20261004`. This closes unfunded x86 installation,
-upgrade and cold-boot acceptance. Loopback-only service policy deliberately excluded
-chain/backup traffic; native-node integration and funded independent restoration
-remain separate gates. The acceptance key is not a public release trust key.
-
-The updated ARM64 package at `0a545ba` passed the same clean-host exercise on a
-fresh pinned Ubuntu VM: authenticated installation, both actual services,
-signer TLS/401, 35 filesystem/database isolation checks, both real SSH denials,
-upgrade preservation and repeat-fresh refusal. A full shutdown/start preserved the
-paused sequence-zero ledger and public configuration; services started at boot,
-and authentication, isolation and SSH checks passed again. Private `arm-final-*`
-results retain evidence for this exact artifact with the reviewed restic binary.
-This completes unfunded installed-package acceptance on both architectures; it
-does not establish funded restoration, native-node integration or remote retention.
-
-Installer-account native/backup integration subsequently passed on a separate
-unfunded ARM64 deployment of that exact package. Two pinned Bitcoin Core 30.2
-daemons used copied real L2L Signet history and loopback-only peers; the application
-checkpoint and challenge matched. A new encrypted native wallet ran under
-`ecxbridges`. The worker's RPC identity was denied wallet unlock/lock, private-key
-export, private descriptors, PSBT signing (including unsigned mode), raw signing
-and wallet backup. Native backup files belonged privately to the signer and were
-unreadable by the worker.
-
-The authenticated `/checkpoint-custody` route then traversed the production critical
-evaluator and returned a sequence-zero receipt only after encrypted HTTPS upload
-and full downloaded-bundle validation. A separate test restic repository on the Mac
-kept this exercise apart from funded custody. The original unfunded native wallet
-was unloaded and retained aside; the production recovery commands downloaded and
-validated the saved bundle and restored its native wallet. Public descriptor
-readback and zero balances matched exactly, encryption remained locked and the
-worker could not read the restored wallet. Snapshot:
-`12c8b329f7f2abdd9e9e1145955ed273d33b0da2e29b4857d2ce8a5d0686f3b1`;
-manifest SHA-256 `ffa5213387a3716f119109d0c4259a00b58749a13a8c87db322b759730dad99a`.
-Private `node-integration-*` records retain the results. This closes the tested
-installer-account native/HTTPS-backup integration, not funded clean-host activation,
-protected remote retention or a different physical failure domain. No customer
-payment or existing custody wallet was used.
-
-## Mainnet blocker history and closure
-
-The documented public endpoint `https://api.mainnet.solana.com` passed two read-only
-production-validator rounds against Alchemy: canonical identity/authority, complete
-custody histories (three token and two operating transactions), exact finalized
-transaction bodies and account balances agreed. VM observation then reconciled all
-three assets with zero differences. This is pilot evidence, not a public-endpoint
-SLA or a production provider recommendation.
-
-The existing 990-unit liability received one explicit retry approval. Required
-backup/readiness checks passed and generation 3 was signed, but reconciliation
-returned `rpc_error_-32019` before broadcast intent. The node's historical storage
-was unavailable; later direct reads succeeded. The error is not evidence of
-nonexecution and the failing provider was not identified by the saved runtime code.
-The bridge stopped without broadcasting. Subsequent two-provider expiry recovery
-retired that exact attempt, and required remote backup caught up to critical
-sequence 32. Worker, signer, tunnel and VM stopped; no next generation was approved.
-The liability remains unpaid. The archive receiver still shares the physical Mac.
-
-The shared RPC boundary retries this specific storage error only for
-`getTransaction`, `getSignatureStatuses` and `getSignaturesForAddress`, sharing the
-existing two-retry budget with connection closures and rate limits. Persistent
-failure retains its error; writes and other errors never gain retry permission.
-That fix (`0d144fd`) passed native/Linux ARM64 builds and Cabal bridge tests and
-was deployed. Generations 4 and 5 reached backed-up broadcast intent but stopped
-at the final 40-block lifetime guard before send. Pilot pacing of worker 4/signer 3
-requests per second per host did not resolve this. Both attempts are now retired
-with two-provider expiry evidence; critical sequence and backup coverage are 44.
-No generation 6 is approved. Private evidence is retained under `fixed-mainnet-*`
-and `paced-mainnet-*` in the deployment directory. The 990-unit payout is unpaid.
-
-Custody inspection now runs the two independent provider reads concurrently against
-one saved ledger snapshot. Each still validates finalized accounts and anchored
-history; balances must agree and the ledger revision is rechecked. An exception
-cancels the sibling inspection. This changes no signing permission, backup barrier,
-RPC count or blockhash floor. The existing PostgreSQL contract now proves concurrent
-entry and cancellation on failure from either side, alongside disagreement and
-stale-view refusal. Native server/checker builds, the complete disposable
-PostgreSQL/restic contract and Cabal bridge tests passed. The Linux ARM64 build and bridge suite also passed, and `fd318c9` was deployed
-with the existing ledger/credentials preserved. Live readiness took 32.4 seconds
-including recovery, with all three custody balances matching; this is not a
-measurement of the entire signed-to-send window. A bounded generation-6 trial
-reached backup-covered broadcast intent at sequence 49, then paused with
-`scanners_not_fresh`; saved custody evidence reported `custody_native_history_advanced`.
-Neither provider found its signature in history. The normal recovery workflow
-then recorded full expiry proof and backup coverage at sequence 50. No generation 7
-was approved; services, VM and tunnel stopped. The 990-unit obligation remains
-unpaid. Diagnose moving-history refresh before further funded retries. Private
-`parallel-mainnet-*` evidence includes the saved attempt, timing, provider responses
-and final recovery readback.
-
-
-The moving-history regression failed on the old code: a fresh but superseded scan
-still led to `custody_not_reconciled`, selecting another custody read instead of a
-rescan. `RecordCustody` now atomically marks the affected scan stale through its
-existing closed Opaleye implementation. Last-success timestamps remain unchanged,
-financial balances are preserved, and scan updates invalidate the custody revision.
-The PostgreSQL contract covers both native and Solana advancement, unaffected-stream
-preservation, refusal even after a premature custody report, successful rescan plus
-fresh custody, and unchanged signed attempts when send authorization is refused.
-Native builds, the complete PostgreSQL/restic contract and Cabal bridge tests passed.
-No deadline, generation limit, backup requirement or authorization path changed.
-The Linux build and bridge suite then passed, and the hash-verified candidate was
-deployed. A live readiness check took 17.6 seconds before the explicitly approved
-generation-7 retry. It passed required checkpoints and settled the original payout;
-no deadline or generation cap was increased. The pre-fix refusals above are retained
-as historical evidence, not current unpaid obligations. Private `rescan-mainnet-*`
-artifacts hold final ledger, transaction, timing and snapshot evidence.
-
-
-The frozen candidate also passed in-flight Solana restoration from the real
-sequence-55 HTTPS/restic custody snapshot. Verified download and ledger restore
-created a separate paused database/fence containing generation 7 in
-`broadcast_intent`, with its original signature and backup coverage 53 (the
-snapshot predates its acknowledgement). With the signer stopped, the production
-observation-only worker recovered `PaymentPaid` from the actual finalized Mainnet
-transaction. All three assets matched the settled live deployment; a subsequent
-observation preserved balances, payment and network cost. No replacement signature
-or payment was needed. The test fence was retired; the disposable database, peer
-rule, observer and recovered secret copies were removed. Private `sequence55-*`
-evidence retains before/after/repeat/cleanup results. This closes the same-host
-in-flight Solana ledger-recovery case, not independent-host activation, restored
-native-wallet use, backup deletion separation or disaster recovery.
-
-A post-boot isolation inspection of the frozen ARM64 deployment passed 42 checks.
-Both service accounts retain non-login shells and no sudo access; neither can
-write the executable, its parent installation directories or either systemd unit.
-The worker cannot read the custody key, signer native credential, TLS private key,
-backup password or custody staging. The signer cannot read the worker's fence.
-PostgreSQL peer authentication rejects worker impersonation of the signer/admin
-roles and signer impersonation of the writer/admin roles; the intended connections
-succeed. Application ledger inspection uses the existing closed Opaleye reader;
-connection-only authentication probes execute no application SQL. The ledger
-remained stable at sequence 55 and the installed executable retained its frozen
-hash. Both services stayed inactive/disabled throughout. Private evidence is
-`frozen-isolation-20261004.json`. This verifies the inspected VM's host access
-boundaries after boot; it does not close independent security review, native RPC
-policy beyond the earlier checks, or disaster-independent backup/restore.
-
-The new installer body passed 23 provisioning/preservation checks in the existing
-Ubuntu ARM64 VM with a fresh, unfunded Solana key and a separate disposable database.
-It applied all eight migrations, initialized/adopted a paused ledger, refused repeat
-fresh installation, preserved all configuration/fence files and closed-DSL ledger
-state on upgrade, and enforced separate PostgreSQL/OS credentials. The required-backup
-and native-unlock input branch installed signer-private files with mode 0600.
-The backup destination/passphrase in this fixture are deliberately non-operational:
-these checks prove provisioning/permissions, not wallet unlocking or backup delivery.
-Five further checks covered wrong architecture, altered artifact bytes and changed
-migration-manifest refusal before release switching, successful final upgrade and
-exact installer-source hash. Shell syntax and ShellCheck passed. The frozen server
-binary remained unchanged. Observation-only processes used the actual operator DSL
-with all IP networking denied; no signer or paying worker ran for this acceptance.
-Private evidence is under `installer-acceptance-20261004`. The existing funded pilot
-was not replaced. This is installer-body evidence, not a clean-host, authenticated
-package-builder, x86-64, reboot or funded restore result. Those gates stay open.
-
-The actual ARM64 package builder then ran through Cabal on the cached Ubuntu build,
-producing a 33,747,993-byte candidate from `18cb881`. Its executable hash exactly
-matched frozen runtime `54c2bfd`; payload inspection found all eight migrations
-and no symlink/traversal entries. A separately held acceptance-test Ed25519 key
-signed the actual ARM64 artifact. Format-2 release indices now list only built
-architectures; missing-architecture and empty-release cases are refused, with the
-existing signature/key/index/artifact tampering cases retained. The Cabal bridge
-suite passed the expanded QuickCheck contract. This does not certify x86-64 or
-establish a public release trust key.
-
-The authenticated fresh-install command passed on a new pinned Ubuntu 24.04 ARM64
-VM with no PostgreSQL package, bridge state or service identities beforehand.
-Both actual systemd services started, the customer configuration API responded,
-and signer HTTPS verified its generated certificate and returned 401 without
-authentication. After a cold boot, both services started automatically, the public
-configuration was unchanged and the ledger remained paused at sequence zero.
-The unfunded acceptance used loopback-only IP policy; it did not contact chain
-providers or demonstrate native-wallet/backups/restored funds on this new host.
-
-This inspection reproduced a real SSH policy gap: a service-owned authorized key
-could forward HTTP through SSH despite the account's `nologin` shell. Explicit
-`DenyUsers ecxbridgew ecxbridges` blocked both service accounts with those keys.
-The installer now writes and checks that effective policy and reloads SSH when it
-is installed. The hardened artifact from `8db99c8` then passed authenticated upgrade
-and repeat upgrade, preserving every recorded configuration, credential and fence
-file hash, with the ledger still paused at sequence zero. Both services restarted
-and both service accounts were denied real SSH forwarding with valid test keys.
-
-That exact hardened artifact also passed authenticated fresh installation on a
-second clean Ubuntu VM, followed by a cold boot. Both services started automatically,
-the public configuration was unchanged, signer TLS returned 401 without credentials,
-and both SSH denials passed again. Artifact SHA-256:
-`4d1d1a86bebadb9f2dc4b8e54d0f7bdfabae38b4d0ae9a6a28080d86adcbc241`
-(33,748,134 bytes). Its executable is byte-identical to the frozen Mainnet runtime.
-These are unfunded, loopback-only provisioning checks, not chain or backup acceptance.
-Do not use the earlier `18cb881` installer with the SSH gap. x86-64, native-node and
-backup integration, funded clean-host restoration, distribution review and independent
-security review remain open. The disposable acceptance VM was deleted; the builder
-and funded pilot VMs are stopped. Private `clean-*`, `hardened-*`, `package-*` and
-`ssh-service-*` evidence is under `installer-acceptance-20261004`.
-
-A subsequent numeric-parser review checked the frozen application's input types
-against hash-verified GHC/Aeson/scientific sources. Hostile exponent tests through
-actual order/policy codecs passed in the Cabal bridge suite, including a valid-order
-control and a one-second deadline. No runtime change was required. This strengthens
-boundary evidence for HSEC-2023-0007 but does not close transitive reachability or
-independent review; see [dependency review](DEPENDENCY-REVIEW.md).
-
-The bundled restic audit then found advisory matches outside the Cabal/Cargo
-inventory. A patched restic candidate passed bidirectional old/new local repository
-restore, full data checks and wrong-password refusal in Ubuntu ARM64. Its binary
-scan retains only an OpenPGP wildcard report, while the selected import graph excludes
-that package. Packaging now pins the reviewed candidate hash and rejects the old
-binary. The frozen bridge executable is unchanged. The candidate then passed the actual
-bridge custody download, inspection, upload and mandatory full readback using the
-real sequence-55 bundle and existing HTTPS repository. Its manifest hash was unchanged.
-The paused VM now uses the patched tool; recovered key files were removed and the
-VM stopped. Both updated signed packages now include this reviewed tool and passed
-installation acceptance, as recorded above. Notice collection covers the actual
-Go/restic graph; distribution review, public release signing and independent-host
-recovery remain open. See [dependency review](DEPENDENCY-REVIEW.md).
-
-## Evidence already obtained
-
-| Area | Evidence and limit |
-| --- | --- |
-| Customer conversions | Real L2L Signet/Solana Devnet wrap/unwrap through the server and dedicated signer; 1% saved fees and quoted net retained. Deposits used dedicated tester clients. |
-| Refunds and earned fees | Finalized verified-owner refunds and native/wrapped earned-fee withdrawals through the shared engine, with replay/restart checks. Additional refunds preserve completed conversion views. |
-| Ledger migration | Populated schema-18 copies and the original test ledger migrated to schema 21; exact signed work, financial history and 24 Opaleye projections compared. Historical records lacking executable cost policy remain archival only. |
-| Browser | GHC-JavaScript fee previews, paused intake, private-link recovery/reload, preserved payout links and network-error/restart behavior checked against the actual server. Actual wallet signing remains open. |
-| Custody restoration | Sequence-98 funded ledger restored into separate same-host staging; 24 projections matched and actual chain reconciliation passed. Minimum sequence 99 refused the archive. This does not prove off-host storage or clean-host wallet activation. |
-| Automated boundaries | Cabal QuickCheck/protocol tests, actual HTTPS tests and PostgreSQL contracts cover typed authority, immutable accounting, fencing, concurrency, cancellation, source/replacement recovery and encrypted restic restoration. Fixtures do not prove all real-chain cases. |
-| Canonical Mainnet mode | Both directions settled on real canonical ECX/Solana Mainnet, with exact net payouts and separately booked network costs. In-flight restoration and other release gates remain separate; earlier canonical process contracts use offline RPC fixtures. |
-| Current VM deployment | Separate worker/signer UIDs and restricted PostgreSQL/native credentials passed live denial checks. Required HTTPS backups, an in-flight sequence-9 restore into a separate paused database, and a VM restart passed. The backup receiver shares the physical Mac; clean-host activation and disaster isolation remain open. |
-| RPC pacing | Tests cover host budgets, idle/late wakeups, cancellation and actual HTTPS accounting of a read retry versus a refused send. Scoped Signet/Devnet operation passed at the default 2 requests/second per process/host. The Mainnet verifier's hourly quota exhausted during recovery; paced request starts do not guarantee hourly capacity or a usable payout window. |
-| Signer model | Bounded two-request TLA+ model: 54,289 distinct states; path/output/dispatch invariants and negative mutations checked. No TLAPS/unbounded Haskell proof. |
-| Token administration | Real Devnet mint/account creation, issuance/burn and metadata readback, preserving signed-attempt replay. Bounded expiry recovery now has a finalized mint-one/burn-one round trip; canonical authority/backing remain open. |
-| Liquidity | Real Devnet pool/position creation, funded deposit/withdrawal and collection replay, plus bounded expiry recovery for an empty-position collection. Subsequent real trades generated 4 units of fees per asset; collection, fee-bounded reinvestment and full withdrawal passed. Unattended compounding is not implemented. |
-| Trading | A real Mainnet SOL→USDC→canonical wrapped ECX purchase used Orca, including the published pool. Two providers confirmed 1,000,000 lamports input, 3,833,230 wrapped base units received and 6,404 lamports transaction fee. This is inventory acquisition, not bridge-conversion or backing evidence. |
-
-Representative funded transactions from the migrated test deployment:
-
-- Native unwrap: `35cd02a112319cf73ccf8e7262e6fe5b0e0eaa9ffc2830220784517a114c4e12`.
-- Wrapped payout: `5eWzmgGVNGZkKVET6kHAokYUttkNrX4bGLiQm6uRz1xMCtKnw73AiGwSUZYjNerzWV2WrmZn4GL9NsXzM87m5chg`.
-- Native earned withdrawal: `31a2c3bc8c6117225a11f1ed4a7767d682af6515ab46808287fc61a7129b6c8d`.
-
-The conversion tests used 50,000 gross, 500 fee and 49,500 net; the native withdrawal
-paid 500 with a separate 141-unit network fee. The deployment was left paused at
-sequence 98. Private custody/evidence is retained outside Git; never overwrite newer
-activity with the pre-migration backup. Earlier host-installation and permission
-checks concern the retired deployment and are not current installation acceptance.
-
-The canonical source promotion passed `cabal build all` (native tools, FFI SDK and
-GHC-JavaScript browser), all three Cabal suites, and disposable PostgreSQL/restic,
-actual server/control, HTTPS signing and encrypted real-Signet-wallet recovery
-contracts. The configuration CLI and both example shapes were checked; six
-compile contracts preserved the Operation caller/severity boundary. All eight SQL
-migrations and the supplied Main.hs reference retained identical bytes. Temporary
-test resources were removed. This verifies the promotion, not the release gates below.
-
-Mainnet enablement and the shared strict SPL mint parser passed the root build,
-all three Cabal suites, PostgreSQL/restic contracts and both Devnet and canonical
-server/HTTPS variants. Tests retain pinned mint/checkpoint, independent-provider,
-backup, profile-alignment and native replay-policy refusals. Mint validation now
-checks the full classic layout and unsigned supply range on both providers and
-requires matching mint authorities; it does not establish issuer approval or pin
-an expected authority. At that checkpoint, the running funded deployment remained
-Signet/Devnet. No Mainnet transaction was broadcast by those tests, no new runtime component/file was added,
-and disposable databases, roles and processes were removed after testing.
-
-The subsequent Mainnet pilot acquired canonical inventory in transaction
-`4ACeCJBRbMDhUsQSuf8u5VW8tboLVw4QtiW5oZzj3UKjJg7rs64WmYPKUSBJa7YPH9bH228wmMLHx4PftCReFQ1K`.
-The route used published Orca pool `nNKg814Wq3uTkoG4fM8LzvBQv4Fu2iCgKFmK2YmPQzM`
-with a 1% slippage bound. Separate custody then received 0.03 wrapped ECX and 0.005 SOL;
-its native wallet received 100,000 ECX base units. Account creation was externally paid,
-and full custody history was retained. The worker's restricted native RPC credential
-passed all fourteen forbidden-method checks, while the wallet stayed locked.
-The separate canonical ledger starts paused with required backups enabled; off-host
-checkpoints and a funded bridge round trip remain outstanding. Same-user local
-processes do not prove production credential isolation.
-
-A later Ubuntu 24.04 ARM64 VM rehearsal built current source with root Cabal and
-passed all three suites. The Linux build reused the Mac's GHC-JavaScript bundle
-only after checking its source/artifact manifest; stale and corrupt bundle tests
-also passed. The sequence-3 custody bundle was inspected, its ledger restored
-through the closed recovery command, the Mac fence retired and the VM fence adopted.
-Worker and signer now run as separate OS users with separate peer-authenticated
-PostgreSQL roles; the worker cannot read the signer key, native credential or unlock
-file. Both systemd services start successfully.
-The Mac runs an authenticated append-only HTTPS restic receiver: a VM probe was
-uploaded, restored byte for byte, and deletion/overwrite attempts were refused.
-This is the same physical host, and the existing ECX node remains on the Mac via
-an SSH tunnel. It is not independent disaster protection. The first checkpoint
-uploaded successfully but could not verify recovery because Ubuntu's restic 0.16.4
-lacks `dump --target`. Installing checksum-verified upstream 0.19.1 allowed the exact
-snapshot to pass `recover-custody` at sequence 3. The normal operator resume then
-completed its full checkpoint/readback and chain/custody checks; the first unfunded
-customer order advanced both critical and backup coverage to 4. No backup barrier
-was waived. A real customer then deposited 3,000 canonical wrapped units on Mainnet;
-the bridge accepted the 30-unit fee quote and broadcast its 2,970-unit ECX payout.
-At that checkpoint, confirmation and the return wrapping leg were pending; it did
-not establish a completed round trip. Required backup coverage reached sequence 9.
-
-Current runtime checks verified separate worker/signer UIDs, NoNewPrivileges,
-seccomp and no effective/permitted/ambient capabilities. The worker could not open
-six signer secret files. Its restricted native credential passed thirteen harmless
-forbidden-method probes; `walletlock` exclusion was inspected rather than called.
-An authenticated invalid-generation signer request passed the current Opaleye
-SELECT-only role check before its expected refusal, without a key operation.
-The VM now uses a separate administrative UID. The signer's existing UID and key
-ownership were retained, but its passwordless sudo grant and SSH authorized key
-were removed, its shell disabled, and SSH explicitly denied. Lima/cloud-init now
-provisions only the separate administrator. Fresh connections and reboot checks
-confirmed administrator access, signer SSH/sudo denial, worker secret-file denial,
-valid signer key identity and an unchanged ledger at sequence 26/coverage 25.
-
-Actual directory-open checks exposed caller-dependent ownership on the Mac-shared
-virtiofs staging mount: mode 0700 there did not deny worker access. A root-owned
-guest-native parent directory, mode 0710 with the signer's group, now protects
-traversal; the worker unit also marks staging inaccessible. After reboot, signer
-access succeeded and worker access failed with EACCES. A harmless cross-host file
-probe and the existing native-wallet backup command both passed; the latter
-archived the actual encrypted wallet and verified its manifest without signing.
-Temporary probes were removed. Worker and signer remain disabled and stopped;
-the supervised native-node tunnel uses the separate administrator and retained
-host-key pinning. This closes the observed account/staging defects, not the wider
-production isolation or independent disaster-recovery review.
-
-Signer transport rotation subsequently passed on the paused VM: a new token and
-TLS key/certificate replaced both services' transport configuration. Old trust
-failed TLS verification; the old token received 403; the actual worker UID's new
-credentials reached the critical evaluator, which rejected an invalid generation
-before chain access. Worker access to the new TLS private key was denied. Custody
-key/unlock material and the sequence-27 ledger were unchanged. Both services were
-stopped afterward. The existing Cabal-built HTTPS/PostgreSQL contract now also
-checks rotation, saved-attempt refusal and unchanged ledger/RPC activity in both
-Devnet and canonical profiles, using offline chain fixtures. No production code
-or new runtime component was added; public-edge TLS and host recovery remain open.
-
-The exact sequence-9 HTTPS snapshot containing the in-flight payout was recovered
-and its full custody/configuration/archive bindings verified. The closed restore
-command produced a distinct paused database at sequence 9, which was then dropped;
-no fence was adopted and no recovered signer activated. This verifies in-flight
-snapshot recovery on the existing VM. The VM was then restarted with that payment
-still pending. Services returned paused, the supervised loopback-only SSH tunnel
-reconnected using a persistent pinned host key, and normal resume restored readiness
-with sequence/coverage 9 unchanged. Tunnel runtime credentials now live in a protected
-local directory, avoiding background access to the removable build disk. This covers
-VM restart; Mac/node reboot, unattended VM startup and independent clean-host
-activation remain unverified.
-
-Live observation exposed a verifier closing an idle HTTPS connection without a
-response. The RPC read allowlist now shares at most two retries across that failure
-and rate limits; sends, signing mutations, unknown methods and timeouts do not retry.
-Root build, all three Cabal suites and the actual HTTPS/PostgreSQL signer contract
-passed, including request counts and pacing for a closed read versus refused sends.
-The paused pilot subsequently reconciled all three real custody balances with zero
-differences and no pending attempts or payment candidates. Its independent readback
-ran while the worker was stopped to exclude concurrent ledger changes. This closes
-the observed read-transport failure, not the remaining deployment/release gates.
-The existing operator DSL allocated the three verified receipts at critical sequence
-3: native float 75,000 plus operating 25,000; wrapped float 3,000,000; SOL operating
-5,000,000, all in base units. A second independent readback matched every chain
-balance after allocation. Offline `backup-custody` and `check-custody` then verified
-the sequence-3 ledger, encrypted native wallet/unlock material, Solana key and
-configuration bundle. This is a protected same-host copy, not an off-host checkpoint
-or restore test. At that earlier checkpoint the temporary Mainnet worker was stopped,
-no bridge order or payout existed, and required backup coverage was still zero.
-The later VM rehearsal above supersedes that runtime state.
-
-The associated-constraint interpreter refactor also passed the root build, all three
-Cabal suites and the same PostgreSQL/server/HTTPS/encrypted-wallet contracts.
-One positive and nine rejected compile cases checked caller/severity alignment,
-closed instance heads, injective constraint identity, dictionary coercion, distinct
-signer results and private interpreter environments. `eqT` establishes constraint-type
-equality only; it does not prove dictionary-value identity or custody security.
-
-The subsequent evaluator consolidation passed the root build, all three Cabal
-suites and the PostgreSQL/server/HTTPS/encrypted-wallet contracts. One positive
-and seventeen rejected compile cases checked the assembled program's ground
-instances, constraint injectivity, caller/severity/result separation, private
-evaluation resources and customer-facade restrictions. Both process startups now
-share one critical evaluator; `Operation` methods implement authorization and
-execution. `Interpreter` and the explicit dictionary method are removed. The three
-central files decreased from 1,193 to 1,176 lines. These checks do not establish
-completion of the funded recovery and release gates below.
-
-DSL constructors now retain only their fully specified `OperationContext`.
-The matching view is private to `Critical.hs`, where the ground instance equations
-resolve that constraint to `Operation`. Six duplicate constraints were removed;
-the relocation reduces the two affected code files by two lines overall. The root
-build, all three Cabal suites and server/HTTPS contracts passed. A positive compile
-case constructs all six DSL forms using only their associated contexts; eighteen
-negative cases reject authority/type violations and access to the private view.
-
-Process startup now joins in `runProcess`, which owns the sole critical dispatch
-and never returns an evaluator callback. The former worker/signer factories are
-removed. Root build, all three Cabal suites, PostgreSQL/restic, executable
-HTTP/control and HTTPS contracts passed. Real concurrent HTTPS requests check
-signer serialization, second-read refusal and gate recovery. Customer HTTP also
-exercises the worker's private signer client, rejecting malformed backup receipts
-and preserving acknowledgment/replay behavior. Compile checks reject imports of
-the retired factories and private evaluator resources. The two production files
-change from 1,059 to 1,061 lines; the contract file falls from 3,852 to 3,757.
-Tests use service interfaces instead of acquiring private evaluators. Automatic
-worker sign/persist/replay retains component and historical evidence, but was not
-rerun on funded chains for this startup change; opt-in live migration/observation
-drivers were adapted and compiled, not rerun.
-
-Recovery readiness now refreshes after source/plan reads and permits one additional
-bounded repair if reconciliation ages the scans. Native recovery rereads historical
-receipts outside the incremental cursor, retaining atomic receipt/evidence updates.
-QuickCheck covers historical recovery, deduplication and batch limits; PostgreSQL
-checks that a confirmation-only update invalidates custody without changing balances
-or creating work. Root build, all suites and SOURCE/server/HTTPS contracts passed.
-These regressions do not close the remaining funded recovery acceptance gates.
-
-The funded encrypted-wallet drill restored an already signed native payout and
-completed it using unchanged bytes, then signed and settled a new native payout
-with the recovered wallet. Its restored HTTP wrap subsequently settled as
-`PaymentPaid`, with payout
-`896KTxnzFQQZ6tJMK143tUhKhbE6fuAtiraJQfDJqv6V3vVf38wQBjWdFMikq1LYEmFu3dxLzEDJhuhHFsihVoc`.
-The expired generation remains in history; verified expiry and explicit retry
-approval preceded its successor. A later real Solana Pay tester deposit also
-settled native payout `f2376847434952256d7426cfef5a6f3dd58870e6caa80da3309e73148f753e8b`
-for 990 net from 1,000 gross, with the 10-unit bridge fee and separate operator
-network cost. Current ledger checks confirm both paid states, no pending attempts
-or payment candidates, and fresh scans/custody. This is same-host Signet/Devnet
-recovery evidence, not clean-host or Mainnet acceptance.
-Earlier rate limits exposed a verifier-outage bug: rereading a verified deposit could revoke
-its eligibility. Unavailable verification now refuses the scan without changing
-receipts; actual disagreement remains reviewable. Root build, all three suites and
-PostgreSQL/HTTPS contracts passed, including repeated-cursor timeout/rate-limit/
-missing-result regressions. The funded acceptance inspector retains retired attempt
-history and scan/custody diagnostics. Its direct worker-stage driver has been
-removed with the evaluator factories: funded recovery must now use the real
-service interfaces and durable backup barriers, rather than private evaluator
-callbacks or timing termination to prevent a broadcast. Funded native replacement
-acceptance remains open.
-Singleton native payouts now share the replacement-family evidence reader for
-observation, custody and lock recovery, removing 88 production lines across four
-existing files. Root build, all three Cabal suites and the existing PostgreSQL/HTTPS
-contract pass. Offline regressions distinguish retained-but-evicted wallet records
-from active spenders and reject changed bytes, foreign spends, unavailable or
-unstable evidence. Custody now separately reports and normalizes proved inputs
-excluded by retained inactive wallet transactions, counting a replacement family's
-shared inputs once. It requires explicit non-abandoned/conflict/trust evidence,
-`avoid_reuse=false`, zero pending wallet credit and stable family/balance anchors.
-Missing/all-abandoned families add nothing; unexplained differences still refuse
-readiness. Root build and all three Cabal suites passed, followed by PostgreSQL/restic
-and actual HTTPS contracts. The isolated restored-ledger cases cover both active
-replacement fees, retained/abandoned/missing families, exact correction and remaining
-mismatch, pending-credit refusal, unchanged-balance mempool transitions and the existing
-single-family constraint. No schema or settlement rule changed. Funded eviction,
-replacement and rebroadcast acceptance remain open; these fixtures do not close them.
-
-The real Mainnet return deposit also exposed an unconfirmed arrival between native
-scanning and custody inspection. An unknown history entry now invalidates custody
-with the existing history-advanced condition so the next scan can catch up; a known
-reviewed or changed entry retains its strict refusal. The two-line guard passed the
-root build, bridge suite and PostgreSQL/HTTPS contracts. Regressions prove that this
-deferral removes certification, does not authorize intake, and never clears an
-existing pause. The deployed pilot required a normal checked resume before the fix.
-Readiness is repaired before obtaining a new blockhash; redundant outer worker
-refreshes are removed while leaf checks and both backup barriers remain. This
-reduces `Critical.hs` by three lines; the verifier fix adds no production lines.
-
-The PostgreSQL archive contract additionally compares all 22 existing migration
-projections alongside deployment, attempts and postings. A committed recipient
-change with unchanged row counts stays outside the exported snapshot and restored
-records; same-length dump-byte corruption is rejected. These assertions reuse the
-existing backup/restore cycles. Successful dump handles now close explicitly before
-validation and hashing. This does not establish protected remote retention.
-
-Administration recovery subsequently passed the root build and all three Cabal
-suites, followed by real Devnet acceptance through Solana's public RPC and
-OnFinality. Signed mint and empty-position collection attempts were deliberately
-left unsubmitted until expiry. Both providers supplied finalized expiry and complete
-history through the saved blockhash origins. Each recovery saved one direct child;
-repeating recovery returned the same bytes, parent submission was refused, and
-finalized child submission replay produced no additional effect. A one-base-unit
-mint followed by a checked burn restored supply to 200,000,000,000 and the tester's
-balance to 99,997,925,053. Pool owner/vault token balances were unchanged; each of
-the three submitted transactions charged 5,000 lamports.
-
-- Recovered mint: `6295tzQeV9Zquqe94hGJGBCn68fZQeJwGv3AeovgQtRVjXs41VoFW2QgTi6humaHUX6iXYKUZb1oMw9Z3dtfujju`.
-- Recovered collection: `44sFY6S7mkN3bZKUdw7C5EKxEH3EQdQewdqEC9ZRo9DhjnV8uMFpqgD5pZNPfg8dFWhHTjvnEnSQqguPB8GL9Fiu`.
-- Restoring burn: `GAEbjW9S465r362gnprkwh37LUtnk6RkgJAFLTysNPE8t2ju34TQZCw2DwGBQncs5W16Yutv4tY9grTtywvMBJV`.
-
-The live run also exposed stale pooled connections after verifier throttling;
-separate read sessions fixed the recovery run without retrying sends. RPC failures
-before recovery left no successor or send authority. Private attempts, provider
-evidence and tested binary hashes are retained outside Git. The failed-transaction
-recovery branch has offline evidence, not a deliberately failed live transfer;
-nonzero LP fees, other live recovery action families and canonical use are not
-established by this run. Publication-crash hardlinks require the documented manual
-inspection; two-provider history remains a trust assumption, not cryptographic
-proof of nonexecution.
-
-The separate 2026-10-04 burn-expiry drill used the existing tester owner's key,
-not the mint-authority key. Both Devnet providers established expiry and absence;
-the production CLI saved generation 1, repeated recovery returned identical bytes,
-and submission refused the superseded parent. The recovered burn finalized with
-exactly one base unit removed; finalized saved-byte replay caused no further burn.
-A separate authorized mint restored supply to 200,000,000,000 and tester balance
-to 99,997,921,043, exactly matching this drill's starting values. Each transaction
-charged 5,000 Devnet lamports. No Mainnet or bridge-custody transaction was made.
-
-- Recovered burn: `5nPsLh5ECxjYMzgkKbidsVtwc1PCFxFVxP2WPUWHao5RrTh2zEaUPb7T17LBecv1REWeewwGq1qAzB9earEDYc8D`.
-- Restoring mint: `5qQzMZgv4WNdMxAyyshbRM9hHGdQoaUMuzw887XW6xBD68NyNs7TJsMo1ULu3R8wvmCYiaFwyxaqzSJy74senAnv`.
-
-Private `admin-recovery-burn-20261004` evidence retains the requests, provider
-observations, binary hashes, immutable attempts and finalized effects. This adds
-live burn-family expiry acceptance; it does not establish finalized-failure,
-metadata/account-creation recovery or canonical issuance authority.
-
-Mint-creation expiry recovery also passed through the simplified token CLI on real
-Devnet. Two-provider absence/expiry evidence produced one saved successor; repeated
-recovery preserved its bytes, the parent was refused, and finalized replay did not
-create another account. Mint `ETvbGEEV8h1xLoDS24zCXebgp2qrNYdwvSMBacZAKCuT`
-has zero supply, eight decimals, the expected test authority and no freeze authority.
-Transaction `2qYrNaBUGJXxPfjQnxcTbCji7xqS1dRwno7268Kz85U82mMz89QraL5hP2LLjEkpH3TYb1FqCRhFqscj4XwGj9p6`
-charged 5,000 Devnet lamports in network fees. Private evidence is retained under
-`admin-recovery-families-20261004`; this does not close other creation/metadata
-families or canonical issuance approval.
-
-The token CLI now accepts a mint intent without a blockhash. Its closed safe
-operation checks HTTPS and network genesis before retrieving a finalized blockhash;
-existing critical signing and recovery still refresh and validate their own context.
-Signed archives retain their strict blockhash field. The token Cabal suite passed,
-including parser rejection of caller-supplied hashes, and a real Devnet sign-only
-check preserved the intent with a matching saved recovery blockhash. That attempt
-was not submitted. Its private evidence is under `token-auto-blockhash-xojgw2g6`.
-
-Associated-account and metadata-creation expiry recovery subsequently finalized
-on Devnet. Each saved generation-1 successor passed exact transaction-byte and
-fee checks, and finalized submission replay retained the same signature and file.
-The test mint remained at zero supply with eight decimals, its original authority
-and no freeze authority; the associated account had the expected owner/mint and
-zero tokens. Metadata account readback is retained for the subsequent update drill.
-
-- Associated account: `5ACXFhTZVPWywxxEioHAPKh5DTmJ2Tu27B1UDHcdhBuQASGe937fzstnPExef8gatcGxmWfoerfjuAtQJyCn5Bg2`.
-- Metadata creation: `Ubi9dxs6BYpntvwf1ZLSepoP399s7byDQjaEzS56kpxX93WPVAdDZK1aw18tve9HPEXdG8kSgCbxWCRXkt6rjM8`.
-
-Private `admin-recovery-families-20261004` evidence contains finality, transaction
-effects and replay results. Metadata-update expiry recovery then passed the same
-successor/idempotence/parent-refusal checks. Transaction
-`2GCxTkvTX92HLaxhqYf8EfmdTLdBGzDotJ7c6piFgRp2t6BAcob7AkE2BoVnpU6MbCSVzMjNh6cdbaF4Vi3dBu2v`
-finalized; saved-byte replay retained its signature, and the no-op update preserved
-the complete metadata account readback, including bytes and lamports. This closes
-the tested creation/update expiry families, not deliberate finalized-failure
-acceptance or canonical issuance authority.
-
-A real Devnet finalized-failure recovery also passed on 2026-10-05. The isolated
-mint `ETvbGEEV8h1xLoDS24zCXebgp2qrNYdwvSMBacZAKCuT` and its tester account began
-with zero supply/balance. After minting one base unit, two separately authorized
-one-unit burns passed the unchanged CLI's signing and submission preflight against
-finalized state. Concurrent submission produced one successful burn and one
-finalized insufficient-balance failure. No preflight bypass or invented RPC
-response was used. Failed transaction
-`3MsVYMn6CojWmzhkCxhUWxTfBDmgW2RXnsVJWxdJUrv8PjAzGbwWwoJCMkQuw4g8tzCadMS367gjVicyu6f8faqb`
-retained token balances and charged only its verified 5,000-lamport fee.
-
-Replenishing one unit allowed the production recovery command to collect identical
-failed-transaction evidence from Solana's public Devnet RPC and OnFinality. It saved
-one generation-1 successor; repeated recovery returned the same bytes, and parent
-submission was refused. Successor
-`vQxzEa1QfPM48xYEZXLJnZsaivXxX61zeDDrEgQYcVaFKnn17dhSLUq13zHRLD77soyMqvFdmKSkRCA9ow5enLZ`
-finalized, and saved-byte replay caused no further burn. Both providers confirmed
-final supply/balance zero. All five submitted transactions used 25,000 Devnet
-lamports total; no Mainnet or bridge-custody funds were used. Private
-`admin-finalized-failure-20261005` evidence retains exact bytes, fees and effects.
-This closes this token failure/recovery path, not every pool failure or chain reorg.
-
-A read-only RPC timeout during this drill exposed a CLI logging defect: uncaught
-administration exceptions included underlying HTTP request context, which could
-contain a private RPC URL. Token and pool CLI boundaries now report only the
-application error code or a fixed HTTP failure code and exit unsuccessfully.
-Their executable-level QuickCheck checks use credential canaries with a refused
-loopback connection and invalid URL; exact stderr checks cover wrapped and direct
-HTTP exceptions. The pool regression failed before the fix; both Cabal suites pass
-afterward. Both administration suites also passed on Ubuntu ARM64 and x86-64 at
-`c547f5b`, retaining `arm-admin-tests-c547f5b.log` and `x86-admin-tests-c547f5b.log`
-in private installer-acceptance evidence. One VM and one build job ran at a time;
-both builders were stopped afterward. The change is confined to administration CLI
-boundaries; bridge runtime, signing policy and saved transaction bytes are unchanged.
-
-The equivalent pool finalized-failure path subsequently passed on real Devnet
-using the existing empty test position. Each deposit was capped at 20 base units
-per token for 10 liquidity units. Two withdrawals submitted with normal preflight
-produced one finalized success and one finalized failure:
-`5dbzChLPAYKzbx24GcJFaEHdVhQESjrqXcSTs2DH7s6NAFrvXTBqEg8NFoMDFYMXmBQbZeDm7JMbYbvoSwUsPR6J`.
-The failed withdrawal changed no token balances and charged only 5,000 lamports.
-After replenishing 10 liquidity units, both providers agreed on exact failed bytes
-and effects; recovery saved one successor, repeat recovery preserved it and parent
-submission was refused. Successor
-`2KZRbXAfmRXzSmTAs5SRyZ7ArG5yS4sACJQgs6FtZZSqYp7gkrpuB1823j7wLvBD4VgL1J8vQ2p38F3nxnV17imU`
-finalized and replay produced no extra withdrawal. Pool liquidity returned to zero;
-both providers confirmed owner/vault token deltas balanced, with two base units of
-each token retained in the vaults. Five transactions charged 25,000 Devnet lamports.
-Private `pool-finalized-failure-20261005` retains complete evidence. The CLI at
-`c547f5b` performed the test; no production change, Mainnet or custody funds were needed.
-
-## Gates still open
-
-The 2026-10-05 isolated Signet drill removed and restored confirmation of the
-original 1,000-unit native deposit for paid wrap order
-`59624fd6491ac3d00ee44bb7f1f886db1e4b1ba13e2a020447cc3301ae518115`.
-Both copied real nodes remained loopback-only; no signer ran. The actual paused
-worker made the source ineligible after rollback and eligible again after
-reconsidering its original block. Closed Opaleye reads showed identical balances,
-settled attempt and customer PaymentPaid before, during and after the transition;
-repeated observation preserved them. Both nodes and observer stopped afterward.
-Private evidence is `native-reorg-acceptance-20261004/source-rollback-live-20261005`.
-An earlier trial restarted at the old rolled-back tip, entered Core initial sync,
-and correctly refused observation; no readiness check was relaxed. The successful
-trial kept synchronized nodes running during rollback. This proves confirmation
-loss/return for a paid source, not a confirmed double spend, deficit coverage,
-an alternate winning payout or a public-network reorg. Those gates remain open.
-
-Real Devnet nonzero fee collection and explicit reinvestment passed after bounded
-trades in the separate test pool. The existing CLI collected 4 units per asset,
-reinvested 3 A / 4 B under receipt-sized caps and withdrew all liquidity. Finalized
-attempt replay and empty-position readback passed; six transactions cost 5,000
-lamports each. No runtime code or custody authority was added. Transaction IDs and
-bounds are in the [pool acceptance](../../3-Create-CPMM-Pool/README.md#nonzero-fees-and-explicit-reinvestment).
-This does not establish unattended compounding, LP locks or canonical use.
-
-The current macOS source/package notice inventory now covers all 358 distinct
-versions across both actual Cabal plans and Cargo.lock. It adds missing notices
-for 41 hash-verified Hackage archives and 18 installed compiler packages, retaining
-the original historical notice bytes. Graph membership, source hashes and retained
-text headers were independently cross-checked. This closes package-text collection
-for these graphs, not final-binary platform, runtime or redistribution review; see
-[THIRD-PARTY.md](THIRD-PARTY.md). No runtime code or services were added.
-
-The funded Signet additional-deposit refund on 2026-10-04 settled through the
-normal worker, HTTPS signer and payment engine. Transaction
-`1c015cf15eb5e6f075442beb99037404c4aa53bdd53411a881f6ac2d25375303`
-returned 1,000 base units to the original order's immutable refund address.
-Paused observation recorded `PaymentPaid`, released principal and booked the
-actual 1,000-unit native network fee against operating funds. Remaining native
-ledger holdings are 1,090 float, 10 earned and 900 operating; the original
-990-unit wrapped conversion remains paid with its original transaction.
-An offline custody archive and integrity check passed at critical sequence 37.
-The scoped worker/signer were stopped; Mainnet was untouched.
-
-This run did **not** complete positive replacement acceptance: Core selected a
-transaction without change and consumed its entire saved 1,000-unit fee ceiling.
-No replacement decision or child was created. A subsequent replacement test needs
-sufficient change and fee headroom under a newly saved policy; never modify an
-existing payment's ceiling to make a test pass.
-
-A subsequent real Signet/Devnet run established replacement headroom before taking
-payment. A 2,000-unit wrapped deposit authorized the normal 1,980-unit native payout.
-Parent `a20ad3fe2218247c3674fa2f93882a81a205edc7990bbb4c9c1cb6d7798758f3`
-paid a 747-unit network fee; the closed operator draft/sign workflow produced child
-`028d2d471d90c38ad73ddb3ce6f37f55a0861ac25fd92abfa986713041e5cb8f`
-with an 847-unit fee under the immutable 1,000-unit ceiling. Draft/sign replay
-returned decision 44 and the identical child without changing ledger state.
-The native node retained only the child in its mempool; decoded transactions
-preserved inputs, sequences, version, locktime and the 1,980-unit recipient output,
-reducing only owned change by 100. The first draft request correctly refused stale
-custody immediately after the parent broadcast; paused observation restored custody
-before the same terms were accepted. Both services stopped after child broadcast
-at critical sequence 46. The child subsequently confirmed, and a paused worker
-restart settled the order once with that child as the customer-visible payout.
-The recipient received exactly 1,980 units; the ledger booked 20 wrapped units of
-bridge revenue and only the winning 847-unit native network cost. Native float
-became 1,110 and operating became 1,553; wrapped principal returned to zero,
-float became 35,890 and earned became 20. Repeated observation left the complete
-payment/balance view unchanged. The post-settlement custody export and integrity
-check passed, and all scoped processes stopped. Positive funded replacement,
-exact authorization replay and restart settlement now have live evidence; winner
-changes after reorg still require separate acceptance. Explicit rebroadcast has
-the isolated real-chain evidence below.
-
-A subsequent isolated recovery drill restored that sequence-46 custody snapshot
-into a new PostgreSQL ledger with separate restricted roles and a new fence. The
-production native-wallet restore verified its descriptors. Two Core nodes copied
-from real L2L Signet history connected only over loopback; no signer ran. Invalidating
-the winning transaction's block on both copies, then restarting with empty mempools
-and automatic wallet broadcasting disabled, made the settled payout unavailable.
-The production paused worker recorded recovery review at sequence 47 with
-`custody:native_settlement_requires_review`, preserving all balances and PaymentPaid.
-Explicit `rebroadcast-native` authorization using that review anchor returned the
-same child to the isolated mempool. Reconsidering the original block restored its
-confirmation and cleared the review. Closed Opaleye reads verified identical
-balances, transaction family and customer payment before and after recovery.
-Both nodes and the worker stopped afterward. Evidence is retained privately under
-`native-reorg-acceptance-20261004`; no custody secrets are published. This proves
-restored-ledger detection and explicit saved-transaction rebroadcast against real
-Core behavior, not an observed public-network reorg, a changed winning transaction,
-a clean-host restore or recovery of an in-flight snapshot. Mainnet and the shared
-Signet node were untouched by this drill.
-
-The current executable also restored the real sequence-7 in-flight custody backup
-from the earlier funded recovery run into a separate restricted PostgreSQL ledger.
-Its `broadcast_intent` attempt, exact signed bytes and policy matched the saved
-pre-backup evidence. Restoring the wallet against later real Signet history exposed
-a false refusal: Core's rescan advanced address indexes from 1 to 2/3 while retaining
-the same descriptors. Restore validation now permits forward-only allocation indexes
-within the expanded keypool, keeping descriptor identity and all other fields exact;
-shrinking ranges, backward/out-of-range indexes and changed descriptors are rejected.
-The production restore then passed. Without a signer or new broadcast, the paused
-worker recognized confirmed transaction
-`16ef98729d8e739986ef3c0fcae8873ad1d4b1d5d9803cee33a33504c856a24a`
-and settled its saved 990-unit payment with the original 141-unit network cost.
-Wrapped principal became zero, float 990 and earned 10. Repeated observation left
-the entire payment/balance view unchanged. Later deposits absent from this old
-snapshot remained unallocated; unexplained later activity kept intake paused for
-review, rather than automatically resuming stale state. Both isolated nodes and
-worker stopped. Private evidence lives under `inflight-restore-20261004`.
-This closes same-host restoration of this in-flight native attempt against later
-confirmed history; Solana in-flight recovery, changed native winners, lost-host
-uncertainty and physically independent clean-host recovery remain distinct gates.
-
-Restoring the same deployment's sequence-23 backup also preserved its retired
-Solana attempt `32RKrYFti4fHFN5xTZJfS8hzRwof3cpDne7NYBao9HUKCkW4tzZDjUaNcFDdjeC45bhnJsqeWWziuxpPLF7raVYQ`
-byte-for-byte in review. Paused observation retained 1,000 native units of customer
-principal and produced no successor attempt; later unallocated activity required
-review. The snapshot was taken after expiry retirement, with no current signed
-attempt, so it does **not** close pending-Solana restoration. Private evidence is
-under `solana-inflight-restore-20261004`; all scoped processes stopped.
-
-The run exposed an operator CLI error-reporting issue: server refusals were printed
-as successful stdout responses. The CLI now raises returned errors through its
-existing nonzero-exit/stderr path. Actual executable/PostgreSQL contracts passed
-for both development and canonical configurations, checking successful status and
-rejected resume, unchanged balances and process cleanup. This adds six application
-lines and five assertions/runner lines in the existing test file, with no new files
-or authority paths. These contracts do not send chain transactions.
-
-The 2026-10-04 dependency refresh replaced the browser's affected Aeson 2.2.3.0 pin
-with patched 2.2.5.1. Root build (also with a fresh browser build directory), all
-three Cabal suites, served-asset hash comparison and saved paid-order reload passed.
-No application-code lines or runtime files were added. The actual native/browser
-plans and Cargo lock were checked against current advisories; generic readFloat,
-build-time Cabal header deletion and bincode maintenance findings remain explicitly
-scoped in [DEPENDENCY-REVIEW.md](DEPENDENCY-REVIEW.md). This does not close independent
-review or distribution/license requirements.
-
-1. **Customer wallet:** sign a real Devnet Solana Pay deposit in a supported wallet;
-   verify reference/effects, both directions, saved-order recovery, refunds and
-   browser errors. A test client or wallet-opening link does not close this gate.
-2. **Recovery effects:** verify permanent source loss/double spend, coverage/return,
-   native winner changes after reorg. Retain the completed same-host in-flight
-   Solana restore/reconciliation evidence. Retain the completed same-host encrypted-wallet drill as regression
-   evidence; clean-host funded recovery remains in the following gate.
-   Preserve one payout, correct capital/cost accounting and exact saved bytes.
-3. **Isolation and off-host recovery:** retain the completed worker/signer checks
-   under separate OS/PostgreSQL identities, restricted native RPC and denied
-   key/full-cookie/unlock access. Restore funded custody on a clean host using a
-   real off-host HTTPS repository, separate deletion authority, retained passwords,
-   protected retention and explicit old-host exclusion/revocation.
-4. **Administration and canonical use:** retain the completed nonzero fee collection
-   and explicit reinvestment evidence and the completed funded betanet/canonical
-   round trip. Finish issuer approval and canonical authority/reserve arrangements.
-   Retain live expiry recovery for mint/burn, mint/account creation and metadata
-   create/update, plus the token and pool finalized-failure paths above. These are
-   scoped live cases alongside the retained offline recovery contracts.
-   Verify actual token/pool identity and current executable routes before enabling links.
-5. **Dependencies and independent review:** resolve applicability/reachability and
-   license questions recorded in [DEPENDENCY-REVIEW.md](DEPENDENCY-REVIEW.md) and
-   [THIRD-PARTY.md](THIRD-PARTY.md); obtain independent review of source and deployment.
-   Earlier dependency inventories are not a clean bill of health for a new artifact.
-6. **Installation/release:** retain the hardened signed ARM64 package's clean
-   fresh/repeat/upgrade, cold-boot and service-isolation evidence and the reviewed
-   x86-64 and updated ARM64 packages' completed installation acceptance. Finish
-   funded clean-host restoration and independent storage/retention; retain the
-   completed unfunded installer-account native/backup integration above.
-   Review distribution notices and the public release trust-key procedure before
-   publishing. The acceptance-test signing key does not establish public trust.
-
-### Current local contract rerun (2026-10-05)
-
-At source `3b13abf`, all three Cabal suites passed (the bridge suite used the
-retained Cargo cache after the empty default cache refused offline resolution).
-The separate root-Cabal ecx-store-check run also passed on a newly created database
-with all eight migrations and a distinct SELECT-only reader. It exercised refund,
-source-loss/coverage/return, changed-winner ledger fixtures, exclusive writer,
-concurrency, authorization, cancellation, custody freshness, fence/rollback and
-backup gating contracts. Its actual encrypted restic exercise verified exported
-snapshot consistency, corruption/wrong-password refusal, restoration of exact
-attempts/postings, staging cleanup and unchanged coverage. These use synthetic
-chain evidence where noted in the tests; they do not close real-chain reorg or
-physically independent recovery acceptance. The disposable database and role were
-dropped after success. No funded chain operation or VM startup occurred. Private
-logs: ecx-ten-item-tests.log, ecx-ten-item-bridge-tests-cached.log and
-ecx-ten-item-ledger.log. Root README now matches the completed Mainnet evidence.
-
-### Real-network fixture limitation (2026-10-05)
-
-The remaining native conflict/winner-change drill cannot be closed by mining the
-upstream enforcer's throwaway integration network. The public
-[LayerTwo-Labs integration chain parameters](https://github.com/LayerTwo-Labs/bip300301_enforcer/blob/master/integration_tests/signet_chain_params.rs)
-(blob `2c4b54644bad6a251e3c1578b692344a954c958a`) explicitly use a public test key.
-Deriving its compressed secp256k1 public key and P2WPKH challenge yields
-`001420dcc9d1afdbed0f9cf088eb28c755323536ffb5`, which differs from the real
-[L2L Signet configuration](https://drivechain.info/dev.txt),
-`00148835832e28c816b7acd8fdb19772ab2199603a56`. No challenge signing authority
-for that live network has been established in this test environment.
-
-The completed invalidate/reconsider drill proves confirmation loss and return;
-it does not create a confirmed conflicting spend or alternate confirmed winner.
-The outstanding acceptance needs valid alternate blocks containing the controlled
-conflict, supplied as a reproducible real-chain fixture or with the network miner's
-cooperation. Do not change the network challenge, fabricate wallet confirmations,
-or relabel an unconfirmed transaction as permanent source loss. No funded retry
-or VM startup was needed to establish this limitation.
-
-Audit from the operation grammar/API through critical authorization, durable store,
-chain validators, signer, settlement and recovery. Review exports, OS credentials,
-transaction boundaries, backup acknowledgements and fence/old-key assumptions together.
-Findings should state the affected invariant, concrete trigger/consequence, required
-change and evidence proving closure. Neither fewer lines nor green local tests
-establish perfect security. Public publication and valuable-fund activation require
-their own operator decision after the required gates close.
+## Consolidated final acceptance
+
+At `ba5c0f1`, root `cabal build all -j1 --offline` and all three Cabal test suites
+passed on macOS. All three suites also passed on Ubuntu x86-64; the updated token
+suite passed separately on Ubuntu ARM64. The explicit `ecx-store-check` contracts
+then passed against disposable real PostgreSQL databases: role isolation, exclusive
+writer, atomic reservations, replay/conflict handling, checkpoint rollback/fencing,
+saved orders, historical fees, settlement and recovery. The same batch passed real
+restic encryption/readback/restoration, corruption and wrong-password refusal,
+exact saved attempts/postings, and real-process pinned HTTPS signer tests including
+concurrency, certificate/auth refusal, second-read rejection and interruption cleanup.
+The disposable databases/role were removed and child processes reaped.
+
+The browser source and installer are unchanged from the accepted `509f617` version
+(`git diff 509f617..ba5c0f1 -- 2-Wrap-Unwrap-Server/web 2-Wrap-Unwrap-Server/install`
+is empty). Retain its actual served GHC-JavaScript/reload evidence rather than
+claiming a new customer-wallet approval. Current Cabal browser asset checks and
+HTTPS contracts passed. No funded Mainnet test was repeated for the offline token
+delta. This freezes the implementation at `ba5c0f1`; later documentation-only commits
+do not silently change that implementation boundary.
+
+Private final logs: `ecx-final-{build,tests,contracts}-ba5c0f1.log`, the ledger/TLS
+contract logs, and `all-nonce-x86-ba5c0f1.log`, retained with installer acceptance.
+
+## Internal review and audit map
+
+The 2026-10-05 review traced the following boundaries at `ba5c0f1`. No additional
+implementation defect was demonstrated in this pass. This is an internal,
+source-level review supported by the named contracts, not an independent audit,
+an exhaustive review of every dependency, or a claim of perfect security.
+
+| Boundary | Code to trace | Property checked |
+| --- | --- | --- |
+| Customer input | `api/Bridge/API.hs`, `workflow/Bridge/Web.hs`, `src/Bridge/Domain.hs` | Four customer endpoints; typed plans; bounded bodies/admission; capability-bound orders; integer amounts and immutable quotes |
+| Critical dispatch | `src/Bridge/Operation/Internal.hs`, `workflow/Bridge/Critical.hs` | Closed caller/severity requests; one critical entry; signer transport remains inside its operation implementation and serialized critical lifetime |
+| Signer authority | `workflow/Bridge/Signer.hs`, `workflow/Bridge/Credentials.hs`, `workflow/Bridge/Payment.hs` | Authenticated pinned HTTPS; process-role checks; saved deployment/decision binding; restricted private keys; independently validated reply |
+| Durable ledger | `runtime/Bridge/Store.hs`, `runtime/Bridge/Store/Schema.hs` | Opaleye operations; exclusive writer, row locks, atomic reservations, immutable signed attempts, unique receipt/settlement use and balanced postings |
+| Native effects | `chain/Bridge/NativePayment.hs` | Confirmed unique prevouts; exact outputs/change/fees; unchanged signed template; canonical block/depth and bounded replacement-family winner checks |
+| Solana effects | `chain/Bridge/SolanaMessage.hs`, `chain/Bridge/SolanaPayment.hs`, `chain/Bridge/PaymentObservation.hs` | Exact signed instructions/keys/message; finalized observation; token deltas, fee/rent and failed-transaction effects; expiry requires separate evidence |
+| Observation and solvency | `workflow/Bridge/Observer.hs`, `workflow/Bridge/Reconciliation.hs`, `chain/Bridge/PaymentSource.hs` | Failed scans do not advance readiness; revision-bound reconciliation; source eligibility; independent configured evidence where required |
+| Recovery and backup | `workflow/Bridge/Recovery.hs`, `runtime/Bridge/Fence.hs`, `runtime/Bridge/Store/Backup.hs` | Identity/sequence checks; monotonic fence; coherent snapshot; full encrypted backup readback before acknowledgement; paused restoration |
+| RPC failure | `chain/Bridge/RPC.hs` | Bounded responses, request identity, redacted errors; allowlisted read retries; ambiguous mutations never automatically retried |
+| Offline administration | `1-Make-Wrapped-ECX/Token.hs`, `Token/Network.hs`, `Token/Signing.hs` | Imported-key identity; exact nonce creation/mint semantics; no RPC in offline signing; no automatic replacement signature; exact replay/consumed-nonce refusal |
+
+Paths are relative to `2-Wrap-Unwrap-Server` except the token row. A reviewer should
+follow one order through reservation, receipt, preparation, backup, signing,
+broadcast intent and settlement; then follow the same order through an interrupted
+send and restore. Compare the actual transaction with the saved intent, and check
+that uncertain effects remain obligations rather than becoming spendable inventory.
+Review configuration trust, operating-system isolation and backup independence
+separately: the Haskell types cannot establish those deployment properties.
+
+## Remaining public-release gates
+
+1. **Customer wallet:** approve a real Devnet Solana Pay payment in a supported
+   wallet, then verify reference/effects, payout, reload and errors. No website
+   wallet connection is required.
+2. **Real-chain recovery:** permanent source loss/double spend, coverage/return and
+   a changed native winner need valid alternate L2L history or miner cooperation.
+   The retained node has no suitable alternate branch. The upstream throwaway
+   Signet challenge differs from L2L; it cannot substitute for this evidence.
+3. **Independent recovery:** obtain a physically separate HTTPS backup repository
+   and clean host, with upload/deletion separation and retention. Restore funded
+   custody plus in-flight work, exclude the old signer, reconcile and explicitly
+   resume. Mac/VM drills cannot establish physical independence.
+4. **Production arrangements:** operator-approved issuer/mint/reserve policy,
+   host/domain, independent RPC capacity, support and alert destination. Verify
+   actual routes, TLS renewal and deployment behavior against those resources.
+5. **Review:** complete final artifact notice verification and obtain
+   independent security/distribution review. See [dependency findings](DEPENDENCY-REVIEW.md)
+   and [notice scope](THIRD-PARTY.md); inventories are not security certification.
+6. **Final release:** finish final artifact verification against the frozen source, use an
+   operator-controlled release trust key, and obtain explicit publication and
+   valuable-fund activation approval.
+
+No outstanding gate is closed by fewer source lines, an unchanged status report,
+or a green test whose scope does not cover it. Retain exact bytes and actual
+financial evidence; do not repeat funded tests or installer builds without a
+relevant change.

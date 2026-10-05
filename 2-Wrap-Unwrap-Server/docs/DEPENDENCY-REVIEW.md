@@ -15,6 +15,18 @@ These are version/source checks, not independent security certification.
 
 ## Remediations and retained findings
 
+The `ba5c0f1` nonce change adds no third-party package versions. The actual native
+plan's 188 non-local versions match retained Hackage/compiler notice records, and
+all 159 available source hashes agree. Every registry entry/checksum in Cargo.lock
+also matches the retained Rust inventory. Native Aeson 2.3.2.0's `FromJSON Integer`
+uses `parseIntegral` and its bounded-scientific guard before conversion; token RPC
+rent/balance/fee fields therefore do not bypass that guard through unbounded Integer.
+This extends the earlier numeric input-path review, not a whole-program proof.
+The public Cabal header-deletion and bincode maintenance advisories were rechecked
+on 2026-10-05 and still list no fixed version. Preserve the scoped mitigations below.
+Private `nonce-dependency-delta.json` records the graph comparison; final Linux
+artifact membership and distribution obligations still need their final check.
+
 - [HSEC-2026-0007](https://github.com/haskell/security-advisories/blob/main/advisories/published/2026/HSEC-2026-0007.md):
   browser Aeson was pinned to affected 2.2.3.0; it is now 2.2.5.1. Native Aeson stays
   2.3.2.0 with a patched-version floor. Both graphs use text-iso8601 0.1.1.2.
