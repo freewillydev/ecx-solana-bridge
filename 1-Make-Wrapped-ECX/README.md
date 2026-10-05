@@ -6,8 +6,10 @@ Requires **GHC 9.14.1 and Cabal 3.16.1.0**. Select the pinned tools using the
 Build from the repository root, then put the executable on this shell's PATH:
 
 ```sh
+curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
+ghcup install cabal
 cabal update
-cabal build exe:ecx-token -j1
+ghcup run --install --ghc 9.14.1 --cabal 3.16.1.0 -- bash cabal build exe:ecx-token -j1
 export PATH="$(dirname "$(cabal list-bin exe:ecx-token)"):$PATH"
 cd 1-Make-Wrapped-ECX
 ```
