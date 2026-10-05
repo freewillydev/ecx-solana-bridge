@@ -9,7 +9,9 @@ import qualified Data.ByteArray as BA
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
 import qualified Data.Text as T
-import Data.Aeson (encode)
+import Data.Aeson (encode,eitherDecodeStrict')
+import qualified Data.Map.Strict as M
+import Data.List (sort)
 import Data.Bits ((.&.))
 import System.Directory
 import System.FilePath ((</>))
@@ -43,13 +45,21 @@ contract=bracket temporary removeDirectoryRecursive $ \directory->do
     let out=directory</>".ecx-bridge"
     config<-C.loadConfig(out</>"worker.json")
     other<-C.loadConfig(out</>"signer.json")
-    modes<-mapM (fmap ((.&. 0o777) . fileMode) . getFileStatus . (out</>)) ["worker.json","signer.json","setup.json","solana.keypair.json"]
+    modes<-mapM (fmap ((.&. 0o777) . fileMode) . getFileStatus . (out</>)) ["worker.json","signer.json","setup.json","sources.json"]
+    entries<-listDirectory out
+    sources<-either fail pure . (eitherDecodeStrict' :: B.ByteString -> Either String (M.Map String FilePath)) =<< B.readFile(out</>"sources.json")
+    originalKey<-B.readFile key
+    originalWorker<-B.readFile worker
+    originalSigner<-B.readFile signer
     before<-B.readFile(out</>"worker.json")
     (again,_,_)<-run "\n"
     after<-B.readFile(out</>"worker.json")
     (cancelled,_,_)<-run ((directory</>"cancelled")<>"\n")
     partial<-doesDirectoryExist(directory</>"cancelled")
     pure(C.fingerprint config==C.fingerprint other && C.nativeCookie config/=C.nativeCookie other
+      && sort entries==["interface.json","setup.json","signer.json","sources.json","worker.json"]
+      && sources==M.fromList [("solana.keypair.json",key),("native-worker.auth",worker),("native-signer.auth",signer)]
+      && originalKey==L.toStrict(encode $ B.unpack(seed<>public)) && originalWorker=="worker:password" && originalSigner=="signer:password"
       && all(==0o600)modes && before==after && again/=ExitSuccess && cancelled/=ExitSuccess && not partial)
  where
   temporary=do

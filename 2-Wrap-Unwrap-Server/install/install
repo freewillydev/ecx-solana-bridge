@@ -85,24 +85,45 @@ fi
 if [ "$mode" = fresh ]; then
   # Inputs are data, never sourced shell. Refuse symlinks and exposed material.
   [ "$(stat -c '%u:%a' "$material")" = 0:700 ] || fail 'material must be root-owned mode 0700'
-  for name in worker.json signer.json solana.keypair.json native-worker.auth native-signer.auth; do
-    [ -f "$material/$name" ] && [ ! -L "$material/$name" ] || fail "missing regular $name"
-    [ "$(stat -c '%u:%a' "$material/$name")" = 0:600 ] || fail "protect $name as root:0600"
-  done
-  # Optional configure output is private material, never a shell fragment.
-  for name in interface.json public-fullchain.pem public-privkey.pem; do
-    if [ -e "$material/$name" ]; then
-      [ -f "$material/$name" ] && [ ! -L "$material/$name" ] && [ "$(stat -c '%u:%a' "$material/$name")" = 0:600 ] || fail "protect $name as root:0600"
+  # Resolve only the closed list below. Legacy manually prepared bundles still work.
+  source_file() {
+    if [ -f "$material/sources.json" ]; then
+      jq -er --arg name "$1" '.[$name] | select(type == "string" and startswith("/") and (contains("\n") | not) and (contains("\r") | not))' "$material/sources.json"
+    else
+      printf '%s/%s\n' "$material" "$1"
+    fi
+  }
+  private_source() {
+    [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c '%u:%a' "$1")" = 0:600 ] || fail 'source must be root-owned regular mode 0600'
+    parent=$(dirname -- "$1")
+    [ -d "$parent" ] && [ ! -L "$parent" ] && [ "$(stat -c '%u:%a' "$parent")" = 0:700 ] || fail 'source directory must be root-owned mode 0700'
+  }
+  for name in worker.json signer.json; do private_source "$material/$name"; done
+  if [ -e "$material/sources.json" ] || [ -L "$material/sources.json" ]; then
+    private_source "$material/sources.json"
+    jq -e 'type == "object" and all(to_entries[]; (.key as $k | ["solana.keypair.json","native-worker.auth","native-signer.auth","native-unlock","backup.repository","backup.password","public-fullchain.pem","public-privkey.pem"] | index($k)) != null and (.value | type == "string" and startswith("/") and (explode | all(. >= 32 and . != 127))))' "$material/sources.json" >/dev/null || fail 'invalid source references'
+  fi
+  key_source=$(source_file solana.keypair.json) || fail 'missing key source'
+  worker_source=$(source_file native-worker.auth) || fail 'missing worker credential source'
+  signer_source=$(source_file native-signer.auth) || fail 'missing signer credential source'
+  for source in "$key_source" "$worker_source" "$signer_source"; do private_source "$source"; done
+  unlock_source=$(source_file native-unlock 2>/dev/null) || unlock_source=
+  cert_source=$(source_file public-fullchain.pem 2>/dev/null) || cert_source=
+  tls_source=$(source_file public-privkey.pem 2>/dev/null) || tls_source=
+  for source in "$unlock_source" "$cert_source" "$tls_source"; do
+    if [ -n "$source" ]; then
+      if [ -f "$material/sources.json" ] || [ -e "$source" ] || [ -L "$source" ]; then private_source "$source"; fi
     fi
   done
-  if [ -e "$material/public-fullchain.pem" ] || [ -e "$material/public-privkey.pem" ]; then
-    [ -f "$material/public-fullchain.pem" ] && [ -f "$material/public-privkey.pem" ] || fail 'both public TLS files required'
+  if [ -e "$cert_source" ] || [ -e "$tls_source" ]; then
+    [ -f "$cert_source" ] && [ -f "$tls_source" ] || fail 'both public TLS files required'
   fi
+  if [ -e "$material/interface.json" ]; then private_source "$material/interface.json"; fi
   # Validate supplied identity/key/policy before creating accounts or databases.
   "$target/bin/ecx-bridge" check-config "$material/worker.json" >/dev/null
-  "$target/bin/ecx-bridge" check-signer "$material/signer.json" "$material/solana.keypair.json" >/dev/null
+  "$target/bin/ecx-bridge" check-signer "$material/signer.json" "$key_source" >/dev/null
   [ "$(jq -Sc 'del(.nativeCookie,.nativeUnlockFile,.signerAuthFile)' "$material/worker.json")" = "$(jq -Sc 'del(.nativeCookie,.nativeUnlockFile,.signerAuthFile)' "$material/signer.json")" ] || fail 'worker/signer policies differ'
-  ! cmp -s "$material/native-worker.auth" "$material/native-signer.auth" || fail 'worker needs distinct restricted native credentials'
+  ! cmp -s "$worker_source" "$signer_source" || fail 'worker needs distinct restricted native credentials'
   useradd --system --user-group --home-dir "$state/worker" --shell /usr/sbin/nologin "$worker"
   useradd --system --user-group --home-dir "$state/signer" --shell /usr/sbin/nologin "$signer"
   install -d -m 0755 "$config" "$state"
@@ -115,12 +136,13 @@ if [ "$mode" = fresh ]; then
       "$material/$role.json" > "$config/$role/config.json"
     chown root:"$account" "$config/$role/config.json"
     chmod 0640 "$config/$role/config.json"
-    install -o "$account" -g "$account" -m 0600 "$material/native-$role.auth" "$config/$role/native.auth"
+    if [ "$role" = worker ]; then credential_source=$worker_source; else credential_source=$signer_source; fi
+    install -o "$account" -g "$account" -m 0600 "$credential_source" "$config/$role/native.auth"
   done
-  install -o "$signer" -g "$signer" -m 0600 "$material/solana.keypair.json" "$config/signer/solana.keypair.json"
-  if [ -e "$material/native-unlock" ]; then
-    [ -f "$material/native-unlock" ] && [ ! -L "$material/native-unlock" ] && [ "$(stat -c '%u:%a' "$material/native-unlock")" = 0:600 ] || fail 'protect native-unlock as root:0600'
-    install -o "$signer" -g "$signer" -m 0600 "$material/native-unlock" "$config/signer/native-unlock"
+  install -o "$signer" -g "$signer" -m 0600 "$key_source" "$config/signer/solana.keypair.json"
+  if [ -e "$unlock_source" ]; then
+    [ -f "$unlock_source" ] && [ ! -L "$unlock_source" ] && [ "$(stat -c '%u:%a' "$unlock_source")" = 0:600 ] || fail 'protect native-unlock as root:0600'
+    install -o "$signer" -g "$signer" -m 0600 "$unlock_source" "$config/signer/native-unlock"
     jq --arg path "$config/signer/native-unlock" '.nativeUnlockFile=$path' "$config/signer/config.json" > "$config/signer/config.new"
     chown root:"$signer" "$config/signer/config.new"; chmod 0640 "$config/signer/config.new"
     mv "$config/signer/config.new" "$config/signer/config.json"
@@ -128,9 +150,9 @@ if [ "$mode" = fresh ]; then
   if [ -f "$material/interface.json" ]; then
     install -o root -g "$worker" -m 0640 "$material/interface.json" "$config/worker/interface.json"
   fi
-  if [ -f "$material/public-fullchain.pem" ]; then
-    install -o root -g "$worker" -m 0640 "$material/public-fullchain.pem" "$config/worker/public-fullchain.pem"
-    install -o "$worker" -g "$worker" -m 0600 "$material/public-privkey.pem" "$config/worker/public-privkey.pem"
+  if [ -f "$cert_source" ]; then
+    install -o root -g "$worker" -m 0640 "$cert_source" "$config/worker/public-fullchain.pem"
+    install -o "$worker" -g "$worker" -m 0600 "$tls_source" "$config/worker/public-privkey.pem"
   fi
   openssl rand -hex 32 | tr -d '\n' > "$config/signer/signer.auth"
   openssl req -x509 -newkey ed25519 -nodes -keyout "$config/signer/signer.auth.key" -out "$config/signer/signer.auth.pem" -days 365 \
@@ -144,8 +166,9 @@ if [ "$mode" = fresh ]; then
   [ "$backup" = "$(jq -r .backupRequired "$config/worker/config.json")" ] || fail 'backup policies differ'
   if [ "$backup" = true ]; then
     for name in backup.repository backup.password; do
-      [ -f "$material/$name" ] && [ ! -L "$material/$name" ] && [ "$(stat -c '%u:%a' "$material/$name")" = 0:600 ] || fail "protect $name as root:0600"
-      install -o "$signer" -g "$signer" -m 0600 "$material/$name" "$config/signer/$name"
+      backup_source=$(source_file "$name") || fail "missing $name reference"
+      private_source "$backup_source"
+      install -o "$signer" -g "$signer" -m 0600 "$backup_source" "$config/signer/$name"
     done
     jq -n --arg restic "$prefix/current/bin/restic" --arg repositoryFile "$config/signer/backup.repository" --arg passwordFile "$config/signer/backup.password" \
       '{restic:$restic,repositoryFile:$repositoryFile,passwordFile:$passwordFile}' > "$config/signer/backup.json"

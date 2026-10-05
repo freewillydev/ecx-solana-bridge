@@ -70,22 +70,26 @@ build directory=do
   key<-prompt "Existing custody Solana JSON keypair FILE (private; never type the key here)" "" $ \path->do
     file<-makeAbsolute path
     verifySigningKey (C.custodyOwner config) file
-    readPrivate file
+    pure file
   workerAuth<-credential "Restricted native WORKER credential FILE (user:password)"
   signerAuth<-prompt "Distinct native SIGNER credential FILE (user:password)" "" $ \path->do
-    bytes<-readCredential path
-    require (bytes/=workerAuth) "worker_signer_credentials_must_differ"
-    pure bytes
+    file<-makeAbsolute path
+    bytes<-readCredential file
+    workerBytes<-readCredential workerAuth
+    require (bytes/=workerBytes) "worker_signer_credentials_must_differ"
+    pure file
   unlock<-optionalFile "Native wallet passphrase FILE (blank if unencrypted)"
   backups<-if C.backupRequired config then do
     repository<-prompt "Initialized HTTPS restic repository FILE (private)" "" $ \path->do
-      bytes<-makeAbsolute path >>= readPrivate
+      file<-makeAbsolute path
+      bytes<-readPrivate file
       require (any (`B.isPrefixOf` bytes) ["rest:https://","https://"]) "https_backup_repository_required"
-      pure bytes
+      pure file
     password<-prompt "Restic encryption password FILE (private)" "" $ \path->do
-      bytes<-makeAbsolute path >>= readPrivate
+      file<-makeAbsolute path
+      bytes<-readPrivate file
       require (not $ B.null bytes) "backup_password_required"
-      pure bytes
+      pure file
     pure [("backup.repository",repository),("backup.password",password)]
    else pure []
   links<-collectLinks config
@@ -93,27 +97,37 @@ build directory=do
   tlsFiles<-if tls then do
     cert<-requiredFile "TLS full-chain certificate FILE (private source copy)"
     secret<-requiredFile "TLS private-key FILE (separate from custody key)"
-    require (secret/=key) "separate_tls_key_required"
+    secretBytes<-readPrivate secret
+    keyBytes<-readPrivate key
+    require (secretBytes/=keyBytes) "separate_tls_key_required"
     pure [("public-fullchain.pem",cert),("public-privkey.pem",secret)]
    else pure []
-  let worker=config {C.nativeCookie=directory</>"native-worker.auth",C.nativeUnlockFile=Nothing}
-      signer=config {C.nativeCookie=directory</>"native-signer.auth",C.nativeUnlockFile=if B.null unlock then Nothing else Just(directory</>"native-unlock")}
-      records=[("setup.json",L.toStrict $ encode setup),("solana.keypair.json",key),("native-worker.auth",workerAuth),("native-signer.auth",signerAuth)]
-        <>[("native-unlock",unlock) | not(B.null unlock)]<>backups<>tlsFiles
-        <>[("interface.json",L.toStrict $ encode links),("signer.json",L.toStrict $ encode signer),("worker.json",L.toStrict $ encode worker)]
+  let worker=config {C.nativeCookie=workerAuth,C.nativeUnlockFile=Nothing}
+      signer=config {C.nativeCookie=signerAuth,C.nativeUnlockFile=if null unlock then Nothing else Just unlock}
+      sources=[("solana.keypair.json",key),("native-worker.auth",workerAuth),("native-signer.auth",signerAuth)]
+        <>[("native-unlock",unlock) | not(null unlock)]<>backups<>tlsFiles
+      records=[("setup.json",L.toStrict $ encode setup),("sources.json",L.toStrict $ encode $ object [K.fromString name .= path | (name,path)<-sources])
+        ,("interface.json",L.toStrict $ encode links),("signer.json",L.toStrict $ encode signer),("worker.json",L.toStrict $ encode worker)]
   C.validateConfig worker; C.validateConfig signer
   mapM_ (\(name,bytes)->savePrivate (directory</>name) bytes) records
-  putStrLn $ "Saved private installation material in "<>directory
+  putStrLn $ "Saved settings and source-file references (no copied key files) in "<>directory
   putStrLn $ "Next: ecx-bridge start "<>directory<>" (Ubuntu 24.04; sudo for installation)."
   putStrLn "Node/RPC permissions, initialized remote backup, DNS, certificate renewal and funding still require provisioning."
   putStrLn "Nothing has been installed or activated. Never initialize a fresh ledger for existing custody."
  where
-  requiredFile label=prompt label "" (\path->makeAbsolute path >>= readPrivate)
-  optionalFile label=prompt label "-" $ \path->if path=="-" then pure B.empty else do
-    bytes<-makeAbsolute path >>= readPrivate
+  requiredFile label=prompt label "" $ \path->do
+    file<-makeAbsolute path
+    _<-readPrivate file
+    pure file
+  optionalFile label=prompt label "-" $ \path->if path=="-" then pure "" else do
+    file<-makeAbsolute path
+    bytes<-readPrivate file
     require (not(B.null bytes) && B.length bytes<=1024 && not(B8.any (`elem` ['\r','\n','\0']) bytes)) "passphrase_requires_1_to_1024_bytes_without_newline"
-    pure bytes
-  credential label=prompt label "" readCredential
+    pure file
+  credential label=prompt label "" $ \path->do
+    file<-makeAbsolute path
+    _<-readCredential file
+    pure file
   readCredential path=do
     bytes<-makeAbsolute path >>= readPrivate
     let value=B8.dropWhileEnd (`elem` ['\r','\n']) bytes
@@ -214,12 +228,15 @@ start path=do
         ,C.signerAuthFile=C.signerAuthFile installedConfig,C.fenceDirectory=C.fenceDirectory installedConfig
         ,C.solanaSdkLibrary=C.solanaSdkLibrary installedConfig}
   require (normalized==installedConfig) "installed_configuration_differs_use_reviewed_upgrade"
-  forM_ [("interface.json","interface.json"),("public-fullchain.pem","public-fullchain.pem"),("public-privkey.pem","public-privkey.pem")] $ \(input,output)->do
-    exists<-doesFileExist (directory</>input)
-    when exists $ do
-      source<-B.readFile(directory</>input)
-      target<-B.readFile("/etc/ecx-bridge/worker"</>output)
-      require (source==target) "installed_material_differs_updated_package_required"
+  sourceInterface<-B.readFile(directory</>"interface.json")
+  installedInterface<-B.readFile "/etc/ecx-bridge/worker/interface.json"
+  require (sourceInterface==installedInterface) "installed_material_differs_updated_package_required"
+  sourceBytes<-readPrivate(directory</>"sources.json")
+  sources<-either (const $ reject "invalid_source_references") pure (eitherDecodeStrict' sourceBytes :: Either String Object)
+  forM_ ["public-fullchain.pem","public-privkey.pem"] $ \name->
+    when (M.member (K.fromString name) sources) $ do
+      exists<-doesFileExist("/etc/ecx-bridge/worker"</>name)
+      require exists "installed_tls_missing_updated_package_required"
   execute "systemctl" ["start","ecx-bridge-signer","ecx-bridge-worker"]
   putStrLn "Services started paused. Checking readiness before enabling orders."
   let operatorArgs=if uid==0 then ["-u","ecxbridgew","--",binary,"operator",config]
