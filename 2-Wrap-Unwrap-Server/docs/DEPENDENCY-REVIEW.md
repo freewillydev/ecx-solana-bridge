@@ -84,3 +84,38 @@ artifact. Current package-notice collection covers all 358 package versions;
 distribution/license obligations and independent application review remain open;
 see [THIRD-PARTY.md](THIRD-PARTY.md). Historical Linux results do not certify
 this macOS build or a future installer.
+
+## Bundled restic binary
+
+The signed ARM64 installer `8db99c8` contains restic 0.19.1 built with Go 1.26.4
+(SHA-256 `2fb45ac6f9071b6f20eb883953a188f9e7c7cb6bbe43c67a2e47ada4e85ee7f0`).
+It is outside the Cabal/Cargo inventories above. Its build metadata contains 79
+Go dependency modules. govulncheck 1.8.0 binary-mode analysis against the Go database
+updated 2026-10-01 reported 22 advisory IDs, including TLS/HTTP/runtime and dependency
+findings. Binary findings are not proof of reachable exploitation, but this binary
+must not be reused for the public release.
+
+A candidate built from checksum-verified upstream restic v0.19.1 with the retained
+`install/restic-security.patch`, Go 1.26.8 and no `selfupdate` tag resolves every
+fixable advisory reported in that scan. The remaining GO-2026-5932 OpenPGP wildcard
+report has no fixed version; the exact Linux/ARM64 selected import graph contains
+no OpenPGP or self-update package. Retain this evidence for reviewer confirmation,
+not a blanket waiver of the crypto module. The scanner's main-module version is
+`(devel)`, so its report also does not establish upstream restic advisory coverage.
+See [govulncheck's binary-mode limitations](https://pkg.go.dev/golang.org/x/vuln/cmd/govulncheck).
+
+Candidate SHA-256:
+`f5fdb349699c6b0a82a3c5bf4b92e94769842ae909f5ffb010dc694b668740bf`.
+In Ubuntu ARM64, old backups restored with the candidate and candidate backups
+restored with the old binary; both complete data checks passed and a wrong password
+was refused. This used disposable local files/repositories, no custody keys, no
+bridge services and no external chain calls. The fixture and copied executables
+were removed and the VM stopped. It does not establish bridge checkpoint or remote
+backup acceptance. The installed tool and signed installer have not been replaced.
+
+`build/toolchains.json` pins the upstream module checksum, compiler, patch and
+reviewed candidate hash. Packaging now rejects the old binary before building.
+There is no reviewed x86-64 hash yet. Remaining work is bridge checkpoint/restore
+integration, updated Go/restic notices, main-module review, x86-64 acceptance and
+regeneration/authentication of the final artifact. Private `restic-*` source,
+scan, import and compatibility evidence is in `security-audit/current-20261004`.

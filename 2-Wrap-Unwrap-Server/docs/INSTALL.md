@@ -16,7 +16,9 @@ Build from a clean reviewed Git checkout on Ubuntu 24.04, as an unprivileged use
 
 This invokes the existing Cabal build, packages its executable, SDK, GHC-JavaScript
 assets, all migrations, retained notices and the supplied restic 0.19.1 client.
-It creates a self-contained `.run` artifact and checksum. Artifact authentication
+It accepts only the reviewed restic hash for that architecture, checked before
+compilation. The earlier upstream Go 1.26.4 binary has open advisory findings and
+is refused. It creates a self-contained `.run` artifact and checksum. Artifact authentication
 uses the retained Ed25519 `scripts/release-auth` protocol; the trust key must arrive
 through a separate reviewed channel. The format-2 index authenticates only the architectures actually built and reviewed;
 requesting an absent architecture is refused. Old format-1 indices are rejected.
@@ -68,6 +70,26 @@ generated unfunded custody, including a clean Ubuntu VM and cold boot. A reprodu
 SSH-forwarding gap led to explicit `DenyUsers` policy for both service accounts;
 `nologin` alone was insufficient. These checks do not establish funded restoration,
 backup delivery or independent-host disaster recovery; see [release evidence](RELEASE-REVIEW.md).
+
+## Restic security candidate
+
+The restic source is an external deployment dependency, not application code.
+Fetch `github.com/restic/restic@v0.19.1` using `go mod download -json` and verify its
+`Sum` against `build/toolchains.json`. Apply `install/restic-security.patch` to a
+separate writable copy of that verified source. From that copy, the reviewed ARM64
+candidate was built with:
+
+```sh
+GOTOOLCHAIN=go1.26.8 GOMAXPROCS=1 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -p=1 -mod=readonly -trimpath -tags=disable_grpc_modules -ldflags='-s -w' -o restic-patched ./cmd/restic
+```
+
+Check the output against the pinned `restic-reviewed.aarch64` SHA-256. Self-update
+is deliberately not compiled into this managed deployment tool. The module patch
+and checksums preserve the exact dependency choices; do not substitute an arbitrary
+binary that prints the same version. This candidate passed local repository
+compatibility but still needs bridge checkpoint integration and notice review.
+The earlier signed installer remains historical acceptance evidence, not a public
+release candidate with these security changes. See [dependency review](DEPENDENCY-REVIEW.md).
 
 ## Build
 

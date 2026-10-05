@@ -194,6 +194,15 @@ control and a one-second deadline. No runtime change was required. This strength
 boundary evidence for HSEC-2023-0007 but does not close transitive reachability or
 independent review; see [dependency review](DEPENDENCY-REVIEW.md).
 
+The bundled restic audit then found advisory matches outside the Cabal/Cargo
+inventory. A patched restic candidate passed bidirectional old/new local repository
+restore, full data checks and wrong-password refusal in Ubuntu ARM64. Its binary
+scan retains only an OpenPGP wildcard report, while the selected import graph excludes
+that package. Packaging now pins the reviewed candidate hash and rejects the old
+binary. The frozen bridge executable is unchanged; the signed package and installed
+restic have not been replaced. Bridge checkpoint integration, refreshed notices and
+final packaging remain required. See [dependency review](DEPENDENCY-REVIEW.md).
+
 ## Evidence already obtained
 
 | Area | Evidence and limit |

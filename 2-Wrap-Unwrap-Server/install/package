@@ -18,12 +18,15 @@ case "$arch" in aarch64|x86_64) ;; *) fail 'unsupported architecture';; esac
 root=$(git rev-parse --show-toplevel)
 cd "$root"
 [ -z "$(git status --porcelain)" ] || fail 'commit/review the exact source before packaging'
+# Version text alone also accepts upstream binaries with affected dependencies.
+expected=$(jq -er --arg arch "$arch" '."restic-reviewed"[$arch] // error("no reviewed restic for architecture")' 2-Wrap-Unwrap-Server/build/toolchains.json)
+[ "$(sha256sum "$restic" | cut -d ' ' -f 1)" = "$expected" ] || fail 'unreviewed restic binary'
+"$restic" version | grep -q '^restic 0.19.1 ' || fail 'restic 0.19.1 required'
 # Compilation stays under the caller, through the existing sole Cabal entry point.
 cabal build exe:ecx-bridge -j1
 binary=$(cabal list-bin exe:ecx-bridge)
 assets=$(jq -er '[."install-plan"[] | select(."pkg-name"=="ecx-build-assets" and .style=="local") | ."dist-dir"] | unique | if length==1 then .[0] else error("ambiguous assets") end' dist-newstyle/cache/plan.json)/build/autogen
 [ -f "$assets/libecx_solana_sdk.so" ] || fail 'missing Cabal SDK'
-"$restic" version | grep -q '^restic 0.19.1 ' || fail 'restic 0.19.1 required'
 mkdir -m 0700 "$output"
 staging=$(mktemp -d "$output/.bundle-XXXXXXXX")
 trap 'rm -rf -- "$staging"' EXIT

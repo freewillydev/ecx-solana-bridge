@@ -43,3 +43,10 @@ the current binary. See [DEPENDENCY-REVIEW.md](DEPENDENCY-REVIEW.md).
 The current advisory review also retains a build-time Cabal source-header deletion
 finding. Previous Linux notice and loader checks remain historical evidence;
 the advisory refresh does not replace a distribution/license audit.
+
+The ARM64 restic binary's 79 Go module dependencies are a separate inventory; they
+are **not** included in the 358 Cabal/Cargo versions above. The security candidate
+also updates that Go graph. Restic, Go runtime and transitive notice collection
+must follow the final binary metadata before distribution; retain the upstream
+restic source license and embedded-component notices. See the candidate hashes
+and remaining checks in [DEPENDENCY-REVIEW.md](DEPENDENCY-REVIEW.md).

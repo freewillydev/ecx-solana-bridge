@@ -46,5 +46,13 @@
   "ghc-source": [
     "https://downloads.haskell.org/ghc/9.14.1/ghc-9.14.1-src.tar.xz",
     "2a83779c9af86554a3289f2787a38d6aa83d00d136aa9f920361dd693c101e77"
-  ]
+  ],
+  "restic-reviewed": {
+    "source": "github.com/restic/restic@v0.19.1",
+    "sourceSum": "h1:LQKkar5/gYxay1OCokAWPBNiLr1lTpt4fhdM4GWqSlY=",
+    "go": "go1.26.8",
+    "tags": "disable_grpc_modules",
+    "patchSha256": "8bc7a3ec39fa617917b567c7da93f2275c21d8ce3616093022612269f099f0f5",
+    "aarch64": "f5fdb349699c6b0a82a3c5bf4b92e94769842ae909f5ffb010dc694b668740bf"
+  }
 }
