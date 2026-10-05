@@ -55,6 +55,18 @@ These are version/source checks, not independent security certification.
   or certify all transitive HTTP/TLS/database/browser parser paths. Source hashes
   and scope are recorded in private `numeric-input-boundaries.json` beside the
   existing source inventories. The deployed runtime remains unchanged.
+  Further HTTP input-path review on 2026-10-05 traced Servant 0.20.3.0
+  ContentTypes.handleAcceptH/canHandleAcceptH and servant-server response rendering
+  to http-media 0.8.1.1. Its Quality.readQ uses Word16 and accepts only 0/1 with
+  at most three fractional digits; exponent notation does not reach floating-point
+  Read. The customer API has Text headers/captures and JSON records, with no Float
+  or Double FromHttpApiData parameter. Its three static files use responseFile
+  directly, without content-negotiation middleware. wai-extra 3.1.18 does contain
+  parseHttpAccept using Read Double, but no caller was found in the application
+  or the cached Hackage source inventory (outside that library's own tests).
+  These findings narrow the reviewed HTTP path; they do not prove absence via
+  compiler boot packages, dynamically selected code or all transitive inputs.
+  No change to the frozen application was justified by this inspection.
 - [HSEC-2026-0006](https://github.com/haskell/security-advisories/blob/main/advisories/published/2026/HSEC-2026-0006.md):
   Cabal 3.16.0.0 can delete duplicate source headers during configure. It belongs
   to the native build-hook dependency closure, not the server's linked-library
