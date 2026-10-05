@@ -518,6 +518,20 @@ including parser rejection of caller-supplied hashes, and a real Devnet sign-onl
 check preserved the intent with a matching saved recovery blockhash. That attempt
 was not submitted. Its private evidence is under `token-auto-blockhash-xojgw2g6`.
 
+Associated-account and metadata-creation expiry recovery subsequently finalized
+on Devnet. Each saved generation-1 successor passed exact transaction-byte and
+fee checks, and finalized submission replay retained the same signature and file.
+The test mint remained at zero supply with eight decimals, its original authority
+and no freeze authority; the associated account had the expected owner/mint and
+zero tokens. Metadata account readback is retained for the subsequent update drill.
+
+- Associated account: `5ACXFhTZVPWywxxEioHAPKh5DTmJ2Tu27B1UDHcdhBuQASGe937fzstnPExef8gatcGxmWfoerfjuAtQJyCn5Bg2`.
+- Metadata creation: `Ubi9dxs6BYpntvwf1ZLSepoP399s7byDQjaEzS56kpxX93WPVAdDZK1aw18tve9HPEXdG8kSgCbxWCRXkt6rjM8`.
+
+Private `admin-recovery-families-20261004` evidence contains finality, transaction
+effects and replay results. Metadata-update recovery and deliberate finalized
+failure acceptance are not established by these two results.
+
 ## Gates still open
 
 Real Devnet nonzero fee collection and explicit reinvestment passed after bounded
