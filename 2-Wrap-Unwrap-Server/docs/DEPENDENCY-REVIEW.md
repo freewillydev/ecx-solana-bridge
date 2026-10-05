@@ -111,11 +111,33 @@ restored with the old binary; both complete data checks passed and a wrong passw
 was refused. This used disposable local files/repositories, no custody keys, no
 bridge services and no external chain calls. The fixture and copied executables
 were removed and the VM stopped. It does not establish bridge checkpoint or remote
-backup acceptance. The installed tool and signed installer have not been replaced.
+backup acceptance. The signed installer has not been replaced. The paused VM now uses the reviewed
+binary after the bridge integration check below.
 
 `build/toolchains.json` pins the upstream module checksum, compiler, patch and
 reviewed candidate hash. Packaging now rejects the old binary before building.
-There is no reviewed x86-64 hash yet. Remaining work is bridge checkpoint/restore
-integration, updated Go/restic notices, main-module review, x86-64 acceptance and
+There is no reviewed x86-64 hash yet. Remaining work is updated Go/restic notices,
+independent applicability review, x86-64 acceptance and
 regeneration/authentication of the final artifact. Private `restic-*` source,
 scan, import and compatibility evidence is in `security-audit/current-20261004`.
+
+The frozen Linux bridge executable subsequently recovered the real sequence-55
+custody snapshot through the candidate and existing HTTPS repository, inspected its
+ledger/native-wallet/key/config bindings, then uploaded the bundle and completed
+its mandatory full download/readback. The custody manifest SHA-256 stayed
+`683700290474dc44eadb3b8b05fb3b48a2f8b081e1ea603e3861aa360580256f`.
+The new snapshot is
+`0a5d2fd769107f31bea65cf870c625cd851e152a87dbc2ba1499ce4932e20e12`.
+This exercises the actual closed custody upload/download implementation used by
+checkpoints, not just standalone restic. It does not exercise a new signing-triggered
+checkpoint or ledger activation. Both services remained stopped; temporary recovered
+keys and files were removed. The candidate replaced `/opt/ecx/bin/restic` atomically
+as root mode 0755, retaining the old tool root-only for explicit recovery; the bridge
+executable was unchanged. The VM was stopped afterward. This repository still lives
+on the same physical Mac, so independent disaster recovery remains unproven.
+
+The Go advisory module index was also checked directly for `github.com/restic/restic`
+and contained no matching module record on 2026-10-04. This addresses the scanner's
+missing main-module version only as published-database evidence, not a source audit
+or guarantee that restic has no unknown vulnerabilities. Private integration,
+deployment and module-index records accompany the earlier scans.

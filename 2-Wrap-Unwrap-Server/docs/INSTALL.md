@@ -86,8 +86,9 @@ GOTOOLCHAIN=go1.26.8 GOMAXPROCS=1 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build
 Check the output against the pinned `restic-reviewed.aarch64` SHA-256. Self-update
 is deliberately not compiled into this managed deployment tool. The module patch
 and checksums preserve the exact dependency choices; do not substitute an arbitrary
-binary that prints the same version. This candidate passed local repository
-compatibility but still needs bridge checkpoint integration and notice review.
+binary that prints the same version. This candidate passed local repository compatibility and the frozen bridge
+custody upload/download/readback path. It still needs notice review and final
+artifact acceptance.
 The earlier signed installer remains historical acceptance evidence, not a public
 release candidate with these security changes. See [dependency review](DEPENDENCY-REVIEW.md).
 

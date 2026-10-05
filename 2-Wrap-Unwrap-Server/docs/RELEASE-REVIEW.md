@@ -199,9 +199,12 @@ inventory. A patched restic candidate passed bidirectional old/new local reposit
 restore, full data checks and wrong-password refusal in Ubuntu ARM64. Its binary
 scan retains only an OpenPGP wildcard report, while the selected import graph excludes
 that package. Packaging now pins the reviewed candidate hash and rejects the old
-binary. The frozen bridge executable is unchanged; the signed package and installed
-restic have not been replaced. Bridge checkpoint integration, refreshed notices and
-final packaging remain required. See [dependency review](DEPENDENCY-REVIEW.md).
+binary. The frozen bridge executable is unchanged. The candidate then passed the actual
+bridge custody download, inspection, upload and mandatory full readback using the
+real sequence-55 bundle and existing HTTPS repository. Its manifest hash was unchanged.
+The paused VM now uses the patched tool; recovered key files were removed and the
+VM stopped. The signed package has not been replaced. Refreshed notices, x86-64 and
+final artifact acceptance remain required. Independent-host recovery is still open. See [dependency review](DEPENDENCY-REVIEW.md).
 
 ## Evidence already obtained
 
