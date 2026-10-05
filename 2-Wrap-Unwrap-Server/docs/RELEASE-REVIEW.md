@@ -30,6 +30,14 @@ passed disposable PostgreSQL/restic and actual HTTPS contracts. Subsequent secti
 retain historical evidence within its recorded scope; they do not certify a later
 artifact.
 
+Ubuntu 24.04 x86-64 subsequently passed the full root `cabal build all -j1`
+and all three Cabal suites (`bridge-test`, `pool-test`, `token-test`) at `7805c02`,
+including the simplified token CLI and default fee cap. The build used the actual
+x86-64 SDK and prebuilt GHC-JavaScript browser assets. This closes native x86-64
+build/unit-suite acceptance, not fresh installation, browser compiler reproduction,
+funded operation or clean-host recovery. The test log is retained privately as
+`installer-acceptance-20261004/x86-tests-7805c02.log`.
+
 ## Mainnet blocker history and closure
 
 The documented public endpoint `https://api.mainnet.solana.com` passed two read-only
