@@ -88,3 +88,24 @@ frozen payloads. Private `release-elf-linkage.json` records artifact and compone
 hashes, ELF machine IDs, direct dependencies and loader paths. No rebuild or
 runtime mutation was required. Final attribution/license-choice and embedded-code
 obligation review remains open; collected notices alone do not resolve it.
+
+## Declared licenses and named-file coverage
+
+The 2026-10-05 archive review verified source checksums for the union of 165 Hackage
+packages in the native/browser/Linux plans and 149 Cargo registry packages in the
+lock (the local SDK crate is separate). Hackage declarations comprise 133 BSD-3,
+21 MIT, nine BSD-2, one ISC and one PublicDomain declaration. Cargo declarations
+include alternative-license expressions and unicode-ident's conjunctive Unicode-3.0
+requirement; all three of its Apache/MIT/Unicode texts are retained. r-efi declares
+MIT OR Apache-2.0 OR LGPL-2.1-or-later; this expression does not by itself require
+choosing its LGPL alternative. These are reported upstream declarations, not a
+legal compatibility determination or proof of actual linked membership.
+
+A complete archive-member scan found 224 Cargo and 171 Hackage conventionally named
+license/copying/copyright/notice/author files. Every text is present in the combined
+notice bundle, including the decompressed streaming-commons test LICENSE.gz.
+No source download or build was needed. Private hackage-license-metadata.json and
+cargo-license-metadata.json retain per-package declaration/checksum and scan scope.
+This closes that named-file comparison, not embedded source-header obligations,
+compiler/runtime or system-library review. The separate Go collection is described
+above. Keep the independent distribution gate open.
