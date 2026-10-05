@@ -16,6 +16,8 @@ import qualified Crypto.PubKey.Ed25519 as Ed
 import qualified Data.ByteArray as BA
 import qualified Data.ByteArray.Encoding as Encoding
 import qualified Data.ByteString.Lazy as L
+import qualified Data.ByteString.Base64 as B64
+import Data.Binary.Put (runPut,putWord32le,putWord64le,putByteString)
 import System.IO (openTempFile,hClose)
 import System.Directory (removeDirectoryRecursive,removeFile,canonicalizePath,doesFileExist)
 import qualified System.Posix.Directory as PD
@@ -49,6 +51,7 @@ main=do
   results<-sequence
     [ quickCheckResult $ once $ ioProperty cliContract
     , quickCheckResult $ once $ ioProperty offlineContract
+    , quickCheckResult $ once $ ioProperty nonceContract
     , quickCheckResult $ \positive->let
         original=request Mint (getPositive positive)
         withoutHash=case toJSON original of Object o->Object(KM.delete "blockhash" o); other->other
@@ -349,6 +352,40 @@ statusContract failed valid=
       ,classify (status "finalized") (transaction "saved-bytes" $ if failed then Null else Number 1) valid
       ,classify (status "unknown") Null valid]
 
+nonceContract :: IO Bool
+nonceContract=do
+  let ordinary=request Mint 123
+      payer=authority ordinary
+      recent=blockhash ordinary
+      nonce=base58(B.replicate 32 42)
+      intent=NonceMint payer (mint ordinary) (account ordinary) 123 recent nonce
+      changed=[intent {quantity=124},intent {nonceAccount=account ordinary},intent {blockhash=mint ordinary}
+        ,intent {authority=account ordinary},intent {mint=account ordinary},intent {account=mint ordinary}]
+  unsigned<-(O.runSafe . O.Request) (Prepare sdkLibraryPath intent)
+  address<-either (fail . T.unpack) pure (nonceAddress payer "offline-mint")
+  let creation=CreateNonce payer address payer "offline-mint" 1447680 recent
+  created<-(O.runSafe . O.Request) (Prepare sdkLibraryPath creation)
+  let key=B.replicate 32 5
+      raw version state= L.toStrict $ runPut $ do
+        putWord32le version; putWord32le state; putByteString key; putByteString(B.replicate 32 6); putWord64le 5000
+      response owner executable bytes=object ["owner" .= (owner::Text),"executable" .= executable
+        ,"data" .= [TE.decodeUtf8(B64.encode bytes),"base64"]]
+      valid=response "11111111111111111111111111111111" False (raw 1 1)
+      parse=parseEither (N.inspectNonce $ base58 key)
+  pure (not(isLeft $ validate intent unsigned)
+    && eitherDecode(encode intent)==Right intent && all (isLeft . flip validate unsigned) changed
+    && isLeft(validate ordinary unsigned) && not(isLeft $ validate creation created)
+    && eitherDecode(encode creation)==Right creation
+    && all (isLeft . flip validate created)
+      [creation {rent=1},creation {owner=account ordinary},creation {seed="changed"},creation {nonceAccount=nonce}]
+    && parse valid==Right(base58(B.replicate 32 6),5000)
+    && isLeft(parseEither (N.inspectNonce nonce) valid)
+    && all (isLeft . parse)
+      [response nonce False (raw 1 1),response "11111111111111111111111111111111" True (raw 1 1)
+      ,response "11111111111111111111111111111111" False (raw 0 1)
+      ,response "11111111111111111111111111111111" False (raw 1 0)
+      ,response "11111111111111111111111111111111" False (raw 1 1<>B.singleton 0)])
+
 -- Full USB-file handoff without configuration, an RPC endpoint or real keys.
 offlineContract :: IO Bool
 offlineContract=bracket temporary removeDirectoryRecursive $ \directory->do
@@ -357,7 +394,8 @@ offlineContract=bracket temporary removeDirectoryRecursive $ \directory->do
       secret=case Ed.secretKey seed of CryptoPassed key->key; _->error "fixture seed"
       public=BA.convert (Ed.toPublic secret) :: B.ByteString
       exported=base58 (seed<>public)
-      original=(request Mint 321) {authority=base58 public}
+      original=NonceMint (base58 public) (mint $ request Mint 321) (account $ request Mint 321)
+        321 (blockhash $ request Mint 321) (base58 $ B.replicate 32 42)
       prepared=directory</>"prepared.json"
       signed=directory</>"signed.json"
       keyfile=directory</>"key.json"

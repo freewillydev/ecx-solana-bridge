@@ -1,6 +1,6 @@
 {-# LANGUAGE GADTs #-}
 -- Read-only preflight; simulation always contains zero signatures.
-module Token.Network (Network(..),Safe(..),Critical(..),evalSafe,evalCritical,inspectPolicy) where
+module Token.Network (Network(..),Safe(..),Critical(..),evalSafe,evalCritical,inspectPolicy,inspectNonce) where
 import Bridge.AdminStatus (Status,inspectStatus,Recovery(..),newRecovery,renewRecovery,validateRecovery,attemptPath)
 import Bridge.AdminKey (readPrivate,readKey,savePrivate,newPrivatePath,withFamily)
 import Bridge.Identity (digest)
@@ -30,15 +30,38 @@ import Network.HTTP.Client (parseRequest,secure,host,closeManager)
 import qualified Data.ByteString.Char8 as B8
 import Data.Char (toLower)
 import Text.Read (readMaybe)
+import Data.Binary.Get (runGetOrFail,getWord32le,getWord64le,getByteString)
 
 data Network = Devnet | Mainnet deriving (Eq,Show)
 data Safe a where
   RecentBlockhash :: Network -> String -> Safe Text
+  NonceValue :: Network -> String -> Text -> Text -> Safe Text
+  NonceRent :: Network -> String -> Safe Word64
   InspectSaved :: Network -> String -> FilePath -> Safe Status
   Check :: Network -> String -> Word64 -> Request -> Text -> Safe Word64
   InspectPolicy :: Network -> String -> String -> Text -> Text -> Text -> Maybe Text -> Safe [(Word64,Word64,Word64)]
 
 evalSafe :: Safe a -> IO a
+evalSafe (NonceRent network endpoint)=do
+  transport<-parseRequest endpoint
+  require (secure transport) "invalid_token_rpc_policy"
+  bracket newRpcManager closeManager $ \manager->do
+    let call=rpc manager endpoint Nothing
+    actual<-call "getGenesisHash" [] >>= parseValue parseJSON
+    require (actual==genesis network) "wrong_token_network"
+    rent<-call "getMinimumBalanceForRentExemption" [toJSON (80::Int),object ["commitment" .= ("finalized"::Text)]] >>= parseValue parseJSON
+    require (rent>0) "invalid_nonce_rent"
+    pure rent
+evalSafe (NonceValue network endpoint owner address)=do
+  mapM_ (either reject (const $ pure ()) . publicKey) [owner,address]
+  transport<-parseRequest endpoint
+  require (secure transport) "invalid_token_rpc_policy"
+  bracket newRpcManager closeManager $ \manager->do
+    let call=rpc manager endpoint Nothing
+    actual<-call "getGenesisHash" [] >>= parseValue parseJSON
+    require (actual==genesis network) "wrong_token_network"
+    accountValue<-call "getAccountInfo" [toJSON address,object ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text)]] >>= fieldValue "value"
+    fst <$> parseValue (inspectNonce owner) accountValue
 evalSafe (RecentBlockhash network endpoint)=do
   transport<-parseRequest endpoint
   require (secure transport) "invalid_token_rpc_policy"
@@ -51,6 +74,9 @@ evalSafe (RecentBlockhash network endpoint)=do
     either reject (const $ pure recent) (publicKey recent)
 evalSafe (InspectSaved network endpoint path)=do
   (saved,_)<-loadFamily path
+  case savedRequest saved of
+    NonceMint{}->reject "nonce_status_requires_submit_file"
+    _->pure ()
   forM_ (savedRecovery saved) $ \context->either reject pure $
     validateRecovery (genesis network) (authority $ savedRequest saved)
       (recoveryFeeLimit context) (blockhash $ savedRequest saved) context
@@ -78,7 +104,19 @@ evalSafe (Check network endpoint feeLimit request unsigned)=do
         accountInfo address=call "getAccountInfo" [toJSON address,options] >>= fieldValue "value"
     actual<-call "getGenesisHash" [] >>= parseValue parseJSON :: IO Text
     require (actual==genesis network) "wrong_token_network"
+    case request of
+      NonceMint{nonceAccount=address}->do
+        value<-call "getAccountInfo" [toJSON address,object ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text)]] >>= fieldValue "value"
+        (stored,_)<-parseValue (inspectNonce $ authority request) value
+        require (stored==blockhash request) "token_nonce_consumed_or_changed"
+      _->pure ()
     rentCost<-case request of
+      CreateNonce{nonceAccount=address,rent=lamports}->do
+        existing<-accountInfo address
+        require (existing==Null) "nonce_account_already_exists"
+        minimumRent<-call "getMinimumBalanceForRentExemption" [toJSON (80::Int),object ["commitment" .= ("finalized"::Text)]] >>= parseValue parseJSON :: IO Integer
+        require (minimumRent>0 && minimumRent==toInteger lamports) "nonce_rent_mismatch"
+        pure minimumRent
       CreateMint{}->do
         existing<-accountInfo (mint request)
         require (existing==Null) "mint_already_exists"
@@ -102,15 +140,17 @@ evalSafe (Check network endpoint feeLimit request unsigned)=do
           _<-metadataState request existing
           pure ()
         pure 0
-      Request{}->do
+      _->do
         mintInfo<-accountInfo (mint request) >>= parseValue (inspectMint (Just 8))
         tokenInfo<-accountInfo (account request) >>= parseValue inspectAccount
         let (mintAuthority,supply)=mintInfo
             (owner,balance,token)=tokenInfo
         require (token==mint request) "token_account_mint_mismatch"
-        case action request of
-          Mint->require (mintAuthority==Just(authority request) && toInteger supply+toInteger(quantity request)<=toInteger(maxBound::Word64)) "token_mint_authority_or_supply"
-          Burn->require (owner==authority request && balance>=quantity request && supply>=quantity request) "token_burn_authority_or_balance"
+        case request of
+          NonceMint{}->require (mintAuthority==Just(authority request) && toInteger supply+toInteger(quantity request)<=toInteger(maxBound::Word64)) "token_mint_authority_or_supply"
+          Request{action=Mint}->require (mintAuthority==Just(authority request) && toInteger supply+toInteger(quantity request)<=toInteger(maxBound::Word64)) "token_mint_authority_or_supply"
+          Request{action=Burn}->require (owner==authority request && balance>=quantity request && supply>=quantity request) "token_burn_authority_or_balance"
+          _->reject "invalid_token_operation"
         pure 0
     -- Both writable token accounts and the mint are checked above; reject a
     -- non-system fee payer, even if an RPC simulation would accept it.
@@ -164,6 +204,7 @@ data Critical a where
 
 evalCritical :: Critical a -> IO a
 evalCritical (Sign library network endpoint feeLimit request unsigned key output)=withFamily output $ do
+  case request of NonceMint{}->reject "nonce_requires_offline_signing"; _->pure ()
   _<-either reject pure (validate request unsigned)
   newPrivatePath output
   _<-readKey (authority request) key
@@ -289,7 +330,9 @@ submitSaved network endpoint feeLimit saved=do
               Metadata{metadata=terms}->Just (toInteger $ M.maxCost terms)
               Associated{rent=lamports}->Just (toInteger lamports+fee)
               CreateMint{rent=lamports}->Just (toInteger lamports+fee)
+              CreateNonce{rent=lamports}->Just (toInteger lamports+fee)
               Request{}->Nothing
+              NonceMint{}->Nothing
         case costLimit of
           Just maximumDebit->do
             before<-fieldValue "preBalances" metadata :: IO [Integer]
@@ -305,6 +348,23 @@ submitSaved network endpoint feeLimit saved=do
         ["encoding" .= ("base64"::Text),"skipPreflight" .= False,"preflightCommitment" .= ("finalized"::Text),"maxRetries" .= (0::Int)]] >>= parseValue parseJSON
       require (result==identifier) "token_submission_identifier_mismatch"
       pure $ object ["signature" .= identifier,"status" .= ("submitted"::Text)]
+
+-- Exact current System Program nonce layout: version, initialized tag, authority,
+-- durable hash and fee calculator. Legacy nonce versions are not durable hashes.
+inspectNonce :: Text -> Value -> Parser (Text,Word64)
+inspectNonce authority value=do
+  owner<-field "owner" value :: Parser Text
+  executable<-field "executable" value
+  encoded<-field "data" value :: Parser [Text]
+  raw<-case encoded of
+    [bytes,"base64"]->either (const $ fail "invalid nonce encoding") pure (B64.decode $ TE.encodeUtf8 bytes)
+    _->fail "invalid nonce encoding"
+  unless (owner=="11111111111111111111111111111111" && not executable && BS.length raw==80)
+    (fail "invalid nonce account")
+  let parser=(,,,,) <$> getWord32le <*> getWord32le <*> getByteString 32 <*> getByteString 32 <*> getWord64le
+  case runGetOrFail parser (L.fromStrict raw) of
+    Right (rest,_,(1,1,key,nonce,fee)) | L.null rest && base58 key==authority && fee>0->pure(base58 nonce,fee)
+    _->fail "invalid nonce state or authority"
 
 -- Strict classic SPL policies: no extensions, frozen/delegated/native accounts,
 -- or hidden close/freeze authority. JSON amounts are canonical unsigned integers.

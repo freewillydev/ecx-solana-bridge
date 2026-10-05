@@ -1,0 +1,9 @@
+{
+  "protocol": 1,
+  "verb": "create_nonce",
+  "authority": "REPLACE_WITH_ONLINE_PAYER_PUBLIC_KEY",
+  "nonceAccount": "REPLACE_WITH_DERIVED_NONCE_ACCOUNT_PUBLIC_KEY",
+  "owner": "REPLACE_WITH_OFFLINE_MINT_AUTHORITY_PUBLIC_KEY",
+  "seed": "offline-mint",
+  "rent": "1447680"
+}

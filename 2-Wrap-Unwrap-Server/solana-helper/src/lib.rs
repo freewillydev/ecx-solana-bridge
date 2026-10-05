@@ -179,7 +179,7 @@ struct TokenRequest {
     protocol: u8,
     verb: TokenVerb,
     authority: String,
-    mint: String,
+    mint: Option<String>,
     account: Option<String>,
     owner: Option<String>,
     amount: Option<String>,
@@ -187,10 +187,12 @@ struct TokenRequest {
     seed: Option<String>,
     rent: Option<String>,
     blockhash: String,
+    #[serde(rename="nonceAccount")]
+    nonce_account: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "snake_case")]
-enum TokenVerb { Mint, Burn, Create, Metadata, Associated }
+enum TokenVerb { Mint, Burn, Create, Metadata, Associated, NonceMint, CreateNonce }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct MetadataRequest {
@@ -204,7 +206,7 @@ fn metadata_instruction(r: &TokenRequest) -> Result<solana_instruction::Instruct
         return Err("invalid_metadata_fields");
     }
     raw_amount(&m.max_cost)?;
-    let mint=key(&r.mint)?;
+    let mint=key(r.mint.as_deref().ok_or("missing_mint")?)?;
     let authority=key(&r.authority)?;
     let program=key("metaqbxxUerdq28cj1RbAWkYQm3ybzjb6a8bt518x1s")?;
     let metadata=metadata_address(&mint, &program);
@@ -230,8 +232,28 @@ fn metadata_address(mint: &Pubkey, program: &Pubkey) -> Pubkey {
 
 fn prepare_token(r: &TokenRequest) -> Result<String, &'static str> {
     if r.protocol != 1 { return Err("invalid_protocol"); }
+    if r.nonce_account.is_some() != matches!(r.verb, TokenVerb::NonceMint | TokenVerb::CreateNonce) {
+        return Err("invalid_nonce_fields");
+    }
     let authority = key(&r.authority)?;
-    let mint = key(&r.mint)?;
+    if matches!(r.verb, TokenVerb::CreateNonce) {
+        let nonce=key(r.nonce_account.as_deref().ok_or("missing_nonce")?)?;
+        let owner=key(r.owner.as_deref().ok_or("missing_nonce_authority")?)?;
+        let seed=r.seed.as_deref().ok_or("missing_nonce_seed")?;
+        let rent=raw_amount(r.rent.as_deref().ok_or("missing_nonce_rent")?)?;
+        if r.mint.is_some() || r.account.is_some() || r.amount.is_some() || r.metadata.is_some()
+            || seed.is_empty() || seed.len()>32 || !authority.is_on_curve() || !owner.is_on_curve()
+            || Pubkey::create_with_seed(&authority,seed,&Pubkey::default()).map_err(|_| "invalid_seed")? != nonce {
+            return Err("invalid_nonce_creation");
+        }
+        let instructions=solana_system_interface::instruction::create_nonce_account_with_seed(
+            &authority,&nonce,&authority,seed,&owner,rent);
+        let hash=Hash::from_str(&r.blockhash).map_err(|_| "invalid_blockhash")?;
+        let message=Message::new_with_blockhash(&instructions,Some(&authority),&hash);
+        return bincode::serialize(&Transaction::new_unsigned(message)).map(|bytes| STANDARD.encode(bytes))
+            .map_err(|_| "serialization_failed");
+    }
+    let mint = key(r.mint.as_deref().ok_or("missing_mint")?)?;
     let program = spl_token_interface::id();
     let blockhash = Hash::from_str(&r.blockhash).map_err(|_| "invalid_blockhash")?;
     if matches!(r.verb, TokenVerb::Associated) {
@@ -281,14 +303,19 @@ fn prepare_token(r: &TokenRequest) -> Result<String, &'static str> {
     }
     let amount = raw_amount(r.amount.as_deref().ok_or("missing_amount")?)?;
     let instruction = match r.verb {
-        TokenVerb::Mint => spl_token_interface::instruction::mint_to_checked(
+        TokenVerb::Mint | TokenVerb::NonceMint => spl_token_interface::instruction::mint_to_checked(
             &program, &mint, &account, &authority, &[], amount, 8),
         TokenVerb::Burn => spl_token_interface::instruction::burn_checked(
             &program, &account, &mint, &authority, &[], amount, 8),
-        TokenVerb::Create | TokenVerb::Metadata | TokenVerb::Associated => return Err("invalid_admin_instruction"),
+        TokenVerb::Create | TokenVerb::Metadata | TokenVerb::Associated | TokenVerb::CreateNonce => return Err("invalid_admin_instruction"),
     }.map_err(|_| "invalid_admin_instruction")?;
     let blockhash = Hash::from_str(&r.blockhash).map_err(|_| "invalid_blockhash")?;
-    let message = Message::new_with_blockhash(&[instruction], Some(&authority), &blockhash);
+    let mut instructions=Vec::new();
+    if let Some(nonce)=r.nonce_account.as_deref() {
+        instructions.push(solana_system_interface::instruction::advance_nonce_account(&key(nonce)?, &authority));
+    }
+    instructions.push(instruction);
+    let message = Message::new_with_blockhash(&instructions, Some(&authority), &blockhash);
     let bytes = bincode::serialize(&Transaction::new_unsigned(message)).map_err(|_| "serialization_failed")?;
     if bytes.len() > 1232 { return Err("transaction_too_large"); }
     Ok(STANDARD.encode(bytes))

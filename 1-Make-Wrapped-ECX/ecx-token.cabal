@@ -23,7 +23,7 @@ test-suite token-test
   main-is: Main.hs
   build-tool-depends: ecx-token:ecx-token
   build-depends: base, ecx-token, ecx-build-assets, ecx-bridge, ecx-bridge:chain,
-    QuickCheck, text, bytestring, aeson, crypton, ram, directory, filepath, unix, process, network
+    QuickCheck, text, bytestring, aeson, crypton, ram, directory, filepath, unix, process, network, binary, base64-bytestring
 
 executable ecx-token
   default-language: GHC2021

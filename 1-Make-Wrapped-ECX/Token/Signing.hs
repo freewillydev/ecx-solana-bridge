@@ -36,6 +36,9 @@ instance FromJSON Saved where
 -- Verify both the signature and its exact request before using an archived file.
 validateSaved :: Saved -> Either Text Text
 validateSaved (Saved request identifier encoded recovery)=do
+  case (request,recovery) of
+    (NonceMint{},Just _)->Left "nonce_recovery_context_forbidden"
+    _->pure ()
   mapM_ (\context->validateRecovery (recoveryGenesis context) (authority request)
     (recoveryFeeLimit context) (blockhash request) context) recovery
   Transaction signatures _ message<-decodeTransaction encoded

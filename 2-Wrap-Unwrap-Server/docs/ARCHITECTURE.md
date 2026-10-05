@@ -323,8 +323,16 @@ custody. `Token.Network` and `Pool.Signing` own private signing helpers and immu
 attempt families. `Token.Signing` also owns closed offline key-import/sign operations:
 it validates the exact prepared intent and key, then saves a portable signed record
 without RPC or recovery claims. Online submission reuses `Token.Network` validation;
-offline records cannot use automatic successor recovery. They use recent blockhashes,
-not durable nonces, so USB handoff must fit the transaction lifetime. Import accepts
+offline records cannot use automatic successor recovery. Ordinary requests use recent
+blockhashes. The closed `NonceMint` request instead binds an initialized System Program
+nonce account to the same mint authority/fee payer, advances it as the first instruction
+and then mints the exact checked amount. Haskell validates every key, writable role and
+instruction independently of SDK encoding. Preflight/submission checks the current
+nonce value and authority; a consumed nonce is refused unless the saved signature is
+already observed. `CreateNonce` provisions rent with a separate online payer using
+create-with-seed and initialization; nonce authority is the explicit owner, not
+implicitly the payer.
+Import accepts
 base58 64-byte Solana keypairs with matching public halves, not seed phrases.
 Shared `Bridge.AdminStatus` collects read-only recovery evidence;
 it cannot sign or broadcast. Recovery binds a payer-history anchor to the actual

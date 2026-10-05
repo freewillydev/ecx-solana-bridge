@@ -35,6 +35,7 @@ main=run `catches`
 run :: IO ()
 run=getArgs >>= \args->case args of
   ["configure"]->configure
+  ["nonce-rent"]->dispatch "nonce-rent" "" Nothing
   ["keygen",key]->makeAbsolute key >>= \output->
     (O.runCritical . O.Request) (GenerateKey output) >>= L.putStrLn . encode
   ["import-key",exported,key]->do
@@ -70,10 +71,11 @@ commands=
   ,("sign",["network","rpc","maxFeeLamports","attemptFile"])
   ,("prepare-offline",["network","rpc","maxFeeLamports"])
   ,("submit-file",["network","rpc","maxFeeLamports"])
+  ,("nonce-rent",["network","rpc"])
   ,("submit",["network","rpc","maxFeeLamports","attemptFile"])
   ,("recover",["rpc","verifierRpc","attemptFile"]),("status",["network","rpc","attemptFile"])
   ,("inspect-policy",["network","rpc","verifierRpc","mint","owner","custodyAta","mintAuthority"])
-  ,("address",["owner","seed"]),("associated-address",["owner","mint"]),("metadata-address",["mint"])]
+  ,("address",["owner","seed"]),("nonce-address",["owner","seed"]),("associated-address",["owner","mint"]),("metadata-address",["mint"])]
 
 configure :: IO ()
 configure=do
@@ -150,6 +152,9 @@ dispatch command key transactionFile=do
       network=field "network" >>= choose
       fee=field "maxFeeLamports" >>= readFee
   case command of
+    "nonce-rent"->do
+      operation<-Network.NonceRent <$> network <*> field "rpc"
+      (O.runSafe . O.Request) operation >>= L.putStrLn . encode
     "status"->do
       operation<-Network.InspectSaved <$> network <*> field "rpc" <*> path "attemptFile"
       (O.runSafe . O.Request) operation >>= L.putStrLn . encode
@@ -167,6 +172,9 @@ dispatch command key transactionFile=do
     "address"->do
       operation<-MintAddress <$> field "owner" <*> field "seed"
       (O.runSafe . O.Request) operation >>= L.putStrLn . encode
+    "nonce-address"->do
+      operation<-NonceAddress <$> field "owner" <*> field "seed"
+      (O.runSafe . O.Request) operation >>= L.putStrLn . encode
     "prepare"->do
       input<-path "requestFile" >>= readBounded
       request<-either die pure (eitherDecodeStrict' input)
@@ -182,13 +190,20 @@ dispatch command key transactionFile=do
       input<-maybe (die "sign requires TRANSACTION.json") pure transactionFile
       requestBytes<-readBounded input
       intent<-either die pure (eitherDecodeStrict' requestBytes)
-      recent<-(O.runSafe . O.Request) (Network.RecentBlockhash selected endpoint)
+      preview<-either die pure (parseEither (parseIntent "11111111111111111111111111111111") intent)
+      recent<-case preview of
+        NonceMint{authority=owner,nonceAccount=nonce}->do
+          unless (signing=="prepare-offline") (die "Use prepare-offline and sign-offline for nonce minting")
+          (O.runSafe . O.Request) (Network.NonceValue selected endpoint owner nonce)
+        _->(O.runSafe . O.Request) (Network.RecentBlockhash selected endpoint)
       request<-either die pure (parseEither (parseIntent recent) intent)
       unsigned<-(O.runSafe . O.Request) (Prepare sdkLibraryPath request)
       if signing=="prepare-offline" then do
         _<-(O.runSafe . O.Request) (Network.Check selected endpoint limit request unsigned)
         savePrivate key (L.toStrict $ encode $ object ["request" .= request,"unsignedTransaction" .= unsigned])
-        putStrLn $ "Saved "<>key<>". Transfer, sign and submit promptly: the blockhash expires after about 150 slots."
+        putStrLn $ "Saved "<>key<>case request of
+          NonceMint{}->". Durable nonce: valid until this nonce is consumed or its authority changes."
+          _->". Transfer, sign and submit promptly: the blockhash expires after about 150 slots."
       else do
         output<-path "attemptFile"
         identifier<-(O.runCritical . O.Request) (Network.Sign sdkLibraryPath selected endpoint limit request unsigned key output)

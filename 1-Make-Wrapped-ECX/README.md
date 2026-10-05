@@ -84,9 +84,36 @@ control the mint and have SOL for transaction fees.
 
 Build/install `ecx-token` on both computers before disconnecting the signing computer.
 Only the online computer needs RPC configuration. This uses ordinary recent-blockhash
-transactions: **prepare, transfer, sign and submit within about 150 slots** (roughly
-a minute; timing varies). Durable nonce transactions for delayed/off-site signing
-are **not supported**. [Solana documents the distinction here](https://solana.com/docs/core/transactions/durable-nonces).
+transactions for ordinary `mint` requests, which expire after about 150 slots.
+For USB/off-site signing use **`nonce_mint`** instead: its durable nonce remains valid
+until consumed or changed. [Solana documents nonce behavior here](https://solana.com/docs/core/transactions/durable-nonces).
+The nonce authority must be the same key as the mint authority and fee payer.
+Only minting has durable-nonce support; other token commands retain recent blockhashes.
+
+Before the first offline mint, provision a nonce account on the online computer:
+
+```sh
+ecx-token configure              # choose nonce-address; owner = online payer; seed = offline-mint
+ecx-token nonce-address unused   # prints the derived public nonce-account address; no key read
+ecx-token configure              # choose nonce-rent; enter network and HTTPS RPC
+ecx-token nonce-rent             # prints the required rent in lamports
+```
+
+Fill in [inputs/create-nonce.json](inputs/create-nonce.json): `authority` is the
+online payer, `nonceAccount` is the derived address, `owner` is the offline mint
+authority, and `seed` matches the address derivation. Set `rent` to the returned
+value (the template's 1447680 is checked against the actual network). Configure
+`sign` with a new private transaction record and submit using the existing flow:
+
+```sh
+ecx-token configure
+ecx-token sign /private/online-payer-key inputs/create-nonce.json
+ecx-token submit /private/online-payer-key
+```
+
+Wait for `finalized`. This separate payer funds the nonce rent and creation fee;
+it need not hold the offline mint key. The offline mint authority also needs SOL
+for mint transaction fees. Keep one outstanding mint intent per nonce account.
 
 1. On the offline computer, create a private working directory:
 
@@ -111,15 +138,15 @@ are **not supported**. [Solana documents the distinction here](https://solana.co
    the public half against the private seed and writes an owner-only JSON keypair;
    it does not create a new wallet or change authority on chain. Keep a secure backup.
 
-2. On the online computer, fill in `inputs/mint.json`, then configure
+2. On the online computer, fill in [inputs/nonce-mint.json](inputs/nonce-mint.json), then configure
    `prepare-offline` with `network`, HTTPS `rpc` and `maxFeeLamports`:
 
    ```sh
    ecx-token configure
-   ecx-token prepare-offline inputs/mint.json .ecx-token/prepared.json
+   ecx-token prepare-offline inputs/nonce-mint.json .ecx-token/prepared.json
    ```
 
-   This gets a fresh blockhash, validates the actual mint/account/authority and
+   This reads the initialized nonce, validates the actual mint/account/authority and
    fee limit, simulates the unsigned transaction and saves it. Copy `prepared.json`
    onto the USB stick and then into `offline-token/` on the offline computer.
 
@@ -154,4 +181,9 @@ are **not supported**. [Solana documents the distinction here](https://solana.co
    Retain it as the transaction record. Offline records do not contain the online
    recovery-history proof, so `recover` deliberately refuses them. If it expires or a
    send outcome is uncertain, establish the original outcome before authorizing a new
-   mint; changing the blockhash and signing again could mint twice.
+   mint; changing the nonce or blockhash and signing again could mint twice. An executed
+   nonce transaction advances its nonce even if the mint instruction fails. A consumed
+   nonce with no verifiable transaction outcome is a refusal, never permission to retry
+   with a fresh signature. After a finalized result, prepare the next mint from the
+   account's new nonce and use new filenames. Use `submit-file` for nonce status;
+   the ordinary blockhash-based `status` command deliberately refuses nonce records.

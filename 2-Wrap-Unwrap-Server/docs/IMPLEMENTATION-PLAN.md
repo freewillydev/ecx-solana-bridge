@@ -1,5 +1,28 @@
 # Remaining implementation plan
 
+## Active nine-step completion goal
+
+This user-approved list supersedes the earlier ten-item accounting below. Complete
+the independently executable work first, reporting these same numbers. External
+wallet approval, physically independent disaster recovery, L2L alternate history,
+issuer arrangements and independent security sign-off remain separate release gates.
+
+| Step | Completion evidence required | Current status |
+| --- | --- | --- |
+| 1. Durable offline minting | Closed nonce creation/preparation/signing/submission, exact message validation, consumed-nonce refusal and documented USB workflow | Complete locally; token Cabal suite passes nonce creation, mint, parser and offline signing contracts |
+| 2. Devnet offline acceptance | Disposable imported key, real prepare/offline-sign/submit, finalized effects, replay/tamper/consumed-nonce cases | Complete; nonce creation and delayed mint finalized, exact bytes/effects and refusals verified; see RELEASE-REVIEW |
+| 3. Linux token CLI | Updated token suite and executable on ARM64 and x86-64 | In progress; locate retained VM caches and build one architecture at a time |
+| 4. Internal security review | Trace retained API/DSL/authorization/ledger/signer/settlement/recovery; concrete findings resolved or explicitly scoped | Earlier evidence retained; final pass pending |
+| 5. Dependencies and notices | Resolve applicable findings, record upstream limits and verify final distribution notices | Earlier evidence retained; follow-through pending |
+| 6. Current release documentation | Separate resolved history from current blockers and bind evidence to source versions | Pending consolidation |
+| 7. Consolidated acceptance | Relevant final browser/database/concurrency/interruption/recovery checks, without repeating unchanged funded tests | Pending fixes |
+| 8. Review freeze | One source identity, audit map, limitations and reviewer checklist | Pending acceptance |
+| 9. Final artifacts and GitHub | Build/verify final artifacts once; install/upgrade/recovery instructions; source and evidence pushed | Pending freeze; public signing/publication remain operator decisions |
+
+Use one build job and stop temporary processes. Local nonce fixtures are not real
+Devnet acceptance. Recent-blockhash offline signing at `3207bd2` is implemented but
+does not satisfy step 1's delayed-signing requirement.
+
 The sole server application is available for source review; the pilot interface is
 currently offline. Prioritize a usable testing handoff and substantive runtime
 findings; leave installer work last.

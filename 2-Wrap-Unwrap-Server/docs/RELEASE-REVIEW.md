@@ -1,5 +1,37 @@
 # Release review
 
+## Durable offline mint acceptance (2026-10-05)
+
+The new `CreateNonce` and `NonceMint` token operations passed the local Cabal token
+suite, including independent exact instruction/account validation, changed intent
+refusal, nonce-state/version/authority parsing, imported-key identity, offline CLI
+confirmation, private-file permissions and no-overwrite checks. Ordinary token
+recovery contracts still pass. Native/Linux acceptance of this change is tracked
+separately from historical bridge packages below.
+
+Real Devnet acceptance used the retained disposable test authority and a separate
+test payer, not Mainnet or bridge custody. The payer created nonce account
+`Gqfkf2VojwkcdSp2YbTkoAufViDLhZY39wdRpXxA4AZM`, assigning its authority to the
+test mint authority. Creation finalized as
+`2Vx1xf9E4sZq2r63gBLXjFKDdH5fktPsnvGHSxr8UyQD4kmjnTcH7ypcegTsfzANYkKL3VQdEyuicyh1VsB3HSvV`.
+Both base58 import and offline signing ran with macOS sandbox network access denied,
+without an offline RPC configuration. The test copied the signed file between
+isolated working directories; no physical USB device was used.
+
+After an ordinary blockhash captured during preparation became invalid, the saved
+nonce mint finalized at slot 507838464 with signature
+`35EviD6g3pi39emd9SvvZsDRtBbt8GSVfu9h6eEkv4CNXPdjeb9ZTFdrzQfJnBppMyCpa9g8gpnHayywcGCKjBSg`.
+RPC returned exactly the signed bytes; recipient token balance increased from 0
+to 1 base unit. Creation and mint each cost 5,000 lamports; nonce rent was 1,447,680.
+Replaying the saved mint returned the same finalized result and unchanged balance.
+Tampered intent and a one-lamport fee ceiling were refused before submission. A
+second signed intent using the consumed nonce was refused with
+`token_nonce_consumed_or_changed`, and its signature remained absent. No automatic
+replacement signature was generated. Private evidence is
+`postgres-integration/private/offline-nonce-20261005/acceptance.json` in the retained
+build root. This establishes the tested Devnet token path, not customer-wallet,
+Mainnet nonce, physically separate-device or independent-security acceptance.
+
 The latest source adds direct public WarpTLS in the existing worker, replacing the
 optional Nginx example. The macOS and Ubuntu 24.04 ARM64/x86-64 root builds and bridge Cabal suites pass actual
 HTTPS, plaintext rejection, oversized-body rejection, incomplete TLS configuration
