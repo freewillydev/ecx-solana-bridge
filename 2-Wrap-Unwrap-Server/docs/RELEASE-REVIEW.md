@@ -46,6 +46,17 @@ reviewed x86-64 restic hash and absence of links/traversal entries. This is pack
 construction/integrity evidence; authentication and clean installation remain open.
 Private evidence is `package-inspection-x86-fb2cb84.json` in the same directory.
 
+Ubuntu ARM64 also passed the full root build and all three Cabal suites at
+`0a545ba`. Its updated package includes the reviewed restic binary and retained
+dependency notices; the bridge executable remains byte-identical to the frozen
+Mainnet-tested runtime. Artifact SHA-256:
+`8367706c2b409fded8772cced812ac67a17ff4b3ac006841afd355ad439978c8`
+(33,688,971 bytes). Both new architecture packages passed Ed25519 index and
+artifact verification with the existing acceptance-only key. This is not the
+public release trust key. Final installed-package acceptance remains separate.
+Private evidence includes `arm-tests-0a545ba.log` and
+`package-inspection-0a545ba.json`; the build VM was stopped after export.
+
 ## Mainnet blocker history and closure
 
 The documented public endpoint `https://api.mainnet.solana.com` passed two read-only
