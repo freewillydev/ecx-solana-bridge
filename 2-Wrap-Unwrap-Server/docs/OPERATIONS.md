@@ -82,7 +82,9 @@ Paths, API keys and ports on the same normalized hostname share a budget. Native
 HTTP RPC is unpaced. This spaces request starts without accumulating idle burst
 credit; it does not guarantee provider arrival times or cover compute-unit,
 method-specific or monthly limits. Keep headroom. Allowlisted reads share at most
-two retries for 429 replies and closed connections without a complete response;
+two retries for 429 replies, closed connections without a complete response, and
+Solana history-storage error `-32019` on `getTransaction`, `getSignatureStatuses`
+and `getSignaturesForAddress`;
 all HTTPS attempts consume the budget. Timeouts, other transport failures, unknown
 methods, signing mutations and sends are not automatically retried.
 Pacing does not remove background observation or replace public-facing DDoS controls.

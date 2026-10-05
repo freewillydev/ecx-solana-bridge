@@ -128,6 +128,19 @@ checks = (\deployment native solana identity observation administration common->
       result<-retryRpcRead (\n->modifyIORef' waits (<>[n])) "getTransaction" action
       count<-readIORef calls; delays<-readIORef waits
       pure (result && count==3 && delays==[250000,1000000])
+  , check "unavailable Solana history shares the bounded read retry budget" $ forAll (elements
+      ["getTransaction","getSignatureStatuses","getSignaturesForAddress"]) $ \method->ioProperty $ do
+      calls<-newIORef (0::Int); waits<-newIORef []
+      let action=do
+            n<-atomicModifyIORef' calls (\i->(i+1,i))
+            if n==0 then pure (Left $ Just 1) else reject "rpc_error_-32019"
+      stopped<-rejects "rpc_error_-32019" (retryRpcRead (\n->modifyIORef' waits (<>[n])) method action :: IO ())
+      count<-readIORef calls; delays<-readIORef waits
+      pure (stopped && count==3 && delays==[1000000,250000])
+  , check "storage failures never retry other methods or other RPC errors" $ forAll (elements
+      [("sendTransaction","rpc_error_-32019"),("getAccountInfo","rpc_error_-32019"),
+       ("futureMethod","rpc_error_-32019"),("getTransaction","rpc_error_-32016")]) $ \(method,code)->ioProperty $
+      rejects code (retryRpcRead (\_->fail "unexpected retry") method (reject code) :: IO ())
   , check "repeated closed reads stop; timeouts never retry" $ forAll (elements
       [(HTTP.NoResponseDataReceived,3),(HTTP.ConnectionClosed,3),(HTTP.ResponseTimeout,1),(HTTP.ConnectionTimeout,1)]) $ \(failure,expected)->ioProperty $ do
       calls<-newIORef (0::Int); waits<-newIORef (0::Int)

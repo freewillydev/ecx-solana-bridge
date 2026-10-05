@@ -293,7 +293,9 @@ Full loss coverage consumes only genuinely free native float/earned capital, nev
 principal, operating, backing or LP. Return restores the original split once.
 Unresolved reviews, deficits or missing policy prevent resume.
 
-Read-only RPC retries use a fixed bounded allowlist. Wallet mutations, sends and
+Read-only RPC retries use a fixed bounded allowlist. Solana history-storage error
+`-32019` retries only the three history methods within the same two-retry budget
+as rate limits and closed connections; exhaustion preserves the error. Wallet mutations, sends and
 unknown outcomes are not automatically retried. Fixtures are not substitutes for
 real protocol/network acceptance.
 

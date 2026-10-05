@@ -95,7 +95,8 @@ rpc manager url auth methodName params = retryRpcRead threadDelay methodName run
             Right <$> fieldValue "result" value
 
 -- Explicit allowlist: a typo/new method cannot accidentally retry a wallet
--- mutation. Closed read connections and rate limits share at most two retries;
+-- mutation. Closed reads, rate limits and unavailable Solana history storage
+-- share at most two retries;
 -- timeouts and other transport failures remain unknown. HTTPS retries are paced
 -- by the manager, and callers still recheck time and blockhash.
 retryRpcRead :: (Int -> IO ()) -> Text -> IO (Either (Maybe Int) a) -> IO a
@@ -111,13 +112,18 @@ retryRpcRead wait methodName action = go (0::Int)
   closed NoResponseDataReceived=True
   closed ConnectionClosed=True
   closed _=False
-  go tries=try action >>= \case
+  go tries=try (try action) >>= \case
     Left e@(HttpExceptionRequest _ failure)
       | readsOnly && tries<2 && closed failure -> wait 250000 >> go (tries+1)
       | otherwise -> throwIO e
     Left e -> throwIO e
-    Right (Right result) -> pure result
-    Right (Left requested) -> do
+    Right (Left e@(BridgeError code))
+      | code=="rpc_error_-32019" && tries<2
+        && methodName `elem` ["getTransaction","getSignatureStatuses","getSignaturesForAddress"] ->
+          wait 250000 >> go (tries+1)
+      | otherwise -> throwIO e
+    Right (Right (Right result)) -> pure result
+    Right (Right (Left requested)) -> do
       let seconds=maybe (4*(tries+1)) id requested
       require (readsOnly && tries<2 && seconds>=0 && seconds<=15) "rpc_rate_limited"
       wait (max 1 seconds*1000000)

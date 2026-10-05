@@ -47,6 +47,34 @@ passed disposable PostgreSQL/restic and actual HTTPS contracts. Subsequent secti
 retain historical evidence within its recorded scope; they do not certify a later
 artifact.
 
+## Latest independent Mainnet RPC attempt
+
+The documented public endpoint `https://api.mainnet.solana.com` passed two read-only
+production-validator rounds against Alchemy: canonical identity/authority, complete
+custody histories (three token and two operating transactions), exact finalized
+transaction bodies and account balances agreed. VM observation then reconciled all
+three assets with zero differences. This is pilot evidence, not a public-endpoint
+SLA or a production provider recommendation.
+
+The existing 990-unit liability received one explicit retry approval. Required
+backup/readiness checks passed and generation 3 was signed, but reconciliation
+returned `rpc_error_-32019` before broadcast intent. The node's historical storage
+was unavailable; later direct reads succeeded. The error is not evidence of
+nonexecution and the failing provider was not identified by the saved runtime code.
+The bridge stopped without broadcasting. Subsequent two-provider expiry recovery
+retired that exact attempt, and required remote backup caught up to critical
+sequence 32. Worker, signer, tunnel and VM stopped; no next generation was approved.
+The liability remains unpaid. The archive receiver still shares the physical Mac.
+
+The shared RPC boundary now retries this specific storage error only for
+`getTransaction`, `getSignatureStatuses` and `getSignaturesForAddress`, sharing the
+existing two-retry budget with connection closures and rate limits. Persistent
+failure retains its error; writes and other errors never gain retry permission.
+Cabal bridge tests and native executable build passed. This source fix is **not yet
+deployed to the Linux pilot**, whose executable remains `3e34b01`; a funded retry
+must not be presented as completed validation of the new code. Private evidence is
+retained in the Mainnet deployment's `public-mainnet-*` and `public-verifier-*` files.
+
 ## Evidence already obtained
 
 | Area | Evidence and limit |
