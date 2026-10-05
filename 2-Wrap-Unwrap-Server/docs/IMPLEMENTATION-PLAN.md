@@ -106,7 +106,9 @@ refusals with a failing exit status, preventing scripts from continuing on an er
 7. **Finish one-command installation against the freeze.** The candidate installer
    targets the sole executable and complete migration chain. The hardened ARM64
    signed package passed clean fresh installation, repeat/upgrade, cold boot, TLS
-   authentication and actual service-account SSH denials. Finish x86-64 acceptance,
+   authentication and actual service-account SSH denials. The reviewed x86-64
+   package now also passes clean installation, upgrade, repeat-fresh refusal,
+   cold boot and service isolation. Finish updated ARM64 installed-package acceptance,
    native-node/backup integration and funded clean-host restoration.
    Reuse expensive builds; run packaging acceptance after runtime changes settle.
    Authenticate the final release artifact. Public publication and valuable-fund

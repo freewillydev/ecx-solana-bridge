@@ -57,6 +57,22 @@ public release trust key. Final installed-package acceptance remains separate.
 Private evidence includes `arm-tests-0a545ba.log` and
 `package-inspection-0a545ba.json`; the build VM was stopped after export.
 
+The exact signed x86-64 candidate then passed fresh installation on a new pinned
+Ubuntu 24.04 VM with no PostgreSQL, bridge configuration or service accounts.
+Both installed services started, the customer configuration endpoint responded,
+and signer HTTPS verified its certificate and rejected unauthenticated requests
+with 401. All 35 filesystem/PostgreSQL identity checks passed; actual SSH forwarding
+with service-owned authorized keys was denied for both service accounts. A signed
+upgrade preserved all configuration, credential and fence hashes and the paused
+sequence-zero ledger. Repeated fresh installation was refused without altering
+those files. Following a complete shutdown/start, both services started
+automatically; public configuration, paused ledger, signer authentication, all 35
+isolation checks and both SSH denials passed again. Private `x86-final-*` evidence
+is retained in `installer-acceptance-20261004`. This closes unfunded x86 installation,
+upgrade and cold-boot acceptance. Loopback-only service policy deliberately excluded
+chain/backup traffic; native-node integration and funded independent restoration
+remain separate gates. The acceptance key is not a public release trust key.
+
 ## Mainnet blocker history and closure
 
 The documented public endpoint `https://api.mainnet.solana.com` passed two read-only
@@ -726,8 +742,9 @@ review or distribution/license requirements.
    [THIRD-PARTY.md](THIRD-PARTY.md); obtain independent review of source and deployment.
    Earlier dependency inventories are not a clean bill of health for a new artifact.
 6. **Installation/release:** retain the hardened signed ARM64 package's clean
-   fresh/repeat/upgrade, cold-boot and service-isolation evidence. Finish x86-64
-   acceptance, native-node/backup integration and funded clean-host restoration.
+   fresh/repeat/upgrade, cold-boot and service-isolation evidence and the reviewed
+   x86-64 package's completed installation acceptance. Finish installed acceptance
+   of the updated ARM64 package, native-node/backup integration and funded clean-host restoration.
    Review distribution notices and the public release trust-key procedure before
    publishing. The acceptance-test signing key does not establish public trust.
 
