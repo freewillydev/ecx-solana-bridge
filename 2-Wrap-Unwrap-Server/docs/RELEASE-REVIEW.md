@@ -1,5 +1,14 @@
 # Release review
 
+The latest source adds direct public WarpTLS in the existing worker, replacing the
+optional Nginx example. The macOS native build and bridge Cabal suite pass actual
+HTTPS, plaintext rejection, oversized-body rejection, incomplete TLS configuration
+and unsafe-key refusal, plus concurrent global admission/refill checks. Temporary
+listeners and certificates are cleaned up. These are local transport checks, not
+public-domain/certificate-renewal or load acceptance. The historical funded runtime
+and Linux packages below predate this addition and must not be described as testing
+it. The separate signer and financial evaluator paths are retained.
+
 The Mainnet round trip passed on frozen review candidate `54c2bfd`, deployed in
 the Ubuntu ARM64 VM. Executable SHA-256:
 `2ce848b303104209bc1bdb5828237db98b613b9c7a32f1a449a4ec93d3c13cbe`.

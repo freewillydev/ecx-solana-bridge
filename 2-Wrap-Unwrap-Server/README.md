@@ -34,6 +34,13 @@ The candidate automated installer has passed clean installation, upgrade and
 cold-boot checks on Ubuntu 24.04 ARM64 and x86-64. It is not yet a public release;
 use the authenticated installation procedure and retain the recovery prerequisites.
 
+Public HTTPS runs directly in this executable through WarpTLS. No external web
+server or reverse proxy is needed. Configure the certificate/key as described in
+[installation](docs/INSTALL.md#public-https-in-the-haskell-server); without them,
+the customer listener remains loopback HTTP. The signer remains a separate process
+using the same executable. PostgreSQL, chain RPC and backup infrastructure remain
+necessary.
+
 ## Audit path
 
 | Responsibility | Source |

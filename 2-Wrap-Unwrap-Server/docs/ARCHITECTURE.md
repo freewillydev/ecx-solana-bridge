@@ -5,6 +5,12 @@ boundaries a reviewer must trace; [release review](RELEASE-REVIEW.md) records wh
 is actually verified. There is one Servant HTTP/worker process and one dedicated
 signer. PostgreSQL, the native daemon, Solana RPC and restic are dependencies.
 The Haskell browser is compiled by GHC JavaScript; Rust is confined to SDK FFI.
+Public HTTPS terminates directly in the worker's WarpTLS listener; no reverse-proxy
+process is required. Optional certificate/key environment variables enable public
+IPv4 TLS; their absence preserves loopback HTTP, and partial configuration refuses
+startup. Constant-space global request/order admission budgets precede the existing
+body/concurrency controls in TLS mode. These controls grant no DSL authority and
+are not a separate process isolation boundary. The signer remains separate.
 
 ## Requests, dictionaries and evaluators
 

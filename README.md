@@ -44,7 +44,13 @@ Cabal builds the SDK and browser through its hooks. Native GHC, Cabal, Rust/Carg
 libpq and GHC JavaScript/Emscripten are compiler prerequisites; there is no npm
 application build or WebAssembly backend. See [local development](2-Wrap-Unwrap-Server/docs/LOCAL-DEVELOPMENT.md).
 
-`ecx-bridge` is the sole server executable. Actual customer-wallet acceptance,
+`ecx-bridge` is the sole server executable and serves public HTTPS directly with
+WarpTLS; no Nginx, Node server or separate reverse proxy is required. See
+[HTTPS configuration](2-Wrap-Unwrap-Server/docs/INSTALL.md#public-https-in-the-haskell-server).
+PostgreSQL, native/Solana RPC access and restic backup storage remain required
+runtime infrastructure. Public certificates must be supplied and renewed.
+
+Actual customer-wallet acceptance,
 remaining recovery cases, canonical authority/backing checks and independent
 review remain. Signed ARM64 and x86-64 candidate packages passed clean installation,
 repeat-fresh refusal, upgrade preservation, cold boot and service isolation checks.

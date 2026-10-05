@@ -1,7 +1,8 @@
 {-# LANGUAGE ConstraintKinds, DataKinds, RankNTypes #-}
-module Bridge.Web (customerApplication,publicApplication,boundedApplication) where
+module Bridge.Web (customerApplication,publicApplication,boundedApplication,runPublicServer,rateLimitedApplication) where
 import Bridge.API
 import Bridge.Operation (Plan,Caller(Customer),CustomerOperations)
+import Bridge.Credentials (protectedSignerFile)
 import Bridge.Error
 import Control.Concurrent.STM
 import Control.Exception (bracket,catch)
@@ -16,6 +17,10 @@ import Network.Wai
 import Servant
 import System.Directory (doesFileExist)
 import System.FilePath ((</>))
+import System.Environment (lookupEnv)
+import GHC.Clock (getMonotonicTimeNSec)
+import Network.Wai.Handler.Warp (runSettings,setHost,setPort,setTimeout,defaultSettings)
+import Network.Wai.Handler.WarpTLS (runTLS,tlsSettings)
 
 customerApplication :: CustomerOperations => (forall a. Plan 'Customer a -> IO a) -> IO Application
 customerApplication evaluate = boundedApplication 32 "server_busy" (customerRoutes evaluate)
@@ -69,3 +74,38 @@ boundedApplication capacity busy app = do
     let size=total+BS.length bytes
     require (size<=4096) "request_too_large"
     if BS.null bytes then pure (BS.concat $ reverse chunks) else consume request size (bytes:chunks)
+
+-- TLS terminates at the existing Servant application, without a forwarding hop.
+-- Absent TLS stays loopback-only; partial TLS configuration must never downgrade.
+runPublicServer :: Int -> Application -> IO ()
+runPublicServer port app = do
+  certificate<-lookupEnv "ECX_PUBLIC_TLS_CERT"
+  key<-lookupEnv "ECX_PUBLIC_TLS_KEY"
+  let settings=setPort port $ setTimeout 65 defaultSettings
+  case (certificate,key) of
+    (Nothing,Nothing)->runSettings (setHost "127.0.0.1" settings) app
+    (Just cert,Just secret)->do
+      require (cert/=secret) "public_tls_files_must_differ"
+      protectedSignerFile cert False False
+      protectedSignerFile secret True False
+      limited<-rateLimitedApplication (toInteger <$> getMonotonicTimeNSec) app
+      runTLS (tlsSettings cert secret) (setHost "*4" settings) limited
+    _->reject "public_tls_requires_certificate_and_key"
+
+-- Two constant-space, atomic admission budgets; no attacker-controlled IP map.
+-- These are global limits, not provider quotas or network-level DDoS protection.
+rateLimitedApplication :: IO Integer -> Application -> IO Application
+rateLimitedApplication clock app = do
+  arrivals<-newTVarIO (0,0)
+  pure $ \request respond->do
+    now<-clock
+    accepted<-atomically $ do
+      (allAt,orderAt)<-readTVar arrivals
+      let creating=requestMethod request=="POST" && filter (/="") (pathInfo request)==["api","v1","orders"]
+          nextAll=max now allAt+33333334
+          nextOrder=if creating then max now orderAt+2000000000 else orderAt
+          allowed=nextAll<=now+60*33333334 && (not creating || nextOrder<=now+4000000000)
+      if allowed then writeTVar arrivals (nextAll,nextOrder) >> pure True else pure False
+    if accepted then app request respond else respond $
+      responseLBS HTTP.status429 [("Content-Type","application/json"),("Cache-Control","no-store"),("Retry-After","2")]
+        "{\"error\":\"request_rate_limited\"}"

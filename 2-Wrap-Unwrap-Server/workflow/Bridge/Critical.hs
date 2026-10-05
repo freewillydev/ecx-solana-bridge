@@ -11,7 +11,7 @@ import Bridge.Credentials (readNativeUnlock,withNativeUnlock)
 import qualified Bridge.Config as C
 import Bridge.Recovery
 import Bridge.Control (runControl)
-import Bridge.Web (publicApplication)
+import Bridge.Web (publicApplication,runPublicServer)
 import Data.Int (Int64)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
@@ -50,7 +50,6 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import System.Directory (removeDirectoryRecursive)
 import System.FilePath (takeDirectory)
 import System.Timeout (timeout)
-import Network.Wai.Handler.Warp (runSettings,setHost,setPort,setTimeout,defaultSettings)
 import Network.HTTP.Client hiding (Request)
 import Network.HTTP.Client.TLS (mkManagerSettings)
 import qualified Network.Connection as NC
@@ -196,7 +195,7 @@ runProcess rpc reader process=do
           evaluate (CriticalPlan request)=dispatch request
       app<-publicApplication assets evaluate
       concurrently_
-        (runSettings (setHost "127.0.0.1" $ setPort port $ setTimeout 65 defaultSettings) app)
+        (runPublicServer port app)
         (concurrently_ (runWorkerLoop dispatch) (runControl directory evaluate))
 
 evalCritical :: MVar () -> Evaluation 'Critical -> DSL caller 'Critical a -> IO a

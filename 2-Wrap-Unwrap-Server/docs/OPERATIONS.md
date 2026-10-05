@@ -109,10 +109,12 @@ On the installed host, these read-only checks use existing service/DSL interface
 ```sh
 systemctl is-active ecx-bridge-worker ecx-bridge-signer
 printf '%s\n' '{"operation":"status"}' | sudo -u ecxbridgew /opt/ecx-bridge/current/bin/ecx-bridge operator /etc/ecx-bridge/worker/config.json
-curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8080/api/v1/config
+curl --fail --silent --show-error --max-time 10 https://YOUR_DOMAIN/api/v1/config
 ```
 
-Use the actual configured port. Monitor the public HTTPS URL from outside the host
+Use the configured public domain/port and normal certificate verification. For
+loopback-only development without TLS, use http://127.0.0.1:8080 instead. Monitor
+the public HTTPS URL from outside the host
 as well. HTTP 200 alone is not readiness: inspect the configuration's
 `availability.available` and `availability.reason`. The private status reports `paused`,
 `pauseReason`, `criticalSequence` and `backupSequence`. Alert on unexpected pause,

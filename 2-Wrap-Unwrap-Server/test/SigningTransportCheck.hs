@@ -10,6 +10,10 @@ import qualified Data.ByteArray as BA
 import Data.Bits (xor)
 import Data.Word (Word8)
 import Control.Monad (forM_)
+import Control.Concurrent (threadDelay)
+import Control.Concurrent.Async (withAsync,replicateConcurrently)
+import qualified Network.Socket as NS
+import System.Environment (lookupEnv,setEnv,unsetEnv)
 import Bridge.SDKBuild (sdkSourceDirectory,sdkTargetDirectory)
 import Data.Default (def)
 import Data.PEM (pemParseBS,pemContent)
@@ -23,7 +27,7 @@ import qualified Bridge.Fence as Fence
 import qualified Data.Text as T
 import System.Posix.Process (forkProcess,getProcessStatus,exitImmediately,ProcessStatus(..))
 import System.Exit (ExitCode(..))
-import Bridge.Web (customerApplication,publicApplication)
+import Bridge.Web (customerApplication,publicApplication,boundedApplication,runPublicServer,rateLimitedApplication)
 import qualified Bridge.Wire as W
 import qualified Bridge.Domain as D
 import qualified Data.Map.Strict as M
@@ -40,7 +44,7 @@ import qualified Data.ByteString.Base64 as B64
 import Data.IORef
 import Data.Text (Text)
 import Network.HTTP.Types
-import Network.Wai (defaultRequest,requestMethod,requestHeaders)
+import Network.Wai (defaultRequest,requestMethod,requestHeaders,responseLBS)
 import Network.Wai.Test
 import Servant.API (BasicAuthData(..))
 import System.Directory (removeFile,createDirectory,removeDirectoryRecursive,renameFile,doesPathExist)
@@ -51,7 +55,23 @@ import Test.QuickCheck
 
 checks :: IO [Result]
 checks=sequence
-  [ check "release authentication binds exact artifacts, trusted key and install arguments" $ withMaxSuccess 5 $
+  [ check "public admission budgets are atomic, bounded and refill without per-client state" $ once $ ioProperty $ do
+      now<-newIORef 0
+      app<-rateLimitedApplication (readIORef now) (\_ respond->respond $ responseLBS status200 [] "ok")
+      let send method path=runSession (srequest $ SRequest ((setPath defaultRequest path) {requestMethod=method}) "") app
+      burst<-replicateConcurrently 80 (send "GET" "/api/v1/config")
+      writeIORef now 2000000000
+      orders<-mapM (send "POST") ["/api/v1/orders","/api/v1/orders/","/api/v1/orders"]
+      status<-send "GET" "/api/v1/orders/saved"
+      writeIORef now 4000000000
+      next<-send "POST" "/api/v1/orders"
+      pure (length(filter ((==status200).simpleStatus) burst)==60
+        && length(filter ((==status429).simpleStatus) burst)==20
+        && map simpleStatus orders==[status200,status200,status429]
+        && simpleStatus status==status200 && simpleStatus next==status200)
+  , check "public WarpTLS serves HTTPS, rejects plaintext and refuses unsafe or incomplete TLS settings" $ once $ ioProperty $
+      bracket temporary removeDirectoryRecursive publicTLSContract
+  , check "release authentication binds exact artifacts, trusted key and install arguments" $ withMaxSuccess 5 $
       forAll (vectorOf 32 arbitrary) $ \seed->ioProperty $
         and <$> sequence [releaseAuthentication fault seed arch | fault<-[minBound..maxBound],arch<-["aarch64","x86_64"]]
   , check "TLS validator enforces permitted and excluded issuer names" $ once $ ioProperty $
@@ -397,3 +417,39 @@ releaseAuthentication fault seed arch = bracket temporary removeDirectoryRecursi
     createDirectory path
     setFileMode path 0o700
     pure path
+
+-- Isolated HTTPS transport only: no node, ledger, signing or external requests.
+publicTLSContract :: FilePath -> IO Bool
+publicTLSContract dir = do
+  let cert=dir</>"public.pem"; key=dir</>"public.key"
+      names=["ECX_PUBLIC_TLS_CERT","ECX_PUBLIC_TLS_KEY"]
+      restore values=forM_ (zip names values) $ \(name,value)->maybe (unsetEnv name) (setEnv name) value
+  bracket (mapM lookupEnv names) restore $ \_->do
+    (made,_,_)<-readProcessWithExitCode "openssl" ["req","-x509","-newkey","rsa:2048","-nodes","-keyout",key,"-out",cert
+      ,"-days","1","-subj","/CN=127.0.0.1","-addext","subjectAltName=IP:127.0.0.1"] ""
+    require (made==ExitSuccess) "public_certificate_fixture_failed"
+    setFileMode key 0o600
+    app<-boundedApplication 1 "busy" (\_ respond->respond $ responseLBS status200 [] "tls-ok")
+    setEnv "ECX_PUBLIC_TLS_CERT" cert
+    unsetEnv "ECX_PUBLIC_TLS_KEY"
+    partial<-try (runPublicServer 0 app) :: IO (Either BridgeError ())
+    setEnv "ECX_PUBLIC_TLS_KEY" key
+    setFileMode key 0o644
+    unsafe<-try (runPublicServer 0 app) :: IO (Either BridgeError ())
+    setFileMode key 0o600
+    port<-bracket (NS.socket NS.AF_INET NS.Stream NS.defaultProtocol) NS.close $ \socket->do
+      NS.bind socket (NS.SockAddrInet 0 (NS.tupleToHostAddress (127,0,0,1)))
+      address<-NS.getSocketName socket
+      case address of NS.SockAddrInet n _->pure (show n); _->fail "IPv4 fixture required"
+    let fetch scheme args=readProcessWithExitCode "curl" (["--noproxy","*","--silent","--show-error","--max-time","2"
+          ,"--cacert",cert,"--write-out","%{http_code}",scheme<>"://127.0.0.1:"<>port<>"/"]<>args) ""
+        ready 0=pure False
+        ready n=do
+          (code,body,_)<-fetch "https" []
+          if code==ExitSuccess && body=="tls-ok200" then pure True else threadDelay 50000 >> ready (n-1)
+    withAsync (runPublicServer (read port) app) $ \_->do
+      serving<-ready (20::Int)
+      (_,plain,_)<-fetch "http" []
+      (_,large,_)<-fetch "https" ["--data-binary",replicate 4097 'x']
+      pure (serving && isLeft partial && isLeft unsafe && not("tls-ok" `T.isInfixOf` T.pack plain)
+        && "413" `T.isSuffixOf` T.pack large)

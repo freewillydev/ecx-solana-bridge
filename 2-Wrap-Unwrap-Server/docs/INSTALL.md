@@ -53,11 +53,11 @@ signer TLS/authentication,
 all eight schema migrations, a fresh paused ledger/fence and systemd units. It leaves
 services stopped, enabled for boot; every worker startup requires checked resume.
 It does not create chain assets, provision the native daemon, initialize remote
-storage or configure public HTTPS. These are real deployment prerequisites, not
+storage or provision public certificates. These are real deployment prerequisites, not
 simulated networks. In particular, the native daemon must be able to produce wallet
 backups in the signer's private staging path with the ownership required by the
 backup validator; verify this integration before enabling required checkpoints.
-A domain/reverse proxy and reviewed interface links remain operator configuration.
+A domain, public certificate and reviewed interface links remain operator configuration.
 
 For a completed installation, replace the final arguments with `-- upgrade`.
 Upgrade stops both services, switches the verified release atomically and preserves
@@ -73,34 +73,44 @@ SSH-forwarding gap led to explicit `DenyUsers` policy for both service accounts;
 `nologin` alone was insufficient. These checks do not establish funded restoration,
 backup delivery or independent-host disaster recovery; see [release evidence](RELEASE-REVIEW.md).
 
-## Public HTTPS and request limits
+## Public HTTPS in the Haskell server
 
-Use [config/nginx.example.conf](../config/nginx.example.conf) inside Nginx's
-`http` context, for example as `/etc/nginx/conf.d/ecx.conf` on Ubuntu. Replace the
-domain, TLS certificate/key paths and upstream port with the actual deployment.
-Provision a valid certificate and renewal before public use; do not use the
-signer's private certificate/key. Remove conflicting virtual-host configuration,
-then run `sudo nginx -t` before reloading Nginx. Expose only HTTPS (and an explicitly
-chosen certificate-renewal method); keep the worker, signer, PostgreSQL and native
-RPC loopback/private. This example assumes direct ingress. A CDN requires separately
-reviewed trusted-proxy addresses; never accept arbitrary forwarded client IPs.
+The repository's `ecx-bridge` serves HTTPS directly using WarpTLS and the existing
+Servant application. No Nginx or separate proxy application is required. With
+neither TLS environment variable set it remains HTTP on 127.0.0.1 for local use.
+Setting both enables IPv4 public HTTPS on `serverPort`; setting only one refuses
+startup, without downgrading to HTTP. The separate signer keeps its own loopback
+HTTPS listener and credentials.
 
-The example bounds request bodies and applies per-IP/site request limits, with
-stricter order-creation limits including trailing-slash variants. These are initial
-operator-adjustable limits, not a throughput guarantee. It disables upstream retries
-and proxy caching, preserves authorization and excludes URLs/credentials/bodies from
-access logs. Network-level saturation still needs hosting-provider protection.
-See the upstream [rate-limit](https://nginx.org/en/docs/http/ngx_http_limit_req_module.html)
-and [proxy](https://nginx.org/en/docs/http/ngx_http_proxy_module.html) documentation.
+Obtain a valid certificate/full chain for your domain and a **separate public TLS
+private key**. Do not reuse the custody key or signer's TLS key. Store both under
+a root-owned directory without group/other write permission. The TLS private key
+must be a regular, non-symlink file owned by the worker (mode 0600); the certificate
+must be owned by root or the worker and not group/other writable. Make the paths
+readable within the worker's systemd sandbox. Configure `serverPort` in the worker
+configuration and add a worker service drop-in using `sudo systemctl edit
+ecx-bridge-worker`:
 
-Ubuntu Nginx 1.24 acceptance used this exact template with isolated loopback ports,
-a temporary trusted test certificate and an HTTP test backend: syntax/TLS passed,
-authorization was preserved, spoofed forwarding was overwritten, a 4,097-byte body
-returned 413 without reaching upstream, repeated order requests returned 429, and
-a failed upstream connection produced one backend attempt. Logs excluded the
-credential canary. This validates proxy behavior, not chain settlement, public DNS,
-certificate renewal or load capacity. Temporary processes/files were removed and
-the VM stopped; the funded bridge stayed stopped.
+```ini
+[Service]
+Environment=ECX_PUBLIC_TLS_CERT=/etc/ecx-bridge/public-tls/fullchain.pem
+Environment=ECX_PUBLIC_TLS_KEY=/etc/ecx-bridge/public-tls/privkey.pem
+```
+
+For port 443, also grant only the worker `AmbientCapabilities=CAP_NET_BIND_SERVICE`
+and `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` in that drop-in. Alternatively use
+an unprivileged HTTPS port. Pause before restarting; run daemon-reload, restart the
+worker and check HTTPS and the existing checked-resume prerequisites. Provision
+certificate renewal; new certificate bytes require a controlled worker restart.
+The installer does not acquire certificates or configure your domain automatically.
+
+Public TLS mode adds constant-space global admission budgets: approximately
+30 requests/second (burst 60) and 30 order creations/minute (burst 2), including
+trailing-slash order routes. Excess requests receive JSON HTTP 429 and Retry-After.
+The existing 4-KiB body and 32-request application concurrency limits still apply.
+There is no forwarding hop, proxy retry, cache or trusted forwarded-IP header.
+These global budgets are not per-user fairness, TLS-handshake limits or protection
+against network saturation; hosting/network protection remains external.
 
 ## Restic security candidate
 
@@ -141,7 +151,7 @@ that file is not an installation command or release certificate.
 ## Required host configuration
 
 Building source does not provision database roles/ACLs, native RPC restrictions,
-signer TLS/authentication files, service supervision or reverse-proxy HTTPS. The candidate installer supplies local service/database policy; native-node,
+signer TLS/authentication files, service supervision or public TLS certificates. The candidate installer supplies local service/database policy; native-node,
 backup-destination and public HTTPS provisioning remain required.
 
 - Run the HTTP/worker and signer as separate OS users. Only the signer may read the
@@ -161,8 +171,8 @@ backup-destination and public HTTPS provisioning remain required.
   The worker verifies the signer's TLS hostname as `127.0.0.1`; issue its certificate
   with `CN=127.0.0.1` and `subjectAltName=IP:127.0.0.1`, matching the existing transport
   fixture. Keep certificate and hostname verification enabled.
-  Use HTTPS for customer exposure through a reviewed local reverse proxy; the
-  application and signer bind loopback. No public operator route exists.
+  Enable the built-in WarpTLS listener for public customer HTTPS as described above.
+  The signer remains loopback-only. No public operator route exists.
 - Provision off-host HTTPS restic storage and retain recovery credentials separately
   before enabling required backup. Automatic repository provisioning is unfinished.
   Use the reviewed, hash-pinned restic build described above at the absolute
