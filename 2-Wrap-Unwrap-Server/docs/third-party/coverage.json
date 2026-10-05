@@ -8289,5 +8289,26 @@
     "additionalVerifiedBinaries": {
       "x86_64": "da56dd1231ddabe0930e8635dda573d144286ebc66f822488bb19d85f723ca99"
     }
+  },
+  "linuxSourceGraphs": {
+    "reviewDate": "2026-10-05",
+    "sourceCommit": "c547f5b",
+    "scope": "Actual Linux ARM64/x86-64 Cabal plans matched to retained notice records. Hackage source archives match exactly; compiler-bundled entries match package/version records, not a fresh platform license-byte or distribution-obligation audit. Includes build/test dependencies.",
+    "plans": {
+      "aarch64-linux": {
+        "planSha256": "e243b1961ad8244f3f92fea22155eca771bda9b5bcff15229f8d09482a9a6522",
+        "packageVersions": 188,
+        "verifiedSourceArchiveHashes": 159,
+        "compilerBundledNoticeVersions": 29,
+        "missing": []
+      },
+      "x86_64-linux": {
+        "planSha256": "488443c9a71008f2d6b27ea640b76e5e34e9c920fd994725bfd34fa97061b9e7",
+        "packageVersions": 188,
+        "verifiedSourceArchiveHashes": 159,
+        "compilerBundledNoticeVersions": 29,
+        "missing": []
+      }
+    }
   }
 }

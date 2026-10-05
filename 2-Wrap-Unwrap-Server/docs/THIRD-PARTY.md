@@ -13,6 +13,13 @@ Historical Linux records and notice bytes remain intact. Presence of these texts
 does not complete review of compiler/runtime components, platform libraries or
 redistribution obligations, and does not certify a future Linux release artifact.
 
+The 2026-10-05 `linuxSourceGraphs` check also matches both actual Linux Cabal
+plans at `c547f5b`: each has 188 non-local package versions, with 159 source archive
+hashes matching the retained Hackage records and 29 compiler-bundled package/version
+notice matches. There are no missing records or source-hash mismatches. This closes
+the graph-to-notice inventory comparison; it does not re-audit platform license
+bytes or satisfy the separate distribution obligations below.
+
 `third-party/bitcoin-core` retains the original Bitcoin Core 30.2 notices and
 source/checksum provenance. `third-party/sqlite` retains the pinned SQLite source
 notices: the native daemon's descriptor wallet can depend on SQLite even though

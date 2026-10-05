@@ -645,8 +645,27 @@ application error code or a fixed HTTP failure code and exit unsuccessfully.
 Their executable-level QuickCheck checks use credential canaries with a refused
 loopback connection and invalid URL; exact stderr checks cover wrapped and direct
 HTTP exceptions. The pool regression failed before the fix; both Cabal suites pass
-afterward. The change is confined to administration CLI boundaries; bridge runtime,
-signing policy and saved transaction bytes are unchanged.
+afterward. Both administration suites also passed on Ubuntu ARM64 and x86-64 at
+`c547f5b`, retaining `arm-admin-tests-c547f5b.log` and `x86-admin-tests-c547f5b.log`
+in private installer-acceptance evidence. One VM and one build job ran at a time;
+both builders were stopped afterward. The change is confined to administration CLI
+boundaries; bridge runtime, signing policy and saved transaction bytes are unchanged.
+
+The equivalent pool finalized-failure path subsequently passed on real Devnet
+using the existing empty test position. Each deposit was capped at 20 base units
+per token for 10 liquidity units. Two withdrawals submitted with normal preflight
+produced one finalized success and one finalized failure:
+`5dbzChLPAYKzbx24GcJFaEHdVhQESjrqXcSTs2DH7s6NAFrvXTBqEg8NFoMDFYMXmBQbZeDm7JMbYbvoSwUsPR6J`.
+The failed withdrawal changed no token balances and charged only 5,000 lamports.
+After replenishing 10 liquidity units, both providers agreed on exact failed bytes
+and effects; recovery saved one successor, repeat recovery preserved it and parent
+submission was refused. Successor
+`2KZRbXAfmRXzSmTAs5SRyZ7ArG5yS4sACJQgs6FtZZSqYp7gkrpuB1823j7wLvBD4VgL1J8vQ2p38F3nxnV17imU`
+finalized and replay produced no extra withdrawal. Pool liquidity returned to zero;
+both providers confirmed owner/vault token deltas balanced, with two base units of
+each token retained in the vaults. Five transactions charged 25,000 Devnet lamports.
+Private `pool-finalized-failure-20261005` retains complete evidence. The CLI at
+`c547f5b` performed the test; no production change, Mainnet or custody funds were needed.
 
 ## Gates still open
 
@@ -804,8 +823,8 @@ review or distribution/license requirements.
    and explicit reinvestment evidence and the completed funded betanet/canonical
    round trip. Finish issuer approval and canonical authority/reserve arrangements.
    Retain live expiry recovery for mint/burn, mint/account creation and metadata
-   create/update, plus the token finalized-failure path above. Pool finalized-failure
-   recovery still has only offline evidence.
+   create/update, plus the token and pool finalized-failure paths above. These are
+   scoped live cases alongside the retained offline recovery contracts.
    Verify actual token/pool identity and current executable routes before enabling links.
 5. **Dependencies and independent review:** resolve applicability/reachability and
    license questions recorded in [DEPENDENCY-REVIEW.md](DEPENDENCY-REVIEW.md) and
