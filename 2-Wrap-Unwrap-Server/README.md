@@ -20,6 +20,11 @@ Requires **GHC 9.14.1 and Cabal 3.16.1.0**. Select the pinned tools using the
 From the repository root:
 
 ```sh
+cd ~
+mkdir ecash
+cd ecash
+git clone https://github.com/freewillydev/ecx-solana-bridge.git
+
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
