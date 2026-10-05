@@ -114,6 +114,21 @@ evidence retains before/after/repeat/cleanup results. This closes the same-host
 in-flight Solana ledger-recovery case, not independent-host activation, restored
 native-wallet use, backup deletion separation or disaster recovery.
 
+A post-boot isolation inspection of the frozen ARM64 deployment passed 42 checks.
+Both service accounts retain non-login shells and no sudo access; neither can
+write the executable, its parent installation directories or either systemd unit.
+The worker cannot read the custody key, signer native credential, TLS private key,
+backup password or custody staging. The signer cannot read the worker's fence.
+PostgreSQL peer authentication rejects worker impersonation of the signer/admin
+roles and signer impersonation of the writer/admin roles; the intended connections
+succeed. Application ledger inspection uses the existing closed Opaleye reader;
+connection-only authentication probes execute no application SQL. The ledger
+remained stable at sequence 55 and the installed executable retained its frozen
+hash. Both services stayed inactive/disabled throughout. Private evidence is
+`frozen-isolation-20261004.json`. This verifies the inspected VM's host access
+boundaries after boot; it does not close independent security review, native RPC
+policy beyond the earlier checks, or disaster-independent backup/restore.
+
 ## Evidence already obtained
 
 | Area | Evidence and limit |

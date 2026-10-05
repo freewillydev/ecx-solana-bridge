@@ -32,7 +32,12 @@ These are version/source checks, not independent security certification.
   bounded integers/decimal strings. Refreshed hash-verified source inventories found
   no readFloat/numberToRational references in 159 native and 49 browser Hackage
   packages. They exclude 29/26 boot packages respectively and do not establish
-  compiled reachability. Keep this finding open for independent review.
+  compiled reachability. Inspection of the frozen macOS executable with `nm`
+  confirms that `GHC.Internal.Numeric.readFloat` and
+  `GHC.Internal.Text.Read.Lex.numberToRational` are linked. Their presence is not
+  evidence of an attacker-reachable call, but excludes treating the source grep
+  as proof that these routines are absent from the executable. Keep this finding
+  open for input-path analysis and independent review.
 - [HSEC-2026-0006](https://github.com/haskell/security-advisories/blob/main/advisories/published/2026/HSEC-2026-0006.md):
   Cabal 3.16.0.0 can delete duplicate source headers during configure. It belongs
   to the native build-hook dependency closure, not the server's linked-library
