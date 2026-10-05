@@ -36,6 +36,18 @@ private `installer-acceptance-20261004/candidate-509f617/`.
 | ARM64 | `5b89ceaeda28a4d52a32a10daf62f27351f4e218877d28e8207cf90a35d3a072` | 33,698,373 |
 | x86-64 | `5a3dec48318d8226eb564807d73dff15cc7ba562a88c17e19bb367ae426decc4` | 28,421,166 |
 
+Both exact `509f617` candidates subsequently passed authenticated fresh install
+and repeat upgrade in disposable Ubuntu 24.04 ARM64/x86-64 VMs. Hashes of all
+configuration/custody files were unchanged across upgrade, which left both services
+stopped. With a separate test certificate and the documented systemd environment,
+the installed worker served HTTPS, refused plaintext, reported unavailable/paused
+intake and could not read the signer custody key. External traffic was denied for
+that worker; no chain transfers occurred. Private evidence is retained in
+`tls-{arm,x86}-{fresh-install.log,upgrade-install.log,installed-review.json}` under
+the existing installer evidence directory. Both disposable VMs were stopped and
+deleted. This closes this candidate's installation/HTTPS smoke check, not public
+certificate renewal, a new cold-boot drill or funded independent restoration.
+
 The Mainnet round trip passed on frozen review candidate `54c2bfd`, deployed in
 the Ubuntu ARM64 VM. Executable SHA-256:
 `2ce848b303104209bc1bdb5828237db98b613b9c7a32f1a449a4ec93d3c13cbe`.
