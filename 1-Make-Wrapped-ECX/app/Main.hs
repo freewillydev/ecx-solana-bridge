@@ -59,8 +59,14 @@ configure=do
   settings<-foldM (\current name->do
     let old=case KM.lookup name current of
           Just(String text)->T.unpack text
-          _->if name=="maxFeeLamports" then "10000" else ""
-    let label=if name=="network" then "network (devnet = test coins, mainnet = real SOL/tokens)" else K.toString name
+          _->case name of
+            "maxFeeLamports"->"10000"
+            "attemptFile"->"token-transaction.json"
+            _->""
+    let label=case name of
+          "network"->"network (devnet = test coins, mainnet = real SOL/tokens)"
+          "attemptFile"->"Transaction record file (inside a private directory)"
+          _->K.toString name
     raw<-prompt label old
     unless (not(null raw)) (die "A value is required")
     case name of

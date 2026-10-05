@@ -44,8 +44,15 @@ control the mint and have SOL for transaction fees.
 
    Choose `sign`. Enter `network` (`devnet` or `mainnet`), your HTTPS `rpc`,
    `maxFeeLamports` (press Enter for `10000`, or retain your saved value) and
-   `attemptFile` (a new absolute path
-   inside a private directory). Settings are saved in `ecx-token.json`.
+   `Transaction record file` (default `token-transaction.json`). This stores the
+   signed transaction and recovery information, not your private key. The default
+   is relative to the directory where you run the commands; that directory must
+   be owned by you with mode `0700`. When running from this repository, instead
+   enter an absolute path inside your existing private directory, for example
+   `/private/token-transaction.json`. Use the same file for submit/status/recover;
+   choose a new filename for each new transaction. Existing records are not
+   overwritten. The configuration field remains `attemptFile` for compatibility.
+   Settings are saved in `ecx-token.json`.
    Configuration does not need or read your key.
 
 3. Sign the mint request:
