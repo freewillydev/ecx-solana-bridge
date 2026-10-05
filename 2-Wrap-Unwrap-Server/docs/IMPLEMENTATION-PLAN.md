@@ -87,7 +87,7 @@ refusals with a failing exit status, preventing scripts from continuing on an er
    evidence. Fix shared-engine failures without introducing parallel payment paths.
 4. **Finish administration and canonical verification.** Extend the existing
    Devnet token/pool recovery acceptance to remaining required action families.
-   Retain the completed nonzero LP collection and explicit fee-bounded reinvestment
+   Retain the completed token finalized-failure recovery, nonzero LP collection and explicit fee-bounded reinvestment
    acceptance. Unattended compounding is not implemented. Preserve bounded
    lineage and complete two-provider evidence; expired-unseen status alone is not
    proof of nonexecution. Confirm issuer-approved canonical identity, authority,
@@ -129,7 +129,7 @@ and node-integration VMs have been deleted. Retain the funded pilot and evidence
 | Still open | Next action and dependency |
 | --- | --- |
 | Internal review follow-through | Address concrete code/dependency/license findings against the frozen source; do not repeat completed funded or installer checks without a relevant change. Independent sign-off remains separate. |
-| Remaining chain recovery evidence | Permanent confirmed source loss, coverage/return and a changed native winner need valid alternate L2L history; acquire a suitable real-chain fixture or miner cooperation. Do not substitute fabricated confirmations. Finalized-failure administration branches retain offline evidence until a bounded live case is specified. |
+| Remaining chain recovery evidence | Permanent confirmed source loss, coverage/return and a changed native winner need valid alternate L2L history; acquire a suitable real-chain fixture or miner cooperation. Do not substitute fabricated confirmations. Token finalized-failure recovery now has live two-provider evidence; pool finalized-failure recovery retains offline evidence. |
 | Customer wallet acceptance | User signs a Devnet Solana Pay request in a supported wallet; verify reference/effects and completion in the existing browser flow. |
 | Independent funded recovery | User supplies physically independent storage and a clean host, with retention/deletion separation. Restore, exclude the old signer, reconcile and explicitly resume. The Mac/VM drill cannot establish physical independence. |
 | Production operation | Operator supplies independent RPC capacity, host/domain/support details and confirms issuer/reserve arrangements. |

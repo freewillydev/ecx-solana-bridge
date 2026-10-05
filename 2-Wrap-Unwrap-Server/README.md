@@ -27,8 +27,9 @@ orders or send payouts. All three profiles, including `CanonicalBeta` on Solana
 Mainnet, support `serve` and `signer`. `serve` permits paying workflows but starts paused; a
 separate signer and guarded operator resume are required. Follow [installation
 prerequisites](docs/INSTALL.md) and [operations](docs/OPERATIONS.md), not a test fixture.
-There is currently **no automated installer**. The incompatible old installer,
-server and deployment harnesses have been removed.
+The candidate automated installer has passed clean installation, upgrade and
+cold-boot checks on Ubuntu 24.04 ARM64 and x86-64. It is not yet a public release;
+use the authenticated installation procedure and retain the recovery prerequisites.
 
 ## Audit path
 

@@ -23,7 +23,12 @@ import qualified Data.ByteString.Base64 as B64
 import qualified Data.Text.Encoding as TE
 import Data.Text (Text)
 import Data.Either (isLeft)
-import System.Exit (exitFailure)
+import System.Exit (exitFailure,ExitCode(..))
+import System.Process (readProcessWithExitCode)
+import Control.Exception (bracket)
+import qualified Network.Socket as Socket
+import System.Timeout (timeout)
+import qualified Data.Text as T
 import Test.QuickCheck hiding (Success,Result)
 main :: IO ()
 main=do
@@ -92,7 +97,8 @@ main=do
   changed<-mapM (successor secrets . changeIntent (last publics)) tracked
   let divergent=zipWith (\old child->child {S.savedRecovery=(\r->r {recoveryParent=Just(digest $ L.toStrict $ encode old)}) <$> S.savedRecovery child}) tracked changed
   results<-sequence
-    [ quickCheckResult $ once $ property $ and
+    [ quickCheckResult $ once $ ioProperty $ cliErrors expected
+    , quickCheckResult $ once $ property $ and
         [not(isLeft $ S.validateSaved child) && isLeft(S.validateChild old (digest $ L.toStrict $ encode old) child)
         | (old,child)<-zip tracked divergent]
     , quickCheckResult $ once $ property $ and [
@@ -312,3 +318,17 @@ quoteContract expected (Positive input) (Positive output)=
     && validateQuote expected input (change "outAmount" (String "18446744073709551615") good)
       ==Right(maxBound,Just "metis",Just "Whirlpool",Just 10)
     && all (isLeft . validateQuote expected input) bad
+
+-- Exercise both direct URL parsing and a wrapped RPC transport exception in the
+-- real executable. Refusal must not reveal credential-bearing request context.
+cliErrors :: Expected -> IO Bool
+cliErrors expected=bracket (Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol) Socket.close $ \socket->do
+  Socket.bind socket (Socket.SockAddrInet 0 (Socket.tupleToHostAddress (127,0,0,1)))
+  Socket.SockAddrInet port _<-Socket.getSocketName socket
+  checks<-mapM (\endpoint->do
+    outcome<-timeout 10000000 $ readProcessWithExitCode "ecx-pool"
+      (["inspect","devnet",endpoint]<>map T.unpack [pool expected,expectedA expected,expectedB expected]) ""
+    pure $ case outcome of
+      Just (ExitFailure _,"",err)->err=="rpc_transport_unknown_outcome\n"
+      _->False) ["https://127.0.0.1:"<>show port<>"/private-canary?apikey=credential-canary","https://[credential-canary"]
+  pure(and checks)

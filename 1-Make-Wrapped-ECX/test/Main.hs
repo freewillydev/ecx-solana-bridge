@@ -36,6 +36,8 @@ import Data.Either (isLeft)
 import Control.Exception (SomeException,try,bracket)
 import System.Exit (exitFailure,ExitCode(..))
 import System.Process (proc,cwd,readCreateProcessWithExitCode)
+import qualified Network.Socket as Socket
+import System.Timeout (timeout)
 import Test.QuickCheck
 
 request :: Action -> Word64 -> Request
@@ -374,12 +376,28 @@ cliContract=bracket temporary removeDirectoryRecursive $ \directory->do
   (missingTransaction,_,_)<-run ["sign","nonexistent-key","missing-transaction.json"] ""
   L.writeFile config $ encode $ object ["secretKey" .= ("never-read"::Text)]
   (unknown,_,_)<-run ["address","nonexistent-key"] ""
+  -- A bound, non-listening loopback socket gives an immediate connection refusal
+  -- without a real provider. Neither wrapped nor direct HTTP errors may print URLs.
+  transport<-bracket (Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol) Socket.close $ \socket->do
+    Socket.bind socket (Socket.SockAddrInet 0 (Socket.tupleToHostAddress (127,0,0,1)))
+    Socket.SockAddrInet port _<-Socket.getSocketName socket
+    L.writeFile (directory</>"request.json") $ encode $ case toJSON original of
+      Object fields->Object(KM.delete "blockhash" fields)
+      value->value
+    checks<-mapM (\endpoint->do
+      L.writeFile config $ encode $ object ["network" .= ("devnet"::Text),"rpc" .= endpoint
+        ,"maxFeeLamports" .= ("10000"::Text),"attemptFile" .= (directory</>"never-created.json")]
+      outcome<-timeout 10000000 (run ["sign","nonexistent-key","request.json"] "")
+      pure $ case outcome of
+        Just (ExitFailure _,"",err)->err=="rpc_transport_unknown_outcome\n"
+        _->False) ["https://127.0.0.1:"<>show port<>"/private-canary?apikey=credential-canary","https://[credential-canary"]
+    pure(and checks)
   keyAfter<-B.readFile (directory</>"secretKey")
   permissions<-fileMode <$> getFileStatus config
   pure (generated==ExitSuccess && keyBefore==keyAfter && permissions Bits..&. 0o777==0o600
     && configured==ExitSuccess && derived==ExitSuccess && actual==expected
     && all (/=ExitSuccess) [extra,missing,badNetwork,badFee,noInput,missingTransaction,unknown]
-    && before==unchanged && signConfig==ExitSuccess && defaultFee)
+    && before==unchanged && signConfig==ExitSuccess && defaultFee && transport)
  where
   temporary=do
     (path,handle)<-openTempFile "/tmp" "ecx-token-cli"

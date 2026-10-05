@@ -617,6 +617,37 @@ the complete metadata account readback, including bytes and lamports. This close
 the tested creation/update expiry families, not deliberate finalized-failure
 acceptance or canonical issuance authority.
 
+A real Devnet finalized-failure recovery also passed on 2026-10-05. The isolated
+mint `ETvbGEEV8h1xLoDS24zCXebgp2qrNYdwvSMBacZAKCuT` and its tester account began
+with zero supply/balance. After minting one base unit, two separately authorized
+one-unit burns passed the unchanged CLI's signing and submission preflight against
+finalized state. Concurrent submission produced one successful burn and one
+finalized insufficient-balance failure. No preflight bypass or invented RPC
+response was used. Failed transaction
+`3MsVYMn6CojWmzhkCxhUWxTfBDmgW2RXnsVJWxdJUrv8PjAzGbwWwoJCMkQuw4g8tzCadMS367gjVicyu6f8faqb`
+retained token balances and charged only its verified 5,000-lamport fee.
+
+Replenishing one unit allowed the production recovery command to collect identical
+failed-transaction evidence from Solana's public Devnet RPC and OnFinality. It saved
+one generation-1 successor; repeated recovery returned the same bytes, and parent
+submission was refused. Successor
+`vQxzEa1QfPM48xYEZXLJnZsaivXxX61zeDDrEgQYcVaFKnn17dhSLUq13zHRLD77soyMqvFdmKSkRCA9ow5enLZ`
+finalized, and saved-byte replay caused no further burn. Both providers confirmed
+final supply/balance zero. All five submitted transactions used 25,000 Devnet
+lamports total; no Mainnet or bridge-custody funds were used. Private
+`admin-finalized-failure-20261005` evidence retains exact bytes, fees and effects.
+This closes this token failure/recovery path, not every pool failure or chain reorg.
+
+A read-only RPC timeout during this drill exposed a CLI logging defect: uncaught
+administration exceptions included underlying HTTP request context, which could
+contain a private RPC URL. Token and pool CLI boundaries now report only the
+application error code or a fixed HTTP failure code and exit unsuccessfully.
+Their executable-level QuickCheck checks use credential canaries with a refused
+loopback connection and invalid URL; exact stderr checks cover wrapped and direct
+HTTP exceptions. The pool regression failed before the fix; both Cabal suites pass
+afterward. The change is confined to administration CLI boundaries; bridge runtime,
+signing policy and saved transaction bytes are unchanged.
+
 ## Gates still open
 
 The 2026-10-05 isolated Signet drill removed and restored confirmation of the
@@ -773,7 +804,8 @@ review or distribution/license requirements.
    and explicit reinvestment evidence and the completed funded betanet/canonical
    round trip. Finish issuer approval and canonical authority/reserve arrangements.
    Retain live expiry recovery for mint/burn, mint/account creation and metadata
-   create/update; finalized-failure branches still have only offline evidence.
+   create/update, plus the token finalized-failure path above. Pool finalized-failure
+   recovery still has only offline evidence.
    Verify actual token/pool identity and current executable routes before enabling links.
 5. **Dependencies and independent review:** resolve applicability/reachability and
    license questions recorded in [DEPENDENCY-REVIEW.md](DEPENDENCY-REVIEW.md) and

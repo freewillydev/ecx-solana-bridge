@@ -21,7 +21,7 @@ executable ecx-pool
   ghc-options: -Wall
   hs-source-dirs: app
   main-is: Main.hs
-  build-depends: base, ecx-pool, ecx-build-assets, aeson, bytestring, text
+  build-depends: base, ecx-pool, ecx-build-assets, ecx-bridge, http-client, aeson, bytestring, text
 
 test-suite pool-test
   type: exitcode-stdio-1.0
@@ -30,6 +30,7 @@ test-suite pool-test
   ghc-options: -Wall
   hs-source-dirs: test
   main-is: Main.hs
+  build-tool-depends: ecx-pool:ecx-pool
   autogen-modules: Paths_ecx_pool
   other-modules: Paths_ecx_pool
-  build-depends: base, ecx-pool, ecx-bridge, ecx-bridge:chain, ecx-build-assets, QuickCheck, aeson, bytestring, text, base64-bytestring, crypton, ram
+  build-depends: base, ecx-pool, ecx-bridge, ecx-bridge:chain, ecx-build-assets, QuickCheck, aeson, bytestring, text, base64-bytestring, crypton, ram, process, network

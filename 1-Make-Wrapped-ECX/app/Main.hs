@@ -9,8 +9,10 @@ import Text.Read (readMaybe)
 import Data.Word (Word64)
 import Token.Signing
 import Control.Monad (unless,foldM)
-import Control.Exception (bracketOnError,finally)
+import Control.Exception (bracketOnError,finally,catches,Handler(..))
 import Bridge.SDKBuild (sdkLibraryPath)
+import Bridge.Error (BridgeError(..))
+import Network.HTTP.Client (HttpException)
 import Data.Aeson (FromJSON,Key,Object,Value(..),eitherDecodeStrict',encode,object,(.=),withObject,(.:))
 import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString as B
@@ -21,7 +23,12 @@ import System.Exit (die)
 import System.IO (withBinaryFile,IOMode(ReadMode),stdout,hFlush,openBinaryTempFile,hClose)
 
 main :: IO ()
-main=getArgs >>= \args->case args of
+main=run `catches`
+  [Handler $ \(BridgeError code)->die(T.unpack code)
+  ,Handler $ \(_ :: HttpException)->die "rpc_transport_unknown_outcome"]
+
+run :: IO ()
+run=getArgs >>= \args->case args of
   ["configure"]->configure
   ["keygen",key]->makeAbsolute key >>= \output->
     (O.runCritical . O.Request) (GenerateKey output) >>= L.putStrLn . encode

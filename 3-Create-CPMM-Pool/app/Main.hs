@@ -5,18 +5,26 @@ import qualified Pool.Signing as S
 import qualified Pool.Position as P
 import qualified Pool.Liquidity as Q
 import Bridge.SDKBuild (sdkLibraryPath)
+import Bridge.Error (BridgeError(..))
+import Network.HTTP.Client (HttpException)
 import Data.Aeson (FromJSON,encode,eitherDecode,object,(.=),withObject,(.:))
 import Data.Aeson.Types (parseEither)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy.Char8 as L
 import qualified Data.Text as T
+import Control.Exception (catches,Handler(..))
 import System.Environment (getArgs)
 import Text.Read (readMaybe)
 import Data.Word (Word16,Word64)
 import System.Exit (die)
 import System.IO (withBinaryFile,IOMode(ReadMode))
 main :: IO ()
-main=getArgs >>= \args->case args of
+main=run `catches`
+  [Handler $ \(BridgeError code)->die(T.unpack code)
+  ,Handler $ \(_ :: HttpException)->die "rpc_transport_unknown_outcome"]
+
+run :: IO ()
+run=getArgs >>= \args->case args of
   "recover":endpoint:verifier:path:keyfiles | not(null keyfiles)->
     (O.runCritical . O.Request) (S.Recover sdkLibraryPath endpoint verifier path keyfiles) >>= L.putStrLn . encode
   ["status",endpoint,path]->(O.runSafe . O.Request) (S.InspectSaved endpoint path) >>= L.putStrLn . encode
