@@ -67,3 +67,24 @@ artifact's distribution obligations. Go archive collection includes compiler
 notices as well as runtime notices. Recheck the exact binary and graph if either
 changes. See the candidate hashes and remaining checks in
 [DEPENDENCY-REVIEW.md](DEPENDENCY-REVIEW.md).
+
+## Candidate binary linkage (2026-10-05)
+
+Direct inspection of the ELF program/dynamic headers inside the exact ARM64
+`0a545ba` and x86-64 `fb2cb84` installer payloads confirms the recorded bridge,
+SDK and reviewed restic hashes. Both bridge binaries reference system libc/libm,
+zlib, libpq and GMP; the SDK references libc and libgcc (plus the platform loader).
+Neither executable/SDK contains DT_RPATH or DT_RUNPATH. Both restic binaries have
+no PT_INTERP or DT_NEEDED entries. This is direct-linkage evidence, not an inventory
+of transitive system libraries, statically incorporated code or runtime dlopen paths.
+Ubuntu packages supply the system libraries; they are not copied into these bundles.
+
+Both actual payloads include the 2,226,420-byte combined notice file and the
+coverage record for 118 restic/compiler notice files, together with the project
+license and retained native-node notices. The project-license SHA-256 is
+`3764c52a349b6fc4bbedb12d9b87867f9d2ee42c0fbd3330d0033b07da55f085`.
+The later Linux graph-comparison metadata is not retroactively present in these
+frozen payloads. Private `release-elf-linkage.json` records artifact and component
+hashes, ELF machine IDs, direct dependencies and loader paths. No rebuild or
+runtime mutation was required. Final attribution/license-choice and embedded-code
+obligation review remains open; collected notices alone do not resolve it.
