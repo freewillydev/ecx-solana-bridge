@@ -3,6 +3,24 @@
 Run commands from the repository root. Build with one job and reuse compiler/SDK
 caches; no VM or extra node is needed for ordinary source changes.
 
+The native freeze requires **GHC 9.14.1 (`base-4.22.0.0`) and Cabal 3.16.1.0**.
+`base` ships with GHC; a solver error rejecting `base-4.20.2.0` means the selected
+compiler does not match the freeze. Keep the freeze intact. With GHCup installed,
+open a shell with the pinned tools (installs them if absent):
+
+```sh
+ghcup run --install --ghc 9.14.1 --cabal 3.16.1.0 -- bash
+ghc --numeric-version
+cabal --numeric-version
+```
+
+The versions must print `9.14.1` and `3.16.1.0`. Run the build commands below
+inside that shell; `exit` returns to your original tool selection. If GHC 9.14.1
+is already installed outside GHCup, select it explicitly with Cabal's
+`--with-compiler=/absolute/path/to/ghc-9.14.1`, using Cabal 3.16.1.0.
+The GHC JavaScript compiler has its separate 9.12.2 freeze; do not apply the native
+compiler selection to the browser's internal project.
+
 ```sh
 cabal build all -j1 --offline
 cabal test all -j1 --offline --test-show-details=direct

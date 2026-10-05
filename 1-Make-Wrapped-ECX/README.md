@@ -1,5 +1,8 @@
 # Mint wrapped ECX
 
+Requires **GHC 9.14.1 and Cabal 3.16.1.0**. Select the pinned tools using the
+[compiler setup instructions](../2-Wrap-Unwrap-Server/docs/LOCAL-DEVELOPMENT.md) before building.
+
 Build from the repository root, then put the executable on this shell's PATH:
 
 ```sh
