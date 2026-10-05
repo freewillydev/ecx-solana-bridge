@@ -9,6 +9,16 @@ Build from the repository root, then put the executable on this shell's PATH:
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
+
+git clone https://github.com/emscripten-core/emsdk.git \
+  "$HOME/.local/share/ecx-emsdk"
+
+cd "$HOME/.local/share/ecx-emsdk"
+./emsdk install 3.1.74
+./emsdk activate 3.1.74
+source ./emsdk_env.sh
+emconfigure ghcup install ghc --set javascript-unknown-ghcjs-9.12.2
+
 ghcup install cabal
 cabal update
 ghcup run --install --ghc 9.14.1 --cabal 3.16.1.0
