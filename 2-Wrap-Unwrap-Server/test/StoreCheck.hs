@@ -914,11 +914,29 @@ ledgerMain = do
         check (certified==(Just revision,Just 100,Nothing))
         evalRead reader ReadState >>= check . ledgerPaused
         fixture fixtures ReadyIntake
-        evalWrite writer (RecordCustody revision 100 (Just "custody_native_history_advanced") Nothing)
-        evalRead reader ReadState >>= check . not . ledgerPaused
-        invalidated<-fixture fixtures ReadCustodyCheck
-        check (invalidated==(Nothing,Just 100,Just "custody_native_history_advanced"))
-        expectStore "custody_not_reconciled" (evalRead reader $ CheckIntake 100)
+        forM_ [("custody_native_history_advanced",["Native"]),("custody_solana_history_advanced",["Solana","SolanaOperating"])] $ \(code,affected)->do
+          before<-evalRead reader ReadCustodyRevision
+          evalWrite writer (RecordCustody before 100 (Just code) Nothing)
+          evalRead reader ReadState >>= check . not . ledgerPaused
+          invalidated<-fixture fixtures ReadCustodyCheck
+          check (invalidated==(Nothing,Just 100,Just code))
+          -- Discovery of newer history must choose a rescan immediately, even
+          -- when the previous scan is less than sixty seconds old.
+          expectStore "scanners_not_fresh" (evalRead reader $ CheckIntake 100)
+          invalidatedRevision<-evalRead reader ReadCustodyRevision
+          evalWrite writer (RecordCustody invalidatedRevision 100 Nothing good)
+          expectStore "scanners_not_fresh" (evalRead reader $ CheckIntake 100)
+          forM_ origins $ \(chain,origin)->do
+            (success,problem,_)<-fixture fixtures (ReadScanHealth chain)
+            check (success==Just 100 && problem==if chain `elem` affected then Just code else Nothing)
+            when (chain `elem` affected) $ do
+              cursor<-evalRead reader (ReadCheckpoint chain) >>= maybe (fail "missing scan cursor") pure
+              evalWrite writer (CommitScan $ W.ScanBatch chain origin (Just cursor) cursor 100 [] [])
+          expectStore "custody_not_reconciled" (evalRead reader $ CheckIntake 100)
+          current<-evalRead reader ReadCustodyRevision
+          evalWrite writer (RecordCustody current 100 Nothing good)
+          evalRead reader (CheckIntake 100)
+        revision<-evalRead reader ReadCustodyRevision
         forM_ ["custody_history_not_current","custody_native_history_changed"] $ \code->do
           fixture fixtures ReadyIntake
           evalWrite writer (RecordCustody revision 100 (Just code) Nothing)
@@ -2238,8 +2256,9 @@ nativeCustodyFamilies fixtures reader writer settings config base solana=do
   revision<-evalRead reader ReadCustodyRevision
   evalWrite writer (RecordCustody revision 100 (Just "custody_native_history_advanced") Nothing)
   evalRead reader ReadState >>= check . not . ledgerPaused
-  expectStore "custody_not_reconciled" (evalWrite writer $ AuthorizeSend 100 $ txid parent)
+  expectStore "scanners_not_fresh" (evalWrite writer $ AuthorizeSend 100 $ txid parent)
   evalRead reader (ReadAttempt $ txid parent) >>= check . (==recorded)
+  fixture fixtures (FreshAt 100)
   paused
   decision<-evalWrite writer (SaveReplacementDraft 100 recorded (draft child) "custody replacement")
   fixture fixtures CoverBackup

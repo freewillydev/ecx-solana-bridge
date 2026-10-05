@@ -250,7 +250,13 @@ the service by themselves. Source updates and slow plan RPC can invalidate readi
 refresh it before preparation, signing, queuing and send authorization. Keep the
 final transaction-acceptance/blockhash check after that refresh. Refresh is bounded;
 if custody reads age the scans, recheck and refresh again without extending their
-60-second validity. Recovering native receipts are reread beyond the incremental
+60-second validity. If custody discovers history ahead of a saved cursor, its
+closed ledger operation also marks the affected scan stale without advancing the
+last successful scan time. The next readiness refresh must observe that history;
+it cannot repeatedly certify the same old cursor. Native advancement invalidates
+the native scan; a Solana history mismatch invalidates both Solana streams.
+A completed scan still requires fresh custody reconciliation before authorization.
+Recovering native receipts are reread beyond the incremental
 cursor so their deposit state and matching evidence are committed together.
 
 Paused recovery can record observed effects and recover owned input locks, but

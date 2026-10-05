@@ -73,6 +73,19 @@ unpaid. Diagnose moving-history refresh before further funded retries. Private
 `parallel-mainnet-*` evidence includes the saved attempt, timing, provider responses
 and final recovery readback.
 
+
+The moving-history regression failed on the old code: a fresh but superseded scan
+still led to `custody_not_reconciled`, selecting another custody read instead of a
+rescan. `RecordCustody` now atomically marks the affected scan stale through its
+existing closed Opaleye implementation. Last-success timestamps remain unchanged,
+financial balances are preserved, and scan updates invalidate the custody revision.
+The PostgreSQL contract covers both native and Solana advancement, unaffected-stream
+preservation, refusal even after a premature custody report, successful rescan plus
+fresh custody, and unchanged signed attempts when send authorization is refused.
+Native builds, the complete PostgreSQL/restic contract and Cabal bridge tests passed.
+No deadline, generation limit, backup requirement or authorization path changed.
+This fix still needs Linux deployment and Mainnet payout acceptance.
+
 ## Evidence already obtained
 
 | Area | Evidence and limit |

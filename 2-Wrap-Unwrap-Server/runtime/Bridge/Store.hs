@@ -2091,6 +2091,13 @@ recordCustody c expected now problem report = do
   forM_ problem $ \code->do
     old<-O.runSelect c $ fmap (\(_,_,_,_,err)->err) (O.selectTable S.custody) :: IO [Maybe Text]
     when (old/=[Just code]) (audit c "custody_failure" code)
+    -- A recent scan can already be behind the chain. Invalidate it atomically
+    -- so readiness refreshes history instead of repeating the same stale check.
+    let affected=case code of
+          "custody_native_history_advanced"->["Native"]
+          "custody_solana_history_advanced"->["Solana","SolanaOperating"]
+          _->[]
+    forM_ affected $ \chain->scanHealth c chain now (Just code)
     when (code `notElem` ["custody_native_history_advanced","custody_solana_history_advanced","custody_ledger_changed"]) $ do
       _<-O.runUpdate c O.Update {O.uTable=S.deployment,O.uUpdateWith= \r->r {S.paused=number 1,S.pauseReason=text $ "custody:"<>code},O.uWhere= \r->S.singleton r O..== number 1,O.uReturning=O.rCount}
       pure ()
