@@ -24,8 +24,12 @@ rent/balance/fee fields therefore do not bypass that guard through unbounded Int
 This extends the earlier numeric input-path review, not a whole-program proof.
 The public Cabal header-deletion and bincode maintenance advisories were rechecked
 on 2026-10-05 and still list no fixed version. Preserve the scoped mitigations below.
-Private `nonce-dependency-delta.json` records the graph comparison; final Linux
-artifact membership and distribution obligations still need their final check.
+Private `nonce-dependency-delta.json` records the graph comparison. Final packages
+at `548c509` were also inspected: both actual Linux plans match all 188 non-local
+versions and 159 distinct source hashes, and the packaged notice/coverage bytes
+match the checkout. ELF linkage and all payload hashes were verified. This completes
+the internal graph/advisory/notice review; upstream findings below and independent
+security/distribution approval remain open. See [final artifacts](RELEASE-REVIEW.md#final-review-artifacts).
 
 - [HSEC-2026-0007](https://github.com/haskell/security-advisories/blob/main/advisories/published/2026/HSEC-2026-0007.md):
   browser Aeson was pinned to affected 2.2.3.0; it is now 2.2.5.1. Native Aeson stays

@@ -2,7 +2,7 @@
 
 The bridge has completed funded development tests and a canonical betanet/Solana
 Mainnet round trip. It is ready for source review, **not public-release approval**.
-The active work is the [nine-step completion plan](IMPLEMENTATION-PLAN.md). Passing
+The [nine-step internal completion plan](IMPLEMENTATION-PLAN.md) is complete. Passing
 an older candidate's tests does not certify later source or packages.
 
 ## Source and evidence boundaries
@@ -11,7 +11,7 @@ an older candidate's tests does not certify later source or packages.
 | --- | --- | --- |
 | `54c2bfd` | Funded canonical wrap/unwrap, exact finalized bytes, reconciliation; same-host in-flight Solana recovery | New public TLS, later token changes, independent-host recovery |
 | `509f617` | Ubuntu ARM64/x86-64 signed test packages, clean installation, repeat upgrade preserving custody/configuration, installed public HTTPS and paused intake | Public-domain renewal, funded clean-host restore, public release signing |
-| `ba5c0f1` | Durable offline token minting: macOS and Ubuntu ARM64/x86-64 token suites; real Devnet delayed signing/submission and refusal checks below | Final distribution artifacts (in progress); independent release gates below |
+| `ba5c0f1` | Consolidated macOS/x86-64 suites and PostgreSQL/recovery/HTTPS contracts; durable offline token minting: macOS and Ubuntu ARM64/x86-64 token suites; real Devnet delayed signing/submission and refusal checks below | Independent release gates below |
 
 Detailed historical transaction IDs, source hashes, snapshots, test scope and
 private evidence locations remain in the immutable
@@ -64,6 +64,41 @@ including the nested browser manifest. The acceptance signing key is not a publi
 release trust key. Private artifacts/evidence are in
 `installer-acceptance-20261004/candidate-509f617/` under the retained secrets directory.
 Do not label them as containing later token changes.
+
+## Final review artifacts
+
+Both Ubuntu 24.04 packages were built from clean commit `548c509`, which adds only
+review documentation to implementation freeze `ba5c0f1`:
+
+| Architecture | SHA-256 |
+| --- | --- |
+| ARM64 | `2e6c05ad00f1205ff818039fe564dfb5ebe22b5a35ca6b514b4805a48b943265` |
+| x86-64 | `dfafeb10f5b0a4fec20e87446168f1a9352ede64efde225027e1bd0ec71a1adf` |
+
+For each artifact, all 40 payload-manifest entries matched, with no unlisted payload
+files, links or traversal paths. The nested browser manifest matched its actual
+source files and generated assets. Migrations, installer and notices matched the
+frozen checkout; restic matched the reviewed architecture-specific pin. Both Linux
+plans matched all 188 non-local notice records and 159 distinct source hashes.
+ELF architecture, loader and direct dependencies were inspected: no RPATH/RUNPATH;
+system libraries remain dynamically supplied by Ubuntu, not copied into the bundle.
+The actual compiled SDK was exercised by that architecture's token suite.
+
+The format-2 release index was signed with the retained **acceptance-only key**;
+`release-auth verify` passed for both artifacts. This verifies artifact integrity
+and the test signer, not public-release authorization. Final payload inspection
+and authentication are new; clean/repeat installation and cold-boot evidence remain
+bound to the earlier candidates above. The installer/browser source is unchanged;
+no new installation or funded transfer is claimed for these final packages.
+
+Artifacts, index and `final-artifact-review.json` are in private
+`installer-acceptance-20261004/candidate-548c509/`. Build/install/upgrade commands are
+in [INSTALL.md](INSTALL.md); paused restoration and old-signer exclusion are in
+[OPERATIONS.md](OPERATIONS.md). The installer bundles the bridge, SDK, browser and
+backup client. Token/pool administration remains separately Cabal-built using its
+own README; no mint authority is installed into the custody server. All temporary
+build VMs were stopped after verification. Later evidence-only documentation commits
+do not require rebuilding these immutable artifacts.
 
 ## Durable offline mint acceptance (2026-10-05)
 
@@ -169,11 +204,9 @@ separately: the Haskell types cannot establish those deployment properties.
 4. **Production arrangements:** operator-approved issuer/mint/reserve policy,
    host/domain, independent RPC capacity, support and alert destination. Verify
    actual routes, TLS renewal and deployment behavior against those resources.
-5. **Review:** complete final artifact notice verification and obtain
-   independent security/distribution review. See [dependency findings](DEPENDENCY-REVIEW.md)
+5. **Review:** obtain independent security/distribution review. See [dependency findings](DEPENDENCY-REVIEW.md)
    and [notice scope](THIRD-PARTY.md); inventories are not security certification.
-6. **Final release:** finish final artifact verification against the frozen source, use an
-   operator-controlled release trust key, and obtain explicit publication and
+6. **Final release:** use an operator-controlled release trust key, and obtain explicit publication and
    valuable-fund activation approval.
 
 No outstanding gate is closed by fewer source lines, an unchanged status report,

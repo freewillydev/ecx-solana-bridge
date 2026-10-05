@@ -1,9 +1,8 @@
 # Remaining implementation plan
 
-## Active nine-step completion goal
+## Completed nine-step implementation goal
 
-This user-approved list supersedes the earlier ten-item accounting in Git history. Complete
-the independently executable work first, reporting these same numbers. External
+This user-approved list supersedes the earlier ten-item accounting in Git history. The independently executable work is complete, with evidence under these same numbers. External
 wallet approval, physically independent disaster recovery, L2L alternate history,
 issuer arrangements and independent security sign-off remain separate release gates.
 
@@ -13,11 +12,11 @@ issuer arrangements and independent security sign-off remain separate release ga
 | 2. Devnet offline acceptance | Disposable imported key, real prepare/offline-sign/submit, finalized effects, replay/tamper/consumed-nonce cases | Complete; nonce creation and delayed mint finalized, exact bytes/effects and refusals verified; see RELEASE-REVIEW |
 | 3. Linux token CLI | Updated token suite and executable on ARM64 and x86-64 | Complete at ba5c0f1; actual Ubuntu builds and token suites pass on both architectures |
 | 4. Internal security review | Trace retained API/DSL/authorization/ledger/signer/settlement/recovery; concrete findings resolved or explicitly scoped | Complete internal pass at ba5c0f1; boundary-by-boundary audit map and explicit limits in RELEASE-REVIEW |
-| 5. Dependencies and notices | Resolve applicable findings, record upstream limits and verify final distribution notices | Current native/Cargo delta matches notices; upstream findings scoped; final platform/distribution check remains |
+| 5. Dependencies and notices | Resolve applicable findings, record upstream limits and verify final distribution notices | Complete internal review: both final Linux graphs, payload notices and ELF linkage verified; unresolved upstream findings and independent distribution review remain explicit |
 | 6. Current release documentation | Separate resolved history from current blockers and bind evidence to source versions | Complete: concise current review, immutable historical evidence link, one active numbered plan |
 | 7. Consolidated acceptance | Relevant final browser/database/concurrency/interruption/recovery checks, without repeating unchanged funded tests | Complete at ba5c0f1: all three Cabal suites on macOS/x86-64; real PostgreSQL, encrypted restic recovery and process HTTPS contracts pass; unchanged browser evidence retained |
 | 8. Review freeze | One source identity, audit map, limitations and reviewer checklist | Complete: implementation frozen at ba5c0f1, with audit map, review sequence and external limits |
-| 9. Final artifacts and GitHub | Build/verify final artifacts once; install/upgrade/recovery instructions; source and evidence pushed | Pending freeze; public signing/publication remain operator decisions |
+| 9. Final artifacts and GitHub | Build/verify final artifacts once; install/upgrade/recovery instructions; source and evidence pushed | Complete: 548c509 ARM64/x86-64 artifacts built, payloads and test signatures verified; source/evidence pushed; public signing/publication remain operator decisions |
 
 Use one build job and stop temporary processes. Local nonce fixtures are not real
 Devnet acceptance. Recent-blockhash offline signing at `3207bd2` is implemented but

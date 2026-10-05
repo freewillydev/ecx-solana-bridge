@@ -109,3 +109,20 @@ cargo-license-metadata.json retain per-package declaration/checksum and scan sco
 This closes that named-file comparison, not embedded source-header obligations,
 compiler/runtime or system-library review. The separate Go collection is described
 above. Keep the independent distribution gate open.
+
+## Final internal artifact check
+
+The `548c509` ARM64/x86-64 review packages each contain the retained notice and
+coverage files byte-for-byte. Both actual Cabal plans match 188 non-local records
+and 159 distinct source hashes; the unchanged Cargo lock is covered by the retained
+registry inventory. Exact pinned restic binaries and all 40 payload-manifest entries
+were verified, including browser source/artifact hashes. Direct ELF linkage still
+uses Ubuntu-provided libc/libm, zlib, libpq, GMP and libgcc; these system libraries
+are not redistributed inside the package, and no RPATH/RUNPATH is embedded.
+
+This closes the internal final-artifact inventory check. It does not convert
+collected upstream declarations into independent legal approval, prove absence of
+embedded obligations, or waive the documented upstream security findings. Preserve
+all notices and the restic modification patch/source pins. Independent distribution
+review remains a public-release gate. Exact artifacts and limitations are recorded
+in [RELEASE-REVIEW.md](RELEASE-REVIEW.md#final-review-artifacts).
