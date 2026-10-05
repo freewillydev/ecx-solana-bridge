@@ -555,6 +555,21 @@ acceptance or canonical issuance authority.
 
 ## Gates still open
 
+The 2026-10-05 isolated Signet drill removed and restored confirmation of the
+original 1,000-unit native deposit for paid wrap order
+`59624fd6491ac3d00ee44bb7f1f886db1e4b1ba13e2a020447cc3301ae518115`.
+Both copied real nodes remained loopback-only; no signer ran. The actual paused
+worker made the source ineligible after rollback and eligible again after
+reconsidering its original block. Closed Opaleye reads showed identical balances,
+settled attempt and customer PaymentPaid before, during and after the transition;
+repeated observation preserved them. Both nodes and observer stopped afterward.
+Private evidence is `native-reorg-acceptance-20261004/source-rollback-live-20261005`.
+An earlier trial restarted at the old rolled-back tip, entered Core initial sync,
+and correctly refused observation; no readiness check was relaxed. The successful
+trial kept synchronized nodes running during rollback. This proves confirmation
+loss/return for a paid source, not a confirmed double spend, deficit coverage,
+an alternate winning payout or a public-network reorg. Those gates remain open.
+
 Real Devnet nonzero fee collection and explicit reinvestment passed after bounded
 trades in the separate test pool. The existing CLI collected 4 units per asset,
 reinvested 3 A / 4 B under receipt-sized caps and withdrew all liquidity. Finalized
