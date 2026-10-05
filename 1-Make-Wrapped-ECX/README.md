@@ -6,6 +6,8 @@ Requires **GHC 9.14.1 and Cabal 3.16.1.0**. Select the pinned tools using the
 Build from the repository root, then put the executable on this shell's PATH:
 
 ```sh
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
 curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
 ghcup install cabal
 cabal update
