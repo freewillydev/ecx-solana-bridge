@@ -47,7 +47,8 @@ application build or WebAssembly backend. See [local development](2-Wrap-Unwrap-
 remaining recovery cases, canonical authority/backing checks and independent
 review remain. Signed ARM64 and x86-64 candidate packages passed clean installation,
 repeat-fresh refusal, upgrade preservation, cold boot and service isolation checks.
-Funded clean-host restoration and native-node/backup integration remain open.
+Unfunded native-node/HTTPS-backup integration also passed. Funded clean-host
+restoration and physically independent backup/retention remain open.
 This is not a public or valuable-fund release.
 
 [Architecture](2-Wrap-Unwrap-Server/docs/ARCHITECTURE.md) ·

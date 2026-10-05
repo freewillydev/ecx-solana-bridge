@@ -109,10 +109,31 @@ refusals with a failing exit status, preventing scripts from continuing on an er
    authentication and actual service-account SSH denials. The reviewed x86-64
    package now also passes clean installation, upgrade, repeat-fresh refusal,
    cold boot and service isolation. The updated ARM64 package passes the same
-   installed checks. Finish native-node/backup integration and funded clean-host restoration.
+   installed checks. Unfunded native-node/HTTPS-backup integration and encrypted
+   native-wallet restoration under installer accounts also pass. Finish funded
+   clean-host restoration with independent storage and old-host exclusion.
    Reuse expensive builds; run packaging acceptance after runtime changes settle.
    Authenticate the final release artifact. Public publication and valuable-fund
    activation remain explicit operator decisions after the required gates close.
+
+## Current handoff: local work versus external prerequisites
+
+The frozen runtime and both signed candidate packages are ready for source review;
+this does not mean public-release approval. Completed local work includes the token
+CLI, all three Cabal suites on both Linux architectures, automated interface checks,
+service-account isolation, installation/upgrade/cold boot, the funded Mainnet round
+trip, same-host in-flight recovery, and installer-account native/HTTPS-backup and
+locked-wallet restoration. All task VMs are stopped; the disposable installation
+and node-integration VMs have been deleted. Retain the funded pilot and evidence.
+
+| Still open | Next action and dependency |
+| --- | --- |
+| Internal review follow-through | Address concrete code/dependency/license findings against the frozen source; do not repeat completed funded or installer checks without a relevant change. Independent sign-off remains separate. |
+| Remaining chain recovery evidence | Permanent confirmed source loss, coverage/return and a changed native winner need valid alternate L2L history; acquire a suitable real-chain fixture or miner cooperation. Do not substitute fabricated confirmations. Finalized-failure administration branches retain offline evidence until a bounded live case is specified. |
+| Customer wallet acceptance | User signs a Devnet Solana Pay request in a supported wallet; verify reference/effects and completion in the existing browser flow. |
+| Independent funded recovery | User supplies physically independent storage and a clean host, with retention/deletion separation. Restore, exclude the old signer, reconcile and explicitly resume. The Mac/VM drill cannot establish physical independence. |
+| Production operation | Operator supplies independent RPC capacity, host/domain/support details and confirms issuer/reserve arrangements. |
+| Public release | Independent security/distribution review, operator-controlled public signing key and explicit publication/activation decision. |
 
 ## Clean reinstall contract
 

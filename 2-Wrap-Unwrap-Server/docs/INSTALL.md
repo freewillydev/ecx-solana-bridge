@@ -4,8 +4,9 @@ The current server is built through Cabal. The candidate installer under `instal
 targets the rebuilt server; it is **not yet a certified release**. Do not use an old
 release built for the retired server. The hardened ARM64 signed package passed clean
 fresh installation, repeat/upgrade, cold boot and service isolation checks.
-The reviewed x86-64 package now passes those checks too. Funded clean-host
-restoration and native-node/backup integration remain open.
+The reviewed x86-64 package now passes those checks too. Unfunded native-node and
+HTTPS-backup integration under installer accounts also passed, including encrypted
+wallet restoration. Funded clean-host restoration and independent storage remain open.
 
 ## Candidate installation and upgrade
 

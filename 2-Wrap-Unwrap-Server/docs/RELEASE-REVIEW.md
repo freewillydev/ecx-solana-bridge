@@ -43,7 +43,8 @@ The x86-64 package builder then produced a 28,414,439-byte candidate at `fb2cb84
 SHA-256: `a3646e2141cfd3720413fa01c12f3d2e7a03e14f5040946fe6980cd5d78e0f58`.
 Host readback verified every payload-manifest entry, all eight migrations, the
 reviewed x86-64 restic hash and absence of links/traversal entries. This is package
-construction/integrity evidence; authentication and clean installation remain open.
+construction/integrity evidence; subsequent authentication and installation
+results appear below.
 Private evidence is `package-inspection-x86-fb2cb84.json` in the same directory.
 
 Ubuntu ARM64 also passed the full root build and all three Cabal suites at
@@ -82,6 +83,30 @@ and authentication, isolation and SSH checks passed again. Private `arm-final-*`
 results retain evidence for this exact artifact with the reviewed restic binary.
 This completes unfunded installed-package acceptance on both architectures; it
 does not establish funded restoration, native-node integration or remote retention.
+
+Installer-account native/backup integration subsequently passed on a separate
+unfunded ARM64 deployment of that exact package. Two pinned Bitcoin Core 30.2
+daemons used copied real L2L Signet history and loopback-only peers; the application
+checkpoint and challenge matched. A new encrypted native wallet ran under
+`ecxbridges`. The worker's RPC identity was denied wallet unlock/lock, private-key
+export, private descriptors, PSBT signing (including unsigned mode), raw signing
+and wallet backup. Native backup files belonged privately to the signer and were
+unreadable by the worker.
+
+The authenticated `/checkpoint-custody` route then traversed the production critical
+evaluator and returned a sequence-zero receipt only after encrypted HTTPS upload
+and full downloaded-bundle validation. A separate test restic repository on the Mac
+kept this exercise apart from funded custody. The original unfunded native wallet
+was unloaded and retained aside; the production recovery commands downloaded and
+validated the saved bundle and restored its native wallet. Public descriptor
+readback and zero balances matched exactly, encryption remained locked and the
+worker could not read the restored wallet. Snapshot:
+`12c8b329f7f2abdd9e9e1145955ed273d33b0da2e29b4857d2ce8a5d0686f3b1`;
+manifest SHA-256 `ffa5213387a3716f119109d0c4259a00b58749a13a8c87db322b759730dad99a`.
+Private `node-integration-*` records retain the results. This closes the tested
+installer-account native/HTTPS-backup integration, not funded clean-host activation,
+protected remote retention or a different physical failure domain. No customer
+payment or existing custody wallet was used.
 
 ## Mainnet blocker history and closure
 
@@ -256,8 +281,10 @@ binary. The frozen bridge executable is unchanged. The candidate then passed the
 bridge custody download, inspection, upload and mandatory full readback using the
 real sequence-55 bundle and existing HTTPS repository. Its manifest hash was unchanged.
 The paused VM now uses the patched tool; recovered key files were removed and the
-VM stopped. The signed package has not been replaced. Notice-file collection now covers the exact Go/restic graph; distribution review,
-x86-64 and final artifact acceptance remain required. Independent-host recovery is still open. See [dependency review](DEPENDENCY-REVIEW.md).
+VM stopped. Both updated signed packages now include this reviewed tool and passed
+installation acceptance, as recorded above. Notice collection covers the actual
+Go/restic graph; distribution review, public release signing and independent-host
+recovery remain open. See [dependency review](DEPENDENCY-REVIEW.md).
 
 ## Evidence already obtained
 
@@ -737,15 +764,16 @@ review or distribution/license requirements.
    Solana restore/reconciliation evidence. Retain the completed same-host encrypted-wallet drill as regression
    evidence; clean-host funded recovery remains in the following gate.
    Preserve one payout, correct capital/cost accounting and exact saved bytes.
-3. **Isolation and off-host recovery:** exercise the current worker/signer under
-   separate OS and PostgreSQL identities, actual restricted native RPC, and denied
+3. **Isolation and off-host recovery:** retain the completed worker/signer checks
+   under separate OS/PostgreSQL identities, restricted native RPC and denied
    key/full-cookie/unlock access. Restore funded custody on a clean host using a
    real off-host HTTPS repository, separate deletion authority, retained passwords,
    protected retention and explicit old-host exclusion/revocation.
 4. **Administration and canonical use:** retain the completed nonzero fee collection
-   and explicit reinvestment evidence; finish issuer approval, canonical authority/reserves and funded
-   betanet/canonical acceptance. Extend recovery acceptance where the offline-only
-   cases and remaining operation families require it; retain the verified bounds.
+   and explicit reinvestment evidence and the completed funded betanet/canonical
+   round trip. Finish issuer approval and canonical authority/reserve arrangements.
+   Retain live expiry recovery for mint/burn, mint/account creation and metadata
+   create/update; finalized-failure branches still have only offline evidence.
    Verify actual token/pool identity and current executable routes before enabling links.
 5. **Dependencies and independent review:** resolve applicability/reachability and
    license questions recorded in [DEPENDENCY-REVIEW.md](DEPENDENCY-REVIEW.md) and
@@ -754,7 +782,8 @@ review or distribution/license requirements.
 6. **Installation/release:** retain the hardened signed ARM64 package's clean
    fresh/repeat/upgrade, cold-boot and service-isolation evidence and the reviewed
    x86-64 and updated ARM64 packages' completed installation acceptance. Finish
-   native-node/backup integration and funded clean-host restoration.
+   funded clean-host restoration and independent storage/retention; retain the
+   completed unfunded installer-account native/backup integration above.
    Review distribution notices and the public release trust-key procedure before
    publishing. The acceptance-test signing key does not establish public trust.
 

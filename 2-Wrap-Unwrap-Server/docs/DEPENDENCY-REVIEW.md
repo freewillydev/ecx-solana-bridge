@@ -111,15 +111,18 @@ restored with the old binary; both complete data checks passed and a wrong passw
 was refused. This used disposable local files/repositories, no custody keys, no
 bridge services and no external chain calls. The fixture and copied executables
 were removed and the VM stopped. It does not establish bridge checkpoint or remote
-backup acceptance. The signed installer has not been replaced. The paused VM now uses the reviewed
+backup acceptance by itself. Both updated signed installer candidates now include
+the reviewed binary and passed clean installation/upgrade/cold-boot acceptance;
+see [release evidence](RELEASE-REVIEW.md). The paused pilot also uses the reviewed
 binary after the bridge integration check below.
 
 `build/toolchains.json` pins the upstream module checksum, compiler, patch and
 reviewed candidate hash. Packaging now rejects the old binary before building.
 The x86-64 backup-tool candidate is also pinned (acceptance below). Go/restic notice-file collection now matches
 the actual ARM64 graph (118 files, 81 components); legal/platform distribution
-review remains. Remaining work includes independent applicability review, x86-64 acceptance and
-regeneration/authentication of the final artifact. Private `restic-*` source,
+review remains. Both architecture candidates have since passed authentication and
+installed acceptance. Independent applicability review and public release signing
+with the operator's release trust key remain. Private `restic-*` source,
 scan, import and compatibility evidence is in `security-audit/current-20261004`.
 
 The frozen Linux bridge executable subsequently recovered the real sequence-55
