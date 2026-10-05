@@ -1,13 +1,21 @@
 # Release review
 
-The application is available for source review; public release remains open.
-The Ubuntu ARM64 pilot has `fd318c9` deployed, executable SHA-256
-`24825eacc77a85d973de856fac3589feda21fe0aa5752f088ff6a39296f3b266`.
-Its canonical Mainnet unwrap is paid: 3,000 wrapped base units in, 30 fee,
-2,970 native units out, with a separate 141-unit network cost. The confirmed
-1,000-unit return deposit still has an unpaid 990-unit wrapped obligation.
-Alchemy is primary; the documented public Mainnet endpoint is the current pilot
-verifier. Both services and the VM are stopped; the private interface is offline.
+The Mainnet round trip passed on frozen review candidate `54c2bfd`, deployed in
+the Ubuntu ARM64 VM. Executable SHA-256:
+`2ce848b303104209bc1bdb5828237db98b613b9c7a32f1a449a4ec93d3c13cbe`.
+The canonical unwrap paid 2,970 native units from 3,000 wrapped units, with a
+30-unit bridge fee and 141-unit network cost. The return wrap paid 990 wrapped
+units from 1,000 native units, with a 10-unit bridge fee and 5,000-lamport network
+cost. Finalized Solana transaction:
+`569aQRwy8WE9KcMpL2DD8XiANbxquwakX864JEfKnKSFPg5KssVg41TDsh9cpcBg8QQrBh12HgQXA3U9ZfyfL2Xy`.
+Alchemy and the independent public Mainnet endpoint returned identical finalized
+transaction bodies at slot 453424255, with custody debited 990 and recipient
+credited 990 canonical token units. The ledger records `PaymentPaid`; reconciliation
+matches Native 97,889, Wrapped 3,002,010 and SOL 4,995,000 base units, all differences
+zero. Critical sequence and backup coverage are 55. The remote snapshot at that
+sequence retains the exact pre-broadcast attempt for an in-flight recovery drill.
+Services are stopped; backup storage remains on the physical Mac. This completes
+the funded round trip, not all public-release gates below.
 
 Earlier keyed OnFinality attempts exhausted its observed 40/minute and 200/hour
 response-unit limits. Relevant methods cost two response units. Alternative
@@ -22,7 +30,7 @@ passed disposable PostgreSQL/restic and actual HTTPS contracts. Subsequent secti
 retain historical evidence within its recorded scope; they do not certify a later
 artifact.
 
-## Latest independent Mainnet RPC attempt
+## Mainnet blocker history and closure
 
 The documented public endpoint `https://api.mainnet.solana.com` passed two read-only
 production-validator rounds against Alchemy: canonical identity/authority, complete
@@ -84,7 +92,12 @@ preservation, refusal even after a premature custody report, successful rescan p
 fresh custody, and unchanged signed attempts when send authorization is refused.
 Native builds, the complete PostgreSQL/restic contract and Cabal bridge tests passed.
 No deadline, generation limit, backup requirement or authorization path changed.
-This fix still needs Linux deployment and Mainnet payout acceptance.
+The Linux build and bridge suite then passed, and the hash-verified candidate was
+deployed. A live readiness check took 17.6 seconds before the explicitly approved
+generation-7 retry. It passed required checkpoints and settled the original payout;
+no deadline or generation cap was increased. The pre-fix refusals above are retained
+as historical evidence, not current unpaid obligations. Private `rescan-mainnet-*`
+artifacts hold final ledger, transaction, timing and snapshot evidence.
 
 ## Evidence already obtained
 
@@ -96,7 +109,7 @@ This fix still needs Linux deployment and Mainnet payout acceptance.
 | Browser | GHC-JavaScript fee previews, paused intake, private-link recovery/reload, preserved payout links and network-error/restart behavior checked against the actual server. Actual wallet signing remains open. |
 | Custody restoration | Sequence-98 funded ledger restored into separate same-host staging; 24 projections matched and actual chain reconciliation passed. Minimum sequence 99 refused the archive. This does not prove off-host storage or clean-host wallet activation. |
 | Automated boundaries | Cabal QuickCheck/protocol tests, actual HTTPS tests and PostgreSQL contracts cover typed authority, immutable accounting, fencing, concurrency, cancellation, source/replacement recovery and encrypted restic restoration. Fixtures do not prove all real-chain cases. |
-| Canonical Mainnet mode | The VM accepted a real canonical-token customer deposit and completed its native payout. The return native deposit is confirmed; wrapped payout/recovery remains pending. Earlier local canonical process/signing contracts use offline RPC fixtures. |
+| Canonical Mainnet mode | Both directions settled on real canonical ECX/Solana Mainnet, with exact net payouts and separately booked network costs. In-flight restoration and other release gates remain separate; earlier canonical process contracts use offline RPC fixtures. |
 | Current VM deployment | Separate worker/signer UIDs and restricted PostgreSQL/native credentials passed live denial checks. Required HTTPS backups, an in-flight sequence-9 restore into a separate paused database, and a VM restart passed. The backup receiver shares the physical Mac; clean-host activation and disaster isolation remain open. |
 | RPC pacing | Tests cover host budgets, idle/late wakeups, cancellation and actual HTTPS accounting of a read retry versus a refused send. Scoped Signet/Devnet operation passed at the default 2 requests/second per process/host. The Mainnet verifier's hourly quota exhausted during recovery; paced request starts do not guarantee hourly capacity or a usable payout window. |
 | Signer model | Bounded two-request TLA+ model: 54,289 distinct states; path/output/dispatch invariants and negative mutations checked. No TLAPS/unbounded Haskell proof. |

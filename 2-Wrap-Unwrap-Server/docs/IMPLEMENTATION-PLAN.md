@@ -6,18 +6,15 @@ findings; leave installer work last.
 Source ownership is in [ARCHITECTURE.md](ARCHITECTURE.md); verified evidence and
 remaining release gates are in [RELEASE-REVIEW.md](RELEASE-REVIEW.md).
 
-The Mainnet pilot has `fd318c9` deployed in the Ubuntu ARM64 VM. Its native
-unwrap is paid (3,000 gross → 2,970 net base units); the return wrap (1,000 → 990)
-remains pending. Concurrent independent custody inspection passed local and Linux
-build/tests and live reconciliation with zero differences. Generation 6 reached
-backed-up broadcast intent, then paused on `scanners_not_fresh`; the saved custody
-failure was `custody_native_history_advanced`. Both providers subsequently reported
-no transaction, and the full expiry workflow retired it with proof. Critical
-sequence and acknowledged backup coverage are 50. No generation 7 is approved.
-Services and VM are stopped. Diagnose the bounded freshness refresh path under
-moving native history before another funded retry; do not extend safety deadlines.
-Backup storage shares the physical Mac; clean-host recovery and the Mainnet
-round trip remain open.
+The Mainnet round trip passed on review candidate `54c2bfd` in the Ubuntu ARM64
+VM: 3,000 wrapped → 2,970 native, then 1,000 native → 990 wrapped. Both providers
+returned the identical finalized Solana payout, and all three custody balances
+reconciled with zero differences. The moving-history rescan regression passed
+locally before this funded retry. Critical sequence and backup coverage are 55;
+the sequence-55 custody snapshot preserves the exact pre-broadcast attempt.
+Freeze this runtime for review and batch the remaining acceptance against it.
+Services are stopped. Backup storage still shares the physical Mac; independent
+backup/clean-host restoration and the remaining release gates are open.
 
 ## Required product
 
@@ -40,12 +37,12 @@ separate explicit tooling and evidence; they are not bridge-custody privileges.
 
 ## Sequence
 
-Complete the payout's blockhash-window acceptance before further funded retries.
-Use the deployed concurrent custody inspection; address the observed native-history
-refresh failure with a focused regression before another generation. Preserve both-provider agreement, required backups and the 40-block
-send floor. Do not repeatedly approve new signed generations to probe timing.
-Public RPC success is pilot evidence; production capacity remains a release gate.
-Keep packaging last.
+The observed payout blockers are fixed and the existing Mainnet obligation is paid.
+Do not create additional Mainnet orders for routine regression. Use the saved
+pre-broadcast snapshot for in-flight restoration and existing Signet/Devnet fixtures
+for remaining recovery work. Preserve both-provider agreement, required backups,
+the 40-block send floor and the frozen candidate. Change runtime only for a
+reproduced substantive finding; keep packaging last.
 
 The latest local checkpoint is a confirmed additional-deposit Signet refund with
 correct principal/cost settlement, the original conversion still paid, and a
@@ -64,12 +61,10 @@ refusals with a failing exit status, preventing scripts from continuing on an er
    from pure Servant requests through authorization, closed Opaleye operations,
    chain validation, signing and settlement. Record concrete findings against the
    same candidate; keep private order capabilities and custody material outside Git.
-2. **Restore RPC capacity and complete customer acceptance.** Obtain sufficient
-   keyed independent-provider capacity and verify exact required history,
-   not just basic RPC responses. SolanaTracker's missing origins and VibeStation's
-   rate limits ruled them out. Recheck the saved 990-unit payout and use the closed
-   recovery/resume workflow; retain every expired attempt and approval. A quota
-   reset alone does not establish sustained capacity or an SLA.
+2. **Finish customer acceptance and provider provisioning.** Retain the completed
+   canonical round trip and exact finalized payout evidence. The public verifier
+   worked for this pilot; production still needs sufficient independent-provider
+   capacity. Do not repeat the funded round trip merely to recheck known results.
    Complete a real supported Solana Pay wallet flow on Devnet, including reference
    and effects, both conversion directions, refund ownership, saved-order reload
    and actionable browser errors. A tester client or rendered QR is partial
