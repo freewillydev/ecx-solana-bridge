@@ -60,7 +60,8 @@ configure=do
     let old=case KM.lookup name current of
           Just(String text)->T.unpack text
           _->if name=="maxFeeLamports" then "10000" else ""
-    raw<-prompt (K.toString name) old
+    let label=if name=="network" then "network (devnet = test coins, mainnet = real SOL/tokens)" else K.toString name
+    raw<-prompt label old
     unless (not(null raw)) (die "A value is required")
     case name of
       "network"->choose raw >> pure ()
