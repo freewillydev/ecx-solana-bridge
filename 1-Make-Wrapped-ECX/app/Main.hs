@@ -50,7 +50,9 @@ configure=do
   selected<-prompt "Command" ""
   fields<-maybe (die "Unknown token command") pure (lookup selected commands)
   settings<-foldM (\current name->do
-    let old=case KM.lookup name current of Just(String text)->T.unpack text; _->""
+    let old=case KM.lookup name current of
+          Just(String text)->T.unpack text
+          _->if name=="maxFeeLamports" then "10000" else ""
     raw<-prompt (K.toString name) old
     unless (not(null raw)) (die "A value is required")
     case name of

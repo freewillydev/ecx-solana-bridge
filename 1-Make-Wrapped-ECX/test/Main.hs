@@ -365,7 +365,11 @@ cliContract=bracket temporary removeDirectoryRecursive $ \directory->do
   (badNetwork,_,_)<-run ["configure"] "sign\nnot-a-network\n"
   (badFee,_,_)<-run ["configure"] "sign\ndevnet\nhttps://rpc.example.invalid\n1e9\n"
   unchanged<-B.readFile config
-  (signConfig,_,_)<-run ["configure"] "sign\ndevnet\nhttps://rpc.example.invalid\n10000\nattempt.json\n"
+  (signConfig,_,_)<-run ["configure"] "sign\ndevnet\nhttps://rpc.example.invalid\n\nattempt.json\n"
+  feeConfig<-B.readFile config
+  let defaultFee=case eitherDecode (L.fromStrict feeConfig) of
+        Right(Object values)->KM.lookup "maxFeeLamports" values==Just(String "10000")
+        _->False
   (noInput,_,_)<-run ["sign","nonexistent-key"] ""
   (missingTransaction,_,_)<-run ["sign","nonexistent-key","missing-transaction.json"] ""
   L.writeFile config $ encode $ object ["secretKey" .= ("never-read"::Text)]
@@ -375,7 +379,7 @@ cliContract=bracket temporary removeDirectoryRecursive $ \directory->do
   pure (generated==ExitSuccess && keyBefore==keyAfter && permissions Bits..&. 0o777==0o600
     && configured==ExitSuccess && derived==ExitSuccess && actual==expected
     && all (/=ExitSuccess) [extra,missing,badNetwork,badFee,noInput,missingTransaction,unknown]
-    && before==unchanged && signConfig==ExitSuccess)
+    && before==unchanged && signConfig==ExitSuccess && defaultFee)
  where
   temporary=do
     (path,handle)<-openTempFile "/tmp" "ecx-token-cli"

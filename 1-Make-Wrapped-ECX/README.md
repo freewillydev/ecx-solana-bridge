@@ -24,7 +24,8 @@ control the mint and have SOL for transaction fees.
    ```
 
    Choose `sign`. Enter `network` (`devnet` or `mainnet`), your HTTPS `rpc`,
-   `maxFeeLamports` (for example `10000`) and `attemptFile` (a new absolute path
+   `maxFeeLamports` (press Enter for `10000`, or retain your saved value) and
+   `attemptFile` (a new absolute path
    inside a private directory). Settings are saved in `ecx-token.json`.
    Configuration does not need or read your key.
 
