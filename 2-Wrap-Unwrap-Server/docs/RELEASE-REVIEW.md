@@ -529,8 +529,13 @@ zero tokens. Metadata account readback is retained for the subsequent update dri
 - Metadata creation: `Ubi9dxs6BYpntvwf1ZLSepoP399s7byDQjaEzS56kpxX93WPVAdDZK1aw18tve9HPEXdG8kSgCbxWCRXkt6rjM8`.
 
 Private `admin-recovery-families-20261004` evidence contains finality, transaction
-effects and replay results. Metadata-update recovery and deliberate finalized
-failure acceptance are not established by these two results.
+effects and replay results. Metadata-update expiry recovery then passed the same
+successor/idempotence/parent-refusal checks. Transaction
+`2GCxTkvTX92HLaxhqYf8EfmdTLdBGzDotJ7c6piFgRp2t6BAcob7AkE2BoVnpU6MbCSVzMjNh6cdbaF4Vi3dBu2v`
+finalized; saved-byte replay retained its signature, and the no-op update preserved
+the complete metadata account readback, including bytes and lamports. This closes
+the tested creation/update expiry families, not deliberate finalized-failure
+acceptance or canonical issuance authority.
 
 ## Gates still open
 
