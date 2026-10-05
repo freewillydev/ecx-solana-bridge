@@ -1,6 +1,7 @@
 {-# LANGUAGE LambdaCase, ScopedTypeVariables #-}
 -- Startup owns resources; all customer/worker effects use their DSL evaluators.
 module Main (main) where
+import Configure (configure,start)
 import qualified Bridge.Config as C
 import Bridge.BrowserBuild (browserAssetsDirectory)
 import Bridge.Critical (Process(..),runProcess,CustomerSettings(..),SignerSettings(..))
@@ -31,6 +32,9 @@ main :: IO ()
 main=(getArgs >>= command) `catch` (\(BridgeError code)->
   LBS.hPutStrLn stderr (encode $ object ["error" .= code]) >> exitFailure)
  where
+  command ["configure"]=configure
+  command ["start"]=start ".ecx-bridge"
+  command ["start",directory]=start directory
   command ["check-config",path]=C.loadConfig path >>= LBS.putStrLn . encode . object . pure . ("fingerprint" .=) . C.fingerprint
   command ["check-signer",path,key]=C.loadConfig path >>= \c->verifySigningKey (C.custodyOwner c) key >> putStrLn "Custody signer valid"
   command [mode,path,file] | mode `elem` ["backup-native-wallet","restore-native-wallet"] = do
@@ -93,7 +97,7 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
     database<-databaseSettings
     withProcessResources c database mode $ \reader process->
       bracket newRpcManager closeManager $ \manager->runProcess manager reader process
-  command _=die "Usage: ecx-bridge initialize-ledger CONFIG (fresh migrated database only) | upload-custody CONFIG BACKUP_CONFIG MANIFEST MINIMUM_SEQUENCE | recover-custody CONFIG BACKUP_CONFIG SNAPSHOT DIRECTORY MINIMUM_SEQUENCE | backup-custody CONFIG KEYFILE DIRECTORY (offline custody authority, PG* and PGREADUSER) | check-custody CONFIG MANIFEST MINIMUM_SEQUENCE | backup-native-wallet CONFIG DESTINATION | restore-native-wallet CONFIG MANIFEST (offline custody authority; never overwrites a wallet) | adopt-ledger CONFIG MINIMUM_SEQUENCE | retire-ledger CONFIG MINIMUM_SEQUENCE | recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE | restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE (offline database owner) | check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE [BACKUP_CONFIG STAGING] (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
+  command _=die "Usage: ecx-bridge configure | start [DIRECTORY] | initialize-ledger CONFIG (fresh migrated database only) | upload-custody CONFIG BACKUP_CONFIG MANIFEST MINIMUM_SEQUENCE | recover-custody CONFIG BACKUP_CONFIG SNAPSHOT DIRECTORY MINIMUM_SEQUENCE | backup-custody CONFIG KEYFILE DIRECTORY (offline custody authority, PG* and PGREADUSER) | check-custody CONFIG MANIFEST MINIMUM_SEQUENCE | backup-native-wallet CONFIG DESTINATION | restore-native-wallet CONFIG MANIFEST (offline custody authority; never overwrites a wallet) | adopt-ledger CONFIG MINIMUM_SEQUENCE | retire-ledger CONFIG MINIMUM_SEQUENCE | recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE | restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE (offline database owner) | check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE [BACKUP_CONFIG STAGING] (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
   restoreCommand path minimumText operation=do
     c<-C.loadConfig path
     minimumSequence<-maybe (reject "invalid_restore_policy") pure (readMaybe minimumText)

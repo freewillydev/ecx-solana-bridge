@@ -89,6 +89,15 @@ if [ "$mode" = fresh ]; then
     [ -f "$material/$name" ] && [ ! -L "$material/$name" ] || fail "missing regular $name"
     [ "$(stat -c '%u:%a' "$material/$name")" = 0:600 ] || fail "protect $name as root:0600"
   done
+  # Optional configure output is private material, never a shell fragment.
+  for name in interface.json public-fullchain.pem public-privkey.pem; do
+    if [ -e "$material/$name" ]; then
+      [ -f "$material/$name" ] && [ ! -L "$material/$name" ] && [ "$(stat -c '%u:%a' "$material/$name")" = 0:600 ] || fail "protect $name as root:0600"
+    fi
+  done
+  if [ -e "$material/public-fullchain.pem" ] || [ -e "$material/public-privkey.pem" ]; then
+    [ -f "$material/public-fullchain.pem" ] && [ -f "$material/public-privkey.pem" ] || fail 'both public TLS files required'
+  fi
   # Validate supplied identity/key/policy before creating accounts or databases.
   "$target/bin/ecx-bridge" check-config "$material/worker.json" >/dev/null
   "$target/bin/ecx-bridge" check-signer "$material/signer.json" "$material/solana.keypair.json" >/dev/null
@@ -115,6 +124,13 @@ if [ "$mode" = fresh ]; then
     jq --arg path "$config/signer/native-unlock" '.nativeUnlockFile=$path' "$config/signer/config.json" > "$config/signer/config.new"
     chown root:"$signer" "$config/signer/config.new"; chmod 0640 "$config/signer/config.new"
     mv "$config/signer/config.new" "$config/signer/config.json"
+  fi
+  if [ -f "$material/interface.json" ]; then
+    install -o root -g "$worker" -m 0640 "$material/interface.json" "$config/worker/interface.json"
+  fi
+  if [ -f "$material/public-fullchain.pem" ]; then
+    install -o root -g "$worker" -m 0640 "$material/public-fullchain.pem" "$config/worker/public-fullchain.pem"
+    install -o "$worker" -g "$worker" -m 0600 "$material/public-privkey.pem" "$config/worker/public-privkey.pem"
   fi
   openssl rand -hex 32 | tr -d '\n' > "$config/signer/signer.auth"
   openssl req -x509 -newkey ed25519 -nodes -keyout "$config/signer/signer.auth.key" -out "$config/signer/signer.auth.pem" -days 365 \
@@ -219,6 +235,23 @@ TasksMax=64
 [Install]
 WantedBy=multi-user.target
 UNIT
+  if [ "$role" = worker ]; then
+    dropin=/etc/systemd/system/ecx-bridge-worker.service.d
+    install -d -m 0755 "$dropin"
+    {
+      printf '%s\n' '[Service]'
+      if [ -f "$config/worker/interface.json" ]; then
+        printf '%s\n' "Environment=ECX_INTERFACE_CONFIG=$config/worker/interface.json"
+      fi
+      if [ -f "$config/worker/public-fullchain.pem" ]; then
+        printf '%s\n' "Environment=ECX_PUBLIC_TLS_CERT=$config/worker/public-fullchain.pem" "Environment=ECX_PUBLIC_TLS_KEY=$config/worker/public-privkey.pem"
+        if [ "$(jq -r .serverPort "$config/worker/config.json")" -lt 1024 ]; then
+          printf '%s\n' 'AmbientCapabilities=CAP_NET_BIND_SERVICE' 'CapabilityBoundingSet=CAP_NET_BIND_SERVICE'
+        fi
+      fi
+    } > "$dropin/30-configure.conf"
+    chmod 0644 "$dropin/30-configure.conf"
+  fi
   chmod 0644 "/etc/systemd/system/ecx-bridge-$role.service"
 done
 # A no-login shell alone still permits SSH forwarding with an authorized key.

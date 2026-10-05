@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds, GADTs, TypeOperators, TypeFamilies, TypeApplications #-}
 module Main (main) where
 
+import qualified ConfigureCheck
 import qualified SigningTransportCheck
 import qualified ChainCheck
 import Bridge.Identity (bearerHash,capabilityHash,payInstruction,payURIFor)
@@ -26,7 +27,8 @@ import Test.QuickCheck hiding (total,Result)
 main :: IO ()
 main = do
   results <- sequence
-    [ check "Solana Pay URI preserves exact units and rejects injectable keys" $ forAll amounts $ \n ->
+    [ check "configure saves private validated material and refuses overwrite/interruption" $ once $ ioProperty ConfigureCheck.contract
+    , check "Solana Pay URI preserves exact units and rejects injectable keys" $ forAll amounts $ \n ->
         let key=T.replicate 32 "1"; quantity=good(amount n); instruction="solana-pay:"<>key
         in payURIFor key key instruction quantity==Right("solana:"<>key<>"?amount="<>renderCoins quantity<>"&spl-token="<>key<>"&reference="<>key<>"&label=ECX%20Bridge")
           && isLeft(payURIFor (key<>"?evil") key instruction quantity)

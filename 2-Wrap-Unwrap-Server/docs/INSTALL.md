@@ -8,6 +8,48 @@ The reviewed x86-64 package now passes those checks too. Unfunded native-node an
 HTTPS-backup integration under installer accounts also passed, including encrypted
 wallet restoration. Funded clean-host restoration and independent storage remain open.
 
+## Interactive setup
+
+From a built checkout, run `cabal run exe:ecx-bridge -- configure`. With the
+executable on PATH, fresh Ubuntu setup is:
+
+```sh
+sudo ecx-bridge configure
+sudo ecx-bridge start
+```
+
+The wizard asks for a new private directory (default `./.ecx-bridge`), real network,
+RPCs, custody identity, chain-history origins, limits, existing private key/credential
+files, backup files, interface links and optional public TLS files. Blank input
+accepts displayed defaults; `-` means none for optional inputs. Invalid answers
+are retried; cross-field validation reopens the settings. It makes no network calls.
+Source secret files must belong to the invoking user with private permissions;
+when configuring as root, prepare root-owned copies. Existing output directories
+are refused, and cancelled/failed collection removes only its newly created output.
+
+If database/services are missing, it asks whether to provision them. Choosing yes
+also collects the repository `scripts/release-auth` path, independently trusted
+release public key and signed candidate directory. `start` invokes that authenticated
+installer for new custody, which provisions PostgreSQL, roles, migrations and the
+paused ledger. Choosing no leaves provisioning to the operator; it never substitutes
+an empty ledger for missing existing services. An arbitrary existing PostgreSQL
+installation alone is not an initialized bridge deployment.
+
+`start [DIRECTORY]` checks that installed configuration matches the saved material,
+starts the two systemd services, waits for the local operator interface and requests
+checked resume. Failed readiness leaves intake paused with an error; fix prerequisites
+and rerun `start`. It never rewrites an existing deployment's financial configuration.
+A current package containing the optional interface/TLS installer support is required;
+the previously frozen packages do not include these changes. This flow still requires
+an actual synchronized native node, restricted RPC credentials, initialized remote
+backup and funding/allocation. DNS and certificate renewal remain external setup.
+
+The output directory contains copies of custody credentials and must remain private
+(0700 directory, 0600 files). The installed signer key and RPC/unlock credentials
+live under `/etc/ecx-bridge/signer/`; its token is shared with the worker via a
+protected copy. Public TLS has a separate worker-only private key. The wizard does
+not delete the sensitive source or setup copies after installation.
+
 ## Candidate installation and upgrade
 
 Build from a clean reviewed Git checkout on Ubuntu 24.04, as an unprivileged user:
