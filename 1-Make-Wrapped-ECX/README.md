@@ -79,3 +79,79 @@ control the mint and have SOL for transaction fees.
    These commands reuse the saved settings and do not read the key. `submitted`
    is not finality; wait for `finalized`. If submission is interrupted, retain the
    attempt and check its status; do not sign the same mint into a new attempt.
+
+## Offline signing and USB submission
+
+Build/install `ecx-token` on both computers before disconnecting the signing computer.
+Only the online computer needs RPC configuration. This uses ordinary recent-blockhash
+transactions: **prepare, transfer, sign and submit within about 150 slots** (roughly
+a minute; timing varies). Durable nonce transactions for delayed/off-site signing
+are **not supported**. [Solana documents the distinction here](https://solana.com/docs/core/transactions/durable-nonces).
+
+1. On the offline computer, create a private working directory:
+
+   ```sh
+   mkdir -m 700 offline-token
+   cd offline-token
+   ```
+
+   Save the exported **Solana account private key** in `phantom-export.txt` here,
+   with mode `0600`. [Phantom's export instructions](https://help.phantom.com/articles/view-or-export-your-recovery-phrase-or-private-keys-in-phantom-25334064171795)
+   describe selecting the account and network. Import accepts a base58-encoded
+   64-byte keypair, not a recovery phrase, Ethereum key or hardware-wallet export.
+   Do not paste secrets into command arguments or transfer them back to the server.
+   An existing Solana CLI 64-number JSON keypair can be used directly without import.
+
+   ```sh
+   chmod 600 phantom-export.txt
+   ecx-token import-key phantom-export.txt secretKey
+   ```
+
+   Check the printed public key against the intended mint authority. Import checks
+   the public half against the private seed and writes an owner-only JSON keypair;
+   it does not create a new wallet or change authority on chain. Keep a secure backup.
+
+2. On the online computer, fill in `inputs/mint.json`, then configure
+   `prepare-offline` with `network`, HTTPS `rpc` and `maxFeeLamports`:
+
+   ```sh
+   ecx-token configure
+   ecx-token prepare-offline inputs/mint.json .ecx-token/prepared.json
+   ```
+
+   This gets a fresh blockhash, validates the actual mint/account/authority and
+   fee limit, simulates the unsigned transaction and saves it. Copy `prepared.json`
+   onto the USB stick and then into `offline-token/` on the offline computer.
+
+3. Sign on the offline computer:
+
+   ```sh
+   ecx-token sign-offline secretKey prepared.json signed-mint.json
+   ```
+
+   Review the displayed operation, authority, mint, destination token account and
+   amount against your own records, then type `sign`. Amounts are integer base units
+   (100000000 = one token). The signer validates the exact instructions and signature
+   locally; it neither loads RPC settings nor contacts the network. It cannot establish
+   current chain state, network identity, freshness or fees offline. Imported keys and
+   signed records require an owned `0700` parent directory; existing files are never
+   overwritten. Transfer **only `signed-mint.json`** back via USB.
+
+4. On the online computer running the bridge, copy the signed record into
+   `.ecx-token/`, set its permissions and submit it with the same network/RPC/fee
+   configuration. This is a separate token-administration CLI operation; the bridge
+   service does not receive the mint-authority private key.
+
+   ```sh
+   chmod 600 .ecx-token/signed-mint.json
+   ecx-token submit-file .ecx-token/signed-mint.json
+   ```
+
+   Run the same command again to check/rebroadcast the **identical bytes** until
+   `finalized`; `submitted` or `pending` does not mean finality. Submission verifies
+   the saved intent/signature, selected network, current authority, fees and simulation.
+   The file contains no private key, but anyone holding it can broadcast that mint.
+   Retain it as the transaction record. Offline records do not contain the online
+   recovery-history proof, so `recover` deliberately refuses them. If it expires or a
+   send outcome is uncertain, establish the original outcome before authorizing a new
+   mint; changing the blockhash and signing again could mint twice.

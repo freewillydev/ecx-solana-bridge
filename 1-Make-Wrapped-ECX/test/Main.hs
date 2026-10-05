@@ -17,7 +17,7 @@ import qualified Data.ByteArray as BA
 import qualified Data.ByteArray.Encoding as Encoding
 import qualified Data.ByteString.Lazy as L
 import System.IO (openTempFile,hClose)
-import System.Directory (removeDirectoryRecursive,removeFile,canonicalizePath)
+import System.Directory (removeDirectoryRecursive,removeFile,canonicalizePath,doesFileExist)
 import qualified System.Posix.Directory as PD
 import System.Posix.Files (setFileMode,createSymbolicLink,getFileStatus,fileMode)
 import qualified Data.Bits as Bits
@@ -48,6 +48,7 @@ main :: IO ()
 main=do
   results<-sequence
     [ quickCheckResult $ once $ ioProperty cliContract
+    , quickCheckResult $ once $ ioProperty offlineContract
     , quickCheckResult $ \positive->let
         original=request Mint (getPositive positive)
         withoutHash=case toJSON original of Object o->Object(KM.delete "blockhash" o); other->other
@@ -347,6 +348,76 @@ statusContract failed valid=
       ,classify (status "finalized") (transaction "different-bytes" failure) valid
       ,classify (status "finalized") (transaction "saved-bytes" $ if failed then Null else Number 1) valid
       ,classify (status "unknown") Null valid]
+
+-- Full USB-file handoff without configuration, an RPC endpoint or real keys.
+offlineContract :: IO Bool
+offlineContract=bracket temporary removeDirectoryRecursive $ \directory->do
+  let run args input=readCreateProcessWithExitCode ((proc "ecx-token" args) {cwd=Just directory}) input
+      seed=B.replicate 32 19
+      secret=case Ed.secretKey seed of CryptoPassed key->key; _->error "fixture seed"
+      public=BA.convert (Ed.toPublic secret) :: B.ByteString
+      exported=base58 (seed<>public)
+      original=(request Mint 321) {authority=base58 public}
+      prepared=directory</>"prepared.json"
+      signed=directory</>"signed.json"
+      keyfile=directory</>"key.json"
+      exportFile=directory</>"export.txt"
+      writeExport bytes=B.writeFile exportFile bytes >> setFileMode exportFile 0o600
+  writeExport (TE.encodeUtf8 $ exported<>"\n")
+  (imported,importOutput,_)<-run ["import-key","export.txt","key.json"] ""
+  importedKey<-Key.readKey (base58 public) keyfile
+  before<-B.readFile keyfile
+  (overwrite,_,_)<-run ["import-key","export.txt","key.json"] ""
+  after<-B.readFile keyfile
+  malformed<-mapM (\value->do
+    writeExport value
+    (result,out,err)<-run ["import-key","export.txt","bad-key.json"] ""
+    exists<-doesFileExist (directory</>"bad-key.json")
+    pure (result/=ExitSuccess && not exists && not(T.unpack exported `isInfix` (out<>err))))
+    ["not a key",TE.encodeUtf8(base58 seed),TE.encodeUtf8(base58(seed<>B.replicate 32 0)),B.replicate 8193 49]
+  writeExport (TE.encodeUtf8 exported)
+  setFileMode exportFile 0o644
+  (unsafe,_,_)<-run ["import-key","export.txt","bad-key.json"] ""
+  setFileMode exportFile 0o600
+  createSymbolicLink exportFile (directory</>"linked.txt")
+  (linked,_,_)<-run ["import-key","linked.txt","bad-key.json"] ""
+  unsigned<-(O.runSafe . O.Request) (Prepare sdkLibraryPath original)
+  let writePrepared intent=L.writeFile prepared $ encode $ object ["request" .= intent,"unsignedTransaction" .= unsigned]
+  writePrepared original
+  (cancelled,_,_)<-run ["sign-offline","key.json","prepared.json","signed.json"] "no\n"
+  absent<-not <$> doesFileExist signed
+  (signedOk,review,_)<-run ["sign-offline","key.json","prepared.json","signed.json"] "sign\n"
+  recordBytes<-B.readFile signed
+  saved<-either fail pure (eitherDecode $ L.fromStrict recordBytes)
+  (duplicate,_,_)<-run ["sign-offline","key.json","prepared.json","signed.json"] "sign\n"
+  unchanged<-(==recordBytes) <$> B.readFile signed
+  writePrepared original {quantity=322}
+  (tampered,_,_)<-run ["sign-offline","key.json","prepared.json","tampered.json"] "sign\n"
+  noTampered<-not <$> doesFileExist (directory</>"tampered.json")
+  otherUnsigned<-(O.runSafe . O.Request) (Prepare sdkLibraryPath $ request Mint 321)
+  L.writeFile prepared $ encode $ object ["request" .= request Mint 321,"unsignedTransaction" .= otherUnsigned]
+  (wrongKey,_,_)<-run ["sign-offline","key.json","prepared.json","wrong.json"] "sign\n"
+  noWrong<-not <$> doesFileExist (directory</>"wrong.json")
+  -- A portable record has no absolute-path recovery context. The online submit
+  -- evaluator accepts its signature/intent at the new path, then applies RPC policy.
+  let received=directory</>"received.json"
+  Key.savePrivate received recordBytes
+  submission<-refuseCode "invalid_token_rpc_policy" $
+    (O.runCritical . O.Request) (N.Submit N.Devnet "http://unused.invalid" 10000 received)
+  mode<-fileMode <$> getFileStatus signed
+  pure (imported==ExitSuccess && not(T.unpack exported `isInfix` importOutput)
+    && base58 (BA.convert $ Ed.toPublic importedKey)==base58 public && before==after
+    && all (/=ExitSuccess) [overwrite,unsafe,linked,cancelled,duplicate,tampered,wrongKey]
+    && and malformed && absent && signedOk==ExitSuccess && unchanged && noTampered && noWrong
+    && T.unpack(mint original) `isInfix` review && "321" `isInfix` review
+    && savedRecovery saved==Nothing && validateSaved saved==Right unsigned && submission
+    && mode Bits..&. 0o777==0o600)
+ where
+  isInfix needle haystack=T.pack needle `T.isInfixOf` T.pack haystack
+  temporary=do
+    (path,handle)<-openTempFile "/tmp" "ecx-token-offline"
+    hClose handle; removeFile path; PD.createDirectory path 0o700
+    canonicalizePath path
 
 -- Exercise the real executable: configuration is key-free and never executes work.
 cliContract :: IO Bool

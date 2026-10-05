@@ -320,7 +320,13 @@ extends its saved deadlines, custody freshness, backup or blockhash checks.
 
 Token and pool administration have their own closed critical evaluators, outside
 custody. `Token.Network` and `Pool.Signing` own private signing helpers and immutable
-attempt families. Shared `Bridge.AdminStatus` collects read-only recovery evidence;
+attempt families. `Token.Signing` also owns closed offline key-import/sign operations:
+it validates the exact prepared intent and key, then saves a portable signed record
+without RPC or recovery claims. Online submission reuses `Token.Network` validation;
+offline records cannot use automatic successor recovery. They use recent blockhashes,
+not durable nonces, so USB handoff must fit the transaction lifetime. Import accepts
+base58 64-byte Solana keypairs with matching public halves, not seed phrases.
+Shared `Bridge.AdminStatus` collects read-only recovery evidence;
 it cannot sign or broadcast. Recovery binds a payer-history anchor to the actual
 block that produced the saved blockhash, then requires two providers to establish
 finalized failure or expiry with complete anchored absence. The sole successor

@@ -13,7 +13,7 @@ import Control.Monad (unless,foldM)
 import Control.Exception (bracketOnError,finally,catches,Handler(..),catch,IOException)
 import Bridge.SDKBuild (sdkLibraryPath)
 import Bridge.Error (BridgeError(..))
-import Bridge.AdminKey (privateParent)
+import Bridge.AdminKey (privateParent,savePrivate)
 import Network.HTTP.Client (HttpException)
 import Data.Aeson (FromJSON,Key,Object,Value(..),eitherDecodeStrict',encode,object,(.=),withObject,(.:))
 import Data.Aeson.Types (parseEither)
@@ -37,17 +37,39 @@ run=getArgs >>= \args->case args of
   ["configure"]->configure
   ["keygen",key]->makeAbsolute key >>= \output->
     (O.runCritical . O.Request) (GenerateKey output) >>= L.putStrLn . encode
+  ["import-key",exported,key]->do
+    input<-makeAbsolute exported; output<-makeAbsolute key
+    owner<-(O.runCritical . O.Request) (ImportKey input output)
+    L.putStrLn $ encode $ object ["publicKey" .= owner,"keyFile" .= output]
+  ["sign-offline",key,prepared,signed]->do
+    keyfile<-makeAbsolute key; output<-makeAbsolute signed
+    (request,unsigned)<-readPrepared prepared
+    either (die . T.unpack) (const $ pure ()) (validate request unsigned)
+    putStrLn "Verify this complete intent against your own records before signing:"
+    L.putStrLn $ encode request
+    putStrLn "Offline: network, authority on chain, balances and current fees cannot be checked."
+    putStr "Type sign to authorize these exact effects: "; hFlush stdout
+    answer<-getLine
+    unless (answer=="sign") (die "Signing cancelled; no output created")
+    identifier<-(O.runCritical . O.Request) (SignOffline keyfile request unsigned output)
+    L.putStrLn $ encode $ object ["signature" .= identifier,"saved" .= output]
+  ["prepare-offline",transaction,output]->do
+    input<-makeAbsolute transaction; destination<-makeAbsolute output
+    dispatch "prepare-offline" destination (Just input)
+  ["submit-file",signed]->makeAbsolute signed >>= \input->dispatch "submit-file" input Nothing
   ["sign",key,transaction]->do
     keyfile<-makeAbsolute key
     input<-makeAbsolute transaction
     dispatch "sign" keyfile (Just input)
-  [command,key] | command/="sign" && command `elem` map fst commands->makeAbsolute key >>= \keyfile->dispatch command keyfile Nothing
-  _->die "Usage: ecx-token configure | ecx-token sign KEYFILE TRANSACTION.json | ecx-token COMMAND KEYFILE (commands: keygen, prepare, check, submit, recover, status, inspect-policy, address, associated-address, metadata-address; settings: ./.ecx-token/ecx-token.json)"
+  [command,key] | command `notElem` ["sign","prepare-offline"] && command `elem` map fst commands->makeAbsolute key >>= \keyfile->dispatch command keyfile Nothing
+  _->die "Usage: ecx-token configure | sign KEYFILE TRANSACTION.json | import-key EXPORT.txt KEYFILE | prepare-offline TRANSACTION.json PREPARED.json | sign-offline KEYFILE PREPARED.json SIGNED.json | submit-file SIGNED.json | COMMAND KEYFILE (keygen, prepare, check, submit, recover, status, inspect-policy, address, associated-address, metadata-address; settings: ./.ecx-token/ecx-token.json)"
 
 commands :: [(String,[Key])]
 commands=
   [("prepare",["requestFile"]),("check",["network","rpc","maxFeeLamports","preparedFile"])
   ,("sign",["network","rpc","maxFeeLamports","attemptFile"])
+  ,("prepare-offline",["network","rpc","maxFeeLamports"])
+  ,("submit-file",["network","rpc","maxFeeLamports"])
   ,("submit",["network","rpc","maxFeeLamports","attemptFile"])
   ,("recover",["rpc","verifierRpc","attemptFile"]),("status",["network","rpc","attemptFile"])
   ,("inspect-policy",["network","rpc","verifierRpc","mint","owner","custodyAta","mintAuthority"])
@@ -155,7 +177,7 @@ dispatch command key transactionFile=do
       (request,unsigned)<-path "preparedFile" >>= readPrepared
       cost<-(O.runSafe . O.Request) (Network.Check selected endpoint limit request unsigned)
       L.putStrLn $ encode $ object ["feeLamports" .= cost,"simulationOnly" .= True]
-    "sign"->do
+    signing | signing `elem` ["sign","prepare-offline"]->do
       selected<-network; endpoint<-field "rpc"; limit<-fee
       input<-maybe (die "sign requires TRANSACTION.json") pure transactionFile
       requestBytes<-readBounded input
@@ -163,9 +185,17 @@ dispatch command key transactionFile=do
       recent<-(O.runSafe . O.Request) (Network.RecentBlockhash selected endpoint)
       request<-either die pure (parseEither (parseIntent recent) intent)
       unsigned<-(O.runSafe . O.Request) (Prepare sdkLibraryPath request)
-      output<-path "attemptFile"
-      identifier<-(O.runCritical . O.Request) (Network.Sign sdkLibraryPath selected endpoint limit request unsigned key output)
-      L.putStrLn $ encode $ object ["signature" .= identifier,"saved" .= output]
+      if signing=="prepare-offline" then do
+        _<-(O.runSafe . O.Request) (Network.Check selected endpoint limit request unsigned)
+        savePrivate key (L.toStrict $ encode $ object ["request" .= request,"unsignedTransaction" .= unsigned])
+        putStrLn $ "Saved "<>key<>". Transfer, sign and submit promptly: the blockhash expires after about 150 slots."
+      else do
+        output<-path "attemptFile"
+        identifier<-(O.runCritical . O.Request) (Network.Sign sdkLibraryPath selected endpoint limit request unsigned key output)
+        L.putStrLn $ encode $ object ["signature" .= identifier,"saved" .= output]
+    "submit-file"->do
+      operation<-Network.Submit <$> network <*> field "rpc" <*> fee <*> pure key
+      (O.runCritical . O.Request) operation >>= L.putStrLn . encode
     "submit"->do
       operation<-Network.Submit <$> network <*> field "rpc" <*> fee <*> path "attemptFile"
       (O.runCritical . O.Request) operation >>= L.putStrLn . encode

@@ -12,7 +12,7 @@ library
   hs-source-dirs: .
   exposed-modules: Token, Token.Signing, Token.Network, Token.Metadata, Token.Operation
   build-depends: base >=4.20 && <4.23, ecx-bridge, ecx-bridge:chain,
-    aeson, bytestring, text, binary, unix, filepath, crypton, ram, base64-bytestring, http-client
+    aeson, bytestring, text, binary, unix, filepath, crypton, ram, base64-bytestring, base58-bytestring, http-client
 
 test-suite token-test
   type: exitcode-stdio-1.0

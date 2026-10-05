@@ -1,10 +1,10 @@
 {-# LANGUAGE GADTs #-}
--- Key creation and pure saved-intent validation. Network owns signing authority.
+-- Offline key import/signing; no RPC or custody capabilities.
 module Token.Signing (Critical(..),evalCritical,Saved(..),validateSaved,validateSuccessorSaved) where
 import Token
 import Bridge.Error (reject)
 import Bridge.SolanaMessage (Transaction(..),base58,publicKey,decodeTransaction)
-import Bridge.AdminKey (savePrivate,newPrivatePath)
+import Bridge.AdminKey (readPrivate,readKey,savePrivate,newPrivatePath)
 import Bridge.AdminStatus (Recovery(..),validateRecovery,validateSuccessor)
 import Crypto.Random (getRandomBytes)
 import Crypto.Error (CryptoFailable(..))
@@ -14,9 +14,12 @@ import Data.Aeson
 import Control.Monad (unless)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Base64 as B64
+import qualified Data.ByteString.Base58 as B58
+import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as L
 import Data.Text (Text)
 import qualified Data.Text.Encoding as T
+import Data.Char (isSpace)
 
 data Saved = Saved
   { savedRequest :: Request, savedId :: Text, savedTransaction :: Text
@@ -58,6 +61,8 @@ validateSuccessorSaved parent parentHash child=do
 
 data Critical a where
   GenerateKey :: FilePath -> Critical Text
+  ImportKey :: FilePath -> FilePath -> Critical Text
+  SignOffline :: FilePath -> Request -> Text -> FilePath -> Critical Text
 
 evalCritical :: Critical a -> IO a
 evalCritical (GenerateKey output)=do
@@ -68,3 +73,30 @@ evalCritical (GenerateKey output)=do
       bytes=BA.convert seed<>public :: B.ByteString
   savePrivate output (L.toStrict $ encode $ B.unpack bytes)
   pure (base58 public)
+evalCritical (ImportKey input output)=do
+  newPrivatePath output
+  exported<-readPrivate input
+  let trimmed=B8.dropWhileEnd isSpace (B8.dropWhile isSpace exported)
+  unless (B.length trimmed>=64 && B.length trimmed<=88)
+    (reject "expected_base58_solana_64_byte_private_key")
+  bytes<-case B58.decodeBase58 B58.bitcoinAlphabet trimmed of
+    Just bytes | B.length bytes==64->pure bytes
+    _->reject "expected_base58_solana_64_byte_private_key"
+  secret<-case Ed.secretKey (B.take 32 bytes) of
+    CryptoPassed key->pure key
+    _->reject "invalid_imported_key"
+  let public=BA.convert (Ed.toPublic secret) :: B.ByteString
+  unless (B.drop 32 bytes==public) (reject "imported_key_public_half_mismatch")
+  savePrivate output (L.toStrict $ encode $ B.unpack bytes)
+  pure (base58 public)
+evalCritical (SignOffline keyfile request unsigned output)=do
+  newPrivatePath output
+  Transaction _ _ message<-either reject pure (validate request unsigned)
+  secret<-readKey (authority request) keyfile
+  let signature=BA.convert (Ed.sign secret (Ed.toPublic secret) message) :: B.ByteString
+      identifier=base58 signature
+      signed=T.decodeUtf8 $ B64.encode (B.singleton 1<>signature<>message)
+      saved=Saved request identifier signed Nothing
+  _<-either reject pure (validateSaved saved)
+  savePrivate output (L.toStrict $ encode saved)
+  pure identifier
