@@ -7,6 +7,7 @@ Build from the repository root, then put the executable on this shell's PATH:
 
 ```sh
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
 curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
 ghcup install cabal
 cabal update
