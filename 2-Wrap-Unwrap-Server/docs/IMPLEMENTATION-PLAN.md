@@ -135,26 +135,28 @@ and node-integration VMs have been deleted. Retain the funded pilot and evidence
 | Production operation | Operator supplies independent RPC capacity, host/domain/support details and confirms issuer/reserve arrangements. |
 | Public release | Independent security/distribution review, operator-controlled public signing key and explicit publication/activation decision. |
 
-## Local checklist accounting (2026-10-05)
+## Active ten-item worklist (2026-10-05)
 
-The latest agreed autonomous-work list contains eight items, not nine. Keep these
-identities stable instead of treating the seven broad sequence headings above as
-an interchangeable completion count. Six are complete; two retain open work.
+This replaces the earlier eight-item local accounting with the user's newly
+approved ten-item list. Preserve these numbers in progress reports. Passing a
+subcheck does not close its entire item or the external release gates above.
 
-| Item | Status | Evidence or remaining condition |
-| --- | --- | --- |
-| 1. Token CLI | Complete | Configuration/signing contract and 10,000-lamport default committed and tested. |
-| 2. Administration acceptance | Complete for agreed cases | Token metadata/creation/expiry and token/pool finalized-failure recovery have live two-provider evidence; replay and superseded-parent rejection passed. |
-| 3. Native recovery cases | Open | Confirmation loss/return, rebroadcast and same-host restoration passed. Permanent confirmed source loss, backing coverage/return and changed confirmed winner still need valid alternate L2L history. |
-| 4. Automated interface checks | Complete | Saved-order reload, instructions, status/refund presentation and network-error checks recorded in release evidence. Actual wallet approval remains an external gate. |
-| 5. Builds/installations | Complete locally | Both Linux architectures passed build/tests and clean install/upgrade/reboot; installer native-node, HTTPS backup and locked-wallet restoration passed. |
-| 6. Deployment isolation | Complete locally | Separate service/database identities, denied key access and restricted native RPC checked under actual installed accounts. |
-| 7. Internal review follow-through | Open | Input-boundary tests and dependency/source inventories are complete; remaining parser reachability and distribution obligations are explicitly unresolved in DEPENDENCY-REVIEW.md. |
-| 8. Review candidate/handoff | Complete | Frozen funded runtime, committed source, artifact identities, operating/recovery instructions and external gates are recorded. This is not public-release approval. |
+| Item | Current work and completion boundary |
+| --- | --- |
+| 1. Internal code review | Trace authorization, DSL dispatch, signer access, accounting, deposits, payouts, refunds and recovery; fix demonstrated defects. Current pass confirms capability-bound reads/idempotency, saved signer decisions with a second read, and single-winner settlement. Continue the remaining paths. |
+| 2. Dependency investigation | Preserve completed source/notice and HTTP parser checks; resolve or explicitly scope remaining parser, compiler/runtime, embedded-code and license findings for independent review. |
+| 3. Locally executable tests | Batch relevant QuickCheck, PostgreSQL, concurrency/restart and recovery contracts. All three Cabal suites passed in the current batch after selecting the retained populated Cargo cache; SDK failures now expose bounded diagnostics. PostgreSQL contracts remain a separate executable check. |
+| 4. Real Signet fixtures | Investigate usable public alternate history. The upstream throwaway challenge differs from L2L; obtaining a suitable real fixture/miner cooperation remains necessary for funded conflict acceptance. |
+| 5. Browser interface | Retain completed form, instructions, saved-order, status/refund and error evidence; prepare an actual wallet flow without claiming a tester client is wallet acceptance. User approval remains separate. |
+| 6. Existing test deployments | Operate only environments needed by these checks, preserve funded state and stop unused services. All task VMs were stopped at handoff. |
+| 7. Authorized chain tests | Retain completed Mainnet round trip and token/pool recovery evidence; run another funded case only for a new justified requirement, within authorized limits. |
+| 8. Local backup/recovery | Retain encryption, consistent snapshot, restoration, permissions and fencing evidence; close demonstrated local gaps. Physical independence requires another host/service. |
+| 9. Production preparation | Complete deployable RPC/HTTPS/service/monitoring configuration and procedures; actual host/domain/provider/issuer details remain operator prerequisites. |
+| 10. Review handoff | Keep exact source/artifact identities, evidence, concise instructions, cleanup and GitHub synchronized; do not regenerate frozen artifacts for documentation-only changes. |
 
-Do not repeat completed builds, installation drills or the Mainnet round trip
-without a relevant source change. Next work is a valid native reorg fixture and
-resolution of specific review findings, followed by the external gates above.
+Use the existing expensive build and real-chain evidence. Do not repeat completed
+acceptance merely to increment a counter. Final completion requires the scope of
+each item, with genuine external dependencies stated explicitly.
 
 ## Clean reinstall contract
 

@@ -70,7 +70,10 @@ checks=sequence
       result<-timeout 120000000 (readProcessWithExitCode "cargo"
         ["test","--locked","--offline","--manifest-path",sdkSourceDirectory</>"Cargo.toml",
          "--target-dir",sdkTargetDirectory,"--lib","-j1"] "")
-      pure $ case result of Just (ExitSuccess,_,_)->True; _->False
+      pure $ case result of
+        Just (ExitSuccess,_,_)->property True
+        Just (code,_,err)->counterexample (show code<>"\n"<>take 4000 err) False
+        Nothing->counterexample "SDK contract check exceeded 120 seconds" False
   , check "worker loop backs off after policy errors and propagates shutdown" $ once $ ioProperty $ do
       calls<-newIORef (0::Int)
       let refuse :: forall a. Request 'Worker 'Critical a -> IO a
