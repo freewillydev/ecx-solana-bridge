@@ -36,6 +36,7 @@ cd "$HOME/.local/share/ecx-emsdk"
 ./emsdk install 3.1.74
 ./emsdk activate 3.1.74
 source ./emsdk_env.sh
+ghcup config add-release-channel cross
 emconfigure ghcup install ghc --set javascript-unknown-ghcjs-9.12.2
 
 cd ~/ecash/ecx-solana-bridge/
