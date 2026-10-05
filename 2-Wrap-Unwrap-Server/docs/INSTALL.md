@@ -73,6 +73,35 @@ SSH-forwarding gap led to explicit `DenyUsers` policy for both service accounts;
 `nologin` alone was insufficient. These checks do not establish funded restoration,
 backup delivery or independent-host disaster recovery; see [release evidence](RELEASE-REVIEW.md).
 
+## Public HTTPS and request limits
+
+Use [config/nginx.example.conf](../config/nginx.example.conf) inside Nginx's
+`http` context, for example as `/etc/nginx/conf.d/ecx.conf` on Ubuntu. Replace the
+domain, TLS certificate/key paths and upstream port with the actual deployment.
+Provision a valid certificate and renewal before public use; do not use the
+signer's private certificate/key. Remove conflicting virtual-host configuration,
+then run `sudo nginx -t` before reloading Nginx. Expose only HTTPS (and an explicitly
+chosen certificate-renewal method); keep the worker, signer, PostgreSQL and native
+RPC loopback/private. This example assumes direct ingress. A CDN requires separately
+reviewed trusted-proxy addresses; never accept arbitrary forwarded client IPs.
+
+The example bounds request bodies and applies per-IP/site request limits, with
+stricter order-creation limits including trailing-slash variants. These are initial
+operator-adjustable limits, not a throughput guarantee. It disables upstream retries
+and proxy caching, preserves authorization and excludes URLs/credentials/bodies from
+access logs. Network-level saturation still needs hosting-provider protection.
+See the upstream [rate-limit](https://nginx.org/en/docs/http/ngx_http_limit_req_module.html)
+and [proxy](https://nginx.org/en/docs/http/ngx_http_proxy_module.html) documentation.
+
+Ubuntu Nginx 1.24 acceptance used this exact template with isolated loopback ports,
+a temporary trusted test certificate and an HTTP test backend: syntax/TLS passed,
+authorization was preserved, spoofed forwarding was overwritten, a 4,097-byte body
+returned 413 without reaching upstream, repeated order requests returned 429, and
+a failed upstream connection produced one backend attempt. Logs excluded the
+credential canary. This validates proxy behavior, not chain settlement, public DNS,
+certificate renewal or load capacity. Temporary processes/files were removed and
+the VM stopped; the funded bridge stayed stopped.
+
 ## Restic security candidate
 
 The restic source is an external deployment dependency, not application code.

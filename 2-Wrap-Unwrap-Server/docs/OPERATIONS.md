@@ -89,6 +89,40 @@ all HTTPS attempts consume the budget. Timeouts, other transport failures, unkno
 methods, signing mutations and sends are not automatically retried.
 Pacing does not remove background observation or replace public-facing DDoS controls.
 
+### Installed monitoring and RPC budget
+
+Set the per-process RPC allowance with `sudo systemctl edit ecx-bridge-worker`
+and the corresponding signer unit, using:
+
+```ini
+[Service]
+Environment=ECX_RPC_REQUESTS_PER_SECOND=2
+```
+
+Budget both processes and other clients together. After an orderly pause, apply
+the drop-ins with daemon-reload and a controlled service restart; startup remains
+paused until checked resume. A rate setting does not increase a provider's hourly
+quota. Keep authenticated endpoint URLs out of monitoring output and access logs.
+
+On the installed host, these read-only checks use existing service/DSL interfaces:
+
+```sh
+systemctl is-active ecx-bridge-worker ecx-bridge-signer
+printf '%s\n' '{"operation":"status"}' | sudo -u ecxbridgew /opt/ecx-bridge/current/bin/ecx-bridge operator /etc/ecx-bridge/worker/config.json
+curl --fail --silent --show-error --max-time 10 http://127.0.0.1:8080/api/v1/config
+```
+
+Use the actual configured port. Monitor the public HTTPS URL from outside the host
+as well. HTTP 200 alone is not readiness: inspect the configuration's
+`availability.available` and `availability.reason`. The private status reports `paused`,
+`pauseReason`, `criticalSequence` and `backupSequence`. Alert on unexpected pause,
+service failure, sustained unavailable intake, persistent backup lag, disk pressure,
+certificate expiry and failures reported by the independent backup destination.
+Brief sequence lag during a checkpoint is expected; do not automatically resume or
+lower backup requirements to clear an alert. Route alerts to the chosen operator
+without publishing order capabilities, keys or RPC URLs. Alert delivery, thresholds
+and the public domain remain deployment-specific acceptance work.
+
 ### Rotate signer transport credentials
 
 Pause the worker and stop both services, preserving the ledger and every saved

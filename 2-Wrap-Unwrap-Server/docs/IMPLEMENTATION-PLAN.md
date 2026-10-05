@@ -151,7 +151,7 @@ subcheck does not close its entire item or the external release gates above.
 | 6. Existing test deployments | Operate only environments needed by these checks, preserve funded state and stop unused services. All task VMs were stopped at handoff. |
 | 7. Authorized chain tests | Retain completed Mainnet round trip and token/pool recovery evidence; run another funded case only for a new justified requirement, within authorized limits. |
 | 8. Local backup/recovery | Complete locally: the fresh disposable PostgreSQL/restic batch passed snapshot consistency, corruption/password refusal, encrypted restore, exact attempts/postings and fencing checks. Test database/role were removed. Physical independence requires another host/service. |
-| 9. Production preparation | Complete deployable RPC/HTTPS/service/monitoring configuration and procedures; actual host/domain/provider/issuer details remain operator prerequisites. |
+| 9. Production preparation | RPC/service/monitoring procedures and an optional HTTPS Nginx template are prepared. Ubuntu proxy acceptance passed TLS, auth forwarding, spoofed-IP overwrite, body/rate limits and no upstream retry. Actual domain/cert renewal, alert delivery, provider capacity and issuer details remain deployment prerequisites. |
 | 10. Review handoff | Keep exact source/artifact identities, evidence, concise instructions, cleanup and GitHub synchronized; do not regenerate frozen artifacts for documentation-only changes. |
 
 Use the existing expensive build and real-chain evidence. Do not repeat completed
