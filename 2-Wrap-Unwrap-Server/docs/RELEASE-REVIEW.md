@@ -1,10 +1,13 @@
 # Release review
 
 The latest source adds direct public WarpTLS in the existing worker, replacing the
-optional Nginx example. The macOS native build and bridge Cabal suite pass actual
+optional Nginx example. The macOS and Ubuntu 24.04 ARM64 root builds and bridge Cabal suites pass actual
 HTTPS, plaintext rejection, oversized-body rejection, incomplete TLS configuration
 and unsafe-key refusal, plus concurrent global admission/refill checks. Temporary
-listeners and certificates are cleaned up. These are local transport checks, not
+listeners and certificates are cleaned up. The Linux fixture explicitly sets its
+certificate permissions instead of inheriting a group-writable umask; startup
+exceptions now propagate into the test. The Ubuntu build reused its dependency
+cache and prebuilt GHC-JavaScript browser assets. These are local transport checks, not
 public-domain/certificate-renewal or load acceptance. The historical funded runtime
 and Linux packages below predate this addition and must not be described as testing
 it. The separate signer and financial evaluator paths are retained.

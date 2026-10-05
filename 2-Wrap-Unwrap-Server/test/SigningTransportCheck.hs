@@ -11,7 +11,7 @@ import Data.Bits (xor)
 import Data.Word (Word8)
 import Control.Monad (forM_)
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (withAsync,replicateConcurrently)
+import Control.Concurrent.Async (withAsync,link,replicateConcurrently)
 import qualified Network.Socket as NS
 import System.Environment (lookupEnv,setEnv,unsetEnv)
 import Bridge.SDKBuild (sdkSourceDirectory,sdkTargetDirectory)
@@ -419,7 +419,7 @@ releaseAuthentication fault seed arch = bracket temporary removeDirectoryRecursi
     pure path
 
 -- Isolated HTTPS transport only: no node, ledger, signing or external requests.
-publicTLSContract :: FilePath -> IO Bool
+publicTLSContract :: FilePath -> IO Property
 publicTLSContract dir = do
   let cert=dir</>"public.pem"; key=dir</>"public.key"
       names=["ECX_PUBLIC_TLS_CERT","ECX_PUBLIC_TLS_KEY"]
@@ -428,6 +428,7 @@ publicTLSContract dir = do
     (made,_,_)<-readProcessWithExitCode "openssl" ["req","-x509","-newkey","rsa:2048","-nodes","-keyout",key,"-out",cert
       ,"-days","1","-subj","/CN=127.0.0.1","-addext","subjectAltName=IP:127.0.0.1"] ""
     require (made==ExitSuccess) "public_certificate_fixture_failed"
+    setFileMode cert 0o644
     setFileMode key 0o600
     app<-boundedApplication 1 "busy" (\_ respond->respond $ responseLBS status200 [] "tls-ok")
     setEnv "ECX_PUBLIC_TLS_CERT" cert
@@ -447,9 +448,11 @@ publicTLSContract dir = do
         ready n=do
           (code,body,_)<-fetch "https" []
           if code==ExitSuccess && body=="tls-ok200" then pure True else threadDelay 50000 >> ready (n-1)
-    withAsync (runPublicServer (read port) app) $ \_->do
+    withAsync (runPublicServer (read port) app) $ \server->do
+      link server
       serving<-ready (20::Int)
+      probe<-fetch "https" []
       (_,plain,_)<-fetch "http" []
       (_,large,_)<-fetch "https" ["--data-binary",replicate 4097 'x']
-      pure (serving && isLeft partial && isLeft unsafe && not("tls-ok" `T.isInfixOf` T.pack plain)
+      pure $ counterexample (show (serving,partial,unsafe,probe,plain,large)) (serving && isLeft partial && isLeft unsafe && not("tls-ok" `T.isInfixOf` T.pack plain)
         && "413" `T.isSuffixOf` T.pack large)
