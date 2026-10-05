@@ -221,6 +221,19 @@ WantedBy=multi-user.target
 UNIT
   chmod 0644 "/etc/systemd/system/ecx-bridge-$role.service"
 done
+# A no-login shell alone still permits SSH forwarding with an authorized key.
+if [ -x /usr/sbin/sshd ]; then
+  install -d -m 0755 /etc/ssh/sshd_config.d
+  printf '%s\n' 'DenyUsers ecxbridgew ecxbridges' > /etc/ssh/sshd_config.d/70-ecx-bridge.conf
+  chown root:root /etc/ssh/sshd_config.d/70-ecx-bridge.conf
+  chmod 0644 /etc/ssh/sshd_config.d/70-ecx-bridge.conf
+  /usr/sbin/sshd -t
+  denied=$(/usr/sbin/sshd -T | sed -n 's/^denyusers //p' | tr '\n' ' ')
+  for account in "$worker" "$signer"; do
+    case " $denied " in *" $account "*) ;; *) fail 'sshd must include bridge account denial';; esac
+  done
+  systemctl try-reload-or-restart ssh.service
+fi
 systemctl daemon-reload
 systemctl enable ecx-bridge-worker ecx-bridge-signer
 printf '%s\n' "$release" > "$config/installed"

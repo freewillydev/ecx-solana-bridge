@@ -65,12 +65,15 @@ def sign(key, directory):
     artifacts = {}
     for arch in ARCHES:
         path = directory / filename(arch)
+        if not path.exists() and not path.is_symlink():
+            continue
         info = regular(path, 512*1024*1024)
         checksum = digest(path)
         saved = path.with_suffix('.run.sha256').read_text().split()
         require(saved == [checksum, path.name], 'Candidate checksum differs')
         artifacts[arch] = dict(filename=path.name, bytes=info.st_size, sha256=checksum)
-    index = dict(format=1, os='ubuntu-24.04', algorithm='Ed25519',
+    require(artifacts, 'At least one actual architecture artifact is required')
+    index = dict(format=2, os='ubuntu-24.04', algorithm='Ed25519',
         publicKeySha256=hashlib.sha256(public_der(key, True)).hexdigest(),
         artifacts=artifacts)
     with (directory / INDEX).open('xb') as output:
@@ -99,10 +102,11 @@ def authenticated_index(key, directory, snapshot):
     openssl('pkeyutl', '-verify', '-rawin', '-pubin', '-inkey', key,
             '-in', index_path, '-sigfile', signature_path)
     index = json.loads(index_path.read_bytes())
-    require(index.get('format') == 1 and index.get('os') == 'ubuntu-24.04'
+    require(index.get('format') == 2 and index.get('os') == 'ubuntu-24.04'
         and index.get('algorithm') == 'Ed25519'
         and index.get('publicKeySha256') == hashlib.sha256(public_der(key)).hexdigest()
-        and set(index.get('artifacts', {})) == set(ARCHES), 'Unsupported signed index')
+        and isinstance(index.get('artifacts'), dict)
+        and bool(index['artifacts']) and set(index['artifacts']) <= set(ARCHES), 'Unsupported signed index')
     return index
 
 
@@ -117,6 +121,7 @@ def verify_or_install(key, directory, arch, install, arguments):
     with tempfile.TemporaryDirectory(prefix='ecx-release-') as temporary:
         snapshot = Path(temporary)
         index = authenticated_index(key, directory, snapshot)
+        require(arch in index['artifacts'], 'Requested architecture is not in this release')
         artifact = index['artifacts'][arch]
         name = filename(arch)
         require(artifact.get('filename') == name, 'Unexpected signed filename')

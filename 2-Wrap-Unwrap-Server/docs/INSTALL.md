@@ -2,8 +2,8 @@
 
 The current server is built through Cabal. The candidate installer under `install/`
 targets the rebuilt server; it is **not yet a certified release**. Do not use an old
-release built for the retired server. Clean-host ARM64/x86-64, authenticated package,
-reboot and restored-operation acceptance remain open.
+release built for the retired server. ARM64 packaged fresh-install and reboot checks have passed on a clean Ubuntu VM.
+The final hardened package, x86-64 and funded restored-operation gates remain open.
 
 ## Candidate installation and upgrade
 
@@ -17,9 +17,11 @@ This invokes the existing Cabal build, packages its executable, SDK, GHC-JavaScr
 assets, all migrations, retained notices and the supplied restic 0.19.1 client.
 It creates a self-contained `.run` artifact and checksum. Artifact authentication
 uses the retained Ed25519 `scripts/release-auth` protocol; the trust key must arrive
-through a separate reviewed channel. Both architectures must be built and reviewed
-before signing the release index. Final restic/platform notice coverage remains a
-distribution gate. The candidate builder itself still needs end-to-end acceptance.
+through a separate reviewed channel. The format-2 index authenticates only the architectures actually built and reviewed;
+requesting an absent architecture is refused. Old format-1 indices are rejected.
+Signing an ARM64 candidate does not establish x86-64 acceptance. Final restic/platform notice coverage remains a
+distribution gate. The actual ARM64 builder and authenticated fresh-install path have been exercised;
+the executable matched the frozen Mainnet-tested binary exactly.
 
 Prepare `/root/ecx-material` as root-owned mode 0700, with regular mode-0600 files:
 
@@ -41,7 +43,8 @@ sudo 2-Wrap-Unwrap-Server/scripts/release-auth install /trusted/release-public.p
 ```
 
 Use `x86_64` on that architecture. Installation provisions PostgreSQL 16, separate
-non-login worker/signer users, restricted database roles, signer TLS/authentication,
+non-login worker/signer users with explicit SSH denial, restricted database roles,
+signer TLS/authentication,
 all eight schema migrations, a fresh paused ledger/fence and systemd units. It leaves
 services stopped, enabled for boot; every worker startup requires checked resume.
 It does not create chain assets, provision the native daemon, initialize remote
@@ -59,9 +62,11 @@ existing state; repeating `upgrade` preserves it. Interrupted installation leave
 its state for inspection, never automatically erases or recreates custody. This is
 not a wipe/restore command. Existing funded custody must follow [recovery](OPERATIONS.md#restore-or-upgrade).
 
-The installer body has been exercised against actual PostgreSQL in the existing
-Ubuntu ARM64 VM with a newly generated unfunded key. This is narrower than a
-clean-host install or a funded restoration; see [release evidence](RELEASE-REVIEW.md).
+The installer body and actual signed ARM64 package have been exercised with newly
+generated unfunded custody, including a clean Ubuntu VM and cold boot. A reproduced
+SSH-forwarding gap led to explicit `DenyUsers` policy for both service accounts;
+`nologin` alone was insufficient. These checks do not establish funded restoration,
+backup delivery or independent-host disaster recovery; see [release evidence](RELEASE-REVIEW.md).
 
 ## Build
 

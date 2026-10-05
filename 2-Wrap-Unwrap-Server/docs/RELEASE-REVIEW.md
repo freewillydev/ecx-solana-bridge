@@ -146,6 +146,34 @@ Private evidence is under `installer-acceptance-20261004`. The existing funded p
 was not replaced. This is installer-body evidence, not a clean-host, authenticated
 package-builder, x86-64, reboot or funded restore result. Those gates stay open.
 
+The actual ARM64 package builder then ran through Cabal on the cached Ubuntu build,
+producing a 33,747,993-byte candidate from `18cb881`. Its executable hash exactly
+matched frozen runtime `54c2bfd`; payload inspection found all eight migrations
+and no symlink/traversal entries. A separately held acceptance-test Ed25519 key
+signed the actual ARM64 artifact. Format-2 release indices now list only built
+architectures; missing-architecture and empty-release cases are refused, with the
+existing signature/key/index/artifact tampering cases retained. The Cabal bridge
+suite passed the expanded QuickCheck contract. This does not certify x86-64 or
+establish a public release trust key.
+
+The authenticated fresh-install command passed on a new pinned Ubuntu 24.04 ARM64
+VM with no PostgreSQL package, bridge state or service identities beforehand.
+Both actual systemd services started, the customer configuration API responded,
+and signer HTTPS verified its generated certificate and returned 401 without
+authentication. After a cold boot, both services started automatically, the public
+configuration was unchanged and the ledger remained paused at sequence zero.
+The unfunded acceptance used loopback-only IP policy; it did not contact chain
+providers or demonstrate native-wallet/backups/restored funds on this new host.
+
+This inspection reproduced a real SSH policy gap: a service-owned authorized key
+could forward HTTP through SSH despite the account's `nologin` shell. Explicit
+`DenyUsers ecxbridgew ecxbridges` blocked both service accounts with those keys.
+The installer now writes and checks that effective policy and reloads SSH when it
+is installed. Final packaged-upgrade acceptance of this hardening remains next;
+do not treat the earlier `18cb881` installer as the completed release. The payment
+runtime remains frozen. Private `clean-*`, `package-*` and `ssh-service-*` evidence
+is under `installer-acceptance-20261004`.
+
 ## Evidence already obtained
 
 | Area | Evidence and limit |
