@@ -1,44 +1,19 @@
 # Release review
 
-The application is available for source review; the pilot interface is currently
-offline and public release remains open. The Ubuntu ARM64 pilot has `3e34b01`
-deployed, executable SHA-256
-`67beccef91cd7d6e61ab35dc5e6be63fd435d2845b137fbf167f9d4f4939ec37`.
-Its real canonical Mainnet unwrap is paid: 3,000 wrapped base units in, 30 fee,
-2,970 native units out, with a separate 141-unit network cost. The 1,000-unit native
-return deposit is confirmed; its saved 990-unit wrapped payout remains pending.
-Alchemy is the primary RPC; a keyed OnFinality endpoint is the independent verifier.
-Observed headers reported limits of 40/minute and 200/hour. OnFinality assigns the
-relevant [Solana methods two response units each](https://documentation.onfinality.io/support/solana),
-so these limits allow roughly 20 calls/minute and 100/hour, not 200 requests/hour.
-Closed retry and resume passed, but recovery exhausted that hourly quota before
-broadcast. Both services are stopped pending sufficient verified capacity;
-no new transaction was broadcast
-by this retry. The private Mac interface at http://127.0.0.1:61992/ is offline.
+The application is available for source review; public release remains open.
+The Ubuntu ARM64 pilot has `0d144fd` deployed, executable SHA-256
+`dbd5ccba371228edf568d9b02879f3be660ab7b7d0d5b43c88441933e945ff11`.
+Its canonical Mainnet unwrap is paid: 3,000 wrapped base units in, 30 fee,
+2,970 native units out, with a separate 141-unit network cost. The confirmed
+1,000-unit return deposit still has an unpaid 990-unit wrapped obligation.
+Alchemy is primary; the documented public Mainnet endpoint is the current pilot
+verifier. Both services and the VM are stopped; the private interface is offline.
 
-Generations 0, 1 and 2 are retired with expiry evidence. After partial quota refill,
-the normal paused-worker recovery verified generation 2 through both providers
-and retained proof hash
-`3ec0a47330399736fbbae26f55af6d6fb47fbae3a3ed43c129e0e2fd07e64166`.
-Its signed attempt `4UNYK88afBe6FXDanTNdaAZ6ZWWPFiusYpo7Xys3NiHRDnYqrUpXwXqi1hMUeWMkuY2fSZuhGVR19mQjv4QRFBL7`
-still has no broadcast sequence. The worker stopped after that bounded recovery;
-the signer remained stopped, and no new generation was authorized. Critical
-sequence is 27 and acknowledged backup coverage is 25.
-The 990-unit obligation remains pending, so the Mainnet round trip is incomplete.
-
-Source inspection estimates approximately 26 verifier calls for a fresh payout
-cycle with the pilot's current single-page history, before retries or additional
-refreshes. That exceeds the observed 20-call minute allowance if completed within
-one minute. Signed-to-send work alone needs at least 12 verifier calls and a full
-custody checkpoint. An hourly reset or per-second pacing cannot establish reliable
-completion on this allocation; increase independent-provider capacity before
-authorizing another generation.
-
-Alternative public endpoints were rejected: SolanaTracker initially passed basic
-checks but omitted immutable history origins (`solana_history_gap`); VibeStation
-rate-limited history reads. The keyed OnFinality endpoint was restored. These probes
-establish neither production provider capacity nor an SLA, and do not complete
-blockhash-window acceptance.
+Earlier keyed OnFinality attempts exhausted its observed 40/minute and 200/hour
+response-unit limits. Relevant methods cost two response units. Alternative
+SolanaTracker history omitted immutable origins and VibeStation rate-limited reads.
+The current public verifier passed exact anchored history checks; this does not
+establish production capacity or an SLA.
 
 The full macOS root build passed on `3b1b3ba`; all three macOS Cabal suites passed
 on `3e34b01`. Linux ARM64 passed the full root build and bridge suite on `3e34b01`;
@@ -66,14 +41,27 @@ retired that exact attempt, and required remote backup caught up to critical
 sequence 32. Worker, signer, tunnel and VM stopped; no next generation was approved.
 The liability remains unpaid. The archive receiver still shares the physical Mac.
 
-The shared RPC boundary now retries this specific storage error only for
+The shared RPC boundary retries this specific storage error only for
 `getTransaction`, `getSignatureStatuses` and `getSignaturesForAddress`, sharing the
 existing two-retry budget with connection closures and rate limits. Persistent
 failure retains its error; writes and other errors never gain retry permission.
-Cabal bridge tests and native executable build passed. This source fix is **not yet
-deployed to the Linux pilot**, whose executable remains `3e34b01`; a funded retry
-must not be presented as completed validation of the new code. Private evidence is
-retained in the Mainnet deployment's `public-mainnet-*` and `public-verifier-*` files.
+That fix (`0d144fd`) passed native/Linux ARM64 builds and Cabal bridge tests and
+was deployed. Generations 4 and 5 reached backed-up broadcast intent but stopped
+at the final 40-block lifetime guard before send. Pilot pacing of worker 4/signer 3
+requests per second per host did not resolve this. Both attempts are now retired
+with two-provider expiry evidence; critical sequence and backup coverage are 44.
+No generation 6 is approved. Private evidence is retained under `fixed-mainnet-*`
+and `paced-mainnet-*` in the deployment directory. The 990-unit payout is unpaid.
+
+Custody inspection now runs the two independent provider reads concurrently against
+one saved ledger snapshot. Each still validates finalized accounts and anchored
+history; balances must agree and the ledger revision is rechecked. An exception
+cancels the sibling inspection. This changes no signing permission, backup barrier,
+RPC count or blockhash floor. The existing PostgreSQL contract now proves concurrent
+entry and cancellation on failure from either side, alongside disagreement and
+stale-view refusal. Native server/checker builds, the complete disposable
+PostgreSQL/restic contract and Cabal bridge tests passed. This latency change is
+not yet deployed to Linux or validated by a funded Mainnet completion.
 
 ## Evidence already obtained
 

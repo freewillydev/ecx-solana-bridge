@@ -2059,6 +2059,25 @@ custodyContract database store fixtures reader = do
   expectStore "custody_solana_history_advanced" (inspect (pure 100) (pure ()) nativeCall (solCall 1000 $ T.replicate 63 "1"<>"2") Nothing settings)
   expectStore "custody_verifier_disagreement" (inspect (pure 100) (pure ()) nativeCall good (Just $ solCall 999 signature)
     settings {solanaSettings=solana {Solana.solanaVerifierRpc=Just "https://independent.example"}})
+  let dual primary verifier=inspect (pure 100) (pure ()) nativeCall primary (Just verifier)
+        settings {solanaSettings=solana {Solana.solanaVerifierRpc=Just "https://independent.example"}}
+  primaryStarted<-newEmptyMVar; verifierStarted<-newEmptyMVar
+  let rendezvous own other method params=do
+        when (method=="getMultipleAccounts") (putMVar own () >> takeMVar other)
+        good method params
+  concurrentResult<-timeout 5000000 $ dual (rendezvous primaryStarted verifierStarted) (rendezvous verifierStarted primaryStarted)
+  case concurrentResult of
+    Just (_,_,True,_)->pure ()
+    _->fail "custody providers did not inspect concurrently"
+  -- Failure on either provider cancels its sibling before returning to the caller.
+  forM_ [False,True] $ \swap->do
+    started<-newEmptyMVar; blocked<-newEmptyMVar; stopped<-newEmptyMVar
+    let waiting _ _=(putMVar started () >> takeMVar blocked) `finally` putMVar stopped ()
+        failing _ _=takeMVar started >> reject "rpc_error_-32019"
+    completed<-timeout 5000000 $ do
+      expectStore "rpc_error_-32019" (if swap then dual failing waiting else dual waiting failing)
+      takeMVar stopped
+    unless (completed==Just ()) (fail "custody provider failure left a running inspection")
   let advanced wallet method params=if method=="listsinceblock" then pure $ object ["lastblock" .= ("advanced"::T.Text)] else nativeCall wallet method params
   expectStore "custody_native_history_advanced" (inspect (pure 100) (pure ()) advanced good Nothing settings)
   -- A new mempool receipt can appear after scanning without advancing the tip.

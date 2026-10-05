@@ -6,14 +6,17 @@ findings; leave installer work last.
 Source ownership is in [ARCHITECTURE.md](ARCHITECTURE.md); verified evidence and
 remaining release gates are in [RELEASE-REVIEW.md](RELEASE-REVIEW.md).
 
-The Mainnet pilot has `3e34b01` deployed in the Ubuntu VM. Its native unwrap is
-`Paid` (3,000 gross → 2,970 net base units); the return wrap (1,000 → 990) remains
-pending. Alchemy is primary and keyed OnFinality is the verifier. Its observed
-40/minute, 200/hour response-unit quota was exhausted before broadcast; both services
-are stopped pending sufficient verified RPC capacity. Separate users/restricted
-roles, a separate administrative account, reboot-persistent signer login/sudo
-denial, shared-backup access isolation and sequence-9 snapshot restoration passed. Backup storage is on
-the same physical Mac; clean-host recovery and the Mainnet round trip remain open.
+The Mainnet pilot has `0d144fd` deployed in the Ubuntu ARM64 VM. Its native
+unwrap is paid (3,000 gross → 2,970 net base units); the return wrap (1,000 → 990)
+remains pending. Alchemy and the documented public Mainnet endpoint agreed on
+custody identity, anchored history and balances. Generations 4 and 5 stopped at
+the final blockhash-lifetime guard before send; both are retired with expiry proof.
+Critical sequence and acknowledged backup coverage are 44. Services and VM are
+stopped. The source now inspects both providers concurrently; local ledger and
+Cabal tests passed, but Linux deployment and funded latency acceptance remain.
+Separate identities/credentials and sequence-9 snapshot restoration passed.
+Backup storage shares the physical Mac; clean-host recovery and the Mainnet
+round trip remain open.
 
 ## Required product
 
@@ -36,11 +39,12 @@ separate explicit tooling and evidence; they are not bridge-custody privileges.
 
 ## Sequence
 
-While the independent Mainnet RPC is quota-blocked, do not repeatedly resume the
-pilot or create fresh signed generations. Advance the independent recovery and
-administration work below, using existing builds and grouped acceptance runs;
-keep packaging last. Revisit the pending Mainnet payout only when capacity is
-usable. A refreshed hourly allowance alone does not resolve the minute limit.
+Complete the payout's blockhash-window acceptance before further funded retries.
+Deploy the tested concurrent custody inspection and measure read-only validation
+latency first. Preserve both-provider agreement, required backups and the 40-block
+send floor. Do not repeatedly approve new signed generations to probe timing.
+Public RPC success is pilot evidence; production capacity remains a release gate.
+Keep packaging last.
 
 The latest local checkpoint is a confirmed additional-deposit Signet refund with
 correct principal/cost settlement, the original conversion still paid, and a

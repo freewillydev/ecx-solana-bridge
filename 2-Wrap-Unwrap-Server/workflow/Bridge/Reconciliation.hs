@@ -14,6 +14,7 @@ import qualified Bridge.SolanaHelper as H
 import Bridge.RPC (fieldValue,parseValue,rpc)
 import Bridge.Wire (Profile(..))
 import Control.Exception (IOException,catch,try)
+import Control.Concurrent.Async (concurrently)
 import Control.Monad (forM_)
 import Data.Aeson hiding (decode)
 import Data.Int (Int64)
@@ -69,12 +70,15 @@ inspectCustodyWith clock identity native solana verifier settings config reader 
       excluded=concatMap (familyExcludedInputs.snd) families
       points=[nativeOutpoint input | (first:_,_)<-families,input<-nativeInputs $ signedNativeTransaction first]
   require (length points==length(nub points)) "custody_native_family_input_overlap"
-  (slot,wrapped,sol)<-solanaBalances solana config view (\chain txid->evalRead reader $ ReadCustodyEvent chain txid)
-  case verifier of
-    Nothing->require (N.profile n/=CanonicalBeta) "independent_rpc_required"
+  let balances call=solanaBalances call config view (\chain txid->evalRead reader $ ReadCustodyEvent chain txid)
+  -- Independent read-only providers share a snapshot, not a DB connection.
+  -- Both must finish successfully; an exception cancels the other inspection.
+  (slot,wrapped,sol)<-case verifier of
+    Nothing->require (N.profile n/=CanonicalBeta) "independent_rpc_required" >> balances solana
     Just verify->do
-      (_,w,supply)<-solanaBalances verify config view (\chain txid->evalRead reader $ ReadCustodyEvent chain txid)
-      require ((w,supply)==(wrapped,sol)) "custody_verifier_disagreement"
+      (primary@(_,w,supply),(_,vw,vs))<-concurrently (balances solana) (balances verify)
+      require ((w,supply)==(vw,vs)) "custody_verifier_disagreement"
+      pure primary
   cursor<-headFor view "Native"
   depth<-evalRead reader (MaximumNativeDepth $ defaultNativeDepth settings)
   history<-native True "listsinceblock" [toJSON cursor,toJSON depth,Bool False,Bool True]
