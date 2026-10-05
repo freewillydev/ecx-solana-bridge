@@ -1,8 +1,8 @@
 # Release review
 
 The application is available for source review; public release remains open.
-The Ubuntu ARM64 pilot has `0d144fd` deployed, executable SHA-256
-`dbd5ccba371228edf568d9b02879f3be660ab7b7d0d5b43c88441933e945ff11`.
+The Ubuntu ARM64 pilot has `fd318c9` deployed, executable SHA-256
+`24825eacc77a85d973de856fac3589feda21fe0aa5752f088ff6a39296f3b266`.
 Its canonical Mainnet unwrap is paid: 3,000 wrapped base units in, 30 fee,
 2,970 native units out, with a separate 141-unit network cost. The confirmed
 1,000-unit return deposit still has an unpaid 990-unit wrapped obligation.
@@ -60,8 +60,18 @@ cancels the sibling inspection. This changes no signing permission, backup barri
 RPC count or blockhash floor. The existing PostgreSQL contract now proves concurrent
 entry and cancellation on failure from either side, alongside disagreement and
 stale-view refusal. Native server/checker builds, the complete disposable
-PostgreSQL/restic contract and Cabal bridge tests passed. This latency change is
-not yet deployed to Linux or validated by a funded Mainnet completion.
+PostgreSQL/restic contract and Cabal bridge tests passed. The Linux ARM64 build and bridge suite also passed, and `fd318c9` was deployed
+with the existing ledger/credentials preserved. Live readiness took 32.4 seconds
+including recovery, with all three custody balances matching; this is not a
+measurement of the entire signed-to-send window. A bounded generation-6 trial
+reached backup-covered broadcast intent at sequence 49, then paused with
+`scanners_not_fresh`; saved custody evidence reported `custody_native_history_advanced`.
+Neither provider found its signature in history. The normal recovery workflow
+then recorded full expiry proof and backup coverage at sequence 50. No generation 7
+was approved; services, VM and tunnel stopped. The 990-unit obligation remains
+unpaid. Diagnose moving-history refresh before further funded retries. Private
+`parallel-mainnet-*` evidence includes the saved attempt, timing, provider responses
+and final recovery readback.
 
 ## Evidence already obtained
 

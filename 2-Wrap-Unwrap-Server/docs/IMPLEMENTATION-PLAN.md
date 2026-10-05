@@ -6,15 +6,16 @@ findings; leave installer work last.
 Source ownership is in [ARCHITECTURE.md](ARCHITECTURE.md); verified evidence and
 remaining release gates are in [RELEASE-REVIEW.md](RELEASE-REVIEW.md).
 
-The Mainnet pilot has `0d144fd` deployed in the Ubuntu ARM64 VM. Its native
+The Mainnet pilot has `fd318c9` deployed in the Ubuntu ARM64 VM. Its native
 unwrap is paid (3,000 gross → 2,970 net base units); the return wrap (1,000 → 990)
-remains pending. Alchemy and the documented public Mainnet endpoint agreed on
-custody identity, anchored history and balances. Generations 4 and 5 stopped at
-the final blockhash-lifetime guard before send; both are retired with expiry proof.
-Critical sequence and acknowledged backup coverage are 44. Services and VM are
-stopped. The source now inspects both providers concurrently; local ledger and
-Cabal tests passed, but Linux deployment and funded latency acceptance remain.
-Separate identities/credentials and sequence-9 snapshot restoration passed.
+remains pending. Concurrent independent custody inspection passed local and Linux
+build/tests and live reconciliation with zero differences. Generation 6 reached
+backed-up broadcast intent, then paused on `scanners_not_fresh`; the saved custody
+failure was `custody_native_history_advanced`. Both providers subsequently reported
+no transaction, and the full expiry workflow retired it with proof. Critical
+sequence and acknowledged backup coverage are 50. No generation 7 is approved.
+Services and VM are stopped. Diagnose the bounded freshness refresh path under
+moving native history before another funded retry; do not extend safety deadlines.
 Backup storage shares the physical Mac; clean-host recovery and the Mainnet
 round trip remain open.
 
@@ -40,8 +41,8 @@ separate explicit tooling and evidence; they are not bridge-custody privileges.
 ## Sequence
 
 Complete the payout's blockhash-window acceptance before further funded retries.
-Deploy the tested concurrent custody inspection and measure read-only validation
-latency first. Preserve both-provider agreement, required backups and the 40-block
+Use the deployed concurrent custody inspection; address the observed native-history
+refresh failure with a focused regression before another generation. Preserve both-provider agreement, required backups and the 40-block
 send floor. Do not repeatedly approve new signed generations to probe timing.
 Public RPC success is pilot evidence; production capacity remains a release gate.
 Keep packaging last.
