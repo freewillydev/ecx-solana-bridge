@@ -1,6 +1,6 @@
 # Auditable financial-core refactor: design and execution plan
 
-Status: **in progress; 75/120 steps verified (A–F, G71–73 and G76–77)**. This replaces the
+Status: **in progress; 84/120 steps verified (A–G)**. This replaces the
 completed implementation checklist, not its evidence. Execution baseline source is
 `3d4970b3e502de9d4c9a89803610df3802e3e322` (implementation `bc9713c`). The funded
 pilot stays on `548c509`. See [RELEASE-REVIEW.md](RELEASE-REVIEW.md) for the actual
@@ -518,8 +518,8 @@ The executor updates this table after verified checkpoints; not merely after edi
 | D. Existing-schema integration | 37–46 | Complete | `62a9c77`; preparation/send/settlement, explicit isolation, fault/race/HTTPS/role checks |
 | E. Customer funding/accounting | 47–56 | Complete | `01eb253`, `99b2657`; pure decisions and derived customer display, 4,500 generated cases, 27 real-PG history comparisons, rollback/restoration pass |
 | F. Recovery/reconciliation | 57–70 | Complete | `fb38ddb`, `2f35af4`; 7,800 generated cases, native/source decisions, shared generation checks, real-PG/HTTPS/process/fence/encrypted-custody restoration pass |
-| G. Schema 22 and migration | 71–84 | In progress: 71–73 and 76–77 verified | Constraints, bounded queues and closed Opaleye conversion preserve 16 populated roots, 12 exact attempts and 83 postings; interruption/activation rollback and existing regressions pass. Prove conversion before switching writers. Next authoritative runtime, initialization/restore and full migrated-process comparison (74–75, 78–84); paying runtime remains schema 21 |
-| H. Protocol/file simplification | 85–94 | Not started | Depends on G |
+| G. Schema 22 and migration | 71–84 | Complete | `249a4a4`; authoritative runtime, owner initialization and private legacy restoration; 16 roots/12 exact attempts/83 postings preserved, old/new customer/work-hash comparisons, interruption/rollback, actual PostgreSQL/Servant/HTTPS/fence and encrypted restore contracts pass; funded pilot unchanged |
+| H. Protocol/file simplification | 85–94 | Next | Inventory matching adapter/file contracts before sharing mechanics |
 | I. Administration/UI/setup | 95–104 | Not started | Depends on H |
 | J. Consolidated review/release candidate | 105–120 | Not started | Depends on I |
 

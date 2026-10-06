@@ -9,8 +9,8 @@ tests does not certify later source or packages.
 
 ## Financial-core refactor execution
 
-Current checkpoint: **75/120 (A–F, G71–73 and G76–77)**. The chronological records below distinguish
-the verified source and scope of each stage. Schema consolidation is next; the
+Current checkpoint: **84/120 (A–G)**. The chronological records below distinguish
+the verified source and scope of each stage. Protocol/file simplification is next; the
 funded deployment has not been upgraded by this refactor.
 
 **12/120: checkpoint A complete, 2026-10-05.** Started from clean local/remote
@@ -539,6 +539,93 @@ support. Tests remain **23 files plus embedded Rust**, **10,167 -> 10,449 lines*
 (**+282**, no new test executable/file). This piece improves durable enforcement
 and migration evidence; it is not a size reduction. G74/G83 remove the obsolete
 runtime status writes and compatibility machinery after the new path is verified.
+
+### Authoritative runtime and checkpoint G complete — 84/120
+
+Implementation `249a4a4491b9bc823455900ca68e3658ea63734c` completes G74–75 and
+G78–84 on top of `e684f9b`. Runtime accepts only schema 22. Payment roots own
+economic phase, active generation and current winner, while retaining the original
+principal event. Orders retain admission only; customer progress/link and queues
+are derived. The old status/payout/resolved projections exist only in private
+migration support and its comparison tests. No alternate paying runtime remains.
+
+Fresh owner initialization applies fixed 009 staging/activation atomically after
+001–008, checks identity/worker exclusion and refuses financial residue. The
+installer invokes that closed operation with only the public fingerprint, retaining
+worker DML and signer SELECT-only privileges. Verified schema-21 archive restoration
+converts only a new private database, preserves financial rows and work hashes,
+invalidates readiness and leaves intake paused. It does not adopt a fence or start
+a signer. Manifest/schema disagreement refuses.
+
+The clean retained schema-21 fixture contains **16 roots, 12 signed attempts and
+83 postings**. Its clone passes exact retained-record, customer/status/payout,
+queue and source/replacement work-hash comparisons. Tests cover reviewed settled
+orders, earned funding, extra refunds, failed/expired generations, native winner
+changes and cancellation. Wrong identity, stale/sequence-mismatched archive,
+malformed terms, ambiguous settlement, unexplained review and active worker refuse.
+SIGKILL during a real PostgreSQL lock wait and failure in final DDL both roll back
+conversion; constraints reject inconsistent or rewound payment facts.
+
+Runtime regression covers I02–I12 and I14–I15: exact replay and atomic financial
+writes, independent-connection races, role checks, admission/backup/readiness,
+uncertain-commit fencing, restored full financial history and failed-stage cleanup.
+Real local encrypted restic upload/download/readback/restoration passes without
+claiming remote backup coverage. Ordinary executable startup and both profile
+signer processes pass actual Servant HTTPS/auth/certificate rotation, serialization,
+second-read refusal, exact SDK bytes, durable replay and pending-payment recovery.
+The profile RPC fixtures are offline; these tests are not new funded transfers or
+independent-host/OS-user acceptance.
+
+Verification used one compiler job and existing caches, from the repository root:
+
+```sh
+cabal build ecx-bridge:exe:ecx-store-check ecx-bridge:exe:ecx-bridge ecx-bridge:test:bridge-test -j1 --offline
+cabal test ecx-bridge:bridge-test -j1 --offline --test-show-details=direct
+sh -n 2-Wrap-Unwrap-Server/install/install
+git diff --check
+```
+
+All passed; bridge-test includes 8,100 generated lifecycle cases and existing
+protocol/API/SDK checks. The built `ecx-store-check` passed each mode below using
+`ECX_REBUILD_CONTRACT_READER=ecx_g_switch_reader_20261006`, PostgreSQL at
+`/tmp/ecx-pg-seam:29436`, the built bridge executable/SDK and package data directory
+as documented in LOCAL-DEVELOPMENT. Each database name below has the prefix
+`ecx_rebuild_contract_g_` and suffix `_20261006`; each log has prefix
+`/tmp/ecx-financial-core-g-switch-` and suffix `.log`.
+
+| Mode | Disposable database | Log |
+| --- | --- | --- |
+| Default financial/roles/restic contract | `current` | `regression` |
+| `ECX_REBUILD_PAYMENT_ROOTS_ONLY=1` | `switch_roots` (clone of preserved `legacy_roots`) | `migration` |
+| Setup and residual-state modes | `setup`, `residue` | `setup`, `residue` |
+| Ordinary server process | `server` | `server` |
+| Devnet signer HTTPS | `tls` | `tls` |
+| Canonical-profile signer HTTPS | `canonical_tls` | `canonical-tls` |
+| Host fence/restart | `fence` | `fence` |
+
+Build/property logs are `build-final` and `cabal-test` under the same prefix.
+Development checks caught an empty Opaleye aggregate returning no row, obsolete
+fixture settlement/fee-hold assumptions, and a display shortcut that hid retained
+admission review. The final implementation handles an empty queue as zero, uses
+real closed settlement facts in fixtures and preserves stored review. Source
+ineligibility retains its specific refusal before generic payment-state errors;
+no custody or signing gate was weakened to pass a fixture. The final full affected
+contracts above passed after these fixes.
+
+Measured against `e684f9b`, application/schema remains **70 files**,
+**16,384 -> 16,389 lines (+5)**. Store is **3,408 -> 3,296 (-112)**;
+Schema **319 -> 300 (-19)**; Projection **102 -> 142 (+40)**; private Migration
+**251 -> 344 (+93)**. Those four total **4,080 -> 4,082 (+2)**; the owner CLI adds
+three lines. Tests remain **23 files plus embedded Rust**, **10,449 -> 10,605
+(+156)**. Tooling/configuration/locks remain **31 files**, **3,363 -> 3,366 (+3)**.
+No application or test file was added. Compatibility is included in these counts;
+this checkpoint reduces duplicate state and live Store code, not total source size.
+
+The original reference Main.hs hash is unchanged. No funded database, wallet,
+network transfer, shared service or dependency pin changed. Linux installation,
+independent backup/restore and external security review remain later release gates.
+Next: H85–94, sharing equivalent protocol/file mechanics while preserving distinct
+chain checks and filesystem policies.
 
 ## Source and evidence boundaries
 
