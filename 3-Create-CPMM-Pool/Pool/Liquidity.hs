@@ -4,12 +4,11 @@ module Pool.Liquidity (Verb(..),Request(..),Prepared(..),Effect(..),Safe(..),eva
 import qualified Pool as Pool
 import qualified Pool.Position as Position
 import Bridge.Error (reject,require)
+import Bridge.Domain (parseNatural)
 import Bridge.RPC
-import Control.Exception (bracket)
 import Data.Binary.Get
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.Text.Encoding as TE
-import Network.HTTP.Client (parseRequest,secure,closeManager)
 import Bridge.Solana (tokenProgram)
 import Bridge.SolanaMessage (publicKey,base58,decodeLiquidityTransaction,Transaction(..),Message(..),Instruction(..))
 import Control.Monad (unless)
@@ -19,7 +18,6 @@ import qualified Data.ByteString as B
 import Data.List (nub,sort)
 import Data.Text (Text)
 import Data.Word (Word64)
-import Text.Read (readMaybe)
 
 data Verb = Deposit | Withdraw | Collect deriving (Eq,Show)
 verbName :: Verb -> Text
@@ -38,9 +36,7 @@ instance FromJSON Request where
     b<-o .: "limitB" >>= units (toInteger(maxBound::Word64))
     Request action <$> o .: "position" <*> pure quantity <*> pure(fromInteger a) <*> pure(fromInteger b) <*> o .: "vaultA" <*> o .: "vaultB"
    where
-    units bound text=case readMaybe text of
-      Just n | n>=0 && n<=bound && show (n::Integer)==text->pure n
-      _->fail "invalid canonical liquidity amount"
+    units bound text=maybe (fail "invalid canonical liquidity amount") pure (parseNatural bound text)
 instance ToJSON Request where
   toJSON r=object ["verb" .= verbName(verb r),"position" .= positionRequest r,"liquidity" .= show(liquidity r)
     ,"limitA" .= show(limitA r),"limitB" .= show(limitB r),"vaultA" .= vaultA r,"vaultB" .= vaultB r]
@@ -106,17 +102,12 @@ evalSafe (Check library network endpoint feeLimit costLimit r p)=do
   canonical<-evalSafe(Prepare library r)
   require (canonical==p && feeLimit>0 && costLimit>=feeLimit) "liquidity_preparation_or_limits_mismatch"
   Transaction _ _ message<-either reject pure(validate r p)
-  transport<-parseRequest endpoint
-  require (secure transport) "liquidity_requires_https"
-  bracket newRpcManager closeManager $ \manager->do
-    let call=rpc manager endpoint Nothing
-        request=positionRequest r
+  withSolanaRpc endpoint (Pool.networkGenesis network) ("liquidity_requires_https","wrong_liquidity_network") $ \call->do
+    let request=positionRequest r
         identities=[Position.pool request,Pool.configuration network,Position.mintA request,Position.mintB request,vaultA r,vaultB r
           ,position p,Position.positionMint request,positionToken p,ownerA p,ownerB p,Position.payer request]
         simulatedIndices=[0,4,5,6,7,8,9,10,11::Int]
         options=object ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text)]
-    genesis<-call "getGenesisHash" [] >>= parseValue parseJSON
-    require (genesis==Pool.networkGenesis network) "wrong_liquidity_network"
     before<-call "getMultipleAccounts" [toJSON identities,options]
     context<-fieldValue "context" before
     height<-fieldValue "slot" context

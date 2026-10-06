@@ -95,8 +95,7 @@ validateHelperReplyWithSignature signed c request@HelperRequest{..} HelperReply{
   let expected=Expected helperOwner helperRecipient (mint c) replySource replyDestination helperBlockhash
         helperAmount (helperMemo c request) helperPayout signed
   tx@(Transaction signatures _ message) <- validateTransaction expected replyTransaction
-  unless (T.length replyMessage<=1644) (Left "invalid_helper_message")
-  encodedMessage <- either (const $ Left "invalid_helper_message") Right (B64.decode $ TE.encodeUtf8 replyMessage)
+  encodedMessage <- either (const $ Left "invalid_helper_message") Right (boundedBase64 1232 replyMessage)
   unless (encodedMessage==message) (Left "helper_message_mismatch")
   let expectedSignature=if signed then case signatures of [sig]->Just (base58 sig); _->Nothing else Nothing
   unless (replySignature==expectedSignature) (Left "helper_signature_mismatch")

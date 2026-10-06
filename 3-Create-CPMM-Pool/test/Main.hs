@@ -321,14 +321,14 @@ quoteContract expected (Positive input) (Positive output)=
 
 -- Exercise both direct URL parsing and a wrapped RPC transport exception in the
 -- real executable. Refusal must not reveal credential-bearing request context.
-cliErrors :: Expected -> IO Bool
+cliErrors :: Expected -> IO Property
 cliErrors expected=bracket (Socket.socket Socket.AF_INET Socket.Stream Socket.defaultProtocol) Socket.close $ \socket->do
   Socket.bind socket (Socket.SockAddrInet 0 (Socket.tupleToHostAddress (127,0,0,1)))
   Socket.SockAddrInet port _<-Socket.getSocketName socket
   checks<-mapM (\endpoint->do
     outcome<-timeout 10000000 $ readProcessWithExitCode "ecx-pool"
       (["inspect","devnet",endpoint]<>map T.unpack [pool expected,expectedA expected,expectedB expected]) ""
-    pure $ case outcome of
+    pure $ counterexample ("Pool CLI refusal: "<>show outcome) $ case outcome of
       Just (ExitFailure _,"",err)->err=="rpc_transport_unknown_outcome\n"
       _->False) ["https://127.0.0.1:"<>show port<>"/private-canary?apikey=credential-canary","https://[credential-canary"]
-  pure(and checks)
+  pure(conjoin checks)

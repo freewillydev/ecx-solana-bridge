@@ -1,6 +1,6 @@
 module Bridge.Solana
-  ( SolanaSettings(..),validateSolanaSettings,solanaCall,solanaIdentity,solanaIdentityWith,tokenAccount
-  , inspectMint,inspectTokenAccount,finalizedTransaction,finalizedTransactionWith,solanaHistory,solanaAddressHistory,solanaAddressHistoryWith
+  ( SolanaSettings(..),validateSolanaSettings,solanaCall,solanaIdentity,solanaIdentityWith
+  , inspectMint,inspectClassicAccount,inspectTokenAccount,finalizedTransaction,finalizedTransactionWith,solanaHistory,solanaAddressHistory,solanaAddressHistoryWith
   , SignatureInfo(..), collectSignatures, tokenProgram,solanaGenesis ) where
 
 import Bridge.Wire (Profile(..))
@@ -17,9 +17,7 @@ import Data.Aeson
 import Data.Aeson.Types (Parser,parseEither)
 import Data.Text (Text)
 import qualified Data.Text as T
-import Network.HTTP.Client (Manager,parseRequest,secure,host)
-import qualified Data.ByteString as BS
-import Text.Read (readMaybe)
+import Network.HTTP.Client (Manager,parseRequest,secure)
 
 data SolanaSettings = SolanaSettings
   { solanaProfile :: Profile, solanaRpc :: String, solanaVerifierRpc :: Maybe String
@@ -36,8 +34,7 @@ validateSolanaSettings c = do
   primary <- parseRequest (solanaRpc c)
   verifier <- traverse parseRequest (solanaVerifierRpc c)
   mapM_ (\endpoint->require (secure endpoint) "solana_requires_https") (primary:maybe [] pure verifier)
-  let normalized endpoint=BS.dropWhileEnd (==46) $ BS.map (\b->if b>=65 && b<=90 then b+32 else b) (host endpoint)
-  mapM_ (\endpoint->require (normalized endpoint/=normalized primary) "independent_rpc_required") verifier
+  mapM_ (\endpoint->require (rpcHost endpoint/=rpcHost primary) "independent_rpc_required") verifier
   if solanaProfile c==CanonicalBeta then do
     require (mint c==canonicalMint && maybe False (const True) verifier) "canonical_identity_or_verifier_required"
   else require (mint c/=canonicalMint) "canonical_mint_forbidden_on_devnet"
@@ -54,7 +51,11 @@ solanaIdentityWith call verifier c = do
   genesis <- call "getGenesisHash" [] >>= parseValue parseJSON
   require (genesis==solanaGenesis (solanaProfile c)) "wrong_solana_genesis"
   (authority,info) <- readMint call
-  _ <- tokenAccountWith call c (custodyAta c) (custodyOwner c)
+  response<-call "getAccountInfo" [toJSON (custodyAta c),object
+    ["commitment" .= ("finalized"::Text),"encoding" .= ("jsonParsed"::Text)]]
+  account<-fieldValue "value" response
+  require (account/=Null) "token_account_missing"
+  _<-either reject pure (inspectTokenAccount (mint c) (custodyOwner c) account)
   case verifier of
     Just verify -> do
       independent <- verify "getGenesisHash" [] >>= parseValue parseJSON
@@ -97,28 +98,22 @@ inspectMint expectedDecimals value=do
   authority<-field "mintAuthority" info
   mapM_ (either (fail . T.unpack) (const $ pure ()) . publicKey) authority
   supply<-field "supply" info
-  unless (not(T.null supply) && T.length supply<=20) (fail "invalid mint supply")
-  quantity<-case readMaybe (T.unpack supply) :: Maybe Integer of
-    Just n | n>=0 && n<=toInteger(maxBound::Word64) && T.pack(show n)==supply->pure(fromInteger n)
-    _->fail "invalid mint supply"
+  quantity<-maybe (fail "invalid mint supply") (pure . fromInteger) (parseNatural (toInteger(maxBound::Word64)) supply)
   pure (authority,quantity)
  where
   field :: FromJSON a => Key -> Value -> Parser a
   field key=withObject "mint field" (.: key)
 
-tokenAccount :: Manager -> SolanaSettings -> Text -> Text -> IO Value
-tokenAccount manager c = tokenAccountWith (solanaCall manager c) c
-tokenAccountWith :: (Text -> [Value] -> IO Value) -> SolanaSettings -> Text -> Text -> IO Value
-tokenAccountWith call c address expectedOwner = do
-  _ <- either reject pure (publicKey address)
-  response <- call "getAccountInfo" [toJSON address,object ["commitment" .= ("finalized"::Text),"encoding" .= ("jsonParsed"::Text)]]
-  v <- fieldValue "value" response
-  require (v/=Null) "token_account_missing"
-  _ <- either reject pure (inspectTokenAccount (mint c) expectedOwner v)
-  fieldValue "data" v >>= fieldValue "parsed" >>= fieldValue "info"
-
 inspectTokenAccount :: Text -> Text -> Value -> Either Text Amount
-inspectTokenAccount expectedMint expectedOwner = either (const $ Left "token_account_policy_mismatch") Right . parseEither inspect
+inspectTokenAccount expectedMint expectedOwner value = either (const $ Left "token_account_policy_mismatch") Right $ do
+  (owner,balance,token)<-parseEither inspectClassicAccount value
+  unless (owner==expectedOwner && token==expectedMint) (Left "unexpected account identity")
+  either (Left . T.unpack) Right (amount $ toInteger balance)
+
+-- Same classic SPL layout for administration and custody. Its u64 balance is
+-- narrowed only at the ledger boundary; these facts alone authorize no transfer.
+inspectClassicAccount :: Value -> Parser (Text,Word64,Text)
+inspectClassicAccount = inspect
  where
   field key = withObject "account field" (.: key)
   inspect v = do
@@ -138,9 +133,12 @@ inspectTokenAccount expectedMint expectedOwner = either (const $ Left "token_acc
     balance <- field "tokenAmount" info
     decimals <- field "decimals" balance :: Parser Int
     unless (program==tokenProgram && not executable && space==165 && kind=="account"
-      && owner==expectedOwner && token==expectedMint && state=="initialized" && not isNative
+      && state=="initialized" && not isNative
       && delegate==Nothing && closeAuthority==Nothing && decimals==8) (fail "unsupported token account")
-    field "amount" balance >>= either (fail . T.unpack) pure . parseUnits
+    mapM_ (either (fail . T.unpack) (const $ pure ()) . publicKey) [owner,token]
+    raw<-field "amount" balance
+    quantity<-maybe (fail "invalid token units") (pure . fromInteger) (parseNatural (toInteger(maxBound::Word64)) raw)
+    pure (owner,quantity,token)
 finalizedTransaction :: Manager -> SolanaSettings -> Text -> IO Value
 finalizedTransaction manager c = finalizedTransactionWith (solanaCall manager c)
 finalizedTransactionWith :: (Text -> [Value] -> IO Value) -> Text -> IO Value

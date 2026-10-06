@@ -1,8 +1,8 @@
 {-# LANGUAGE ScopedTypeVariables, LambdaCase #-}
-module Bridge.RPC (newRpcManager, rpcManagerSettings, rpc, retryRpcRead, parseValue, fieldValue, boundedBody) where
+module Bridge.RPC (newRpcManager, rpcManagerSettings, rpcHost, withSolanaRpc, independentHttps, rpc, retryRpcRead, parseValue, fieldValue, boundedBody) where
 
 import Bridge.Error
-import Control.Exception (catch, try, throwIO)
+import Control.Exception (bracket, catch, try, throwIO)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
 import Control.Monad (when)
@@ -27,6 +27,26 @@ newRpcManager = do
   rate<-maybe (pure 2) (maybe (reject "invalid_rpc_rate") pure . readMaybe) configured
   rpcManagerSettings rate (toInteger <$> getMonotonicTimeNSec) threadDelay >>= newManager
 
+rpcHost :: Request -> BS.ByteString
+rpcHost = BSC.dropWhileEnd (=='.') . BSC.map toLower . host
+
+-- Only session mechanics are shared. Each closed caller supplies its expected
+-- network and refusal categories; no authority or mutable chain fact is cached.
+withSolanaRpc :: String -> Text -> (Text,Text) -> ((Text -> [Value] -> IO Value) -> IO a) -> IO a
+withSolanaRpc endpoint genesis (transportError,identityError) action = do
+  request<-parseRequest endpoint
+  require (secure request) transportError
+  bracket newRpcManager closeManager $ \manager->do
+    let call=rpc manager endpoint Nothing
+    actual<-call "getGenesisHash" [] >>= parseValue parseJSON
+    require (actual==genesis) identityError
+    action call
+
+independentHttps :: String -> String -> IO ()
+independentHttps primary verifier = do
+  first<-parseRequest primary; second<-parseRequest verifier
+  require (secure first && secure second && rpcHost first/=rpcHost second) "independent_https_providers_required"
+
 -- Per-manager HTTPS admission pacing, not a provider-wide or wire-arrival quota.
 -- Worker, signer and administration processes need budgets whose sum fits the
 -- provider plan. Host keys exclude credentials, paths and query strings.
@@ -39,7 +59,7 @@ rpcManagerSettings rate clock wait = do
         now<-clock
         when (now<next) $ wait (fromInteger $ min 1000000 ((next-now+999) `div` 1000)) >> untilTime next
       pace request=when (secure request) $ do
-        let key=BSC.map toLower $ BSC.dropWhileEnd (=='.') $ host request
+        let key=rpcHost request
         gate<-modifyMVar hosts $ \known->case M.lookup key known of
           Just existing->pure (known,existing)
           Nothing->do fresh<-newMVar 0; pure (M.insert key fresh known,fresh)

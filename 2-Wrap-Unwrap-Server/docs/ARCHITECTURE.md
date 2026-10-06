@@ -347,6 +347,23 @@ before any submission. Protected files and process locks prevent local branching
 RPC completeness and exclusion of other hosts holding keys remain trust assumptions.
 See the token/pool READMEs for commands, bounds and publication-crash handling.
 
+## Protocol simplification contracts (H85–89)
+
+The inventory at `249a4a4` separates mechanics from authorization:
+
+| Repeated responsibility | Shared owner / retained difference |
+| --- | --- |
+| Canonical decimal strings in bridge, mint and pool inputs | Domain's bounded natural parser; bridge still narrows to signed Int64, SPL amounts to Word64 and liquidity to 128 bits. Positive-only fields reject zero separately. Native scientific coin parsing remains distinct. |
+| Classic SPL account JSON in bridge and token administration | Solana parser returns typed owner/balance/mint once; custody additionally binds expected identities and its ledger range. Mint, nonce, binary pool and metadata layouts retain distinct validators. |
+| Base64 account/message decoding | SolanaMessage bounds encoded text before decoding and decoded bytes afterward; callers retain exact account size/layout, field set and error category. Transaction signer/instruction/account limits remain separate. |
+| HTTPS session/genesis setup and hostname normalization | RPC shares mechanics and closes each administration session; each caller supplies its exact genesis and existing errors. Independent providers, mutable reads and uncertainty semantics remain explicit. No extra retries or permanent identity cache. |
+| Saved/SDK/HTTP representations | Keep original bytes at persistence/transport boundaries; remove repeated internal JSON extraction only. Worker and signer each independently decode and validate their inputs. |
+
+Native prevout/template verification and Solana instruction/key/signature/effect
+verification stay independent of SDK encoding. Administration's binary account
+parsers and custody's finalized effects are not interchangeable. Shared parsing
+does not prove freshness, ownership or authorization.
+
 ## Backup boundary
 
 Required instruction/sign/send coverage acknowledges the exact durable sequence.

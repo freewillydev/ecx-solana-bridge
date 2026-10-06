@@ -2,12 +2,13 @@
 -- Closed, read-only liquidity operations. No signing key, ledger or custody access.
 module Pool (Network(..),Safe(..),Create(..),Prepared(..),Costs(..),MarketQuote,validateQuote,validatePrepared,validateCreated,Expected(..),Snapshot(..),Report(..),Whirlpool(..),evalSafe,validate,decodePool,program,configuration,networkGenesis,accountData,parse,mintParser,vaultParser) where
 import Bridge.Identity (digest)
+import Bridge.Domain (parseNatural)
 import Data.Time.Clock (getCurrentTime)
 import Network.HTTP.Types.Status (statusCode)
 import Bridge.Error (require,reject)
 import Bridge.RPC
 import Bridge.Solana (tokenProgram)
-import Bridge.SolanaMessage (publicKey,base58,decodePoolTransaction,Transaction(..),Message(..),Instruction(..))
+import Bridge.SolanaMessage (publicKey,base58,boundedBase64,decodePoolTransaction,Transaction(..),Message(..),Instruction(..))
 import Control.Exception (bracket)
 import Control.Monad (unless,(>=>))
 import Data.Aeson
@@ -18,13 +19,12 @@ import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Lazy as L
 import Data.List (nub,sort)
 import qualified Data.Aeson.KeyMap as KM
-import Text.Read (readMaybe)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Foreign
 import Foreign.C.Types
-import Network.HTTP.Client (parseRequest,secure,closeManager,withResponse,redirectCount,responseBody,responseStatus,checkResponse,responseTimeout,responseTimeoutMicro)
+import Network.HTTP.Client (parseRequest,closeManager,withResponse,redirectCount,responseBody,responseStatus,checkResponse,responseTimeout,responseTimeoutMicro)
 import System.Posix.DynamicLinker hiding (Null)
 
 data Network = Devnet | Mainnet deriving (Eq,Show)
@@ -59,9 +59,7 @@ instance FromJSON Create where
   parseJSON=withObject "pool creation" $ \o->do
     unless (KM.size o==7) (fail "unexpected pool request fields")
     price<-o .: "sqrtPriceX64"
-    n<-case readMaybe price of
-      Just value | show (value::Integer)==price->pure value
-      _->fail "noncanonical pool price"
+    n<-maybe (fail "noncanonical pool price") pure (parseNatural (2^(128::Int)-1) price)
     Create <$> o .: "payer" <*> o .: "mintA" <*> o .: "mintB" <*> o .: "vaultA" <*> o .: "vaultB" <*> pure n <*> o .: "blockhash"
 instance ToJSON Create where
   toJSON r=object ["payer" .= payer r,"mintA" .= createMintA r,"mintB" .= createMintB r
@@ -150,14 +148,9 @@ evalSafe (Check library network endpoint feeLimit costLimit r p)=do
   canonical<-evalSafe (Prepare library network r)
   require (canonical==p && feeLimit>0 && costLimit>=feeLimit) "pool_preparation_or_limits_mismatch"
   Transaction _ _ message<-either reject pure (validatePrepared network r p)
-  transport<-parseRequest endpoint
-  require (secure transport) "pool_requires_https"
-  bracket newRpcManager closeManager $ \manager->do
-    let call=rpc manager endpoint Nothing
-        options=object ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text)]
+  withSolanaRpc endpoint (networkGenesis network) ("pool_requires_https","wrong_pool_network") $ \call->do
+    let options=object ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text)]
         identities=[createdPool p,configuration network,createMintA r,createMintB r,createVaultA r,createVaultB r,payer r,feeTier p]
-    genesis<-call "getGenesisHash" [] >>= parseValue parseJSON :: IO Text
-    require (genesis==networkGenesis network) "wrong_pool_network"
     before<-call "getMultipleAccounts" [toJSON identities,options]
     context<-fieldValue "context" before
     height<-fieldValue "slot" context :: IO Integer
@@ -214,13 +207,8 @@ evalSafe (Address library network a b index)=do
   either reject (const $ pure address) (publicKey address)
 evalSafe (Inspect library network endpoint expected)=do
   mapM_ (either reject (const $ pure ()) . publicKey) [pool expected,expectedA expected,expectedB expected]
-  transport<-parseRequest endpoint
-  require (secure transport) "pool_requires_https"
-  bracket newRpcManager closeManager $ \manager->do
-    let call=rpc manager endpoint Nothing
-        options=object ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text)]
-    genesis<-call "getGenesisHash" [] >>= parseValue parseJSON :: IO Text
-    require (genesis==networkGenesis network) "wrong_pool_network"
+  withSolanaRpc endpoint (networkGenesis network) ("pool_requires_https","wrong_pool_network") $ \call->do
+    let options=object ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text)]
     initial<-call "getAccountInfo" [toJSON (pool expected),options] >>= fieldValue "value"
     p<-either reject pure (accountData program 653 initial >>= decodePool)
     canonical<-evalSafe (Address library network (expectedA expected) (expectedB expected) (tier p))
@@ -304,7 +292,7 @@ accountData owner size value=do
   (actual,executable,encoded)<-either (Left . T.pack) Right $ parseEither (withObject "chain account" $ \o->
     (,,) <$> o .: "owner" <*> o .: "executable" <*> o .: "data") value :: Either Text (Text,Bool,[Text])
   unless (actual==owner && not executable) (Left "wrong_pool_account_owner")
-  raw<-case encoded of [text,"base64"]->either (const $ Left "invalid_pool_base64") Right (B64.decode $ TE.encodeUtf8 text); _->Left "invalid_pool_encoding"
+  raw<-case encoded of [text,"base64"]->either (const $ Left "invalid_pool_base64") Right (boundedBase64 size text); _->Left "invalid_pool_encoding"
   unless (B.length raw==size) (Left "invalid_pool_account_size")
   pure raw
 
@@ -346,9 +334,8 @@ validateQuote expected quantity=parseEither $ withObject "market quote" $ \o->do
     && transaction `elem` [Nothing,Just (String "")] && taker==Nothing && problem==Nothing)
     (fail "quote identity or execution fields")
   text<-o .: "outAmount"
-  unless (not(null text) && length text<=20 && all (\c->c>='0' && c<='9') text) (fail "invalid quote quantity")
-  output<-case readMaybe text :: Maybe Integer of
-    Just n | n>0 && n<=toInteger(maxBound::Word64) && show n==text->pure(fromInteger n)
+  output<-case parseNatural (toInteger(maxBound::Word64)) text of
+    Just n | n>0->pure(fromInteger n)
     _->fail "invalid quote quantity"
   route<-o .: "routePlan"
   poolLabel<-case route of

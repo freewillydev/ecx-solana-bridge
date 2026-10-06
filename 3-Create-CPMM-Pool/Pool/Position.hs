@@ -5,7 +5,6 @@ import Bridge.Error (require,reject)
 import Bridge.RPC
 import Bridge.Solana (tokenProgram)
 import Bridge.SolanaMessage (publicKey,base58,decodePositionTransaction,Transaction(..),Message(..),Instruction(..))
-import Control.Exception (bracket)
 import Control.Monad (unless)
 import Data.Aeson
 import Data.Binary.Get
@@ -15,7 +14,6 @@ import Data.List (nub,sort)
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import Data.Word (Word8,Word64)
-import Network.HTTP.Client (parseRequest,secure,closeManager)
 
 data Request = Request {payer :: Text,pool :: Text,mintA :: Text,mintB :: Text,positionMint :: Text,blockhash :: Text} deriving (Eq,Show)
 instance FromJSON Request where
@@ -83,14 +81,9 @@ evalSafe (Check library network endpoint feeLimit costLimit r p)=do
   Transaction _ _ message<-either reject pure(validate r p)
   P.Report _ _ state _<-P.evalSafe(P.Inspect library network endpoint (P.Expected (pool r) (mintA r) (mintB r)))
   require (P.spacing state==32896) "unsupported_position_spacing"
-  transport<-parseRequest endpoint
-  require (secure transport) "position_requires_https"
-  bracket newRpcManager closeManager $ \manager->do
-    let call=rpc manager endpoint Nothing
-        identities=[position p,positionMint r,tokenAccount p,payer r]
+  withSolanaRpc endpoint (P.networkGenesis network) ("position_requires_https","wrong_position_network") $ \call->do
+    let identities=[position p,positionMint r,tokenAccount p,payer r]
         options=object ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text)]
-    genesis<-call "getGenesisHash" [] >>= parseValue parseJSON
-    require (genesis==P.networkGenesis network) "wrong_position_network"
     before<-call "getMultipleAccounts" [toJSON identities,options]
     context<-fieldValue "context" before
     height<-fieldValue "slot" context :: IO Integer

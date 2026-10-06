@@ -14,9 +14,8 @@ import qualified Crypto.PubKey.Ed25519 as Ed
 import Token (Request(..),Action(..),validate)
 import Bridge.Error (require,reject)
 import Bridge.RPC
-import Bridge.Solana (tokenProgram,inspectMint)
-import Bridge.SolanaMessage (Transaction(..),publicKey,base58)
-import Control.Exception (bracket)
+import Bridge.Solana (inspectMint,inspectClassicAccount)
+import Bridge.SolanaMessage (Transaction(..),publicKey,base58,boundedBase64)
 import Control.Monad (unless,forM_)
 import System.Posix.Files (fileExist)
 import Data.Aeson
@@ -26,10 +25,6 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Word (Word64)
-import Network.HTTP.Client (parseRequest,secure,host,closeManager)
-import qualified Data.ByteString.Char8 as B8
-import Data.Char (toLower)
-import Text.Read (readMaybe)
 import Data.Binary.Get (runGetOrFail,getWord32le,getWord64le,getByteString)
 
 data Network = Devnet | Mainnet deriving (Eq,Show)
@@ -42,33 +37,18 @@ data Safe a where
   InspectPolicy :: Network -> String -> String -> Text -> Text -> Text -> Maybe Text -> Safe [(Word64,Word64,Word64)]
 
 evalSafe :: Safe a -> IO a
-evalSafe (NonceRent network endpoint)=do
-  transport<-parseRequest endpoint
-  require (secure transport) "invalid_token_rpc_policy"
-  bracket newRpcManager closeManager $ \manager->do
-    let call=rpc manager endpoint Nothing
-    actual<-call "getGenesisHash" [] >>= parseValue parseJSON
-    require (actual==genesis network) "wrong_token_network"
+evalSafe (NonceRent network endpoint)=
+  withSolanaRpc endpoint (genesis network) ("invalid_token_rpc_policy","wrong_token_network") $ \call->do
     rent<-call "getMinimumBalanceForRentExemption" [toJSON (80::Int),object ["commitment" .= ("finalized"::Text)]] >>= parseValue parseJSON
     require (rent>0) "invalid_nonce_rent"
     pure rent
 evalSafe (NonceValue network endpoint owner address)=do
   mapM_ (either reject (const $ pure ()) . publicKey) [owner,address]
-  transport<-parseRequest endpoint
-  require (secure transport) "invalid_token_rpc_policy"
-  bracket newRpcManager closeManager $ \manager->do
-    let call=rpc manager endpoint Nothing
-    actual<-call "getGenesisHash" [] >>= parseValue parseJSON
-    require (actual==genesis network) "wrong_token_network"
+  withSolanaRpc endpoint (genesis network) ("invalid_token_rpc_policy","wrong_token_network") $ \call->do
     accountValue<-call "getAccountInfo" [toJSON address,object ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text)]] >>= fieldValue "value"
     fst <$> parseValue (inspectNonce owner) accountValue
-evalSafe (RecentBlockhash network endpoint)=do
-  transport<-parseRequest endpoint
-  require (secure transport) "invalid_token_rpc_policy"
-  bracket newRpcManager closeManager $ \manager->do
-    let call=rpc manager endpoint Nothing
-    actual<-call "getGenesisHash" [] >>= parseValue parseJSON
-    require (actual==genesis network) "wrong_token_network"
+evalSafe (RecentBlockhash network endpoint)=
+  withSolanaRpc endpoint (genesis network) ("invalid_token_rpc_policy","wrong_token_network") $ \call->do
     recent<-call "getLatestBlockhash" [object ["commitment" .= ("finalized"::Text)]]
       >>= fieldValue "value" >>= fieldValue "blockhash" >>= parseValue parseJSON
     either reject (const $ pure recent) (publicKey recent)
@@ -83,27 +63,18 @@ evalSafe (InspectSaved network endpoint path)=do
   inspectStatus (genesis network) endpoint (savedId saved) (savedTransaction saved) (blockhash $ savedRequest saved)
 evalSafe (InspectPolicy network primary verifier key owner custody issuer)=do
   mapM_ (either reject (const $ pure ()) . publicKey) ([key,owner,custody]<>maybe [] pure issuer)
-  first<-parseRequest primary; second<-parseRequest verifier
-  require (secure first && secure second && B8.dropWhileEnd (=='.') (B8.map toLower $ host first)/=B8.dropWhileEnd (=='.') (B8.map toLower $ host second)) "independent_https_providers_required"
-  bracket newRpcManager closeManager $ \manager->do
-    readings<-mapM (\endpoint->do
-      let call=rpc manager endpoint Nothing
-      actual<-call "getGenesisHash" [] >>= parseValue parseJSON
-      require (actual==genesis network) "wrong_token_network"
+  independentHttps primary verifier
+  readings<-mapM (\endpoint->withSolanaRpc endpoint (genesis network) ("invalid_token_rpc_policy","wrong_token_network") $ \call->
       call "getMultipleAccounts" [toJSON [key,custody],object ["encoding" .= ("jsonParsed"::Text),"commitment" .= ("finalized"::Text)]]
         >>= parseValue (inspectPolicy key owner issuer)) [primary,verifier]
-    require (case readings of [(_,supply,balance),(_,otherSupply,otherBalance)]->supply==otherSupply && balance==otherBalance; _->False) "token_provider_policy_mismatch"
-    pure readings
+  require (case readings of [(_,supply,balance),(_,otherSupply,otherBalance)]->supply==otherSupply && balance==otherBalance; _->False) "token_provider_policy_mismatch"
+  pure readings
 evalSafe (Check network endpoint feeLimit request unsigned)=do
-  transport<-parseRequest endpoint
-  require (secure transport && feeLimit>0) "invalid_token_rpc_policy"
+  require (feeLimit>0) "invalid_token_rpc_policy"
   Transaction _ _ message<-either reject pure (validate request unsigned)
-  bracket newRpcManager closeManager $ \manager->do
-    let call=rpc manager endpoint Nothing
-        options=object ["encoding" .= ("jsonParsed"::Text),"commitment" .= ("finalized"::Text)]
+  withSolanaRpc endpoint (genesis network) ("invalid_token_rpc_policy","wrong_token_network") $ \call->do
+    let options=object ["encoding" .= ("jsonParsed"::Text),"commitment" .= ("finalized"::Text)]
         accountInfo address=call "getAccountInfo" [toJSON address,options] >>= fieldValue "value"
-    actual<-call "getGenesisHash" [] >>= parseValue parseJSON :: IO Text
-    require (actual==genesis network) "wrong_token_network"
     case request of
       NonceMint{nonceAccount=address}->do
         value<-call "getAccountInfo" [toJSON address,object ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text)]] >>= fieldValue "value"
@@ -129,7 +100,7 @@ evalSafe (Check network endpoint feeLimit request unsigned)=do
         require (minimumRent>0 && minimumRent==toInteger(rent request)) "account_rent_mismatch"
         existing<-accountInfo (account request)
         if existing==Null then pure minimumRent else do
-          (actualOwner,_,actualMint)<-parseValue inspectAccount existing
+          (actualOwner,_,actualMint)<-parseValue inspectClassicAccount existing
           require (actualOwner==recipient && actualMint==mint request) "associated_account_identity_mismatch"
           pure 0
       Metadata{metadata=terms}->do
@@ -142,7 +113,7 @@ evalSafe (Check network endpoint feeLimit request unsigned)=do
         pure 0
       _->do
         mintInfo<-accountInfo (mint request) >>= parseValue (inspectMint (Just 8))
-        tokenInfo<-accountInfo (account request) >>= parseValue inspectAccount
+        tokenInfo<-accountInfo (account request) >>= parseValue inspectClassicAccount
         let (mintAuthority,supply)=mintInfo
             (owner,balance,token)=tokenInfo
         require (token==mint request) "token_account_mint_mismatch"
@@ -190,7 +161,7 @@ metadataState Metadata{authority=owner,mint=key} value=do
   encoded<-fieldValue "data" value :: IO [Text]
   require (actualOwner==M.program && not executable) "invalid_metadata_account_owner"
   raw<-case encoded of
-    [bytes,"base64"]->either (const $ reject "invalid_metadata_base64") pure (B64.decode $ TE.encodeUtf8 bytes)
+    [bytes,"base64"]->either (const $ reject "invalid_metadata_base64") pure (boundedBase64 679 bytes)
     _->reject "invalid_metadata_encoding"
   either reject pure (M.inspect owner key raw)
 metadataState _ _=reject "metadata_operation_required"
@@ -306,13 +277,9 @@ networkFor value
 submitSaved :: Network -> String -> Word64 -> Saved -> IO Value
 submitSaved network endpoint feeLimit saved=do
   unsigned<-either reject pure (validateSaved saved)
-  transport<-parseRequest endpoint
-  require (secure transport && feeLimit>0) "invalid_token_rpc_policy"
-  bracket newRpcManager closeManager $ \manager->do
-    let call=rpc manager endpoint Nothing
-        identifier=savedId saved
-    actual<-call "getGenesisHash" [] >>= parseValue parseJSON :: IO Text
-    require (actual==genesis network) "wrong_token_network"
+  require (feeLimit>0) "invalid_token_rpc_policy"
+  withSolanaRpc endpoint (genesis network) ("invalid_token_rpc_policy","wrong_token_network") $ \call->do
+    let identifier=savedId saved
     statuses<-call "getSignatureStatuses" [toJSON [identifier],object ["searchTransactionHistory" .= True]] >>= fieldValue "value"
     status<-case statuses of [value]->pure value; _->reject "invalid_token_status"
     if status/=Null then do
@@ -357,7 +324,7 @@ inspectNonce authority value=do
   executable<-field "executable" value
   encoded<-field "data" value :: Parser [Text]
   raw<-case encoded of
-    [bytes,"base64"]->either (const $ fail "invalid nonce encoding") pure (B64.decode $ TE.encodeUtf8 bytes)
+    [bytes,"base64"]->either (const $ fail "invalid nonce encoding") pure (boundedBase64 80 bytes)
     _->fail "invalid nonce encoding"
   unless (owner=="11111111111111111111111111111111" && not executable && BS.length raw==80)
     (fail "invalid nonce account")
@@ -366,39 +333,8 @@ inspectNonce authority value=do
     Right (rest,_,(1,1,key,nonce,fee)) | L.null rest && base58 key==authority && fee>0->pure(base58 nonce,fee)
     _->fail "invalid nonce state or authority"
 
--- Strict classic SPL policies: no extensions, frozen/delegated/native accounts,
--- or hidden close/freeze authority. JSON amounts are canonical unsigned integers.
-inspectAccount :: Value -> Parser (Text,Word64,Text)
-inspectAccount value=do
-  info<-accountFields 165 "account" value
-  owner<-field "owner" info
-  mint<-field "mint" info
-  state<-field "state" info :: Parser Text
-  native<-field "isNative" info
-  delegate<-withObject "token" (.:? "delegate") info :: Parser (Maybe Text)
-  close<-withObject "token" (.:? "closeAuthority") info :: Parser (Maybe Text)
-  amount<-field "tokenAmount" info
-  decimals<-field "decimals" amount :: Parser Int
-  unless (state=="initialized" && not native && delegate==Nothing && close==Nothing && decimals==8) (fail "unsupported token account")
-  mapM_ (either (fail . T.unpack) (const $ pure ()) . publicKey) [owner,mint]
-  balance<-field "amount" amount >>= units
-  pure (owner,balance,mint)
-accountFields :: Int -> Text -> Value -> Parser Value
-accountFields size kind value=do
-  owner<-field "owner" value
-  executable<-field "executable" value
-  dat<-field "data" value
-  space<-field "space" dat
-  parsed<-field "parsed" dat
-  actual<-field "type" parsed
-  unless (owner==tokenProgram && not executable && space==size && actual==kind) (fail "unsupported token layout")
-  field "info" parsed
 field :: FromJSON a => Key -> Value -> Parser a
 field key=withObject "field" (.:key)
-units :: Text -> Parser Word64
-units text=case readMaybe (T.unpack text) :: Maybe Integer of
-  Just n | n>=0 && n<=toInteger(maxBound::Word64) && T.pack(show n)==text->pure(fromInteger n)
-  _->fail "invalid token units"
 
 genesis :: Network -> Text
 genesis Devnet="EtWTRABZaYq6iMfeYKouRu166VU2xqa1wcaWoxPkrZBG"
@@ -412,7 +348,7 @@ inspectPolicy key owner issuer value=do
   case accounts of
     [mintValue,custodyValue]->do
       (actualIssuer,supply)<-inspectMint (Just 8) mintValue
-      (actualOwner,balance,actualMint)<-inspectAccount custodyValue
+      (actualOwner,balance,actualMint)<-inspectClassicAccount custodyValue
       unless (slot>0 && actualIssuer==issuer && actualOwner==owner && actualMint==key && balance<=supply) (fail "token policy mismatch")
       pure (slot,supply,balance)
     _->fail "expected mint and custody accounts"
