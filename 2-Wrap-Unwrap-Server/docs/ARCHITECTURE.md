@@ -521,3 +521,74 @@ unsigned cancellations in both cancellation contracts, native family/source work
 `nativeReplacementContract`/`restorationContract`, and uncertain publication/restore
 in `archiveContract`/`fenceMain`. Reuse their closed Opaleye fixtures. Their literal
 keys, fake RPC responses and deterministic identifiers are never deployment data.
+
+### Concrete lifecycle extraction contracts
+
+`Lifecycle.hs` owns the existing `PaymentView`, `PreparedPayment` and
+`RecordedAttempt` records; Store reexports them to avoid a broad caller migration.
+These are the payment, preparation and attempt facts, not duplicate wire DTOs.
+`Payment` already owns `Funding` (conversion/refund/earned), recipient and amount;
+`PaymentTerms` owns policy/limits. Their constructors grant no execution authority.
+The initial module deliberately retains schema-21 `PaymentStatus`; the proposed
+economic phase is introduced only with its proven projection/migration.
+
+| Current field/fact | Owner and intended fate |
+| --- | --- |
+| `orders.status`, `orders.payout_tx` | Admission and duplicated payment display; narrow admission state and derive payment view in G |
+| `obligations.status` | Duplicated economic progress; retire in G after all callers use the payment root |
+| `intents.resolved` | Incomplete payment lifecycle; replace by root phase/generation/winner/original settlement event in G |
+| Order request/quote/policy/costs, capability/deadlines/instruction | Immutable order facts; retain exact historical terms and scope |
+| Deposit anchor/depth/eligibility/allocation and source evidence | Receipt/execution eligibility; separate from whether principal was paid |
+| Preparation generation/policy/draft/retired/cancelled | Exact plan and allowed successor/cleanup; retain |
+| Attempt bytes/policy/generation/state/queue sequence/observation | Chain execution evidence; retain every byte and distinct phase |
+| Fee holds, principal/operating reservations | Capital ownership and release/transfer; retain, not another economic phase |
+| Journal events/postings, withdrawals/cancellations | Once-only economic effects and explicit earned funding; retain |
+| Replacement/expiry/source loss/cover/return/approvals | Recovery evidence bound to subject/work; retain separately |
+| Deployment/custody sequence, clock, scan origins/checkpoints/health | Shared authority/freshness bounds; retain, no parallel revision system |
+
+Target phase validity is `Ready` with no active generation/winner, `Active g` with
+exactly one belonging preparation, `Settled tx` with a belonging retained attempt
+and immutable original settlement event, or `Cancelled` with cancellation evidence
+and no active work. Execution review is independent, including after settlement.
+Old-generation evidence cannot authorize the active generation. Until G, the
+schema-21 rows/constraints enforce their existing combinations and unknown states
+continue to refuse; the refactor must not guess a successful mapping.
+
+Each pure decision receives only the facts needed by its closed Store leaf:
+
+| Decision family | Actor / facts / result / idempotency |
+| --- | --- |
+| Settlement or finalized failure | Worker; expected/current queued attempt, funding, exact outcome/cost proof, unresolved fee hold, prior winner/failed cost. Replay or apply principal/cost/release/display effects. Same proof replays; changed proof/bytes/allowance conflicts. |
+| Preparation/draft/signature retention | Worker; funding, saved limits/source/readiness, current work, allowed next generation, holds/budget. Reuse exact plan or create one permitted generation; no external effect in the decision. |
+| Queue/send | Worker; current signed attempt/preparation/source, family selection, coverage, current readiness. Reuse queue or allocate its sequence / authorize exact saved bytes; no new bytes or signing. |
+| Admission/promotion/refund | Customer/worker/operator respectively; immutable terms/receipt ownership/deadlines, capacity and saved allocations. Reuse/create order, promote once, or bind full-principal refund. No caller-selected refund recipient. |
+| Treasury/earned fees | Operator; paused/fresh verified unbound receipt or free earned balance, exact split/recipient, current holds. Allocation/reservation/cancellation with balanced movements and immutable reason/replay identity. |
+| Cancellation/expiry/retry | Operator or observation worker; exact active unsigned work or proved nonexecution, cleanup/approval/generation/source. Begin/finish/retire/approve separately; no timeout-derived permission. |
+| Source/replacement/winner recovery | Operator/observation worker; exact bounded saved family, latest proof/approvals, source/custody and original postings. Preserve liabilities; apply only justified deficit/cover/return/cost adjustments. Principal never replays. |
+| Read/control/backup/setup/admin | Retain their specific closed operations and independent proof/resource contracts above. They do not gain a generic lifecycle commit method. |
+
+Pure results are narrow operation-specific data, not table patches or callbacks.
+Store gathers current facts and computes the result inside its locked transaction.
+The first slice uses `Either Text` with the existing exact refusal codes, avoiding
+a second competing error-to-wire translation table during extraction. The semantic
+categories remain the conflict/stale/unavailable/corrupt/uncertain mapping above;
+no catch-all success or retry is introduced.
+
+Stable comparisons include full payment ID/funding/recipient/terms, preparation
+generation/policy/draft/fee, exact attempt bytes and queue identity, current subject
+source/approval and its necessary freshness/coverage. Normalize only the old/new
+attempt state/observation when comparing an exact settlement replay, as the baseline
+does. Unrelated deployment sequence changes are not subject changes; current
+custody and scan checks still run independently. Do not normalize amounts, protocol
+bytes, generation, evidence or ordering to make differential tests pass.
+
+`LifecycleCheck` supplies bounded funding/delivery histories and validity-preserving
+shrinkers. Its expected account map and paid set are independent of production
+accounting. Initially the comparison adapter uses existing `Domain.settlement`
+with the already-tested Store replay contract; C replaces that adapter with actual
+pure lifecycle decisions. No new production replay claim follows from the adapter.
+The existing real-PostgreSQL duplicate-settlement, extra-refund, stale-generation,
+missing-backup and native-source-refresh regressions remain the durable oracle.
+The separate HTTPS fixture suspends signing, invalidates custody, then proves the
+second read refuses and the held gate recovers. Negative accounting mutations must
+fail, demonstrating that the independent model is capable of detecting differences.

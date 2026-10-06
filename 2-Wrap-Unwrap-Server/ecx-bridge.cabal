@@ -16,7 +16,7 @@ common settings
 library
   import: settings
   hs-source-dirs: src
-  exposed-modules: Bridge.Domain, Bridge.Error, Bridge.Identity, Bridge.Wire, Bridge.Operation, Bridge.Operation.Internal
+  exposed-modules: Bridge.Domain, Bridge.Error, Bridge.Identity, Bridge.Wire, Bridge.Lifecycle, Bridge.Operation, Bridge.Operation.Internal
   build-depends: base >=4.20 && <4.23, aeson >=2.2 && <2.4, text >=2.1 && <2.2, containers, bytestring, base16-bytestring, base58-bytestring, crypton >=1 && <1.2, ram >=0.22 && <0.23
 
 library customer-api
@@ -65,7 +65,7 @@ test-suite bridge-test
   hs-source-dirs: test
   main-is: Main.hs
   build-tool-depends: ecx-bridge:ecx-bridge
-  other-modules: ConfigureCheck, ChainCheck, NativePaymentCheck, SolanaPaymentCheck, ObservationCheck, SigningTransportCheck, Paths_ecx_bridge
+  other-modules: ConfigureCheck, ChainCheck, NativePaymentCheck, SolanaPaymentCheck, ObservationCheck, SigningTransportCheck, LifecycleCheck, Paths_ecx_bridge
   autogen-modules: Paths_ecx_bridge
   build-depends: base, ecx-bridge, ecx-bridge:customer-api, ecx-bridge:chain, ecx-bridge:store, ecx-bridge:workflow, servant, aeson, text, containers,
     QuickCheck >=2.15 && <2.19, bytestring, scientific, http-client, base64-bytestring, wai, wai-extra, http-types, directory, unix, filepath,

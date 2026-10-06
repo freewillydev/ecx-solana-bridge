@@ -66,8 +66,38 @@ passing result. Evidence remains bounded to these fixtures and the retained fund
 version above; external release gaps remain open.
 
 Checkpoint A adds documentation only; the application/test counts are unchanged.
-Next: B's concrete lifecycle types and independent regression harness, followed
-by settlement/preparation extraction on unchanged schema 21.
+### Checkpoint B — 24/120
+
+Moved the four existing payment fact records from Store into the 23-line pure
+`Lifecycle.hs`, retaining Store's reexports and all field/constructor identities.
+ARCHITECTURE specifies current fact ownership, target validity, operation-specific
+inputs/effects, comparison identity and unchanged refusal mapping. No new runtime
+decision, schema, JSON or signer authority exists yet.
+
+Added `LifecycleCheck` to the existing Cabal suite: independent account formulas,
+paid-identity model, bounded histories and meaningful shrinkers. It passed 600
+generated checks and both deliberately wrong accounting/replay mutations failed
+as expected. Its baseline adapter is explicitly not proof of a new replay engine;
+the real PostgreSQL replay tests remain the durable baseline oracle for C.
+
+`cabal test ecx-bridge:bridge-test -j1 --offline --test-show-details=direct` exited
+0 with the same cache environment as A; log
+`/tmp/ecx-financial-core-types-tests.log`. Existing warnings remain in unchanged
+code; no warnings were introduced in Lifecycle or its model. Before changing the
+fact declarations, the existing `ecx-store-check` binary also passed the dedicated
+HTTPS mode (`ECX_REBUILD_TLS_ONLY=1`) on a second fresh schema-21 database,
+`ecx_rebuild_contract_core_b_tls_20261005`, same restricted reader and the SDK path
+from Cabal's generated `Bridge.SDKBuild`. Log:
+`/tmp/ecx-financial-core-baseline-tls.log`. This verifies serialized signing,
+authentication/certificate rotation, refusal after a changed custody snapshot,
+gate recovery and exact saved replies using offline RPC fixtures; no chain send.
+
+Piece size: four facts were 10 lines embedded in Store; now 23 lines in one pure
+file plus one Store import, **net +14 application lines / +1 file**. This checkpoint
+isolates facts for pure review; it does not claim line savings yet. Application
+total is 66 files/14,857 lines; test total is 23 files plus embedded Rust tests,
+9,378 lines (**+113**). Next: extract settlement, preparation and queue/send
+decisions using these facts on unchanged schema 21, removing their old rules.
 
 ## Source and evidence boundaries
 

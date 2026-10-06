@@ -1,6 +1,6 @@
 # Auditable financial-core refactor: design and execution plan
 
-Status: **in progress; 12/120 steps verified (checkpoint A)**. This replaces the
+Status: **in progress; 24/120 steps verified (checkpoints A–B)**. This replaces the
 completed implementation checklist, not its evidence. Baseline source is
 `6fa733483360da2414d120eb963025d87c3e0507` (implementation `bc9713c`). The funded
 pilot stays on `548c509`. See [RELEASE-REVIEW.md](RELEASE-REVIEW.md) for the actual
@@ -504,8 +504,8 @@ The executor updates this table after verified checkpoints; not merely after edi
 
 | Checkpoint | Steps | State | Evidence commit / next action |
 | --- | --- | --- | --- |
-| A. Baseline and contracts | 1–12 | Complete | Baseline `3d4970b`; ARCHITECTURE inventory and RELEASE-REVIEW commands; next B |
-| B. Concrete types and regression harness | 13–24 | Not started | Depends on A |
+| A. Baseline and contracts | 1–12 | Complete | `4b8fa31`; baseline `3d4970b`, inventory and reproducible commands recorded |
+| B. Concrete types and regression harness | 13–24 | Complete | Pure facts/accounting model; bridge suite and baseline TLS pass; next C |
 | C. Complete payment slice | 25–36 | Not started | Depends on B |
 | D. Existing-schema integration | 37–46 | Not started | Depends on C |
 | E. Customer funding/accounting | 47–56 | Not started | Depends on D |

@@ -15,6 +15,7 @@ import Bridge.Identity (bearerHash,digest,payInstruction,publicKey)
 import Text.Read (readMaybe)
 import qualified Bridge.Wire as W
 import Bridge.Domain
+import Bridge.Lifecycle
 import Bridge.Wire (PaymentTerms(..),PolicySnapshot(..),CostLimits(..),SignedAttempt(..))
 import qualified Bridge.Store.Schema as S
 import Bridge.Store.Catalog (claimWorker,verifyReadRole,exportSnapshot)
@@ -62,16 +63,6 @@ data OrderLimits = OrderLimits
 data StorePolicy = StorePolicy
   { executionTerms :: PaymentTerms, admissionLimits :: OrderLimits
   , deploymentName :: Text, requireBackup :: Bool } deriving (Eq,Show)
-data PaymentStatus = PaymentReady | PaymentPaying | PaymentPaid | PaymentReview | PaymentCancelled deriving (Eq,Show)
-data PaymentView = PaymentView
-  { savedPayment :: Payment, savedTerms :: PaymentTerms, savedStatus :: PaymentStatus } deriving (Eq,Show)
-data PreparedPayment = PreparedPayment
-  { preparedView :: PaymentView, preparedGeneration :: Int, preparedPolicy :: Text
-  , preparedDraft :: Maybe Text, preparedFee :: Amount } deriving (Eq,Show)
-data RecordedAttempt = RecordedAttempt
-  { recordedPayment :: Text, recordedChain :: Text, recordedGeneration :: Int
-  , recordedFee :: Amount, recordedState :: Text, recordedSequence :: Maybe Int64
-  , recordedObservation :: Maybe Text, recordedSigned :: SignedAttempt } deriving (Eq,Show)
 data AllocationClaim = AllocationClaim { allocationLabel :: Text, mayAllocate :: Bool }
   deriving (Eq,Show)
 

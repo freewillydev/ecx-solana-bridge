@@ -4,6 +4,7 @@ module Main (main) where
 import qualified ConfigureCheck
 import qualified SigningTransportCheck
 import qualified ChainCheck
+import qualified LifecycleCheck
 import Bridge.Identity (bearerHash,capabilityHash,payInstruction,payURIFor)
 import Bridge.API (customerServer)
 import Bridge.Signer (signingServer)
@@ -146,7 +147,8 @@ main = do
     ]
   chainResults <- ChainCheck.checks
   transportResults <- SigningTransportCheck.checks
-  if all isSuccess (results<>chainResults<>transportResults) then pure () else exitFailure
+  lifecycleResults <- LifecycleCheck.checks
+  if all isSuccess (results<>chainResults<>transportResults<>lifecycleResults) then pure () else exitFailure
  where
   check description p=putStrLn description >> quickCheckWithResult stdArgs{maxSuccess=300} p
   amounts=chooseInteger (0,toInteger(maxBound::Int64))
