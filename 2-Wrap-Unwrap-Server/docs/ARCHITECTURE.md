@@ -722,3 +722,23 @@ verifier still proves finalized complete absence using every required provider;
 these facts cannot be manufactured by an HTTP customer. Bytes, principal and old
 generations survive retirement. Approval does not reserve funds, sign or send; a
 new preparation must independently pass the normal budget/backup/signing gates.
+
+Native/source recovery now uses these pure decisions with closed Store readers
+and fixed writes. Protocol checks remain independently owned by the chain adapters:
+
+| Recovery operation | Pure decision | Retained durable/protocol boundary |
+| --- | --- | --- |
+| Native replacement | `checkReplacementParent`, `checkReplacementDraft`, `checkReplacementSigning` | Current bounded family, exact work hash, paused/fresh authority; NativePayment validates identical inputs/recipient and allowed change/fee adjustment |
+| Settled native observation/winner | `decideNativeReview`, `decideNativeWinner` | Fresh actual winner/cost proof; immutable original settlement; winner changes post only Operating/External fee delta |
+| Source loss/return | `decideSourceCheck`, `sourceReturnPostings` | Atomic receipt/evidence sequence; unavailable retains previous loss; original coverage split returns once |
+| Source capital/approval | `decideLossCover`, `decideSourceApproval` | Current source proof/custody anchor and exact suspended-work hash; only free Float/Earned; no pending cleanup |
+| Native rebroadcast | `checkRebroadcast` | Paused settled review, retained source, exact saved family/bytes/digest, immutable approval and backup; live source/absence rechecked before send |
+| Successor generation | `successorGeneration` | Bounded contiguous history; wholly unsigned completed cleanup is distinct from independently proved and separately approved Solana expiry |
+
+Generation readers fetch at most nine preparation rows to detect the eight-entry
+limit. Evidence constructors retain their different meaning: releasing an earned
+reservation accepts completed unsigned cleanup, while a new preparation can also
+accept proved and approved expiry. Old-generation callbacks cannot retire current
+work. Native accounting corrections, overlap exclusion, wallet anchors, pending
+credit restrictions and lock ownership remain in their existing adapter/reconciliation
+checks. Neither a timeout nor a partial history becomes absence or send permission.

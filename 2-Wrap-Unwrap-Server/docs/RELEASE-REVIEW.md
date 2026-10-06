@@ -9,6 +9,10 @@ tests does not certify later source or packages.
 
 ## Financial-core refactor execution
 
+Current checkpoint: **70/120 (A–F)**. The chronological records below distinguish
+the verified source and scope of each stage. Schema consolidation is next; the
+funded deployment has not been upgraded by this refactor.
+
 **12/120: checkpoint A complete, 2026-10-05.** Started from clean local/remote
 `master` at `3d4970b3e502de9d4c9a89803610df3802e3e322`; created branch
 `codex/auditable-financial-core` in the existing checkout. No funded runtime,
@@ -364,6 +368,69 @@ still has a net line cost; removing redundant persisted state remains G. Next:
 F61–64 native replacement, settled-winner/source recovery and same-byte rebroadcast,
 followed by the shared mechanics/failure/recovery batch in F65–70. No completion
 or security guarantee is inferred from these passing local checks.
+
+### Native/source recovery and checkpoint F complete — 70/120
+
+F61–70 are verified on top of `fb38ddb030fa4cd1cb70d606ed26017fd119b1b9`.
+Replacement authorization, settled observation/winner changes, source loss/return,
+loss coverage/approval and same-byte rebroadcast now have explicit pure decisions.
+Store loads current facts and applies their narrow results under its existing lock.
+Shared generation handling retains separate unsigned-cleanup and proved/approved
+expiry evidence; the reader detects overflow with at most nine preparation rows.
+Native transaction validation, wallet accounting corrections and live finality/
+source checks remain intact. Schema 21, wire formats, critical dispatch and the
+funded deployment are unchanged. I03–I13 and I15 are the main regression boundaries.
+
+Verification used one build job and the existing cache environment:
+
+- `cabal build ecx-bridge:exe:ecx-store-check ecx-bridge:exe:ecx-bridge ecx-bridge:test:bridge-test -j1 --offline`: pass.
+- `cabal test ecx-bridge:bridge-test -j1 --offline --test-show-details=direct`: pass,
+  including **7,800 generated lifecycle cases**, fixed refusals and two expected
+  mutation failures. New cases cover exact replacement work/family, reversible
+  fee-only winner changes, native-review idempotence, missing/unavailable/returned
+  sources, original capital split, stale approvals, timeout refusal and successor
+  histories. Existing native tests retain shared-input exclusion, stable wallet
+  anchors, pending-credit restrictions, foreign locks and unknown cleanup.
+- `cabal run ecx-bridge:exe:ecx-store-check -j1 --offline`: five sequential modes
+  passed on fresh `ecx_rebuild_contract_core_f_native_{store,tls,server,fence,custody}_20261005`
+  databases with migrations 001–008 and the restricted
+  `ecx_core_reader_native_20261005` role. Default mode covers atomic rollback,
+  exact bytes, all cancellation generations/late callbacks, source coverage and
+  repeated return, native winner changes, budget/recovery interleavings, 17/27
+  customer-history comparisons and complete encrypted restic restoration.
+  `ECX_REBUILD_TLS_ONLY=1` covers actual signer HTTPS, second-read refusal,
+  serialization and gate recovery; `ECX_REBUILD_SERVER_ONLY=1 ECX_REBUILD_CANONICAL=1`
+  covers executable HTTP and paused unavailable-chain startup;
+  `ECX_REBUILD_FENCE_ONLY=1` covers uncertain commits and stale restart refusal.
+  These modes used Cabal's current executable/SDK paths in
+  `ECX_REBUILD_EXECUTABLE`/`ECX_REBUILD_TEST_SDK`.
+- The final mode used `ECX_REBUILD_NATIVE_RECOVERY_ONLY=1`,
+  `ECX_REBUILD_ENCRYPTED_NATIVE_ONLY=1`, `ECX_REBUILD_CUSTODY_ONLY=1` and the existing
+  real L2L Signet node on port 29432. A newly created unfunded encrypted wallet
+  was restored in separate executable processes with a relocated manifest.
+  Descriptor state, labels, next address and private-key signing matched; complete
+  custody export/encrypted upload/download/paused ledger restoration passed.
+  The random test wallets were removed. Existing wallets/funds were untouched.
+
+Logs: `/tmp/ecx-financial-core-f-native-{build,tests,schema,store,tls,server,fence,custody}.log`.
+The disposable databases/role were removed; no build/test process or new VM remains.
+The reference hash and sole `evalCritical` dispatch are unchanged. No funded send,
+real alternate-chain history, physically independent backup or independent security
+audit is claimed from this batch. Existing compiler warnings remain.
+
+| F61–70 source | Before | After | Difference |
+| --- | ---: | ---: | ---: |
+| `src/Bridge/Lifecycle.hs` | 705 | 876 | +171 |
+| `runtime/Bridge/Store.hs` | 3,444 | 3,404 | -40 |
+| Application piece | 4,149 | 4,280 | **+131, zero new files** |
+| `test/LifecycleCheck.hs` | 528 | 643 | **+115, zero new files** |
+
+Totals: **66 application/schema files / 15,743 lines**, **23 test files plus
+embedded Rust / 10,150 lines**, **31 tooling files / 3,362 lines**. All of F adds
+226 application and 187 test lines. The benefit is explicit separately reviewable
+decisions and fewer mixed query/decision blocks; this is not a net size reduction
+or a claim of perfect security. G must remove duplicated persisted lifecycle
+state and its writes while retaining every financial guarantee and migration.
 
 ## Source and evidence boundaries
 

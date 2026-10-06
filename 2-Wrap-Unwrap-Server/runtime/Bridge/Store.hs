@@ -59,9 +59,6 @@ data NativeLockWork = NativeLockWork
 data CustodySnapshot = CustodySnapshot
   { custodyRevision :: Int64, custodyTotals :: M.Map Asset Integer
   , custodyHeads :: [(Text,Text)], custodySlot :: Int64, custodyPending :: [RecordedAttempt] } deriving (Eq,Show)
-data NativeSettlementCheck = NativeConfirming | NativeUnavailable Text
-  | NativeReconfirmed W.PaymentCosts Text
-  | NativeWinnerChanged [RecordedAttempt] Text W.PaymentCosts Text deriving (Eq,Show)
 
 -- Explicit fresh installation only. Schema DDL is applied separately; this
 -- operation cannot restore funds, adopt a fence or make an existing ledger empty.
@@ -1128,7 +1125,6 @@ sourceProof = \case W.SourcePending p->p; W.SourceMissing p->p; W.SourceRestored
 recordSourceCheck :: PG.Connection -> S.Deposit -> W.SourceCheck -> IO ()
 recordSourceCheck c source check = do
   let did=S.depositId source
-      eligible=S.depositEligible source==1
   asset <- parseAsset (S.depositAsset source)
   history <- O.runSelect c $ O.limit 1 $ O.orderBy (O.desc (\(key,_,_,_,_,_)->key)) $ do
     row@(_,deposit,_,_,_,_) <- O.selectTable S.sourceChecks
@@ -1136,24 +1132,15 @@ recordSourceCheck c source check = do
     pure row
     :: IO [(Int64,Text,Text,Int64,Text,Int64)]
   let old=case history of [(_,_,state,loss,savedProof,_)]->Just(state,loss,savedProof); _->Nothing
-      previousLoss=maybe 0 (\(_,n,_)->n) old
-      proof=sourceProof check
-      evidence=encodeSaved proof
-  (state,loss) <- case check of
-    W.SourcePending _->require (not eligible && asset==Native) "source_recovery_scan_not_current" >> pure ("pending",0)
-    W.SourceMissing _->require (not eligible && asset==Native) "source_recovery_scan_not_current" >> pure ("missing",S.depositAmount source)
-    W.SourceRestored _->require eligible "source_recovery_scan_not_current" >> pure ("restored",0)
-    W.SourceUnavailable _->pure ("unavailable",previousLoss)
-  require (proof/=Null && T.length evidence<=16384) "invalid_source_recovery_evidence"
-  let ordinary=old==Nothing && S.depositAllocated source==0 && state=="pending"
-      unchanged=maybe False (\(s,n,p)->s==state && n==loss && (state/="unavailable" || p==evidence)) old
-  unless (ordinary || unchanged) $ do
+  deposit<-asDeposit source
+  effect<-checked (decideSourceCheck deposit (S.depositAllocated source==1) old check)
+  forM_ effect $ \decision->do
+    let state=sourceState decision; loss=sourceLoss decision; evidence=sourceCheckEvidence decision; delta=sourceLossDelta decision
     sequenceNo <- nextSequence c
     _ <- O.runInsert c O.Insert {O.iTable=S.sourceChecks,
       O.iRows=[(Nothing,O.sqlStrictText did,O.sqlStrictText state,O.sqlInt8 loss,O.sqlStrictText evidence,O.sqlInt8 sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-    let delta=toInteger loss-toInteger previousLoss
     when (delta/=0) $ post c ("source-recovery:"<>T.pack(show sequenceNo)) "change in verified missing source value"
-      [Posting asset SourceDeficit (negate delta),Posting asset External delta]
+      (sourcePostings decision)
     when (delta<0) $ do
       covers <- O.runSelect c $ do
         (key,deposit,n,capital,earned) <- S.activeSourceCovers
@@ -1161,10 +1148,10 @@ recordSourceCheck c source check = do
         pure (key,n,capital,earned)
         :: IO [(Int64,Int64,Int64,Int64)]
       forM_ covers $ \(covered,n,capital,earned)->do
-        require (toInteger n==negate delta) "source_loss_return_mismatch"
+        postings<-checked (sourceReturnPostings asset (negate delta) (n,capital,earned))
         _ <- O.runInsert c O.Insert {O.iTable=S.sourceReturns,O.iRows=[(O.sqlInt8 covered,O.sqlInt8 sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
         post c ("source-loss-return:"<>T.pack(show covered)) "restored source returns its operator loss allocation"
-          [Posting asset Float (toInteger capital),Posting asset Earned (toInteger earned),Posting asset SourceDeficit (negate $ toInteger n)]
+          postings
     _ <- O.runUpdate c O.Update {O.uTable=S.deployment,
       O.uUpdateWith= \row->row {S.paused=O.sqlInt8 1,S.pauseReason=O.sqlStrictText "source_recovery_review"},
       O.uWhere= \row->S.singleton row O..== O.sqlInt8 1,O.uReturning=O.rCount}
@@ -2507,7 +2494,7 @@ retryGeneration :: PG.Connection -> Text -> IO (Maybe Int)
 retryGeneration=nextGeneration True
 nextGeneration :: Bool -> PG.Connection -> Text -> IO (Maybe Int)
 nextGeneration includeExpired c identifier = do
-  rows<-O.runSelect c $ O.orderBy (O.asc (\(g,_,_)->g)) $ do
+  rows<-O.runSelect c $ O.limit 9 $ O.orderBy (O.asc (\(g,_,_)->g)) $ do
     (key,g,_,_,retired,cancelled)<-S.workPreparations
     O.where_ (key O..== O.sqlStrictText identifier)
     pure (g,retired,cancelled)
@@ -2519,16 +2506,16 @@ nextGeneration includeExpired c identifier = do
     :: IO [(Text,Int64)]
   if null rows || length rows>8 || map (\(g,_,_)->g) rows/=[0..fromIntegral(length rows)-1]
     then pure Nothing else do
-      permitted<-forM rows $ \(g,retired,cancelled)->case (retired,cancelled) of
+      endings<-forM rows $ \(g,retired,cancelled)->(g,) <$> case (retired,cancelled) of
         (Nothing,1)->do
           done<-readCancellation c identifier (fromIntegral g)
-          pure (case done of Just(_,_,True)->all ((/=g).snd) attempts; _->False)
+          pure $ UnsignedCleanup (case done of Just(_,_,True)->True; _->False)
         (Just txid,0) | includeExpired->do
           expired<-expiryProof c txid
           approved<-retryReason c txid
-          pure (expired/=Nothing && approved/=Nothing && filter ((==g).snd) attempts==[(txid,g)])
-        _->pure False
-      pure $ if and permitted && all (\(_,g)->g>=0 && g<fromIntegral(length rows)) attempts then Just(length rows) else Nothing
+          pure $ SolanaRetired txid (expired/=Nothing) (approved/=Nothing)
+        _->pure OpenGeneration
+      pure (successorGeneration includeExpired endings attempts)
 
 expiryProof :: PG.Connection -> Text -> IO (Maybe Text)
 expiryProof c txid = do
@@ -2791,11 +2778,10 @@ sourceRecovery c covered key restoration = do
     O.where_ (receipt O..== text(S.depositId deposit))
     pure row
     :: IO [(Int64,Text,Text,Int64,Text,Int64)]
-  require (S.obligationStatus obligation=="review" && case history of
-    (_,_,phase,shortfall,_,n):_->n==restoration && if covered
-      then S.depositAsset deposit=="Native" && S.depositEligible deposit==0 && phase=="missing" && shortfall==S.depositAmount deposit
-      else S.depositEligible deposit==1 && phase=="restored" && shortfall==0
-    _->False) "source_approval_not_expected"
+  source<-asDeposit deposit
+  status<-checked (parsePaymentStatus $ S.obligationStatus obligation)
+  let latest=case history of (_,_,phase,shortfall,_,n):_->Just(phase,shortfall,n); _->Nothing
+  checked (checkSourceApprovalSource covered restoration status source latest)
   cover<-if not covered then pure Nothing else do
     covers<-O.runSelect c $ do
       (n,receipt,quantity,_,_)<-S.activeSourceCovers
@@ -2821,17 +2807,14 @@ sourceRecovery c covered key restoration = do
           pure [(previous,n,hash)]
       require (length(concat matches)<=1) "source_review_context_missing"
       pure (concat matches)
-  (previous,loss,expected)<-case concat reviews of
-    row@(state,_,_):_ | state `elem` ["ready","paying"]->pure row
-    _->reject "source_review_context_missing"
+  let reviewed=case concat reviews of row:_->Just row; _->Nothing
   actual<-sourceWorkHash c key
-  require (expected==actual) "source_review_work_changed"
   pending<-O.runSelect c $ do
     (identifier,g,_,_,done)<-S.workCancellations
     O.where_ (identifier O..== text key O..&& done O..== num 0)
     pure g
     :: IO [Int64]
-  require (null pending) "preparation_cancellation_pending"
+  (previous,loss)<-checked (decideSourceApproval covered restoration $ SourceApprovalFacts status source latest cover reviewed actual (not $ null pending))
   pure (obligation,previous,loss,actual,cover)
  where field name value=either (const $ reject "invalid_source_recovery_evidence") pure (parseEither (withObject "recovery" (.: name)) value)
 
@@ -2920,32 +2903,29 @@ coverSourceLoss c policy source recovery now capital earned reason proof (revisi
   case previous of
     Just saved->require (saved==(capital,earned,reason)) "source_loss_cover_conflict"
     Nothing->do
-      require (W.depositAsset source==Native && not(W.depositEligible source)) "source_loss_not_proven"
       current<-readSource c receipt >>= asDeposit
       history<-O.runSelect c $ O.limit 1 $ O.orderBy (O.desc (\(n,_,_,_,_,_)->n)) $ do
         row@(_,key,_,_,_,_)<-O.selectTable S.sourceChecks
         O.where_ (key O..== text receipt)
         pure row
         :: IO [(Int64,Text,Text,Int64,Text,Int64)]
-      require (current==source && case history of [(_,_,"missing",n,_,sequenceNo)]->n==quantity && sequenceNo==recovery; _->False) "source_loss_not_proven"
-      require (toInteger(units capital)+toInteger(units earned)==toInteger quantity) "source_loss_allocation_mismatch"
       covers<-O.runSelect c $ do
         (n,key,_,_,_)<-S.activeSourceCovers
         O.where_ (key O..== text receipt)
         pure n
         :: IO [Int64]
-      require (null covers) "source_loss_already_covered"
       verifyLossView c receipt proof report
       currentRevision<-readCustodyRevision c
-      require (matches && currentRevision==revision && at>=0 && at<=now && toInteger now-toInteger at<=60) "source_loss_custody_not_current"
       booked<-balances c
       holds<-O.runSelect c $ do
         (_,asset,n,phase)<-O.selectTable S.reservations
         O.where_ (asset O..== text "Native" O..&& phase O../= text "released")
         pure n
         :: IO [Int64]
-      require (M.findWithDefault 0 (Native,Float) booked-sum(map toInteger holds)>=toInteger(units capital)
-        && M.findWithDefault 0 (Native,Earned) booked>=toInteger(units earned)) "insufficient_loss_capital"
+      let latest=case history of [(_,_,"missing",n,_,sequenceNo)]->Just(n,sequenceNo); _->Nothing
+          checkedCustody=if matches then Just(currentRevision,revision,at) else Nothing
+      postings<-checked (decideLossCover source recovery now capital earned $ LossCoverFacts current latest (not $ null covers) checkedCustody
+        (M.findWithDefault 0 (Native,Float) booked-sum(map toInteger holds)) (M.findWithDefault 0 (Native,Earned) booked))
       let custody=object ["revision" .= revision,"checkedAt" .= at,"report" .= report]
           evidence=encodeSaved $ object ["source" .= proof,"custody" .= custody]
       require (T.length evidence<=32768) "source_loss_evidence_too_large"
@@ -2953,7 +2933,7 @@ coverSourceLoss c policy source recovery now capital earned reason proof (revisi
       count<-O.runInsert c O.Insert {O.iTable=S.sourceLossCovers,O.iRows=[(num sequenceNo,text receipt,num recovery,num quantity,num $ units capital,num $ units earned,text reason,text evidence)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
       require (count==1) "source_loss_cover_insert_failed"
       post c ("source-loss-cover:"<>T.pack(show sequenceNo)) "operator capital covers verified source shortfall"
-        [Posting Native Float (negate $ toInteger $ units capital),Posting Native Earned (negate $ toInteger $ units earned),Posting Native SourceDeficit (toInteger quantity)]
+        postings
       audit c "source_loss_covered" receipt
 
 -- Both capital coverage and payment approval bind to the same scanned outpoint
@@ -3051,20 +3031,20 @@ replacementDecision c parent fee reason = do
 -- a bounded replacement of the current, already broadcast family member.
 replacementDraftContext :: PG.Connection -> Text -> Int64 -> Text -> Amount -> IO [(RecordedAttempt,N.NativeSigned)]
 replacementDraftContext c identity now txid fee = do
-  metadata c identity >>= \state->require (S.paused state==1) "pause_before_operator_action"
+  operator<-readOperator c identity now
+  require (operatorPaused operator) "pause_before_operator_action"
   current<-sendContext c identity txid
   require (recordedChain current=="Native" && recordedState current=="broadcast_intent"
     && maybe False (>0) (recordedSequence current)) "native_replacement_not_expected"
   family<-nativeFamily c identity (recordedPayment current)
-  require (fst(last family)==current && length family<8) "native_replacement_not_current"
+  checked (checkReplacementParent current $ map fst family)
   _<-checked (N.replacementOutputs (snd $ last family) fee)
   drafts<-O.runSelect c $ do
     (n,parent,_,_,_,_)<-S.replacementDrafts
     O.where_ (O.in_ (map (O.sqlStrictText.signedId.recordedSigned.fst) family) parent)
     pure n
     :: IO [Int64]
-  require (length drafts<7) "native_replacement_draft_limit"
-  fresh c now
+  checked (checkReplacementDraft operator current (map fst family) $ length drafts)
   pure family
 
 saveReplacementDraft :: PG.Connection -> PaymentTerms -> Int64 -> RecordedAttempt -> N.NativeDraft -> Text -> IO Int64
@@ -3168,14 +3148,10 @@ replacementSigning c identity backed now decision = do
   parent<-readAttempt c txid
   let identifier=recordedPayment parent
   prepared<-readPreparation c identity identifier
-  require (recordedChain parent=="Native" && recordedState parent=="broadcast_intent"
-    && maybe False (>0) (recordedSequence parent) && recordedGeneration parent==preparedGeneration prepared
-    && savedStatus(preparedView prepared)==PaymentPaying && recordedFee parent==preparedFee prepared) "native_replacement_not_expected"
-  paymentSource c (savedPayment $ preparedView prepared)
+  eligible<-paymentSourceEligible c (savedPayment $ preparedView prepared)
   family<-nativeFamily c identity identifier
-  require (fst(last family)==parent) "native_replacement_not_current"
   currentHash<-paymentWorkHash c identifier
-  require (currentHash==hash) "native_replacement_work_changed"
+  checked (checkReplacementSigning prepared parent (map fst family) eligible (hash,currentHash))
   draft<-decodeSaved raw
   require (units(N.draftFee draft)==fee) "native_replacement_draft_changed"
   checked (N.validateNativeReplacementDraft (map snd family) (N.draftFee draft) draft)
@@ -3263,22 +3239,19 @@ recordNativeSettlement c identity expected result = do
   case result of
     NativeWinnerChanged expectedFamily winnerId costs proof->do
       family<-nativeFamily c identity identifier
-      require (map fst family==expectedFamily && winnerId/=txid && actual `elem` map fst family) "native_replacement_family_changed"
       (winner,signed)<-case [(a,s)|(a,s)<-family,signedId(recordedSigned a)==winnerId] of
         [member]->pure member; _->reject "native_family_winner_missing"
-      require (recordedState winner `elem` ["broadcast_intent","review"] && maybe False (>0) (recordedSequence winner)) "unrecorded_broadcast_observed"
       oldSigned<-decodeSaved (signedPolicy $ recordedSigned actual)
       oldCosts<-settledCosts actual oldSigned
       hash<-nativeSettlementProof c winner signed costs proof
-      let saved=encodeSaved $ object ["costs" .= costs,"proof" .= proof]
-          delta=toInteger(units $ W.networkFee costs)-toInteger(units $ W.networkFee oldCosts)
-      require (T.length saved<=32768 && delta/=0 && abs delta<=toInteger(maxBound::Int64)) "invalid_native_settlement"
+      effect<-checked (decideNativeWinner expectedFamily winnerId costs proof $ NativeWinnerFacts actual (map fst family) oldCosts)
+      let saved=changedObservation effect; delta=changedFee effect
       n<-nextSequence c
       inserted<-O.runInsert c O.Insert {O.iTable=S.nativeWinnerChanges,
         O.iRows=[(num n,text txid,text winnerId,text previous,text saved,text hash,num $ fromInteger delta)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
       require (inserted==1) "native_winner_record_failed"
       post c ("native-winner-fee:"<>T.pack(show n)) "canonical native winner fee adjustment"
-        [Posting Native Operating (negate delta),Posting Native External delta]
+        (winnerPostings effect)
       oldChanged<-O.runUpdate c O.Update {O.uTable=S.attempts,O.uUpdateWith= \r->r {S.attemptState=text "review"},O.uWhere= \r->S.attemptId r O..== text txid,O.uReturning=O.rCount}
       newChanged<-O.runUpdate c O.Update {O.uTable=S.attempts,O.uUpdateWith= \r->r {S.attemptState=text "settled",S.attemptObservation=O.toNullable $ text saved},O.uWhere= \r->S.attemptId r O..== text winnerId,O.uReturning=O.rCount}
       require (oldChanged==1 && newChanged==1) "native_winner_context_changed"
@@ -3291,31 +3264,22 @@ recordNativeSettlement c identity expected result = do
       pauseScan c "native_winner_changed"
       audit c "native_winner_changed" (txid<>":"<>winnerId)
     _->do
-      (state,saved)<-case result of
-        NativeConfirming->pure ("confirming",encodeSaved $ object ["reason" .= ("native_confirmation_policy_pending"::Text)])
-        NativeUnavailable reason->do
-          require (not(T.null reason) && T.length reason<=160) "invalid_native_recovery_reason"
-          pure ("unavailable",encodeSaved $ object ["reason" .= reason])
+      case result of
         NativeReconfirmed costs proof->do
           family<-nativeFamily c identity identifier
           signed<-case [s|(a,s)<-family,a==actual] of [s]->pure s; _->reject "native_settlement_changed"
           oldCosts<-settledCosts actual signed
           require (costs==oldCosts) "native_recovery_cost_changed"
           _<-nativeSettlementProof c actual signed costs proof
-          pure ("reconfirmed",encodeSaved $ object ["costs" .= costs,"proof" .= proof])
-      validateSavedJson 32768 saved
+          pure ()
+        _->pure ()
       old<-O.runSelect c $ do
         (tx,_,status,proof,_)<-S.nativeRecoveryDetails
         O.where_ (tx O..== text txid)
         pure (status,proof)
         :: IO [(Text,Text)]
-      let base value=case value of Object fields->Object $ foldr KM.delete fields ["rebroadcastRecovery","operatorReason","rebroadcastProof"]; other->other
-      unchanged<-case old of
-        [(status,proof)] | status==state->(==) <$> (base <$> (decodeSaved proof :: IO Value)) <*> (decodeSaved saved :: IO Value)
-        []->pure (state=="reconfirmed" && previous==saved)
-        [_]->pure False
-        _->reject "duplicate_native_recovery_state"
-      unless unchanged $ do
+      decision<-checked (decideNativeReview result previous old)
+      forM_ decision $ \(state,saved)->do
         n<-nextSequence c
         _<-O.runInsert c O.Insert {O.iTable=S.nativeRecoveryRows,O.iRows=[(text txid,text previous,text state,text saved,num n)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
         when (state=="reconfirmed") $ do
@@ -3381,10 +3345,8 @@ nativeRebroadcastContext c identity txid = do
     && maybe False (>0) (recordedSequence saved)) "native_rebroadcast_payment_changed"
   nativeResolved c saved
   view<-readPayment c identity (recordedPayment saved)
-  require (savedStatus view==PaymentPaid) "native_rebroadcast_payment_changed"
-  paymentSource c (savedPayment view)
+  eligible<-paymentSourceEligible c (savedPayment view)
   family<-nativeFamily c identity (recordedPayment saved)
-  require (saved `elem` map fst family) "native_replacement_family_changed"
   reviews<-O.runSelect c $ do
     (key,previous,status,proof,n)<-S.nativeRecoveryDetails
     O.where_ (key O..== O.sqlStrictText txid)
@@ -3393,9 +3355,7 @@ nativeRebroadcastContext c identity txid = do
   (previous,status,raw,n)<-case reviews of [row]->pure row; _->reject "native_rebroadcast_review_missing"
   value<-decodeSaved raw
   reason<-nativeProofField "reason" value :: IO Text
-  require (recordedObservation saved==Just previous
-    && (status=="confirming" && reason=="native_confirmation_policy_pending"
-      || status=="unavailable" && reason=="native_settled_payment_unseen")) "native_rebroadcast_not_missing"
+  checked (checkRebroadcast saved $ RebroadcastFacts (S.paused state==1) view eligible (map fst family) (previous,status,reason))
   pure (saved,family,status,value,n)
 
 nativeRebroadcastDecision :: PG.Connection -> Text -> Int64 -> Text -> IO (Maybe Int64)

@@ -21,6 +21,11 @@ module Bridge.Lifecycle
   , scanAssets, scanFacts, checkScanBatch, checkScan, ObservationFacts(..), checkObservation, observationNeedsReview
   , CleanupPhase(..), CancellationFacts(..), CancellationDecision(..), decideCancellation
   , ExpiryFacts(..), decideSolanaExpiry, RetryFacts(..), decideSolanaRetry
+  , checkReplacementParent, checkReplacementDraft, checkReplacementSigning
+  , NativeSettlementCheck(..), NativeWinnerFacts(..), NativeWinnerEffect(..), decideNativeWinner, decideNativeReview
+  , SourceEffect(..), decideSourceCheck, sourceReturnPostings, LossCoverFacts(..), decideLossCover
+  , SourceApprovalFacts(..), checkSourceApprovalSource, decideSourceApproval, RebroadcastFacts(..), checkRebroadcast
+  , GenerationEnd(..), successorGeneration
   ) where
 
 import Bridge.Domain hiding (fee)
@@ -28,6 +33,8 @@ import Bridge.Wire (PaymentTerms(..),CostLimits(..),SignedAttempt(..),PaymentCos
 import qualified Bridge.Wire as W
 import Control.Monad (unless,forM_)
 import Data.Aeson (Value(Null),eitherDecodeStrict',encode,object,(.=))
+import qualified Data.Aeson as A
+import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
 import Data.List (sort,sortOn,nub)
@@ -703,3 +710,167 @@ decideSolanaRetry expected reason previous facts = case previous of
       && savedStatus view==PaymentReview && paymentId(savedPayment view)==recordedPayment expected) "solana_retry_not_expected"
     ensure (retrySourceEligible saved) "source_not_eligible"
     pure True
+
+-- Protocol validation of family inputs/outputs/fees remains in NativePayment.
+-- These checks bind that verified family to the current durable payment.
+checkReplacementParent :: RecordedAttempt -> [RecordedAttempt] -> Either Text ()
+checkReplacementParent parent family = do
+  ensure (recordedChain parent=="Native" && recordedState parent=="broadcast_intent"
+    && maybe False (>0) (recordedSequence parent)) "native_replacement_not_expected"
+  ensure (case reverse family of current:_->current==parent; _->False) "native_replacement_not_current"
+checkReplacementDraft :: OperatorFacts -> RecordedAttempt -> [RecordedAttempt] -> Int -> Either Text ()
+checkReplacementDraft operator parent family drafts = do
+  ensure (operatorPaused operator) "pause_before_operator_action"
+  checkReplacementParent parent family
+  ensure (length family<8) "native_replacement_not_current"
+  ensure (drafts>=0 && drafts<7) "native_replacement_draft_limit"
+  checkCustody (operatorTime operator) (operatorCustody operator)
+checkReplacementSigning :: PreparedPayment -> RecordedAttempt -> [RecordedAttempt] -> Bool -> (Text,Text) -> Either Text ()
+checkReplacementSigning prepared parent family eligible (expectedHash,currentHash) = do
+  checkReplacementParent parent family
+  ensure (recordedPayment parent==paymentId(savedPayment $ preparedView prepared)
+    && recordedGeneration parent==preparedGeneration prepared && recordedFee parent==preparedFee prepared
+    && savedStatus(preparedView prepared)==PaymentPaying) "native_replacement_not_expected"
+  ensure eligible "source_not_eligible"
+  ensure (currentHash==expectedHash) "native_replacement_work_changed"
+
+data NativeSettlementCheck = NativeConfirming | NativeUnavailable Text
+  | NativeReconfirmed PaymentCosts Text
+  | NativeWinnerChanged [RecordedAttempt] Text PaymentCosts Text deriving (Eq,Show)
+data NativeWinnerFacts = NativeWinnerFacts
+  { formerWinner :: RecordedAttempt, verifiedFamily :: [RecordedAttempt], formerCosts :: PaymentCosts } deriving (Eq,Show)
+data NativeWinnerEffect = NativeWinnerEffect
+  { changedWinner :: RecordedAttempt, changedObservation :: Text
+  , changedFee :: Integer, winnerPostings :: [Posting] } deriving (Eq,Show)
+
+-- The original principal event is never an output of a winner change. The
+-- chain adapter verifies the actual winner/fee; this decision only adjusts costs.
+decideNativeWinner :: [RecordedAttempt] -> Text -> PaymentCosts -> Text -> NativeWinnerFacts -> Either Text NativeWinnerEffect
+decideNativeWinner expected winnerId costs proof facts = do
+  let old=formerWinner facts; family=verifiedFamily facts
+  ensure (family==expected && winnerId/=signedId(recordedSigned old) && old `elem` family) "native_replacement_family_changed"
+  winner<-case [a | a<-family,signedId(recordedSigned a)==winnerId] of
+    [a]->Right a; _->Left "native_family_winner_missing"
+  ensure (recordedState winner `elem` ["broadcast_intent","review"] && maybe False (>0) (recordedSequence winner)) "unrecorded_broadcast_observed"
+  let saved=outcomeRecord (Succeeded costs proof)
+      delta=toInteger(units $ networkFee costs)-toInteger(units $ networkFee $ formerCosts facts)
+  ensure (recordedChain old=="Native" && recordedState old=="settled" && recordedChain winner=="Native"
+    && recordedPayment winner==recordedPayment old && units(accountRent costs)==0
+    && units(accountRent $ formerCosts facts)==0 && units(networkFee costs)>0 && networkFee costs<=recordedFee winner
+    && units(networkFee $ formerCosts facts)>0 && networkFee(formerCosts facts)<=recordedFee old && T.length saved<=32768
+    && delta/=0 && abs delta<=toInteger(maxBound::Int64)) "invalid_native_settlement"
+  pure $ NativeWinnerEffect winner saved delta [Posting Native Operating (negate delta),Posting Native External delta]
+
+decideNativeReview :: NativeSettlementCheck -> Text -> [(Text,Text)] -> Either Text (Maybe (Text,Text))
+decideNativeReview result previous old = do
+  (state,saved)<-case result of
+    NativeConfirming->Right("confirming",object ["reason" .= ("native_confirmation_policy_pending"::Text)])
+    NativeUnavailable reason->do
+      ensure (not(T.null reason) && T.length reason<=160) "invalid_native_recovery_reason"
+      pure ("unavailable",object ["reason" .= reason])
+    NativeReconfirmed costs proof->Right("reconfirmed",object ["costs" .= costs,"proof" .= proof])
+    NativeWinnerChanged{}->Left "invalid_native_settlement"
+  let encoded=TE.decodeUtf8 $ BL.toStrict $ encode saved
+      base (A.Object fields)=A.Object $ foldr KM.delete fields ["rebroadcastRecovery","operatorReason","rebroadcastProof"]
+      base other=other
+  ensure (T.length encoded<=32768) "invalid_payment_record"
+  unchanged<-case old of
+    [(status,raw)] | status==state->do
+      value<-either (const $ Left "corrupt_ledger_json") Right (eitherDecodeStrict' $ TE.encodeUtf8 raw)
+      pure (base value==saved)
+    []->pure (state=="reconfirmed" && previous==encoded)
+    [_]->pure False
+    _->Left "duplicate_native_recovery_state"
+  pure $ if unchanged then Nothing else Just(state,encoded)
+
+data SourceEffect = SourceEffect
+  { sourceState :: Text, sourceLoss :: Int64, sourceCheckEvidence :: Text
+  , sourceLossDelta :: Integer, sourcePostings :: [Posting] } deriving (Eq,Show)
+decideSourceCheck :: W.Deposit -> Bool -> Maybe (Text,Int64,Text) -> W.SourceCheck -> Either Text (Maybe SourceEffect)
+decideSourceCheck source allocated old result = do
+  let eligible=W.depositEligible source; asset=W.depositAsset source
+      previousLoss=maybe 0 (\(_,n,_)->n) old
+  (state,loss,proof)<-case result of
+    W.SourcePending p->ensure (not eligible && asset==Native) "source_recovery_scan_not_current" >> pure("pending",0,p)
+    W.SourceMissing p->ensure (not eligible && asset==Native) "source_recovery_scan_not_current" >> pure("missing",units $ W.depositAmount source,p)
+    W.SourceRestored p->ensure eligible "source_recovery_scan_not_current" >> pure("restored",0,p)
+    W.SourceUnavailable p->pure("unavailable",previousLoss,p)
+  let evidence=TE.decodeUtf8 $ BL.toStrict $ encode proof
+      ordinary=old==Nothing && not allocated && state=="pending"
+      unchanged=maybe False (\(s,n,p)->s==state && n==loss && (state/="unavailable" || p==evidence)) old
+      delta=toInteger loss-toInteger previousLoss
+  ensure (proof/=Null && T.length evidence<=16384) "invalid_source_recovery_evidence"
+  pure $ if ordinary || unchanged then Nothing else Just $ SourceEffect state loss evidence delta
+    (if delta==0 then [] else [Posting asset SourceDeficit (negate delta),Posting asset External delta])
+
+sourceReturnPostings :: Asset -> Integer -> (Int64,Int64,Int64) -> Either Text [Posting]
+sourceReturnPostings asset returned (quantity,capital,earned) = do
+  ensure (toInteger quantity==returned && toInteger capital+toInteger earned==returned) "source_loss_return_mismatch"
+  pure [Posting asset Float (toInteger capital),Posting asset Earned (toInteger earned),Posting asset SourceDeficit (negate returned)]
+
+data LossCoverFacts = LossCoverFacts
+  { lossCurrent :: W.Deposit, lossLatest :: Maybe (Int64,Int64), lossAlreadyCovered :: Bool
+  , lossCustody :: Maybe (Int64,Int64,Int64), lossFreeFloat :: Integer, lossEarned :: Integer } deriving (Eq,Show)
+decideLossCover :: W.Deposit -> Int64 -> Int64 -> Amount -> Amount -> LossCoverFacts -> Either Text [Posting]
+decideLossCover source recovery now capital earned facts = do
+  let quantity=units(W.depositAmount source); fromFloat=toInteger(units capital); fromEarned=toInteger(units earned)
+  ensure (W.depositAsset source==Native && not(W.depositEligible source) && lossCurrent facts==source
+    && lossLatest facts==Just(quantity,recovery)) "source_loss_not_proven"
+  ensure (fromFloat+fromEarned==toInteger quantity) "source_loss_allocation_mismatch"
+  ensure (not $ lossAlreadyCovered facts) "source_loss_already_covered"
+  ensure (case lossCustody facts of Just(current,checked,at)->current==checked && freshAt now at; _->False) "source_loss_custody_not_current"
+  ensure (lossFreeFloat facts>=fromFloat && lossEarned facts>=fromEarned) "insufficient_loss_capital"
+  pure [Posting Native Float (-fromFloat),Posting Native Earned (-fromEarned),Posting Native SourceDeficit (toInteger quantity)]
+
+data SourceApprovalFacts = SourceApprovalFacts
+  { approvalStatus :: PaymentStatus, approvalSource :: W.Deposit
+  , approvalLatest :: Maybe (Text,Int64,Int64), approvalCover :: Maybe Int64
+  , approvalReview :: Maybe (Text,Int64,Text), approvalWorkHash :: Text, approvalCleanupPending :: Bool } deriving (Eq,Show)
+decideSourceApproval :: Bool -> Int64 -> SourceApprovalFacts -> Either Text (Text,Int64)
+decideSourceApproval covered restoration facts = do
+  checkSourceApprovalSource covered restoration (approvalStatus facts) (approvalSource facts) (approvalLatest facts)
+  ensure (not covered || maybe False (>0) (approvalCover facts)) "source_loss_not_covered"
+  (previous,loss,expected)<-case approvalReview facts of
+    Just row@(state,_,_) | state `elem` ["ready","paying"]->Right row
+    _->Left "source_review_context_missing"
+  ensure (expected==approvalWorkHash facts) "source_review_work_changed"
+  ensure (not $ approvalCleanupPending facts) "preparation_cancellation_pending"
+  pure (previous,loss)
+checkSourceApprovalSource :: Bool -> Int64 -> PaymentStatus -> W.Deposit -> Maybe (Text,Int64,Int64) -> Either Text ()
+checkSourceApprovalSource covered restoration status source latest =
+  ensure (status==PaymentReview && case latest of
+    Just(phase,shortfall,n)->n==restoration && if covered
+      then W.depositAsset source==Native && not(W.depositEligible source) && phase=="missing" && shortfall==units(W.depositAmount source)
+      else W.depositEligible source && phase=="restored" && shortfall==0
+    _->False) "source_approval_not_expected"
+
+data RebroadcastFacts = RebroadcastFacts
+  { rebroadcastPaused :: Bool, rebroadcastPayment :: PaymentView, rebroadcastSourceEligible :: Bool
+  , rebroadcastFamily :: [RecordedAttempt], rebroadcastReview :: (Text,Text,Text) } deriving (Eq,Show)
+checkRebroadcast :: RecordedAttempt -> RebroadcastFacts -> Either Text ()
+checkRebroadcast saved facts = do
+  ensure (rebroadcastPaused facts) "pause_before_operator_action"
+  ensure (recordedChain saved=="Native" && recordedState saved=="settled" && maybe False (>0) (recordedSequence saved)
+    && savedStatus(rebroadcastPayment facts)==PaymentPaid
+    && paymentId(savedPayment $ rebroadcastPayment facts)==recordedPayment saved) "native_rebroadcast_payment_changed"
+  ensure (rebroadcastSourceEligible facts) "source_not_eligible"
+  ensure (saved `elem` rebroadcastFamily facts) "native_replacement_family_changed"
+  let (previous,status,reason)=rebroadcastReview facts
+  ensure (recordedObservation saved==Just previous && (status=="confirming" && reason=="native_confirmation_policy_pending"
+    || status=="unavailable" && reason=="native_settled_payment_unseen")) "native_rebroadcast_not_missing"
+
+-- Cleanup and expiry remain distinct evidence. Releasing earned-fee reserves
+-- permits only completed wholly unsigned cleanup; preparation may also accept
+-- the independently proved and approved expiry of exactly one saved attempt.
+data GenerationEnd = OpenGeneration | UnsignedCleanup Bool | SolanaRetired Text Bool Bool deriving (Eq,Show)
+successorGeneration :: Bool -> [(Int64,GenerationEnd)] -> [(Text,Int64)] -> Maybe Int
+successorGeneration includeExpired rows attempts
+  | null rows || length rows>8 || map fst rows/=[0..fromIntegral(length rows)-1] = Nothing
+  | all permitted rows && all (\(_,g)->g>=0 && g<fromIntegral(length rows)) attempts = Just(length rows)
+  | otherwise = Nothing
+ where
+  permitted (generation,ending)=case ending of
+    UnsignedCleanup done->done && all ((/=generation).snd) attempts
+    SolanaRetired txid expired approved->includeExpired && expired && approved
+      && filter ((==generation).snd) attempts==[(txid,generation)]
+    OpenGeneration->False

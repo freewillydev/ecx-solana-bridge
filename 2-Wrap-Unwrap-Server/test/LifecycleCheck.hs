@@ -8,12 +8,14 @@ import Bridge.Lifecycle
 import qualified Bridge.Wire as W
 import Bridge.Wire (PaymentTerms(..),CostLimits(..),PolicySnapshot(..),SignedAttempt(..),PaymentCosts(..))
 import Control.Monad (foldM)
-import Data.Aeson (object)
+import Data.Aeson (Value(Null),object,(.=),encode)
+import qualified Data.ByteString.Lazy as BL
 import Data.Int (Int64)
 import Data.List (nub)
 import qualified Data.Map.Strict as M
 import qualified Data.Set as Set
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import Test.QuickCheck
 
 data FundingCase = Convert Direction Integer Integer | Return Asset Integer | Revenue Asset Integer
@@ -300,6 +302,119 @@ checks = sequence
              ,decideSolanaRetry expired "approved" (Just "approved") Nothing===Right False
              ,decideSolanaRetry expired "changed" (Just "approved") Nothing===Left "retry_approval_conflict"
              ,recordedSigned expired===recordedSigned attempt]
+  , check "native replacement binds the latest broadcast family exact work and fresh paused authority" $
+      forAll (chooseInt (0,6)) $ \drafts -> forAll (chooseInt (0,7)) $ \generation ->
+        let funding=Return Native 100
+            prepared=(created $ good $ decidePreparation (money 10) "{}" $ initialPreparation funding) {preparedGeneration=generation}
+            parent=(settlementCurrent $ snapshot 0 funding) {recordedGeneration=generation}
+            family=[parent]
+        in conjoin [checkReplacementDraft readyOperator parent family drafts===Right ()
+             ,checkReplacementDraft readyOperator parent family 7===Left "native_replacement_draft_limit"
+             ,checkReplacementDraft readyOperator parent (replicate 8 parent) drafts===Left "native_replacement_not_current"
+             ,checkReplacementDraft readyOperator {operatorPaused=False} parent family drafts===Left "pause_before_operator_action"
+             ,checkReplacementSigning prepared parent family True ("work","work")===Right ()
+             ,checkReplacementSigning prepared parent family False ("work","work")===Left "source_not_eligible"
+             ,checkReplacementSigning prepared parent family True ("work","changed")===Left "native_replacement_work_changed"
+             ,checkReplacementSigning prepared {preparedGeneration=generation+1} parent family True ("work","work")===Left "native_replacement_not_expected"
+             ,checkReplacementParent parent {recordedState="signed"} family===Left "native_replacement_not_expected"]
+  , check "changed native winners adjust only actual costs and reversing a winner restores the same allocation" $
+      forAll (chooseInteger (1,4)) $ \oldFee -> forAll (chooseInteger (5,10)) $ \newFee ->
+        let base=settlementCurrent $ snapshot 0 (Return Native 100)
+            old=base {recordedState="settled"}
+            new=base {recordedSigned=(recordedSigned base) {signedId="replacement",signedBytes="saved replacement bytes"}}
+            family=[old,new]; costs n=PaymentCosts (money n) (money 0)
+            result=good $ decideNativeWinner family "replacement" (costs newFee) "proof" (NativeWinnerFacts old family $ costs oldFee)
+            changed=new {recordedState="settled",recordedObservation=Just $ changedObservation result}
+            back=[old {recordedState="review"},changed]
+            reversed=good $ decideNativeWinner back (signedId $ recordedSigned old) (costs oldFee) "earlier winner" (NativeWinnerFacts changed back $ costs newFee)
+        in conjoin [changedWinner result===new,changedFee result===newFee-oldFee
+             ,aggregate(winnerPostings result)===M.fromList [((Native,Operating),oldFee-newFee),((Native,External),newFee-oldFee)]
+             ,aggregate(winnerPostings result<>winnerPostings reversed)===M.empty
+             ,property $ all ((`elem` [Operating,External]).postingAccount) (winnerPostings result)
+             ,decideNativeWinner family "replacement" (costs newFee) "proof" (NativeWinnerFacts old [old] $ costs oldFee)===Left "native_replacement_family_changed"
+             ,decideNativeWinner family "replacement" (costs 11) "proof" (NativeWinnerFacts old family $ costs oldFee)===Left "invalid_native_settlement"]
+  , check "native evidence reviews preserve idempotency across rebroadcast metadata without erasing settlement" $ once $
+      let prior="original settlement"; decision=NativeUnavailable "native_settled_payment_unseen"
+          Just(state,raw)=good $ decideNativeReview decision prior []
+          approved=TE.decodeUtf8 $ BL.toStrict $ encode $ object ["reason" .= ("native_settled_payment_unseen"::T.Text)
+            ,"rebroadcastRecovery" .= (5::Int),"operatorReason" .= ("resend saved bytes"::T.Text),"rebroadcastProof" .= object []]
+      in conjoin [decideNativeReview decision prior [(state,raw)]===Right Nothing
+           ,decideNativeReview decision prior [(state,approved)]===Right Nothing
+           ,property $ good(decideNativeReview NativeConfirming prior [(state,raw)])/=Nothing
+           ,decideNativeReview (NativeUnavailable "") prior []===Left "invalid_native_recovery_reason"
+           ,decideNativeReview decision prior [(state,raw),(state,raw)]===Left "duplicate_native_recovery_state"]
+  , check "source loss unavailable and return histories retain liabilities and post the deficit exactly once" $
+      forAll (chooseInteger (1,1000000)) $ \n -> forAll (chooseInteger (0,1000000)) $ \part ->
+        let source=W.Deposit "native:source:0" (Just "order") Native (money n) "anchor" 0 False 100
+            proof=object []; missing=good $ decideSourceCheck source True Nothing (W.SourceMissing proof)
+            effect=maybe (error "missing loss") id missing
+            old=Just(sourceState effect,sourceLoss effect,sourceCheckEvidence effect)
+            unavailable=maybe (error "missing unavailable") id $ good $ decideSourceCheck source True old (W.SourceUnavailable proof)
+            unseen=Just(sourceState unavailable,sourceLoss unavailable,sourceCheckEvidence unavailable)
+            returned=maybe (error "missing return") id $ good $ decideSourceCheck source {W.depositEligible=True} True unseen (W.SourceRestored proof)
+            split=min part n; cover=[Posting Native Float (-split),Posting Native Earned (split-n),Posting Native SourceDeficit n]
+            restore=good $ sourceReturnPostings Native n (fromInteger n,fromInteger split,fromInteger(n-split))
+        in conjoin [sourceLoss effect===fromInteger n,sourcePostings unavailable===[]
+             ,decideSourceCheck source True old (W.SourceMissing proof)===Right Nothing
+             ,aggregate(sourcePostings effect<>sourcePostings returned)===M.empty
+             ,aggregate(cover<>restore)===M.empty
+             ,property $ all ((`elem` [SourceDeficit,External]).postingAccount) (sourcePostings effect)
+             ,decideSourceCheck source True Nothing (W.SourceUnavailable proof)===Right(Just $ SourceEffect "unavailable" 0 "{}" 0 [])
+             ,decideSourceCheck source False Nothing (W.SourcePending proof)===Right Nothing
+             ,decideSourceCheck source True Nothing (W.SourceMissing Null)===Left "invalid_source_recovery_evidence"
+             ,sourceReturnPostings Native (n+1) (fromInteger n,fromInteger split,fromInteger(n-split))===Left "source_loss_return_mismatch"]
+  , check "covering a source loss spends only exact free native float and earned capital at the current loss" $
+      forAll (chooseInteger (1,1000000)) $ \n -> forAll (chooseInteger (0,n)) $ \capital ->
+        let source=W.Deposit "native:source:0" (Just "order") Native (money n) "anchor" 0 False 100
+            facts=LossCoverFacts source (Just(fromInteger n,4)) False (Just(2,2,100)) capital (n-capital)
+            cover=decideLossCover source 4 100 (money capital) (money(n-capital))
+            postings=good $ cover facts
+        in conjoin [sum(map postingDelta postings)===0
+             ,aggregate postings===normalize(M.fromList [((Native,Float),-capital),((Native,Earned),capital-n),((Native,SourceDeficit),n)])
+             ,cover facts {lossAlreadyCovered=True}===Left "source_loss_already_covered"
+             ,cover facts {lossLatest=Just(fromInteger n,5)}===Left "source_loss_not_proven"
+             ,cover facts {lossCustody=Just(3,2,100)}===Left "source_loss_custody_not_current"
+             ,cover facts {lossFreeFloat=capital-1}===Left "insufficient_loss_capital"
+             ,property $ all ((`notElem` [Principal,Operating,Backing,Liquidity]).postingAccount) postings]
+  , check "source approval is bound to current loss or restoration exact suspended work and completed cleanup" $
+      forAll arbitrary $ \covered -> forAll (elements ["ready","paying"]) $ \previous ->
+        let source=W.Deposit "native:source:0" (Just "order") Native (money 10) "anchor" 0 (not covered) 100
+            facts=SourceApprovalFacts PaymentReview source (Just(if covered then "missing" else "restored",if covered then 10 else 0,5))
+              (if covered then Just 4 else Nothing) (Just(previous,3,"work")) "work" False
+            approve=decideSourceApproval covered 5
+        in conjoin [approve facts===Right(previous,3)
+             ,approve facts {approvalStatus=PaymentReady}===Left "source_approval_not_expected"
+             ,approve facts {approvalWorkHash="changed"}===Left "source_review_work_changed"
+             ,approve facts {approvalCleanupPending=True}===Left "preparation_cancellation_pending"
+             ,approve facts {approvalReview=Nothing}===Left "source_review_context_missing"
+             ,approve facts {approvalCover=Nothing}===(if covered then Left "source_loss_not_covered" else Right(previous,3))]
+  , check "same-byte rebroadcast requires paid native work an applicable missing review and retained source backing" $
+      forAll (elements [("confirming","native_confirmation_policy_pending"),("unavailable","native_settled_payment_unseen")]) $ \review ->
+        let snapshot'=snapshot 0 (Return Native 100)
+            saved=(settlementCurrent snapshot') {recordedState="settled",recordedObservation=Just "original"}
+            view=(settlementPayment snapshot') {savedStatus=PaymentPaid}
+            facts=RebroadcastFacts True view True [saved] ("original",fst review,snd review)
+        in conjoin [checkRebroadcast saved facts===Right ()
+             ,checkRebroadcast saved facts {rebroadcastPaused=False}===Left "pause_before_operator_action"
+             ,checkRebroadcast saved facts {rebroadcastSourceEligible=False}===Left "source_not_eligible"
+             ,checkRebroadcast saved facts {rebroadcastReview=("original","unavailable","rpc_timeout")}===Left "native_rebroadcast_not_missing"
+             ,checkRebroadcast saved facts {rebroadcastFamily=[]}===Left "native_replacement_family_changed"
+             ,checkRebroadcast saved {recordedState="signed"} facts===Left "native_rebroadcast_payment_changed"
+             ,checkRebroadcast saved facts {rebroadcastReview=("changed",fst review,snd review)}===Left "native_rebroadcast_not_missing"]
+  , check "shared generation history keeps unsigned cleanup separate from proved approved expiry" $
+      forAll (chooseInt (1,8)) $ \count -> forAll (vectorOf count arbitrary) $ \expired ->
+        let rows=[(fromIntegral g,if retired then SolanaRetired (T.pack $ show g) True True else UnsignedCleanup True)
+                 | (g,retired)<-zip [0::Int ..] expired]
+            attempts=[(T.pack $ show g,fromIntegral g) | (g,True)<-zip [0::Int ..] expired]
+        in conjoin [successorGeneration True rows attempts===Just count
+             ,successorGeneration False rows attempts===(if or expired then Nothing else Just count)
+             ,successorGeneration True rows (attempts<>[("future",fromIntegral count)])===Nothing
+             ,successorGeneration True (rows<>rows) attempts===Nothing
+             ,successorGeneration True ((0,OpenGeneration):drop 1 rows) attempts===Nothing
+             ,successorGeneration True ((0,UnsignedCleanup False):drop 1 rows) attempts===Nothing
+             ,successorGeneration True ((0,SolanaRetired "0" True False):drop 1 rows) attempts===Nothing
+             ,successorGeneration True ((0,SolanaRetired "0" False True):drop 1 rows) attempts===Nothing
+             ,successorGeneration True ((0,UnsignedCleanup True):drop 1 rows) (("signed",0):attempts)===Nothing]
   ]
  where
   check name test=putStrLn name >> quickCheckWithResult stdArgs {maxSuccess=300} test
