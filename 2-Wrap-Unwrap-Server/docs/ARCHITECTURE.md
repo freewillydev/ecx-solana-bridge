@@ -514,7 +514,7 @@ Only `pause` is allowed as a critical operator action in observation-only mode.
 
 The bridge CLI also retains `configure`, `start [DIRECTORY]`, `check-config`,
 `check-signer`, `initialize-ledger`, `serve`, `observe`, `signer`,
-`backup-native-wallet`, `restore-native-wallet`, `backup-custody`, `check-custody`,
+`initialize-native-wallet DIRECTORY`, `backup-native-wallet`, `restore-native-wallet`, `backup-custody`, `check-custody`,
 `upload-custody`, `recover-custody`, `restore-ledger`, `recover-ledger`,
 `adopt-ledger`, `retire-ledger`. Exact positional forms remain in `app/Main.hs`
 and OPERATIONS. `ConfigureCheck`, `setupMain`, `fenceMain`, `archiveContract` and
@@ -554,6 +554,20 @@ keeps its stricter UID-owned private parent rule and re-prompts on malformed UTF
 as startup would refuse it. Worker JSON excludes unlock material; signer JSON and
 sources retain the path, not copied secret bytes. Existing private defaults,
 source/release selection, optional database setup and no-overwrite rules remain.
+
+Wallet setup optionally generates independent BIP-39 English phrases for Solana
+and ECX, using OS-backed Crypton randomness. `Bridge.Wallet` embeds the standard
+word list, validates its checksum, and derives fixed SLIP-0010 Solana / BIP-84 native
+keys. Configure displays phrases only on the controlling terminal and saves private
+recovery files outside the disposable settings directory. It passes the derived
+Solana keypair through the existing signer-file contract. Native initialization
+is a closed `NativeRecovery` operation requiring separate local administrator RPC
+authority, chain identity, two exact public descriptors and a private completion
+record; it cannot sign transactions or broadcast. Service startup does not receive
+that administrator credential or either phrase. Linux process dumpability/core
+files are disabled while handling seed material. Privileged host/terminal capture
+remains outside this guarantee. Native restoration requires complete chain history,
+an explicit bounded recovery range and separate ledger recovery, not fresh custody.
 
 ### Formats and failure semantics to retain
 

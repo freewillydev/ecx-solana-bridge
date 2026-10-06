@@ -22,13 +22,77 @@ sudo ecx-bridge start
 ```
 
 The wizard asks for a new private directory (default `./.ecx-bridge`), real network,
-RPCs, custody identity, chain-history origins, limits, existing private key/credential
+RPCs, custody wallet generation/import/recovery, chain-history origins, limits, private credential
 files, backup files, interface links and optional public TLS files. Blank input
 accepts displayed defaults; `-` means none for optional inputs. Invalid answers
 are retried; cross-field validation reopens the settings. It makes no network calls.
 Source secret files must belong to the invoking user with private permissions;
 when configuring as root, prepare root-owned copies. Existing output directories
 are refused, and cancelled/failed collection removes only its newly created output.
+
+For a new Solana wallet, select **generate** (default). An interactive terminal is
+required. Setup generates 128 bits of cryptographic entropy and displays a 12-word
+BIP-39 English phrase directly on the controlling terminal, never on redirected
+stdout. Write it down and type `saved`. The derivation is SLIP-0010 ed25519 at
+`m/44'/501'/0'/0'`, with an **empty BIP-39 passphrase**. This is the recovery path;
+a wallet using a different path will show a different address.
+
+The separate private wallet directory defaults to `SETUP-DIRECTORY-solana-wallet`:
+`solana-recovery.txt` contains the words and `solana.keypair.json` contains the
+derived signer keypair. Both are mode 0600 in a new mode-0700 directory. It is
+preserved if configuration is cancelled or fails. Existing directories are never
+overwritten. The installer copies only the derived keypair to the signer; it does
+not give the recovery phrase or private key to the worker. Back up the phrase
+outside the server, and do not record the setup terminal session.
+
+Setup displays the SOL funding address and fixes `custodyOwner` to that wallet.
+The `custodyAta` and history anchors still need to match this wallet and the selected
+mint; generation does not create a token account, submit transactions or fund it.
+Select **restore** with a private file containing the 12 words to reproduce the
+same keypair; select **import** for an existing JSON keypair. A phrase recovers only
+the Solana wallet, not the native ECX wallet, bridge ledger or in-flight obligations.
+Restoring a wallet is not authorization to initialize a new ledger for old custody.
+
+For ECX, select **generate** at `ECX wallet: existing / generate / restore`.
+A **separate** 12-word phrase is displayed and saved as `ecx-recovery.txt` in
+`SETUP-DIRECTORY-ecx-wallet` (same permissions and cancellation protection).
+The two phrases must be backed up separately. The ECX derivation is BIP-84:
+`m/84'/0'/0'/0/*` for betanet receiving addresses and `/1/*` for change; L2L Signet
+uses coin type `1'`. Both use an empty BIP-39 passphrase. The node receives two
+standard `wpkh` descriptors, with derived account xprv/tprv keys and their origin;
+it never receives the recovery words. The existing native signer continues to use
+restricted node RPC, with the ECX keys stored in the node's wallet database.
+
+Provide a private **node administrator credential file** for this one-time creation.
+It stays in the private setup references and is not installed into either service.
+`start` initializes a new blank descriptor wallet before fresh installation, using
+the optional native unlock file to encrypt it. Alternatively initialize it first:
+
+```sh
+sudo ecx-bridge initialize-native-wallet /absolute/path/to/.ecx-bridge
+```
+
+The command verifies the real chain, imports receiving/change descriptors and displays
+a checked funding address. It saves a private completion record beside the phrase;
+repeat calls verify the same wallet and return the same address. Existing unrelated
+wallets and incomplete/uncertain imports refuse without overwriting keys or retrying
+mutations. Keep the seed and completion record until installation succeeds.
+
+**restore** reads a protected phrase file and asks for the highest address index
+covering every previously used receiving/change address (minimum/default 999,
+maximum 1,000,000). It requires an unpruned, synchronized node and rescans from
+history origin; this can take a long time. An import/rescan failure does not create
+a successful completion record. Restored custody requires ledger recovery:
+`start` refuses fresh-ledger installation when the wizard restored either phrase.
+Use the existing custody/ledger recovery procedure before starting that deployment.
+
+The wizard writes phrases only to their explicitly protected recovery files and
+`/dev/tty`, never stdout/stderr, arguments, configuration JSON or RPC payloads.
+On Linux, it disables process dumpability (`PR_SET_DUMPABLE=0`) and core-file limits
+before handling phrases. This prevents ordinary core collectors from receiving
+phrase memory; it cannot prevent a privileged recorder, terminal scrollback/session
+recording, or compromised host from capturing the displayed text. Standard Ubuntu
+does not enable sudo I/O recording by default. Do not run setup in a recorded session.
 
 If database/services are missing, it asks whether to provision them, then offers:
 

@@ -1482,3 +1482,39 @@ No outstanding gate is closed by fewer source lines, an unchanged status report,
 or a green test whose scope does not cover it. Retain exact bytes and actual
 financial evidence; do not repeat funded tests or installer builds without a
 relevant change.
+
+
+### 2026-10-06 — private seed-based wallet setup
+
+Baseline `e9dfd96`; added independent 12-word BIP-39 generation/recovery to the
+existing configure flow. Solana uses SLIP-0010 `m/44'/501'/0'/0'`; ECX uses BIP-84
+receive/change descriptor accounts (coin type 0 on betanet, 1 on L2L Signet).
+The standard 2,048-word list is embedded, with its upstream MIT notice retained.
+No new signer HTTP path, broadcast capability or database operation was added.
+
+Validation: `cabal test ecx-bridge:bridge-test -j1 --offline
+--test-show-details=direct` passed. QuickCheck covers standard BIP-39 vectors,
+independently cross-checked Solana derivation, the published BIP-84 account vector,
+random entropy, malformed checksum, private file modes, restore/cancellation and
+native initialization replay/refusal, including failed imports without a completion
+record. A real pseudo-terminal check completed both generated-wallet setup flows:
+phrases appeared only in the controlling terminal and private recovery files,
+not captured stdout/stderr or setup JSON. The actual running ECX betanet node
+accepted both receiving/change descriptors; their first addresses matched BIP-84
+vectors. Unencrypted and encrypted initialization/replay passed, with the encrypted
+wallet relocked. Test wallets were unfunded, unloaded, removed and unregistered
+from automatic startup. No production custody or ledger was replaced or resumed.
+
+Linux dump-protection CPP branch typechecked with GHC (`-fno-code
+-Dlinux_HOST_OS`); source-distribution listing includes the embedded word list.
+A fresh Ubuntu deployment and a full historic seed-only rescan were not repeated
+for this checkpoint. Native recovery requires an unpruned node and explicit range;
+failed/ambiguous creation/import requires review, not mutation retry. Restored
+custody cannot use the wizard's fresh-ledger path. Ledger/custody backups and the
+existing release gates remain necessary. Terminal/privileged host recording is
+outside the application's no-phrase-on-logs guarantee.
+
+Production changes add approximately 300 Haskell lines across configuration,
+wallet derivation and the closed native setup evaluator, plus the 2,048-line
+standard data list; they add no daemon or runtime signing route. This is new
+functionality, not a claimed reduction of the financial core.

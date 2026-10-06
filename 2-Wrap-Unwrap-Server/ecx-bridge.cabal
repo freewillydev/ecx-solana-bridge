@@ -6,7 +6,7 @@ license: MIT
 license-file: LICENSE
 build-type: Simple
 data-files: test/fixtures/*.json, migrations/*.sql
-extra-source-files: test/formal/*.tla, test/formal/*.cfg, install/install, install/package, install/source, install/restic-security.patch
+extra-source-files: test/formal/*.tla, test/formal/*.cfg, install/install, install/package, install/source, install/restic-security.patch, chain/Bridge/bip39-english.txt
 
 common settings
   default-language: GHC2021
@@ -43,10 +43,10 @@ library chain
   import: settings
   visibility: public
   hs-source-dirs: chain
-  exposed-modules: Bridge.File, Bridge.AdminStatus, Bridge.AdminKey, Bridge.RPC, Bridge.Native, Bridge.NativeObservation, Bridge.NativePayment, Bridge.Solana, Bridge.SolanaObservation, Bridge.SolanaMessage, Bridge.SolanaHelper, Bridge.SolanaPayment, Bridge.SolanaDeposit, Bridge.PaymentObservation, Bridge.PaymentSource
+  exposed-modules: Bridge.Wallet, Bridge.File, Bridge.AdminStatus, Bridge.AdminKey, Bridge.RPC, Bridge.Native, Bridge.NativeObservation, Bridge.NativePayment, Bridge.Solana, Bridge.SolanaObservation, Bridge.SolanaMessage, Bridge.SolanaHelper, Bridge.SolanaPayment, Bridge.SolanaDeposit, Bridge.PaymentObservation, Bridge.PaymentSource
   build-depends: base, ecx-bridge, aeson, bytestring, text, scientific,
     filepath, http-client, http-client-tls, http-types, binary, containers, base58-bytestring,
-    base64-bytestring, crypton, ram, unix
+    base64-bytestring, crypton, ram, unix, template-haskell
 
 library workflow
   import: settings
@@ -80,7 +80,7 @@ executable ecx-bridge
   ghc-options: -threaded -rtsopts -with-rtsopts=-N2
   build-depends: base, ecx-bridge, ecx-bridge:workflow, ecx-bridge:chain,
     ecx-bridge:store, ecx-build-assets, aeson, bytestring, text,
-    postgresql-simple, http-client, unix, filepath, directory, process
+    postgresql-simple, http-client, unix, filepath, directory, process, crypton
 
 -- Explicitly invoked against a disposable migrated database, never live custody.
 executable ecx-store-check

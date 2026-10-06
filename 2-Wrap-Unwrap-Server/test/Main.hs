@@ -28,7 +28,8 @@ import Test.QuickCheck hiding (total,Result)
 main :: IO ()
 main = do
   results <- sequence
-    [ check "configure saves private validated material and refuses overwrite/interruption" $ once $ ioProperty ConfigureCheck.contract
+    [ check "BIP39 generation and Solana wallet recovery" ConfigureCheck.walletProperty
+    , check "configure saves private validated material and refuses overwrite/interruption" $ once $ ioProperty ConfigureCheck.contract
     , check "Solana Pay URI preserves exact units and rejects injectable keys" $ forAll amounts $ \n ->
         let key=T.replicate 32 "1"; quantity=good(amount n); instruction="solana-pay:"<>key
         in payURIFor key key instruction quantity==Right("solana:"<>key<>"?amount="<>renderCoins quantity<>"&spl-token="<>key<>"&reference="<>key<>"&label=ECX%20Bridge")

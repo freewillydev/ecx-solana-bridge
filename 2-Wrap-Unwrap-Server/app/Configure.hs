@@ -1,21 +1,25 @@
 {-# LANGUAGE ScopedTypeVariables #-}
--- Offline installation material only: no database, RPC, signing or activation.
-module Configure (configure,start) where
+-- Offline installation material only: wallet generation, no RPC/signing/activation.
+module Configure (configure,start,initializeNative) where
 import qualified Bridge.Config as C
 import Bridge.SDKBuild (sdkLibraryPath,sdkSourceDirectory)
 import Bridge.BrowserBuild (browserAssetsDirectory)
 import System.Environment (getExecutablePath)
+import Bridge.Wallet (mnemonic,walletKey,nativeDescriptors,derivationPath,protectWalletProcess)
+import qualified Bridge.Native as N
+import Bridge.SolanaMessage (base58)
+import Crypto.Random (getRandomBytes)
 import Bridge.Error
 import Bridge.AdminKey (privateParent,readPrivate,savePrivate)
 import Bridge.Signer (verifySigningKey,verifyNativeUnlock)
-import Control.Exception (IOException,catch,onException)
+import Control.Exception (IOException,catch,onException,bracket)
 import Control.Monad (foldM,forM_,when)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
 import Data.Maybe (fromMaybe)
-import Data.List (sort)
+import Data.List (sort,isPrefixOf)
 import Control.Concurrent (threadDelay)
-import Network.HTTP.Client (HttpException)
+import Network.HTTP.Client (HttpException,closeManager,newManager,defaultManagerSettings,managerSetProxy,noProxy,managerResponseTimeout,managerRetryableException,responseTimeoutNone)
 import System.Process (rawSystem,readProcessWithExitCode)
 import System.Exit (ExitCode(..))
 import System.Info (os,arch)
@@ -28,15 +32,16 @@ import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as L
 import qualified Data.Text as T
 import System.Directory (makeAbsolute,canonicalizePath,removeDirectoryRecursive,doesFileExist)
-import System.FilePath ((</>))
+import System.FilePath ((</>),takeDirectory,addTrailingPathSeparator)
 import qualified System.Posix.Directory as P
-import System.IO (hFlush,stdout,isEOF)
+import System.IO (hFlush,stdout,stdin,isEOF,hIsTerminalDevice,withFile,IOMode(ReadWriteMode),hPutStrLn,hGetLine)
 
 configure :: IO ()
 configure=do
+  protectWalletProcess
   putStrLn "For fresh Ubuntu installation, run configure and start with sudo; source secret files must be root-owned and private."
   putStrLn "Prepare NEW installation material. Existing deployments must use recovery/upgrade."
-  putStrLn "No network calls, wallet creation, database changes or payments. Amounts are base units."
+  putStrLn "No network calls, database changes or payments. Wallet generation is offline. Amounts are base units."
   destination<-prompt "New private output directory" ".ecx-bridge" makeAbsolute
   -- Exclusive directory creation refuses overwriting an existing configuration or custody.
   P.createDirectory destination 0o700
@@ -48,6 +53,10 @@ build directory=do
   selected<-prompt "Network: L2LSignetDevnet / ECXBetanetDevnet / CanonicalBeta (real funds)" "L2LSignetDevnet" $ \s->do
     require (s `elem` ["L2LSignetDevnet","ECXBetanetDevnet","CanonicalBeta"]) "choose_listed_network"
     pure s
+  walletMode<-prompt "Solana custody wallet: generate / import / restore" "generate" $ \s->do
+    require (s `elem` ["generate","import","restore"]) "choose_generate_import_or_restore"
+    pure s
+  generated<-if walletMode=="import" then pure Nothing else Just <$> prepareWallet directory walletMode
   let canonical=selected=="CanonicalBeta"; signet=selected=="L2LSignetDevnet"
       replace k v=M.insert k v
       defaults=replace "profile" (String $ T.pack selected)
@@ -58,7 +67,10 @@ build directory=do
         $ replace "mint" (String $ if canonical then "EVHqNdzjCupKi4rQkbuYw52sa1m8A7jeUAMP23S9AVVq" else "")
         $ replace "solanaRpc" (String $ if canonical then "" else "https://api.devnet.solana.com")
         $ replace "backupRequired" (Bool canonical) template
-  config<-collect defaults
+  let walletDefaults=case generated of
+        Nothing->defaults
+        Just (_,owner)->replace "custodyOwner" (String owner) defaults
+  config<-collect (if walletMode=="import" then [] else ["custodyOwner"]) walletDefaults
   installed<-prompt "Is this an existing installer-managed bridge (database and services already set up)? yes/no" "no" yesNo
   setup<-if installed then pure(object ["existing" .= True]) else do
     provision<-prompt "Set up PostgreSQL, restricted roles and a NEW paused ledger when starting? yes/no" "yes" yesNo
@@ -84,10 +96,24 @@ build directory=do
         trust<-prompt "Path to trusted release PUBLIC key file (prefer absolute path; obtained independently of package)" "" makeAbsolute
         candidate<-prompt "Path to reviewed signed installer directory" "" makeAbsolute
         pure(object ["existing" .= False,"method" .= method,"installer" .= auth,"trustKey" .= trust,"candidate" .= candidate])
-  key<-prompt "Existing custody Solana JSON keypair FILE (private; never type the key here)" "" $ \path->do
-    file<-makeAbsolute path
-    verifySigningKey (C.custodyOwner config) file
-    pure file
+  key<-case generated of
+    Just (file,_)->verifySigningKey (C.custodyOwner config) file >> pure file
+    Nothing->prompt "Existing custody Solana JSON keypair FILE (private; never type the key here)" "" $ \path->do
+      file<-makeAbsolute path
+      verifySigningKey (C.custodyOwner config) file
+      pure file
+  nativeMode<-prompt "ECX wallet: existing / generate / restore" "existing" $ \s->do
+    require (s `elem` ["existing","generate","restore"]) "choose_existing_generate_or_restore"
+    pure s
+  nativeSetup<-if nativeMode=="existing" then pure [] else do
+    (phraseFile,phrase)<-prepareSeed directory "ecx" nativeMode
+    _<-either reject pure (nativeDescriptors signet phrase)
+    putStrLn $ "ECX recovery path: m/84'/"<>(if signet then "1" else "0")<>"'/0'/0/* (receive), /1/* (change); empty BIP-39 passphrase."
+    rangeEnd<-if nativeMode=="restore" then prompt "ECX recovery highest address index (cover ALL previously used receiving/change indexes)" "999" (\input->case readMaybe input of
+      Just n | n>=999 && n<=1000000->pure (n::Int)
+      _->reject "enter_recovery_index_999_to_1000000") else pure (999::Int)
+    admin<-credential "Private native NODE ADMIN credential FILE (for one-time wallet creation/import only)"
+    pure ["nativeSeedFile" .= phraseFile,"nativeAdminAuth" .= admin,"nativeRestore" .= (nativeMode=="restore"),"nativeRangeEnd" .= rangeEnd]
   workerAuth<-credential "Restricted native WORKER credential FILE (user:password)"
   signerAuth<-prompt "Distinct native SIGNER credential FILE (user:password)" "" $ \path->do
     file<-makeAbsolute path
@@ -119,11 +145,12 @@ build directory=do
     require (secretBytes/=keyBytes) "separate_tls_key_required"
     pure [("public-fullchain.pem",cert),("public-privkey.pem",secret)]
    else pure []
-  let worker=config {C.nativeCookie=workerAuth,C.nativeUnlockFile=Nothing}
+  let setupWithNative=case setup of Object values->Object (M.union (M.fromList (nativeSetup<>["restoredCustody" .= True | walletMode=="restore" || nativeMode=="restore"])) values); _->setup
+      worker=config {C.nativeCookie=workerAuth,C.nativeUnlockFile=Nothing}
       signer=config {C.nativeCookie=signerAuth,C.nativeUnlockFile=if null unlock then Nothing else Just unlock}
       sources=[("solana.keypair.json",key),("native-worker.auth",workerAuth),("native-signer.auth",signerAuth)]
         <>[("native-unlock",unlock) | not(null unlock)]<>backups<>tlsFiles
-      records=[("setup.json",L.toStrict $ encode setup),("sources.json",L.toStrict $ encode $ object [K.fromString name .= path | (name,path)<-sources])
+      records=[("setup.json",L.toStrict $ encode setupWithNative),("sources.json",L.toStrict $ encode $ object [K.fromString name .= path | (name,path)<-sources])
         ,("interface.json",L.toStrict $ encode links),("signer.json",L.toStrict $ encode signer),("worker.json",L.toStrict $ encode worker)]
   C.validateConfig worker; C.validateConfig signer
   mapM_ (\(name,bytes)->savePrivate (directory</>name) bytes) records
@@ -151,17 +178,90 @@ build directory=do
     require (not(B.null value) && B8.elem ':' value && not(B8.any (`elem` ['\r','\n','\0']) value)) "expected_native_user_password"
     pure value
 
+-- Keep generated wallet files separate: cancelling settings must not erase a
+-- wallet whose address the operator may already have funded. No secret on stdout.
+prepareWallet :: FilePath -> String -> IO (FilePath,T.Text)
+prepareWallet directory mode=do
+  (phraseFile,phrase)<-prepareSeed directory "solana" mode
+  bytes<-either reject pure (walletKey phrase)
+  let key=takeDirectory phraseFile</>"solana.keypair.json"
+      owner=base58 (B.drop 32 bytes)
+  savePrivate key (L.toStrict $ encode $ B.unpack bytes)
+  putStrLn $ "Solana custody owner / SOL funding address: "<>T.unpack owner
+  putStrLn $ "Recovery derivation: "<>derivationPath
+  putStrLn "The custodyAta and history fields must describe this NEW wallet and its configured mint."
+  pure (key,owner)
+
+prepareSeed :: FilePath -> String -> String -> IO (FilePath,String)
+prepareSeed directory asset mode=do
+  when (mode=="generate") $ do
+    terminal<-hIsTerminalDevice stdin
+    require terminal "wallet_generation_requires_interactive_terminal"
+  recovery<-if mode=="restore" then Just <$> prompt "Path to private 12-word recovery phrase file" "" (\path->do
+    file<-makeAbsolute path
+    phrase<-B8.unpack . B8.strip <$> readPrivate file
+    _<-either reject pure (walletKey phrase)
+    pure phrase) else pure Nothing
+  settingsRoot<-canonicalizePath directory
+  output<-prompt "NEW private wallet directory (preserved if configuration is cancelled)" (directory<>"-"<>asset<>"-wallet") $ \path->do
+    file<-makeAbsolute path >>= canonicalizePath
+    require (file/=settingsRoot && not(addTrailingPathSeparator settingsRoot `isPrefixOf` file)) "wallet_directory_must_be_outside_settings"
+    P.createDirectory file 0o700
+    pure file
+  phrase<-case recovery of
+    Just value->pure value
+    Nothing->getRandomBytes 16 >>= either reject pure . mnemonic
+  let phraseFile=output</>asset<>"-recovery.txt"
+  savePrivate phraseFile (B8.pack $ phrase<>"\n")
+  putStrLn $ "Recovery file saved privately in "<>output<>". Preserve it even if setup is cancelled."
+  when (mode=="generate") $ withFile "/dev/tty" ReadWriteMode $ \terminal->do
+    hPutStrLn terminal $ "Write down these 12 "<>asset<>" recovery words in order. Anyone with them can spend this wallet's funds:"
+    hPutStrLn terminal phrase
+    let acknowledge=do
+          hPutStrLn terminal "Type saved once you have backed up the phrase:"
+          hFlush terminal
+          answer<-hGetLine terminal
+          if answer=="saved" then pure () else acknowledge
+    acknowledge
+  putStrLn "Recovery phrases do not recover the bridge ledger or in-flight obligations."
+  pure (phraseFile,phrase)
+
+-- Closed setup action, never a customer/worker API. Root's one-time admin
+-- credential is not copied to either service. Mutations are not retried.
+initializeNative :: FilePath -> IO ()
+initializeNative path=do
+  protectWalletProcess
+  directory<-makeAbsolute path
+  bytes<-readPrivate (directory</>"setup.json")
+  value<-either (const $ reject "invalid_setup_json") pure (eitherDecodeStrict' bytes)
+  seed<-either (const $ reject "invalid_setup_json") pure (parseEither (withObject "setup" (.:? "nativeSeedFile")) value)
+  forM_ seed $ \phraseFile->do
+    admin<-field "nativeAdminAuth" value
+    restoring<-field "nativeRestore" value
+    rangeEnd<-field "nativeRangeEnd" value
+    _<-readPrivate admin
+    config<-C.loadConfig (directory</>"signer.json")
+    let native=(C.nativeSettings config) {N.nativeCookie=admin}
+    putStrLn "Initializing/checking the ECX descriptor wallet; recovery may require a full blockchain rescan."
+    let managerSettings=managerSetProxy noProxy defaultManagerSettings
+          {managerResponseTimeout=responseTimeoutNone,managerRetryableException=const False}
+    address<-bracket (newManager managerSettings) closeManager $ \manager->N.evalNativeRecoveryWith (N.nativeCall manager native) native
+      (N.InitializeNativeWallet phraseFile (C.nativeUnlockFile config) restoring rangeEnd)
+    putStrLn $ "ECX wallet ready. Funding address: "<>T.unpack address
+ where
+  field name value=either (const $ reject "invalid_setup_json") pure (parseEither (withObject "setup" (.:name)) value)
+
 -- Reuse the full runtime validator; cross-field errors allow editing the collected answers.
-collect :: Object -> IO C.Config
-collect initial=do
+collect :: [K.Key] -> Object -> IO C.Config
+collect locked initial=do
   fields<-foldM ask initial [k | k<-sort (M.keys initial),k `notElem` fixed]
   case fromJSON (Object fields) of
-    Error _->putStrLn "Invalid field type or amount; correct the settings." >> collect fields
+    Error _->putStrLn "Invalid field type or amount; correct the settings." >> collect locked fields
     Success c->(C.validateConfig c >> pure c) `catch` (\(BridgeError code)->do
       putStrLn $ "Please correct settings: "<>T.unpack code
-      collect fields) `catch` (\(_::HttpException)->putStrLn "Invalid RPC URL; correct the endpoint fields." >> collect fields)
+      collect locked fields) `catch` (\(_::HttpException)->putStrLn "Invalid RPC URL; correct the endpoint fields." >> collect locked fields)
  where
-  fixed=["profile","nativeCookie","nativeUnlockFile","signerAuthFile","fenceDirectory","solanaSdkLibrary"]
+  fixed=locked<>["profile","nativeCookie","nativeUnlockFile","signerAuthFile","fenceDirectory","solanaSdkLibrary"]
   ask fields key=do
     let old=fromMaybe Null (M.lookup key fields)
         shown=case old of String t | "REQUIRED_" `T.isPrefixOf` t->""; String t->T.unpack t; Null->"-"; _->B8.unpack $ L.toStrict $ encode old
@@ -232,10 +332,14 @@ start path=do
   (present,_,_)<-readProcessWithExitCode "systemctl" ["cat","ecx-bridge-worker.service","ecx-bridge-signer.service"] ""
   when (present/=ExitSuccess) $ do
     require (not existing) "existing_services_missing_use_recovery_not_fresh"
+    restored<-either (const $ reject "invalid_setup_json") pure
+      (parseEither (withObject "setup" (\o->o .:? "restoredCustody" .!= False)) value)
+    require (not restored) "phrase_restore_requires_ledger_recovery_not_fresh_install"
     method<-either (const $ reject "invalid_setup_method") pure
       (parseEither (withObject "setup" (\o->o .:? "method" .!= ("release"::String))) value)
     -- Old setup files retain signed-release verification; never silently downgrade.
     require (uid==0) "fresh_install_run_sudo_ecx_bridge_configure_then_sudo_ecx_bridge_start"
+    initializeNative directory
     case method of
       "source"->do
         root<-field "sourceRoot" value
