@@ -3,9 +3,71 @@
 The bridge has completed funded development tests and a canonical betanet/Solana
 Mainnet round trip. It is ready for source review, **not public-release approval**.
 The [previous nine-step internal completion plan](https://github.com/freewillydev/ecx-solana-bridge/blob/6fa7334/2-Wrap-Unwrap-Server/docs/IMPLEMENTATION-PLAN.md) is complete.
-The new [auditable-core refactor plan](IMPLEMENTATION-PLAN.md) is planning only;
+The [auditable-core refactor plan](IMPLEMENTATION-PLAN.md) is in progress;
 its implementation and acceptance are not complete. Passing an older candidate's
 tests does not certify later source or packages.
+
+## Financial-core refactor execution
+
+**12/120: checkpoint A complete, 2026-10-05.** Started from clean local/remote
+`master` at `3d4970b3e502de9d4c9a89803610df3802e3e322`; created branch
+`codex/auditable-financial-core` in the existing checkout. No funded runtime,
+configuration, wallet, dependency lock or application source changed in A.
+ARCHITECTURE now inventories customer/worker/signer/operator/token/pool contracts,
+formats, failure behavior, I01–I15 enforcement, fixture coverage and interruption
+points. All later acceptance must name its actual new source.
+
+Baseline physical counts use `git ls-files`, counting split lines including
+comments/blanks. Application/schema means `.hs/.rs/.sql/.html/.css` outside
+`test`, `docs`, `build`; fixtures/formal files count as tests; notices have their
+own category. Embedded Rust tests are reassigned, not hidden:
+
+| Category at `3d4970b` | Files | Lines |
+| --- | ---: | ---: |
+| Application/schema | 65 | 14,843 (15,059 physical minus 216 embedded tests) |
+| Tests/fixtures/formal | 22 + embedded part of 1 application file | 9,265 |
+| Documentation | 17 | 7,403 |
+| Tooling/configuration/locks | 30 | 3,316 |
+| Third-party notices/provenance | 19 | 52,479 |
+
+Runtime is 5 files/4,341 lines; workflow 12/2,327; pure source 6/601;
+chain 14/2,800. Native/browser freezes contain 191/76 pinned package entries;
+Cargo.lock has 150 package records (overlaps are not unique dependency counts).
+Installed GHC 9.14.1, Cabal 3.16.1.0 and GHC JavaScript 9.12.2 were confirmed.
+Reused existing native, browser and SDK caches; one build job, no VM started.
+
+Commands, from repository root, with the existing project cache paths in
+`CARGO_HOME`, `CARGO_TARGET_DIR`, `ECX_BROWSER_BUILD_DIR`:
+
+```sh
+cabal test ecx-bridge:bridge-test ecx-token:token-test ecx-pool:pool-test -j1 --offline --test-show-details=direct
+ECX_REBUILD_CONTRACT_DATABASE=ecx_rebuild_contract_core_a_20261005 \
+ECX_REBUILD_CONTRACT_READER=ecx_core_reader_20261005 \
+  cabal run ecx-store-check -j1 --offline
+```
+
+Both commands exited 0. All three suites passed, including the Rust SDK checks.
+The PostgreSQL database was newly created on `/tmp/ecx-pg-seam:29436`, with
+migrations 001–008 applied in order and a new nonprivileged SELECT-only reader
+(schema USAGE, tables/sequences SELECT, no schema CREATE). Application fixture
+data was created only by StoreCheck's closed Opaleye operations. The default
+contract passed ledger/role/concurrency/replay/failure/cancellation/refund/source/
+replacement/custody checks and actual encrypted restic archive download/restore.
+No real-chain transaction was sent. Dedicated TLS/fence/native modes are not
+claimed from this default run.
+
+Local logs: `/tmp/ecx-financial-core-baseline-tests.log`,
+`/tmp/ecx-financial-core-baseline-store.log`,
+`/tmp/ecx-financial-core-baseline-schema.log`. The first suite attempt lacked the
+existing `CARGO_HOME` override and failed only offline SDK dependency lookup;
+the corrected complete run passed without source or dependency changes. Store's
+intentional interrupted-connection/rollback fixtures emit diagnostics before their
+passing result. Evidence remains bounded to these fixtures and the retained funded
+version above; external release gaps remain open.
+
+Checkpoint A adds documentation only; the application/test counts are unchanged.
+Next: B's concrete lifecycle types and independent regression harness, followed
+by settlement/preparation extraction on unchanged schema 21.
 
 ## Source and evidence boundaries
 

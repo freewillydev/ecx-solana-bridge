@@ -363,3 +363,161 @@ adopt a nondecreasing fence and reconcile both chains before explicit resume. A
 local retirement marker does not revoke copied keys elsewhere. Never replace a
 missing ledger with a new empty ledger for existing custody. See
 [OPERATIONS.md](OPERATIONS.md) for commands and old-host exclusion requirements.
+
+## Refactor baseline contract inventory
+
+This inventory describes source `3d4970b` on schema 21. It is the compatibility
+boundary for the financial-core refactor, not a claim that the proposed schema 22
+is already implemented. Names below are exact source constructors/commands.
+
+### Customer, worker and signer
+
+| Entry | Input → result | Authority / refusal boundary | Existing checks |
+| --- | --- | --- | --- |
+| `GET /api/v1/config` | none → `PublicConfiguration` | Safe reader; availability reports failed intake without authorizing work | `Main.handlerContract`, `SigningTransportCheck`, `StoreCheck.orderWorkflowContract` |
+| `POST /api/v1/orders` | required Authorization + `OrderRequest` → `OrderView` | Critical customer; paying mode, validated identity/addresses, immutable replay, capacity/holds/freshness/backup | `orderWorkflowContract`, `serverMain`, `tlsMain` |
+| `GET /api/v1/orders/:id` | id + Authorization → `OrderView` | Safe capability-scoped read; applies source/payment review overlay | `ledgerMain`, `paidRefundContract` |
+| `POST /api/v1/orders/:id/transaction` | id + Authorization → `PaymentInstruction` | Safe read of saved payable order; no allocation, signing or send; refuses closed deposit window | `orderWorkflowContract`, `SigningTransportCheck` |
+
+The worker leaves are `CheckpointBackup Int64 -> ()`, `RecoverNativeSettlements`,
+`RecoverNativeSources`, `RecoverNativeLocks`, `RunWorkerCycle`, `ObserveChains`,
+`ReconcileCustody` (all `-> ()`), `PrepareOutgoing payment -> ()`,
+`SignPreparedPayment payment -> transaction`, `ReconcilePayment transaction -> ()`,
+`QueuePayment transaction -> Int64`, `BroadcastPayment transaction -> ()`.
+They are critical worker-only instructions, implemented by `Critical.hs` and
+specific Store operations. The cycle observes/reconciles while paused; preparation,
+queue/send and signing require their saved policy/readiness checks. The guarded
+payment boundary pauses on failure. Recovery never implicitly resumes intake.
+
+The four signer leaves and result constructors are listed above. Their payloads
+are respectively `(deployment,payment,generation)`, `(deployment,decision)`,
+`(deployment,parent,fee)` and `(deployment,minimumSequence)`. A request names saved
+work, never arbitrary transaction bytes. `runProcess` contains the only
+`evalCritical` call; `Critical.hs` contains the only generated signer client.
+`SigningTransportCheck` verifies HTTP authentication/result identity;
+`StoreCheck.tlsMain` verifies actual HTTPS and changed-during-signing refusal.
+The latter mode is separate from the default PostgreSQL suite.
+
+### Operator and administration inventory
+
+The private operator envelope is JSON on stdin to `ecx-bridge operator CONFIG`.
+`Control.controlPlan` rejects unknown fields and selects these closed leaves:
+
+| Commands | Inputs after `operation` | Result / implementation and checks |
+| --- | --- | --- |
+| `status`, `native-reviews` | none | Safe `ServiceStatus` / review tuples; `Critical`, `ledgerMain` |
+| `pause`, `resume` | reason / none | `()`; explicit pause/resume readiness; `serverMain` |
+| `refund` | deposit | Saved `RefundAuthorization`; `refundContract`, `paidRefundContract` |
+| `repair-completed-order` | order | `()`; only verified settled conversion+refund repair; `paidRefundContract` |
+| `withdraw-fees`, `cancel-fees` | id,asset,amount,recipient,reason / id,reason | Payment/status text; `ledgerMain`, `earnedCancellationContract` |
+| `allocate-treasury`, `classify-spend` | deposit,split,reason / chain,transaction,reason | Sequence; `treasuryContract` |
+| `cancel-preparation` | payment,generation,reason | `()`; `cancellationContract`, `earnedCancellationContract` |
+| `retry-solana` | transaction,reason | `()`; separate paused approval; `expiryContract` |
+| `rebroadcast-native` | transaction,recovery,reason | Same transaction ID; `nativeReplacementContract`, `serverMain` |
+| `draft-replacement`, `sign-replacement`, `cancel-replacement` | parent,fee,reason / decision / decision,reason | Decision / transaction / `()`; `nativeReplacementContract`, `tlsMain` |
+| `cover-source-loss`, `approve-covered-source`, `approve-source-recovery` | deposit,recovery,float,earned,reason / payment,recovery,reason / payment,restoration,reason | `()`; `restorationContract` |
+
+These commands retain their operation-specific paused-state, ownership, current
+evidence, budget and reason requirements; successful parsing grants none of them.
+Only `pause` is allowed as a critical operator action in observation-only mode.
+
+The bridge CLI also retains `configure`, `start [DIRECTORY]`, `check-config`,
+`check-signer`, `initialize-ledger`, `serve`, `observe`, `signer`,
+`backup-native-wallet`, `restore-native-wallet`, `backup-custody`, `check-custody`,
+`upload-custody`, `recover-custody`, `restore-ledger`, `recover-ledger`,
+`adopt-ledger`, `retire-ledger`. Exact positional forms remain in `app/Main.hs`
+and OPERATIONS. `ConfigureCheck`, `setupMain`, `fenceMain`, `archiveContract` and
+the native/custody modes cover their distinct boundaries. Configuration/start are
+local setup, not extra HTTP routes; signer keys remain outside worker resources.
+
+`ecx-token` retains `configure`, `keygen`, `enter-key`, `import-key`, `prepare`,
+`check`, `sign KEY TRANSACTION`, `prepare-offline`, `sign-offline`, `submit-file`,
+`submit`, `recover`, `status`, `inspect-policy`, `address`, `nonce-address`,
+`nonce-rent`, `associated-address`, `metadata-address`. Its closed transaction
+verbs are `mint`, `burn`, `create`, `associated`, `metadata`, `nonce_mint`,
+`create_nonce`. `Token.Operation` separates safe preparation/network reads from
+key/sign/send operations; `token-test` covers codecs, effects, private files,
+terminal key entry, offline intent and recovery. Recent-blockhash input acquisition
+and durable nonce signing retain their different freshness rules.
+
+`ecx-pool` retains `address`, `inspect`, `quote-mainnet`, `prepare`, `check`,
+`sign`, `prepare-position`, `check-position`, `sign-position`, `prepare-liquidity`,
+`check-liquidity`, `sign-liquidity`, `submit`, `status`, `recover`.
+`Pool.Operation` separates inspection/preparation from saved-attempt signing/send.
+Pool creation, full-range position/boundary initialization, deposits, withdrawals
+and collection are exercised in `pool-test`. Reinvestment is an explicit liquidity
+operation; unattended compounding, multisig and LP locking are not implemented scope.
+
+### Formats and failure semantics to retain
+
+`Wire.hs` is the exact HTTP field/enum codec contract: `OrderRequest` has
+`direction,input,recipient,refund,sourceOwner,idempotencyKey`; `OrderView` has
+`orderId,request,quote,status,deadline,depositInstruction,payoutTx,policy`.
+Payment instruction fields are `uri,reference,mint,amount,refundPolicy`.
+Public configuration strips `pub` and lowercases the first letter. Amounts remain
+base-unit strings; quotes have `gross,fee,net`. Missing Authorization is a Servant
+failure; valid syntax with rejected authority/policy returns HTTP 409 with
+`{"error":code}`. Body/concurrency/cross-origin/admission refusals retain
+413/503/403/429. Unexpected infrastructure exceptions are not successful defaults.
+
+Public status vocabulary is `Provisioning`, `AwaitingDeposit`, `ExpiredUnfunded`,
+`NeedsReview`, `Ready`, `Preparing`, `Paying`, `Refunding`, `Refunded`, `Paid`.
+`PaymentReady/Paying/Paid/Review/Cancelled` is the current internal projection,
+not a replacement public enum. Preserve capability hashing, idempotency conflict,
+Solana reference and original conversion payout-link precedence.
+
+Retain strict configuration fields/fingerprint (`Config.hs`), private setup
+source-file references (`Configure.hs`), token `.ecx-token/ecx-token.json` defaults
+and legacy read-only fallback. Preserve saved `PaymentTerms`, `SignedAttempt`,
+native/Solana draft/message bytes, token/pool attempt/parent formats, custody archive
+formats 1/2 and schema-21 backup manifests. Exact keys, decoder bounds and rejected
+unknown fields remain owned by their existing codecs; no new compatibility codec.
+
+Policy/conflict (`*_conflict`, `*_invalid`, `*_required`) means no successful
+mutation. Stale evidence (`*_changed`, freshness/coverage refusals) requires a fresh
+bounded inspection, not weaker checks. Unavailable RPC/DB is not proof of absence.
+`rpc_transport_unknown_outcome`, `signer_outcome_unknown`, `operator_outcome_unknown`
+retain saved work for inspection; never automatically create a successor.
+`corrupt_*` and a fenced connection require investigation/recovery. `guarded` payment
+failures pause intake; signing exceptions pause with `signing_requires_review`;
+scans retain cursors and mark failure. Safe customer reads do not resume or pause.
+
+### Invariant and interruption map
+
+| Invariant | Pure/adapter rule | Durable/process enforcement | Existing evidence and limitation |
+| --- | --- | --- | --- |
+| I01 | Profile/genesis/checkpoint/mint parsers | Deployment fingerprint, startup role/process checks | `ChainCheck`, `serverMain`, `tlsMain`; issuer approval external |
+| I02 | `Domain` Amount/Quote/Payment, exact codec checks | Immutable request/quote/policy/attempt triggers | Main amount/accounting properties; `ledgerMain` historical terms |
+| I03 | `Domain.settlement`, bounded cost amounts | Balanced event posting, unique event IDs, append-only journal | `ledgerMain`, archive comparisons |
+| I04 | Receipt binding, source proof, allocation arithmetic | Unique deposit use, held principal/operating/fee reservations | Promotion/refund/treasury contracts |
+| I05 | Verified outcome/family classification | Intent/attempt winner checks + unique settlement event | Duplicate settlement and native family contracts; alternate-chain history still open |
+| I06 | Saved-byte/protocol equality | Preparation/attempt/queue sequences; no signer broadcast | TLS/signing/expiry/restart contracts; unknown outcomes retained |
+| I07 | Subject equality and 60-second freshness | Custody revision, scan anchors, re-read before/after signing | `tlsMain`, native readiness/custody regression; new code must rerun these |
+| I08 | Closed GADTs, contexts, unique results | Sole critical dispatch; auth/SELECT-only role/OS/RPC separation | Main, SigningTransportCheck, TLA+; bounded model only |
+| I09 | Identity/sequence/coverage checks | Advisory lock, deployment row, host fence before commit, backup | `fenceMain`, `archiveContract`; physical independent restore open |
+| I10 | Fee/rent/generation/deadline bounds | Immutable cost times, operating clock, holds, eight generations | Main/chain and expiry/cancellation/budget contracts |
+| I11 | Exact observed effects; unknown differs from absent | Atomic page+cursor+evidence, current custody revision | ObservationCheck, custodyContract; fixtures are not real reorgs |
+| I12 | Family/source/cancellation proof checks | Append-only loss/cover/return/winner approvals | restoration/replacement/cancellation contracts; live conflicts open |
+| I13 | Exact file/key/manifest validation | Ownership/mode/link refusal, exclusive publication and locks | ConfigureCheck, SigningTransportCheck, archive/token/pool tests |
+| I14 | Stable wire/CLI and derived display precedence | Capability scope, paused boot, protected setup | API/server/refund/token/pool checks; customer-wallet interaction open |
+| I15 | Bounds on amounts/lists/bodies/history | Concurrency/admission/RPC budgets, fenced failures | Chain/transport checks; production load/security review open |
+
+Before address allocation, only the saved claim survives; its owner can allocate,
+others recover the same label. After preparation, exact generation/plan/holds
+survive; unsigned recovery cannot discard foreign locks. Backup acknowledgment
+binds its durable sequence, not newer writes. Lost signing replies leave preparation
+and no permission to send. Once saved, exact signed bytes survive every retry.
+Queue records a new sequence; send requires coverage and fresh final checks of that
+queue. Lost send replies are resolved by observation of those bytes. A confirmed
+outcome settles in one transaction; redelivery compares saved evidence and cannot
+post principal again. A fence advanced before an uncertain commit may exceed the
+ledger: startup refuses rather than lowering it. These are the D06 interruption
+points exercised by the existing fixtures; a new pure decision cannot remove them.
+
+Representative histories already live in `StoreCheck`: initial/unpaid and prepared
+payments in `ledgerMain`, exact signed/queued fixtures in `test/fixtures`, successful
+and extra-refund paths in `paidRefundContract`, failed/expired in `expiryContract`,
+unsigned cancellations in both cancellation contracts, native family/source work in
+`nativeReplacementContract`/`restorationContract`, and uncertain publication/restore
+in `archiveContract`/`fenceMain`. Reuse their closed Opaleye fixtures. Their literal
+keys, fake RPC responses and deterministic identifiers are never deployment data.
