@@ -58,6 +58,8 @@ import qualified Bridge.SolanaPayment as SP
 import qualified Network.Wai.Handler.Warp as Warp
 import qualified Data.ByteString as BS
 import Data.Time.Clock.POSIX (getPOSIXTime)
+import GHC.Clock (getMonotonicTimeNSec)
+import Text.Read (readMaybe)
 import Servant.API (BasicAuthData(..))
 import qualified Bridge.Native as N
 import qualified Bridge.Solana as Solana
@@ -3505,12 +3507,21 @@ orderedRefundContract fixtures reader writer=do
   -- by its original principal event, independently of transaction-name ordering.
   let header="Bearer "<>T.replicate 64 "0"
       check ok=unless ok (fail "ordered refund projection contract failed")
+  requested<-lookupEnv "ECX_REBUILD_HISTORY_COUNT"
+  count<-case requested of
+    Nothing->pure 2
+    Just raw | Just n<-readMaybe raw, n>=2 && n<=2000->pure n
+    _->fail "history workload count must be between 2 and 2000"
+  let transactions=take count $ ["z-first","a-second"]<>["history-"<>T.pack(show n) | n<-[3::Int ..]]
+      observed transaction review=fixture fixtures $ SeedTreasuryEvidence "Native" transaction "fixture-anchor" "outgoing" review
+        (object ["confirmations" .= (2::Int)])
   fixture fixtures ReadyIntake
   ordered<-evalWrite writer (CreateOrder 110 header $ W.OrderRequest NativeToWrapped (money 10) "recipient" "native-refund" Nothing "refund-ordered")
   claim<-evalWrite writer (ClaimNative 110 header ordered)
   void $ evalWrite writer (RecordNative header ordered (allocationLabel claim) "ordered-refund-address")
-  forM_ [("z-first",9,Nothing),("a-second",3,Just "z-first")] $ \(transaction,n,previous)->do
+  forM_ (zip3 [1::Int ..] transactions (Nothing:map Just transactions)) $ \(index,transaction,previous)->do
     let sourceId="ordered:"<>transaction
+        n=if index==1 then 9 else 3
         view=evalRead reader (ReadOrder header ordered)
     fixture fixtures (SeedReceipt sourceId (Just ordered) Native n 2 True 110)
     evalWrite writer (Pause "ordered refunds")
@@ -3531,12 +3542,25 @@ orderedRefundContract fixtures reader writer=do
     fixture fixtures CoverBackup
     fixture fixtures ReadyIntake
     queued<-evalWrite writer (AuthorizeSend 110 transaction)
-    let settle=SettlePayment queued (W.PaymentCosts (money 1) (money 0)) "{\"offlineOrderedRefund\":true}"
+    observed transaction 0
+    let settle=SettlePayment queued (W.PaymentCosts (money 1) (money 0)) "{\"offlineOrderedRefund\":true,\"blockhash\":\"fixture-anchor\",\"requiredDepth\":2}"
     evalWrite writer settle
     view >>= \v->check (W.status v=="Refunded" && W.payoutTx v==Just transaction)
     settled<-evalRead reader ReadBalances
     evalWrite writer settle
     evalRead reader ReadBalances >>= check . (==settled)
+    when (count>2 && (index `elem` [1,10,100,1000] || index==count)) $ do
+      -- Exercise actual closed reads across the 1000-row page boundary. Fixture
+      -- outcomes are deliberately offline; there is no chain RPC or signing.
+      started<-getMonotonicTimeNSec
+      forM_ [1::Int ..10] $ \_->view >>= \v->check (W.status v=="Refunded" && W.payoutTx v==Just transaction)
+      finished<-getMonotonicTimeNSec
+      putStrLn ("WORKLOAD: refunds="<>show index<>" mean ReadOrder ms="<>show (fromIntegral(finished-started)/10000000::Double))
+  -- Healthy lifetime history is not a recovery backlog. More than 1000
+  -- unresolved observations still refuse rather than silently skipping work.
+  when (count>1000) $ bracket_ (mapM_ (`observed` 1) transactions) (mapM_ (`observed` 0) transactions) $
+    expectStore "native_settlement_recovery_backlog" (evalRead reader NativeSettlementCandidates)
+  evalRead reader NativeSettlementCandidates >>= check . all ((`notElem` transactions) . signedId . recordedSigned)
 
 refundContract :: PG.Connection -> Reader -> Writer -> IO ()
 refundContract fixtures reader writer=do

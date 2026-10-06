@@ -98,6 +98,7 @@ invocation needs `ecx_bridge_datadir` pointing to the server package.
 | Mode | Additional input / scope |
 | --- | --- |
 | Default | Ledger, concurrency, recovery and local encrypted restic contracts |
+| `ECX_REBUILD_HISTORY_COUNT=1001` | Default mode with 1,001 sequential offline refund/settlement/replay histories on one order; measures actual customer reads at increasing sizes and across the 1,000-row page boundary. Accepts 2–2,000; ordinary runs retain two refunds. No RPC or funds. |
 | `ECX_REBUILD_PAYMENT_ROOTS_ONLY=1` | Populated schema-21 fixture from baseline `e684f9b`; converts through the closed Opaleye operation, compares retained records, customer views, queues and all work hashes, checks migration refusal/kill/rollback/constraints, then tests ordinary legacy-archive restoration. Ends paused on schema 22. The `child` value is private test-process plumbing. |
 | `ECX_REBUILD_MIGRATION_ONLY=1` | Populated offline schema-18 copy with baseline DDL 001–005; applies 006–008 and the closed schema-22 conversion; optional `ECX_REBUILD_MIGRATION_RECOVERY_CONFIG` for read-only real-chain reconciliation |
 | `ECX_REBUILD_SETUP_ONLY=1` | `ECX_REBUILD_EXECUTABLE`; optional `ECX_REBUILD_SETUP_RESIDUE=1` |

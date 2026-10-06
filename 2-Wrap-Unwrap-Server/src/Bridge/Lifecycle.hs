@@ -43,8 +43,8 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 
--- Schema-21 projection retained during extraction. Review can hide economic
--- progress here; schema 22 will separate phase from its execution restrictions.
+-- Derived execution projection for callers. Schema 22 stores economic progress
+-- separately from recovery restrictions; review does not erase a settlement.
 data PaymentStatus = PaymentReady | PaymentPaying | PaymentPaid | PaymentReview | PaymentCancelled deriving (Eq,Show)
 
 -- Schema-22 economic ownership, independent of execution/recovery restrictions.
