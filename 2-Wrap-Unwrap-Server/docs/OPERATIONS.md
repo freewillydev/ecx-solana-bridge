@@ -6,6 +6,15 @@ All commands below run from the repository root using the sole server executable
 bridge() { cabal run -v0 exe:ecx-bridge -- "$@"; }
 ```
 
+For the installed package, use its matching data directory instead of Cabal:
+
+```sh
+bridge() { env ecx_bridge_datadir=/opt/ecx-bridge/current/share /opt/ecx-bridge/current/bin/ecx-bridge "$@"; }
+```
+
+Initialization and schema-21 restoration read migrations from that directory.
+Installed systemd services already set it; direct maintenance commands must too.
+
 `CONFIG`, `SIGNER_CONFIG`, `KEYFILE`, `BACKUP_CONFIG` and staging paths refer to
 reviewed private files/directories. Read [INSTALL.md](INSTALL.md) first. The candidate installer supports fresh installation and code-only upgrade; it
 does not provide an automatic wipe/reinstall recovery command.

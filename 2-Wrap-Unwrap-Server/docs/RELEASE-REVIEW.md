@@ -1002,6 +1002,23 @@ J105–111 evidence above describes passing checks and limits. Actual wallet app
 alternate chain histories, independent recovery and security/distribution review
 remain unverified release gates.
 
+**J113–115 in progress: packaged migration data path.** Fresh schema-22
+initialization now reads its two migration files through Cabal's data-directory
+lookup. The installer's offline postgres invocation omitted the installed data
+directory even though its systemd services supplied it. Direct execution outside
+Cabal reproduced `009-stage.sql: does not exist` on an empty disposable database.
+The transaction rolled back: the same database then initialized successfully with
+the correct data-directory environment. The database was removed afterward.
+
+The installer now passes `ecx_bridge_datadir` pointing at the installed release's
+`share` directory. OPERATIONS documents the same requirement for direct installed
+maintenance commands; Cabal already supplies it when using `cabal run`. This is
+one changed shell invocation, no new files or application/schema lines. Shell
+syntax and the paired CLI reproduction pass; complete fresh Linux installation
+remains J114. Logs: `/tmp/ecx-financial-core-j-installer-{missing-data,data-fixed}.log`.
+Native Haskell/SDK/browser inputs are unchanged from `3174822`; reassemble the
+candidate with the fixed installer rather than recompiling identical binaries.
+
 ## Source and evidence boundaries
 
 | Version | Verified scope | Not established by that evidence |

@@ -217,7 +217,7 @@ if [ "$mode" = fresh ]; then
   deployment_identity=$("$prefix/current/bin/ecx-bridge" check-config "$config/worker/config.json" | jq -er .fingerprint)
   # Only the offline database owner installs constraints. The worker keeps DML
   # privileges and never gains schema ownership or access to another role's files.
-  runuser -u postgres -- env PGHOST=/var/run/postgresql PGPORT=5432 PGDATABASE=ecx_bridge PGUSER=postgres \
+  runuser -u postgres -- env PGHOST=/var/run/postgresql PGPORT=5432 PGDATABASE=ecx_bridge PGUSER=postgres ecx_bridge_datadir="$prefix/current/share" \
     "$prefix/current/bin/ecx-bridge" initialize-ledger --fingerprint "$deployment_identity"
   runuser -u "$worker" -- env PGHOST=/var/run/postgresql PGPORT=5432 PGDATABASE=ecx_bridge PGUSER="$worker" \
     "$prefix/current/bin/ecx-bridge" adopt-ledger "$config/worker/config.json" 0
