@@ -9,7 +9,7 @@ tests does not certify later source or packages.
 
 ## Financial-core refactor execution
 
-Current checkpoint: **70/120 (A–F)**. The chronological records below distinguish
+Current checkpoint: **72/120 (A–F and G71–72)**. The chronological records below distinguish
 the verified source and scope of each stage. Schema consolidation is next; the
 funded deployment has not been upgraded by this refactor.
 
@@ -431,6 +431,46 @@ embedded Rust / 10,150 lines**, **31 tooling files / 3,362 lines**. All of F add
 decisions and fewer mixed query/decision blocks; this is not a net size reduction
 or a claim of perfect security. G must remove duplicated persisted lifecycle
 state and its writes while retaining every financial guarantee and migration.
+
+### Schema dependency map and typed root — 72/120
+
+G71–72 are verified on top of `2f35af4627b5dbae0c06bb9297c4ca527c538fc4`.
+The architecture now maps every current status/resolved-dependent trigger, index,
+reader, hash, initialization and recovery boundary before conversion. It records
+the source-to-target cases, including cancelled conversions superseded by refunds,
+ready work with no old intent and changed winners retaining their original event.
+The existing installer migration glob was identified as an activation hazard:
+new staged DDL must not be added to it without the closed migration path.
+
+`PaymentPhase` encodes economic ownership separately from review and accepts only
+valid ready/active/settled/cancelled column combinations. It bounds generation 0–7,
+requires both settled identities and retains the original principal event when the
+winner changes. Schema's typed `PaymentRoot` targets the extended existing intents
+relation. The source remains on schema 21; these types do not install any columns,
+grant a migration capability or change a current payment decision.
+
+One measured design refinement preserves receipt uniqueness with less custom code:
+an immutable root receipt reference is constrained to the obligation's existing
+receipt by a composite FK, permitting a partial unique index on noncancelled roots.
+This replaces the old obligation-status index without a cross-table concurrency
+trigger or a second mutable cancellation flag. Its DDL/runtime integration belongs
+to G73 onward and has not yet been exercised.
+
+`cabal build ecx-bridge:exe:ecx-store-check ecx-bridge:exe:ecx-bridge ecx-bridge:test:bridge-test -j1 --offline`
+and `cabal test ecx-bridge:bridge-test -j1 --offline --test-show-details=direct`
+passed with the existing caches. Lifecycle now has **8,100 generated cases** plus
+fixed refusal/mutation checks. New cases cover phase round trips, preserving the
+original event with a different winner, absent/mixed fields, invalid generation,
+unknown review phase and malformed/oversized event identity. A final incremental
+build after adding the constrained receipt projection also passed; pure phase code
+and test source were unchanged. Logs:
+`/tmp/ecx-financial-core-g-phase-{build,tests,build-final}.log`.
+
+This piece adds **41 application lines and 17 test lines, zero files**. Totals:
+**66 application/schema files / 15,784 lines**, **23 test files plus embedded Rust /
+10,167 lines**, unchanged tooling. No database, process, network, dependency,
+installed schema or funded state was changed. The new PostgreSQL constraints,
+complete migration/comparison and deletion of old projections/writes remain open.
 
 ## Source and evidence boundaries
 

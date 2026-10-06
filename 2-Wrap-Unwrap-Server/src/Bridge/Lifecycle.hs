@@ -26,6 +26,7 @@ module Bridge.Lifecycle
   , SourceEffect(..), decideSourceCheck, sourceReturnPostings, LossCoverFacts(..), decideLossCover
   , SourceApprovalFacts(..), checkSourceApprovalSource, decideSourceApproval, RebroadcastFacts(..), checkRebroadcast
   , GenerationEnd(..), successorGeneration
+  , PaymentPhase(..), PhaseFields, encodePaymentPhase, decodePaymentPhase
   ) where
 
 import Bridge.Domain hiding (fee)
@@ -45,6 +46,28 @@ import qualified Data.Text.Encoding as TE
 -- Schema-21 projection retained during extraction. Review can hide economic
 -- progress here; schema 22 will separate phase from its execution restrictions.
 data PaymentStatus = PaymentReady | PaymentPaying | PaymentPaid | PaymentReview | PaymentCancelled deriving (Eq,Show)
+
+-- Schema-22 economic ownership, independent of execution/recovery restrictions.
+-- Settled retains the original principal event even when the verified winner
+-- changes. Decoding shape is not proof of its foreign keys or chain evidence.
+data PaymentPhase = Ready | Active Int | Settled Text Text | Cancelled deriving (Eq,Show)
+type PhaseFields = (Text,Maybe Int64,Maybe Text,Maybe Text)
+encodePaymentPhase :: PaymentPhase -> PhaseFields
+encodePaymentPhase phase=case phase of
+  Ready->("ready",Nothing,Nothing,Nothing)
+  Active generation->("active",Just(fromIntegral generation),Nothing,Nothing)
+  Settled winner originalEvent->("settled",Nothing,Just winner,Just originalEvent)
+  Cancelled->("cancelled",Nothing,Nothing,Nothing)
+decodePaymentPhase :: PhaseFields -> Either Text PaymentPhase
+decodePaymentPhase fields=case fields of
+  ("ready",Nothing,Nothing,Nothing)->Right Ready
+  ("active",Just generation,Nothing,Nothing) | generation>=0 && generation<8->Right(Active $ fromIntegral generation)
+  ("settled",Nothing,Just winner,Just event)
+    | validIdentity winner,Just original<-T.stripPrefix "settlement:" event,validIdentity original->Right(Settled winner event)
+  ("cancelled",Nothing,Nothing,Nothing)->Right Cancelled
+  _->Left "invalid_payment_phase"
+ where validIdentity value=not(T.null value) && T.length value<=160
+
 parsePaymentStatus :: Text -> Either Text PaymentStatus
 parsePaymentStatus state=case state of
   "ready"->Right PaymentReady; "paying"->Right PaymentPaying; "paid"->Right PaymentPaid

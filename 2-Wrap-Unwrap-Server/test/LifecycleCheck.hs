@@ -25,7 +25,24 @@ type Balances = M.Map (Asset,Account) Integer
 
 checks :: IO [Result]
 checks = sequence
-  [ check "lifecycle accounting agrees with an independent funding model" $
+  [ check "economic phase round trips with one original principal event across winner changes" $
+      forAll (chooseInt (0,7)) $ \generation->forAll (chooseInteger (0,1000000)) $ \nonce->
+        let old=T.pack(show nonce); winner="winner-"<>old; original="settlement:"<>old
+            phases=[Ready,Active generation,Settled winner original,Cancelled]
+        in conjoin ([decodePaymentPhase(encodePaymentPhase phase)===Right phase | phase<-phases]
+          <>[encodePaymentPhase(Settled "other-winner" original)===("settled",Nothing,Just "other-winner",Just original)])
+  , check "economic phase refuses review mixed states and incomplete or out-of-range identities" $ once $
+      conjoin [decodePaymentPhase fields===Left "invalid_payment_phase" | fields<-
+        [("review",Nothing,Nothing,Nothing),("ready",Just 0,Nothing,Nothing)
+        ,("cancelled",Nothing,Just "tx",Nothing),("active",Nothing,Nothing,Nothing)
+        ,("active",Just(-1),Nothing,Nothing),("active",Just 8,Nothing,Nothing)
+        ,("active",Just(maxBound::Int64),Nothing,Nothing),("active",Just 0,Just "tx",Nothing)
+        ,("settled",Just 0,Just "tx",Just "settlement:tx"),("settled",Nothing,Nothing,Just "settlement:tx")
+        ,("settled",Nothing,Just "",Just "settlement:tx"),("settled",Nothing,Just "tx",Nothing)
+        ,("settled",Nothing,Just "tx",Just "network-fee:tx"),("settled",Nothing,Just "tx",Just "settlement:")
+        ,("settled",Nothing,Just(T.replicate 161 "x"),Just "settlement:tx")
+        ,("settled",Nothing,Just "tx",Just("settlement:"<>T.replicate 161 "x"))]]
+  , check "lifecycle accounting agrees with an independent funding model" $
       forAllShrink fundingCases shrinkFunding $ \funding ->
         aggregate (settlement $ outgoing 0 funding) === expected funding
   , check "bounded delivery histories preserve principal identity and protected accounts" $

@@ -222,6 +222,24 @@ intents = O.table "intents" $ pIntent Intent
   , intentWithdrawal=O.requiredTableField "withdrawal_id", intentChain=O.requiredTableField "chain"
   , intentCommon=O.requiredTableField "common_input", intentResolved=O.requiredTableField "resolved" }
 
+-- Target projection for the atomic schema-22 migration. Runtime keeps the
+-- schema-21 projection above until conversion/constraints pass; no dual writer.
+data PaymentRootF t nt nn = PaymentRoot
+  { rootId :: t, rootObligation :: nt, rootWithdrawal :: nt, rootDeposit :: nt, rootChain :: t
+  , rootCommon :: nt, rootPhase :: t, rootGeneration :: nn
+  , rootWinner :: nt, rootSettlementEvent :: nt } deriving (Eq,Show)
+$(makeAdaptorAndInstance "pPaymentRoot" ''PaymentRootF)
+type PaymentRoot = PaymentRootF Text (Maybe Text) (Maybe Int64)
+type PaymentRootFields = PaymentRootF TextField (O.FieldNullable O.SqlText) (O.FieldNullable O.SqlInt8)
+paymentRoots :: O.Table PaymentRootFields PaymentRootFields
+paymentRoots = O.table "intents" $ pPaymentRoot PaymentRoot
+  { rootId=O.requiredTableField "id", rootObligation=O.requiredTableField "obligation_id"
+  , rootWithdrawal=O.requiredTableField "withdrawal_id", rootDeposit=O.requiredTableField "deposit_id"
+  , rootChain=O.requiredTableField "chain"
+  , rootCommon=O.requiredTableField "common_input", rootPhase=O.requiredTableField "phase"
+  , rootGeneration=O.requiredTableField "active_generation", rootWinner=O.requiredTableField "settled_txid"
+  , rootSettlementEvent=O.requiredTableField "settlement_event_id" }
+
 preparations :: O.Table (TextField,IntField,TextField,O.FieldNullable O.SqlText,O.FieldNullable O.SqlText,IntField)
                        (TextField,IntField,TextField,O.FieldNullable O.SqlText,O.FieldNullable O.SqlText,IntField)
 preparations = O.table "preparations" $ p6

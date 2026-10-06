@@ -742,3 +742,65 @@ accept proved and approved expiry. Old-generation callbacks cannot retire curren
 work. Native accounting corrections, overlap exclusion, wallet anchors, pending
 credit restrictions and lock ownership remain in their existing adapter/reconciliation
 checks. Neither a timeout nor a partial history becomes absence or send permission.
+
+### Schema-22 dependency and conversion contract (G71)
+
+This inventory was checked against migrations 001–008 and Store at `2f35af4`.
+Schema 21 is still the only accepted runtime schema. `PaymentPhase` and Schema's
+`PaymentRoot` projection describe the target; adding those types does not install
+columns, backfill data or make a staged database usable. Do not add a staged SQL
+file to the installer's current `migrations/*.sql` loop: conversion must own both
+DDL stages and Opaleye backfill/verification in one transaction.
+
+| Existing dependency | Required replacement / invariant |
+| --- | --- |
+| `intents.resolved` CHECK and `one_unresolved_chain_intent` | Four valid phase/nullable-column combinations; partial unique active-chain index. Ready roots must not occupy the active-chain slot. |
+| `obligations.status` CHECK and `one_active_deposit_allocation` | Derive execution from the root and restrictions. Add immutable root `deposit_id`, a composite FK to obligation identity/receipt and a partial unique noncancelled-receipt index. Earned roots have no receipt. No cross-table uniqueness trigger or duplicate cancellation flag. |
+| `orders.status`, `orders.payout_tx` | Narrow admission field; customer execution/link projection. Admission/expiry, queue limits, promotion candidates, instruction exposure and legacy-policy resume checks must stop treating admission as payment progress. |
+| `trg_cancelled_preparation_attempt` (001) | Require root `active` and exact `active_generation`, unretired/noncancelled preparation and no cleanup request. |
+| `trg_source_approval_binding` (004) | Replace obligation status with a current unresolved source restriction; retain latest restoration/loss ordering, eligible-restored or exact covered-loss alternatives, source-cover identity and sequence. |
+| `trg_native_replacement_member_binding` (001) | Require active root/exact generation; retain parent/child identity, states, fee, draft membership and cancellation exclusion. |
+| `trg_native_replacement_draft_binding` (008) | Require active root and no source restriction; retain paused authority, full fee hold, exact eligible or covered/approved source, earned-funding branch and single open draft. |
+| `trg_native_winner_change_binding` (003) | Require settled root pointing to previous winner; retain family/generation/allowance, queued proof and immutable prior observation. Preserve original settlement event. |
+| `trg_fee_withdrawal_cancellation_binding` (007) | A ready root with no preparation is now normal. Otherwise require wholly unsigned completed cleanup, released fee hold and paused authority; preserve request/decision sequencing. |
+| `trg_payment_funding_binding` (006) | Preserve exactly-one immutable funding identity and asset/chain binding; allow an already cancelled withdrawal's root only in its proved cancelled phase, including migration. |
+| `one_active_preparation`, `one_settled_payment_per_intent`, attempt/preparation immutable triggers | Retain. Deferred root/attempt/preparation checks bind their final transaction state, including winner swaps. A failed retained preparation is not permission to create another. |
+| Root settlement fields | Composite belonging checks for active generation and winner; original event FK/unique/immutability and exact `settlement:<original-attempt>` binding. Changing winner must not alter that event. |
+| Funding/root completeness | Obligation and withdrawal creation commit with exactly one corresponding root. Deferred checks validate both insertion orders without permitting orphan funding after commit. |
+| Source/native recovery views and immutable journals | No view directly references the removed fields. Retain latest-state/winner cutoff semantics, all evidence FKs and append-only/custody-invalidation triggers. |
+| `workIntents` and `workHash` | Preserve the old approval hash preimage: omit a new ready/cancelled root with no preparation (old representation had no intent), otherwise derive `resolved` as phase other than active. Preserve all ordering/common-input/history bytes. This is a hash encoding, not stored compatibility state. |
+| Initialization, manifests, table inventories and permissions | Refuse occupied/staged/unknown ledgers; allow schema-21 inspection only through migration/recovery; activate 22 atomically. Extend full-record comparisons and SELECT-only checks; retain sequence/fence/backup boundaries. |
+
+The six status/resolved-dependent trigger bodies are listed above; funding binding
+also needs changed cancellation timing. No trigger or constraint is dropped merely
+because the corresponding Haskell decision exists. A root's deferred final-state
+checks must tolerate the established within-transaction ordering but not a committed
+orphan, active-generation mismatch, unbound winner or duplicate principal event.
+
+Conversion maps existing records as follows. Rows not named for removal retain all
+fields and identities; no transaction, approval, event or financial posting is regenerated.
+
+| Source facts | Target / required evidence |
+| --- | --- |
+| Ready customer obligation / earned request without intent | New root with same payment/funding ID, correct destination chain, ready phase, no work/winner/event. No new posting. |
+| Active unresolved intent, including source review or pending cleanup | Active root with its uniquely belonging current generation. Keep its review/cleanup restriction separate; do not turn review into ready or discard signed work. |
+| Successful payment, including changed native winners | Settled root with current uniquely settled attempt and the unique original principal event proved through retained attempts/postings/winner history. Current winner need not be that original event's transaction. |
+| Finalized failed attempt | Ready economic phase with failed-attempt restriction; preserve failed cost, attempt and unreleased liability. No new retry capability. |
+| Verified Solana expiry | Ready phase; preserve retired preparation/bytes/expiry. Retry eligibility still requires the separate saved approval and normal gates. |
+| Completed unsigned preparation cancellation | Ready phase; preserve complete cleanup and history. Source review/generation limit remain restrictions. Pending cleanup stays active. |
+| Cancelled earned withdrawal | Cancelled phase proved by its immutable cancellation; no attempts, and any preparation history must have completed unsigned cleanup. |
+| Cancelled conversion superseded by refund | Cancelled phase bound to the retained refund for the same receipt, with no unresolved work or original principal settlement. The refund gets its own root; receipt uniqueness ignores only the proved cancelled conversion. |
+| Historical order display fields | Admission/expiry/review and payment-derived display must match the old facts. Unknown or ambiguous mapping refuses; do not quietly drop a sticky review or select an arbitrary refund. |
+| Missing executable legacy cost policy | Keep the known economic history and explicit restriction; do not fabricate new limits. If phase or original settlement cannot be proved, refuse migration. |
+| Terms/capabilities/deadlines/receipts/allocations/holds/budgets | Unchanged immutable bytes and financial meaning, compared before activation. Released holds are not removed or recreated. |
+| Scans/evidence/source covers/returns/replacements/approvals | Unchanged identities, exact bytes, order and sequence. Check old/new work hashes on every migrated subject, including ready source-review work. |
+| Deployment identity/critical sequence/backup/host fence | Same identity and nondecreasing boundary; migration never resumes or creates a covered new send. Restore/migrate in isolation, then reconcile before explicit activation. |
+
+Migration first takes the existing exclusive worker lock and verifies paused
+identity/sequence under the deployment-row lock. A bounded transaction can stage
+columns, convert rows through a closed Opaleye operation, compare complete financial
+state, install final constraints and activate version 22 together. Failure rolls
+back schema and data; no serve/signer accepts staging. A committed staging/resume
+scheme is justified only if measured ledger size makes this transaction unsuitable.
+Old worker and signer must be quiescent and the encrypted snapshot retained; the
+database lock is not proof that another host no longer has signing keys.

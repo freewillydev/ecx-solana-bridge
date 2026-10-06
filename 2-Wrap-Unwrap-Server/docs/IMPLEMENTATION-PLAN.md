@@ -1,6 +1,6 @@
 # Auditable financial-core refactor: design and execution plan
 
-Status: **in progress; 70/120 steps verified (A–F)**. This replaces the
+Status: **in progress; 72/120 steps verified (A–F and G71–72)**. This replaces the
 completed implementation checklist, not its evidence. Execution baseline source is
 `3d4970b3e502de9d4c9a89803610df3802e3e322` (implementation `bc9713c`). The funded
 pilot stays on `548c509`. See [RELEASE-REVIEW.md](RELEASE-REVIEW.md) for the actual
@@ -151,6 +151,7 @@ all existing IDs and funding foreign keys. Replace `resolved` with these columns
 
 | Column | Meaning / constraint |
 | --- | --- |
+| `deposit_id` | Present exactly for customer funding; immutable composite FK with `obligation_id` binds its existing receipt; partial uniqueness excludes cancelled roots |
 | `phase` | Closed values `ready`, `active`, `settled`, `cancelled` |
 | `active_generation` | Nonnegative bounded generation only when active; references that payment's preparation |
 | `settled_txid` | Present only when settled; references an attempt belonging to this payment |
@@ -160,6 +161,13 @@ Keep existing `id`, exactly-one `obligation_id`/`withdrawal_id`, chain and nativ
 common-input identity. Funding remains immutable. Do not duplicate amount,
 recipient and policy from their current immutable funding owners just to avoid
 a join. All payment-root rows are created atomically with their funding record.
+
+G71's concrete schema inventory found that removing obligation status also removes
+the partial receipt-allocation index. Retain that guarantee declaratively: add the
+immutable receipt reference above, constrained by `(obligation_id,deposit_id)` to
+the obligation's existing identity, and a unique `deposit_id` index for noncancelled
+roots. Earned funding has neither customer field. This constrained reference avoids
+custom cross-table locking/uniqueness code and cannot independently change funding.
 
 Preserve one active payment per destination chain using a partial unique index on
 `chain WHERE phase='active'`. The old `resolved=0` partial index must be replaced
@@ -509,8 +517,8 @@ The executor updates this table after verified checkpoints; not merely after edi
 | C. Complete payment slice | 25–36 | Complete | `a4aa94f`; pure decisions, 2,100 generated cases, real-PG settlement comparisons |
 | D. Existing-schema integration | 37–46 | Complete | `62a9c77`; preparation/send/settlement, explicit isolation, fault/race/HTTPS/role checks |
 | E. Customer funding/accounting | 47–56 | Complete | `01eb253`, `99b2657`; pure decisions and derived customer display, 4,500 generated cases, 27 real-PG history comparisons, rollback/restoration pass |
-| F. Recovery/reconciliation | 57–70 | Complete | `fb38ddb` plus the F61–70 checkpoint recorded in RELEASE-REVIEW; 7,800 generated cases, native/source decisions, shared generation checks, real-PG/HTTPS/process/fence/encrypted-custody restoration pass |
-| G. Schema 22 and migration | 71–84 | Next | Inventory schema dependencies and map every retained financial guarantee before DDL; funded deployment stays unchanged |
+| F. Recovery/reconciliation | 57–70 | Complete | `fb38ddb`, `2f35af4`; 7,800 generated cases, native/source decisions, shared generation checks, real-PG/HTTPS/process/fence/encrypted-custody restoration pass |
+| G. Schema 22 and migration | 71–84 | In progress: 71–72 verified | Exact dependency/conversion inventory, closed phase codec and target Opaleye root projection. 8,100 generated cases pass. Next constraints/queues and authoritative readers; runtime remains schema 21 pending atomic migration |
 | H. Protocol/file simplification | 85–94 | Not started | Depends on G |
 | I. Administration/UI/setup | 95–104 | Not started | Depends on H |
 | J. Consolidated review/release candidate | 105–120 | Not started | Depends on I |
