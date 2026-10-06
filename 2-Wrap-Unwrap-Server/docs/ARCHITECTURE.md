@@ -508,6 +508,22 @@ Pool creation, full-range position/boundary initialization, deposits, withdrawal
 and collection are exercised in `pool-test`. Reinvestment is an explicit liquidity
 operation; unattended compounding, multisig and LP locking are not implemented scope.
 
+The I95–104 review retains the existing shared AdminKey publication/family locks
+and AdminStatus status/retirement evidence. Token and pool archives, signatures,
+nonce behavior and finalized cost checks differ; combining those interpreters
+would obscure their authority. No generic signing callback or transaction builder
+was added. The browser already consumes the derived OrderView: its four state
+fields hold public configuration, the current capability/request, bounded saved
+history and copyable instructions, not another financial lifecycle.
+
+Configure and config loading use the same complete runtime validation. Native
+unlock setup additionally calls the signer's fixed credential check, which returns
+only `()`; the secret reader remains private to the workflow component. Configure
+keeps its stricter UID-owned private parent rule and re-prompts on malformed UTF-8
+as startup would refuse it. Worker JSON excludes unlock material; signer JSON and
+sources retain the path, not copied secret bytes. Existing private defaults,
+source/release selection, optional database setup and no-overwrite rules remain.
+
 ### Formats and failure semantics to retain
 
 `Wire.hs` is the exact HTTP field/enum codec contract: `OrderRequest` has

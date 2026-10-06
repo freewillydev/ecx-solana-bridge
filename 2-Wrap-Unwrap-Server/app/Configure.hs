@@ -7,7 +7,7 @@ import Bridge.BrowserBuild (browserAssetsDirectory)
 import System.Environment (getExecutablePath)
 import Bridge.Error
 import Bridge.AdminKey (privateParent,readPrivate,savePrivate)
-import Bridge.Signer (verifySigningKey)
+import Bridge.Signer (verifySigningKey,verifyNativeUnlock)
 import Control.Exception (IOException,catch,onException)
 import Control.Monad (foldM,forM_,when)
 import Data.Aeson
@@ -138,8 +138,8 @@ build directory=do
     pure file
   optionalFile label=prompt label "-" $ \path->if path=="-" then pure "" else do
     file<-makeAbsolute path
-    bytes<-readPrivate file
-    require (not(B.null bytes) && B.length bytes<=1024 && not(B8.any (`elem` ['\r','\n','\0']) bytes)) "passphrase_requires_1_to_1024_bytes_without_newline"
+    privateParent file
+    verifyNativeUnlock file
     pure file
   credential label=prompt label "" $ \path->do
     file<-makeAbsolute path

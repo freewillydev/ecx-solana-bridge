@@ -45,7 +45,7 @@ import qualified Data.ByteString.Base64 as B64
 import Data.IORef
 import Data.Text (Text)
 import Network.HTTP.Types
-import Network.Wai (defaultRequest,requestMethod,requestHeaders,responseLBS)
+import Network.Wai (requestMethod,requestHeaders,responseLBS)
 import Network.Wai.Test
 import Servant.API (BasicAuthData(..))
 import System.Directory (removeFile,createDirectory,removeDirectoryRecursive,renameFile,doesPathExist)

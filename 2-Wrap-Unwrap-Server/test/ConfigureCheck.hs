@@ -31,8 +31,10 @@ contract=bracket temporary removeDirectoryRecursive $ \directory->do
       history=T.unpack(base58 $ B.replicate 64 1)
       run input=readCreateProcessWithExitCode ((proc executable ["configure"]) {cwd=Just directory}) input
       key=directory</>"key.json"; worker=directory</>"worker.auth"; signer=directory</>"signer.auth"
+      invalidUnlock=directory</>"invalid-unlock"; unlock=directory</>"unlock"
   savePrivate key (L.toStrict $ encode $ B.unpack(seed<>public))
   savePrivate worker "worker:password";savePrivate signer "signer:password"
+  savePrivate invalidUnlock (B.singleton 255);savePrivate unlock " exact unlock secret "
   -- Field order is explicitly sorted, and booleans/numbers retain their JSON types.
   let fields=["false","1200",owner,owner,"test-deployment","100000","10000","1000"
         ,"invalid-number","4","2100000","10000000","10000","10000",owner
@@ -57,15 +59,19 @@ contract=bracket temporary removeDirectoryRecursive $ \directory->do
     (cancelled,_,_)<-run ((directory</>"cancelled")<>"\n")
     partial<-doesDirectoryExist(directory</>"cancelled")
     let local=directory</>"source-setup"
-        sourceAnswers=[local,"L2LSignetDevnet"]<>fields<>["no","yes","invalid-mode","source",directory,worker,key,worker,signer,"-","-","-","-","-","-","no"]
+        sourceAnswers=[local,"L2LSignetDevnet"]<>fields<>["no","yes","invalid-mode","source",directory,worker,key,worker,signer,invalidUnlock,unlock,"-","-","-","-","-","no"]
     (sourceCode,sourceOutput,_)<-run (unlines sourceAnswers)
     sourceSetup<-either fail pure . (eitherDecodeStrict' :: B.ByteString -> Either String Value) =<< B.readFile(local</>"setup.json")
+    sourceWorker<-C.loadConfig(local</>"worker.json")
+    sourceSigner<-C.loadConfig(local</>"signer.json")
     let expectedSetup=object ["existing" .= False,"method" .= ("source"::String),"sourceRoot" .= directory,"restic" .= worker]
     pure(C.fingerprint config==C.fingerprint other && C.nativeCookie config/=C.nativeCookie other
       && sort entries==["interface.json","setup.json","signer.json","sources.json","worker.json"]
       && sources==M.fromList [("solana.keypair.json",key),("native-worker.auth",worker),("native-signer.auth",signer)]
       && originalKey==L.toStrict(encode $ B.unpack(seed<>public)) && originalWorker=="worker:password" && originalSigner=="signer:password"
       && sourceCode==ExitSuccess && sourceSetup==expectedSetup && not ("PUBLIC key file" `isInfixOf` sourceOutput) && not ("signed installer directory" `isInfixOf` sourceOutput)
+      && C.nativeUnlockFile sourceWorker==Nothing && C.nativeUnlockFile sourceSigner==Just unlock
+      && "invalid_native_unlock_file" `isInfixOf` sourceOutput && not (" exact unlock secret " `isInfixOf` sourceOutput)
       && all(==0o600)modes && before==after && again/=ExitSuccess && cancelled/=ExitSuccess && not partial)
  where
   temporary=do

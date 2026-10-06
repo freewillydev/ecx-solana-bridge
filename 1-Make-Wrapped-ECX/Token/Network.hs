@@ -22,7 +22,6 @@ import Data.Aeson
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Base64 as B64
 import Data.Text (Text)
-import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Word (Word64)
 import Data.Binary.Get (runGetOrFail,getWord32le,getWord64le,getByteString)

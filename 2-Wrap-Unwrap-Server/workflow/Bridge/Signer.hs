@@ -2,10 +2,10 @@
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- Authenticated signer transport. Concrete signing runs in Bridge.Critical.
 module Bridge.Signer
-  ( SigningAPI, signingAPI, signingServer, verifySigningKey, protectedSignerFile
+  ( SigningAPI, signingAPI, signingServer, verifySigningKey, verifyNativeUnlock, protectedSignerFile
   , SigningEndpoint(..), signerCredentials, signerCertificate, signingApplication, runSigningServer ) where
 import Bridge.Operation.Internal
-import Bridge.Credentials (verifySigningKey,protectedSignerFile,readSignerAuth,readSignerCertificate)
+import Bridge.Credentials (verifySigningKey,protectedSignerFile,readSignerAuth,readSignerCertificate,readNativeUnlock)
 import Control.Exception (catch)
 import Data.Aeson (encode,object,(.=))
 import Bridge.Domain (Amount)
@@ -19,9 +19,12 @@ import qualified Data.ByteArray as BA
 import qualified Data.ByteString as BS
 import Data.PEM (pemParseBS,pemContent)
 import Data.X509 (SignedCertificate,decodeSignedCertificate)
-import Network.Wai hiding (Request)
 import Network.Wai.Handler.Warp (setHost,setPort,setTimeout,defaultSettings)
 import Network.Wai.Handler.WarpTLS (runTLS,tlsSettings)
+
+-- Configure can check the fixed credential policy without receiving the secret.
+verifyNativeUnlock :: FilePath -> IO ()
+verifyNativeUnlock path = readNativeUnlock path >> pure ()
 
 -- Keep the shared API pure; only the critical runtime will generate ClientM.
 type SigningAPI = BasicAuth "signer" () :>
