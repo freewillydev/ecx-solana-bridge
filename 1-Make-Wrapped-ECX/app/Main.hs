@@ -38,6 +38,10 @@ run=getArgs >>= \args->case args of
   ["nonce-rent"]->dispatch "nonce-rent" "" Nothing
   ["keygen",key]->makeAbsolute key >>= \output->
     (O.runCritical . O.Request) (GenerateKey output) >>= L.putStrLn . encode
+  ["enter-key",key]->do
+    output<-makeAbsolute key
+    owner<-(O.runCritical . O.Request) (EnterKey output)
+    L.putStrLn $ encode $ object ["publicKey" .= owner,"keyFile" .= output]
   ["import-key",exported,key]->do
     input<-makeAbsolute exported; output<-makeAbsolute key
     owner<-(O.runCritical . O.Request) (ImportKey input output)
@@ -63,7 +67,7 @@ run=getArgs >>= \args->case args of
     input<-makeAbsolute transaction
     dispatch "sign" keyfile (Just input)
   [command,key] | command `notElem` ["sign","prepare-offline"] && command `elem` map fst commands->makeAbsolute key >>= \keyfile->dispatch command keyfile Nothing
-  _->die "Usage: ecx-token configure | sign KEYFILE TRANSACTION.json | import-key EXPORT.txt KEYFILE | prepare-offline TRANSACTION.json PREPARED.json | sign-offline KEYFILE PREPARED.json SIGNED.json | submit-file SIGNED.json | COMMAND KEYFILE (keygen, prepare, check, submit, recover, status, inspect-policy, address, associated-address, metadata-address; settings: ./.ecx-token/ecx-token.json)"
+  _->die "Usage: ecx-token configure | sign KEYFILE TRANSACTION.json | enter-key KEYFILE | import-key EXPORT.txt KEYFILE | prepare-offline TRANSACTION.json PREPARED.json | sign-offline KEYFILE PREPARED.json SIGNED.json | submit-file SIGNED.json | COMMAND KEYFILE (keygen, prepare, check, submit, recover, status, inspect-policy, address, associated-address, metadata-address; settings: ./.ecx-token/ecx-token.json)"
 
 commands :: [(String,[Key])]
 commands=

@@ -130,10 +130,15 @@ for mint transaction fees. Keep one outstanding mint intent per nonce account.
    64-byte keypair, not a recovery phrase, Ethereum key or hardware-wallet export.
    Do not paste secrets into command arguments or transfer them back to the server.
    An existing Solana CLI 64-number JSON keypair can be used directly without import.
+   `enter-key` requires a real terminal, creates no temporary export file, restores
+   terminal echo on failure, and refuses to overwrite an existing key. Choose one
+   import command, not both.
 
    ```sh
    chmod 600 phantom-export.txt
    ecx-token import-key phantom-export.txt secretKey
+   # Or enter it directly in a terminal, with input hidden:
+   ecx-token enter-key secretKey
    ```
 
    Check the printed public key against the intended mint authority. Import checks

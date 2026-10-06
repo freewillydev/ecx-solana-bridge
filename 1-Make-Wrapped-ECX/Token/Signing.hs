@@ -12,6 +12,8 @@ import qualified Crypto.PubKey.Ed25519 as Ed
 import qualified Data.ByteArray as BA
 import Data.Aeson
 import Control.Monad (unless)
+import Control.Exception (bracket,finally)
+import System.IO (stdin,stderr,hIsTerminalDevice,hGetEcho,hSetEcho,hPutStr,hFlush,hGetChar)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.ByteString.Base58 as B58
@@ -65,6 +67,7 @@ validateSuccessorSaved parent parentHash child=do
 data Critical a where
   GenerateKey :: FilePath -> Critical Text
   ImportKey :: FilePath -> FilePath -> Critical Text
+  EnterKey :: FilePath -> Critical Text
   SignOffline :: FilePath -> Request -> Text -> FilePath -> Critical Text
 
 evalCritical :: Critical a -> IO a
@@ -79,6 +82,38 @@ evalCritical (GenerateKey output)=do
 evalCritical (ImportKey input output)=do
   newPrivatePath output
   exported<-readPrivate input
+  importKey output exported
+evalCritical (EnterKey output)=do
+  newPrivatePath output
+  terminal<-hIsTerminalDevice stdin
+  unless terminal (reject "private_key_entry_requires_terminal")
+  exported<-bracket (hGetEcho stdin) (hSetEcho stdin) (\_->do
+    hSetEcho stdin False
+    hPutStr stderr "Paste base58 private key (hidden), then Enter: ";hFlush stderr
+    readHidden 0 []) `finally` hPutStr stderr "\n"
+  importKey output exported
+ where
+  readHidden :: Int -> [Char] -> IO B.ByteString
+  readHidden n chars=do
+    c<-hGetChar stdin
+    if c=='\n' then pure(B8.pack $ reverse chars) else do
+      unless (n<128 && c>=' ' && c<='~') (reject "invalid_private_key_input")
+      readHidden (n+1) (c:chars)
+evalCritical (SignOffline keyfile request unsigned output)=do
+  newPrivatePath output
+  Transaction _ _ message<-either reject pure (validate request unsigned)
+  secret<-readKey (authority request) keyfile
+  let signature=BA.convert (Ed.sign secret (Ed.toPublic secret) message) :: B.ByteString
+      identifier=base58 signature
+      signed=T.decodeUtf8 $ B64.encode (B.singleton 1<>signature<>message)
+      saved=Saved request identifier signed Nothing
+  _<-either reject pure (validateSaved saved)
+  savePrivate output (L.toStrict $ encode saved)
+  pure identifier
+
+-- Shared validation/publication for both closed import operations.
+importKey :: FilePath -> B.ByteString -> IO Text
+importKey output exported=do
   let trimmed=B8.dropWhileEnd isSpace (B8.dropWhile isSpace exported)
   unless (B.length trimmed>=64 && B.length trimmed<=88)
     (reject "expected_base58_solana_64_byte_private_key")
@@ -92,14 +127,3 @@ evalCritical (ImportKey input output)=do
   unless (B.drop 32 bytes==public) (reject "imported_key_public_half_mismatch")
   savePrivate output (L.toStrict $ encode $ B.unpack bytes)
   pure (base58 public)
-evalCritical (SignOffline keyfile request unsigned output)=do
-  newPrivatePath output
-  Transaction _ _ message<-either reject pure (validate request unsigned)
-  secret<-readKey (authority request) keyfile
-  let signature=BA.convert (Ed.sign secret (Ed.toPublic secret) message) :: B.ByteString
-      identifier=base58 signature
-      signed=T.decodeUtf8 $ B64.encode (B.singleton 1<>signature<>message)
-      saved=Saved request identifier signed Nothing
-  _<-either reject pure (validateSaved saved)
-  savePrivate output (L.toStrict $ encode saved)
-  pure identifier

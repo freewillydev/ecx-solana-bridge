@@ -18,7 +18,9 @@ import qualified Data.ByteArray.Encoding as Encoding
 import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString.Base64 as B64
 import Data.Binary.Put (runPut,putWord32le,putWord64le,putByteString)
-import System.IO (openTempFile,hClose)
+import System.IO (openTempFile,hClose,hGetEcho,hSetEcho,hGetChar,hPutStr,hFlush,hGetContents',hWaitForInput,hIsClosed)
+import System.Posix.Terminal (openPseudoTerminal)
+import System.Posix.IO (fdToHandle,dup)
 import System.Directory (removeDirectoryRecursive,removeFile,canonicalizePath,doesFileExist)
 import qualified System.Posix.Directory as PD
 import System.Posix.Files (setFileMode,createSymbolicLink,getFileStatus,fileMode)
@@ -37,7 +39,7 @@ import qualified Data.Text as T
 import Data.Either (isLeft)
 import Control.Exception (SomeException,try,bracket)
 import System.Exit (exitFailure,ExitCode(..))
-import System.Process (proc,cwd,readCreateProcessWithExitCode)
+import System.Process (proc,cwd,readCreateProcessWithExitCode,withCreateProcess,std_in,std_out,std_err,StdStream(..),waitForProcess)
 import qualified Network.Socket as Socket
 import System.Timeout (timeout)
 import Test.QuickCheck
@@ -403,6 +405,12 @@ offlineContract=bracket temporary removeDirectoryRecursive $ \directory->do
       writeExport bytes=B.writeFile exportFile bytes >> setFileMode exportFile 0o600
   writeExport (TE.encodeUtf8 $ exported<>"\n")
   (imported,importOutput,_)<-run ["import-key","export.txt","key.json"] ""
+  entered<-terminalImport directory exported "entered.json"
+  enteredKey<-Key.readKey (base58 public) (directory</>"entered.json")
+  invalidEntry<-terminalImport directory "not-a-valid-export-123" "rejected.json"
+  rejectedAbsent<-not <$> doesFileExist(directory</>"rejected.json")
+  (piped,_,_)<-run ["enter-key","piped.json"] (T.unpack exported<>"\n")
+  pipedAbsent<-not <$> doesFileExist(directory</>"piped.json")
   importedKey<-Key.readKey (base58 public) keyfile
   before<-B.readFile keyfile
   (overwrite,_,_)<-run ["import-key","export.txt","key.json"] ""
@@ -449,7 +457,10 @@ offlineContract=bracket temporary removeDirectoryRecursive $ \directory->do
     && and malformed && absent && signedOk==ExitSuccess && unchanged && noTampered && noWrong
     && T.unpack(mint original) `isInfix` review && "321" `isInfix` review
     && savedRecovery saved==Nothing && validateSaved saved==Right unsigned && submission
-    && mode Bits..&. 0o777==0o600)
+    && entered==(ExitSuccess,True,True) && invalidEntry/=(ExitSuccess,True,True)
+    && case invalidEntry of (_,echoRestored,hidden)->echoRestored && hidden && rejectedAbsent
+      && piped/=ExitSuccess && pipedAbsent && Ed.toPublic enteredKey==Ed.toPublic importedKey
+      && mode Bits..&. 0o777==0o600)
  where
   isInfix needle haystack=T.pack needle `T.isInfixOf` T.pack haystack
   temporary=do
@@ -519,3 +530,28 @@ cliContract=bracket temporary removeDirectoryRecursive $ \temporaryDirectory->do
     (path,handle)<-openTempFile "/tmp" "ecx-token-cli"
     hClose handle; removeFile path; PD.createDirectory path 0o700
     pure path
+
+-- Exercise hidden entry through a real PTY, including echo restoration on refusal.
+terminalImport :: FilePath -> Text -> FilePath -> IO (ExitCode,Bool,Bool)
+terminalImport directory value output=bracket open close $ \(master,slave,childInput)->do
+  hSetEcho slave True
+  withCreateProcess ((proc "ecx-token" ["enter-key",output])
+      {cwd=Just directory,std_in=UseHandle childInput,std_out=CreatePipe,std_err=CreatePipe}) $ \_ stdoutHandle stderrHandle process->do
+    let Just out=stdoutHandle; Just err=stderrHandle
+        promptText :: String
+        promptText="Paste base58 private key (hidden), then Enter: "
+    promptRead<-mapM (const $ hGetChar err) promptText
+    echoDuring<-hGetEcho slave
+    hPutStr master (T.unpack value<>"\n");hFlush master
+    status<-waitForProcess process
+    echoAfter<-hGetEcho slave
+    stdoutText<-hGetContents' out;stderrText<-hGetContents' err
+    echoed<-hWaitForInput master 50
+    pure(status,echoAfter,not echoDuring && not echoed && promptRead==promptText
+      && not(value `T.isInfixOf` T.pack(stdoutText<>stderrText)))
+ where
+  open=do
+    (master,slave)<-openPseudoTerminal
+    childInput<-dup slave >>= fdToHandle
+    (,,) <$> fdToHandle master <*> fdToHandle slave <*> pure childInput
+  close (master,slave,childInput)=mapM_ (\h->hIsClosed h >>= \closed->if closed then pure () else hClose h) [master,slave,childInput]
