@@ -136,30 +136,76 @@ decisions and temporary comparison adapter, then measures the total replacement.
 The expansion gate is met for this bounded slice; broader recovery and schema
 work remain unverified, and no overall line-count target is guaranteed.
 
-### Checkpoint D — 37/120, settlement integrated
+### Checkpoint D — 46/120
 
-The closed `SettlePayment` and `FailSolana` operations now load their current
-schema-21 facts under the existing writer transaction and call `decideSettlement`.
-Removed the old duplicate success/failure/context rules. One application path
-retains exact principal/cost event identities, replay evidence and paid-order link
-precedence; required attempt/intent/fee-hold/obligation updates each affect one row.
-Malformed outcome evidence retains its earlier refusal order. This covers I02–I07
-without changing the schema, critical entry or funded deployment.
+Settlement landed in `3fb3753`; this checkpoint completes preparation and queue/
+send integration over unchanged schema 21. Store loads fresh facts under its
+existing deployment lock and applies the pure decision. Removed the duplicate
+settlement/preparation/send rules and temporary comparison adapter. Exact plans,
+drafts, signed bytes, generation/replay identity, event IDs, historical terms and
+paid-conversion link precedence remain. Required single-row writes are checked;
+no generic commit/query endpoint or new critical entry was added. READ COMMITTED /
+READ WRITE is now explicit; safe/signing snapshots remain READ ONLY / REPEATABLE
+READ. I02–I10, I12 and I14 were the principal regression boundaries.
 
-The one-job offline `ecx-store-check` build and default PostgreSQL contract run
-both exited 0 on fresh `ecx_rebuild_contract_core_d_settlement_20261005`, using the
-same restricted reader and migrations as A. Logs:
-`/tmp/ecx-financial-core-integrate-build.log` and
-`/tmp/ecx-financial-core-integration-store.log`. All existing settlement, replay,
-failure, extra-refund, source/replacement, role, fencing and encrypted archive
-assertions passed. The temporary comparison adapter now shares the production
-decision; these are integration checks, not another old/new differential run.
-Preparation/send and the full assembled-process checks still await D38–46.
+Verified, with one build job and the existing caches:
 
-The Store settlement responsibility fell from 79 to 68 physical lines. Including
-the shared pure evidence check and row-count checks, the total is **−7 application
-lines, no file change** relative to C: 66 application/schema files / 15,066 lines.
-Test counts remain 9,640. The overall refactor has not yet reduced baseline size.
+- `cabal build ecx-bridge:exe:ecx-store-check ecx-bridge:exe:ecx-bridge ecx-bridge:test:bridge-test -j1 --offline`
+- `cabal test ecx-bridge:bridge-test -j1 --offline --test-show-details=direct`
+- `cabal run ecx-store-check -j1 --offline` in default, `ECX_REBUILD_TLS_ONLY=1`
+  and `ECX_REBUILD_SERVER_ONLY=1 ECX_REBUILD_CANONICAL=1` modes. Each used a fresh
+  schema-21 database on `/tmp/ecx-pg-seam:29436`, the same restricted reader as A,
+  and `ECX_REBUILD_CONTRACT_DATABASE=ecx_rebuild_contract_core_d_{all,tls,server}_20261005`.
+  TLS used Cabal's generated SDK dylib through `ECX_REBUILD_TEST_SDK`; server mode
+  used the current `exe:ecx-bridge` path through `ECX_REBUILD_EXECUTABLE`.
+
+All exited 0. The bridge suite includes 2,100 generated lifecycle cases and
+negative mutations. PostgreSQL includes preparation and settlement constraint
+failure, queue failure at commit, exact rollback of financial records/holds/cost
+clock/postings, writer fencing, successful policy rollback/reuse, actual SELECT-only
+write denial (`42501`), competing-budget/recovery interleavings on separate
+connections, concurrent same-order replay, restart/recovery and encrypted archive
+restoration. The advisory-lock check rejects a second writer: the independent
+fixture connection tests the database row-lock boundary without sharing its MVar.
+This is bounded concurrency evidence, not a universal schedule proof.
+
+Actual Servant HTTPS verifies auth/certificate refusal and rotation, wrong
+identity/generation, changed-during-signing refusal, serialization, recovery and
+exact SDK output. Existing bridge codec tests reject wrong result constructors
+and malformed bytes. The assembled canonical-profile executable verifies HTTP
+assets, paused unavailable-chain startup, unchanged balances and fence/process
+cleanup. These are offline protocol/process fixtures, not new network acceptance.
+The sole `evalCritical` call and signer `ClientM` construction remain in Critical;
+customer component imports/exports and the signer's no-writer/no-broadcast API
+were rechecked. The reference Main.hs hash is unchanged.
+
+A short Ubuntu check used actual disposable service UIDs and systemd confinement
+matching the installer's directory/file ownership and sandbox properties. Positive
+own-file access passed; worker reads of custody/native-unlock/TLS keys and signer
+writes to worker state were denied. It used public fixture material, not custody
+secrets, and did not redeploy a bridge. The test UIDs/files were removed and the VM
+stopped. No funded process, configuration, wallet or network transaction changed.
+
+Logs: `/tmp/ecx-financial-core-integrate-all-build.log`,
+`/tmp/ecx-financial-core-d-contract-build.log`,
+`/tmp/ecx-financial-core-d-combined-tests.log`,
+`/tmp/ecx-financial-core-d-{store,tls,server,os}.log`. An early added Native test
+fixture supplied plain text where the existing recovery query expects a JSON
+proof; it was corrected to the established fixture format and the complete run
+passed. No production proof format was changed. Concurrent commits `e207c60` and
+`78ee184` updated configure/start; their source was preserved and the combined
+bridge suite/executable was verified before closing D.
+
+Size: D adds **64 application lines, zero application files** relative to C,
+including the seven-line reduction in settlement. Lifecycle is now 268 lines;
+Store is 3,432. The replaced mixed IO rules now have one pure decision owner, but
+separate readers/types currently cost more lines. No overall size saving is claimed.
+The comparison adapter was removed; targeted fault/role/race tests give a net
+**+52 test lines**. Including the concurrent setup change (+27 application/+6 test
+lines), totals are **66 application/schema files / 15,164 lines** and **23 test
+files plus embedded Rust / 9,698 lines**. Next is E47–56: customer funding/accounting
+and projection, still on schema 21. Removing duplicate persistent state remains G;
+current tests do not certify that future migration or public release.
 
 ## Source and evidence boundaries
 

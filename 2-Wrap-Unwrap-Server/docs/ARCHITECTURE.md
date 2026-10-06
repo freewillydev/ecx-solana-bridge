@@ -163,7 +163,9 @@ including SELECT on sequences without USAGE/UPDATE. Startup checks inherited and
 catalog privileges, schema creation and elevated role flags.
 
 The writer owns a deployment advisory lock and an independent monotonic host fence.
-Ledger actions serialize on the deployment row. The fence advances before commit;
+Ledger actions explicitly use READ COMMITTED / READ WRITE and lock the deployment
+row before reading decision facts; safe/signing reads use READ ONLY / REPEATABLE
+READ snapshots. The fence advances before commit;
 stale/wrong-identity/retired state is refused. Unexpected database failures fence the
 connection; policy failures permit reuse only after successful rollback. Startup
 pauses intake. Schema-18 migration retains exact history through migrations 006–008;
@@ -586,8 +588,9 @@ bytes, generation, evidence or ordering to make differential tests pass.
 shrinkers. Its expected account map and paid set are independent of production
 accounting. The new adapter uses actual pure settlement decisions for replay;
 the baseline `Domain.settlement` adapter remains a test-only accounting comparison.
-Settlement now uses the pure decision in its closed Store operation; preparation
-and send still use their old Store rules until the remainder of checkpoint D.
+Settlement, preparation and queue/send now use the pure decisions in their closed
+Store operations. Current facts are loaded under the existing deployment lock; no
+caller may submit a precomputed decision or an arbitrary patch for commitment.
 The existing real-PostgreSQL duplicate-settlement, extra-refund, stale-generation,
 missing-backup and native-source-refresh regressions remain the durable oracle.
 The separate HTTPS fixture suspends signing, invalidates custody, then proves the
@@ -616,13 +619,26 @@ twice. The rolling spend total uses the Store's existing durable operating clock
 Live exact preparation replay deliberately does not require fresh admission; it
 grants no new signing/send authority. All such later operations recheck readiness.
 
-The temporary `StoreCheck.compareSettlement` adapter loaded sanitized current facts
-using closed Opaleye operations and compared the pure decision with the unchanged
-actual Store writer at checkpoint C. Fifteen success/failure/replay/refusal calls cover native,
-Solana, earned, conversion, extra refund, covered source and native replacement.
-It compares exact refusal codes, balance movements, retained posting prefix and
-saved outcome; refusals/replays must leave the financial history unchanged. It
-neither runs a second paying server nor normalizes monetary values or signed bytes.
-Now that settlement uses that decision, it is integration coverage only. Remove
-the adapter during D, retaining the independent model and
-original financial regression checks.
+Checkpoint C (`a4aa94f`) compared the extracted settlement decisions with the old
+Store writer across fifteen success/failure/replay/refusal paths. The temporary
+comparison adapter is now removed. The independent model and original durable
+assertions remain; no old/new runtime switch or second paying implementation exists.
+
+Preparation's reader projects exact lineage, source authorization, holds and the
+budget before mutation. Its writes consume only an approved `CreatePreparation`;
+replay retains the existing generation/draft. Successor holds are replaced directly
+after the decision, removing the old release/recheck/reset sequence. Required
+single-row writes are checked. Queue allocation similarly checks exactly one
+previously signed, unqueued attempt; send authorization returns its saved bytes.
+`checkSendPayment` also validates paused native replacement subjects without
+mistaking that permission for intake or broadcast authorization.
+
+The PostgreSQL contracts now inject preparation/settlement constraint failures and
+a deferred queue commit failure, comparing complete financial rows, holds, cost
+clock/history, attempts and postings after rollback. Unexpected errors fence the
+writer; ordinary policy refusals retain reuse after rollback. An independent
+connection holds the deployment row while requests wait, then commits a competing
+operating expenditure or recovery pause. Decisions must use those committed facts.
+Two same-order requests also race behind that database lock; the sole-writer
+advisory claim still excludes a second worker. These are bounded interleaving
+checks, not a proof of every possible schedule or real-chain recovery history.

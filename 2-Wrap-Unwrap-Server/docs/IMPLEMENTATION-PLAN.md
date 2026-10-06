@@ -1,8 +1,8 @@
 # Auditable financial-core refactor: design and execution plan
 
-Status: **in progress; 37/120 steps verified (A–C and settlement integration)**. This replaces the
-completed implementation checklist, not its evidence. Baseline source is
-`6fa733483360da2414d120eb963025d87c3e0507` (implementation `bc9713c`). The funded
+Status: **in progress; 46/120 steps verified (checkpoints A–D)**. This replaces the
+completed implementation checklist, not its evidence. Execution baseline source is
+`3d4970b3e502de9d4c9a89803610df3802e3e322` (implementation `bc9713c`). The funded
 pilot stays on `548c509`. See [RELEASE-REVIEW.md](RELEASE-REVIEW.md) for the actual
 acceptance record and open release gates. Do not relabel old tests as evidence
 for new code.
@@ -507,7 +507,7 @@ The executor updates this table after verified checkpoints; not merely after edi
 | A. Baseline and contracts | 1–12 | Complete | `4b8fa31`; baseline `3d4970b`, inventory and reproducible commands recorded |
 | B. Concrete types and regression harness | 13–24 | Complete | `a18b04b`; pure facts/accounting model, bridge and baseline TLS pass |
 | C. Complete payment slice | 25–36 | Complete | `a4aa94f`; pure decisions, 2,100 generated cases, real-PG settlement comparisons |
-| D. Existing-schema integration | 37–46 | In progress: 37 verified | Settlement uses the pure decision; real-PG contracts pass. Next: preparation/send and steps 39–46 |
+| D. Existing-schema integration | 37–46 | Complete | Settlement `3fb3753`; this checkpoint integrates preparation/send, explicit isolation, fault/race/HTTPS/role checks; next E47–56 |
 | E. Customer funding/accounting | 47–56 | Not started | Depends on D |
 | F. Recovery/reconciliation | 57–70 | Not started | Depends on E |
 | G. Schema 22 and migration | 71–84 | Not started | Depends on F |

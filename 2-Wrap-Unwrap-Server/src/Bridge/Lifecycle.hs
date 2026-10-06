@@ -5,8 +5,9 @@ module Bridge.Lifecycle
   , SettlementOutcome(..), SettlementFacts(..), SettlementDecision(..), SettlementEffects(..)
   , CustomerResolution(..), decideSettlement, checkSettlementEvidence, outcomeState, outcomeRecord, outcomeCosts
   , IntakeFacts(..), FeeBudget(..), PreparationHistory(..), PriorFeeHold(..)
-  , PreparationAdmission(..), PreparationFacts(..), PreparationDecision(..), decidePreparation
-  , SendFacts(..), QueueDecision(..), decideQueue, decideSend, checkIntake
+  , PreparationAdmission(..), PreparationFacts(..), PreparationDecision(..), decidePreparation, checkPreparationInput
+  , SendFacts(..), QueueDecision(..), decideQueue, decideSend, checkSendPayment
+  , checkIntake, checkScans, checkCustody, checkFeeBudget
   ) where
 
 import Bridge.Domain hiding (fee)
@@ -117,13 +118,19 @@ data IntakeFacts = IntakeFacts
 checkIntake :: IntakeFacts -> Either Text ()
 checkIntake facts = do
   let now=intakeTime facts
-      fresh at=at>=0 && at<=now && toInteger now-toInteger at<=60
   ensure (now>=0) "invalid_order_time"
   ensure (not $ intakePaused facts) "intake_paused"
-  ensure (case intakeScans facts of
-    Just(a,b,c)->all (\(at,anchor)->fresh at && not(T.null anchor)) [a,b,c]
+  checkScans now (intakeScans facts)
+  checkCustody now (intakeCustody facts)
+
+freshAt :: Int64 -> Int64 -> Bool
+freshAt now at=at>=0 && at<=now && toInteger now-toInteger at<=60
+checkScans :: Int64 -> Maybe ((Int64,Text),(Int64,Text),(Int64,Text)) -> Either Text ()
+checkScans now scans=ensure (case scans of
+    Just(a,b,c)->all (\(at,anchor)->freshAt now at && not(T.null anchor)) [a,b,c]
     Nothing->False) "scanners_not_fresh"
-  ensure (case intakeCustody facts of Just(revision,checked,at)->revision==checked && fresh at; _->False)
+checkCustody :: Int64 -> Maybe (Int64,Int64,Int64) -> Either Text ()
+checkCustody now custody=ensure (case custody of Just(revision,checked,at)->revision==checked && freshAt now at; _->False)
     "custody_not_reconciled"
 
 -- Integer totals come from the journal/holds at the durable operating clock.
@@ -131,6 +138,14 @@ checkIntake facts = do
 data FeeBudget = FeeBudget
   { operatingBalance :: Integer, operatingHeld :: Integer
   , operatingSpent :: Integer, operatingDaily :: Amount } deriving (Eq,Show)
+
+checkFeeBudget :: Amount -> FeeBudget -> Either Text ()
+checkFeeBudget quantity budget = do
+  let needed=toInteger(units quantity); held=operatingHeld budget
+  ensure (held>=0) "operating_reservation_missing"
+  ensure (operatingBalance budget-held>=needed) "insufficient_fee_budget"
+  ensure (operatingSpent budget+held+needed<=toInteger(units $ operatingDaily budget)) "operating_daily_limit"
+
 data PreparationHistory = InitialPreparation | LivePreparation Text PreparedPayment
   | RetiredPreparation Text (Maybe Int) deriving (Eq,Show)
 data PriorFeeHold = PriorFeeHold
@@ -147,10 +162,7 @@ data PreparationDecision = ReusePreparation PreparedPayment | CreatePreparation 
 
 decidePreparation :: Amount -> Text -> PreparationFacts -> Either Text PreparationDecision
 decidePreparation allowance plan facts = do
-  ensure (not(T.null plan) && T.length plan<=16384) "invalid_payment_record"
-  decoded<-either (const $ Left "invalid_saved_payment") Right (eitherDecodeStrict' $ TE.encodeUtf8 plan)
-  ensure (decoded/=Null) "invalid_payment_record"
-  ensure (needed>0 && needed<=bound) "order_fee_limit_exceeded"
+  checkPreparationInput allowance plan view
   case preparationHistory facts of
     LivePreparation savedChain saved -> do
       ensure (preparedPolicy saved==plan && preparedFee saved==allowance && savedChain==chain
@@ -165,9 +177,7 @@ decidePreparation allowance plan facts = do
  where
   view=preparationPayment facts; outgoing=savedPayment view; funding=paymentFunding outgoing
   native=paymentAsset outgoing==Native; chain=if native then "Native" else "Solana"
-  currency=if native then Native else Sol; costs=paymentLimits $ savedTerms view
-  bound=if native then value(savedNativeFee costs) else value(savedSolanaFee costs)+value(savedSolanaRent costs)
-  needed=value allowance
+  currency=if native then Native else Sol
   value=toInteger . units
   checkSource EarnedFees{} _=Right ()
   checkSource _ admitted=ensure (preparationSourceEligible admitted) "source_not_eligible"
@@ -194,10 +204,20 @@ decidePreparation allowance plan facts = do
         pure $ value quantity
       _->pure 0
     let budget=preparationBudget admitted; held=operatingHeld budget-released-transferred
-    ensure (held>=0) "operating_reservation_missing"
-    ensure (operatingBalance budget-held>=needed) "insufficient_fee_budget"
-    ensure (operatingSpent budget+held+needed<=value(operatingDaily budget)) "operating_daily_limit"
+    checkFeeBudget allowance budget {operatingHeld=held}
     pure $ CreatePreparation $ PreparedPayment view {savedStatus=PaymentPaying} generation plan Nothing allowance
+
+-- Also used before Store reads the remaining snapshot, preserving input-refusal
+-- precedence without another implementation of the monetary limits.
+checkPreparationInput :: Amount -> Text -> PaymentView -> Either Text ()
+checkPreparationInput allowance plan view = do
+  ensure (not(T.null plan) && T.length plan<=16384) "invalid_payment_record"
+  decoded<-either (const $ Left "invalid_saved_payment") Right (eitherDecodeStrict' $ TE.encodeUtf8 plan)
+  ensure (decoded/=Null) "invalid_payment_record"
+  let costs=paymentLimits $ savedTerms view; value=toInteger . units
+      bound=if paymentAsset(savedPayment view)==Native then value(savedNativeFee costs)
+        else value(savedSolanaFee costs)+value(savedSolanaRent costs)
+  ensure (units allowance>0 && value allowance<=bound) "order_fee_limit_exceeded"
 
 -- Native family selection is the latest saved member and whether an unfinished
 -- replacement draft exists. Only the native adapter/closed reader derives it.
@@ -211,14 +231,19 @@ data QueueDecision = ReuseQueue Int64 | CreateQueue deriving (Eq,Show)
 sendContext :: SendFacts -> Either Text RecordedAttempt
 sendContext facts = do
   checkIntake (sendIntake facts)
-  let prepared=sendPreparation facts; view=preparedView prepared; saved=sendAttempt facts
-      outgoing=savedPayment view
+  checkSendPayment (sendPreparation facts) (sendAttempt facts) (sendSourceEligible facts) (sendNativeSelection facts)
+
+-- Shared with paused native replacement drafting, which is not intake or send
+-- permission and has its own custody/approval checks in the closed operation.
+checkSendPayment :: PreparedPayment -> RecordedAttempt -> Bool -> Maybe (Text,Bool) -> Either Text RecordedAttempt
+checkSendPayment prepared saved sourceEligible nativeSelection = do
+  let view=preparedView prepared; outgoing=savedPayment view
   ensure (savedStatus view==PaymentPaying && recordedPayment saved==paymentId outgoing
     && recordedChain saved==(if paymentAsset outgoing==Native then "Native" else "Solana")
     && recordedGeneration saved==preparedGeneration prepared && recordedFee saved==preparedFee prepared) "payment_not_sendable"
-  case paymentFunding outgoing of EarnedFees{}->pure (); _->ensure (sendSourceEligible facts) "source_not_eligible"
+  case paymentFunding outgoing of EarnedFees{}->pure (); _->ensure sourceEligible "source_not_eligible"
   if recordedChain saved=="Native" then do
-    (latest,pending)<-maybe (Left "native_replacement_not_current") Right (sendNativeSelection facts)
+    (latest,pending)<-maybe (Left "native_replacement_not_current") Right nativeSelection
     ensure (latest==signedId(recordedSigned saved)) "native_replacement_not_current"
     ensure (not pending) "native_replacement_draft_pending"
   else pure ()
