@@ -65,6 +65,46 @@ release trust key. Private artifacts/evidence are in
 `installer-acceptance-20261004/candidate-509f617/` under the retained secrets directory.
 Do not label them as containing later token changes.
 
+## Interactive setup release candidate (2026-10-05)
+
+Source `bc9713c` adds interactive `ecx-bridge configure`/`start`, source-file
+references instead of copied setup secrets, and offline `ecx-token enter-key`.
+The latter uses a real terminal with echo disabled, shares existing key validation,
+restores echo on rejection and refuses piped input or output overwrite. Real-PTY
+token acceptance passed on macOS and Ubuntu ARM64/x86-64; the full token/bridge
+suites passed on both Ubuntu architectures.
+The customer API, financial workflows, ledger, chain adapters, migrations and SDK
+sources are unchanged from the funded `548c509` runtime; no new funded transfer is
+claimed for these setup packages.
+
+| Architecture | Package SHA-256 |
+| --- | --- |
+| ARM64 | `56ae772b86d04b58c8a3c675c07ed4d98859a9c87fbec94b0d3dc8a483c5fbe1` |
+| x86-64 | `f17dc72aa42707c6833093566c6af9c8582af59c5a8bb36d4b1804e5d067e103` |
+
+Both artifacts have 40 verified manifest entries, matching frozen installer,
+migrations, nested browser manifest and retained notices. Each current Linux plan
+matches all 188 non-local notice records and 159 dependency source hashes. ELF
+architectures/loaders were checked, with no embedded RPATH/RUNPATH; restic matches
+the reviewed architecture-specific pin. The format-2 indexes use the retained
+**acceptance-only** signing key, not a public release authorization key.
+
+ARM64 and x86-64 clean Ubuntu acceptance started without PostgreSQL or bridge services.
+`configure` produced exactly five private JSON files and no key-file copies.
+`start` installed PostgreSQL, restricted roles, migrations and the two services,
+then refused readiness with chain access deliberately disabled. HTTPS, plaintext
+refusal, signer authentication, key isolation, port 443 capabilities, source-file-
+independent restart, repeat upgrade preservation, fresh-over-existing refusal and
+cold boot passed on both architectures. Service accounts were denied SSH access.
+No funded wallets were used. The bootstrap executable needs Ubuntu runtime
+libraries (including `libpq5`); these were installed before running `configure`.
+This is not evidence that an executable can launch on an OS lacking its libraries.
+
+Private evidence is in `installer-acceptance-20261004/candidate-bc9713c/` and
+`candidate-bc9713c-x86/`. These packages do not install the separate token/pool
+administration executables; build those through Cabal. The funded pilot stays on
+its previously verified runtime. External release gates below remain open.
+
 ## Final review artifacts
 
 Both Ubuntu 24.04 packages were built from clean commit `548c509`, which adds only

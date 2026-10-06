@@ -1,5 +1,21 @@
 # Remaining implementation plan
 
+## Current autonomous completion pass (2026-10-05)
+
+The latest requested setup/key-entry changes and independently executable acceptance
+are complete. External prerequisites are batched below. Implementation source for this pass is `bc9713c`.
+
+| Work | Evidence/status |
+| --- | --- |
+| Hidden offline key entry | `ecx-token enter-key KEYFILE`; token suite tests a real terminal, hidden input, echo restoration, invalid input and piped-input refusal; macOS, Ubuntu ARM64 and x86-64 passed |
+| Configure/start and secret references | ARM64 clean Ubuntu: PostgreSQL initially absent; configure/start installs and remains paused without external prerequisites; HTTPS, secret isolation, source-file-independent restart, repeat upgrade, fresh refusal, port 443 and cold boot passed |
+| x86-64 parity | Token/bridge suites and the same fresh installation, isolation, restart, upgrade, cold boot and port 443 acceptance passed |
+| Review packages and handoff | Both source-bound packages, manifests, dependency notices and acceptance signatures verified; results and external handoff recorded in RELEASE-REVIEW |
+
+Keep the funded VM on its previously verified runtime. Disposable acceptance uses
+no funded custody and no enabled chain access. Do not treat successful installation
+or a deliberate readiness refusal as a newly funded transfer or public approval.
+
 ## Completed nine-step implementation goal
 
 This user-approved list supersedes the earlier ten-item accounting in Git history. The independently executable work is complete, with evidence under these same numbers. External
