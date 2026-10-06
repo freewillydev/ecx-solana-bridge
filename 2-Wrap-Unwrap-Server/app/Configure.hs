@@ -64,7 +64,7 @@ build directory=do
       pure(object ["existing" .= True])
      else do
       auth<-prompt "Repository release-auth script path" "2-Wrap-Unwrap-Server/scripts/release-auth" makeAbsolute
-      trust<-prompt "Trusted release PUBLIC key file (obtained independently of package)" "" makeAbsolute
+      trust<-prompt "Path to trusted release PUBLIC key file (prefer absolute path; obtained independently of package)" "" makeAbsolute
       candidate<-prompt "Reviewed signed installer directory" "" makeAbsolute
       pure(object ["existing" .= False,"installer" .= auth,"trustKey" .= trust,"candidate" .= candidate])
   key<-prompt "Existing custody Solana JSON keypair FILE (private; never type the key here)" "" $ \path->do
