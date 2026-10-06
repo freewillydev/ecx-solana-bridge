@@ -2,8 +2,10 @@
 
 The bridge has completed funded development tests and a canonical betanet/Solana
 Mainnet round trip. It is ready for source review, **not public-release approval**.
-The [nine-step internal completion plan](IMPLEMENTATION-PLAN.md) is complete. Passing
-an older candidate's tests does not certify later source or packages.
+The [previous nine-step internal completion plan](https://github.com/freewillydev/ecx-solana-bridge/blob/6fa7334/2-Wrap-Unwrap-Server/docs/IMPLEMENTATION-PLAN.md) is complete.
+The new [auditable-core refactor plan](IMPLEMENTATION-PLAN.md) is planning only;
+its implementation and acceptance are not complete. Passing an older candidate's
+tests does not certify later source or packages.
 
 ## Source and evidence boundaries
 
