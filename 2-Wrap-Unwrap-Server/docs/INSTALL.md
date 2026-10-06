@@ -109,7 +109,7 @@ sudo 2-Wrap-Unwrap-Server/scripts/release-auth install /trusted/release-public.p
 Use `x86_64` on that architecture. Installation provisions PostgreSQL 16, separate
 non-login worker/signer users with explicit SSH denial, restricted database roles,
 signer TLS/authentication,
-all eight schema migrations, a fresh paused ledger/fence and systemd units. It leaves
+baseline migrations 001–008, closed schema-22 initialization, a fresh paused ledger/fence and systemd units. It leaves
 services stopped, enabled for boot; every worker startup requires checked resume.
 It does not create chain assets, provision the native daemon, initialize remote
 storage or provision public certificates. These are real deployment prerequisites, not
@@ -260,17 +260,30 @@ alone does not prove that every baseline correction is present. Stop the paying
 worker, preserve a consistent backup and verify financial records before/after.
 Do not rerun non-idempotent schema files blindly.
 
-For a genuinely new empty deployment, with local database credentials configured:
+For a genuinely new empty deployment, with local **database-owner** credentials
+configured (the worker must not own the schema):
 
 ```sh
 cabal run exe:ecx-bridge -- initialize-ledger /absolute/private/config.json
 cabal run exe:ecx-bridge -- adopt-ledger /absolute/private/config.json 0
 ```
 
-Initialization expects the schema already installed and creates only deployment,
-custody and clock state. It refuses residual financial data and starts paused.
+Initialization expects 001–008 already installed, creates deployment/custody/clock
+state and installs the schema-22 constraints in the same transaction. It refuses
+residual financial data and starts paused. The installer passes only the validated
+public fingerprint using `initialize-ledger --fingerprint ID` to the database owner;
+that owner need not read the service configuration or secrets. The worker's
+existing DML-only privileges are sufficient after initialization.
 It does not create keys, fund custody, restore history or authorize payments.
 Existing custody must follow recovery/migration, never this empty-ledger procedure.
+
+Current serve/signer processes accept only schema 22. For schema-21 custody, quiesce
+both old processes and preserve the verified final archive. The ordinary
+`restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE` command converts only its new
+private restore database, preserves exact financial history and leaves custody
+unreconciled and paused. Inspect that copy before fence adoption and chain
+reconciliation. Do not execute `009-stage.sql` or `009-activate.sql` directly,
+or replace a ledger with a fresh initialization to satisfy the new version check.
 
 [OPERATIONS.md](OPERATIONS.md) covers process startup, funding, operator commands
 and restore. Deleting or reinstalling a server is not itself a recovery procedure.

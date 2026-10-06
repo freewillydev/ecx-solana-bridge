@@ -168,9 +168,11 @@ row before reading decision facts; safe/signing reads use READ ONLY / REPEATABLE
 READ snapshots. The fence advances before commit;
 stale/wrong-identity/retired state is refused. Unexpected database failures fence the
 connection; policy failures permit reuse only after successful rollback. Startup
-pauses intake. Schema-18 migration retains exact history through migrations 006–008;
-migrations 001–005 remain necessary baseline DDL. Fresh initialization expects the
-complete schema and refuses residual financial rows.
+pauses intake. Runtime reads/writes accept only schema 22. Schema-18 migration retains
+exact history through 006–008 to schema 21; the closed offline converter then builds
+payment roots. Fresh initialization expects 001–008, refuses residual financial
+rows and atomically installs 009 as the database owner. Worker privileges stay DML
+only. Legacy archive restoration performs conversion only in its new private database.
 
 Amounts are canonical base-unit decimal strings. Both conversion assets have eight
 decimals; arithmetic uses Integer with bounded persisted values. New fee is
@@ -368,9 +370,9 @@ missing ledger with a new empty ledger for existing custody. See
 
 ## Refactor baseline contract inventory
 
-This inventory describes source `3d4970b` on schema 21. It is the compatibility
-boundary for the financial-core refactor, not a claim that the proposed schema 22
-is already implemented. Names below are exact source constructors/commands.
+This inventory describes source `3d4970b` on schema 21. It remains the compatibility
+boundary for the financial-core refactor; the schema-22 ownership and migration
+changes are documented below. Names below are exact source constructors/commands.
 
 ### Customer, worker and signer
 
@@ -472,7 +474,7 @@ Retain strict configuration fields/fingerprint (`Config.hs`), private setup
 source-file references (`Configure.hs`), token `.ecx-token/ecx-token.json` defaults
 and legacy read-only fallback. Preserve saved `PaymentTerms`, `SignedAttempt`,
 native/Solana draft/message bytes, token/pool attempt/parent formats, custody archive
-formats 1/2 and schema-21 backup manifests. Exact keys, decoder bounds and rejected
+formats 1/2 and schema-21/22 backup manifests. Exact keys, decoder bounds and rejected
 unknown fields remain owned by their existing codecs; no new compatibility codec.
 
 Policy/conflict (`*_conflict`, `*_invalid`, `*_required`) means no successful
@@ -531,14 +533,14 @@ keys, fake RPC responses and deterministic identifiers are never deployment data
 These are the payment, preparation and attempt facts, not duplicate wire DTOs.
 `Payment` already owns `Funding` (conversion/refund/earned), recipient and amount;
 `PaymentTerms` owns policy/limits. Their constructors grant no execution authority.
-The initial module deliberately retains schema-21 `PaymentStatus`; the proposed
-economic phase is introduced only with its proven projection/migration.
+`PaymentStatus` remains an execution projection for callers. Schema 22 persists
+the separate economic phase and derives that status from phase and recovery facts.
 
 | Current field/fact | Owner and intended fate |
 | --- | --- |
-| `orders.status`, `orders.payout_tx` | Schema-21 compatibility writes; public payment progress/link now derive from payment facts, admission/review still uses status; remove redundant columns in G |
-| `obligations.status` | Duplicated economic progress; retire in G after all callers use the payment root |
-| `intents.resolved` | Incomplete payment lifecycle; replace by root phase/generation/winner/original settlement event in G |
+| `orders.status`, `orders.payout_tx` | Removed. `admission_state` owns admission/expiry/review only; progress/link derive from payments |
+| `obligations.status` | Removed. Obligation columns are immutable funding; execution derives from the root and restrictions |
+| `intents.resolved` | Removed. Root phase/generation/winner/original settlement event own economic progress |
 | Order request/quote/policy/costs, capability/deadlines/instruction | Immutable order facts; retain exact historical terms and scope |
 | Deposit anchor/depth/eligibility/allocation and source evidence | Receipt/execution eligibility; separate from whether principal was paid |
 | Preparation generation/policy/draft/retired/cancelled | Exact plan and allowed successor/cleanup; retain |
@@ -552,9 +554,9 @@ Target phase validity is `Ready` with no active generation/winner, `Active g` wi
 exactly one belonging preparation, `Settled tx` with a belonging retained attempt
 and immutable original settlement event, or `Cancelled` with cancellation evidence
 and no active work. Execution review is independent, including after settlement.
-Old-generation evidence cannot authorize the active generation. Until G, the
-schema-21 rows/constraints enforce their existing combinations and unknown states
-continue to refuse; the refactor must not guess a successful mapping.
+Old-generation evidence cannot authorize the active generation. Schema-22 checks,
+belonging foreign keys and deferred consistency triggers enforce these combinations.
+Unknown or contradictory legacy states refuse conversion.
 
 Each pure decision receives only the facts needed by its closed Store leaf:
 
@@ -688,10 +690,15 @@ Unknown or inconsistent combinations refuse instead of inventing a successful vi
 The closed `ReadOrder` operation reads ordered pages within its read snapshot and
 retains at most three display facts: conversion, unfinished work and latest refund.
 Older records remain in PostgreSQL; source-review checks cover the whole order.
-Schema-21 admission and sticky review still use `orders.status`, but payment progress
-and payout no longer trust that column or `orders.payout_tx`. No presentation result
-authorizes a write or signature. Real-PG comparisons retain a test-only schema-21
-oracle; deliberately stale display fields cannot override verified payment facts.
+Admission and sticky review use only `admission_state`; reads never hide a retained
+review merely because another payment is active or paid. Validated funding,
+preparation, signature, settlement, cleanup or retry transitions may supersede
+admission review through the private `acceptCustomerPayment` helper. That helper
+stores no execution progress and cannot clear source, retry or winner evidence.
+No presentation result authorizes a write or signature. Real-PG comparisons retain
+a test-only schema-21 oracle, including a reviewed order with a completed payout.
+`RepairCompletedOrderView` validates a completed conversion without rewriting its
+status/link or advancing the financial sequence.
 
 Observation rules also have a pure owner. `checkScanBatch`/`checkScan` validate the
 closed stream, bound, asset, cursor and immutable origin; `checkObservation` fixes
@@ -743,14 +750,18 @@ work. Native accounting corrections, overlap exclusion, wallet anchors, pending
 credit restrictions and lock ownership remain in their existing adapter/reconciliation
 checks. Neither a timeout nor a partial history becomes absence or send permission.
 
-### Schema-22 dependency and conversion contract (G71)
+### Schema-22 dependency and conversion contract (G71–84)
 
 This inventory was checked against migrations 001–008 and Store at `2f35af4`.
-Schema 21 remains the accepted paying-runtime schema until G74–75 integration.
-The closed `StoreSetup.MigratePaymentRoots` operation now converts a paused offline
+Schema 22 is the only accepted runtime schema. Old table projections live only in
+the private migration module and its tests, with no dual-paying implementation.
+The closed `StoreSetup.MigratePaymentRoots` operation converts a paused offline
 copy to schema 22. It owns both fixed DDL stages and Opaleye backfill/verification
-in one transaction. The installer explicitly runs 001–008; the new 009 stage and
-activation files must run only through the converter, never as standalone scripts.
+in one transaction. The installer explicitly runs 001–008; 009 staging/activation
+must run only through closed conversion or fresh initialization, never as standalone
+scripts. `restore-ledger` accepts a verified schema-21 archive, restores a private
+copy and converts it before exposing schema-22 inspection. It does not adopt a
+fence, restore readiness or start a signer. Schema/manifest disagreement refuses.
 
 | Existing dependency | Required replacement / invariant |
 | --- | --- |
@@ -817,11 +828,15 @@ change. New trigger installation does not validate earlier writes automatically,
 so the closed Opaleye converter explicitly invokes the fixed consistency check for
 every mapped root before forcing deferred constraints and recording version 22.
 
-G73/G77's disposable PostgreSQL contract preserves 16 roots, 12 attempts and 83
+The disposable PostgreSQL migration contract preserves 16 roots, 12 attempts and 83
 postings, with failed/expired work, bounded unsigned cancellation, native winner
 history, source review and ordered refunds. It checks all retained table projections,
 old/new payment states and queues, unexplained-review refusal, worker exclusion,
 actual migration-process death during DDL and rollback after final-DDL failure.
-This establishes the conversion mechanism; full runtime/customer/work-hash,
-initialization/restore and migrated-process acceptance remain G74–75/G78–84 work.
-No funded deployment is converted or resumed by this test.
+New runtime reads preserve all source/replacement work hashes, queues and customer
+status/link projections. Legacy restoration preserves exact financial records while
+invalidating custody readiness. Fresh initialization, ordinary Servant startup,
+restricted signer reads, HTTPS signing for both real network profiles (offline
+RPC fixtures), restart recovery, fences and encrypted schema-22 ledger restoration
+pass their local contracts. No funded deployment is converted or resumed by these
+tests; real-chain and independent-host acceptance remain release gates.

@@ -98,8 +98,8 @@ invocation needs `ecx_bridge_datadir` pointing to the server package.
 | Mode | Additional input / scope |
 | --- | --- |
 | Default | Ledger, concurrency, recovery and local encrypted restic contracts |
-| `ECX_REBUILD_PAYMENT_ROOTS_ONLY=1` | Fresh schema-21 disposable DB (001–008); builds retained histories, converts through the closed Opaleye operation, compares roots/financial rows, kills a migration child during DDL and checks rollback/constraints. Ends paused on schema 22; the current paying runtime still refuses that version. The `child` value is private test-process plumbing. |
-| `ECX_REBUILD_MIGRATION_ONLY=1` | Populated offline schema-18 copy with baseline DDL 001–005; applies 006–008; optional `ECX_REBUILD_MIGRATION_RECOVERY_CONFIG` for read-only real-chain reconciliation |
+| `ECX_REBUILD_PAYMENT_ROOTS_ONLY=1` | Populated schema-21 fixture from baseline `e684f9b`; converts through the closed Opaleye operation, compares retained records, customer views, queues and all work hashes, checks migration refusal/kill/rollback/constraints, then tests ordinary legacy-archive restoration. Ends paused on schema 22. The `child` value is private test-process plumbing. |
+| `ECX_REBUILD_MIGRATION_ONLY=1` | Populated offline schema-18 copy with baseline DDL 001–005; applies 006–008 and the closed schema-22 conversion; optional `ECX_REBUILD_MIGRATION_RECOVERY_CONFIG` for read-only real-chain reconciliation |
 | `ECX_REBUILD_SETUP_ONLY=1` | `ECX_REBUILD_EXECUTABLE`; optional `ECX_REBUILD_SETUP_RESIDUE=1` |
 | `ECX_REBUILD_SERVER_ONLY=1` | `ECX_REBUILD_EXECUTABLE`; process, HTTP and private control |
 | `ECX_REBUILD_TLS_ONLY=1` | `ECX_REBUILD_TEST_SDK`; actual HTTPS saved-decision signing |
@@ -109,6 +109,21 @@ invocation needs `ecx_bridge_datadir` pointing to the server package.
 | `ECX_REBUILD_ENCRYPTED_NATIVE_ONLY=1` | Same native recovery inputs; encrypts only its disposable wallet |
 | `ECX_REBUILD_CUSTODY_ONLY=1` | With native/encrypted recovery mode and disposable DB; complete custody bundle |
 | `ECX_REBUILD_LIVE_OBSERVER_CONFIG=CONFIG` | Observation-only real-chain checks with restricted native credentials |
+
+Fresh default/setup/server/TLS/fence contracts receive 001–008; their closed
+initializer installs schema 22. Do not apply 009 manually. The preserved migration
+fixture on this development host is `ecx_rebuild_contract_g_legacy_roots_20261006`;
+run the destructive migration test on a clone, not that baseline. It contains only
+offline fixture histories, no live keys or paying services.
+
+To reproduce that baseline, build `ecx-store-check` at `e684f9b` in an isolated
+checkout and run its payment-roots mode on a fresh 001–008 disposable database.
+Before the run, install a test-only deployment trigger which raises SQLSTATE
+`P2221` when `NEW.schema_version=22`; this deliberately stops before committing
+conversion after the old runtime has generated the histories. Drop that trigger
+and function after the controlled failure, then clone the database for the current
+contract. This is fixture capture, not a passing test. Keep the original untouched;
+the current runtime intentionally cannot generate new payments on schema 21.
 
 For the bounded formal check, run from `2-Wrap-Unwrap-Server/test/formal`:
 

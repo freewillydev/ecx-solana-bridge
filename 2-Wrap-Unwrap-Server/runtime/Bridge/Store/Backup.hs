@@ -44,7 +44,7 @@ import System.Timeout (timeout)
 
 data LedgerArchive = LedgerArchive
   { archivePath :: FilePath, manifestPath :: FilePath, archiveHash :: Text
-  , archiveIdentity :: Text, archiveSequence :: Int64 } deriving (Eq,Show)
+  , archiveIdentity :: Text, archiveSequence :: Int64, archiveSchema :: Int64 } deriving (Eq,Show)
 
 -- The existing private directory is supplied by startup, never a customer.
 -- pg_dump streams to disk with bounded memory. Keeping the exporting read-only
@@ -76,7 +76,7 @@ archiveLedger settings directory identity version sequenceNo snapshot = do
       hClose output
       syncFile manifest
       bracket (openFd directory ReadOnly defaultFileFlags {nofollow=True,cloexec=True,directory=True}) closeFd fileSynchronise
-      pure (LedgerArchive path manifest checksum identity sequenceNo)
+      pure (LedgerArchive path manifest checksum identity sequenceNo version)
 
 hashChunks :: Context SHA256 -> Handle -> IO Text
 hashChunks context handle = do
@@ -234,7 +234,7 @@ manifestArchive identity minimumSequence manifest bytes = do
     either (const $ reject "invalid_backup_manifest") pure $ parseEither
       (withObject "ledger manifest" $ \o->(,,,,,,) <$> o .: "format" <*> o .: "archive" <*> o .: "sha256"
         <*> o .: "fingerprint" <*> o .: "schemaVersion" <*> o .: "criticalSequence" <*> o .: "remoteDurabilityAcknowledged") value
-  require (version==(2::Int) && schema==(21::Int) && not remote && sequenceNo>=0
+  require (version==(2::Int) && schema `elem` ([21,22]::[Int64]) && not remote && sequenceNo>=0
     && name==takeFileName name && name `notElem` ["",".",".."])
     "invalid_backup_manifest"
   require (saved==identity) "backup_identity_mismatch"
@@ -244,7 +244,7 @@ manifestArchive identity minimumSequence manifest bytes = do
         ,"fingerprint" .= (saved::Text),"schemaVersion" .= schema,"criticalSequence" .= (sequenceNo::Int64)
         ,"remoteDurabilityAcknowledged" .= remote]
   require (value==expected) "invalid_backup_manifest"
-  pure (LedgerArchive path manifest checksum saved sequenceNo)
+  pure (LedgerArchive path manifest checksum saved sequenceNo schema)
 
 -- Authentication is provided by restic; only these two bound files are fetched,
 -- never a directory/tree extraction or an archive-selected local destination.

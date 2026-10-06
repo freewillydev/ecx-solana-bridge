@@ -1,10 +1,50 @@
 -- Relational facts for specific closed Store/migration operations. No connection,
 -- evaluator or write capability is exported. Phase and restrictions stay distinct.
-module Bridge.Store.Projection (paymentStates, activePayments, readyPayments, sourceRestricted, successorReady) where
+module Bridge.Store.Projection (paymentStates, activePayments, readyPayments, orderObligations, openOrders, workIntents, sourceRestricted, successorReady) where
 
 import qualified Bridge.Store.Schema as S
 import qualified Opaleye as O
 import qualified Opaleye.Exists as E
+
+orderObligations :: O.Select (S.TextField,S.TextField,S.TextField,S.TextField)
+orderObligations = do
+  ob<-O.selectTable S.obligations
+  (root,state)<-paymentStates
+  O.where_ (S.rootId root O..== S.obligationId ob)
+  pure (S.obligationId ob,S.obligationOrder ob,S.obligationDeposit ob,state)
+
+-- Admission counts unfinished liability as well as orders awaiting a receipt.
+-- A settled conversion with an additional unpaid refund is still open.
+openOrders :: O.Select S.OrderFields
+openOrders = do
+  order<-O.selectTable S.orders
+  let work=do
+        ob<-O.selectTable S.obligations
+        root<-O.selectTable S.paymentRoots
+        O.where_ (S.obligationOrder ob O..== S.orderId order O..&& S.rootId root O..== S.obligationId ob)
+        pure root
+  unpaid<-E.exists $ do
+    root<-work
+    O.where_ (O.not $ O.in_ (map O.sqlStrictText ["settled","cancelled"]) (S.rootPhase root))
+    pure ()
+  settled<-E.exists $ do
+    root<-work
+    O.where_ (S.rootPhase root O..== O.sqlStrictText "settled")
+    pure ()
+  O.where_ (unpaid O..|| (O.not settled O..&& S.admissionState order O../= O.sqlStrictText "ExpiredUnfunded"))
+  pure order
+
+-- Compatibility preimage for existing work-bound recovery approvals only.
+-- Newly materialized roots with no preparation never contributed an old intent.
+workIntents :: O.Select (S.TextField,S.TextField,S.IntField,O.FieldNullable O.SqlText)
+workIntents = do
+  root<-O.selectTable S.paymentRoots
+  prepared<-E.exists $ do
+    (key,_,_,_,_,_)<-S.workPreparations
+    O.where_ (key O..== S.rootId root)
+    pure ()
+  O.where_ prepared
+  pure (S.rootId root,S.rootChain root,O.ifThenElse (S.rootPhase root O..== O.sqlStrictText "active") (O.sqlInt8 0) (O.sqlInt8 1),S.rootCommon root)
 
 -- The caller checks the overflow row. Active ownership excludes competing ready
 -- work even when that active payment itself needs review.

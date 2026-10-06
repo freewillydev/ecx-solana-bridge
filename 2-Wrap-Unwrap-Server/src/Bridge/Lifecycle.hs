@@ -288,10 +288,10 @@ sendContext facts = do
 checkSendPayment :: PreparedPayment -> RecordedAttempt -> Bool -> Maybe (Text,Bool) -> Either Text RecordedAttempt
 checkSendPayment prepared saved sourceEligible nativeSelection = do
   let view=preparedView prepared; outgoing=savedPayment view
+  case paymentFunding outgoing of EarnedFees{}->pure (); _->ensure sourceEligible "source_not_eligible"
   ensure (savedStatus view==PaymentPaying && recordedPayment saved==paymentId outgoing
     && recordedChain saved==(if paymentAsset outgoing==Native then "Native" else "Solana")
     && recordedGeneration saved==preparedGeneration prepared && recordedFee saved==preparedFee prepared) "payment_not_sendable"
-  case paymentFunding outgoing of EarnedFees{}->pure (); _->ensure sourceEligible "source_not_eligible"
   if recordedChain saved=="Native" then do
     (latest,pending)<-maybe (Left "native_replacement_not_current") Right nativeSelection
     ensure (latest==signedId(recordedSigned saved)) "native_replacement_not_current"

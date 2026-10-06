@@ -26,7 +26,7 @@ import Bridge.Identity (capabilityHash,payInstruction,digest,publicKey)
 import qualified Bridge.Wire as W
 import qualified Data.Aeson.KeyMap as KM
 import Data.Aeson (ToJSON,encode,object,(.=),toJSON,Value(..),eitherDecodeStrict')
-import Data.Profunctor.Product (p2,p3,p5,p6,p7,p8,p9)
+import Data.Profunctor.Product (p2,p3,p6,p7,p8,p9)
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.Text.Encoding as TE
@@ -50,7 +50,7 @@ import qualified System.Posix.Files as Posix
 import System.Posix.Signals (signalProcess,sigKILL)
 import Data.Bits ((.&.))
 import qualified Bridge.NativePayment as NP
-import Bridge.Error (BridgeError(..),reject)
+import Bridge.Error (reject)
 import Bridge.Observer (ObserverSettings(..))
 import Bridge.Reconciliation (inspectCustodyWith,nativeBalance)
 import Bridge.RPC (fieldValue,newRpcManager,rpcManagerSettings,rpc)
@@ -70,6 +70,7 @@ import qualified Network.TLS as TLS
 import Network.TLS.Extra.Cipher (ciphersuite_default)
 import Data.X509.CertificateStore (makeCertificateStore)
 import qualified Bridge.Store.Schema as S
+import qualified Bridge.Store.Migration as Legacy
 import qualified Bridge.Store.Projection as Projection
 import Control.Exception
 import Data.Int (Int64)
@@ -81,7 +82,7 @@ import Control.Monad (unless,void,when,forM_,filterM)
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import qualified Database.PostgreSQL.Simple as PG
-import Database.PostgreSQL.Simple.Types (Identifier(..))
+import Database.PostgreSQL.Simple.Types (Identifier(..),Query(..))
 import qualified Opaleye as O
 import System.Exit (ExitCode(..))
 import System.Environment (getEnv,lookupEnv,getEnvironment,getExecutablePath)
@@ -277,7 +278,7 @@ migrationMain=do
       check message ok=unless ok (fail message)
   bracket (PG.connect settings) PG.close $ \connection->do
     (before,attempts,postings)<-fixture connection ArchiveRecords
-    history<-fixture connection MigrationRecords
+    history<-fixture connection LegacyMigrationRecords
     original<-case before of
       [row] | S.schemaVersion row==18 -> pure row
       _->fail "populated schema-18 baseline required"
@@ -288,25 +289,28 @@ migrationMain=do
         ["-X","-h","/tmp/ecx-pg-seam","-p","29436","-U",user,"-d",database,"-v","ON_ERROR_STOP=1","-f",path] ""
       check ("migration failed: "<>name<>"\n"<>diagnostic) (code==ExitSuccess)
     (after,savedAttempts,savedPostings)<-fixture connection ArchiveRecords
-    savedHistory<-fixture connection MigrationRecords
+    savedHistory<-fixture connection LegacyMigrationRecords
     check "migration changed financial history" (attempts==savedAttempts && postings==savedPostings && history==savedHistory)
     check "migration changed identity, sequence or pause contract"
       (after==[original {S.schemaVersion=21,S.paused=1,S.pauseReason="payment_funding_migration"}])
     intents<-fixture connection MigratedIntents
-    check "migration changed customer funding" (all (\row->S.intentWithdrawal row==Nothing && S.intentObligation row==Just(S.intentId row)) intents)
+    check "migration changed customer funding" (all (\row->Legacy.intentWithdrawal row==Nothing && Legacy.intentObligation row==Just(Legacy.intentId row)) intents)
     legacyRecords<-fixture connection MigrationLegacyPayments
     let legacy=map fst legacyRecords
     check "unfinished legacy payments require explicit cost-policy review" (all snd legacyRecords)
+    withTestSigningKey $ \key->do
+      archive<-fixture connection (ArchiveLegacy settings $ takeDirectory key)
+      void $ evalSetup settings (MigratePaymentRoots (S.fingerprint original) 0 (manifestPath archive))
     withReader (settings {PG.connectUser=role}) (S.fingerprint original) False $ \reader->do
       state<-evalRead reader ReadState
       check "rebuild cannot read migrated sequence" (ledgerSequence state==S.criticalSequence original && ledgerPaused state)
-      forM_ intents $ \row->if S.intentId row `elem` legacy
-        then expectStore "payment_funding_missing" (evalRead reader $ ReadPaymentWork $ S.intentId row)
-        else void $ evalRead reader (ReadPaymentWork $ S.intentId row)
+      forM_ intents $ \row->if Legacy.intentId row `elem` legacy
+        then expectStore "payment_funding_missing" (evalRead reader $ ReadPaymentWork $ Legacy.intentId row)
+        else void $ evalRead reader (ReadPaymentWork $ Legacy.intentId row)
       pending<-evalRead reader PendingAttempts
       let expected=sort [S.attemptId attempt | attempt<-attempts,
             S.attemptState attempt `elem` ["signed","broadcast_intent"],
-            any (\intent->S.intentId intent==S.attemptIntent attempt && S.intentResolved intent==0) intents]
+            any (\intent->Legacy.intentId intent==S.attemptIntent attempt && Legacy.intentResolved intent==0) intents]
       check "migration lost pending attempts" (pending==expected)
       forM_ pending $ \identifier->void $ evalRead reader (ReadAttempt identifier)
       void $ evalRead reader PaymentCandidates
@@ -335,143 +339,140 @@ paymentRootsMain=do
   role<-getEnv "ECX_REBUILD_CONTRACT_READER"
   user<-getEnv "USER"
   let settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
-      terms=PaymentTerms (PolicySnapshot 2 "finalized" "contract") (CostLimits (money 10) (money 10) (money 10))
-      policy=StorePolicy terms (OrderLimits (money 2) (money 1000) 100 100 100 (money 100000) (money 100000)) "contract" True
       check :: HasCallStack => Bool -> IO ()
       check ok=unless ok (fail $ "payment-root migration contract failed\n"<>prettyCallStack callStack)
       header="Bearer "<>T.replicate 64 "0"
   bracket (PG.connect settings) PG.close $ \fixtures->do
-    fixture fixtures Initialize
-    fixture fixtures SeedIntake
-    fixture fixtures PromotionFunds
-    fixture fixtures SeedCustodyHeads
-    withReader settings {PG.connectUser=role} "contract" True $ \reader->do
-      (reviewed,unexplained)<-withWriter settings policy (const $ pure ()) $ \writer->do
-        let customer name=do
-              fixture fixtures ReadyIntake
-              oid<-evalWrite writer (CreateOrder 110 header $ W.OrderRequest NativeToWrapped (money 10) "recipient" "native-refund" Nothing name)
-              claim<-evalWrite writer (ClaimNative 110 header oid)
-              void $ evalWrite writer (RecordNative header oid (allocationLabel claim) ("root-address:"<>name))
-              fixture fixtures (SeedReceipt name (Just oid) Native 10 2 True 110)
-              evalWrite writer (PromoteDeposit 110 name) >>= check
-              pure ("convert:"<>oid)
-            paused=evalWrite writer (Pause "payment-root contract") >> fixture fixtures RefreshCustody
-            queue identifier transaction=do
-              fixture fixtures ReadyIntake
-              void $ evalWrite writer (PreparePayment 110 identifier (money 10) "{}")
-              evalWrite writer (SaveDraft identifier 0 "{}")
-              fixture fixtures CoverBackup
-              fixture fixtures ReadyIntake
-              prepared<-evalRead reader (ReadSigningDecision 110 identifier 0)
-              void $ evalWrite writer (RecordAttempt prepared $ SignedAttempt transaction "unchanged signed bytes" "{}" Nothing)
-              fixture fixtures ReadyIntake
-              void $ evalWrite writer (MarkBroadcast 110 transaction)
-              fixture fixtures CoverBackup
-              fixture fixtures ReadyIntake
-              evalWrite writer (AuthorizeSend 110 transaction)
-        paid<-customer "root-paid"
-        queued<-queue paid "root-paid-transaction"
-        evalWrite writer (SettlePayment queued (W.PaymentCosts (money 1) (money 0)) "{\"offlineRootSettlement\":true}")
-        failed<-customer "root-failed" >>= flip queue "root-failed-transaction"
-        evalWrite writer (FailSolana failed (money 2) "offline root failure")
-        orderedRefundContract fixtures reader writer
-        nativeReplacementContract fixtures reader writer
-        earnedCancellationContract fixtures reader writer
-        exhausted<-customer "root-generation-limit"
-        forM_ [0..7::Int] $ \generation->do
-          fixture fixtures ReadyIntake
-          prepared<-evalWrite writer (PreparePayment 110 exhausted (money 10) "{}")
-          check (preparedGeneration prepared==generation)
-          paused
-          evalWrite writer (BeginCancellation prepared 110 "bounded migration history" "{}")
-          evalWrite writer (FinishCancellation prepared "bounded migration history" "{}")
-        void $ customer "root-refund"
-        paused
-        void $ evalWrite writer (AuthorizeRefund 110 "root-refund")
-        reviewed<-customer "root-source-review"
-        source<-evalRead reader (ReadSource "root-source-review")
-        evalWrite writer (RefreshPaymentSource source source {W.depositEligible=False})
-        unexplained<-customer "root-unexplained"
-        paused
-        void $ evalWrite writer (ReserveFees 110 (T.replicate 64 "b") Native (money 3) "owner-address" "ready root")
-        fixture fixtures RefreshCustody
-        void $ evalWrite writer (ReserveFees 110 (T.replicate 64 "c") Native (money 3) "owner-address" "active root")
-        fixture fixtures ReadyIntake
-        void $ evalWrite writer (PreparePayment 110 ("fee:"<>T.replicate 64 "c") (money 5) "{}")
-        expiryContract fixtures reader writer
-        paused
-        pure (reviewed,unexplained)
-      -- An unexplained legacy review must refuse and roll back added columns as
-      -- well as data. After restoring the fixture, the identical archive is usable.
-      withTestSigningKey $ \key->do
-        let directory=takeDirectory key
-            migrate file minimumSequence=evalSetup settings (MigratePaymentRoots "contract" minimumSequence file)
-        archive<-evalBackup reader (ExportLedger directory)
-        before<-fixture fixtures ArchiveRecords
-        history<-fixture fixtures RootRetainedRecords
-        ids<-fixture fixtures OldPaymentIds
-        oldPayments<-mapM (\identifier->do
-          view<-evalRead reader (ReadPayment identifier)
-          pure (identifier,T.toLower $ T.drop 7 $ T.pack $ show $ savedStatus view)) ids
-        oldCandidates<-evalRead reader PaymentCandidates
-        fixture fixtures (MigrationReview unexplained True)
-        expectStore "migration_execution_state_not_proven" (migrate (manifestPath archive) 0)
-        fixture fixtures (MigrationReview unexplained False)
-        fixture fixtures ArchiveRecords >>= check . (==before)
-        fixture fixtures RootRetainedRecords >>= check . (==history)
-        fixture fixtures MigratedIntents >>= check . all ((`elem` [0,1]).S.intentResolved)
-        expectStore "backup_identity_mismatch" (evalSetup settings $ MigratePaymentRoots "wrong" 0 (manifestPath archive))
-        expectStore "backup_snapshot_too_old" (migrate (manifestPath archive) (archiveSequence archive+1))
-        bracket (PG.connect settings) PG.close $ \holder->do
-          fixture holder ClaimWorkerLock >>= check
-          expectStore "worker_already_running" (migrate (manifestPath archive) 0)
-        beforeActivation<-fixture fixtures ArchiveRecords
-        -- Hold an orders read lock so activation blocks partway through staging.
-        -- Wait for the actual PostgreSQL lock wait, then interrupt the migrator.
-        bracket_ (PG.begin fixtures) (PG.rollback fixtures) $ do
-          void $ fixture fixtures OrderSnapshot
-          binary<-getExecutablePath
-          environment<-getEnvironment
-          let overrides=[("ECX_REBUILD_PAYMENT_ROOTS_ONLY","child"),("ECX_REBUILD_PAYMENT_ROOTS_ARCHIVE",manifestPath archive)]
-          Process.withCreateProcess (Process.proc binary [])
-            {Process.env=Just $ overrides<>filter ((`notElem` map fst overrides).fst) environment} $ \_ _ _ child->do
-              ready<-timeout 10000000 $ awaitCondition "migration staging lock" $ do
-                Process.getProcessExitCode child >>= \status->check (status==Nothing)
-                bracket (PG.connect settings) PG.close (\c->fixture c $ WaitingRootMigration $ T.pack database)
-              -- Kill before releasing the blocking lock, including on timeout;
-              -- no child can race onward into a successful activation.
-              pid<-Process.getPid child >>= maybe (fail "migration child missing") pure
-              signalProcess sigKILL pid
-              Process.waitForProcess child >>= check . (/=ExitSuccess)
-              check (ready==Just ())
-        fixture fixtures ArchiveRecords >>= check . (==beforeActivation)
-        fixture fixtures RootRetainedRecords >>= check . (==history)
-        -- Installing a real trigger failure exercises rollback after conversion
-        -- and final DDL, not just input validation before the transaction.
-        bracket_ (void $ PG.execute_ fixtures "CREATE FUNCTION ecx_contract_activation_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.schema_version=22 THEN RAISE EXCEPTION USING ERRCODE='53100', MESSAGE='contract activation failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER ecx_contract_activation_failure BEFORE UPDATE ON deployment FOR EACH ROW EXECUTE FUNCTION ecx_contract_activation_failure()")
-          (void $ PG.execute_ fixtures "DROP TRIGGER ecx_contract_activation_failure ON deployment; DROP FUNCTION ecx_contract_activation_failure()") $ do
-            failed<-try (migrate (manifestPath archive) 0) :: IO (Either PG.SqlError (Int64,Int))
-            case failed of
-              Left err | PG.sqlState err=="53100"->pure ()
-              Left err->throwIO err
-              Right _->fail "injected activation failure was bypassed"
-        fixture fixtures ArchiveRecords >>= check . (==beforeActivation)
-        fixture fixtures RootRetainedRecords >>= check . (==history)
-        (sequenceNo,count)<-migrate (manifestPath archive) 0
-        check (sequenceNo==archiveSequence archive && count==length oldPayments)
-        (after,attempts,postings)<-fixture fixtures ArchiveRecords
-        let (original,oldAttempts,oldPostings)=beforeActivation
-        check (after==[row {S.schemaVersion=22,S.paused=1,S.pauseReason="payment_root_migration_requires_reconciliation"}|row<-original]
-          && attempts==oldAttempts && postings==oldPostings)
-        fixture fixtures RootRetainedRecords >>= check . (==history)
-        states<-fixture fixtures RootPaymentStates
-        check (states==oldPayments && (reviewed,"review") `elem` states)
-        fixture fixtures RootCandidates >>= check . (==oldCandidates)
-        roots<-fixture fixtures PaymentRoots
-        check (length roots==count && all ((`elem` ["ready","active","settled","cancelled"]).S.rootPhase) roots)
-        fixture fixtures RootConstraintFailures >>= check
-        expectStore "ledger_profile_or_schema_mismatch" (evalRead reader ReadState)
-        putStrLn ("PASS: schema-22 closed Opaleye conversion; "<>show count<>" roots, "<>show(length attempts)<>" exact attempts and "<>show(length postings)<>" postings preserved; restrictions, final-DDL rollback and constraints verified")
+    fixture fixtures (SetPause True)
+    reviewed<-fixture fixtures (ReceiptPayment "root-source-review")
+    unexplained<-fixture fixtures (ReceiptPayment "root-unexplained")
+    -- A historical review flag must survive even when the payment is already
+    -- settled; projection is not permission to discard unexplained old review.
+    views<-fixture fixtures CustomerCompatibility
+    reviewedOrder<-case [key | (key,"Paid",Just _)<-views] of
+      key:_->pure key; _->fail "settled migration fixture missing"
+    fixture fixtures (ReviewLegacyOrder reviewedOrder)
+    -- An unexplained legacy review must refuse and roll back added columns as
+    -- well as data. After restoring the fixture, the identical archive is usable.
+    withTestSigningKey $ \key->do
+      let directory=takeDirectory key
+          migrate file minimumSequence=evalSetup settings (MigratePaymentRoots "contract" minimumSequence file)
+      archive<-fixture fixtures (ArchiveLegacy settings directory)
+      expectStore "ledger_profile_or_schema_mismatch" $
+        withReader settings {PG.connectUser=role} "contract" True (const $ pure ())
+      before<-fixture fixtures ArchiveRecords
+      history<-fixture fixtures RootRetainedRecords
+      ids<-fixture fixtures OldPaymentIds
+      oldPayments<-fixture fixtures LegacyPaymentStates
+      oldCandidates<-fixture fixtures LegacyCandidates
+      oldViews<-fixture fixtures CustomerCompatibility
+      hashes<-mapM (\identifier->(,) identifier <$> fixture fixtures (LegacyHash identifier)) ids
+      fixture fixtures (SetArchiveSequence $ archiveSequence archive+1)
+      expectStore "migration_snapshot_sequence_mismatch" (migrate (manifestPath archive) 0)
+      fixture fixtures (SetArchiveSequence $ archiveSequence archive)
+      bracket_ (fixture fixtures $ MigrationMalformedOrder True) (fixture fixtures $ MigrationMalformedOrder False) $
+        expectStore "migration_corrupt_saved_record" (migrate (manifestPath archive) 0)
+      let (_,savedAttempts,_)=before
+      settled<-case [S.attemptId row | row<-savedAttempts,S.attemptState row=="settled"] of
+        key:_->pure key; _->fail "settled migration fixture missing"
+      -- A copy lets an ambiguous winner invalidate custody without resetting any
+      -- monotonic revision in the retained baseline or suppressing its triggers.
+      bracket (Backup.restoreLedger settings archive) Backup.discardRestore $ \target->
+        bracket (PG.connect target) PG.close $ \connection->do
+          fixture connection (MigrationLostWinner settled)
+          corrupted<-fixture connection ArchiveRecords
+          expectStore "migration_settlement_or_phase_ambiguous" $
+            evalSetup target (MigratePaymentRoots "contract" 0 $ manifestPath archive)
+          fixture connection ArchiveRecords >>= check . (==corrupted)
+      fixture fixtures (MigrationReview unexplained True)
+      expectStore "migration_execution_state_not_proven" (migrate (manifestPath archive) 0)
+      fixture fixtures (MigrationReview unexplained False)
+      fixture fixtures ArchiveRecords >>= check . (==before)
+      fixture fixtures RootRetainedRecords >>= check . (==history)
+      fixture fixtures MigratedIntents >>= check . all ((`elem` [0,1]).Legacy.intentResolved)
+      expectStore "backup_identity_mismatch" (evalSetup settings $ MigratePaymentRoots "wrong" 0 (manifestPath archive))
+      expectStore "backup_snapshot_too_old" (migrate (manifestPath archive) (archiveSequence archive+1))
+      bracket (PG.connect settings) PG.close $ \holder->do
+        fixture holder ClaimWorkerLock >>= check
+        expectStore "worker_already_running" (migrate (manifestPath archive) 0)
+      beforeActivation<-fixture fixtures ArchiveRecords
+      -- Hold an orders read lock so activation blocks partway through staging.
+      -- Wait for the actual PostgreSQL lock wait, then interrupt the migrator.
+      bracket_ (PG.begin fixtures) (PG.rollback fixtures) $ do
+        void $ fixture fixtures LegacyOrderSnapshot
+        binary<-getExecutablePath
+        environment<-getEnvironment
+        let overrides=[("ECX_REBUILD_PAYMENT_ROOTS_ONLY","child"),("ECX_REBUILD_PAYMENT_ROOTS_ARCHIVE",manifestPath archive)]
+        Process.withCreateProcess (Process.proc binary [])
+          {Process.env=Just $ overrides<>filter ((`notElem` map fst overrides).fst) environment} $ \_ _ _ child->do
+            ready<-timeout 10000000 $ awaitCondition "migration staging lock" $ do
+              Process.getProcessExitCode child >>= \status->check (status==Nothing)
+              bracket (PG.connect settings) PG.close (\c->fixture c $ WaitingRootMigration $ T.pack database)
+            -- Kill before releasing the blocking lock, including on timeout;
+            -- no child can race onward into a successful activation.
+            pid<-Process.getPid child >>= maybe (fail "migration child missing") pure
+            signalProcess sigKILL pid
+            Process.waitForProcess child >>= check . (/=ExitSuccess)
+            check (ready==Just ())
+      fixture fixtures ArchiveRecords >>= check . (==beforeActivation)
+      fixture fixtures RootRetainedRecords >>= check . (==history)
+      -- Installing a real trigger failure exercises rollback after conversion
+      -- and final DDL, not just input validation before the transaction.
+      bracket_ (void $ PG.execute_ fixtures "CREATE FUNCTION ecx_contract_activation_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF NEW.schema_version=22 THEN RAISE EXCEPTION USING ERRCODE='53100', MESSAGE='contract activation failure'; END IF; RETURN NEW; END $$; CREATE TRIGGER ecx_contract_activation_failure BEFORE UPDATE ON deployment FOR EACH ROW EXECUTE FUNCTION ecx_contract_activation_failure()")
+        (void $ PG.execute_ fixtures "DROP TRIGGER ecx_contract_activation_failure ON deployment; DROP FUNCTION ecx_contract_activation_failure()") $ do
+          failed<-try (migrate (manifestPath archive) 0) :: IO (Either PG.SqlError (Int64,Int))
+          case failed of
+            Left err | PG.sqlState err=="53100"->pure ()
+            Left err->throwIO err
+            Right _->fail "injected activation failure was bypassed"
+      fixture fixtures ArchiveRecords >>= check . (==beforeActivation)
+      fixture fixtures RootRetainedRecords >>= check . (==history)
+      (sequenceNo,count)<-migrate (manifestPath archive) 0
+      check (sequenceNo==archiveSequence archive && count==length oldPayments)
+      (after,attempts,postings)<-fixture fixtures ArchiveRecords
+      let (original,oldAttempts,oldPostings)=beforeActivation
+      check (after==[row {S.schemaVersion=22,S.paused=1,S.pauseReason="payment_root_migration_requires_reconciliation"}|row<-original]
+        && attempts==oldAttempts && postings==oldPostings)
+      fixture fixtures RootRetainedRecords >>= check . (==history)
+      states<-fixture fixtures RootPaymentStates
+      check (states==oldPayments && (reviewed,"review") `elem` states)
+      fixture fixtures RootCandidates >>= check . (==oldCandidates)
+      roots<-fixture fixtures PaymentRoots
+      check (length roots==count && all ((`elem` ["ready","active","settled","cancelled"]).S.rootPhase) roots)
+      fixture fixtures RootConstraintFailures >>= check
+      let compareReads database=withReader database {PG.connectUser=role} "contract" True $ \reader->do
+            evalRead reader ReadState >>= check . ledgerPaused
+            evalRead reader PaymentCandidates >>= check . (==oldCandidates)
+            forM_ hashes $ \(identifier,hash)->evalRead reader (ReadSourceWorkHash identifier) >>= check . (==hash)
+            forM_ oldPayments $ \(identifier,status)->do
+              view<-evalRead reader (ReadPayment identifier)
+              check (T.toLower (T.drop 7 $ T.pack $ show $ savedStatus view)==status)
+            forM_ oldViews $ \(identifier,status,payout)->do
+              view<-evalRead reader (ReadOrder header identifier)
+              check ((W.status view,W.payoutTx view)==(status,payout))
+      compareReads settings
+      -- The ordinary restore operation upgrades only its new private database.
+      -- It keeps exact money/work and deliberately invalidates custody readiness.
+      converted<-fixture fixtures MigrationRecords
+      bracket (evalRestore settings $ RestoreLedger (manifestPath archive) "contract" sequenceNo)
+        (\(name,_)->Backup.discardRestore settings {PG.connectDatabase=T.unpack name}) $ \(name,n)->do
+          check (n==sequenceNo && name/=T.pack database)
+          let restored=settings {PG.connectDatabase=T.unpack name}
+          bracket (PG.connect restored) PG.close $ \connection->do
+            void $ PG.execute connection "GRANT CONNECT ON DATABASE ? TO ?" (Identifier name,Identifier $ T.pack role)
+            forM_ ["GRANT USAGE ON SCHEMA public TO ?","GRANT SELECT ON ALL TABLES IN SCHEMA public TO ?",
+              "GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO ?"] $ \sql->
+                void $ PG.execute connection sql (PG.Only $ Identifier $ T.pack role)
+            (deployment,savedAttempts,savedPostings)<-fixture connection ArchiveRecords
+            check (deployment==[row {S.pauseReason="restored_requires_reconciliation"}|row<-after]
+              && savedAttempts==attempts && savedPostings==postings)
+            fixture connection MigrationRecords >>= check . (==converted)
+            fixture connection PaymentRoots >>= check . (==roots)
+            (checked,at,problem)<-fixture connection ReadCustodyCheck
+            check (checked==Nothing && at==Nothing && problem==Just "restored_requires_reconciliation")
+            compareReads restored
+      fixture fixtures MigrationRecords >>= check . (==converted)
+      putStrLn ("PASS: schema-22 closed Opaleye conversion and legacy restore; "<>show count<>" roots, "<>show(length attempts)<>" exact attempts and "<>show(length postings)<>" postings preserved; customer views, work hashes, restrictions, rollback and constraints verified")
 
 -- Observation-only recovery of saved bytes on real public test networks. Never
 -- start a signer, prepare a new payment, resume intake or broadcast from a copy.
@@ -573,9 +574,9 @@ setupMain=do
       identity=Config.fingerprint config
       initialize=evalSetup settings (InitializeLedger identity)
       check ok=unless ok (fail "fresh initialization contract failed")
-      run=do
+      run arguments=do
         let overrides=[("PGHOST","/tmp/ecx-pg-seam"),("PGPORT","29436"),("PGDATABASE",database),("PGUSER",user),("PGPASSWORD","")]
-        (code,_,_)<-Process.readCreateProcessWithExitCode (Process.proc binary ["initialize-ledger",configPath])
+        (code,_,_)<-Process.readCreateProcessWithExitCode (Process.proc binary ("initialize-ledger":arguments))
           {Process.env=Just $ overrides<>filter (not . T.isPrefixOf "PG" . T.pack . fst) environment} ""
         check (code==ExitSuccess)
   if residue==Just "1" then bracket (PG.connect settings) PG.close $ \fixtures->do
@@ -585,14 +586,14 @@ setupMain=do
     check (null rows && null attempts && null postings)
    else do
     expectStore "invalid_deployment_identity" (evalSetup settings $ InitializeLedger "invalid")
-    run
+    run [configPath]
     withReader settings {PG.connectUser=role} identity True $ \reader->do
       before<-evalRead reader ReadState
       check (before==LedgerState 0 0 True "installation_requires_reconciliation")
       evalRead reader ReadBalances >>= check . M.null
       evalRead reader PendingAttempts >>= check . null
       expectStore "intake_paused" (evalRead reader $ CheckIntake 100)
-      run
+      run ["--fingerprint",T.unpack identity]
       evalRead reader ReadState >>= check . (==before)
       expectStore "ledger_profile_or_schema_mismatch" (evalSetup settings $ InitializeLedger (T.replicate 64 "a"))
       withWriter settings (Config.storePolicy config) (const $ pure ()) $ \writer->do
@@ -1310,7 +1311,10 @@ ledgerMain = do
         expectStore "custody_not_reconciled" (evalWrite writer $ PreparePayment 100 intent (money 10) "{}")
         evalRead reader (ReadPaymentWork intent) >>= check . (==(readyWork,Nothing,[]))
         fixture fixtures RefreshCustody
+        fixture fixtures (ReviewAdmission historical)
+        evalRead reader (ReadOrder auth historical) >>= check . (=="NeedsReview") . W.status
         prepared<-evalWrite writer (PreparePayment 100 intent (money 10) "{}")
+        evalRead reader (ReadOrder auth historical) >>= check . (=="Preparing") . W.status
         selected<-evalRead reader PaymentCandidates
         check (intent `elem` selected && length selected<=2)
         sequenceBefore<-evalRead reader ReadState
@@ -1374,8 +1378,11 @@ ledgerMain = do
         expectStore "source_not_eligible" (evalRead reader $ ReadSigningDecision 100 intent 0)
         expectStore "source_not_eligible" (evalWrite writer $ RecordAttempt decision signed)
         fixture fixtures (SourceEligibility "historical-fee" True)
+        fixture fixtures (ReviewAdmission historical)
+        evalRead reader (ReadOrder auth historical) >>= check . (=="NeedsReview") . W.status
         beforeSignature<-evalRead reader ReadBalances
         recorded<-evalWrite writer (RecordAttempt decision signed)
+        evalRead reader (ReadOrder auth historical) >>= check . (=="Paying") . W.status
         firstSequence<-evalRead reader ReadState
         repeated<-evalWrite writer (RecordAttempt decision signed)
         secondSequence<-evalRead reader ReadState
@@ -1657,7 +1664,7 @@ ledgerMain = do
             expectedWithAttempts=digest $ BL.toStrict $ encode
               [toJSON [("refund:"<>oid,oid,did,"refund"::T.Text,"Native"::T.Text,10::Int64,"refund"::T.Text)],toJSON [("Native"::T.Text,False,Nothing::Maybe T.Text)],
                toJSON [(0::Int64,"{}"::T.Text,Just("{}"::T.Text),Nothing::Maybe T.Text,False)],
-               toJSON attemptRows,toJSON ([]::[Value]),toJSON ([]::[Value])]
+               toJSON attemptRows,toJSON ([]::[Value]),toJSON [("Native"::T.Text,1::Int64,False)]]
         check (hashWithAttempts/=workHash && hashWithAttempts==expectedWithAttempts)
         fixture fixtures ReadyIntake
         commit (batch (Just "scan-3") "scan-4" [] [W.ChainEvent "saved-signed" "outgoing" "anchor" (object [])])
@@ -1836,18 +1843,22 @@ customerProjectionContract :: PG.Connection -> Reader -> IO ()
 customerProjectionContract fixtures reader = do
   fixture fixtures CoverBackup
   before<-fixture fixtures MigrationRecords
-  expected<-fixture fixtures CustomerCompatibility
-  forM_ expected $ \(identifier,status,payout)->do
-    actual<-evalRead reader (ReadOrder ("Bearer "<>T.replicate 64 "0") identifier)
-    unless ((W.status actual,W.payoutTx actual)==(status,payout)) $
-      fail ("customer projection differs: "<>show(identifier,(status,payout),(W.status actual,W.payoutTx actual)))
+  expected<-fixture fixtures CurrentCustomerOrders
+  forM_ expected $ \identifier->void $ evalRead reader (ReadOrder ("Bearer "<>T.replicate 64 "0") identifier)
   after<-fixture fixtures MigrationRecords
   unless (length expected>=10 && before==after) (fail "customer projection must be read-only and cover retained histories")
-  putStrLn ("PASS: "<>show(length expected)<>" customer status/payout projections agree with schema-21 histories; financial records unchanged")
+  putStrLn ("PASS: "<>show(length expected)<>" customer projections read successfully without changing financial records")
 
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  ArchiveLegacy :: PG.ConnectInfo -> FilePath -> Fixture LedgerArchive
+  ReceiptPayment :: T.Text -> Fixture T.Text
+  LegacyPaymentStates :: Fixture [(T.Text,T.Text)]
+  LegacyCandidates :: Fixture [T.Text]
+  LegacyHash :: T.Text -> Fixture T.Text
+  LegacyOrderSnapshot :: Fixture [T.Text]
+  LegacyMigrationRecords :: Fixture [String]
   RootRetainedRecords :: Fixture [String]
   PaymentHistoryRecords :: Fixture [String]
   ClaimWorkerLock :: Fixture Bool
@@ -1857,23 +1868,26 @@ data Fixture a where
   RootCandidates :: Fixture [T.Text]
   WaitingRootMigration :: T.Text -> Fixture Bool
   MigrationReview :: T.Text -> Bool -> Fixture ()
+  MigrationMalformedOrder :: Bool -> Fixture ()
+  MigrationLostWinner :: T.Text -> Fixture ()
+  ReviewLegacyOrder :: T.Text -> Fixture ()
+  ReviewAdmission :: T.Text -> Fixture ()
   RootConstraintFailures :: Fixture Bool
+  CurrentCustomerOrders :: Fixture [T.Text]
   CustomerCompatibility :: Fixture [(T.Text,T.Text,Maybe T.Text)]
-  RawCustomerView :: T.Text -> Fixture (T.Text,Maybe T.Text)
-  PrimaryLink :: T.Text -> T.Text -> Fixture ()
-  HistoricalRefundView :: T.Text -> T.Text -> Fixture ()
   LiveScanHealth :: Fixture [(T.Text,Maybe Int64,Maybe T.Text)]
   NativeRecoveryEvidence :: Fixture [(T.Text,T.Text,T.Text,T.Text,Int64)]
   SetupResidue :: Fixture ()
   SetPause :: Bool -> Fixture ()
   RestoreDatabases :: Fixture [T.Text]
   MigrationRecords :: Fixture [String]
-  MigratedIntents :: Fixture [S.Intent]
+  MigratedIntents :: Fixture [Legacy.Intent]
   MigrationLegacyPayments :: Fixture [(T.Text,Bool)]
   ExportArchiveSnapshot :: Fixture T.Text
   SetArchiveSequence :: Int64 -> Fixture ()
   ArchiveRecords :: Fixture ([S.Deployment],[S.Attempt],[(Int64,T.Text,T.Text,T.Text,Int64)])
   SourceRecipient :: T.Text -> T.Text -> Fixture ()
+  SourceAnchor :: T.Text -> T.Text -> Fixture ()
   TLSFunds :: Fixture ()
   FreshAt :: Int64 -> Fixture ()
   ChangeTreasuryAnchor :: T.Text -> T.Text -> Fixture ()
@@ -1884,7 +1898,7 @@ data Fixture a where
   LockRestoreAudits :: Fixture [T.Text]
   OrderWorkflowFunds :: Fixture ()
   CustodyHeadReview :: Int64 -> Fixture ()
-  CustodyFamilyResolved :: T.Text -> Bool -> Fixture ()
+  ReactivatePayment :: T.Text -> Fixture ()
   SeedCustodyHeads :: Fixture ()
   ReadCustodyCheck :: Fixture (Maybe Int64,Maybe Int64,Maybe T.Text)
   ImmutableAttempt :: T.Text -> Fixture Bool
@@ -1924,6 +1938,110 @@ data Fixture a where
   ProtectHolds :: T.Text -> Fixture ()
   CheckPhases :: T.Text -> T.Text -> Fixture Bool
 fixture :: PG.Connection -> Fixture a -> IO a
+fixture c (LegacyHash intent) = do
+  let includeReplacements=True
+  obligations <- O.runSelect c $ do
+    r <- O.selectTable S.obligations
+    O.where_ (S.obligationId r O..== O.sqlStrictText intent)
+    pure (S.obligationId r,S.obligationOrder r,S.obligationDeposit r,S.obligationKind r,S.obligationAsset r,S.obligationAmount r,S.obligationRecipient r)
+    :: IO [(T.Text,T.Text,T.Text,T.Text,T.Text,Int64,T.Text)]
+  work <- O.runSelect c $ do
+    row <- O.selectTable Legacy.intents
+    let key=Legacy.intentId row; chain=Legacy.intentChain row; resolved=Legacy.intentResolved row; common=Legacy.intentCommon row
+    O.where_ (key O..== O.sqlStrictText intent)
+    pure (chain,resolved O..== O.sqlInt8 1,common)
+    :: IO [(T.Text,Bool,Maybe T.Text)]
+  preparations <- O.runSelect c $ O.orderBy (O.asc (\(n,_,_,_,_)->n)) $ do
+    (key,n,policy,draft,retired,cancelled) <- S.workPreparations
+    O.where_ (key O..== O.sqlStrictText intent)
+    pure (n,policy,draft,retired,cancelled O..== O.sqlInt8 1)
+    :: IO [(Int64,T.Text,Maybe T.Text,Maybe T.Text,Bool)]
+  attempts <- O.runSelect c $ O.orderBy (O.asc (\(_,_,n,_,_)->n) <> O.asc (\(tx,_,_,_,_)->tx)) $ do
+    (tx,key,state,n,sequenceNo,observation) <- S.workAttempts
+    O.where_ (key O..== O.sqlStrictText intent)
+    pure (tx,state,n,sequenceNo,observation)
+    :: IO [(T.Text,T.Text,Int64,Maybe Int64,Maybe T.Text)]
+  cancellations <- O.runSelect c $ O.orderBy (O.asc (\(n,_,_,_)->n)) $ do
+    (key,n,reason,cleanup,completed) <- S.workCancellations
+    O.where_ (key O..== O.sqlStrictText intent)
+    pure (n,reason,cleanup,completed O..== O.sqlInt8 1)
+    :: IO [(Int64,T.Text,T.Text,Bool)]
+  fees <- O.runSelect c $ do
+    (key,asset,n,released) <- S.workFees
+    O.where_ (key O..== O.sqlStrictText intent)
+    pure (asset,n,released O..== O.sqlInt8 1)
+    :: IO [(T.Text,Int64,Bool)]
+  drafts <- O.runSelect c $ O.orderBy (O.asc (\(n,_,_,_,_,_)->n)) $ do
+    draft@(_,parent,_,_,_,_) <- S.replacementDrafts
+    (tx,key,_,_,_,_) <- S.workAttempts
+    O.where_ (parent O..== tx O..&& key O..== O.sqlStrictText intent)
+    pure draft
+    :: IO [(Int64,T.Text,Int64,T.Text,T.Text,T.Text)]
+  cancelled <- O.runSelect c $ O.orderBy (O.asc (\(_,_,n)->n)) $ do
+    decision@(draft,_,_) <- S.replacementCancellations
+    (n,parent,_,_,_,_) <- S.replacementDrafts
+    (tx,key,_,_,_,_) <- S.workAttempts
+    O.where_ (draft O..== n O..&& parent O..== tx O..&& key O..== O.sqlStrictText intent)
+    pure decision
+    :: IO [(Int64,T.Text,Int64)]
+  let hashJson=digest . BL.toStrict . encode
+      base=hashJson (obligations,work,preparations,attempts,cancellations,fees)
+  pure (if not includeReplacements || null drafts && null cancelled then base else digest $ BL.toStrict $ encode (base,drafts,cancelled))
+
+fixture c (ArchiveLegacy settings directory) = Tx.withTransactionMode (Tx.TransactionMode Tx.RepeatableRead Tx.ReadOnly) c $ do
+  (rows,_,_)<-fixture c ArchiveRecords
+  row<-case rows of [r] | S.schemaVersion r==21 && S.paused r==1->pure r; _->fail "paused populated schema21 fixture required"
+  snapshot<-fixture c ExportArchiveSnapshot
+  Backup.archiveLedger settings directory (S.fingerprint row) 21 (S.criticalSequence row) snapshot
+fixture c LegacyOrderSnapshot = O.runSelect c (fmap Legacy.orderId $ O.selectTable Legacy.orders)
+fixture c (ReviewLegacyOrder key) = void $ O.runUpdate c O.Update {O.uTable=Legacy.orders,
+  O.uUpdateWith= \row->row {Legacy.status=O.sqlStrictText "NeedsReview"},
+  O.uWhere= \row->Legacy.orderId row O..== O.sqlStrictText key,O.uReturning=O.rCount}
+fixture c (ReviewAdmission key) = void $ O.runUpdate c O.Update {O.uTable=S.orders,
+  O.uUpdateWith= \row->row {S.admissionState=O.sqlStrictText "NeedsReview"},
+  O.uWhere= \row->S.orderId row O..== O.sqlStrictText key,O.uReturning=O.rCount}
+fixture c (ReceiptPayment receipt) = do
+  ids<-O.runSelect c $ do
+    (key,source)<-S.obligationReceipts
+    O.where_ (source O..== O.sqlStrictText receipt)
+    pure key
+  case ids of [key]->pure key; _->fail "baseline receipt payment missing"
+fixture c LegacyPaymentStates = do
+  customer<-O.runSelect c (fmap (\ob->(Legacy.obligationId ob,Legacy.obligationStatus ob)) $ O.selectTable Legacy.obligations)
+  fees<-O.runSelect c (O.selectTable S.withdrawals) :: IO [S.Withdrawal]
+  earned<-mapM (\withdrawal->do
+    let key="fee:"<>S.withdrawalId withdrawal; text=O.sqlStrictText
+    rows<-O.runSelect c $ do
+      i<-O.selectTable Legacy.intents
+      O.where_ (Legacy.intentId i O..== text key)
+      pure (Legacy.intentResolved i)
+      :: IO [Int64]
+    cancelled<-O.runSelect c $ do
+      (id,_,_)<-O.selectTable S.cancellations
+      O.where_ (id O..== text(S.withdrawalId withdrawal))
+      pure id
+      :: IO [T.Text]
+    winners<-O.runSelect c $ do
+      a<-O.selectTable S.attempts
+      O.where_ (S.attemptIntent a O..== text key O..&& S.attemptState a O..== text "settled")
+      pure (S.attemptId a)
+      :: IO [T.Text]
+    retry<-O.runSelect c (Projection.successorReady $ text key) :: IO [Bool]
+    pure (key,if not(null cancelled) then "cancelled" else if rows==[0] then "paying" else if length winners==1 then "paid" else if rows==[] || retry==[True] then "ready" else "review")) fees
+  pure (sort $ customer<>earned)
+fixture c LegacyCandidates = do
+  states<-fixture c LegacyPaymentStates
+  active<-O.runSelect c $ do
+    i<-O.selectTable Legacy.intents
+    O.where_ (Legacy.intentResolved i O..== O.sqlInt8 0)
+    pure (Legacy.intentId i,Legacy.intentChain i)
+    :: IO [(T.Text,T.Text)]
+  currencies<-O.runSelect c $ O.unionAll
+    (fmap (\o->(Legacy.obligationId o,Legacy.obligationAsset o)) $ O.selectTable Legacy.obligations)
+    (fmap (\w->(O.sqlStrictText "fee:" O..++ S.withdrawalId w,S.asset w)) $ O.selectTable S.withdrawals)
+    :: IO [(T.Text,T.Text)]
+  let ready=[(key,if asset=="Native" then "Native" else "Solana") | (key,"ready")<-states,Just asset<-[lookup key currencies]]
+  pure [key | chain<-["Native","Solana"],key<-take 1 [id | (id,currency)<-active<>ready,currency==chain]]
 fixture c ClaimWorkerLock = claimWorker c
 fixture c OldPaymentIds = sort <$> ((<>)
   <$> O.runSelect c (fmap S.obligationId $ O.selectTable S.obligations)
@@ -1947,9 +2065,18 @@ fixture c (WaitingRootMigration database) = do
     pure name
     :: IO [T.Text]
   pure (not $ null rows)
-fixture c (MigrationReview identifier blocked) = void $ O.runUpdate c O.Update {O.uTable=S.obligations,
-  O.uUpdateWith= \row->row {S.obligationStatus=O.sqlStrictText $ if blocked then "review" else "ready"},
-  O.uWhere= \row->S.obligationId row O..== O.sqlStrictText identifier,O.uReturning=O.rCount}
+fixture c (MigrationReview identifier blocked) = void $ O.runUpdate c O.Update {O.uTable=Legacy.obligations,
+  O.uUpdateWith= \row->row {Legacy.obligationStatus=O.sqlStrictText $ if blocked then "review" else "ready"},
+  O.uWhere= \row->Legacy.obligationId row O..== O.sqlStrictText identifier,O.uReturning=O.rCount}
+fixture c (MigrationMalformedOrder present) =
+  let text=O.sqlStrictText; key=text "migration-malformed-order" in
+  if present then void $ O.runInsert c O.Insert {O.iTable=Legacy.orders,
+    O.iRows=[Legacy.Order key key key key (text "{}") (text "{}") (text "{}") (text "AwaitingDeposit")
+      (O.sqlInt8 200) (O.sqlInt8 300) O.null O.null O.null (O.sqlInt8 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  else void $ O.runDelete c O.Delete {O.dTable=Legacy.orders,O.dWhere= \row->Legacy.orderId row O..== key,O.dReturning=O.rCount}
+fixture c (MigrationLostWinner key) = void $ O.runUpdate c O.Update {O.uTable=S.attempts,
+  O.uUpdateWith= \row->row {S.attemptState=O.sqlStrictText "review"},
+  O.uWhere= \row->S.attemptId row O..== O.sqlStrictText key,O.uReturning=O.rCount}
 fixture c RootConstraintFailures = do
   roots<-fixture c PaymentRoots
   let text=O.sqlStrictText; num=O.sqlInt8
@@ -1993,23 +2120,27 @@ fixture c RootConstraintFailures = do
     ]
   after<-fixture c PaymentRoots
   pure (and checks && roots==after)
-fixture c (RawCustomerView identifier) = do
-  rows<-O.runSelect c $ do
-    o<-O.selectTable S.orders
-    O.where_ (S.orderId o O..== O.sqlStrictText identifier)
-    pure (S.status o,S.payoutTx o)
-  case rows of [one]->pure one; _->fail "missing customer compatibility row"
 -- Test-only schema-21 display oracle. Retain the old recovery overlays and
 -- compatibility columns while production derives progress/winner from payments.
-fixture c CustomerCompatibility = do
+fixture c CurrentCustomerOrders = do
   cap<-either (fail . T.unpack) pure (capabilityHash $ T.replicate 64 "0")
-  orders<-O.runSelect c $ do
+  O.runSelect c $ do
     o<-O.selectTable S.orders
     O.where_ (S.capabilityHash o O..== O.sqlStrictText cap
       O..&& O.not (O.in_ (map O.sqlStrictText ["mismatch","corrupt"]) (S.orderId o)))
-    pure (S.orderId o,S.status o,S.payoutTx o)
+    pure (S.orderId o)
+fixture c CustomerCompatibility = do
+  cap<-either (fail . T.unpack) pure (capabilityHash $ T.replicate 64 "0")
+  orders<-O.runSelect c $ do
+    o<-O.selectTable Legacy.orders
+    O.where_ (Legacy.capabilityHash o O..== O.sqlStrictText cap
+      O..&& O.not (O.in_ (map O.sqlStrictText ["mismatch","corrupt"]) (Legacy.orderId o)))
+    pure (Legacy.orderId o,Legacy.status o,Legacy.payoutTx o)
     :: IO [(T.Text,T.Text,Maybe T.Text)]
-  obligations<-O.runSelect c S.orderObligations :: IO [(T.Text,T.Text,T.Text,T.Text)]
+  let orderObligations=do
+        ob<-O.selectTable Legacy.obligations
+        pure (Legacy.obligationId ob,Legacy.obligationOrder ob,Legacy.obligationDeposit ob,Legacy.obligationStatus ob)
+  obligations<-O.runSelect c orderObligations :: IO [(T.Text,T.Text,T.Text,T.Text)]
   sources<-O.runSelect c $ do
     (source,state)<-S.sourceRecovery
     (deposit,order)<-S.orderDeposits
@@ -2021,7 +2152,7 @@ fixture c CustomerCompatibility = do
     (tx,state)<-S.nativeRecovery
     (attempt,intent)<-S.attemptIntents
     (intentId,obligation)<-S.intentObligations
-    (obligationId,order,_,_)<-S.orderObligations
+    (obligationId,order,_,_)<-orderObligations
     O.where_ (tx O..== attempt O..&& intent O..== intentId O..&& O.matchNullable (O.sqlBool False) (O..== obligationId) obligation
       O..&& state O../= O.sqlStrictText "reconfirmed")
     pure order
@@ -2036,13 +2167,10 @@ fixture c CustomerCompatibility = do
 fixture c (SetPause paused) = void $ O.runUpdate c O.Update {O.uTable=S.deployment,
   O.uUpdateWith= \row->row {S.paused=O.sqlInt8 (if paused then 1 else 0)},
   O.uWhere= \row->S.singleton row O..== O.sqlInt8 1,O.uReturning=O.rCount}
--- Isolate pending families inside the disposable custody snapshot. The schema
--- must still reject exposing two native families at the same time.
-fixture c (CustodyFamilyResolved identifier resolved) = do
-  n<-O.runUpdate c O.Update {O.uTable=S.intents,
-    O.uUpdateWith= \row->row {S.intentResolved=O.sqlInt8 (if resolved then 1 else 0)},
-    O.uWhere= \row->S.intentId row O..== O.sqlStrictText identifier,O.uReturning=O.rCount}
-  unless (n==1) (fail "custody family fixture missing")
+-- A settled root cannot be reopened, even by a writer with database credentials.
+fixture c (ReactivatePayment identifier) = void $ O.runUpdate c O.Update {O.uTable=S.paymentRoots,
+  O.uUpdateWith= \row->row {S.rootPhase=O.sqlStrictText "active",S.rootGeneration=O.toNullable $ O.sqlInt8 0,S.rootWinner=O.null,S.rootSettlementEvent=O.null},
+  O.uWhere= \row->S.rootId row O..== O.sqlStrictText identifier,O.uReturning=O.rCount}
 fixture c RestoreDatabases = O.runSelect c $ O.orderBy (O.asc id) $ do
   name<-O.selectTable $ O.tableWithSchema "pg_catalog" "pg_database" (O.requiredTableField "datname")
   O.where_ (O.like name $ O.sqlStrictText "ecx_restore_%")
@@ -2054,29 +2182,41 @@ fixture c NativeRecoveryEvidence = O.runSelect c S.nativeRecoveryDetails
 fixture c SetupResidue = void $ O.runInsert c O.Insert {O.iTable=S.events,
   O.iRows=[(O.sqlStrictText "orphaned-ledger-event",O.sqlStrictText "initialization must refuse surviving history")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
 fixture c MigrationLegacyPayments = do
-  obligations<-O.runSelect c (O.selectTable S.obligations) :: IO [S.Obligation]
+  obligations<-O.runSelect c (O.selectTable Legacy.obligations) :: IO [Legacy.Obligation]
   costs<-O.runSelect c (O.selectTable S.orderCosts) :: IO [(T.Text,Int64,Int64,Int64)]
-  orders<-O.runSelect c (O.selectTable S.orders) :: IO [S.Order]
-  intents<-O.runSelect c (O.selectTable S.intents) :: IO [S.Intent]
+  orders<-O.runSelect c (O.selectTable Legacy.orders) :: IO [Legacy.Order]
+  intents<-O.runSelect c (O.selectTable Legacy.intents) :: IO [Legacy.Intent]
   attempts<-O.runSelect c (O.selectTable S.attempts) :: IO [S.Attempt]
   let archived row =
-        let matching=[i | i<-intents,S.intentObligation i==Just(S.obligationId row)]
-            winners=[a | a<-attempts,S.attemptIntent a `elem` map S.intentId matching,S.attemptState a=="settled"]
-        in S.obligationStatus row=="paid" && not(null matching) && all ((==1).S.intentResolved) matching
+        let matching=[i | i<-intents,Legacy.intentObligation i==Just(Legacy.obligationId row)]
+            winners=[a | a<-attempts,S.attemptIntent a `elem` map Legacy.intentId matching,S.attemptState a=="settled"]
+        in Legacy.obligationStatus row=="paid" && not(null matching) && all ((==1).Legacy.intentResolved) matching
           && length winners==1 && all ((/=Nothing).S.attemptObservation) winners
-          && any (\o->S.orderId o==S.obligationOrder row && S.status o `elem` ["Paid","Refunded"]) orders
+          && any (\o->Legacy.orderId o==Legacy.obligationOrder row && Legacy.status o `elem` ["Paid","Refunded"]) orders
   -- Missing historical terms never become executable PaymentTerms. Require a
   -- resolved intent and unique recorded winner; unfinished/review work must fail.
-  pure [(S.obligationId row,archived row) | row<-obligations,
-    S.obligationOrder row `notElem` [key | (key,_,_,_)<-costs]]
-fixture c MigratedIntents = O.runSelect c (O.selectTable S.intents)
+  pure [(Legacy.obligationId row,archived row) | row<-obligations,
+    Legacy.obligationOrder row `notElem` [key | (key,_,_,_)<-costs]]
+fixture c MigratedIntents = O.runSelect c (O.selectTable Legacy.intents)
 fixture c MigrationRecords = do
   original<-sequence
     [ rows (O.runSelect c (O.selectTable S.orders) :: IO [S.Order])
     , rows (O.runSelect c (O.selectTable S.deposits) :: IO [S.Deposit])
     , rows (O.runSelect c (O.selectTable S.obligations) :: IO [S.Obligation])
     , rows (O.runSelect c S.intentObligations :: IO [(T.Text,Maybe T.Text)])
-    , rows (O.runSelect c S.workIntents :: IO [(T.Text,T.Text,Int64,Maybe T.Text)])]
+    , rows (O.runSelect c Projection.workIntents :: IO [(T.Text,T.Text,Int64,Maybe T.Text)])]
+  retained<-fixture c PaymentHistoryRecords
+  pure (original<>retained)
+ where
+  rows :: Show a => IO [a] -> IO String
+  rows action=show . sort . map show <$> action
+fixture c LegacyMigrationRecords = do
+  original<-sequence
+    [ rows (O.runSelect c (O.selectTable Legacy.orders) :: IO [Legacy.Order])
+    , rows (O.runSelect c (O.selectTable S.deposits) :: IO [S.Deposit])
+    , rows (O.runSelect c (O.selectTable Legacy.obligations) :: IO [Legacy.Obligation])
+    , rows (O.runSelect c S.intentObligations :: IO [(T.Text,Maybe T.Text)])
+    , rows (O.runSelect c (O.selectTable Legacy.intents) :: IO [Legacy.Intent])]
   retained<-fixture c PaymentHistoryRecords
   pure (original<>retained)
  where
@@ -2153,6 +2293,8 @@ fixture c ArchiveRecords = (,,)
   <$> O.runSelect c (O.selectTable S.deployment)
   <*> O.runSelect c (O.orderBy (O.asc S.attemptId) $ O.selectTable S.attempts)
   <*> O.runSelect c (O.orderBy (O.asc $ \(n,_,_,_,_)->n) $ O.selectTable S.postings)
+fixture c (SourceAnchor key anchor) = void $ O.runUpdate c O.Update {O.uTable=S.deposits,
+  O.uUpdateWith= \r->r {S.depositAnchor=O.sqlStrictText anchor},O.uWhere= \r->S.depositId r O..== O.sqlStrictText key,O.uReturning=O.rCount}
 fixture c (SourceRecipient key recipient) = void $ O.runUpdate c O.Update {O.uTable=S.obligations,
   O.uUpdateWith= \row->row {S.obligationRecipient=O.sqlStrictText recipient},
   O.uWhere= \row->S.obligationId row O..== O.sqlStrictText key,O.uReturning=O.rCount}
@@ -2189,7 +2331,11 @@ fixture c LockRestoreAudits = O.runSelect c $ do
   pure subject
 fixture c Initialize = fixture c (InitializeIdentity "contract")
 fixture c (InitializeIdentity identity) = PG.withTransaction c $ do
-  void $ O.runInsert c O.Insert {O.iTable=S.deployment,O.iRows=[S.Deployment (O.sqlInt8 1) (O.sqlInt8 21) (O.sqlStrictText identity) (O.sqlInt8 0) (O.sqlInt8 0) (O.sqlInt8 1) (O.sqlStrictText "test")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.deployment,O.iRows=[S.Deployment (O.sqlInt8 1) (O.sqlInt8 2200) (O.sqlStrictText identity) (O.sqlInt8 0) (O.sqlInt8 0) (O.sqlInt8 1) (O.sqlStrictText "test")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  forM_ ["009-stage.sql","009-activate.sql"] $ \name->do
+    path<-getDataFileName ("migrations/"<>name)
+    BS.readFile path >>= void . PG.execute_ c . Query
+  void $ O.runUpdate c O.Update {O.uTable=S.deployment,O.uUpdateWith= \r->r {S.schemaVersion=O.sqlInt8 22},O.uWhere= \r->S.singleton r O..== O.sqlInt8 1,O.uReturning=O.rCount}
   void $ O.runInsert c O.Insert {O.iTable=S.custody,O.iRows=[(O.sqlInt8 1,O.sqlInt8 0,O.null,O.null,O.null)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.events,O.iRows=[(O.sqlStrictText "fixture",O.sqlStrictText "contract balances")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.postings,O.iRows=[(Nothing,O.sqlStrictText "fixture",O.sqlStrictText "Native",O.sqlStrictText account,O.sqlInt8 delta)| (account,delta)<-[("external",-1000),("earned",1000)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
@@ -2212,14 +2358,23 @@ fixture c SeedOrders = PG.withTransaction c $ do
           (O.sqlStrictText $ if identifier=="corrupt" then "{}" else raw savedQuote) (O.sqlStrictText $ raw policy)
           (O.sqlStrictText "AwaitingDeposit") (O.sqlInt8 200) (O.sqlInt8 300)
           (O.toNullable $ O.sqlStrictText $ "instruction-"<>identifier) (O.toNullable $ O.sqlInt8 sequenceNumber)
-          O.null (O.sqlInt8 $ if identifier=="visible" then 1 else 0)
+          (O.sqlInt8 $ if identifier=="visible" then 1 else 0)
     void $ O.runInsert c O.Insert {O.iTable=S.orders,O.iRows=[row],O.iReturning=O.rCount,O.iOnConflict=Nothing}
 fixture c CoverBackup = void $ O.runUpdate c O.Update {O.uTable=S.deployment,
   O.uUpdateWith= \r->r {S.backupSequence=S.criticalSequence r},O.uWhere= \r->S.singleton r O..== O.sqlInt8 1,O.uReturning=O.rCount}
 fixture c SeedReview = PG.withTransaction c $ do
   let text=O.sqlStrictText; num=O.sqlInt8
   void $ O.runInsert c O.Insert {O.iTable=S.deposits,O.iRows=[S.Deposit (text "review-deposit") (O.toNullable $ text "visible") (text "Native") (num 100) (text "anchor") (num 100) (num 2) (num 1) (num 1) (text "observed")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-  void $ O.runInsert c O.Insert {O.iTable=S.obligations,O.iRows=[S.Obligation (text "review-obligation") (text "visible") (text "review-deposit") (text "conversion") (text "Wrapped") (num 93) (text "recipient") (text "review")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.obligations,O.iRows=[S.Obligation (text "review-obligation") (text "visible") (text "review-deposit") (text "conversion") (text "Wrapped") (num 93) (text "recipient")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.paymentRoots,
+    O.iRows=[S.PaymentRoot (text "review-obligation") (O.toNullable $ text "review-obligation") O.null (O.toNullable $ text "review-deposit")
+      (text "Solana") O.null (text "ready") O.null O.null O.null],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  -- Restored source eligibility does not approve the payment's retained review.
+  -- This replaces the old freely writable obligation status with its evidence.
+  void $ O.runInsert c O.Insert {O.iTable=S.sourceChecks,
+    O.iRows=[(Nothing,text "review-deposit",text state,num 0,text proof,num n) | (state,proof,n)<-
+      [("unavailable","{\"reason\":\"source_eligibility_lost\",\"reviewedObligations\":[{\"intent\":\"review-obligation\"}]}",1),
+       ("restored","{}",2)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
 
 fixture c SeedIntake = PG.withTransaction c $ do
   let text=O.sqlStrictText; num=O.sqlInt8
@@ -2259,13 +2414,6 @@ fixture c (CheckHolds identifier direction quantity) = do
       solanaKind=if direction==NativeToWrapped then "conversion" else "refund"
   pure (inventory==[(T.pack $ show $ destinationAsset direction,quantity,"quote")] &&
     sort costs==sort [(nativeKind,"Native",10,"quote"),(solanaKind,"Sol",20,"quote")])
-
-fixture c (PrimaryLink order transaction) = void $ O.runUpdate c O.Update
-  {O.uTable=S.orders,O.uUpdateWith= \r->r {S.payoutTx=O.toNullable $ O.sqlStrictText transaction},
-   O.uWhere= \r->S.orderId r O..== O.sqlStrictText order,O.uReturning=O.rCount}
-fixture c (HistoricalRefundView order transaction) = void $ O.runUpdate c O.Update
-  {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=O.sqlStrictText "Refunded",S.payoutTx=O.toNullable $ O.sqlStrictText transaction},
-   O.uWhere= \r->S.orderId r O..== O.sqlStrictText order,O.uReturning=O.rCount}
 
 fixture c LargeBalances = PG.withTransaction c $ do
   let text=O.sqlStrictText
@@ -2344,9 +2492,15 @@ fixture c (CheckPromotion oid did asset quantity status) = do
   orders<-O.runSelect c $ do
     row<-O.selectTable S.orders
     O.where_ (S.orderId row O..== O.sqlStrictText oid)
-    pure (S.status row)
+    pure (S.admissionState row)
     :: IO [T.Text]
-  pure (obligations==[S.Obligation ("convert:"<>oid) oid did "conversion" (T.pack $ show asset) quantity "recipient" "ready"] && deposits==[1] && orders==[status])
+  states<-O.runSelect c $ do
+    (key,_,_,state)<-Projection.orderObligations
+    O.where_ (key O..== O.sqlStrictText("convert:"<>oid))
+    pure state
+    :: IO [T.Text]
+  let display=if "review" `elem` states || "NeedsReview" `elem` orders then "NeedsReview" else "Ready"
+  pure (obligations==[S.Obligation ("convert:"<>oid) oid did "conversion" (T.pack $ show asset) quantity "recipient"] && deposits==[1] && states `elem` [["ready"],["review"]] && display==status)
 
 fixture c (OperatingPhase oid phase) = void $ O.runUpdate c O.Update {O.uTable=S.operatingReservations,
   O.uUpdateWith= \(key,kind,asset,n,_)->(key,kind,asset,n,O.sqlStrictText phase),
@@ -2360,7 +2514,7 @@ fixture c (HistoricalHolds oid) = PG.withTransaction c $ do
   void $ O.runInsert c O.Insert {O.iTable=S.orders,
     O.iRows=[S.Order (text oid) (text cap) (text oid) (text "fixture") (text $ raw request) (text $ raw saved)
       (text $ raw $ W.PolicySnapshot 2 "finalized" "contract") (text "AwaitingDeposit") (num 200) (num 300)
-      (O.toNullable $ text "historical-native-fixture") (O.toNullable $ num 0) O.null (num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      (O.toNullable $ text "historical-native-fixture") (O.toNullable $ num 0) (num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.reservations,O.iRows=[(text oid,text "Wrapped",num 93,text "quote")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.orderCosts,O.iRows=[(text oid,num 10,num 10,num 10)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=S.operatingReservations,
@@ -2405,9 +2559,9 @@ fixture c (ReadEventReview chain identifier) = do
   case rows of [row]->pure row; _->fail "missing chain event"
 fixture c (CheckSuspended oid did hash) = do
   obligations<-O.runSelect c $ do
-    row<-O.selectTable S.obligations
-    O.where_ (S.obligationOrder row O..== O.sqlStrictText oid)
-    pure (S.obligationStatus row)
+    (_,order,_,state)<-Projection.orderObligations
+    O.where_ (order O..== O.sqlStrictText oid)
+    pure state
     :: IO [T.Text]
   proofs<-O.runSelect c $ do
     (_,key,state,_,proof,_)<-O.selectTable S.sourceChecks
@@ -2419,7 +2573,6 @@ fixture c (CheckSuspended oid did hash) = do
   pure (obligations==["review"] && case proofs of [("unavailable",raw)]->eitherDecodeStrict' (TE.encodeUtf8 raw)==Right expected; _->False)
 fixture c (SeedScanAttempts oid) = PG.withTransaction c $ do
   let text=O.sqlStrictText; num=O.sqlInt8; intent="refund:"<>oid
-      intents=O.table "intents" $ p5 (O.requiredTableField "id",O.requiredTableField "obligation_id",O.requiredTableField "chain",O.requiredTableField "common_input",O.requiredTableField "resolved")
       preparations=O.table "preparations" $ p6 (O.requiredTableField "intent_id",O.requiredTableField "generation",O.requiredTableField "policy_json",O.requiredTableField "draft_json",O.requiredTableField "retired_txid",O.requiredTableField "cancelled")
       attempts=O.table "attempts" $ p9 (O.requiredTableField "txid",O.requiredTableField "intent_id",O.requiredTableField "signed_bytes",O.requiredTableField "policy_json",O.requiredTableField "fee_limit",O.requiredTableField "state",O.requiredTableField "critical_sequence",O.requiredTableField "observation_json",O.requiredTableField "preparation_generation")
   sources<-O.runSelect c $ do
@@ -2427,12 +2580,16 @@ fixture c (SeedScanAttempts oid) = PG.withTransaction c $ do
     O.where_ (S.obligationId row O..== text ("convert:"<>oid))
     pure (S.obligationDeposit row)
   source<-case sources of [did]->pure did; _->fail "missing scan source"
-  void $ O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \r->r {S.obligationStatus=text "cancelled"},
-    O.uWhere= \r->S.obligationId r O..== text ("convert:"<>oid),O.uReturning=O.rCount}
+  void $ O.runUpdate c O.Update {O.uTable=S.paymentRoots,O.uUpdateWith= \r->r {S.rootPhase=text "cancelled"},
+    O.uWhere= \r->S.rootId r O..== text ("convert:"<>oid),O.uReturning=O.rCount}
   void $ O.runInsert c O.Insert {O.iTable=S.obligations,
-    O.iRows=[S.Obligation (text intent) (text oid) (text source) (text "refund") (text "Native") (num 10) (text "refund") (text "review")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-  void $ O.runInsert c O.Insert {O.iTable=intents,O.iRows=[(text intent,text intent,text "Native",O.null,num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+    O.iRows=[S.Obligation (text intent) (text oid) (text source) (text "refund") (text "Native") (num 10) (text "refund")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.paymentRoots,O.iRows=[S.PaymentRoot (text intent) (O.toNullable $ text intent) O.null (O.toNullable $ text source)
+    (text "Native") O.null (text "ready") O.null O.null O.null],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runInsert c O.Insert {O.iTable=S.feeHolds,O.iRows=[(text intent,text "Native",num 1,num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   void $ O.runInsert c O.Insert {O.iTable=preparations,O.iRows=[(text intent,num 0,text "{}",O.toNullable $ text "{}",O.null,num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  void $ O.runUpdate c O.Update {O.uTable=S.paymentRoots,O.uUpdateWith= \r->r {S.rootPhase=text "active",S.rootGeneration=O.toNullable $ num 0},
+    O.uWhere= \r->S.rootId r O..== text intent,O.uReturning=O.rCount}
   void $ O.runInsert c O.Insert {O.iTable=attempts,
     O.iRows=[(text tx,text intent,text "fixture-bytes",text "{}",num 1,text state,sequenceNo,O.null,num 0) |
       (tx,state,sequenceNo)<-[("saved-signed","signed",O.null),("saved-intent","broadcast_intent",O.toNullable $ num 1)]],O.iReturning=O.rCount,O.iOnConflict=Nothing}
@@ -2466,11 +2623,11 @@ fixture c (PaymentAttemptHistory identifier) = do
 
 fixture c (CheckFundingBinding identifier withdrawal) = do
   rows<-O.runSelect c $ do
-    row<-O.selectTable S.intents
-    O.where_ (S.intentId row O..== O.sqlStrictText identifier)
-    pure (S.intentObligation row,S.intentWithdrawal row)
+    row<-O.selectTable S.paymentRoots
+    O.where_ (S.rootId row O..== O.sqlStrictText identifier)
+    pure (S.rootObligation row,S.rootWithdrawal row)
     :: IO [(Maybe T.Text,Maybe T.Text)]
-  changed<-try (O.runUpdate c O.Update {O.uTable=S.intents,O.uUpdateWith= \r->r {S.intentChain=O.sqlStrictText "Solana"},O.uWhere= \r->S.intentId r O..== O.sqlStrictText identifier,O.uReturning=O.rCount}) :: IO (Either PG.SqlError Int64)
+  changed<-try (O.runUpdate c O.Update {O.uTable=S.paymentRoots,O.uUpdateWith= \r->r {S.rootChain=O.sqlStrictText "Solana"},O.uWhere= \r->S.rootId r O..== O.sqlStrictText identifier,O.uReturning=O.rCount}) :: IO (Either PG.SqlError Int64)
   pure (rows==[(Nothing,Just withdrawal)] && case changed of Left err->PG.sqlState err=="23514"; _->False)
 
 fixture c (ImmutableAttempt identifier) = do
@@ -2666,6 +2823,12 @@ nativeCustodyFamilies fixtures reader writer settings config base solana=do
         pure identifier
       evidence s=fixture fixtures $ SeedTreasuryEvidence "Native" (txid s) "unconfirmed" "outgoing" 0
         (object ["confirmations" .= (0::Int),"walletNetUnits" .= ("-10"::T.Text),"feeUnits" .= NP.signedNativeFee s])
+      settle s=do
+        saved<-evalRead reader (ReadAttempt $ txid s)
+        evalWrite writer (SettlePayment saved (W.PaymentCosts (NP.signedNativeFee s) (money 0)) $
+          encodeText $ object ["blockhash" .= block,"requiredDepth" .= (2::Int)])
+        fixture fixtures $ SeedTreasuryEvidence "Native" (txid s) block "outgoing" 0
+          (object ["confirmations" .= (2::Int),"walletNetUnits" .= ("-10"::T.Text),"feeUnits" .= NP.signedNativeFee s])
       decoded s=let tx=NP.signedNativeTransaction s in object
         ["txid" .= txid s,"version" .= NP.nativeVersion tx,"locktime" .= NP.nativeLocktime tx
         ,"vin" .= [object ["txid" .= NP.outpointTxid p,"vout" .= NP.outpointVout p,"sequence" .= NP.nativeSequence i]
@@ -2750,8 +2913,8 @@ nativeCustodyFamilies fixtures reader writer settings config base solana=do
   assertReport [parent,child] True False Nothing 2100 0 shared 0 False
   assertReport [parent,child] True False Nothing 1999 0 shared 0 False
   expectStore "custody_native_pending_credit_unresolved" $ inspect $ call [parent,child] True False Nothing 2000 1
-  fixture fixtures (CustodyFamilyResolved first True)
-  second<-seed noChange
+  settle child
+  _<-seed noChange
   evidence noChange
   fixture fixtures (FreshAt 100)
   samples<-newIORef (0::Int)
@@ -2762,13 +2925,13 @@ nativeCustodyFamilies fixtures reader writer settings config base solana=do
   -- An exact-output spend has no change: raw balance is identical before and
   -- after mempool admission, yet the accounting evidence must be rejected.
   expectStore "custody_native_view_changed" (inspect transition)
-  fixture fixtures (CustodyFamilyResolved second True)
+  settle noChange
   _<-seed overlap
-  -- The intact schema rejects a second pending native family before the
-  -- reconciliation overlap guard can run; do not weaken it for branch coverage.
-  conflicting<-try (fixture fixtures $ CustodyFamilyResolved first False) :: IO (Either PG.SqlError ())
+  -- The intact schema refuses reopening the settled family; the active-chain
+  -- unique index is exercised separately by the root constraint contract.
+  conflicting<-try (fixture fixtures $ ReactivatePayment first) :: IO (Either PG.SqlError ())
   check (case conflicting of
-    Left problem->PG.sqlState problem=="23505" && "one_unresolved_chain_intent" `BS.isInfixOf` PG.sqlErrorMsg problem
+    Left problem->PG.sqlState problem=="23514" && "invalid_payment_phase_transition" `BS.isInfixOf` PG.sqlErrorMsg problem
     Right ()->False)
 
 orderWorkflowContract :: PG.Connection -> Reader -> Writer -> StorePolicy -> IO ()
@@ -3325,17 +3488,12 @@ paidRefundContract fixtures reader writer=do
   evalWrite writer (Pause "repair historical refund view")
   expectStore "custody_not_reconciled" (evalWrite writer $ RepairCompletedOrderView 110 paidOrder)
   fixture fixtures RefreshCustody
-  fixture fixtures (HistoricalRefundView paidOrder "unrelated-transaction")
-  unchanged
-  expectStore "completed_order_repair_not_proven" (evalWrite writer $ RepairCompletedOrderView 110 paidOrder)
-  fixture fixtures (HistoricalRefundView paidOrder $ signedId signed)
-  unchanged
   beforeRepair<-evalRead reader ReadState
   evalWrite writer (RepairCompletedOrderView 110 paidOrder)
   unchanged
   evalRead reader ReadBalances >>= check . (==afterRefund)
   afterRepair<-evalRead reader ReadState
-  check (ledgerPaused afterRepair && ledgerSequence afterRepair==ledgerSequence beforeRepair+1)
+  check (ledgerPaused afterRepair && ledgerSequence afterRepair==ledgerSequence beforeRepair)
   evalWrite writer (RepairCompletedOrderView 110 paidOrder)
   evalRead reader ReadState >>= check . (==afterRepair)
   expectStore "completed_order_repair_not_proven" (evalWrite writer $ RepairCompletedOrderView 110 "unknown-order")
@@ -4138,9 +4296,8 @@ restorationContract fixtures reader writer=do
   expectStore "pause_before_operator_action" (approve key restoration "source reviewed")
   evalWrite writer (Pause "source contract")
   fixture fixtures RefreshCustody
-  fixture fixtures (SourceRecipient key "changed")
-  expectStore "source_review_work_changed" (approve key restoration "source reviewed")
-  fixture fixtures (SourceRecipient key "recipient")
+  mutation<-try (fixture fixtures $ SourceRecipient key "changed") :: IO (Either PG.SqlError ())
+  check (case mutation of Left err->PG.sqlState err=="23514"; _->False)
   fixture fixtures RefreshCustody
   approve key restoration "source reviewed"
   recorded<-evalRead reader ReadState
@@ -4186,9 +4343,8 @@ restorationContract fixtures reader writer=do
   certify
   expectStore "source_recovery_scan_not_current" (approveCovered $ object ["transaction" .= tx,"output" .= (0::Int),"confirmations" .= (-1::Int),"observationHash" .= ("wrong"::T.Text)])
   expectStore "source_loss_custody_view_changed" (approveCovered $ object ["transaction" .= tx,"output" .= (0::Int),"confirmations" .= (-1::Int),"observationHash" .= observationHash,"nodeBlock" .= ("wrong"::T.Text),"nodeHeight" .= (100::Int)])
-  fixture fixtures (SourceRecipient key "changed")
-  expectStore "source_review_work_changed" (approveCovered proof)
-  fixture fixtures (SourceRecipient key "recipient")
+  mutation<-try (fixture fixtures $ SourceRecipient key "changed") :: IO (Either PG.SqlError ())
+  check (case mutation of Left err->PG.sqlState err=="23514"; _->False)
   certify
   coveredBalances<-evalRead reader ReadBalances
   approveCovered proof
@@ -4468,15 +4624,12 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   expectStore "native_settlement_changed" (record reconfirmed $ NativeWinnerChanged familyNow (signedId wire) (costs 1) $ proof parent c)
   candidate changed >>= check . not
   updatedFamily<-map fst <$> evalRead reader (ReadNativeFamily identifier)
-  -- The compatibility write must not replace an unrelated primary link. The
-  -- public projection independently follows the actual payment's current winner.
-  forM_ order $ \oid->fixture fixtures (PrimaryLink oid "unrelated-primary")
+  -- The primary link is derived from the payment winner; there is no mutable
+  -- compatibility column that can point at an unrelated transaction.
   scanned child d 2 2
   record changed (NativeWinnerChanged updatedFamily (signedId $ recordedSigned child) (costs 2) $ proof child d)
   restoredWinner<-evalRead reader (ReadAttempt $ signedId $ recordedSigned child)
-  forM_ order $ \oid->fixture fixtures (RawCustomerView oid) >>= check . (==Just "unrelated-primary") . snd
   link (signedId $ recordedSigned child)
-  forM_ order $ \oid->fixture fixtures (PrimaryLink oid $ signedId $ recordedSigned child)
   candidate restoredWinner >>= check . not
   evalRead reader ReadBalances >>= check . (==settledBalances)
   evalRead reader PendingAttempts >>= check . all (`notElem` [signedId wire,signedId(recordedSigned child)])
@@ -4585,11 +4738,11 @@ archiveContract settings fixtures reader = do
     -- both metadata and complete financial records must retain the old snapshot.
     let snapshotSettings=settings {PG.connectUser=role}
         originalSequence=ledgerSequence before
-        payment="convert:historical-promotion"
+        payment="historical-fee"
         changeSource n recipient=PG.withTransaction fixtures $ do
           fixture fixtures (SetArchiveSequence n)
-          fixture fixtures (SourceRecipient payment recipient)
-    recipient<-paymentRecipient . savedPayment <$> evalRead reader (ReadPayment payment)
+          fixture fixtures (SourceAnchor payment recipient)
+    recipient<-W.depositAnchor <$> evalRead reader (ReadSource payment)
     snapshotArchive<-bracket (PG.connect snapshotSettings) PG.close $ \connection->
       Tx.withTransactionMode (Tx.TransactionMode Tx.RepeatableRead Tx.ReadOnly) connection $ do
         original<-fixture connection ArchiveRecords
@@ -4615,6 +4768,8 @@ archiveContract settings fixtures reader = do
     expectStore "restored_sequence_mismatch" (evalRestore settings $ RestoreLedger tampered "contract" 0)
     change "schemaVersion" (toJSON (18::Int))
     expectStore "invalid_backup_manifest" (evalRestore settings $ RestoreLedger tampered "contract" 0)
+    change "schemaVersion" (toJSON (21::Int))
+    expectStore "restored_schema_or_sequence_mismatch" (evalRestore settings $ RestoreLedger tampered "contract" 0)
     change "sha256" (toJSON $ T.replicate 64 "0")
     expectStore "backup_archive_mismatch" (evalRestore settings $ RestoreLedger tampered "contract" 0)
     -- Corrupt bytes, not just a manifest field; retain the same file length.
@@ -4641,6 +4796,7 @@ archiveContract settings fixtures reader = do
     expectStore "unsafe_backup_file" (upload archive)
     setFileMode repository 0o600
     expectStore "backup_archive_mismatch" (upload archive {archiveSequence=archiveSequence archive+1})
+    expectStore "backup_archive_mismatch" (upload archive {archiveSchema=21})
     expectStore "backup_archive_mismatch" (upload archive {archiveHash=T.replicate 64 "0"})
     receipt<-upload archive
     check (receiptIdentity receipt==archiveIdentity archive && receiptSequence receipt==archiveSequence archive && receiptArchiveHash receipt==archiveHash archive)

@@ -78,9 +78,8 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
     restoreCommand path minimumText (\c->(if mode=="adopt-ledger" then AdoptLedger else RetireLedger) (C.fenceDirectory c) (C.fingerprint c))
   command ["initialize-ledger",path]=do
     c<-C.loadConfig path
-    database<-databaseSettings
-    evalSetup database (InitializeLedger $ C.fingerprint c)
-    LBS.putStrLn $ encode $ object ["fingerprint" .= C.fingerprint c]
+    initialize (C.fingerprint c)
+  command ["initialize-ledger","--fingerprint",identity]=initialize (T.pack identity)
   command ["operator",path]=do
     c<-C.loadConfig path
     bytes<-BS.hGet stdin 4097
@@ -97,7 +96,11 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
     database<-databaseSettings
     withProcessResources c database mode $ \reader process->
       bracket newRpcManager closeManager $ \manager->runProcess manager reader process
-  command _=die "Usage: ecx-bridge configure | start [DIRECTORY] | initialize-ledger CONFIG (fresh migrated database only) | upload-custody CONFIG BACKUP_CONFIG MANIFEST MINIMUM_SEQUENCE | recover-custody CONFIG BACKUP_CONFIG SNAPSHOT DIRECTORY MINIMUM_SEQUENCE | backup-custody CONFIG KEYFILE DIRECTORY (offline custody authority, PG* and PGREADUSER) | check-custody CONFIG MANIFEST MINIMUM_SEQUENCE | backup-native-wallet CONFIG DESTINATION | restore-native-wallet CONFIG MANIFEST (offline custody authority; never overwrites a wallet) | adopt-ledger CONFIG MINIMUM_SEQUENCE | retire-ledger CONFIG MINIMUM_SEQUENCE | recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE | restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE (offline database owner) | check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE [BACKUP_CONFIG STAGING] (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
+  command _=die "Usage: ecx-bridge configure | start [DIRECTORY] | initialize-ledger CONFIG (fresh database owner; installer may pass --fingerprint ID) | upload-custody CONFIG BACKUP_CONFIG MANIFEST MINIMUM_SEQUENCE | recover-custody CONFIG BACKUP_CONFIG SNAPSHOT DIRECTORY MINIMUM_SEQUENCE | backup-custody CONFIG KEYFILE DIRECTORY (offline custody authority, PG* and PGREADUSER) | check-custody CONFIG MANIFEST MINIMUM_SEQUENCE | backup-native-wallet CONFIG DESTINATION | restore-native-wallet CONFIG MANIFEST (offline custody authority; never overwrites a wallet) | adopt-ledger CONFIG MINIMUM_SEQUENCE | retire-ledger CONFIG MINIMUM_SEQUENCE | recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE | restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE (offline database owner) | check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE [BACKUP_CONFIG STAGING] (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
+  initialize identity=do
+    database<-databaseSettings
+    evalSetup database (InitializeLedger identity)
+    LBS.putStrLn $ encode $ object ["fingerprint" .= identity]
   restoreCommand path minimumText operation=do
     c<-C.loadConfig path
     minimumSequence<-maybe (reject "invalid_restore_policy") pure (readMaybe minimumText)

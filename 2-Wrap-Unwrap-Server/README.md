@@ -5,10 +5,15 @@ and Solana SPL inventory. Customers receive deposit instructions; the website
 requires no wallet connection. New quotes charge **1% in each direction**, with
 network costs paid separately by the operator. Saved terms remain immutable.
 
-This is the only server implementation in the repository. It has completed real
+This is the only server implementation in the repository. Earlier versions completed real
 L2L Signet/Solana Devnet conversions, refunds, earned-fee withdrawals and scoped
 recovery checks. It is not yet a public or valuable-fund release. See the precise
 [evidence and remaining gates](docs/RELEASE-REVIEW.md).
+
+The current financial-core refactor uses schema 22: payment roots own execution,
+while immutable funding and retained chain/recovery evidence remain separate.
+Local migration, restoration and process checks are recorded against this version;
+historical funded tests do not establish funded acceptance of the refactor.
 
 ## Build and run
 
