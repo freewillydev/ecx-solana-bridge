@@ -1285,3 +1285,165 @@ Public release is a separate decision: actual customer-wallet approval,
 physically independent recovery, real L2L exceptional histories, production
 arrangements, independent security/distribution review and operator-controlled
 release signing/activation remain required as recorded in RELEASE-REVIEW.
+
+## 7. Reassessing the 7,000-line goal after the completed refactor
+
+Planning review, 2026-10-06, against `3aa5d8a`; no implementation change or new
+acceptance claim. This is a feasibility gate for further simplification, not an
+extension of the completed 120-step checklist. The three external release gates
+remain open. Recounting tracked application/schema files reproduces **71 files /
+16,339 physical lines**, including comments and blanks and assigning the 216
+embedded Rust test lines to tests. Tests, tooling and licenses remain separately
+reported; deleting them cannot meet this application target.
+
+### What the source actually supports
+
+Reaching 7,000 requires removing **9,339 lines (57.2%)**. Even deleting the entire
+899-line Lifecycle extraction, 344-line converter and 240-line net schema growth
+would leave 14,856 lines, and would break required behavior. Reversing the latest
+refactor is neither sufficient nor the proposed approach.
+
+The following are **required allocations to test feasibility**, not estimates of
+achievable sizes. They make the missing evidence visible instead of promising a
+7k outcome from unspecified cleanup.
+
+| Responsibility | Current | Hypothetical 7k allocation | Required reduction |
+| --- | ---: | ---: | ---: |
+| Pure source, including Operation grammar | 1,508 | 650 | 858 |
+| Store, projections, conversion, archive and fence | 4,719 | 1,800 | 2,919 |
+| All retained schema DDL | 1,008 | 450 | 558 |
+| Chain, protocol and protected-file adapters | 2,843 | 1,500 | 1,343 |
+| Startup, API, workflow and browser | 3,477 | 1,350 | 2,127 |
+| Token administration | 1,141 | 450 | 691 |
+| Pool administration | 1,067 | 400 | 667 |
+| Rust SDK FFI, excluding embedded tests | 576 | 400 | 176 |
+| **Total** | **16,339** | **7,000** | **9,339** |
+
+Shared replacements must be counted once in their actual owning component; moving
+code between rows is not a saving. New codecs, helpers, migration paths and build
+machinery count too. In particular, token/pool budgets are very aggressive given
+their nonce, offline signing, metadata, position and liquidity functionality.
+There is currently no demonstrated implementation meeting these allocations.
+
+### Specific simplification candidates
+
+1. **Remove obsolete representations left behind by schema 22.** In Lifecycle,
+   `CustomerResolution.preservePaidOrder` and `resolutionStatus` are constructed
+   and tested but have no production consumers. Store's `resolvePayment` uses
+   only `resolutionOrder`. Replace this effect with the actual customer identity
+   needed for reservation release/admission, while retaining paid/refund display
+   tests against `projectCustomer`. Check the other decision result records for
+   similarly obsolete payloads; do not assume they are all redundant. Keep the
+   `repair-completed-order` compatibility command's validation behavior unless
+   its removal is separately approved.
+2. **Reduce representation changes inside one authority boundary.** Today a
+   payment travels through SQL rows, decoded saved terms, PaymentView,
+   operation-specific Facts, Decision and write assembly. Reuse a small typed
+   payment/preparation/attempt representation where fields have identical meaning.
+   Keep wire encoding at HTTP/RPC/file boundaries and persistence encoding at the
+   store boundary. Avoid repeated JSON encode/decode between ordinary internal
+   functions. Never reuse a previously checked snapshot as live authorization
+   after RPC, backup or lock acquisition.
+3. **Simplify the closed Store operations themselves.** Store.hs is 3,296 lines;
+   Lifecycle adds 899. Preparation, queue and settlement are the first vertical
+   slice. Each operation should visibly load bounded current facts under the
+   existing transaction, call its pure rule, and execute its explicit Opaleye
+   changes. Consolidate repeated payment/hold/source joins and exact cardinality
+   checks privately. Keep operation-specific decisions; do not add a universal
+   patch/event interpreter or move all validation into database triggers.
+4. **Share the token/pool saved-attempt mechanics.** `Token.Network` and
+   `Pool.Signing` repeat family locking, parent traversal, successor exclusion,
+   publication and submission/status handling despite sharing AdminStatus.
+   A shared implementation is worthwhile only for identical mechanics; retain
+   distinct token/pool intent validators, signer counts, costs and offline/nonce
+   rules. It must remain behind the existing closed administration operations,
+   never expose arbitrary-message signing or accept caller-provided validation
+   callbacks. Count any new sum type/dispatch glue against the saving.
+5. **Collapse repeated worker orchestration, not freshness checks.** Critical.hs
+   is 905 lines. Queue, sign and send each refresh source/readiness because those
+   are different authorization moments. A private named preparation step may
+   share that sequence, but each boundary still executes it. Preserve the single
+   critical dispatch, unique signer outputs and worker/signer separation. Do not
+   add another interpreter class or generic workflow framework.
+6. **Treat schema and deployment compatibility honestly.** Fresh installation
+   currently builds 001–008 and then closed 009 conversion/activation. A direct
+   current-schema bootstrap could simplify installation, but is not a source
+   reduction if the old scripts/converter must remain for existing archives.
+   Count both until equivalent migration and restore behavior genuinely replaces
+   them. Do not ship a smaller runtime by silently abandoning old funded ledgers.
+7. **Leave already small components alone initially.** Customer API.hs is 25
+   lines, Signer.hs 85 and File.hs 33. Rewriting these cannot materially close the
+   gap. H-stage sharing saved only 52 net lines; I-stage changes added two. More
+   file reshuffling, generic parsers and UI/installer churn are not a 7k strategy.
+
+### Candidate architecture and non-negotiable boundaries
+
+Keep the existing process and capability architecture. The candidate improvement
+is fewer internal representations and repeated implementations, not fewer
+authorization boundaries:
+
+    Servant handler / operator / worker
+      -> existing existential Request and Operation.command
+      -> safe or sole critical dispatch
+      -> specific closed operation
+      -> locked typed facts -> pure decision -> explicit Opaleye writes
+      -> separately authorized external effect, using saved exact work
+
+Use named records for facts repeatedly reconstructed across store operations;
+avoid a giant eager snapshot or a new N+1 query pattern. Raw rows remain private.
+Pure decisions do not become externally supplied executable plans. Immutable
+chain evidence, customer liabilities, operating holds, signed bytes, generations,
+backup coverage and fencing retain their separate meanings. Keep the same schema
+for the first experiments, so a failed simplification does not require funded
+migration or another full installation campaign.
+
+Independent signer validation is deliberately repeated across a trust boundary.
+Database constraints defend committed shape while pure functions express business
+rules. Neither is redundant merely because it resembles the other. Native and
+Solana recovery differ; a shared parser or executor must not erase those differences.
+Keep comments that explain financial invariants and readable formatting.
+
+### Execution sequence: establish savings before expanding scope
+
+1. **Freeze measurement and behavior.** Use the above commit and category counts;
+   preserve existing tests and funded evidence. Reuse caches, one build job and no
+   new services for pure changes. Record source sizes, queries and authority paths
+   for each replacement slice before editing it.
+2. **First experiment: preparation through settlement.** Include the matching
+   Lifecycle facts/decisions, Store readers/writes and production consumers, not
+   just the file that becomes shorter. Remove the unused settlement payloads,
+   simplify internal representations and consolidate identical private queries.
+   Retain existing pure properties and actual PostgreSQL replay, locking,
+   changed-subject, constraint and rollback checks. Count all replacement code.
+   Aim for a substantial net reduction (at least 30% of the measured slice), not
+   a sequence of cosmetic commits. This threshold is a feasibility signal, not
+   permission to delete checks. If it fails, report the measured ceiling and
+   revise the 7k hypothesis before expanding to recovery.
+3. **Second experiment: token/pool attempt lifecycle.** Measure both old families
+   plus shared AdminStatus/AdminKey against their replacements. Retain exact
+   message/signature validation, crash-safe publication, offline nonce signing,
+   replay, expiry and finalized-failure tests. If the shared abstraction is longer
+   or harder to follow, discard it; no framework is justified by hoped-for future
+   callers.
+4. **Recalculate the whole-product budget.** Use actual net savings from both
+   experiments, not their target allocations. For each remaining area, name the
+   code that will disappear and the complete replacement that permits it. Do not
+   extrapolate happy-path savings to recovery validators or historical schema.
+   Proceed toward 7k only if this accounting closes the 9,339-line gap credibly.
+   Otherwise publish the supported target instead of another completion percentage.
+5. **Apply only proven patterns.** Extend the successful Store pattern to refunds,
+   treasury and recovery; then simplify worker orchestration and internal codecs.
+   Keep chain-specific proofs and external formats. Replace old implementations
+   as each slice passes, without maintaining two production engines. Commit/push
+   passing slices with before/after counts and invariant evidence.
+6. **One final integrated campaign.** After runtime inputs stabilize, run the full
+   suites, both builds and affected real-chain/restore acceptance once. Repeat
+   only for relevant changes or failures. Installation and independent release
+   work remain separate gates, not the main simplification activity.
+
+**Present conclusion:** concrete smaller replacements are identifiable, but a
+functionally equivalent, more auditable 7,000-line whole product is not yet proven.
+The best next implementation is the bounded financial-slice experiment, not a
+second wholesale rewrite or a promise that adding another abstraction will halve
+the project. Reject any numerical success obtained by scope loss, hidden code,
+weaker trust boundaries or deleting the tests needed to establish equivalence.
