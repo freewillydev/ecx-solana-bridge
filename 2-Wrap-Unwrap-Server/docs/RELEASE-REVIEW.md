@@ -9,7 +9,7 @@ tests does not certify later source or packages.
 
 ## Financial-core refactor execution
 
-Current checkpoint: **109/120 (A–I, J105–109)**. The chronological records below distinguish
+Current checkpoint: **110/120 (A–I, J105–109, J111)**. The chronological records below distinguish
 the verified source and scope of each stage. Real-chain acceptance and final release work remain; the
 funded deployment has not been upgraded by this refactor.
 
@@ -909,6 +909,44 @@ custody token account (`-j-canonical-config.log`, `-j-canonical-rpc.log`). This 
 not complete canonical migration/cutover, customer-wallet approval, alternate L2L
 history, physically independent recovery or J118–119. The funded runtime was not
 started, upgraded or used to sign/send.
+
+**110/120: J111 canonical preparation complete, 2026-10-06.** Source `3ed3619`
+and its already Cabal-built runtime restored the actual encrypted canonical pilot
+snapshots at sequences 60 and 76. Only their original ledger manifest/dump pairs
+were extracted from the authenticated local restic repository; no wallet keys
+were downloaded. Hash, fingerprint, schema and minimum sequence checks passed;
+requesting each sequence plus one refused before restoration.
+
+| Original schema-21 snapshot | Schema-22 roots | Exact attempts | Exact postings | Retained pending attempts |
+| --- | ---: | ---: | ---: | ---: |
+| Sequence 60, `25ffc885` | 3 | 10 | 33 | 1 |
+| Sequence 76, `5b40ebb7` | 4 | 12 | 42 | 1 |
+
+The ordinary closed `RestoreLedger` operation created and migrated new private
+databases. Existing closed Opaleye fixture operations compared the original and
+converted copies: all retained financial/history projections, exact signed bytes,
+payment states, candidates and approval work hashes matched. Deployment identity,
+backup coverage and critical sequence were unchanged. Each restored copy was
+paused with `restored_requires_reconciliation` and its custody readiness cleared.
+The retained pending records are not evidence of a new unresolved economic payout;
+the migration preserves historical signed work rather than erasing it.
+
+The restricted reader successfully read balances, work and pending attempts. No
+fence was adopted, no signer/worker started, and no chain call or transfer occurred
+during this rehearsal. All four temporary databases were dropped by the probe's
+brackets. The earlier read-only canonical configuration and independent Mainnet
+RPC checks above complete J111's preparation scope. Actual funded cutover still
+needs a fresh coherent snapshot, old-signer exclusion and explicit authorization.
+This same-Mac repository does not satisfy physically independent recovery.
+
+Private evidence: `/tmp/ecx-financial-core-j-canonical-NiY7sy/result.log`,
+`runtime.log`, original snapshot inventories and probe source. Temporary plaintext
+ledger files and the probe executable were removed afterward. The temporary Haskell
+probe reused StoreCheck's closed operations and the exact Cabal-built runtime
+objects; no probe or weakened implementation entered the repository. The run used
+14 MiB total Haskell memory under a 256 MiB heap cap. Application and test source
+counts are unchanged. J110 and J112 remain open; independent release preparation
+continues without changing the funded pilot.
 
 ## Source and evidence boundaries
 
