@@ -692,3 +692,33 @@ Schema-21 admission and sticky review still use `orders.status`, but payment pro
 and payout no longer trust that column or `orders.payout_tx`. No presentation result
 authorizes a write or signature. Real-PG comparisons retain a test-only schema-21
 oracle; deliberately stale display fields cannot override verified payment facts.
+
+Observation rules also have a pure owner. `checkScanBatch`/`checkScan` validate the
+closed stream, bound, asset, cursor and immutable origin; `checkObservation` fixes
+the evidence encoding. `observationNeedsReview` distinguishes a retained signature
+from an authorized observed outflow and preserves former native-winner/treasury
+evidence. The Store commits receipts, events, cursor and successful time atomically.
+Failed observations preserve prior successful coverage and require review; neither
+the pure result nor a successful scan grants payment or resume authority.
+
+`scanFacts`, `checkScans`, `checkCustody` and `checkIntake` share the exact freshness
+rules. The existing `freshIntake` remains the single bounded refresh workflow after
+slow IO; live acceptance/blockhash checks still follow it. Missing, duplicate,
+errored or future observations cannot satisfy readiness. Approval, budget, backup
+and profile checks retain their own subject-specific boundaries.
+
+`decideCancellation` distinguishes saving cleanup intent, completing it and exact
+replay. Its closed reader supplies current unsigned work; native cleanup happens
+between the two durable operations. Unknown cleanup leaves the first record pending.
+Completion does not need a new custody certification, but must match the saved
+cleanup/generation and paused authority. A completed old callback cannot affect a
+newer generation. Source eligibility and the eight-generation bound determine
+whether customer work returns to ready or remains under review.
+
+`decideSolanaExpiry` retires only an exact current attempt/preparation with no other
+unretired member. `decideSolanaRetry` separately checks paused/fresh authority,
+retained expiry, current generation/payment and source backing. The existing chain
+verifier still proves finalized complete absence using every required provider;
+these facts cannot be manufactured by an HTTP customer. Bytes, principal and old
+generations survive retirement. Approval does not reserve funds, sign or send; a
+new preparation must independently pass the normal budget/backup/signing gates.

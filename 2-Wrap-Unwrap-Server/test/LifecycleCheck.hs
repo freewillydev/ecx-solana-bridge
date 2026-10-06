@@ -8,6 +8,7 @@ import Bridge.Lifecycle
 import qualified Bridge.Wire as W
 import Bridge.Wire (PaymentTerms(..),CostLimits(..),PolicySnapshot(..),SignedAttempt(..),PaymentCosts(..))
 import Control.Monad (foldM)
+import Data.Aeson (object)
 import Data.Int (Int64)
 import Data.List (nub)
 import qualified Data.Map.Strict as M
@@ -228,6 +229,77 @@ checks = sequence
         in forAll (shuffle $ conversion:active:refunds) $ \payments ->
           let summary=good $ foldM (\kept page->compactCustomerPayments $ kept<>page) [] (chunks payments)
           in conjoin [property(length summary<=3),projectCustomer "Paid" review summary===projectCustomer "Paid" review payments]
+  , check "scan evidence binds its exact cursor origin asset and bounded batch" $
+      forAll (elements scanAssets) $ \(chain,asset) -> forAll (chooseInteger (1,1000000)) $ \n ->
+        let receipt=W.Deposit "receipt" Nothing asset (money n) "anchor" 2 True 100
+            batch=W.ScanBatch chain "origin" (Just "prior") "next" 100 [receipt] []
+        in conjoin [checkScan batch (Just "prior") ["origin"]===Right ()
+             ,checkScan batch (Just "stale") ["origin"]===Left "stale_scan_cursor"
+             ,checkScan batch (Just "prior") ["changed"]===Left "scan_origin_mismatch"
+             ,checkScan batch (Just "prior") ["origin","origin"]===Left "duplicate_scan_origin"
+             ,checkScan batch {W.scanDeposits=replicate 1001 receipt} (Just "prior") []===Left "invalid_scan_batch"
+             ,checkScan batch {W.scanDeposits=[receipt {W.depositAsset=if asset==Sol then Native else Sol}]} (Just "prior") []===Left "scan_asset_mismatch"]
+  , check "unavailable missing duplicated or future scan evidence cannot establish readiness" $ once $
+      let rows=[("Native",Just 100,Nothing,"n"),("Solana",Just 100,Nothing,"s"),("SolanaOperating",Just 100,Nothing,"o")]
+          checkRows xs=checkScans 100 (scanFacts xs)
+      in conjoin [checkRows rows===Right (),checkRows (drop 1 rows)===Left "scanners_not_fresh"
+           ,checkRows (rows<>rows)===Left "scanners_not_fresh"
+           ,checkRows (("Native",Just 100,Just "provider_unavailable","n"):drop 1 rows)===Left "scanners_not_fresh"
+           ,checkRows (("Native",Just 101,Nothing,"n"):drop 1 rows)===Left "scanners_not_fresh"
+           ,checkIntake readyIntake {intakePaused=True}===Left "intake_paused"]
+  , check "observing retained signed bytes is not evidence of an authorized outgoing transfer" $
+      forAll (elements ["signed","broadcast_intent","settled","failed","review"]) $ \state ->
+      forAll (elements ["Native","Solana","SolanaOperating"]) $ \chain ->
+        let event=W.ChainEvent "transaction" "outgoing" "anchor" (object [])
+            facts=ObservationFacts [(state,Just 1,Just "winner-proof")] [] []
+            known=state `elem` ["broadcast_intent","settled","failed"]
+        in conjoin [observationNeedsReview chain event facts===not known
+             ,observationNeedsReview chain event facts {observationFormerWinners=["winner-proof"]}===not(known || state=="review" && chain=="Native")
+             ,property $ observationNeedsReview chain event {W.chainEventKind="disputed"} facts
+             ,property $ either (const False) (not . T.null) (checkObservation chain event)
+             ,checkObservation chain event {W.chainEventKind="invented"}===Left "invalid_observation_kind"]
+  , check "cleanup binds exact unsigned generation and preserves completed replay after later work" $
+      forAllShrink fundingCases shrinkFunding $ \funding -> forAll (chooseInt (0,7)) $ \generation ->
+      forAll arbitrary $ \eligible ->
+        let prepared=(created $ good $ decidePreparation (money 10) "{}" $ initialPreparation funding) {preparedGeneration=generation}
+            facts=CancellationFacts readyOperator Nothing (Just prepared) eligible
+            pending=facts {cancellationPrevious=Just("cancel","{}",False)}
+            done=pending {cancellationPrevious=Just("cancel","{}",True),cancellationUnsigned=Nothing}
+            decide phase=decideCancellation phase prepared "cancel" "{}"
+        in conjoin [decide BeginCleanup facts===Right RequestCancellation
+             ,decide BeginCleanup pending===Right KeepCancellation
+             ,decide FinishCleanup pending===Right(CompleteCancellation $ eligible && generation<7)
+             ,decide FinishCleanup done===Right KeepCancellation
+             ,decide FinishCleanup facts===Left "preparation_cancellation_not_expected"
+             ,decide FinishCleanup pending {cancellationUnsigned=Just prepared {preparedGeneration=generation+1}}===Left "preparation_cancellation_not_expected"
+             ,decide FinishCleanup pending {cancellationUnsigned=Nothing}===Left "preparation_cancellation_not_expected"
+             ,decide FinishCleanup pending {cancellationPrevious=Just("other","{}",False)}===Left "preparation_cancellation_conflict"
+             ,decide BeginCleanup facts {cancellationOperator=readyOperator {operatorCustody=Nothing}}===Left "custody_not_reconciled"
+             ,decide FinishCleanup done {cancellationOperator=readyOperator {operatorPaused=False}}===Left "pause_before_operator_action"]
+  , check "Solana expiry retains exact bytes and separate retry binds current generation source and authority" $
+      forAll (chooseInt (0,6)) $ \generation -> forAll (elements ["signed","broadcast_intent"]) $ \state ->
+        let funding=Convert NativeToWrapped 100 1
+            prepared=(created $ good $ decidePreparation (money 10) "{}" $ initialPreparation funding) {preparedGeneration=generation}
+            attempt=(settlementCurrent $ snapshot 0 funding) {recordedGeneration=generation,recordedState=state}
+            expiry=ExpiryFacts attempt prepared [signedId $ recordedSigned attempt]
+            expired=attempt {recordedState="review",recordedObservation=Just "proof"}
+            retry=RetryFacts readyOperator expired (Just "proof") [(fromIntegral generation,Just(signedId $ recordedSigned attempt),0,1)]
+              (preparedView prepared) {savedStatus=PaymentReview} True
+            approve=decideSolanaRetry expired "approved" Nothing . Just
+        in conjoin [decideSolanaExpiry attempt "proof" Nothing (Just expiry)===Right True
+             ,decideSolanaExpiry attempt "proof" (Just "proof") Nothing===Right False
+             ,decideSolanaExpiry attempt "changed" (Just "proof") Nothing===Left "expiry_evidence_conflict"
+             ,decideSolanaExpiry attempt "proof" Nothing (Just expiry {expiryUnretiredAttempts=["other"]})===Left "expiry_attempt_changed"
+             ,decideSolanaExpiry attempt "proof" Nothing (Just expiry {expiryPreparation=prepared {preparedGeneration=generation+1}})===Left "expiry_attempt_changed"
+             ,approve retry===Right True
+             ,approve retry {retryExpiry=Nothing}===Left "solana_retry_not_expected"
+             ,approve retry {retryHistory=[]}===Left "solana_retry_not_expected"
+             ,approve retry {retryHistory=[(fromIntegral generation+1,Just "later",0,1)]}===Left "solana_retry_not_expected"
+             ,approve retry {retrySourceEligible=False}===Left "source_not_eligible"
+             ,approve retry {retryOperator=readyOperator {operatorPaused=False}}===Left "pause_before_operator_action"
+             ,decideSolanaRetry expired "approved" (Just "approved") Nothing===Right False
+             ,decideSolanaRetry expired "changed" (Just "approved") Nothing===Left "retry_approval_conflict"
+             ,recordedSigned expired===recordedSigned attempt]
   ]
  where
   check name test=putStrLn name >> quickCheckWithResult stdArgs {maxSuccess=300} test

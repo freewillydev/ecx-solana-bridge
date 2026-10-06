@@ -18,6 +18,9 @@ module Bridge.Lifecycle
   , withdrawalInput, decideWithdrawal, decideWithdrawalCancellation
   , TreasuryFacts(..), treasurySplit, decideTreasury, decideTreasurySpend
   , CustomerKind(..), CustomerPayment(..), projectCustomer, compactCustomerPayments, parsePaymentStatus
+  , scanAssets, scanFacts, checkScanBatch, checkScan, ObservationFacts(..), checkObservation, observationNeedsReview
+  , CleanupPhase(..), CancellationFacts(..), CancellationDecision(..), decideCancellation
+  , ExpiryFacts(..), decideSolanaExpiry, RetryFacts(..), decideSolanaRetry
   ) where
 
 import Bridge.Domain hiding (fee)
@@ -587,3 +590,116 @@ compactCustomerPayments payments = do
   let refunds=[p | p<-payments,customerKind p==CustomerRefund,customerState p==PaymentPaid]
       retained=[p | p<-payments,customerKind p==CustomerConversion || customerState p `notElem` [PaymentPaid,PaymentCancelled]]
   pure (retained<>take 1 (sortOn (negate . maybe 0 snd . customerSettlement) refunds))
+
+-- Observations can retain evidence and require review, never authorize payment.
+-- The cursor, original scan anchor and all evidence commit in one transaction.
+scanAssets :: [(Text,Asset)]
+scanAssets=[("Native",Native),("Solana",Wrapped),("SolanaOperating",Sol)]
+scanFacts :: [(Text,Maybe Int64,Maybe Text,Text)] -> Maybe ((Int64,Text),(Int64,Text),(Int64,Text))
+scanFacts [("Native",Just n,Nothing,a),("Solana",Just t,Nothing,b),("SolanaOperating",Just s,Nothing,c)] = Just((n,a),(t,b),(s,c))
+scanFacts _ = Nothing
+
+checkScanBatch :: W.ScanBatch -> Either Text ()
+checkScanBatch batch = do
+  ensure (W.scanChain batch `elem` map fst scanAssets && W.scanTime batch>=0
+    && length(W.scanDeposits batch)<=1000 && length(W.scanEvents batch)<=1000) "invalid_scan_batch"
+  ensure (all (\anchor->not(T.null anchor) && T.length anchor<=128) [W.scanOrigin batch,W.scanNext batch]) "invalid_scan_anchor"
+  ensure (all (\d->Just(W.depositAsset d)==lookup (W.scanChain batch) scanAssets) (W.scanDeposits batch)) "scan_asset_mismatch"
+checkScan :: W.ScanBatch -> Maybe Text -> [Text] -> Either Text ()
+checkScan batch previous origins = do
+  checkScanBatch batch
+  ensure (previous==W.scanPrevious batch) "stale_scan_cursor"
+  case origins of
+    []->pure ()
+    [saved]->ensure (saved==W.scanOrigin batch) "scan_origin_mismatch"
+    _->Left "duplicate_scan_origin"
+
+data ObservationFacts = ObservationFacts
+  { observationAttempts :: [(Text,Maybe Int64,Maybe Text)], observationFormerWinners :: [Text]
+  , observationTreasury :: [(Text,Text)] } deriving (Eq,Show)
+checkObservation :: Text -> W.ChainEvent -> Either Text Text
+checkObservation chain event = do
+  let identifier=W.chainEventId event; anchor=W.chainEventAnchor event; kind=W.chainEventKind event; proof=W.chainEventEvidence event
+      encoded=TE.decodeUtf8 . BL.toStrict . encode
+      evidence=encoded $ object ["chain" .= chain,"id" .= identifier,"anchor" .= anchor,"kind" .= kind,"proof" .= proof]
+  ensure (not(T.null identifier) && T.length identifier<=128 && T.length anchor<=128) "invalid_observation_identity"
+  ensure (kind `elem` ["incoming","unmatched_incoming","outgoing","failed","reference","unsupported","unclassified","awaiting_verifier","disputed"]) "invalid_observation_kind"
+  ensure (T.length evidence<=8192) "observation_evidence_too_large"
+  pure evidence
+observationNeedsReview :: Text -> W.ChainEvent -> ObservationFacts -> Bool
+observationNeedsReview chain event facts =
+  kind `elem` ["unsupported","unclassified","disputed"] || kind=="outgoing" && not known && not approved
+ where
+  kind=W.chainEventKind event
+  known=any (\(state,sequenceNo,observed)->state `elem` ["broadcast_intent","settled","failed"] ||
+    state=="review" && chain=="Native" && maybe False (>0) sequenceNo
+      && maybe False (`elem` observationFormerWinners facts) observed) (observationAttempts facts)
+  approved=case W.economicOutflow chain (W.chainEventEvidence event) of
+    Right economic->observationTreasury facts==[(W.chainEventAnchor event,TE.decodeUtf8 $ BL.toStrict $ encode economic)]
+    Left _->False
+
+data CleanupPhase = BeginCleanup | FinishCleanup deriving (Eq,Show)
+data CancellationFacts = CancellationFacts
+  { cancellationOperator :: OperatorFacts, cancellationPrevious :: Maybe (Text,Text,Bool)
+  , cancellationUnsigned :: Maybe PreparedPayment, cancellationSourceEligible :: Bool } deriving (Eq,Show)
+data CancellationDecision = KeepCancellation | RequestCancellation | CompleteCancellation Bool deriving (Eq,Show)
+
+-- Only the closed reader can supply current unsigned work. Begin requires fresh
+-- custody; finish instead requires the exact saved cleanup to have returned.
+-- Its caller performs cleanup between commits; an unknown result never finishes.
+decideCancellation :: CleanupPhase -> PreparedPayment -> Text -> Text -> CancellationFacts -> Either Text CancellationDecision
+decideCancellation phase expected reason cleanup facts = do
+  let operator=cancellationOperator facts
+      current=ensure (cancellationUnsigned facts==Just expected) "preparation_cancellation_not_expected"
+  ensure (preparedGeneration expected>=0 && preparedGeneration expected<8) "invalid_preparation_generation"
+  ensure (operatorPaused operator) "pause_before_operator_action"
+  case cancellationPrevious facts of
+    Just(old,plan,done)->do
+      ensure (old==reason && plan==cleanup) "preparation_cancellation_conflict"
+      if phase==BeginCleanup || done then pure KeepCancellation else do
+        current
+        pure $ CompleteCancellation (cancellationSourceEligible facts && preparedGeneration expected<7)
+    Nothing->do
+      ensure (phase==BeginCleanup) "preparation_cancellation_not_expected"
+      checkOperator "pause_before_operator_action" operator
+      current
+      pure RequestCancellation
+
+data ExpiryFacts = ExpiryFacts
+  { expiryCurrent :: RecordedAttempt, expiryPreparation :: PreparedPayment
+  , expiryUnretiredAttempts :: [Text] } deriving (Eq,Show)
+-- The chain verifier must establish complete finalized absence first. This
+-- transition retires only that generation, preserves bytes and grants no retry.
+decideSolanaExpiry :: RecordedAttempt -> Text -> Maybe Text -> Maybe ExpiryFacts -> Either Text Bool
+decideSolanaExpiry expected proof previous facts = do
+  ensure (recordedChain expected=="Solana" && recordedState expected `elem` ["signed","broadcast_intent"]) "invalid_solana_expiry"
+  case previous of
+    Just old->ensure (old==proof) "expiry_evidence_conflict" >> pure False
+    Nothing->do
+      saved<-maybe (Left "expiry_attempt_changed") Right facts
+      let prepared=expiryPreparation saved
+      ensure (expiryCurrent saved==expected && preparedGeneration prepared==recordedGeneration expected
+        && paymentId(savedPayment $ preparedView prepared)==recordedPayment expected
+        && expiryUnretiredAttempts saved==[signedId $ recordedSigned expected]) "expiry_attempt_changed"
+      pure True
+
+data RetryFacts = RetryFacts
+  { retryOperator :: OperatorFacts, retryCurrent :: RecordedAttempt, retryExpiry :: Maybe Text
+  , retryHistory :: [(Int64,Maybe Text,Int64,Int64)], retryPayment :: PaymentView
+  , retrySourceEligible :: Bool } deriving (Eq,Show)
+-- Approval is distinct from observing expiry. A new generation still goes
+-- through ordinary preparation, current source, budget, backup and signing gates.
+decideSolanaRetry :: RecordedAttempt -> Text -> Maybe Text -> Maybe RetryFacts -> Either Text Bool
+decideSolanaRetry expected reason previous facts = case previous of
+  Just old->ensure (old==reason) "retry_approval_conflict" >> pure False
+  Nothing->do
+    saved<-maybe (Left "solana_retry_not_expected") Right facts
+    checkOperator "pause_before_operator_action" (retryOperator saved)
+    let generation=recordedGeneration expected; rows=retryHistory saved; view=retryPayment saved
+    ensure (retryCurrent saved==expected && recordedChain expected=="Solana" && recordedState expected=="review"
+      && retryExpiry saved/=Nothing && not(null rows)
+      && maximum(map (\(g,_,_,_)->g) rows)==fromIntegral generation
+      && (fromIntegral generation,Just(signedId $ recordedSigned expected),0,1) `elem` rows && generation>=0 && generation<7
+      && savedStatus view==PaymentReview && paymentId(savedPayment view)==recordedPayment expected) "solana_retry_not_expected"
+    ensure (retrySourceEligible saved) "source_not_eligible"
+    pure True

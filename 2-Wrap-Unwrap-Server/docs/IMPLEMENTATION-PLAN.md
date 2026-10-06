@@ -1,6 +1,6 @@
 # Auditable financial-core refactor: design and execution plan
 
-Status: **in progress; 56/120 steps verified (A–E)**. This replaces the
+Status: **in progress; 60/120 steps verified (A–E and F57–60)**. This replaces the
 completed implementation checklist, not its evidence. Execution baseline source is
 `3d4970b3e502de9d4c9a89803610df3802e3e322` (implementation `bc9713c`). The funded
 pilot stays on `548c509`. See [RELEASE-REVIEW.md](RELEASE-REVIEW.md) for the actual
@@ -508,8 +508,8 @@ The executor updates this table after verified checkpoints; not merely after edi
 | B. Concrete types and regression harness | 13–24 | Complete | `a18b04b`; pure facts/accounting model, bridge and baseline TLS pass |
 | C. Complete payment slice | 25–36 | Complete | `a4aa94f`; pure decisions, 2,100 generated cases, real-PG settlement comparisons |
 | D. Existing-schema integration | 37–46 | Complete | `62a9c77`; preparation/send/settlement, explicit isolation, fault/race/HTTPS/role checks |
-| E. Customer funding/accounting | 47–56 | Complete | `01eb253` plus E54–56 checkpoint; pure decisions and derived customer display, 4,500 generated cases, 27 real-PG history comparisons, rollback/restoration pass |
-| F. Recovery/reconciliation | 57–70 | Next | E passed; preserve evidence/permission separation while extracting cancellation, expiry, source and native recovery |
+| E. Customer funding/accounting | 47–56 | Complete | `01eb253`, `99b2657`; pure decisions and derived customer display, 4,500 generated cases, 27 real-PG history comparisons, rollback/restoration pass |
+| F. Recovery/reconciliation | 57–70 | In progress: 57–60 verified | Scan/observation, readiness, cancellation and Solana expiry/retry; 5,700 generated cases, real-PG recovery/restoration and HTTPS checks pass. Next native replacement/winner/source/rebroadcast (61–64) |
 | G. Schema 22 and migration | 71–84 | Not started | Depends on F |
 | H. Protocol/file simplification | 85–94 | Not started | Depends on G |
 | I. Administration/UI/setup | 95–104 | Not started | Depends on H |

@@ -316,6 +316,55 @@ The old settlement/preparation/admission helper implementations are removed; sch
 compatibility writes remain intentionally until G. Next is F57–70 recovery extraction,
 then the schema/state consolidation. Security review and final release gates remain.
 
+### Observation, cancellation and Solana recovery — 60/120
+
+F57–60 are verified on top of `99b2657`. Scan-envelope/cursor/origin checks,
+observation encoding/classification, unsigned cancellation and Solana expiry/retry
+decisions now live in `Lifecycle`. Their closed Store operations still load facts
+and apply writes under the existing lock. Readiness was already centralized by
+C/D; this batch moved the named-stream projection beside those pure checks and
+retained the existing two-refresh workflow, sixty-second window and final live
+chain check. No new evaluator, role, protocol, schema or funded process was added.
+
+Verification (I04–I09, I13–I14), one job and existing cache environment:
+
+- `cabal build ecx-bridge:exe:ecx-store-check ecx-bridge:exe:ecx-bridge ecx-bridge:test:bridge-test -j1 --offline`: pass after correcting a Payment/Funding projection caught by the compiler.
+- `cabal test ecx-bridge:bridge-test -j1 --offline --test-show-details=direct`: pass.
+  Lifecycle has **5,700 generated cases**, fixed groups and two expected mutation
+  failures. New cases cover scan bounds/cursor/origin, unavailable/duplicate/future
+  coverage, signed-but-unqueued observations, exact cleanup and late replay,
+  current-generation expiry and separate retry/source/authority requirements.
+- Default `cabal run ecx-bridge:exe:ecx-store-check -j1 --offline`: pass on disposable
+  `ecx_rebuild_contract_core_f_observation_20261005`, including actual atomic scan
+  rollback, preserved cursor/success on failure, eight cancellation generations,
+  interleaved expiry/cancellation/retry, old callbacks after newer work, protected
+  balances, exact saved bytes and encrypted restic restore. Customer-history
+  comparisons remained 17/27 with no financial mutation.
+- The same executable with `ECX_REBUILD_TLS_ONLY=1` and Cabal's SDK library on
+  `ecx_rebuild_contract_core_f_tls_20261005`: pass. Actual worker/signer HTTPS,
+  authentication/certificate refusal and rotation, concurrent request serialization,
+  stale-custody second-read refusal/gate recovery, replay and pending recovery all
+  passed. Chain responses were offline fixtures; no Mainnet/Devnet send occurred.
+
+Logs: `/tmp/ecx-financial-core-f-observation-{build,tests,store,tls,schema}.log`.
+The sole `evalCritical` call and the reference Main.hs hash remain unchanged.
+Existing warning output remains; this checkpoint is not a warning-free build or an
+independent security assessment.
+
+| F57–60 source | Before | After | Difference |
+| --- | ---: | ---: | ---: |
+| `src/Bridge/Lifecycle.hs` | 589 | 705 | +116 |
+| `runtime/Bridge/Store.hs` | 3,465 | 3,444 | -21 |
+| Application piece | 4,054 | 4,149 | **+95, zero new files** |
+| `test/LifecycleCheck.hs` | 456 | 528 | **+72, zero new files** |
+
+Totals: **66 application/schema files / 15,612 lines**, **23 test files plus
+embedded Rust / 10,035 lines**, **31 tooling files / 3,362 lines**. The extraction
+still has a net line cost; removing redundant persisted state remains G. Next:
+F61–64 native replacement, settled-winner/source recovery and same-byte rebroadcast,
+followed by the shared mechanics/failure/recovery batch in F65–70. No completion
+or security guarantee is inferred from these passing local checks.
+
 ## Source and evidence boundaries
 
 | Version | Verified scope | Not established by that evidence |
