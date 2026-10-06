@@ -8,9 +8,9 @@ module Bridge.Native
 import Bridge.Wire (Profile(..))
 import Bridge.RPC
 import Bridge.Error
+import Bridge.File (withHandle,readBounded,hashHandle)
 import Bridge.Domain
 import Control.Exception (IOException,bracket,catch,throwIO,try)
-import Crypto.Hash (Context,Digest,SHA256,hashInit,hashUpdate,hashFinalize)
 import Data.Aeson
 import Data.Bits ((.&.))
 import qualified Data.Aeson.Key as K
@@ -23,7 +23,7 @@ import Data.Scientific (Scientific, coefficient, base10Exponent)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.HTTP.Client (Manager,parseRequest,host,path,queryString,requestHeaders)
-import System.IO (Handle,withBinaryFile,IOMode(ReadMode),hClose,hFlush)
+import System.IO (withBinaryFile,IOMode(ReadMode),hFlush)
 import System.FilePath (isAbsolute,normalise,takeDirectory,takeFileName,(</>))
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files
@@ -205,16 +205,15 @@ evalNativeRecoveryWith call c operation = do
       after<-descriptors
       require (before==after) "native_wallet_changed_during_backup"
       sync destination
-      checksum<-withBinaryFile destination ReadMode (hashChunks hashInit)
+      checksum<-withBackupFile destination hashHandle
       let evidence=manifestValue (profile c) (nativeCheckpointHeight c) (nativeCheckpointHash c)
             (nativeWallet c) (takeFileName destination) checksum before
           encoded=encode evidence
       require (BL.length encoded<=1048576) "native_backup_manifest_too_large"
       bracket (openFd manifest WriteOnly defaultFileFlags
-        {creat=Just 0o600,exclusive=True,nofollow=True,cloexec=True} >>= fdToHandle) hClose $ \handle->do
-          BL.hPut handle encoded
-          hFlush handle
-      sync manifest
+        {creat=Just 0o600,exclusive=True,nofollow=True,cloexec=True}) closeFd $ \fd->do
+          withHandle fd $ \handle->BL.hPut handle encoded >> hFlush handle
+          fileSynchronise fd
       sync (takeDirectory destination)
       pure manifest
     RestoreNativeWallet manifest -> do
@@ -235,9 +234,7 @@ evalNativeRecoveryWith call c operation = do
  where
   load manifest = do
     privateParent manifest
-    privateBackup manifest
-    bytes<-withBinaryFile manifest ReadMode (`BS.hGet` 1048577)
-    require (BS.length bytes<=1048576) "native_backup_manifest_too_large"
+    bytes<-withBackupFile manifest (readBounded 1048576) >>= maybe (reject "native_backup_manifest_too_large") pure
     value<-either (const $ reject "invalid_native_backup_manifest") pure (eitherDecodeStrict' bytes)
     version<-fieldValue "format" value :: IO Int
     savedProfile<-fieldValue "profile" value
@@ -255,8 +252,7 @@ evalNativeRecoveryWith call c operation = do
       && checkpoint==nativeCheckpointHash c) "native_backup_network_mismatch"
     validateNativeSettings c {nativeWallet=wallet}
     let backup=takeDirectory manifest </> name
-    privateBackup backup
-    actual<-withBinaryFile backup ReadMode (hashChunks hashInit)
+    actual<-withBackupFile backup hashHandle
     require (actual==checksum) "native_backup_hash_mismatch"
     pure (wallet,backup,checksum,expected)
   -- Only public descriptors and relative archive names enter the manifest;
@@ -308,14 +304,14 @@ evalNativeRecoveryWith call c operation = do
     status<-getSymbolicLinkStatus (takeDirectory path)
     uid<-getEffectiveUserID
     require (isDirectory status && fileOwner status==uid && fileMode status .&. 0o077==0) "unsafe_native_backup_directory"
-  privateBackup path = do
-    status<-getSymbolicLinkStatus path
+  privateBackup path = getSymbolicLinkStatus path >>= backupStatus
+  backupStatus status = do
     uid<-getEffectiveUserID
     require (isRegularFile status && fileOwner status==uid && fileMode status .&. 0o077==0
       && linkCount status==1 && fileSize status>0) "unsafe_native_backup_file"
-  hashChunks :: Context SHA256 -> Handle -> IO Text
-  hashChunks context handle = do
-    bytes<-BS.hGet handle 65536
-    if BS.null bytes then pure (T.pack $ show (hashFinalize context :: Digest SHA256))
-      else hashChunks (hashUpdate context bytes) handle
+  withBackupFile path action=do
+    privateBackup path
+    bracket (openFd path ReadOnly defaultFileFlags {nofollow=True,cloexec=True,nonBlock=True}) closeFd $ \fd->do
+        getFdStatus fd >>= backupStatus
+        withHandle fd action
   sync path=bracket (openFd path ReadOnly defaultFileFlags {nofollow=True,cloexec=True}) closeFd fileSynchronise

@@ -2,8 +2,9 @@
 -- No signing or network authority is exposed here.
 module Bridge.AdminKey (readKey,readPrivate,withFamily,savePrivate,privateParent,newPrivatePath) where
 import Bridge.Error (require,reject)
+import Bridge.File (withHandle,readBounded)
 import Bridge.SolanaMessage (publicKey,base58)
-import Control.Exception (bracket,bracketOnError,finally)
+import Control.Exception (bracket,finally)
 import Crypto.Random (getRandomBytes)
 import Crypto.Error (CryptoFailable(..))
 import qualified Crypto.PubKey.Ed25519 as Ed
@@ -15,7 +16,7 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Word (Word8)
 import System.FilePath (isAbsolute,takeDirectory,normalise)
-import System.IO (hClose,hFlush,SeekMode(AbsoluteSeek))
+import System.IO (hFlush,SeekMode(AbsoluteSeek))
 import System.Posix.Files
 import System.Posix.IO
 import System.Posix.Unistd (fileSynchronise)
@@ -25,13 +26,12 @@ import System.Posix.Types (Fd)
 readKey :: Text -> FilePath -> IO Ed.SecretKey
 readKey expectedOwner keyfile=do
   privateParent keyfile
-  bracket (openFd keyfile ReadOnly defaultFileFlags {nofollow=True,cloexec=True}) closeFd $ \fd->do
+  bracket (openFd keyfile ReadOnly defaultFileFlags {nofollow=True,cloexec=True,nonBlock=True}) closeFd $ \fd->do
     status<-getFdStatus fd
     uid<-getEffectiveUserID
-    require (isRegularFile status && fileOwner status==uid && fileMode status .&. 0o777==0o600) "unsafe_token_key"
-    bracket (dup fd >>= fdToHandle) hClose $ \handle->do
-      bytes<-B.hGet handle 4097
-      require (B.length bytes<=4096) "token_key_too_large"
+    require (isRegularFile status && fileOwner status==uid && fileMode status .&. 0o777==0o600 && linkCount status==1) "unsafe_token_key"
+    withHandle fd $ \handle->do
+      bytes<-readBounded 4096 handle >>= maybe (reject "token_key_too_large") pure
       numbers<-either (const $ reject "invalid_token_key") pure
         (eitherDecodeStrict' bytes :: Either String [Integer])
       require (length numbers==64 && all (\n->n>=0 && n<=255) numbers) "invalid_token_key"
@@ -54,8 +54,8 @@ savePrivate output record=do
   bracket (openFd staging WriteOnly defaultFileFlags
     {creat=Just 0o600,exclusive=True,nofollow=True,cloexec=True})
     (\fd->closeFd fd `finally` (removeLink staging >> syncParent output)) $ \fd->do
-      bracketOnError (dup fd >>= fdToHandle) hClose $ \handle->do
-        B.hPut handle record; hFlush handle; fileSynchronise fd; hClose handle
+      withHandle fd $ \handle->B.hPut handle record >> hFlush handle
+      fileSynchronise fd
       createLink staging output
       syncParent output
 
@@ -64,10 +64,9 @@ savePrivate output record=do
 readPrivate :: FilePath -> IO B.ByteString
 readPrivate path=do
   privateParent path
-  bracket (openFd path ReadOnly defaultFileFlags {nofollow=True,cloexec=True}) closeFd $ \fd->do
+  bracket (openFd path ReadOnly defaultFileFlags {nofollow=True,cloexec=True,nonBlock=True}) closeFd $ \fd->do
     privateFile fd
-    bytes<-bracket (dup fd >>= fdToHandle) hClose (`B.hGet` 8193)
-    require (B.length bytes<=8192) "administration_attempt_too_large"
+    bytes<-withHandle fd (readBounded 8192) >>= maybe (reject "administration_attempt_too_large") pure
     fileSynchronise fd; syncParent path
     pure bytes
 

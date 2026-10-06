@@ -387,6 +387,24 @@ mode rules. Keep service credentials, operator archives, immutable attempts and
 replaceable fence state separate. Preserve immediate-parent checks and protected
 ancestor assumptions; consolidation alone does not prove hostile-ancestor safety.
 
+H91–94 implements this map with `Bridge.File`: a 33-line module operating only on
+already-open descriptors/handles. It bounds reads, hashes streams and closes a
+temporary handle while retaining the caller's descriptor for fsync. The duplicate
+is marked close-on-exec. Fixed-purpose readers retain ownership/mode/size policy,
+recheck the opened descriptor and reject links/nonregular files before reading;
+nonblocking open prevents a substituted FIFO from hanging the reader. Service
+credentials and backup inputs now also require a single link. Existing pathname
+prechecks retain policy error categories; descriptor checks are the authority for
+the bytes actually read. Same-UID modification and trusted ancestor assumptions
+still require OS isolation; these helpers do not make mutable files immutable.
+
+Private staging writers share mechanics only within Backup; immutable AdminKey
+publication and replaceable fence watermarks retain their separate protocols.
+Native/custody manifests fsync the same descriptor used to write, and downloaded
+ledger files and staging directories are synced before returning. Full decrypted
+bundle validation, exact file sets, sequence/fingerprint, wallet/key identity and
+encrypted-wallet unlock verification remain unchanged.
+
 Required instruction/sign/send coverage acknowledges the exact durable sequence.
 A checkpoint exports a consistent PostgreSQL snapshot plus native wallet, Solana
 key, configuration and manifests, uploads via restic and verifies the downloaded

@@ -4729,6 +4729,13 @@ archiveContract settings fixtures reader = do
             denied<-try (bracket (PG.connect target {PG.connectUser=role}) PG.close (const $ pure ())) :: IO (Either SomeException ())
             check (case denied of Left err->"permission denied for database" `T.isInfixOf` T.pack(show err); Right ()->False)
     databasesBefore<-fixture fixtures RestoreDatabases
+    let linked=directory</>"linked-manifest"
+    bracket_ (Posix.createSymbolicLink (manifestPath archive) linked) (removeFile linked) $
+      expectStore "unsafe_backup_file" (restore linked)
+    bracket_ (Posix.createLink (manifestPath archive) linked) (removeFile linked) $
+      expectStore "unsafe_backup_file" (restore $ manifestPath archive)
+    bracket_ (BS.writeFile linked (BS.replicate 8193 32) >> setFileMode linked 0o600) (removeFile linked) $
+      expectStore "backup_file_too_large" (restore linked)
     expectStore "invalid_restore_policy" (evalRestore settings $ RestoreLedger (manifestPath archive) "contract" (-1))
     expectStore "backup_identity_mismatch" (evalRestore settings $ RestoreLedger (manifestPath archive) "wrong" 0)
     expectStore "backup_snapshot_too_old" (evalRestore settings $ RestoreLedger (manifestPath archive) "contract" (archiveSequence archive+1))

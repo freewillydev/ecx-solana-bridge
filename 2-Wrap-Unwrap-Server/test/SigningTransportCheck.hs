@@ -23,6 +23,7 @@ import Data.X509.CertificateStore (makeCertificateStore)
 import System.Process (readProcessWithExitCode)
 import System.Timeout (timeout)
 import Bridge.Signer
+import qualified Bridge.AdminKey as AdminKey
 import qualified Bridge.Fence as Fence
 import qualified Data.Text as T
 import System.Posix.Process (forkProcess,getProcessStatus,exitImmediately,ProcessStatus(..))
@@ -50,7 +51,7 @@ import Servant.API (BasicAuthData(..))
 import System.Directory (removeFile,createDirectory,removeDirectoryRecursive,renameFile,doesPathExist)
 import System.FilePath ((</>),takeDirectory)
 import System.IO (openTempFile,hClose)
-import System.Posix.Files (setFileMode,createSymbolicLink)
+import System.Posix.Files (setFileMode,createSymbolicLink,createLink)
 import Test.QuickCheck
 
 checks :: IO [Result]
@@ -285,7 +286,10 @@ checks=sequence
         setFileMode file 0o600
         createSymbolicLink file (directory</>"key-link")
         linkedKey<-refuses (verifySigningKey owner (directory</>"key-link"))
-        pure (wrongOwner && wrongSeed && wrongPublic && outOfRange && short && oversized && sharedKey && linkedKey)
+        createLink file (directory</>"key-hardlink")
+        hardlinkedKey<-refuses (verifySigningKey owner file)
+        hardlinkedAdmin<-refuses (AdminKey.readKey owner file)
+        pure (wrongOwner && wrongSeed && wrongPublic && outOfRange && short && oversized && sharedKey && linkedKey && hardlinkedKey && hardlinkedAdmin)
   , check "signer credentials reject unsafe modes symlinks parents and token formats" $ once $ ioProperty $
       bracket temporary removeDirectoryRecursive $ \directory->do
         let path=directory</>"auth"; endpoint=SigningEndpoint 9443 path
@@ -307,8 +311,10 @@ checks=sequence
         createSymbolicLink path (directory</>"link")
         linked<-refuses (signerCredentials endpoint {signerAuthFile=directory</>"link"})
         invalidPort<-refuses (signerCredentials endpoint {signerPort=0})
+        createLink path (directory</>"auth-hardlink")
+        hardlink<-refuses (signerCredentials endpoint)
         pure (basicAuthPassword valid==token && basicAuthPassword shared==token
-          && public && writableParent && malformed && linked && invalidPort)
+          && public && writableParent && malformed && linked && invalidPort && hardlink)
   ]
  where
   check description p=putStrLn description >> quickCheckWithResult stdArgs p

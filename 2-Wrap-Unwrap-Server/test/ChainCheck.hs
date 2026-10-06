@@ -6,12 +6,14 @@ import qualified Bridge.Store as Store
 import qualified Bridge.SolanaHelper as Helper
 import qualified Bridge.Wire as W
 import qualified Bridge.AdminKey as AdminKey
+import qualified Bridge.File as File
 import qualified Bridge.AdminStatus as Admin
 import qualified Bridge.SolanaMessage as Message
 import Paths_ecx_bridge (getDataFileName)
-import System.Directory (removeFile,removeDirectoryRecursive,listDirectory)
+import System.Directory (removeFile,removeDirectoryRecursive,listDirectory,renameFile)
 import qualified System.Posix.Directory as PD
-import System.Posix.Files (setFileMode,createSymbolicLink,createLink)
+import System.Posix.Files (setFileMode,createSymbolicLink,createLink,createNamedPipe)
+import qualified System.Posix.IO as Posix
 import System.Posix.Process (forkProcess,getProcessStatus,exitImmediately,ProcessStatus(..))
 import System.Posix.Signals (signalProcess,sigKILL)
 import System.Exit (ExitCode(..))
@@ -25,7 +27,7 @@ import Bridge.Domain
 import Bridge.Error
 import Bridge.Native
 import qualified Bridge.Solana as Solana
-import Bridge.Identity (publicKey)
+import Bridge.Identity (publicKey,digest)
 import Bridge.RPC
 import Bridge.Wire (Profile(..))
 import Control.Exception (try,bracket,SomeException,throwIO)
@@ -512,6 +514,20 @@ administrationChecks=sequence
             [successor {Admin.recoveryRoot="/tmp/other-attempt"},successor {Admin.recoveryParent=Just(T.replicate 64 "b")}
             ,successor {Admin.recoveryGeneration=2},successor {Admin.recoveryBlockhash=recent},successor {Admin.recoverySlot=100}]
           && Admin.attemptPath successor==root<>".retry"
+  , check "stream helpers retain opened inode, close-on-exec and bounded reads" $ once $ ioProperty $
+      withPrivateDirectory $ \directory->do
+        let path=directory</>"source"; moved=directory</>"original"; bytes=BS.replicate 131073 42
+        BS.writeFile path bytes
+        actual<-bracket (Posix.openFd path Posix.ReadOnly Posix.defaultFileFlags) Posix.closeFd $ \fd->do
+          renameFile path moved
+          BS.writeFile path "replacement"
+          File.withHandle fd File.hashHandle
+        limits<-mapM (\bound->bracket (Posix.openFd moved Posix.ReadOnly Posix.defaultFileFlags) Posix.closeFd $ \fd->
+          File.withHandle fd (File.readBounded bound)) [131073,131072,-1,maxBound]
+        closeOnExec<-bracket (Posix.openFd moved Posix.ReadOnly Posix.defaultFileFlags) Posix.closeFd $ \fd->
+          File.withHandle fd $ \handle->bracket (Posix.handleToFd handle) Posix.closeFd
+            (`Posix.queryFdOption` Posix.CloseOnExec)
+        pure (actual==digest bytes && closeOnExec && limits==[Just bytes,Nothing,Nothing,Nothing])
   , check "private administration records publish exclusively and survive refused writes unchanged" $ once $ ioProperty $
       withPrivateDirectory $ \directory->do
         let path=directory </> "attempt"; symbolic=directory </> "symbolic"; hard=directory </> "hard"
@@ -532,9 +548,12 @@ administrationChecks=sequence
         BS.writeFile (directory </> "oversized") (BS.replicate 8193 32)
         setFileMode (directory </> "oversized") 0o600
         bound<-rejects "administration_attempt_too_large" (AdminKey.readPrivate $ directory </> "oversized")
+        let pipe=directory</>"pipe"
+        createNamedPipe pipe 0o600
+        pipeRefused<-timeout 1000000 (rejects "unsafe_administration_file" $ AdminKey.readPrivate pipe)
         names<-listDirectory directory
         pure (and [duplicate,symlinkRead,symlinkWrite,hardlinkRead,hardlinkWrite,permission,writeBound,bound]
-          && saved=="saved exact transaction bytes" && all (not . T.isInfixOf ".pending-" . T.pack) names)
+          && pipeRefused==Just True && saved=="saved exact transaction bytes" && all (not . T.isInfixOf ".pending-" . T.pack) names)
   , check "administration family locks exclude another process and release after failure" $ once $ ioProperty $
       withPrivateDirectory $ \directory->do
         let path=directory </> "attempt"

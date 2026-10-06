@@ -5,7 +5,7 @@ module Bridge.Signer
   ( SigningAPI, signingAPI, signingServer, verifySigningKey, protectedSignerFile
   , SigningEndpoint(..), signerCredentials, signerCertificate, signingApplication, runSigningServer ) where
 import Bridge.Operation.Internal
-import Bridge.Credentials (verifySigningKey,protectedSignerFile)
+import Bridge.Credentials (verifySigningKey,protectedSignerFile,readSignerAuth,readSignerCertificate)
 import Control.Exception (catch)
 import Data.Aeson (encode,object,(.=))
 import Bridge.Domain (Amount)
@@ -22,7 +22,6 @@ import Data.X509 (SignedCertificate,decodeSignedCertificate)
 import Network.Wai hiding (Request)
 import Network.Wai.Handler.Warp (setHost,setPort,setTimeout,defaultSettings)
 import Network.Wai.Handler.WarpTLS (runTLS,tlsSettings)
-import System.IO (withBinaryFile,IOMode(ReadMode))
 
 -- Keep the shared API pure; only the critical runtime will generate ClientM.
 type SigningAPI = BasicAuth "signer" () :>
@@ -44,8 +43,7 @@ signerCredentials :: SigningEndpoint -> IO BasicAuthData
 signerCredentials endpoint = do
   require (signerPort endpoint>0 && signerPort endpoint<=65535) "invalid_signer_port"
   let path=signerAuthFile endpoint
-  protectedSignerFile path True True
-  bytes<-withBinaryFile path ReadMode (`BS.hGet` 66)
+  bytes<-readSignerAuth path
   let token=BS.take 64 bytes
   require (BS.length token==64 && BS.all (\x->x>=48 && x<=57 || x>=97 && x<=102) token
     && (bytes==token || bytes==token<>"\n")) "invalid_signer_auth_token"
@@ -54,9 +52,7 @@ signerCredentials endpoint = do
 signerCertificate :: SigningEndpoint -> IO SignedCertificate
 signerCertificate endpoint = do
   let path=signerAuthFile endpoint<>".pem"
-  protectedSignerFile path False False
-  bytes<-withBinaryFile path ReadMode (`BS.hGet` 8193)
-  require (BS.length bytes<=8192) "signer_certificate_too_large"
+  bytes<-readSignerCertificate path
   pems<-either (const $ reject "invalid_signer_certificate") pure (pemParseBS bytes)
   case pems of
     [pem]->either (const $ reject "invalid_signer_certificate") pure (decodeSignedCertificate $ pemContent pem)
