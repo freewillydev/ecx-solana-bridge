@@ -9,7 +9,7 @@ tests does not certify later source or packages.
 
 ## Financial-core refactor execution
 
-Current checkpoint: **114/120 (A–I, J105–109, J111, J113, J115–117)**. The chronological records below distinguish
+Current checkpoint: **115/120 (A–I, J105–109, J111, J113–117)**. The chronological records below distinguish
 the verified source and scope of each stage. Real-chain acceptance and final release work remain; the
 funded deployment has not been upgraded by this refactor.
 
@@ -1059,6 +1059,61 @@ artifact inspections and signed candidates) is retained privately under
 `/Volumes/T705/ecx-financial-core-j-release-Pm8VnIab/`. No production files or
 application/schema lines changed in this verification checkpoint. Fresh installation
 and restart/upgrade acceptance of these exact artifacts remains J114.
+
+**115/120: J114 fresh installation acceptance, 2026-10-06.** The two exact
+`a55ec8b` artifacts above pass on separate fresh Ubuntu 24.04 ARM64 and x86-64
+VMs (one CPU/1 GiB, run sequentially). Neither had PostgreSQL, bridge identities,
+deployment state, GHC or Cabal initially. Installing bootstrap OS runtime libraries
+first is necessary to run the ELF executable; `configure` then produced exactly
+five private settings/reference files without creating a database or copying keys.
+`start` authenticated the candidate and provisioned PostgreSQL, schema 22, separate
+roles, keys, host fence and services. The installed data-directory fix passed.
+
+Both architectures passed the same batch:
+
+- HTTPS on guest port 443 using a separate test certificate/key; correct public
+  profile, 1% fees each way and paused availability. No live native RPC was supplied
+  in these installer-only VMs, so checked resume correctly refused readiness.
+- Signer listening only on guest loopback; unauthenticated signing returned 401;
+  removed public operator route returned 404. Worker could not read signer keys,
+  native credentials or signer state; signer could not read public TLS keys or
+  modify worker state. Config/binary ownership, SSH denial, systemd protection and
+  signer zero effective/ambient capabilities were checked.
+- Repeat fresh install refused existing custody. Two authenticated code-only
+  upgrades retained every installed private-file hash and the host sequence fence.
+- Restart with original key/credential paths absent succeeded using installed
+  material. A full VM stop/start changed the kernel boot ID and automatically
+  started both services with zero crash restarts, unchanged private-file/fence
+  hashes, paused intake and ledger/backup sequences still zero.
+
+These are unfunded installation/isolation checks; an empty test ledger does not
+prove funded recovery or physical backup independence. Both disposable VMs were
+stopped and deleted after retaining evidence, reclaiming their disk/RAM. The
+shared backup VM and original custody were preserved. The private release directory
+contains `fresh-acceptance.sh`, both VM templates and `fresh-{arm,x86}-evidence.tgz`
+with configure/start/upgrade/restart logs, unit/permission/runtime-package records,
+status and retained-state hashes. The only harness repair was resolving the
+guest's actual ownership when exporting logs; application checks had passed.
+No new application files or application/schema lines were needed.
+
+**J110 live preparation, still open.** Current `ecx-store-check` passed two complete
+actual L2L Signet/Devnet observation cycles in disposable
+`ecx_rebuild_contract_j_live_20261006`, using the existing restricted reader and
+`ECX_REBUILD_LIVE_OBSERVER_CONFIG` pointing at the retained `rebuild-live` worker
+configuration. It verified restricted native RPC, stable accounting, no pending
+attempts and paused intake without signing or moving funds. Runtime was 40 seconds,
+maximum live Haskell residency 4.5 MB; the database and temporary fence were removed.
+Log: `/tmp/ecx-financial-core-j-live.log`. This is observation evidence, not a new
+funded conversion or actual customer-wallet approval.
+
+The dedicated Signet tester had only 3,494 base units. The official
+[L2L network configuration](https://drivechain.dev/config) and
+[faucet](https://node.signet.drivechain.info/) were checked against the local
+height-16000 block hash. A single 0.01-Signet-coin faucet request was accepted as
+`a7b1c864519f0bc7f3d1b9b7dcc2fd0cccd6825838d78cf08fa0cd4c7d6dd7f9`; the local
+tester wallet sees the exact receipt, initially unconfirmed. No canonical funds
+were moved and no live custody was migrated or activated. Confirm that receipt
+before relying on it for the remaining real-chain transfer batch.
 
 ## Source and evidence boundaries
 

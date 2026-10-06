@@ -2,11 +2,14 @@
 
 The current server is built through Cabal. The candidate installer under `install/`
 targets the rebuilt server; it is **not yet a certified release**. Do not use an old
-release built for the retired server. The hardened ARM64 signed package passed clean
-fresh installation, repeat/upgrade, cold boot and service isolation checks.
-The reviewed x86-64 package now passes those checks too. Unfunded native-node and
-HTTPS-backup integration under installer accounts also passed, including encrypted
-wallet restoration. Funded clean-host restoration and independent storage remain open.
+release built for the retired server. The schema-22 candidates packaged at
+`a55ec8b` pass fresh configure/start, repeated upgrades, restart without source keys,
+cold boot, HTTPS/443 and service isolation on both ARM64 and x86-64. These latest
+installation checks used unfunded custody and intentionally unavailable native RPC;
+checked resume correctly left orders paused. Earlier native-node/HTTPS-backup
+integration and encrypted wallet restoration are recorded separately in
+[release review](RELEASE-REVIEW.md). Funded clean-host restoration and independent
+storage remain open.
 
 ## Interactive setup
 
@@ -79,9 +82,10 @@ is refused. It creates a self-contained `.run` artifact and checksum. Artifact a
 uses the retained Ed25519 `scripts/release-auth` protocol; the trust key must arrive
 through a separate reviewed channel. The format-2 index authenticates only the architectures actually built and reviewed;
 requesting an absent architecture is refused. Old format-1 indices are rejected.
-Signing an ARM64 candidate does not establish x86-64 acceptance. Final restic/platform notice coverage remains a
-distribution gate. The actual ARM64 builder and authenticated fresh-install path have been exercised;
-the executable matched the frozen Mainnet-tested binary exactly.
+Signing an ARM64 candidate does not establish x86-64 acceptance. Final restic/platform
+distribution review remains a gate. Both current Linux builds and authenticated
+fresh-install paths have been exercised. The funded Mainnet pilot remains on its
+older frozen release; its acceptance does not establish funded schema-22 behavior.
 
 Prepare `/root/ecx-material` as root-owned mode 0700, with regular mode-0600 files:
 
