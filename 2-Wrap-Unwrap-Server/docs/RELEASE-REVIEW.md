@@ -9,8 +9,8 @@ tests does not certify later source or packages.
 
 ## Financial-core refactor execution
 
-Current checkpoint: **104/120 (A–I)**. The chronological records below distinguish
-the verified source and scope of each stage. Consolidated audit/acceptance is next; the
+Current checkpoint: **109/120 (A–I, J105–109)**. The chronological records below distinguish
+the verified source and scope of each stage. Real-chain acceptance and final release work remain; the
 funded deployment has not been upgraded by this refactor.
 
 **12/120: checkpoint A complete, 2026-10-05.** Started from clean local/remote
@@ -813,6 +813,102 @@ dependency. Remaining complexity is principally financial/recovery rules, typed
 Opaleye persistence, protocol validation and legacy conversion; no claim is made
 that this refactor has met its experimental line budget. J now audits those
 boundaries, tests deliberate mutations and consolidates release evidence.
+
+### Consolidated audit and local acceptance — 109/120
+
+Implementation/test checkpoint `222b13389935b9dea73ef1fc95b805c240f65820` completes
+J105–109. Production behavior is unchanged from I: only a stale Lifecycle comment
+was corrected. The existing StoreCheck gains **24 net lines** for optional bounded
+history testing, including matching observation fixtures. No new file, dependency,
+runtime, schema change or funded transaction. Application/schema remains
+**71 files / 16,339 lines**; tests are **23 files plus embedded Rust / 10,704 lines**.
+
+The code-first I01–I15 trace followed admission, promotion, preparation, saved
+signing/send, settlement/replay, cancellation, expiry/retry, source recovery,
+native winner changes, treasury, projection, file and restore boundaries. Locked
+Store operations reread facts before deciding/writing; RPC/signing remain outside
+those transactions. Principal and cost events, immutable roots, current generation,
+backup, host fence and read-only role checks remain independent controls. No new
+financial defect was demonstrated. This is internal review, not the independent
+security review required by J118.
+
+Disposable source copies deliberately weakened these checks; each compiled and
+failed the expected Haskell property. Unmodified controls passed. Compiler/harness
+failures were not counted as detected mutations.
+
+| Weakened production predicate | Detection |
+| --- | --- |
+| Promotion receipt amount equals saved gross | Historical-terms/promotion property |
+| Settlement payment identity equals its saved attempt | Settlement refusal property |
+| Send generation equals saved preparation generation | Queue/send refusal property |
+| Broadcast/review sequence has required backup | Preparation/queue/send property |
+| Operator action requires paused state | Retry authority property |
+| New settlement has no previous principal winner | Settlement refusal property |
+| Catalog privilege result accepts a writable owner | Real PostgreSQL owner/SELECT-only reader probe |
+
+The six lifecycle mutations used the existing LifecycleCheck suite and Cabal's
+resolved package IDs; the catalog probe exercised its production Opaleye checker
+against the disposable database. No weakened copy entered the repository. Separate
+compiler probes rejected severity coercion, interchangeable signer results and a
+new customer operation family in the presence of the concrete instances. Export/
+dependency review found one critical dispatch call and one signer client creation/
+execution site; application row queries remain confined to closed Store operations.
+Remaining direct PostgreSQL execute calls are database/DDL/constraint infrastructure.
+
+TLA+ 1.7.4, one worker and a 256 MB heap: **54,289 distinct states**, no violations.
+Wrong output, reused constructor, authentication bypass, dispatch bypass and
+observer dispatch each violated its expected invariant. This checks the finite
+abstract model, not Haskell refinement, cryptography or OS isolation. Logs:
+`/tmp/ecx-financial-core-j-formal-*.log`, `-j-mutation-*.log`, `-j-types-*.log`.
+
+Root `cabal build all -j1 --offline` and the three Cabal suites passed. Final
+assembled StoreCheck runs used `+RTS -M384m` and fresh 001–008 databases with the
+restricted reader, or a clone of the retained schema-21 fixture. These passed:
+
+- Full ledger/rollback/concurrency/replay and encrypted restic restore, with every
+  financial record compared, including the expanded history below.
+- Schema-22 conversion/legacy restoration: 16 roots, 12 exact attempts and 83
+  postings retained; work hashes, customer views, interruption and constraints.
+- Both Devnet and canonical-profile signer HTTPS, authentication/rotation,
+  concurrent serialization, changed-during-signing refusal and exact SDK bytes.
+- Host/ledger fence and uncertain-commit/stale-restart refusal.
+- Actual L2L Signet disposable encrypted-wallet and complete custody backup/
+  download/relocated restore, labels/next address/private signing; wallets removed.
+
+Logs: `/tmp/ecx-financial-core-j-{build,tests,ledger,migration,tls,canonical-tls,fence,custody}.log`.
+I's fresh setup, both-profile server and actual GHC-JavaScript UI evidence still
+applies: their implementation is unchanged. HTTPS payment effects above use offline
+RPC fixtures; wallet restoration is real Signet, not a new funded bridge round trip.
+
+With `ECX_REBUILD_HISTORY_COUNT=1001`, the actual closed ledger operations created,
+prepared, queued, settled and replayed 1,001 refunds for one customer order.
+Ten ReadOrder samples at 1/10/100/1000/1001 refunds averaged
+**20.3 / 22.0 / 32.4 / 249.7 / 249.9 ms**, respectively, on this Mac. At 1,001,
+database logging measured **10 SELECTs** for ReadOrder (including role/metadata
+checks), plus connection/transaction setup; **no chain RPC**. Logging was enabled
+only for that disposable database and reset afterward. Source inspection confirms
+paged order-specific projection rather than replaying journal entries in the
+application. Database query cost still grows with history; these measurements are
+not a production-throughput claim. The complete workload/restore run reported
+142 MiB maximum resident size, 32.4 MiB maximum live Haskell residency and 101 MiB
+total Haskell memory in use, within its 384 MB heap cap.
+
+The first expanded fixture lacked matching chain observations and correctly hit
+the 1,000-unresolved-native-candidate guard; it was not a passing aggregate run
+(`-j-ledger-unobserved-fixture.log`). The corrected fixture now tests both sides:
+1,001 healthy historical payments are excluded from recovery work, while marking
+them all unresolved refuses explicitly; restoring observations clears that backlog.
+Production limits were not raised. The ordinary suite retains two refunds; large
+history is opt-in, avoiding repeated eight-minute workloads during small edits.
+Query evidence: `-j-query-counts.json`; all default financial/recovery tests passed
+after the large-history scenario.
+
+Read-only preparation for J111 also passed using the retained canonical pilot
+configuration: both Mainnet genesis identities, matching mint policy and the
+custody token account (`-j-canonical-config.log`, `-j-canonical-rpc.log`). This does
+not complete canonical migration/cutover, customer-wallet approval, alternate L2L
+history, physically independent recovery or J118–119. The funded runtime was not
+started, upgraded or used to sign/send.
 
 ## Source and evidence boundaries
 
