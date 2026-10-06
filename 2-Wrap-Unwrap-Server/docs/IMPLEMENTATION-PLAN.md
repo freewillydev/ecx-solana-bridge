@@ -1,6 +1,6 @@
 # Auditable financial-core refactor: design and execution plan
 
-Status: **in progress; 36/120 steps verified (checkpoints A–C)**. This replaces the
+Status: **in progress; 37/120 steps verified (A–C and settlement integration)**. This replaces the
 completed implementation checklist, not its evidence. Baseline source is
 `6fa733483360da2414d120eb963025d87c3e0507` (implementation `bc9713c`). The funded
 pilot stays on `548c509`. See [RELEASE-REVIEW.md](RELEASE-REVIEW.md) for the actual
@@ -506,8 +506,8 @@ The executor updates this table after verified checkpoints; not merely after edi
 | --- | --- | --- | --- |
 | A. Baseline and contracts | 1–12 | Complete | `4b8fa31`; baseline `3d4970b`, inventory and reproducible commands recorded |
 | B. Concrete types and regression harness | 13–24 | Complete | `a18b04b`; pure facts/accounting model, bridge and baseline TLS pass |
-| C. Complete payment slice | 25–36 | Complete | Pure decisions, 2,100 generated cases, real-PG settlement comparisons; next D integration |
-| D. Existing-schema integration | 37–46 | Not started | Depends on C |
+| C. Complete payment slice | 25–36 | Complete | `a4aa94f`; pure decisions, 2,100 generated cases, real-PG settlement comparisons |
+| D. Existing-schema integration | 37–46 | In progress: 37 verified | Settlement uses the pure decision; real-PG contracts pass. Next: preparation/send and steps 39–46 |
 | E. Customer funding/accounting | 47–56 | Not started | Depends on D |
 | F. Recovery/reconciliation | 57–70 | Not started | Depends on E |
 | G. Schema 22 and migration | 71–84 | Not started | Depends on F |

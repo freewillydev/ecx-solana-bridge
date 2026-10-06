@@ -461,8 +461,8 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
     when (requireBackup config) $ require (S.backupSequence state>=S.criticalSequence state) "backup_pending"
     pure saved
   RecordNativeSettlement expected result -> recordNativeSettlement c (deploymentFingerprint $ paymentPolicy policy) expected result
-  SettlePayment expected costs proof -> settlePayment c (deploymentFingerprint $ paymentPolicy policy) expected costs proof
-  FailSolana expected fee proof -> failSolana c (deploymentFingerprint $ paymentPolicy policy) expected fee proof
+  SettlePayment expected costs proof -> settleOutcome c (deploymentFingerprint $ paymentPolicy policy) expected (Succeeded costs proof)
+  FailSolana expected fee proof -> settleOutcome c (deploymentFingerprint $ paymentPolicy policy) expected (Failed fee proof)
   RefreshPaymentSource expected observed -> do
     saved<-readSource c (W.depositId expected) >>= asDeposit
     require (saved==expected && observed {W.depositAnchor=W.depositAnchor expected,
@@ -1833,82 +1833,71 @@ authorizeSend c config now txid = do
 
 -- Settlement accepts only an independently verified outcome for the exact saved
 -- attempt. Pausing/source loss does not erase an already finalized liability.
-settlePayment :: PG.Connection -> Text -> RecordedAttempt -> W.PaymentCosts -> Text -> IO ()
-settlePayment c identity expected costs proof = do
-  let txid=signedId(recordedSigned expected)
-      saved=encodeSaved $ object ["costs" .= costs,"proof" .= proof]
-      actual=toInteger(units $ W.networkFee costs)+toInteger(units $ W.accountRent costs)
-  require (not(T.null proof) && T.length proof<=32768 && units(W.networkFee costs)>0
-    && actual<=toInteger(units $ recordedFee expected)
-    && (recordedChain expected=="Solana" || units(W.accountRent costs)==0)) "settlement_fee_or_evidence_invalid"
-  (current,view)<-settlementContext c identity expected "settled" saved
-  unless (recordedState current=="settled") $ do
-    post c ("settlement:"<>txid) "successful finalized payout" (settlement $ savedPayment view)
-    forM_ [("network-fee",W.networkFee costs),("account-rent",W.accountRent costs)] $ \(label,cost)->
-      when (units cost>0) $ paymentCost c current (label<>":"<>txid) label cost
-    resolvePayment c current view "settled" saved
-
-failSolana :: PG.Connection -> Text -> RecordedAttempt -> Amount -> Text -> IO ()
-failSolana c identity expected fee proof = do
-  require (recordedChain expected=="Solana" && units fee>0 && fee<=recordedFee expected
-    && not(T.null proof) && T.length proof<=32768) "invalid_failure_evidence"
-  let txid=signedId(recordedSigned expected)
-  (current,view)<-settlementContext c identity expected "failed" proof
-  if recordedState current=="failed" then do
-    charged<-O.runSelect c $ do
-      (_,event,_,account,n)<-O.selectTable S.postings
-      O.where_ (event O..== O.sqlStrictText("failed-fee:"<>txid) O..&& account O..== O.sqlStrictText "external")
-      pure n
-      :: IO [Int64]
-    require (charged==[units fee]) "failure_evidence_conflict"
-  else do
-    paymentCost c current ("failed-fee:"<>txid) "finalized Solana failure network fee" fee
-    resolvePayment c current view "failed" proof
-
-settlementContext :: PG.Connection -> Text -> RecordedAttempt -> Text -> Text -> IO (RecordedAttempt,PaymentView)
-settlementContext c identity expected state proof = do
-  current<-readAttempt c (signedId $ recordedSigned expected)
-  require (recordedState expected=="broadcast_intent" && recordedSequence expected/=Nothing
-    && current {recordedState=recordedState expected,recordedObservation=recordedObservation expected}==expected) "settlement_attempt_changed"
+settleOutcome :: PG.Connection -> Text -> RecordedAttempt -> SettlementOutcome -> IO ()
+settleOutcome c identity expected outcome = do
+  checked (checkSettlementEvidence expected outcome)
+  let txid=signedId(recordedSigned expected); text=O.sqlStrictText
+  current<-readAttempt c txid
   view<-readPayment c identity (recordedPayment current)
-  if recordedState current==state then require (recordedObservation current==Just proof) "settlement_evidence_conflict"
-  else do
-    require (current==expected && savedStatus view `elem` [PaymentPaying,PaymentReview]) "settlement_not_expected"
-    rows<-O.runSelect c $ do
-      intent<-O.selectTable S.intents
-      (key,currency,n,released)<-O.selectTable S.feeHolds
-      O.where_ (S.intentId intent O..== O.sqlStrictText(recordedPayment current) O..&& key O..== S.intentId intent)
-      pure (S.intentResolved intent,currency,n,released)
-      :: IO [(Int64,Text,Int64,Int64)]
-    let asset=if recordedChain current=="Native" then "Native" else "Sol"
-    require (case rows of [(0,currency,n,0)]->currency==asset && n>=units(recordedFee current); _->False) "payment_intent_not_settleable"
-    winners<-O.runSelect c $ do
-      r<-O.selectTable S.attempts
-      O.where_ (S.attemptIntent r O..== O.sqlStrictText(recordedPayment current) O..&& S.attemptState r O..== O.sqlStrictText "settled")
-      pure (S.attemptId r)
-      :: IO [Text]
-    require (null winners) "payment_already_settled"
-  pure (current,view)
+  holds<-O.runSelect c $ O.limit 2 $ do
+    intent<-O.selectTable S.intents
+    (key,currency,n,released)<-O.selectTable S.feeHolds
+    O.where_ (S.intentId intent O..== text(recordedPayment current) O..&& key O..== S.intentId intent
+      O..&& S.intentResolved intent O..== O.sqlInt8 0 O..&& released O..== O.sqlInt8 0)
+    pure (currency,n)
+    :: IO [(Text,Int64)]
+  winners<-O.runSelect c $ O.limit 1 $ do
+    row<-O.selectTable S.attempts
+    O.where_ (S.attemptIntent row O..== text(recordedPayment current) O..&& S.attemptState row O..== text "settled")
+    pure(S.attemptId row)
+    :: IO [Text]
+  charged<-case outcome of
+    Failed{} | recordedState current=="failed"->O.runSelect c $ O.limit 2 $ do
+      (_,event,_,account,n)<-O.selectTable S.postings
+      O.where_ (event O..== text("failed-fee:"<>txid) O..&& account O..== text "external")
+      pure n
+    _->pure []
+    :: IO [Int64]
+  let held=case holds of
+        [(currency,n)]->(,) <$> lookup currency [("Native",Native),("Sol",Sol)] <*> either (const Nothing) Just (amount $ toInteger n)
+        _->Nothing
+      winner=case winners of [tx]->Just tx; _->Nothing
+      failedCharge=case charged of [n]->Just(toInteger n); _->Nothing
+  decision<-checked $ decideSettlement expected (SettlementFacts current view held winner failedCharge) outcome
+  case decision of
+    SettlementReplay->pure ()
+    ApplySettlement effects->do
+      case settlementOutcome effects of
+        Succeeded costs _->do
+          post c ("settlement:"<>txid) "successful finalized payout" (settlementPrincipal effects)
+          forM_ [("network-fee",W.networkFee costs),("account-rent",W.accountRent costs)] $ \(label,cost)->
+            when (units cost>0) $ paymentCost c current (label<>":"<>txid) label cost
+        Failed cost _->paymentCost c current ("failed-fee:"<>txid) "finalized Solana failure network fee" cost
+      resolvePayment c current effects
 
 paymentCost :: PG.Connection -> RecordedAttempt -> Text -> Text -> Amount -> IO ()
 paymentCost c saved event explanation quantity =
   let asset=if recordedChain saved=="Native" then Native else Sol; n=toInteger(units quantity)
   in post c event explanation [Posting asset Operating (-n),Posting asset External n]
 
-resolvePayment :: PG.Connection -> RecordedAttempt -> PaymentView -> Text -> Text -> IO ()
-resolvePayment c saved view state proof = do
-  let text=O.sqlStrictText; identifier=recordedPayment saved; paid=state=="settled"
-  _<-O.runUpdate c O.Update {O.uTable=S.attempts,O.uUpdateWith= \r->r {S.attemptState=text state,S.attemptObservation=O.toNullable $ text proof},O.uWhere= \r->S.attemptId r O..== text(signedId $ recordedSigned saved),O.uReturning=O.rCount}
-  _<-O.runUpdate c O.Update {O.uTable=S.intents,O.uUpdateWith= \r->r {S.intentResolved=O.sqlInt8 1},O.uWhere= \r->S.intentId r O..== text identifier,O.uReturning=O.rCount}
-  _<-O.runUpdate c O.Update {O.uTable=S.feeHolds,O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,O.sqlInt8 1),O.uWhere= \(key,_,_,_)->key O..== text identifier,O.uReturning=O.rCount}
-  let customer=case paymentFunding(savedPayment view) of Conversion order _ _ _->Just(order,False); Refund order _ _ _->Just(order,True); EarnedFees{}->Nothing
-  forM_ customer $ \(order,isRefund)->do
-    _<-O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \r->r {S.obligationStatus=text $ if paid then "paid" else "review"},O.uWhere= \r->S.obligationId r O..== text identifier,O.uReturning=O.rCount}
-    _<-O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text $ if not paid then "NeedsReview" else if isRefund then "Refunded" else "Paid",S.payoutTx=if paid then O.toNullable(text $ signedId $ recordedSigned saved) else S.payoutTx r},O.uWhere= \r->S.orderId r O..== text order O..&& (O.sqlBool(not isRefund) O..|| S.status r O../= text "Paid"),O.uReturning=O.rCount}
+resolvePayment :: PG.Connection -> RecordedAttempt -> SettlementEffects -> IO ()
+resolvePayment c saved effects = do
+  let text=O.sqlStrictText; identifier=recordedPayment saved; outcome=settlementOutcome effects
+      state=outcomeState outcome; proof=outcomeRecord outcome
+      paid=case outcome of Succeeded{}->True; Failed{}->False
+  requireOne "settlement_attempt_update_failed" $ O.runUpdate c O.Update {O.uTable=S.attempts,O.uUpdateWith= \r->r {S.attemptState=text state,S.attemptObservation=O.toNullable $ text proof},O.uWhere= \r->S.attemptId r O..== text(signedId $ recordedSigned saved),O.uReturning=O.rCount}
+  requireOne "settlement_intent_update_failed" $ O.runUpdate c O.Update {O.uTable=S.intents,O.uUpdateWith= \r->r {S.intentResolved=O.sqlInt8 1},O.uWhere= \r->S.intentId r O..== text identifier,O.uReturning=O.rCount}
+  requireOne "settlement_fee_hold_update_failed" $ O.runUpdate c O.Update {O.uTable=S.feeHolds,O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,O.sqlInt8 1),O.uWhere= \(key,_,_,_)->key O..== text identifier,O.uReturning=O.rCount}
+  forM_ (settlementCustomer effects) $ \customer->do
+    let order=resolutionOrder customer
+    requireOne "settlement_obligation_update_failed" $ O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \r->r {S.obligationStatus=text $ if paid then "paid" else "review"},O.uWhere= \r->S.obligationId r O..== text identifier,O.uReturning=O.rCount}
+    _<-O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text $ resolutionStatus customer,S.payoutTx=if paid then O.toNullable(text $ signedId $ recordedSigned saved) else S.payoutTx r},O.uWhere= \r->S.orderId r O..== text order O..&& (O.sqlBool(not $ preservePaidOrder customer) O..|| S.status r O../= text "Paid"),O.uReturning=O.rCount}
     when paid $ do
       _<-O.runUpdate c O.Update {O.uTable=S.reservations,O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,text "released"),O.uWhere= \(key,_,_,_)->key O..== text order,O.uReturning=O.rCount}
       _<-O.runUpdate c O.Update {O.uTable=S.operatingReservations,O.uUpdateWith= \(key,kind,asset,n,_)->(key,kind,asset,n,text "released"),O.uWhere= \(key,_,_,_,phase)->key O..== text order O..&& O.in_ (map text ["quote","obligation"]) phase,O.uReturning=O.rCount}
       pure ()
+ where
+  requireOne code operation=operation >>= \count->require (count==1) code
 
 -- Repair only the historical extra-refund projection bug. Both economic payments
 -- must already be settled; the caller supplies neither status nor payout identity.

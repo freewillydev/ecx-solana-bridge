@@ -136,6 +136,31 @@ decisions and temporary comparison adapter, then measures the total replacement.
 The expansion gate is met for this bounded slice; broader recovery and schema
 work remain unverified, and no overall line-count target is guaranteed.
 
+### Checkpoint D — 37/120, settlement integrated
+
+The closed `SettlePayment` and `FailSolana` operations now load their current
+schema-21 facts under the existing writer transaction and call `decideSettlement`.
+Removed the old duplicate success/failure/context rules. One application path
+retains exact principal/cost event identities, replay evidence and paid-order link
+precedence; required attempt/intent/fee-hold/obligation updates each affect one row.
+Malformed outcome evidence retains its earlier refusal order. This covers I02–I07
+without changing the schema, critical entry or funded deployment.
+
+The one-job offline `ecx-store-check` build and default PostgreSQL contract run
+both exited 0 on fresh `ecx_rebuild_contract_core_d_settlement_20261005`, using the
+same restricted reader and migrations as A. Logs:
+`/tmp/ecx-financial-core-integrate-build.log` and
+`/tmp/ecx-financial-core-integration-store.log`. All existing settlement, replay,
+failure, extra-refund, source/replacement, role, fencing and encrypted archive
+assertions passed. The temporary comparison adapter now shares the production
+decision; these are integration checks, not another old/new differential run.
+Preparation/send and the full assembled-process checks still await D38–46.
+
+The Store settlement responsibility fell from 79 to 68 physical lines. Including
+the shared pure evidence check and row-count checks, the total is **−7 application
+lines, no file change** relative to C: 66 application/schema files / 15,066 lines.
+Test counts remain 9,640. The overall refactor has not yet reduced baseline size.
+
 ## Source and evidence boundaries
 
 | Version | Verified scope | Not established by that evidence |

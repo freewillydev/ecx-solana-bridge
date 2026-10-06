@@ -586,7 +586,8 @@ bytes, generation, evidence or ordering to make differential tests pass.
 shrinkers. Its expected account map and paid set are independent of production
 accounting. The new adapter uses actual pure settlement decisions for replay;
 the baseline `Domain.settlement` adapter remains a test-only accounting comparison.
-The actual server continues using its old Store rules until checkpoint D.
+Settlement now uses the pure decision in its closed Store operation; preparation
+and send still use their old Store rules until the remainder of checkpoint D.
 The existing real-PostgreSQL duplicate-settlement, extra-refund, stale-generation,
 missing-backup and native-source-refresh regressions remain the durable oracle.
 The separate HTTPS fixture suspends signing, invalidates custody, then proves the
@@ -615,12 +616,13 @@ twice. The rolling spend total uses the Store's existing durable operating clock
 Live exact preparation replay deliberately does not require fresh admission; it
 grants no new signing/send authority. All such later operations recheck readiness.
 
-The temporary `StoreCheck.compareSettlement` adapter loads sanitized current facts
-using closed Opaleye operations, then compares the pure decision with the unchanged
-actual Store writer. Fifteen success/failure/replay/refusal calls cover native,
+The temporary `StoreCheck.compareSettlement` adapter loaded sanitized current facts
+using closed Opaleye operations and compared the pure decision with the unchanged
+actual Store writer at checkpoint C. Fifteen success/failure/replay/refusal calls cover native,
 Solana, earned, conversion, extra refund, covered source and native replacement.
 It compares exact refusal codes, balance movements, retained posting prefix and
 saved outcome; refusals/replays must leave the financial history unchanged. It
 neither runs a second paying server nor normalizes monetary values or signed bytes.
-Remove it when D replaces the old rules, retaining the independent model and
+Now that settlement uses that decision, it is integration coverage only. Remove
+the adapter during D, retaining the independent model and
 original financial regression checks.

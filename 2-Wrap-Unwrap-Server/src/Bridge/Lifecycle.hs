@@ -3,7 +3,7 @@
 module Bridge.Lifecycle
   ( PaymentStatus(..), PaymentView(..), PreparedPayment(..), RecordedAttempt(..)
   , SettlementOutcome(..), SettlementFacts(..), SettlementDecision(..), SettlementEffects(..)
-  , CustomerResolution(..), decideSettlement, outcomeState, outcomeRecord, outcomeCosts
+  , CustomerResolution(..), decideSettlement, checkSettlementEvidence, outcomeState, outcomeRecord, outcomeCosts
   , IntakeFacts(..), FeeBudget(..), PreparationHistory(..), PriorFeeHold(..)
   , PreparationAdmission(..), PreparationFacts(..), PreparationDecision(..), decidePreparation
   , SendFacts(..), QueueDecision(..), decideQueue, decideSend, checkIntake
@@ -65,18 +65,10 @@ outcomeCosts (Failed cost _) = PaymentCosts cost zero
 -- under source review. Source loss cannot erase an observed outgoing payment.
 decideSettlement :: RecordedAttempt -> SettlementFacts -> SettlementOutcome -> Either Text SettlementDecision
 decideSettlement expected facts outcome = do
+  checkSettlementEvidence expected outcome
   let current=settlementCurrent facts; view=settlementPayment facts
       state=outcomeState outcome; proof=outcomeRecord outcome
-      costs=outcomeCosts outcome
-      fee=networkFee costs; rent=accountRent costs
-      validProof text=not(T.null text) && T.length text<=32768
       paid=case outcome of Succeeded{}->True; Failed{}->False
-  case outcome of
-    Succeeded _ evidence -> ensure (validProof evidence && units fee>0
-      && toInteger(units fee)+toInteger(units rent)<=toInteger(units $ recordedFee expected)
-      && (recordedChain expected=="Solana" || units rent==0)) "settlement_fee_or_evidence_invalid"
-    Failed _ evidence -> ensure (recordedChain expected=="Solana" && validProof evidence
-      && units fee>0 && fee<=recordedFee expected) "invalid_failure_evidence"
   ensure (recordedState expected=="broadcast_intent" && recordedSequence expected/=Nothing
     && paymentId(savedPayment view)==recordedPayment current
     && recordedChain current==(if paymentAsset(savedPayment view)==Native then "Native" else "Solana")
@@ -84,7 +76,7 @@ decideSettlement expected facts outcome = do
     "settlement_attempt_changed"
   if recordedState current==state then do
     ensure (recordedObservation current==Just proof) "settlement_evidence_conflict"
-    unless paid $ ensure (settlementFailedCharge facts==Just(toInteger $ units fee)) "failure_evidence_conflict"
+    unless paid $ ensure (settlementFailedCharge facts==Just(toInteger $ units $ networkFee $ outcomeCosts outcome)) "failure_evidence_conflict"
     pure SettlementReplay
   else do
     ensure (current==expected && savedStatus view `elem` [PaymentPaying,PaymentReview]) "settlement_not_expected"
@@ -98,6 +90,18 @@ decideSettlement expected facts outcome = do
           Refund order _ _ _ -> Just $ CustomerResolution order True (if paid then "Refunded" else "NeedsReview")
           EarnedFees{} -> Nothing
     pure $ ApplySettlement $ SettlementEffects outcome (if paid then settlement outgoing else []) customer
+
+-- Store checks this before loading the subject, retaining the existing refusal
+-- order for malformed evidence. decideSettlement repeats the same pure check;
+-- passing it alone is never permission to commit any financial effect.
+checkSettlementEvidence :: RecordedAttempt -> SettlementOutcome -> Either Text ()
+checkSettlementEvidence expected outcome = case outcome of
+  Succeeded costs proof -> ensure (validProof proof && units(networkFee costs)>0
+    && toInteger(units $ networkFee costs)+toInteger(units $ accountRent costs)<=toInteger(units $ recordedFee expected)
+    && (recordedChain expected=="Solana" || units(accountRent costs)==0)) "settlement_fee_or_evidence_invalid"
+  Failed cost proof -> ensure (recordedChain expected=="Solana" && validProof proof
+    && units cost>0 && cost<=recordedFee expected) "invalid_failure_evidence"
+ where validProof proof=not(T.null proof) && T.length proof<=32768
 
 ensure :: Bool -> Text -> Either Text ()
 ensure condition code=unless condition (Left code)
