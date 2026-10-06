@@ -1,6 +1,8 @@
 # Auditable financial-core refactor: design and execution plan
 
-Status: **in progress; 115/120 steps verified (A–I, J105–109, J111, J113–117)**. This replaces the
+Status: **117/120 steps verified (A–I, J105–111, J113–117, J120)**. Implementation and
+available acceptance are complete; external gates J112, J118 and J119 remain open.
+The source-size reduction target was not met; see the measured J117 results. This replaces the
 completed implementation checklist, not its evidence. Execution baseline source is
 `3d4970b3e502de9d4c9a89803610df3802e3e322` (implementation `bc9713c`). The funded
 pilot stays on `548c509`. See [RELEASE-REVIEW.md](RELEASE-REVIEW.md) for the actual

@@ -5,12 +5,13 @@ administration. New conversions charge 1% in each direction. The implementation
 uses Haskell, Servant and PostgreSQL/Opaleye; its browser uses GHC's JavaScript
 backend and HTML/CSS. The Solana Rust SDK is called through bounded Haskell FFI.
 
-The main application is available for source review. Funded L2L Signet/Solana
-Devnet flows and the canonical Mainnet round trip passed: 3,000 wrapped → 2,970
-native, followed by 1,000 native → 990 wrapped base units. Both providers agreed
-on the finalized Solana payout and custody reconciliation had zero differences.
-The pilot is stopped. Public release still requires the remaining acceptance and
-external operating prerequisites; see [evidence and release gates](2-Wrap-Unwrap-Server/docs/RELEASE-REVIEW.md).
+The schema-22 candidate is ready for source review. Real L2L Signet/Solana Devnet
+tests passed both conversions (10,000 → 9,900 base units), an additional-payment
+refund, restart during payout and a verified Solana expiry followed by an approved
+retry. Final custody matched the ledger exactly. The refactor has completed
+117/120 checkpoints; external recovery, independent review and activation remain.
+Its source-size target was not met: application/schema is 16,339 lines. See the
+[measured results, evidence and release gates](2-Wrap-Unwrap-Server/docs/RELEASE-REVIEW.md).
 
 1. [Make Wrapped ECX](1-Make-Wrapped-ECX/README.md): mint, token-account and metadata operations.
 2. [Wrap/Unwrap Server](2-Wrap-Unwrap-Server/README.md): customer orders, custody, payments and recovery.
@@ -23,7 +24,9 @@ the network, token, limits, fee previews and both direction forms. Creating an
 order requires live availability; funding is a separate test step. Existing tester
 orders require their private recovery links. Keep those links private.
 
-The funded runtime is frozen at `54c2bfd` in an Ubuntu VM with separate
+The earlier canonical betanet/Mainnet pilot remains frozen at `548c509`; this
+refactor has not upgraded it. Its confirmed round trip was 3,000 wrapped → 2,970
+native, then 1,000 native → 990 wrapped base units. It uses an Ubuntu VM with separate
 administrator, worker and signer users and restricted database roles. Same-host
 in-flight restoration passed using the sequence-55 custody snapshot. Its HTTPS
 backup receiver remains on the same Mac, so physically independent disaster

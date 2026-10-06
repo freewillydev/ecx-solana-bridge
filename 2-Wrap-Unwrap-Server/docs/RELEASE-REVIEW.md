@@ -3,15 +3,16 @@
 The bridge has completed funded development tests and a canonical betanet/Solana
 Mainnet round trip. It is ready for source review, **not public-release approval**.
 The [previous nine-step internal completion plan](https://github.com/freewillydev/ecx-solana-bridge/blob/6fa7334/2-Wrap-Unwrap-Server/docs/IMPLEMENTATION-PLAN.md) is complete.
-The [auditable-core refactor plan](IMPLEMENTATION-PLAN.md) is in progress;
-its implementation and acceptance are not complete. Passing an older candidate's
-tests does not certify later source or packages.
+The [auditable-core refactor plan](IMPLEMENTATION-PLAN.md) has completed implementation
+and available acceptance; external recovery, independent review and activation gates
+remain open. Its source-size reduction target was not met. Passing an older
+candidate's tests does not certify later source or packages.
 
 ## Financial-core refactor execution
 
-Current checkpoint: **115/120 (A–I, J105–109, J111, J113–117)**. The chronological records below distinguish
-the verified source and scope of each stage. Real-chain acceptance and final release work remain; the
-funded deployment has not been upgraded by this refactor.
+Current checkpoint: **117/120 (A–I, J105–111, J113–117, J120)**. The chronological records below
+distinguish the verified source and scope of each stage. J112, J118 and J119 remain open;
+the funded canonical deployment has not been upgraded by this refactor.
 
 **12/120: checkpoint A complete, 2026-10-05.** Started from clean local/remote
 `master` at `3d4970b3e502de9d4c9a89803610df3802e3e322`; created branch
@@ -1111,9 +1112,74 @@ The dedicated Signet tester had only 3,494 base units. The official
 [faucet](https://node.signet.drivechain.info/) were checked against the local
 height-16000 block hash. A single 0.01-Signet-coin faucet request was accepted as
 `a7b1c864519f0bc7f3d1b9b7dcc2fd0cccd6825838d78cf08fa0cd4c7d6dd7f9`; the local
-tester wallet sees the exact receipt, initially unconfirmed. No canonical funds
-were moved and no live custody was migrated or activated. Confirm that receipt
-before relying on it for the remaining real-chain transfer batch.
+tester wallet saw the exact receipt, initially unconfirmed. It subsequently confirmed
+and funded the isolated testnet batch below; no canonical funds were moved.
+
+**116/120: J110 funded Signet/Devnet acceptance, 2026-10-06.** Frozen implementation
+`3174822`, schema 22, ran through the actual customer/operator Servant and separate
+signer interfaces with a new dedicated native wallet, Solana custody key and database
+`ecx_rebuild_contract_j_funded_20261006`. Historical custody/configuration was untouched.
+The official L2L faucet supplied tester coins; existing Devnet tester inventory
+funded the new custody. Both conversions used 10,000 gross, 100 fee and 9,900 net
+base units. Additional wrapped principal was refunded in full, without another fee.
+
+| Confirmed/finalized effect | Transaction | Evidence |
+| --- | --- | --- |
+| Native payout, 9,900 units | `faafcce28fd33a62cf853794bae3493c5002e662f3dad834da0ec029baf6bc6c` | L2L block 17156; 747-unit operating fee |
+| Wrapped payout, 9,900 units | `22WRLMExLYyKitJenfFKtDT6qC5R62qi2SHiUuxiuXBn65R78oHuoBGSJutqEV358aBx4VcTvmFEmYDPQSTzwMUL` | Devnet slot 508059536; 5,000-lamport fee |
+| Extra-payment refund, 10,000 units | `3v7kEKubBAvCDR3Tay5X7GaN7pSx9jsVyrVqcy7iiQnvgh5QfW5FiXFxdbGVaum62qa5bmYqgdEpH5FLMRwnJVNR` | Devnet slot 508059748; 5,000-lamport fee |
+
+The native payout was broadcast before stopping/restarting the worker. Startup
+paused intake; explicit checked resume passed. Confirmation retained one attempt
+with identical transaction ID, signed-byte hash, generation and queue sequence.
+
+For real Solana expiry, a private Haskell watcher using existing closed Store reads
+suspended only this worker immediately after generation-0 signed bytes were saved.
+No RPC response, financial row or network was fabricated. After resumption, the
+blockhash-window check refused submission and paused intake. Recovery proved finalized
+height beyond validity, invalid blockhash, absent transaction/status and complete
+custody-token/operating histories to their immutable origins. The retained attempt
+`9vqK9tyBeWaH3L7ZYy5iR8ud2g9atQ7sAMC1YmsjvfGQVQoX5t66L8abuENsSd1tcuVn5UAzfSszXuCm2KU9n6T`
+remains in review with unchanged bytes and expiry evidence. Only the separate paused
+`retry-solana` approval allowed generation 1, which settled the original payment once.
+
+An additional payment to the completed unwrap's original Solana Pay reference was
+observed, explicitly refunded to its verified sender and finalized. The customer
+view retained the original native conversion link throughout. Replaying both
+original order requests returned HTTP 200, identical saved terms/deadlines and the
+paid views; saved-order reads agreed. Actual finalized transaction bytes matched
+the ledger hashes, and token balance changes proved the exact two Solana payouts.
+
+Final custody matched the ledger: **99,353 native units, 100,100 wrapped units and
+4,990,000 lamports**. Native/wrapped earned balances are 100 each; customer principal,
+pending attempts and payment candidates are zero. Critical sequence is 27, intake
+is paused and custody reconciliation has no error. A full local custody bundle
+(ledger, native wallet, Solana key and configuration) passed `check-custody` at 27.
+
+Private evidence is `/Volumes/T705/ecx-financial-core-j-live-8S5IgNl8/`: `acceptance.json`,
+original requests, signed customer transactions, chain results, stopped-worker
+Opaleye inspections, hashes, logs and the custody bundle. The temporary customer/
+watcher drivers total 167 Haskell lines; their source/compile recipes are retained,
+and their 204-MiB executables/objects were removed. Harness setup corrections were
+limited to the watcher's expected missing-payment error/import and the backup's
+required existing private parent. No application defect or production edit was
+needed. Application/schema stays **71 files / 16,339 lines**, unchanged in this batch.
+
+Scope is I01–I07, I09–I11 and I14. Transfers used dedicated tester clients, not
+customer-wallet UI approval. Devnet used its configured public primary provider;
+this is not independent-Mainnet verification. `backupRequired=false` and a local
+bundle do not prove production backup coverage or physical independence. Existing
+canonical preparation and installation evidence retain their separate scopes.
+
+**117/120: J120 local closure.** Both task test services and the watcher are stopped;
+the new test wallet is unloaded but preserved with its keys, funded ledger and
+verified bundle. Temporary installer VMs are deleted; retained build/test VMs are
+stopped. The shared backup VM, native nodes, PostgreSQL and original custody are
+preserved. This documentation checkpoint is committed/pushed on the refactor branch;
+no rebuild is needed because executable inputs are unchanged. J112 (external
+recovery), J118 (independent review) and J119 (operator resources/activation) remain
+required. This closes available implementation/acceptance, not public release or
+the unmet source-size target.
 
 ## Source and evidence boundaries
 

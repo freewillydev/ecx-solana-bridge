@@ -12,8 +12,11 @@ recovery checks. It is not yet a public or valuable-fund release. See the precis
 
 The current financial-core refactor uses schema 22: payment roots own execution,
 while immutable funding and retained chain/recovery evidence remain separate.
-Local migration, restoration and process checks are recorded against this version;
-historical funded tests do not establish funded acceptance of the refactor.
+This version passed local migration/restoration/process checks and real Signet/
+Devnet conversions, an additional-payment refund, payout restart and Solana expiry/
+retry. These used dedicated tester clients; wallet approval, external recovery and
+independent review remain. Historical canonical tests do not approve this refactor
+for valuable funds.
 
 ## Build and run
 
