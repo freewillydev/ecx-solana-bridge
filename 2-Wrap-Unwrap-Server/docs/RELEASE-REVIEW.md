@@ -268,6 +268,54 @@ size reduction or security certification. E54 (derived customer status/payout),
 E55 (its integrated mixed-history comparison) and E56 (whole-checkpoint closure)
 remain. The schema/state reduction and remaining release gates are still open.
 
+### Customer projection and checkpoint E complete — 56/120
+
+Steps E54–56 are verified on top of `01eb253`. `projectCustomer` now owns public
+payment progress and payout precedence. The closed Opaleye reader supplies original
+settlement order, the current winner and active work. Paid conversion links survive
+extra refunds; successive refunds retain the previous link until the next settlement.
+Applicable source/native review remains visible. Admission/sticky review still uses
+schema-21 status; compatibility columns remain written until G. No schema or signing
+authority changed, and funded custody stayed on its prior source.
+
+Verification (I02–I07, I09–I10, I13–I14), with the same cache environment and one job:
+
+- `cabal build ecx-bridge:exe:ecx-store-check ecx-bridge:exe:ecx-bridge ecx-bridge:test:bridge-test -j1 --offline`: pass.
+- `cabal test ecx-bridge:bridge-test -j1 --offline --test-show-details=direct`: pass.
+  Lifecycle has 4,500 generated cases, fixed groups and two expected mutation failures.
+  The new 900 generated cases cover row-order-independent projection, successive
+  refunds and paged summaries of up to 1,010 refund records retaining at most three
+  display facts. This last boundary is a pure property, not a thousand-row PG test.
+- `cabal run ecx-bridge:exe:ecx-store-check -j1 --offline`: pass on freshly migrated
+  disposable `ecx_rebuild_contract_core_e_projection_20261005` and its SELECT-only
+  role. The projection matched 17 histories before settlement and 27 after recovery,
+  without financial mutation. Stale compatibility links, changed native winners,
+  reverse-ordered refund IDs, in-flight status and exact replay all passed.
+  Injected promotion/refund failures restored every financial row/hold and fenced
+  the writer. Existing preparation/queue/settlement faults, budget/recovery races,
+  role isolation and encrypted restic download/restoration also passed.
+
+An added refund fixture initially followed an intentionally unresolved native scan
+fixture and correctly refused `destination_payment_unresolved`. Moving that fixture
+before the unresolved work fixed test ordering without changing the production guard.
+The fresh full run passed. Logs: `/tmp/ecx-financial-core-e-projection-{build,tests,store,schema}.log`.
+No new VM or real-chain send; protocol evidence here is deterministic test data.
+
+| E54–56 source | Before | After | Difference |
+| --- | ---: | ---: | ---: |
+| `src/Bridge/Lifecycle.hs` | 532 | 589 | +57 |
+| `runtime/Bridge/Store.hs` | 3,405 | 3,465 | +60 |
+| Application piece | 3,937 | 4,054 | **+117, zero new files** |
+| Existing lifecycle/Store tests | 4,686 | 4,848 | **+162, zero new files** |
+
+All of E costs **+353 application / +265 test lines**, with no new files. Repository
+totals are **66 application/schema files / 15,517 lines**, **23 test files plus
+embedded Rust / 9,963 lines**, and **31 tooling files / 3,362 lines**. This adds an
+explicit decision/projection boundary; it is not yet the planned net code reduction.
+The old settlement/preparation/admission helper implementations are removed; schema-21
+compatibility writes remain intentionally until G. Next is F57–70 recovery extraction,
+then the schema/state consolidation. Security review and final release gates remain.
+
 ## Source and evidence boundaries
 
 | Version | Verified scope | Not established by that evidence |

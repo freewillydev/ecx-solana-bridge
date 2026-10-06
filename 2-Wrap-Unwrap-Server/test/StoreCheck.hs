@@ -1297,6 +1297,7 @@ ledgerMain = do
         expectStore "invalid_promotion_time" (evalWrite writer $ PromoteDeposit (-1) "promote-source")
         pure ("promote-source",missing)
       paymentAtomicityContract fixtures settings reader (store policy limits)
+      customerProjectionContract fixtures reader
       withWriter settings (store policy limits) (const $ pure ()) $ \writer -> do
         evalWrite writer (PromoteDeposit 100 promoted) >>= check . not
         (_,restartedPreparation,restartedHistory)<-evalRead reader (ReadPaymentWork "convert:historical-promotion")
@@ -1322,6 +1323,7 @@ ledgerMain = do
         completed<-evalRead reader (ReadPayment "convert:historical-promotion")
         check (savedStatus completed==PaymentPaid)
         paidRefundContract fixtures reader writer
+        orderedRefundContract fixtures reader writer
         fixture fixtures ReadyIntake
         _<-evalWrite writer (PreparePayment 100 ("convert:"<>failedPayment) (money 10) "{}")
         evalWrite writer (SaveDraft ("convert:"<>failedPayment) 0 "{}")
@@ -1553,6 +1555,7 @@ ledgerMain = do
         treasuryContract fixtures reader writer
         -- Unavailable-chain startup and its retained balances are exercised by
         -- serverMain through the actual executable, HTTP and operator transport.
+      customerProjectionContract fixtures reader
       archiveContract settings fixtures reader
       beforeLarge<-evalRead reader ReadBalances
       fixture fixtures LargeBalances
@@ -1581,13 +1584,14 @@ paymentAtomicityContract fixtures settings reader policy = do
       snapshot=(,) <$> fixture fixtures MigrationRecords <*> fixture fixtures ArchiveRecords
       write :: (Writer -> IO a) -> IO a
       write action=withWriter settings policy (const $ pure ()) action
-      fault :: PG.Query -> StoreWrite a -> Bool -> IO ()
-      fault trigger operation deferred = bracket_
+      fault :: PG.Query -> StoreWrite a -> Bool -> Bool -> IO ()
+      fault trigger operation deferred paused = bracket_
         (void $ PG.execute_ fixtures ("CREATE FUNCTION ecx_contract_payment_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION USING ERRCODE='23514', MESSAGE='injected payment constraint'; END $$; "<>trigger))
         (void $ PG.execute_ fixtures "DROP FUNCTION ecx_contract_payment_failure() CASCADE") $ do
           checkpoint<-newIORef False
           withWriter settings policy (\_->writeIORef checkpoint True) $ \writer->do
             fixture fixtures ReadyIntake
+            when paused (fixture fixtures $ SetPause True)
             before<-snapshot
             writeIORef checkpoint False
             result<-try (void $ evalWrite writer operation) :: IO (Either PG.SqlError ())
@@ -1609,9 +1613,26 @@ paymentAtomicityContract fixtures settings reader policy = do
           `onException` PG.rollback fixtures
       reserve writer k=fixture fixtures RefreshCustody >>
         evalWrite writer (ReserveFees 100 k Native (money 10) "atomicity-recipient" "payment transaction contract")
+  customer<-write $ \writer->do
+    fixture fixtures ReadyIntake
+    let header="Bearer "<>T.replicate 64 "0"
+    oid<-evalWrite writer (CreateOrder 100 header $ W.OrderRequest NativeToWrapped (money 10) "recipient" "refund" Nothing "customer-atomicity")
+    claim<-evalWrite writer (ClaimNative 100 header oid)
+    void $ evalWrite writer (RecordNative header oid (allocationLabel claim) "atomicity-native-address")
+    fixture fixtures (SeedReceipt "atomicity-source" (Just oid) Native 10 2 True 100)
+    pure oid
+  fault "CREATE TRIGGER ecx_contract_payment_failure BEFORE UPDATE ON operating_reservations FOR EACH ROW WHEN (NEW.phase='obligation') EXECUTE FUNCTION ecx_contract_payment_failure()"
+    (PromoteDeposit 100 "atomicity-source") False False
+  write $ \writer->evalWrite writer (PromoteDeposit 100 "atomicity-source") >>= check
+  fault "CREATE TRIGGER ecx_contract_payment_failure BEFORE INSERT ON obligations FOR EACH ROW WHEN (NEW.kind='refund') EXECUTE FUNCTION ecx_contract_payment_failure()"
+    (AuthorizeRefund 100 "atomicity-source") False True
+  write $ \writer->do
+    fixture fixtures RefreshCustody
+    void $ evalWrite writer (AuthorizeRefund 100 "atomicity-source")
+    evalRead reader (ReadPayment $ "convert:"<>customer) >>= check . (==PaymentCancelled) . savedStatus
   write $ \writer->void $ reserve writer key
   fault "CREATE TRIGGER ecx_contract_payment_failure BEFORE INSERT ON preparations FOR EACH ROW EXECUTE FUNCTION ecx_contract_payment_failure()"
-    (PreparePayment 100 identifier (money 5) "{}") False
+    (PreparePayment 100 identifier (money 5) "{}") False False
   write $ \writer->do
     fixture fixtures ReadyIntake
     _<-evalWrite writer (PreparePayment 100 identifier (money 5) "{}")
@@ -1621,7 +1642,7 @@ paymentAtomicityContract fixtures settings reader policy = do
     fixture fixtures ReadyIntake
     void $ evalWrite writer (RecordAttempt prepared $ SignedAttempt txid "atomicity-fixture-bytes" "{}" (Just "atomicity-prevout:0"))
   fault "CREATE CONSTRAINT TRIGGER ecx_contract_payment_failure AFTER UPDATE ON attempts DEFERRABLE INITIALLY DEFERRED FOR EACH ROW EXECUTE FUNCTION ecx_contract_payment_failure()"
-    (MarkBroadcast 100 txid) True
+    (MarkBroadcast 100 txid) True False
   queued<-write $ \writer->do
     fixture fixtures ReadyIntake
     _<-evalWrite writer (MarkBroadcast 100 txid)
@@ -1629,7 +1650,7 @@ paymentAtomicityContract fixtures settings reader policy = do
     fixture fixtures ReadyIntake
     evalWrite writer (AuthorizeSend 100 txid)
   let settle=SettlePayment queued (W.PaymentCosts (money 3) (money 0)) "{\"offline\":true}"
-  fault "CREATE TRIGGER ecx_contract_payment_failure BEFORE UPDATE ON intents FOR EACH ROW EXECUTE FUNCTION ecx_contract_payment_failure()" settle False
+  fault "CREATE TRIGGER ecx_contract_payment_failure BEFORE UPDATE ON intents FOR EACH ROW EXECUTE FUNCTION ecx_contract_payment_failure()" settle False False
   write $ \writer->do
     -- Recovery may pause intake while a finalized outcome is arriving. Waiting
     -- for its database commit must retain the economic outcome and exact replay.
@@ -1650,11 +1671,26 @@ paymentAtomicityContract fixtures settings reader policy = do
     fixture fixtures (OperatingBudgetRace False)
     evalWrite writer (Pause "cancel race fixture")
     void $ evalWrite writer (CancelFees competitor "race fixture complete")
-  putStrLn "PASS: preparation/settlement constraint rollback, queue commit failure and fencing, independent-connection budget/recovery interleavings and exact settled replay"
+  putStrLn "PASS: promotion/refund/preparation/settlement rollback, queue commit failure and fencing, independent-connection budget/recovery interleavings and exact settled replay"
+
+customerProjectionContract :: PG.Connection -> Reader -> IO ()
+customerProjectionContract fixtures reader = do
+  fixture fixtures CoverBackup
+  before<-fixture fixtures MigrationRecords
+  expected<-fixture fixtures CustomerCompatibility
+  forM_ expected $ \(identifier,status,payout)->do
+    actual<-evalRead reader (ReadOrder ("Bearer "<>T.replicate 64 "0") identifier)
+    unless ((W.status actual,W.payoutTx actual)==(status,payout)) $
+      fail ("customer projection differs: "<>show(identifier,(status,payout),(W.status actual,W.payoutTx actual)))
+  after<-fixture fixtures MigrationRecords
+  unless (length expected>=10 && before==after) (fail "customer projection must be read-only and cover retained histories")
+  putStrLn ("PASS: "<>show(length expected)<>" customer status/payout projections agree with schema-21 histories; financial records unchanged")
 
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  CustomerCompatibility :: Fixture [(T.Text,T.Text,Maybe T.Text)]
+  RawCustomerView :: T.Text -> Fixture (T.Text,Maybe T.Text)
   PrimaryLink :: T.Text -> T.Text -> Fixture ()
   HistoricalRefundView :: T.Text -> T.Text -> Fixture ()
   LiveScanHealth :: Fixture [(T.Text,Maybe Int64,Maybe T.Text)]
@@ -1719,6 +1755,46 @@ data Fixture a where
   ProtectHolds :: T.Text -> Fixture ()
   CheckPhases :: T.Text -> T.Text -> Fixture Bool
 fixture :: PG.Connection -> Fixture a -> IO a
+fixture c (RawCustomerView identifier) = do
+  rows<-O.runSelect c $ do
+    o<-O.selectTable S.orders
+    O.where_ (S.orderId o O..== O.sqlStrictText identifier)
+    pure (S.status o,S.payoutTx o)
+  case rows of [one]->pure one; _->fail "missing customer compatibility row"
+-- Test-only schema-21 display oracle. Retain the old recovery overlays and
+-- compatibility columns while production derives progress/winner from payments.
+fixture c CustomerCompatibility = do
+  cap<-either (fail . T.unpack) pure (capabilityHash $ T.replicate 64 "0")
+  orders<-O.runSelect c $ do
+    o<-O.selectTable S.orders
+    O.where_ (S.capabilityHash o O..== O.sqlStrictText cap
+      O..&& O.not (O.in_ (map O.sqlStrictText ["mismatch","corrupt"]) (S.orderId o)))
+    pure (S.orderId o,S.status o,S.payoutTx o)
+    :: IO [(T.Text,T.Text,Maybe T.Text)]
+  obligations<-O.runSelect c S.orderObligations :: IO [(T.Text,T.Text,T.Text,T.Text)]
+  sources<-O.runSelect c $ do
+    (source,state)<-S.sourceRecovery
+    (deposit,order)<-S.orderDeposits
+    O.where_ (source O..== deposit O..&& state O../= O.sqlStrictText "restored")
+    pure (source,order)
+    :: IO [(T.Text,Maybe T.Text)]
+  accounted<-O.runSelect c S.accountedLosses :: IO [T.Text]
+  native<-O.runSelect c $ do
+    (tx,state)<-S.nativeRecovery
+    (attempt,intent)<-S.attemptIntents
+    (intentId,obligation)<-S.intentObligations
+    (obligationId,order,_,_)<-S.orderObligations
+    O.where_ (tx O..== attempt O..&& intent O..== intentId O..&& O.matchNullable (O.sqlBool False) (O..== obligationId) obligation
+      O..&& state O../= O.sqlStrictText "reconfirmed")
+    pure order
+    :: IO [T.Text]
+  let original (identifier,status,payout)=
+        let owned=[(deposit,state) | (_,order,deposit,state)<-obligations,order==identifier]
+            lost=[deposit | (deposit,Just order)<-sources,order==identifier]
+            review=identifier `elem` native || any ((=="review").snd) owned
+              || any (\deposit->deposit `notElem` accounted || (deposit,"paid") `notElem` owned) lost
+        in (identifier,if review then "NeedsReview" else status,payout)
+  pure (map original orders)
 fixture c (SetPause paused) = void $ O.runUpdate c O.Update {O.uTable=S.deployment,
   O.uUpdateWith= \row->row {S.paused=O.sqlInt8 (if paused then 1 else 0)},
   O.uWhere= \row->S.singleton row O..== O.sqlInt8 1,O.uReturning=O.rCount}
@@ -2968,8 +3044,10 @@ paidRefundContract fixtures reader writer=do
   expectStore "custody_not_reconciled" (evalWrite writer $ RepairCompletedOrderView 110 paidOrder)
   fixture fixtures RefreshCustody
   fixture fixtures (HistoricalRefundView paidOrder "unrelated-transaction")
+  unchanged
   expectStore "completed_order_repair_not_proven" (evalWrite writer $ RepairCompletedOrderView 110 paidOrder)
   fixture fixtures (HistoricalRefundView paidOrder $ signedId signed)
+  unchanged
   beforeRepair<-evalRead reader ReadState
   evalWrite writer (RepairCompletedOrderView 110 paidOrder)
   unchanged
@@ -2979,6 +3057,46 @@ paidRefundContract fixtures reader writer=do
   evalWrite writer (RepairCompletedOrderView 110 paidOrder)
   evalRead reader ReadState >>= check . (==afterRepair)
   expectStore "completed_order_repair_not_proven" (evalWrite writer $ RepairCompletedOrderView 110 "unknown-order")
+
+orderedRefundContract :: PG.Connection -> Reader -> Writer -> IO ()
+orderedRefundContract fixtures reader writer=do
+  -- Two receipts can be refunded successively without a conversion. While the
+  -- second is active, preserve the first link; once settled, select the second
+  -- by its original principal event, independently of transaction-name ordering.
+  let header="Bearer "<>T.replicate 64 "0"
+      check ok=unless ok (fail "ordered refund projection contract failed")
+  fixture fixtures ReadyIntake
+  ordered<-evalWrite writer (CreateOrder 110 header $ W.OrderRequest NativeToWrapped (money 10) "recipient" "native-refund" Nothing "refund-ordered")
+  claim<-evalWrite writer (ClaimNative 110 header ordered)
+  void $ evalWrite writer (RecordNative header ordered (allocationLabel claim) "ordered-refund-address")
+  forM_ [("z-first",9,Nothing),("a-second",3,Just "z-first")] $ \(transaction,n,previous)->do
+    let sourceId="ordered:"<>transaction
+        view=evalRead reader (ReadOrder header ordered)
+    fixture fixtures (SeedReceipt sourceId (Just ordered) Native n 2 True 110)
+    evalWrite writer (Pause "ordered refunds")
+    fixture fixtures RefreshCustody
+    authorized<-evalWrite writer (AuthorizeRefund 110 sourceId)
+    view >>= \v->check (W.status v=="Refunding" && W.payoutTx v==previous)
+    fixture fixtures ReadyIntake
+    void $ evalWrite writer (PreparePayment 110 (W.refundPayment authorized) (money 1) "{}")
+    view >>= \v->check (W.status v=="Preparing" && W.payoutTx v==previous)
+    evalWrite writer (SaveDraft (W.refundPayment authorized) 0 "{}")
+    fixture fixtures CoverBackup
+    fixture fixtures ReadyIntake
+    prepared<-evalRead reader (ReadSigningDecision 110 (W.refundPayment authorized) 0)
+    void $ evalWrite writer (RecordAttempt prepared $ SignedAttempt transaction "ordered-refund-fixture-bytes" "{}" (Just $ transaction<>"-input:0"))
+    view >>= \v->check (W.status v=="Paying" && W.payoutTx v==previous)
+    fixture fixtures ReadyIntake
+    void $ evalWrite writer (MarkBroadcast 110 transaction)
+    fixture fixtures CoverBackup
+    fixture fixtures ReadyIntake
+    queued<-evalWrite writer (AuthorizeSend 110 transaction)
+    let settle=SettlePayment queued (W.PaymentCosts (money 1) (money 0)) "{\"offlineOrderedRefund\":true}"
+    evalWrite writer settle
+    view >>= \v->check (W.status v=="Refunded" && W.payoutTx v==Just transaction)
+    settled<-evalRead reader ReadBalances
+    evalWrite writer settle
+    evalRead reader ReadBalances >>= check . (==settled)
 
 refundContract :: PG.Connection -> Reader -> Writer -> IO ()
 refundContract fixtures reader writer=do
@@ -4068,12 +4186,14 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   expectStore "native_settlement_changed" (record reconfirmed $ NativeWinnerChanged familyNow (signedId wire) (costs 1) $ proof parent c)
   candidate changed >>= check . not
   updatedFamily<-map fst <$> evalRead reader (ReadNativeFamily identifier)
-  -- An extra refund's winner must never replace an unrelated primary payout link.
+  -- The compatibility write must not replace an unrelated primary link. The
+  -- public projection independently follows the actual payment's current winner.
   forM_ order $ \oid->fixture fixtures (PrimaryLink oid "unrelated-primary")
   scanned child d 2 2
   record changed (NativeWinnerChanged updatedFamily (signedId $ recordedSigned child) (costs 2) $ proof child d)
   restoredWinner<-evalRead reader (ReadAttempt $ signedId $ recordedSigned child)
-  link "unrelated-primary"
+  forM_ order $ \oid->fixture fixtures (RawCustomerView oid) >>= check . (==Just "unrelated-primary") . snd
+  link (signedId $ recordedSigned child)
   forM_ order $ \oid->fixture fixtures (PrimaryLink oid $ signedId $ recordedSigned child)
   candidate restoredWinner >>= check . not
   evalRead reader ReadBalances >>= check . (==settledBalances)

@@ -17,6 +17,7 @@ module Bridge.Lifecycle
   , OperatorFacts(..), checkOperator, checkReason, WithdrawalView(..), WithdrawalWork(..)
   , withdrawalInput, decideWithdrawal, decideWithdrawalCancellation
   , TreasuryFacts(..), treasurySplit, decideTreasury, decideTreasurySpend
+  , CustomerKind(..), CustomerPayment(..), projectCustomer, compactCustomerPayments, parsePaymentStatus
   ) where
 
 import Bridge.Domain hiding (fee)
@@ -34,6 +35,11 @@ import qualified Data.Text.Encoding as TE
 -- Schema-21 projection retained during extraction. Review can hide economic
 -- progress here; schema 22 will separate phase from its execution restrictions.
 data PaymentStatus = PaymentReady | PaymentPaying | PaymentPaid | PaymentReview | PaymentCancelled deriving (Eq,Show)
+parsePaymentStatus :: Text -> Either Text PaymentStatus
+parsePaymentStatus state=case state of
+  "ready"->Right PaymentReady; "paying"->Right PaymentPaying; "paid"->Right PaymentPaid
+  "review"->Right PaymentReview; "cancelled"->Right PaymentCancelled
+  _->Left "unknown_payment_status"
 data PaymentView = PaymentView
   { savedPayment :: Payment, savedTerms :: PaymentTerms, savedStatus :: PaymentStatus } deriving (Eq,Show)
 data PreparedPayment = PreparedPayment
@@ -530,3 +536,54 @@ decideTreasurySpend (currency,outflow,fee) freeFloat freeOperating = do
       costs=case currency of Native->[(Float,total-charge),(Operating,charge)]; Wrapped->[(Float,total)]; Sol->[(Operating,total)]
   forM_ costs $ \(account,cost)->ensure (cost>=0 && (if account==Float then freeFloat else freeOperating)>=cost) "treasury_spend_exceeds_free_allocation"
   pure ([Posting currency account (-cost) | (account,cost)<-costs]<>[Posting currency External total])
+
+data CustomerKind = CustomerConversion | CustomerRefund deriving (Eq,Show)
+data CustomerPayment = CustomerPayment
+  { customerReceipt :: Text, customerKind :: CustomerKind, customerState :: PaymentStatus
+  , customerWork :: Maybe Bool, customerSettlement :: Maybe (Text,Int64) } deriving (Eq,Show)
+
+-- Nothing/Just False/Just True describes no active preparation, unsigned work,
+-- or retained signed work. A settlement binds the current winner to the original
+-- principal event's posting ordinal. Winner replacement never changes that order.
+-- These display facts grant no payment/signing authority.
+projectCustomer :: Text -> Bool -> [CustomerPayment] -> Either Text (Text,Maybe Text)
+projectCustomer admission recoveryReview payments = do
+  ensure (admission `elem` ["Provisioning","AwaitingDeposit","ExpiredUnfunded","NeedsReview","Ready","Preparing","Paying","Refunding","Refunded","Paid"])
+    "unknown_order_status"
+  ensure (length [() | p<-payments,customerKind p==CustomerConversion]<=1) "ambiguous_customer_payments"
+  forM_ payments $ \p->do
+    let settled=customerSettlement p/=Nothing; active=customerWork p/=Nothing
+    ensure (settled==(customerState p==PaymentPaid) && (not settled || not active)
+      && (customerState p/=PaymentPaying || active)
+      && (customerState p `notElem` [PaymentReady,PaymentCancelled] || not active)) "customer_payment_state_inconsistent"
+    forM_ (customerSettlement p) $ \(tx,n)->ensure (not(T.null tx) && n>0) "customer_settlement_missing"
+  let paid=[(customerKind p,tx,n) | p<-payments,Just(tx,n)<-[customerSettlement p]]
+      conversions=[tx | (CustomerConversion,tx,_)<-paid]
+      refunds=sortOn (negate . snd) [(tx,n) | (CustomerRefund,tx,n)<-paid]
+      ordinals=[n | (_,_,n)<-paid]
+      unfinished=[p | p<-payments,customerState p `notElem` [PaymentPaid,PaymentCancelled]]
+      review=recoveryReview || admission=="NeedsReview" || any ((==PaymentReview).customerState) payments
+  ensure (length(nub ordinals)==length ordinals && length unfinished<=1) "ambiguous_customer_payments"
+  let payout=case conversions of tx:_->Just tx; []->case refunds of (tx,_):_->Just tx; []->Nothing
+  status<-if review then Right "NeedsReview" else case conversions of
+    [_]->Right "Paid"
+    _->case unfinished of
+      [p]->case customerWork p of
+        Just signed->Right (if signed then "Paying" else "Preparing")
+        Nothing->Right (if customerKind p==CustomerRefund then "Refunding" else "Ready")
+      [] | not(null refunds)->Right "Refunded"
+         | admission `elem` ["Provisioning","AwaitingDeposit","ExpiredUnfunded"]->Right admission
+         | otherwise->Left "customer_payment_state_inconsistent"
+      _->Left "ambiguous_customer_payments"
+  pure (status,payout)
+
+-- Keep a bounded display summary while Store walks immutable, ordered pages.
+-- Each principal ordinal belongs to one payment through its unique attempt/event
+-- binding. Completed older refunds and cancelled refund work cannot change the
+-- displayed winner; retained conversions and unfinished work must stay explicit.
+compactCustomerPayments :: [CustomerPayment] -> Either Text [CustomerPayment]
+compactCustomerPayments payments = do
+  _<-projectCustomer "AwaitingDeposit" False payments
+  let refunds=[p | p<-payments,customerKind p==CustomerRefund,customerState p==PaymentPaid]
+      retained=[p | p<-payments,customerKind p==CustomerConversion || customerState p `notElem` [PaymentPaid,PaymentCancelled]]
+  pure (retained<>take 1 (sortOn (negate . maybe 0 snd . customerSettlement) refunds))

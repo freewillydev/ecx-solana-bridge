@@ -536,7 +536,7 @@ economic phase is introduced only with its proven projection/migration.
 
 | Current field/fact | Owner and intended fate |
 | --- | --- |
-| `orders.status`, `orders.payout_tx` | Admission and duplicated payment display; narrow admission state and derive payment view in G |
+| `orders.status`, `orders.payout_tx` | Schema-21 compatibility writes; public payment progress/link now derive from payment facts, admission/review still uses status; remove redundant columns in G |
 | `obligations.status` | Duplicated economic progress; retire in G after all callers use the payment root |
 | `intents.resolved` | Incomplete payment lifecycle; replace by root phase/generation/winner/original settlement event in G |
 | Order request/quote/policy/costs, capability/deadlines/instruction | Immutable order facts; retain exact historical terms and scope |
@@ -676,3 +676,19 @@ Treasury decisions calculate only balanced allocation/spend postings from eligib
 unbound receipts or free float/operating balances. The Store operation independently
 checks custody evidence, ownership attestation and replay identity before applying
 them. Pure posting values grant no authority to write, sign or broadcast.
+
+`projectCustomer` derives progress and payout from obligations, active preparations,
+retained attempts and original principal-settlement events. Applicable source/native
+review remains first; a paid conversion keeps precedence over extra refunds. During
+a new refund, the previous completed payout link remains visible. Multiple completed
+refunds use original settlement posting order, while their links use the current
+verified winner. A native winner change cannot move or repeat its principal event.
+Unknown or inconsistent combinations refuse instead of inventing a successful view.
+
+The closed `ReadOrder` operation reads ordered pages within its read snapshot and
+retains at most three display facts: conversion, unfinished work and latest refund.
+Older records remain in PostgreSQL; source-review checks cover the whole order.
+Schema-21 admission and sticky review still use `orders.status`, but payment progress
+and payout no longer trust that column or `orders.payout_tx`. No presentation result
+authorizes a write or signature. Real-PG comparisons retain a test-only schema-21
+oracle; deliberately stale display fields cannot override verified payment facts.

@@ -186,6 +186,48 @@ checks = sequence
              ,decideTreasurySpend (Native,money(n+1),money 1) (n-1) 1===Left "treasury_spend_exceeds_free_allocation"
              ,decideTreasury (PolicySnapshot 2 "finalized" "fixture") [("float",money(n+2))] facts {treasuryLinked=True}===Left "receipt_has_customer_obligation"
              ,property $ all ((`notElem` [Principal,Backing,Liquidity,Earned]).postingAccount) spent]
+  , check "customer projection preserves conversion priority independently of row ordering and extra refunds" $
+      forAll (chooseInt (1,6)) $ \count -> forAll arbitrary $ \review ->
+      forAll (elements [Nothing,Just False,Just True]) $ \work ->
+        let conversion=CustomerPayment "source" CustomerConversion PaymentPaid Nothing (Just("conversion",1))
+            refunded=[CustomerPayment (T.pack $ show n) CustomerRefund PaymentPaid Nothing (Just(T.pack $ show n,fromIntegral(n+1))) | n<-[1..count]]
+            extra=CustomerPayment "extra" CustomerRefund (if work==Nothing then PaymentReady else PaymentPaying) work Nothing
+        in forAll (shuffle $ conversion:extra:refunded) $ \payments -> conjoin
+          [projectCustomer "Refunded" review payments===Right(if review then "NeedsReview" else "Paid",Just "conversion")
+          ,projectCustomer "Paid" False (conversion:extra {customerState=PaymentReview}:refunded)===Right("NeedsReview",Just "conversion")]
+  , check "multiple refunds use original settlement order and retain the previous link during new work" $
+      forAll (chooseInt (2,8)) $ \count -> forAll (elements [Nothing,Just False,Just True]) $ \work ->
+        let completed=[CustomerPayment (T.pack $ show n) CustomerRefund PaymentPaid Nothing
+                (Just(if n==count then "replacement-winner" else T.pack(show n),fromIntegral n)) | n<-[1..count]]
+            active=CustomerPayment "new" CustomerRefund (if work==Nothing then PaymentReady else PaymentPaying) work Nothing
+            status=case work of Nothing->"Refunding"; Just False->"Preparing"; Just True->"Paying"
+        in forAll (shuffle completed) $ \payments -> conjoin
+          [projectCustomer "Refunded" False payments===Right("Refunded",Just "replacement-winner")
+          ,projectCustomer status False (active:payments)===Right(status,Just "replacement-winner")
+          ,projectCustomer status True (active:payments)===Right("NeedsReview",Just "replacement-winner")]
+  , check "customer status never invents settlement or an active generation" $ once $
+      let ready=CustomerPayment "source" CustomerConversion PaymentReady Nothing Nothing
+          paid=ready {customerState=PaymentPaid,customerSettlement=Just("winner",1)}
+      in conjoin
+        ([projectCustomer status False []===Right(status,Nothing) | status<-["Provisioning","AwaitingDeposit","ExpiredUnfunded"]]
+        <>[projectCustomer "Ready" False [ready]===Right("Ready",Nothing)
+        ,projectCustomer "NeedsReview" False [ready]===Right("NeedsReview",Nothing)
+        ,projectCustomer "Paid" False []===Left "customer_payment_state_inconsistent"
+        ,projectCustomer "Paid" False [paid {customerSettlement=Nothing}]===Left "customer_payment_state_inconsistent"
+        ,projectCustomer "Paying" False [ready {customerState=PaymentPaying}]===Left "customer_payment_state_inconsistent"
+        ,projectCustomer "Paid" False [paid,paid]===Left "ambiguous_customer_payments"
+        ,projectCustomer "Refunded" False [paid {customerKind=CustomerRefund},paid {customerKind=CustomerRefund}]===Left "ambiguous_customer_payments"
+        ,projectCustomer "invented" True [ready]===Left "unknown_order_status"])
+  , check "paged customer history retains the same result with at most three display facts" $
+      forAll (chooseInt (1,1010)) $ \count -> forAll (chooseInt (1,20)) $ \width ->
+      forAll arbitrary $ \review ->
+        let conversion=CustomerPayment "source" CustomerConversion PaymentPaid Nothing (Just("conversion",fromIntegral(count+1)))
+            active=CustomerPayment "new" CustomerRefund PaymentPaying (Just True) Nothing
+            refunds=[CustomerPayment (T.pack $ show n) CustomerRefund PaymentPaid Nothing (Just(T.pack $ show n,fromIntegral n)) | n<-[1..count]]
+            chunks []=[]; chunks xs=let (page,rest)=splitAt width xs in page:chunks rest
+        in forAll (shuffle $ conversion:active:refunds) $ \payments ->
+          let summary=good $ foldM (\kept page->compactCustomerPayments $ kept<>page) [] (chunks payments)
+          in conjoin [property(length summary<=3),projectCustomer "Paid" review summary===projectCustomer "Paid" review payments]
   ]
  where
   check name test=putStrLn name >> quickCheckWithResult stdArgs {maxSuccess=300} test
