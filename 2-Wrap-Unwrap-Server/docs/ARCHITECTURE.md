@@ -366,6 +366,27 @@ does not prove freshness, ownership or authorization.
 
 ## Backup boundary
 
+### Protected-file policy map (H90)
+
+The pre-extraction inventory at `abee44a` has these distinct policies. Here
+"private" means no group/other access, while service inputs can be root-owned.
+
+| Owner | Input policy and bound | Publication/locking policy |
+| --- | --- | --- |
+| AdminKey | Canonical absolute path, UID-owned private parent; keys exactly 0600/4 KiB; attempts exactly 0600/8 KiB and one link; opened-descriptor checks | Exclusive private staging, fsync, hard-link publication without replacement, parent fsync; persistent per-family fcntl lock |
+| Credentials / Signer | Absolute path, root/current UID and non-group-writable parent; signing key and unlock exactly 0600, auth also 0640, certificate non-writable by group/other; 4 KiB/1 KiB/66 bytes/8 KiB respectively | Read-only inputs; unlock already checks descriptor and one link; remaining key/auth/certificate reads need equivalent descriptor validation |
+| Recovery | UID-owned private files, one link; key 4 KiB, custody manifest 8 KiB; archives stream-hashed; canonical private staging parent | Exclusive files in new 0700 bundle, file and directory sync; before/after identity/sequence/key checks; opened-descriptor validation must replace pathname-only authorization |
+| Store.Backup | Canonical absolute root/UID private inputs, 8 KiB configuration/manifest; UID-owned private output directory; dump streamed | pg_dump snapshot, exclusive staging and authenticated restic download; descriptor checks needed for reading/hashing; the two identical staging writers can share one private implementation |
+| Native recovery | Canonical absolute path, UID-owned private parent, private regular nonempty single-link wallet/manifest; manifest 1 MiB | Node creates wallet; exclusive manifest; file/parent sync; exact descriptors and hash; descriptor checks needed when reading/hashing |
+| Fence | Canonical UID-owned private directory/files, 8 KiB state; opened lock descriptor | flock held for lifetime; monotonic state via private temp, fsync and rename under lock; state reads need descriptor check; never use exclusive attempt publication for a replaceable watermark |
+| Configure | AdminKey's fixed private-record policy; source references retained, no long-lived copied secrets | Existing exclusive publication and setup validation; public interface/config loading remains a separate non-secret contract |
+
+Share stream hashing/bounded handle reads only after each owner validates its
+opened descriptor. No exported pathname reader takes caller-selected ownership or
+mode rules. Keep service credentials, operator archives, immutable attempts and
+replaceable fence state separate. Preserve immediate-parent checks and protected
+ancestor assumptions; consolidation alone does not prove hostile-ancestor safety.
+
 Required instruction/sign/send coverage acknowledges the exact durable sequence.
 A checkpoint exports a consistent PostgreSQL snapshot plus native wallet, Solana
 key, configuration and manifests, uploads via restic and verifies the downloaded

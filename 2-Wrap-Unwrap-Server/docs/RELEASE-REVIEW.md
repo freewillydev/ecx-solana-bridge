@@ -9,8 +9,8 @@ tests does not certify later source or packages.
 
 ## Financial-core refactor execution
 
-Current checkpoint: **84/120 (A–G)**. The chronological records below distinguish
-the verified source and scope of each stage. Protocol/file simplification is next; the
+Current checkpoint: **90/120 (A–G, H85–90)**. The chronological records below distinguish
+the verified source and scope of each stage. Protected-file consolidation is next; the
 funded deployment has not been upgraded by this refactor.
 
 **12/120: checkpoint A complete, 2026-10-05.** Started from clean local/remote
@@ -626,6 +626,61 @@ network transfer, shared service or dependency pin changed. Linux installation,
 independent backup/restore and external security review remain later release gates.
 Next: H85–94, sharing equivalent protocol/file mechanics while preserving distinct
 chain checks and filesystem policies.
+
+### Shared protocol mechanics and file-policy inventory — 90/120
+
+Implementation `abee44a368893a6068569544f7f4695e1095cea1` completes H85–89;
+ARCHITECTURE records the H90 ownership/mode/bound/publication/lock inventory.
+Canonical unsigned parsing checks length/syntax before Integer conversion and
+retains signed-ledger, SPL u64 and liquidity u128 bounds. Shared base64 decoding
+checks encoded length before allocation, then decoded size. Invalid pool prices
+outside u128 and oversized account encodings now refuse earlier; no supported
+operation or wire format broadens. Native scientific amounts stay separate.
+
+One classic SPL JSON parser returns owner/balance/mint facts for both token
+administration and custody, with custody retaining exact identity and signed-ledger
+range checks. The unused generic account-info export/repeated JSON extraction is
+removed. Existing pure native/nonce/metadata/pool/transaction validators retain
+their distinct layouts and complete byte/effect checks; each worker/signer boundary
+still validates its own input. SDK output is not treated as authorization.
+
+RPC shares HTTPS/genesis session setup and normalized hostname identity. Each
+operation retains its network/error categories; each administration session closes.
+The paced manager, bounded bodies/timeouts, independent providers, explicit read
+retry allowlist, mutation/send nonretry behavior and unknown-outcome refusal are
+unchanged. No mutable authorization fact or balance is cached.
+
+Verification used the existing caches and one job:
+
+```sh
+cabal test ecx-bridge:bridge-test ecx-token:token-test ecx-pool:pool-test -j1 --offline --test-show-details=direct
+cabal test ecx-bridge:bridge-test ecx-pool:pool-test -j1 --offline --test-show-details=direct
+git diff --check
+```
+
+Token passed the first invocation. The initial pool CLI transport assertion failed
+without a diagnostic; both direct canary-URL CLI refusals returned the expected
+sanitized error, and the second invocation passed pool and bridge. Only the test
+diagnostic changed between invocations; no production gate was relaxed. The cause
+of the initial assertion is unestablished, so it is not represented as a fixed
+product defect. The assertion now reports its synthetic canary result if it recurs.
+Logs: `/tmp/ecx-financial-core-h-protocol-tests.log` and
+`/tmp/ecx-financial-core-h-protocol-retest.log`.
+
+New QuickCheck cases cover canonical/oversized integers, distinct amount ranges,
+typed SPL facts, exact base64 round trips and transport/provider alias refusals.
+Existing native/Solana/token/pool byte mutations, effects, signature validation,
+SDK, offline signing, CLI, HTTPS, pacing/retry and 8,100 lifecycle cases pass.
+Scope: I01–I02, I06–I08, I10, I14–I15; local protocols and executable contracts,
+not new live-chain or independent-host acceptance.
+
+All shared helpers counted, the changed production piece remains **13 files**,
+**2,726 -> 2,649 lines (-77)**. Whole application/schema remains **70 files**,
+**16,389 -> 16,312 (-77)**; tests remain **23 files plus embedded Rust**,
+**10,605 -> 10,642 (+37)**. No new source/test file or dependency. The largest
+reduction is Token.Network **418 -> 354 (-64)**. H90 identifies pathname-only
+file authorization that H91 will replace with checks on the opened descriptor;
+different credential/archive/fence policies must not be merged to reduce lines.
 
 ## Source and evidence boundaries
 
