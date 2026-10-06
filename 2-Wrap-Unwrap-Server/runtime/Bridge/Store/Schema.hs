@@ -98,6 +98,9 @@ obligations = O.table "obligations" $ pObligation Obligation
   , obligationRecipient=O.requiredTableField "recipient", obligationStatus=O.requiredTableField "status" }
 
 -- Read projections for recovery overlays. They grant no update capability.
+obligationReceipts :: O.Select (TextField,TextField)
+obligationReceipts = O.selectTable $ O.table "obligations" $ p2
+  (O.requiredTableField "id",O.requiredTableField "deposit_id")
 nativeRecovery, sourceRecovery :: O.Select (TextField,TextField)
 nativeRecovery = O.selectTable $ O.table "native_payment_recovery_state" $ p2
   (O.requiredTableField "txid",O.requiredTableField "state")

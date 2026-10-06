@@ -9,7 +9,7 @@ tests does not certify later source or packages.
 
 ## Financial-core refactor execution
 
-Current checkpoint: **72/120 (A–F and G71–72)**. The chronological records below distinguish
+Current checkpoint: **75/120 (A–F, G71–73 and G76–77)**. The chronological records below distinguish
 the verified source and scope of each stage. Schema consolidation is next; the
 funded deployment has not been upgraded by this refactor.
 
@@ -471,6 +471,74 @@ This piece adds **41 application lines and 17 test lines, zero files**. Totals:
 10,167 lines**, unchanged tooling. No database, process, network, dependency,
 installed schema or funded state was changed. The new PostgreSQL constraints,
 complete migration/comparison and deletion of old projections/writes remain open.
+
+### Payment-root constraints and closed conversion — 75/120
+
+G73, G76 and G77 are verified on top of `7caef4da4751a3b502f99fe0742ebb6e273ade8a`.
+The source-to-target inventory now has an executable closed Opaleye converter and
+real PostgreSQL constraints. They are proven before changing paying-runtime writers,
+so old behavior remains available as a regression oracle. G74–75 and G78–84 remain
+open; this checkpoint is not schema-22 runtime or funded-migration acceptance.
+
+Private `Store.Migration` implements only `MigratePaymentRoots`: it verifies a
+protected schema-21 archive, identity, minimum sequence, paused deployment and
+exclusive worker lock, then converts bounded pages inside one transaction. Fixed
+DDL stages version 2200, finalizes constraints and drops obsolete status columns;
+Opaleye performs all data access and atomic version-22 activation. Every backfilled
+root is checked explicitly because newly installed triggers cannot validate past
+writes. Activation leaves intake paused without advancing or adopting a host fence.
+The installer names migrations 001–008 explicitly to prevent accidental execution
+of staged 009 DDL. Serve/signer still refuse schema 22 at this checkpoint.
+
+The new root owns phase, active generation, settled winner and original settlement
+event. Constraints bind each to immutable funding and exact preparation/attempt/
+journal facts; protect receipt allocation and one active destination-chain payment;
+and reject economic rewind, unproved winner changes and principal replay. Bounded
+ready/active queries and review projection are private pure query definitions,
+with no connection/evaluator or handler-accessible callback. Source review stays
+separate from economic phase. The populated test exposed a necessary distinction:
+completed unsigned cleanup can retain a fee hold for a later retry, including at
+the generation limit. Conversion preserves that hold; it does not release money
+merely to make a ready phase satisfy an oversimplified constraint.
+
+The disposable schema-21-to-22 contract preserves **16 roots, 12 exact attempts
+and 83 postings**, including conversions, ordered refunds, earned withdrawals,
+finalized failures, expiry/approved successors, unsigned cancellation/exhaustion,
+native replacements/winner changes and source review. It compares immutable
+customer terms/capabilities, funding, holds/budgets, all signed bytes, accounting,
+evidence, scans and custody records. Wrong identity, stale archive, active worker
+and unexplained review refuse without changes. A migration child killed during an
+actual PostgreSQL lock wait rolls back; an injected failure at final activation
+also restores old columns and records. Negative constraints reject forged winner/
+event, chain mutation, invalid phase, duplicate active chain/receipt, changed
+obligation recipient and root deletion. The schema-21 reader refuses version 22.
+
+Verification (one compiler job, existing GHC/SDK/browser caches):
+
+- `cabal build ecx-bridge:exe:ecx-store-check ecx-bridge:exe:ecx-bridge ecx-bridge:test:bridge-test -j1 --offline`: passed.
+- Existing `ecx-store-check`, with `ECX_REBUILD_PAYMENT_ROOTS_ONLY=1` against the
+  disposable `ecx_rebuild_contract_g_roots_20261006`: passed.
+- Default `ecx-store-check` against a separate disposable schema-21 database:
+  passed, including generated decisions, financial rollback/concurrency, 27
+  customer projections and real encrypted restic readback/restoration.
+- `cabal test ecx-bridge:bridge-test -j1 --offline --test-show-details=direct`:
+  passed, including 8,100 generated lifecycle cases and executable/SDK contracts.
+  An earlier direct binary invocation lacked Cabal's executable PATH and the SDK
+  cache environment; the documented Cabal invocation passed without a source fix.
+
+Logs: `/tmp/ecx-financial-core-g-root-{build,contract,regression,tests-final}.log`.
+The converter's protected local archive check is not independent encrypted custody
+restoration. Full migration orchestration, old-signer exclusion, postconversion
+work-hash/runtime comparison, initialization and schema-22 restore still need
+G74–75/G78–84. No network transfer, funded deployment, dependency or shared service
+was changed; task databases/roles are disposable.
+
+Like-for-like application/schema count is **66 files / 15,784 lines -> 70 files /
+16,384 lines**: **+4 files / +600 lines**, including both DDL files and migration
+support. Tests remain **23 files plus embedded Rust**, **10,167 -> 10,449 lines**
+(**+282**, no new test executable/file). This piece improves durable enforcement
+and migration evidence; it is not a size reduction. G74/G83 remove the obsolete
+runtime status writes and compatibility machinery after the new path is verified.
 
 ## Source and evidence boundaries
 

@@ -188,8 +188,8 @@ CREATE ROLE ecxbridger LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 CREATE ROLE ecxbridges LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
 SQL
   runuser -u postgres -- createdb ecx_bridge
-  for migration in "$target/share/migrations/"*.sql; do
-    runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -d ecx_bridge -f "$migration"
+  for migration in 001 002 003 004 005 006 007 008; do
+    runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -d ecx_bridge -f "$target/share/migrations/$migration.sql"
   done
   runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d ecx_bridge <<'SQL'
 REVOKE ALL ON DATABASE ecx_bridge FROM PUBLIC;

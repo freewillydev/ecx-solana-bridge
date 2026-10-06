@@ -18,6 +18,7 @@ import Bridge.Domain
 import Bridge.Lifecycle
 import Bridge.Wire (PaymentTerms(..),PolicySnapshot(..),CostLimits(..),SignedAttempt(..))
 import qualified Bridge.Store.Schema as S
+import qualified Bridge.Store.Migration as Migration
 import Bridge.Store.Catalog (claimWorker,verifyReadRole,exportSnapshot)
 import Bridge.Store.Backup (LedgerArchive(..),archiveLedger,BackupReceipt(..),loadRemoteBackup,uploadRemoteArchive,loadLedgerArchive,restoreLedger,discardRestore,downloadRemoteArchive,CustodyArchive(..),loadCustodyArchive,uploadRemoteCustody,downloadRemoteCustody)
 import Crypto.Random (getRandomBytes)
@@ -60,12 +61,15 @@ data CustodySnapshot = CustodySnapshot
   { custodyRevision :: Int64, custodyTotals :: M.Map Asset Integer
   , custodyHeads :: [(Text,Text)], custodySlot :: Int64, custodyPending :: [RecordedAttempt] } deriving (Eq,Show)
 
--- Explicit fresh installation only. Schema DDL is applied separately; this
--- operation cannot restore funds, adopt a fence or make an existing ledger empty.
+-- Closed offline setup: initialization cannot replace recovery, and conversion
+-- requires a paused source and verified archive. Neither operation adopts a fence.
 data StoreSetup a where
   InitializeLedger :: Text -> StoreSetup ()
+  MigratePaymentRoots :: Text -> Int64 -> FilePath -> StoreSetup (Int64,Int)
 
 evalSetup :: PG.ConnectInfo -> StoreSetup a -> IO a
+evalSetup settings (MigratePaymentRoots identity minimumSequence manifest) =
+  Migration.migratePaymentRoots settings identity minimumSequence manifest
 evalSetup settings (InitializeLedger identity) = do
   require (T.length identity==64 && T.all (`elem` ("0123456789abcdef"::String)) identity) "invalid_deployment_identity"
   bracket (PG.connect settings) PG.close $ \c->PG.withTransaction c $ do

@@ -98,6 +98,7 @@ invocation needs `ecx_bridge_datadir` pointing to the server package.
 | Mode | Additional input / scope |
 | --- | --- |
 | Default | Ledger, concurrency, recovery and local encrypted restic contracts |
+| `ECX_REBUILD_PAYMENT_ROOTS_ONLY=1` | Fresh schema-21 disposable DB (001–008); builds retained histories, converts through the closed Opaleye operation, compares roots/financial rows, kills a migration child during DDL and checks rollback/constraints. Ends paused on schema 22; the current paying runtime still refuses that version. The `child` value is private test-process plumbing. |
 | `ECX_REBUILD_MIGRATION_ONLY=1` | Populated offline schema-18 copy with baseline DDL 001–005; applies 006–008; optional `ECX_REBUILD_MIGRATION_RECOVERY_CONFIG` for read-only real-chain reconciliation |
 | `ECX_REBUILD_SETUP_ONLY=1` | `ECX_REBUILD_EXECUTABLE`; optional `ECX_REBUILD_SETUP_RESIDUE=1` |
 | `ECX_REBUILD_SERVER_ONLY=1` | `ECX_REBUILD_EXECUTABLE`; process, HTTP and private control |

@@ -746,11 +746,11 @@ checks. Neither a timeout nor a partial history becomes absence or send permissi
 ### Schema-22 dependency and conversion contract (G71)
 
 This inventory was checked against migrations 001–008 and Store at `2f35af4`.
-Schema 21 is still the only accepted runtime schema. `PaymentPhase` and Schema's
-`PaymentRoot` projection describe the target; adding those types does not install
-columns, backfill data or make a staged database usable. Do not add a staged SQL
-file to the installer's current `migrations/*.sql` loop: conversion must own both
-DDL stages and Opaleye backfill/verification in one transaction.
+Schema 21 remains the accepted paying-runtime schema until G74–75 integration.
+The closed `StoreSetup.MigratePaymentRoots` operation now converts a paused offline
+copy to schema 22. It owns both fixed DDL stages and Opaleye backfill/verification
+in one transaction. The installer explicitly runs 001–008; the new 009 stage and
+activation files must run only through the converter, never as standalone scripts.
 
 | Existing dependency | Required replacement / invariant |
 | --- | --- |
@@ -787,7 +787,7 @@ fields and identities; no transaction, approval, event or financial posting is r
 | Successful payment, including changed native winners | Settled root with current uniquely settled attempt and the unique original principal event proved through retained attempts/postings/winner history. Current winner need not be that original event's transaction. |
 | Finalized failed attempt | Ready economic phase with failed-attempt restriction; preserve failed cost, attempt and unreleased liability. No new retry capability. |
 | Verified Solana expiry | Ready phase; preserve retired preparation/bytes/expiry. Retry eligibility still requires the separate saved approval and normal gates. |
-| Completed unsigned preparation cancellation | Ready phase; preserve complete cleanup and history. Source review/generation limit remain restrictions. Pending cleanup stays active. |
+| Completed unsigned preparation cancellation | Ready phase; preserve complete cleanup, history and any retained fee reservation for a later retry. Source review/generation limit remain restrictions. Pending cleanup stays active. Cancelling funding itself releases the hold. |
 | Cancelled earned withdrawal | Cancelled phase proved by its immutable cancellation; no attempts, and any preparation history must have completed unsigned cleanup. |
 | Cancelled conversion superseded by refund | Cancelled phase bound to the retained refund for the same receipt, with no unresolved work or original principal settlement. The refund gets its own root; receipt uniqueness ignores only the proved cancelled conversion. |
 | Historical order display fields | Admission/expiry/review and payment-derived display must match the old facts. Unknown or ambiguous mapping refuses; do not quietly drop a sticky review or select an arbitrary refund. |
@@ -804,3 +804,24 @@ back schema and data; no serve/signer accepts staging. A committed staging/resum
 scheme is justified only if measured ledger size makes this transaction unsuitable.
 Old worker and signer must be quiescent and the encrypted snapshot retained; the
 database lock is not proof that another host no longer has signing keys.
+
+The converter loads and verifies the protected schema-21 archive before taking the
+transaction, then requires its exact sequence, identity and paused metadata. It
+uses version 2200 only within the uncommitted transaction. Pages of 1,000 funding/
+order rows preserve IDs, terms and work; incompatible economic state or unexplained
+review refuses conversion. Target phase constraints, composite belonging FKs,
+receipt/active-chain uniqueness and deferred payment-consistency triggers replace
+the removed status dependencies. With progress removed, obligation funding columns
+are immutable; a recorded native common input and original settlement event cannot
+change. New trigger installation does not validate earlier writes automatically,
+so the closed Opaleye converter explicitly invokes the fixed consistency check for
+every mapped root before forcing deferred constraints and recording version 22.
+
+G73/G77's disposable PostgreSQL contract preserves 16 roots, 12 attempts and 83
+postings, with failed/expired work, bounded unsigned cancellation, native winner
+history, source review and ordered refunds. It checks all retained table projections,
+old/new payment states and queues, unexplained-review refusal, worker exclusion,
+actual migration-process death during DDL and rollback after final-DDL failure.
+This establishes the conversion mechanism; full runtime/customer/work-hash,
+initialization/restore and migrated-process acceptance remain G74–75/G78–84 work.
+No funded deployment is converted or resumed by this test.
