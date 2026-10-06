@@ -9,7 +9,7 @@ tests does not certify later source or packages.
 
 ## Financial-core refactor execution
 
-Current checkpoint: **112/120 (A–I, J105–109, J111, J116–117)**. The chronological records below distinguish
+Current checkpoint: **114/120 (A–I, J105–109, J111, J113, J115–117)**. The chronological records below distinguish
 the verified source and scope of each stage. Real-chain acceptance and final release work remain; the
 funded deployment has not been upgraded by this refactor.
 
@@ -1018,6 +1018,47 @@ syntax and the paired CLI reproduction pass; complete fresh Linux installation
 remains J114. Logs: `/tmp/ecx-financial-core-j-installer-{missing-data,data-fixed}.log`.
 Native Haskell/SDK/browser inputs are unchanged from `3174822`; reassemble the
 candidate with the fixed installer rather than recompiling identical binaries.
+
+**114/120: J113 and J115 frozen Linux candidates, 2026-10-06.** Sequential
+Ubuntu 24.04 ARM64 and x86-64 builds of `3174822` pass `cabal build all` and all
+three Cabal suites. GHC 9.14.1, Cabal 3.16.1.0, retained locks/caches, one compiler
+job, 2-GiB VM and a 1280-MiB compiler cap were used. The ARM64 setup initially
+refused global RTS options and its large StoreCheck compile exceeded a 768-MiB
+cap; removing the global option and setting the compiler-only cap resolved these
+build-resource failures. Final commands from the repository root:
+
+```sh
+cabal build all -j1 --offline --builddir=dist-core-3174822 --ghc-options="+RTS -M1280m -RTS"
+cabal test ecx-bridge:bridge-test ecx-token:token-test ecx-pool:pool-test -j1 --offline --builddir=dist-core-3174822 --ghc-options="+RTS -M1280m -RTS" --test-show-details=direct
+```
+
+Packaging source is `a55ec8b9521ea600fa5a833d7e44fa985b08a32c`: only documentation
+and the installer data-directory invocation differ from the compiled source.
+Reassembled with `install/package --local` using the exact tested binaries,
+SDK, browser and reviewed restic. This explicitly records a locally trusted build,
+not independently reproducible provenance. Both build VMs were stopped afterward.
+
+| Architecture | Installer SHA-256 |
+| --- | --- |
+| ARM64 | `179078e2a02bfd8a3986988ba89b008b90492f8dc789f4f746295a8e3ac72296` |
+| x86-64 | `7979c4616c6ee38d70db2d65f478c2b91dd5e332db46aa615ba895ef6e12039e` |
+
+Each package has exactly 43 manifested files with no extra/missing files or links;
+all migrations, installer and notices match source. Nine browser source hashes,
+three browser artifact hashes, compiled executable/SDK receipts and architecture
+match. All 188 non-local native dependency versions and 159 source hashes match
+the retained notice inventory. ELF dependencies were inspected, with no RPATH or
+RUNPATH. The executable still requires OS libraries including libpq5, libgmp,
+zlib and libc; the installer provisions PostgreSQL and the listed runtime packages.
+
+The combined index was signed with the retained **acceptance-only** Ed25519 key.
+Both architecture verifications pass; modifying the signed index is refused
+before execution. This does not establish operator-owned public release trust or
+close independent distribution review. Evidence (build/test logs, plans, hashes,
+artifact inspections and signed candidates) is retained privately under
+`/Volumes/T705/ecx-financial-core-j-release-Pm8VnIab/`. No production files or
+application/schema lines changed in this verification checkpoint. Fresh installation
+and restart/upgrade acceptance of these exact artifacts remains J114.
 
 ## Source and evidence boundaries
 
