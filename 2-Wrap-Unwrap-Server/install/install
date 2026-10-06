@@ -1,5 +1,5 @@
 #!/bin/sh
-# Run only from an authenticated, root-private release snapshot.
+# Run only from an authenticated release or explicitly trusted local-build snapshot.
 # Guard chains intentionally fail if any check fails.
 # shellcheck disable=SC2015
 set -eu

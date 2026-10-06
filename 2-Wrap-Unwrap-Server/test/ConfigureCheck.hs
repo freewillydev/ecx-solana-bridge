@@ -9,9 +9,9 @@ import qualified Data.ByteArray as BA
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
 import qualified Data.Text as T
-import Data.Aeson (encode,eitherDecodeStrict')
+import Data.Aeson (encode,eitherDecodeStrict',Value(..),object,(.=))
 import qualified Data.Map.Strict as M
-import Data.List (sort)
+import Data.List (sort,isInfixOf)
 import Data.Bits ((.&.))
 import System.Directory
 import System.FilePath ((</>))
@@ -39,7 +39,7 @@ contract=bracket temporary removeDirectoryRecursive $ \directory->do
         ,"00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47"
         ,"16000","1","http://127.0.0.1:29432","test-wallet","300","8080","8081"
         ,history,history,"https://api.devnet.solana.com","-"]
-      answers=["","L2LSignetDevnet"]<>fields<>["no","yes","installer","release.pem","candidate",key,worker,signer,"-","-","-","-","-","-","no"]
+      answers=["","L2LSignetDevnet"]<>fields<>["no","yes","release","installer","release.pem","candidate",key,worker,signer,"-","-","-","-","-","-","no"]
   (code,_,_)<-run (unlines answers)
   if code/=ExitSuccess then pure False else do
     let out=directory</>".ecx-bridge"
@@ -56,10 +56,16 @@ contract=bracket temporary removeDirectoryRecursive $ \directory->do
     after<-B.readFile(out</>"worker.json")
     (cancelled,_,_)<-run ((directory</>"cancelled")<>"\n")
     partial<-doesDirectoryExist(directory</>"cancelled")
+    let local=directory</>"source-setup"
+        sourceAnswers=[local,"L2LSignetDevnet"]<>fields<>["no","yes","invalid-mode","source",directory,worker,key,worker,signer,"-","-","-","-","-","-","no"]
+    (sourceCode,sourceOutput,_)<-run (unlines sourceAnswers)
+    sourceSetup<-either fail pure . (eitherDecodeStrict' :: B.ByteString -> Either String Value) =<< B.readFile(local</>"setup.json")
+    let expectedSetup=object ["existing" .= False,"method" .= ("source"::String),"sourceRoot" .= directory,"restic" .= worker]
     pure(C.fingerprint config==C.fingerprint other && C.nativeCookie config/=C.nativeCookie other
       && sort entries==["interface.json","setup.json","signer.json","sources.json","worker.json"]
       && sources==M.fromList [("solana.keypair.json",key),("native-worker.auth",worker),("native-signer.auth",signer)]
       && originalKey==L.toStrict(encode $ B.unpack(seed<>public)) && originalWorker=="worker:password" && originalSigner=="signer:password"
+      && sourceCode==ExitSuccess && sourceSetup==expectedSetup && not ("PUBLIC key file" `isInfixOf` sourceOutput) && not ("signed installer directory" `isInfixOf` sourceOutput)
       && all(==0o600)modes && before==after && again/=ExitSuccess && cancelled/=ExitSuccess && not partial)
  where
   temporary=do

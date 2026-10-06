@@ -3,7 +3,13 @@
 set -eu
 umask 077
 fail() { echo "Packaging refused: $*" >&2; exit 1; }
-[ "$#" = 2 ] || fail 'usage: package NEW_OUTPUT_DIRECTORY RESTIC_0_19_1_BINARY'
+local_build=false
+if [ "${1:-}" = --local ]; then
+  local_build=true
+  shift
+  [ "$#" = 5 ] || fail 'usage: package --local OUTPUT RESTIC EXECUTABLE SDK_LIBRARY BROWSER_DIRECTORY'
+fi
+[ "$local_build" = true ] || [ "$#" = 2 ] || fail 'usage: package NEW_OUTPUT_DIRECTORY RESTIC_0_19_1_BINARY'
 output=$1; restic=$2
 for path in "$output" "$restic"; do
   case "$path" in /*) ;; *) fail 'absolute output/restic paths required';; esac
@@ -15,18 +21,37 @@ done
 [ "$ID:$VERSION_ID" = ubuntu:24.04 ] || fail 'Ubuntu 24.04 required'
 arch=$(uname -m)
 case "$arch" in aarch64|x86_64) ;; *) fail 'unsupported architecture';; esac
-root=$(git rev-parse --show-toplevel)
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$root"
-[ -z "$(git status --porcelain)" ] || fail 'commit/review the exact source before packaging'
+[ "$local_build" = true ] || [ -z "$(git status --porcelain)" ] || fail 'commit/review the exact source before packaging'
 # Version text alone also accepts upstream binaries with affected dependencies.
 expected=$(jq -er --arg arch "$arch" '."restic-reviewed"[$arch] // error("no reviewed restic for architecture")' 2-Wrap-Unwrap-Server/build/toolchains.json)
 [ "$(sha256sum "$restic" | cut -d ' ' -f 1)" = "$expected" ] || fail 'unreviewed restic binary'
 "$restic" version | grep -q '^restic 0.19.1 ' || fail 'restic 0.19.1 required'
 # Compilation stays under the caller, through the existing sole Cabal entry point.
+if [ "$local_build" = true ]; then
+  binary=$3; sdk=$4; web=$5
+  for path in "$binary" "$sdk" "$web"; do
+    case "$path" in /*) ;; *) fail 'absolute local build paths required';; esac
+  done
+  [ -f "$binary" ] && [ -f "$sdk" ] && [ -f "$web/manifest.sha256" ] || fail 'build executable, SDK and browser with Cabal first'
+  # Refuse macOS/wrong-architecture artifacts before provisioning anything.
+  machine=62; [ "$arch" != aarch64 ] || machine=183
+  for path in "$binary" "$sdk"; do
+    [ "$(od -An -tx1 -N6 "$path" | tr -d ' \n')" = 7f454c460201 ] || fail '64-bit little-endian Linux ELF required'
+    [ "$(od -An -tu2 -j18 -N2 "$path" | tr -d ' \n')" = "$machine" ] || fail 'local build architecture differs'
+  done
+  [ "$(head -n 1 "$web/manifest.sha256")" = ecx-browser-sha256-v1 ] || fail 'invalid browser manifest'
+  (cd 2-Wrap-Unwrap-Server && sed -n 's/^source //p' "$web/manifest.sha256" | sha256sum -c - >/dev/null) || fail 'browser source changed; rebuild'
+  (cd "$web" && sed -n 's/^artifact //p' manifest.sha256 | sha256sum -c - >/dev/null) || fail 'browser assets changed; rebuild'
+else
 cabal build exe:ecx-bridge -j1
 binary=$(cabal list-bin exe:ecx-bridge)
 assets=$(jq -er '[."install-plan"[] | select(."pkg-name"=="ecx-build-assets" and .style=="local") | ."dist-dir"] | unique | if length==1 then .[0] else error("ambiguous assets") end' dist-newstyle/cache/plan.json)/build/autogen
 [ -f "$assets/libecx_solana_sdk.so" ] || fail 'missing Cabal SDK'
+  sdk=$assets/libecx_solana_sdk.so
+  web=$assets/web
+fi
 mkdir -m 0700 "$output"
 staging=$(mktemp -d "$output/.bundle-XXXXXXXX")
 trap 'rm -rf -- "$staging"' EXIT
@@ -34,12 +59,17 @@ trap 'exit 1' HUP INT TERM
 mkdir -p "$staging/bin" "$staging/lib" "$staging/share/web" "$staging/share/migrations" "$staging/share/notices"
 cp "$binary" "$staging/bin/ecx-bridge"
 cp "$restic" "$staging/bin/restic"
-cp "$assets/libecx_solana_sdk.so" "$staging/lib/"
-cp -R "$assets/web/." "$staging/share/web/"
+cp "$sdk" "$staging/lib/libecx_solana_sdk.so"
+cp -R "$web/." "$staging/share/web/"
 cp 2-Wrap-Unwrap-Server/migrations/*.sql "$staging/share/migrations/"
 cp 2-Wrap-Unwrap-Server/install/install "$staging/install"
 printf '%s\n' "$arch" > "$staging/architecture"
-git rev-parse HEAD > "$staging/source-commit"
+if [ "$local_build" = true ]; then
+  git -c safe.directory="$root" rev-parse HEAD > "$staging/source-commit"
+  printf '%s\n' 'Locally trusted build; source commit is context, not verified build provenance.' > "$staging/local-build"
+else
+  git rev-parse HEAD > "$staging/source-commit"
+fi
 cp 2-Wrap-Unwrap-Server/LICENSE "$staging/share/notices/LICENSE"
 cp 2-Wrap-Unwrap-Server/docs/THIRD-PARTY.md "$staging/share/notices/"
 # Keep collected notices at their repository paths (including license subtrees).

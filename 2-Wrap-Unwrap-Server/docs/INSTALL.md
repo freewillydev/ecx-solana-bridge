@@ -27,13 +27,23 @@ Source secret files must belong to the invoking user with private permissions;
 when configuring as root, prepare root-owned copies. Existing output directories
 are refused, and cancelled/failed collection removes only its newly created output.
 
-If database/services are missing, it asks whether to provision them. Choosing yes
-also collects the repository `scripts/release-auth` path, independently trusted
-release public key and signed candidate directory. `start` invokes that authenticated
-installer for new custody, which provisions PostgreSQL, roles, migrations and the
-paused ledger. Choosing no leaves provisioning to the operator; it never substitutes
-an empty ledger for missing existing services. An arbitrary existing PostgreSQL
-installation alone is not an initialized bridge deployment.
+If database/services are missing, it asks whether to provision them, then offers:
+
+- **source (default):** trust your local checkout and Cabal build. Enter the checkout
+  path and the path to the reviewed restic binary described below. No release key,
+  signature or downloaded installer is required. Keep the build's SDK and browser
+  assets in place. `start` assembles a private snapshot of the running executable,
+  those assets and repository installer files, then invokes the same installer.
+  It does not compile as root. Local trust is explicit, not a claim of signed or
+  reproducible provenance. Assembly requires Git, jq and standard Ubuntu tools.
+- **release:** enter the `scripts/release-auth` path, independently trusted public
+  key path and signed candidate directory. Signature verification remains mandatory;
+  failure never falls back to source installation. Older setup files retain this mode.
+
+Both modes provision PostgreSQL, restricted roles, migrations and a paused ledger.
+Choosing no leaves provisioning to the operator; it never substitutes an empty
+ledger for missing existing services. An arbitrary existing PostgreSQL installation
+alone is not an initialized bridge deployment.
 
 `start [DIRECTORY]` checks that installed configuration matches the saved material,
 starts the two systemd services, waits for the local operator interface and requests

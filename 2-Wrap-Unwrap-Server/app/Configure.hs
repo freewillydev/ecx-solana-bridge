@@ -2,6 +2,9 @@
 -- Offline installation material only: no database, RPC, signing or activation.
 module Configure (configure,start) where
 import qualified Bridge.Config as C
+import Bridge.SDKBuild (sdkLibraryPath,sdkSourceDirectory)
+import Bridge.BrowserBuild (browserAssetsDirectory)
+import System.Environment (getExecutablePath)
 import Bridge.Error
 import Bridge.AdminKey (privateParent,readPrivate,savePrivate)
 import Bridge.Signer (verifySigningKey)
@@ -24,7 +27,7 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as L
 import qualified Data.Text as T
-import System.Directory (makeAbsolute,removeDirectoryRecursive,doesFileExist)
+import System.Directory (makeAbsolute,canonicalizePath,removeDirectoryRecursive,doesFileExist)
 import System.FilePath ((</>))
 import qualified System.Posix.Directory as P
 import System.IO (hFlush,stdout,isEOF)
@@ -63,10 +66,24 @@ build directory=do
       putStrLn "Database setup skipped; start will require an existing installer-managed deployment."
       pure(object ["existing" .= True])
      else do
-      auth<-prompt "Repository release-auth script path" "2-Wrap-Unwrap-Server/scripts/release-auth" makeAbsolute
-      trust<-prompt "Path to trusted release PUBLIC key file (prefer absolute path; obtained independently of package)" "" makeAbsolute
-      candidate<-prompt "Reviewed signed installer directory" "" makeAbsolute
-      pure(object ["existing" .= False,"installer" .= auth,"trustKey" .= trust,"candidate" .= candidate])
+      method<-prompt "Installation source: source (your local Cabal build) / release (signed package)" "source" $ \s->do
+        require (s `elem` ["source","release"]) "choose_source_or_release"
+        pure s
+      if method=="source" then do
+        putStrLn "Trust the local checkout and this executable. No release signature is claimed; start does not compile as root."
+        defaultRoot<-canonicalizePath (sdkSourceDirectory</>"../..")
+        root<-prompt "Path to trusted repository checkout" defaultRoot makeAbsolute
+        restic<-prompt "Path to reviewed restic backup executable (see docs/INSTALL.md)" "" $ \path->do
+          file<-makeAbsolute path
+          exists<-doesFileExist file
+          require exists "restic_executable_file_required"
+          pure file
+        pure(object ["existing" .= False,"method" .= method,"sourceRoot" .= root,"restic" .= restic])
+       else do
+        auth<-prompt "Repository release-auth script path" "2-Wrap-Unwrap-Server/scripts/release-auth" makeAbsolute
+        trust<-prompt "Path to trusted release PUBLIC key file (prefer absolute path; obtained independently of package)" "" makeAbsolute
+        candidate<-prompt "Path to reviewed signed installer directory" "" makeAbsolute
+        pure(object ["existing" .= False,"method" .= method,"installer" .= auth,"trustKey" .= trust,"candidate" .= candidate])
   key<-prompt "Existing custody Solana JSON keypair FILE (private; never type the key here)" "" $ \path->do
     file<-makeAbsolute path
     verifySigningKey (C.custodyOwner config) file
@@ -215,13 +232,23 @@ start path=do
   (present,_,_)<-readProcessWithExitCode "systemctl" ["cat","ecx-bridge-worker.service","ecx-bridge-signer.service"] ""
   when (present/=ExitSuccess) $ do
     require (not existing) "existing_services_missing_use_recovery_not_fresh"
-    installer<-field "installer" value
-    trust<-field "trustKey" value
-    candidate<-field "candidate" value
-    architecture<-case arch of "aarch64"->pure "aarch64"; "x86_64"->pure "x86_64"; _->reject "unsupported_installer_architecture"
-    -- Material ownership is required by the installer; do not silently chown caller files.
+    method<-either (const $ reject "invalid_setup_method") pure
+      (parseEither (withObject "setup" (\o->o .:? "method" .!= ("release"::String))) value)
+    -- Old setup files retain signed-release verification; never silently downgrade.
     require (uid==0) "fresh_install_run_sudo_ecx_bridge_configure_then_sudo_ecx_bridge_start"
-    execute installer ["install",trust,candidate,architecture,"--","fresh",directory]
+    case method of
+      "source"->do
+        root<-field "sourceRoot" value
+        restic<-field "restic" value
+        binaryPath<-getExecutablePath
+        execute "/bin/sh" [root</>"2-Wrap-Unwrap-Server/install/source",binaryPath,sdkLibraryPath,browserAssetsDirectory,restic,directory]
+      "release"->do
+        installer<-field "installer" value
+        trust<-field "trustKey" value
+        candidate<-field "candidate" value
+        architecture<-case arch of "aarch64"->pure "aarch64"; "x86_64"->pure "x86_64"; _->reject "unsupported_installer_architecture"
+        execute installer ["install",trust,candidate,architecture,"--","fresh",directory]
+      _->reject "invalid_setup_method"
   requested<-C.loadConfig (directory</>"worker.json")
   installedConfig<-C.loadConfig config
   let normalized=requested {C.nativeCookie=C.nativeCookie installedConfig,C.nativeUnlockFile=C.nativeUnlockFile installedConfig
