@@ -1,6 +1,6 @@
 # Auditable financial-core refactor: design and execution plan
 
-Status: **in progress; 94/120 steps verified (A–H)**. This replaces the
+Status: **in progress; 104/120 steps verified (A–I)**. This replaces the
 completed implementation checklist, not its evidence. Execution baseline source is
 `3d4970b3e502de9d4c9a89803610df3802e3e322` (implementation `bc9713c`). The funded
 pilot stays on `548c509`. See [RELEASE-REVIEW.md](RELEASE-REVIEW.md) for the actual
@@ -520,8 +520,8 @@ The executor updates this table after verified checkpoints; not merely after edi
 | F. Recovery/reconciliation | 57–70 | Complete | `fb38ddb`, `2f35af4`; 7,800 generated cases, native/source decisions, shared generation checks, real-PG/HTTPS/process/fence/encrypted-custody restoration pass |
 | G. Schema 22 and migration | 71–84 | Complete | `249a4a4`; authoritative runtime, owner initialization and private legacy restoration; 16 roots/12 exact attempts/83 postings preserved, old/new customer/work-hash comparisons, interruption/rollback, actual PostgreSQL/Servant/HTTPS/fence and encrypted restore contracts pass; funded pilot unchanged |
 | H. Protocol/file simplification | 85–94 | Complete | `abee44a`, `4f8c9e1`; shared bounded protocol/stream mechanics, fixed file policies and opened-descriptor checks; all three suites and actual PostgreSQL/HTTPS/fence/encrypted native/custody restore contracts pass. Net H: −52 application lines / +1 file |
-| I. Administration/UI/setup | 95–104 | In progress | Review remaining reuse, command compatibility, GHC-JavaScript browser and configure validation |
-| J. Consolidated review/release candidate | 105–120 | Not started | Depends on I |
+| I. Administration/UI/setup | 95–104 | Complete | `5fce544`; retained shared administration mechanics and projected browser state, unified setup credential validation; complete build/suites, actual GHC-JavaScript UI, mutated bundle refusal, fresh setup and both-profile server processes pass; +2 application lines, no new files |
+| J. Consolidated review/release candidate | 105–120 | In progress | Independent invariant trace, deliberate mutations and bounded formal/workload checks next; external gates remain explicit |
 
 The numbered steps below implement the design above. They are not permission to
 reconsider every design choice while coding. Change the design only for a concrete

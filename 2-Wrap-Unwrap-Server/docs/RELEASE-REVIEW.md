@@ -9,8 +9,8 @@ tests does not certify later source or packages.
 
 ## Financial-core refactor execution
 
-Current checkpoint: **94/120 (A–H)**. The chronological records below distinguish
-the verified source and scope of each stage. Administration/UI/setup is next; the
+Current checkpoint: **104/120 (A–I)**. The chronological records below distinguish
+the verified source and scope of each stage. Consolidated audit/acceptance is next; the
 funded deployment has not been upgraded by this refactor.
 
 **12/120: checkpoint A complete, 2026-10-05.** Started from clean local/remote
@@ -742,6 +742,77 @@ including the entire 33-line helper. Application/schema is now **71 files /
 All H together removes **52 application lines** and adds one source file; this
 checkpoint's additional checks deliberately cost more than the duplicated loops
 they replace. No size target is claimed from moving code between categories.
+
+### Administration, browser and setup: checkpoint I complete — 104/120
+
+Implementation `5fce544f35d17f10c946b2740b468978a9e92928` completes I95–104.
+The administration review found matching key/publication, family-lock, status,
+expiry-evidence and RPC mechanics already shared through AdminKey/AdminStatus and
+H. Token/pool intent, nonce, signer-count and cost validation remain explicit;
+no generic callback framework was added to combine different contracts. The
+browser already reads G's derived customer projection and retains only local
+capabilities, pending immutable requests, bounded history and payment text. Its
+source required no new state layer or rewrite. Unused imports identified by GHC
+were removed; live migration/format support, pins and notices remain necessary.
+
+Configure's native passphrase check previously omitted UTF-8 validation. It now
+uses the same fixed validator as startup, retaining the stricter private-parent
+requirement. Its exported check returns only `()`; the credential reader remains
+private. A real-executable contract supplies malformed UTF-8 then a valid private
+file, verifies re-prompting, no secret output and the signer-only source reference.
+The diagnostic is now `invalid_native_unlock_file`, consistent with startup.
+The four customer routes, CLI forms, saved wire formats and critical dispatch are
+unchanged. No funded runtime was modified.
+
+Final root commands, one job and the existing caches, both exited 0:
+
+```sh
+cabal build all -j1 --offline
+cabal test ecx-bridge:bridge-test ecx-token:token-test ecx-pool:pool-test -j1 --offline --test-show-details=direct
+```
+
+Logs: `/tmp/ecx-financial-core-i-build.log` and `-i-tests.log`. All three suites
+passed, including token configure/defaults/private key generation/import/terminal
+entry, offline/nonce signing and tamper/replay refusal; mint/burn/create/associated/
+metadata codecs; pool creation/position/liquidity/fee collection and recovery;
+8,100 lifecycle cases; all customer routes and real public WarpTLS with body/rate/
+origin/refusal controls. H's actual signer/custody tests remain applicable: I adds
+a setup-only check and removes unused imports, without changing those workflows.
+
+The rebuilt `ecx-store-check` passed setup and actual executable server modes on
+fresh `ecx_rebuild_contract_i_{setup,server,canonical}_20261006` databases. The
+last used `ECX_REBUILD_CANONICAL=1`; reader, datadir, SDK, executable and base-DDL
+settings match H. Logs are `-i-{schema,setup,server,canonical}.log` under the same
+`/tmp/ecx-financial-core` prefix. These cover owner initialization, repeat/residue/
+identity/writer refusal, public assets/config, local operator checks, paused
+unavailable-chain startup, unchanged balances, restore/fence and child cleanup.
+They are real HTTP/PostgreSQL process tests with unavailable-chain fixtures, not
+new Mainnet transfers. Fresh Linux installation remains J114.
+
+Actual Cabal-produced `wallet.js` ran in a separate headless Chrome session, served
+with controlled HTTP fixtures. Both direction/fee forms, QR and exact Solana Pay
+binding, copy/recovery fragment removal, saved reload, payout/refund/expiry,
+failed requests, same-key/request replay after a lost success response, paused
+controls and unavailable localStorage passed. No capability entered an HTTP URL.
+Browser/server were closed. The temporary automation had to wait for the Haskell
+event callback before checking clipboard text; no application change was needed.
+Log: `-i-browser.log`. This is UI acceptance, not customer-wallet approval or
+real-chain evidence. No JavaScript implementation/test dependency was added.
+
+The production `SetupHooks.buildBrowser` was also invoked through GHC with its
+existing Cabal-hooks package database, using a disposable bundle. Matching all
+nine source inputs and three artifacts passed; a changed artifact, stale source
+manifest and changed bundle selection each refused. Originals were untouched and
+temporary copies removed. Log: `-i-browser-manifest.log`. The initial invocation
+used an incorrect relative fixture path; the corrected production-hook run passed.
+
+Scope: I01–I02, I06, I08–I10, I13–I15. Three touched production files total
+**728 -> 730 lines (+2)**; application/schema is **71 files / 16,339 lines**.
+Tests remain **23 files plus embedded Rust / 10,680 lines (+6)**. No new file or
+dependency. Remaining complexity is principally financial/recovery rules, typed
+Opaleye persistence, protocol validation and legacy conversion; no claim is made
+that this refactor has met its experimental line budget. J now audits those
+boundaries, tests deliberate mutations and consolidates release evidence.
 
 ## Source and evidence boundaries
 
