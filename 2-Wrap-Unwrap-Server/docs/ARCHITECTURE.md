@@ -642,3 +642,37 @@ operating expenditure or recovery pause. Decisions must use those committed fact
 Two same-order requests also race behind that database lock; the sole-writer
 advisory claim still excludes a second worker. These are bounded interleaving
 checks, not a proof of every possible schedule or real-chain recovery history.
+
+Customer funding decisions also live in `Lifecycle.hs`. `quoteOrder` is shared
+by network admission preview and locked order creation. Only new orders use it;
+capability/idempotency replay keeps the saved quote and deadlines. `decideOrder`
+checks free journal float and both operating budgets. `orderCostReservations`
+is the single conversion/refund cost formula used by admission, promotion and
+refund. Principal inventory, alternate operating allowances and prepared-payment
+fee holds remain distinct records with distinct transfer/release semantics.
+
+`decideNativeClaim`, instruction binding and issue decisions preserve the original
+saved label/reference and the backup-before-exposure gate. Retrying a saved claim
+never permits another address allocation. The real-chain ownership/solvability
+and ambiguous-allocation checks remain in `Order.hs` and the native adapter.
+
+`decidePromotion` retains historical terms and returns either the exact conversion
+payment or review; it never discards a receipt. The writer validates both saved
+holds before inserting the obligation. Quote expiry now requires that **no receipt
+has been observed** before releasing provisional holds. Partial, late and shallow
+receipts therefore retain their allocations pending review/refund; an operator may
+need to resolve them before that capacity becomes available again. Paid/prepared
+work retains its distinct non-provisional holds.
+
+Refund source/work checks and `decideRefund` preserve full-principal funding,
+verified destinations, and successful earlier conversions. The closed operation
+still verifies the actual Solana owner/reference evidence. It computes any fresh
+budget from the state before mutation, subtracting only fee/conversion holds that
+this same transaction will release. Receipt cancellation, refund insertion and
+hold changes remain atomic. Withdrawal decisions keep earned funds separate and
+require exact replay terms; cancellation requires verified unsigned cleanup.
+
+Treasury decisions calculate only balanced allocation/spend postings from eligible
+unbound receipts or free float/operating balances. The Store operation independently
+checks custody evidence, ownership attestation and replay identity before applying
+them. Pure posting values grant no authority to write, sign or broadcast.

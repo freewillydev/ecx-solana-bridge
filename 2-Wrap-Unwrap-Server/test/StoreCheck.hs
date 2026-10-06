@@ -1105,6 +1105,7 @@ ledgerMain = do
           check (not result)
           view<-evalRead reader (ReadOrder auth oid)
           check (W.status view=="NeedsReview")
+          evalWrite writer (ExpireQuotes 301)
           fixture fixtures (CheckPhases oid "quote") >>= check
         waiting<-make "unconfirmed" NativeToWrapped
         seed "unconfirmed" waiting Native 10 0 False 100

@@ -207,6 +207,67 @@ files plus embedded Rust / 9,698 lines**. Next is E47–56: customer funding/acc
 and projection, still on schema 21. Removing duplicate persistent state remains G;
 current tests do not certify that future migration or public release.
 
+### Customer funding and accounting — 53/120
+
+Steps E47–53 are verified over schema 21, on top of `62a9c77`. This checkpoint
+moves customer admission, instruction allocation/exposure, promotion, refund,
+earned withdrawal/cancellation and treasury arithmetic into specific pure
+`Lifecycle` decisions. Store still loads current facts and applies results inside
+its closed Opaleye operations under the deployment lock. No DSL route, signer
+capability, schema, wire format or real-chain policy changed.
+
+Shared `quoteOrder` removes the separate preview/admission rules. Historical
+capability/idempotency replay bypasses new pricing and retains its deadlines.
+The alternate conversion/refund cost formula is shared by admission, promotion
+and refund. Refund re-reservation now checks the state before mutation and
+subtracts only holds this transaction will release. Ownership/reference evidence,
+paused operator authority and full-principal refund funding remain mandatory.
+Treasury postings can use only verified unbound receipts or free float/operating
+allocations; the closed Store operation still verifies the exact custody proof.
+
+One protective correction was demonstrated during this extraction: quote expiry
+previously released provisional holds even when a partial/late/shallow receipt
+was present. It now releases them only when no receipt was observed. PostgreSQL
+regressions verify the received liability's holds remain provisional until handled;
+existing unpaid expiry and funded/prepared hold tests also pass. This deliberately
+retains capacity for review/refund rather than making it available to a new order.
+
+Verification (I02–I04, I06–I10, I13–I14):
+
+- `cabal build ecx-bridge:exe:ecx-store-check ecx-bridge:exe:ecx-bridge ecx-bridge:test:bridge-test -j1 --offline`: pass, with existing caches and one job.
+- `cabal test ecx-bridge:bridge-test -j1 --offline --test-show-details=direct`: pass.
+  Lifecycle now has 3,600 generated cases, fixed refusal/replay groups and two
+  deliberate negative accounting mutations. The 1,500 new generated cases cover
+  ceiling fees, exact historical promotion, changed/lost/extra receipts, complete
+  refunds, earned funding, time rollback, treasury conservation and protected funds.
+- `cabal run ecx-bridge:exe:ecx-store-check -j1 --offline`: pass against freshly
+  migrated disposable `ecx_rebuild_contract_core_e_20261005` and its SELECT-only
+  role. Admission/refund/treasury, historical terms, holds, rollback/fencing,
+  source/native/Solana recovery, original payout-link precedence and actual restic
+  archive restoration all passed. This uses fixture chain evidence, not a new
+  funded network acceptance. The first run exposed changed treasury refusal
+  precedence; the original refusal was restored before the successful fresh run.
+
+Logs: `/tmp/ecx-financial-core-e-{build,tests,store,schema}.log`. No VM, funded
+runtime or chain transaction was started. The exact reference `Main.hs` hash is
+unchanged. No application SQL escape, generic evaluator or second payment path
+was added.
+
+| Changed source | Before | After | Difference |
+| --- | ---: | ---: | ---: |
+| `src/Bridge/Lifecycle.hs` | 268 | 532 | +264 |
+| `runtime/Bridge/Store.hs` | 3,432 | 3,405 | -27 |
+| `workflow/Bridge/Admission.hs` | 90 | 89 | -1 |
+| Application total for this piece | 3,790 | 4,026 | **+236, zero new files** |
+| Existing lifecycle/Store tests | 4,583 | 4,686 | **+103, zero new files** |
+
+Repository totals are **66 application/schema files / 15,400 lines**, **23 test
+files plus embedded Rust / 9,801 lines**, and unchanged **31 tooling files /
+3,362 lines**. This is a verified decision-boundary improvement, not yet a net
+size reduction or security certification. E54 (derived customer status/payout),
+E55 (its integrated mixed-history comparison) and E56 (whole-checkpoint closure)
+remain. The schema/state reduction and remaining release gates are still open.
+
 ## Source and evidence boundaries
 
 | Version | Verified scope | Not established by that evidence |

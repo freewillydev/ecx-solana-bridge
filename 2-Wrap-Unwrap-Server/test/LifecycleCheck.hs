@@ -5,6 +5,7 @@ module LifecycleCheck (checks) where
 
 import Bridge.Domain hiding (fee)
 import Bridge.Lifecycle
+import qualified Bridge.Wire as W
 import Bridge.Wire (PaymentTerms(..),CostLimits(..),PolicySnapshot(..),SignedAttempt(..),PaymentCosts(..))
 import Control.Monad (foldM)
 import Data.Int (Int64)
@@ -103,6 +104,88 @@ checks = sequence
         in conjoin [checkIntake facts===Right (),checkIntake facts {intakeTime=now+60}===Right ()
              ,checkIntake facts {intakeTime=now+61}===Left "scanners_not_fresh"
              ,checkIntake facts {intakeCustody=Just(4,3,now)}===Left "custody_not_reconciled"]
+  , check "new admission uses ceiling one percent and retains both alternate cost holds" $
+      forAll (chooseInteger (2,100000000)) $ \n -> forAll (elements [NativeToWrapped,WrappedToNative]) $ \direction ->
+        let request=customerRequest direction n
+            admitted=good $ decideOrder customerLimits customerCosts request customerAdmission
+            charged=1+(n-1) `div` 100
+            expectedCosts=if direction==NativeToWrapped then [("refund",Native,money 10),("conversion",Sol,money 20)]
+              else [("conversion",Native,money 10),("refund",Sol,money 20)]
+        in conjoin [net(admittedQuote admitted)===money(n-charged),admittedDeadline admitted===200,admittedGrace admitted===300
+             ,admittedCosts admitted===expectedCosts
+             ,decideOrder customerLimits customerCosts request customerAdmission {availableFloat=n-charged-1}===Left "insufficient_inventory"
+             ,decideOrder customerLimits customerCosts request customerAdmission {nativeOrderBudget=FeeBudget 9 0 0 (money 1000000000)}===Left "insufficient_fee_budget"]
+  , check "native allocation retries never allocate twice or extend immutable instructions" $ once $
+      let fresh=InstructionFacts NativeToWrapped "Provisioning" 200 Nothing Nothing 0
+          saved=fresh {instructionStatus="AwaitingDeposit",savedInstruction=Just "owned-address",savedInstructionSequence=Just 4}
+      in conjoin [decideNativeClaim "label" Nothing fresh (Just readyIntake)===Right(AllocationClaim "label" True)
+           ,decideNativeClaim "label" (Just "label") fresh Nothing===Right(AllocationClaim "label" False)
+           ,decideNativeClaim "other" (Just "label") fresh Nothing===Left "allocation_label_mismatch"
+           ,decideInstruction saved "other-address"===Left "instruction_is_immutable"
+           ,decideInstructionIssue True 3 saved Nothing===Left "backup_pending"
+           ,decideInstructionIssue True 4 saved (Just(readyIntake,["quote"],["quote","quote"]))===Right True
+           ,decideInstructionIssue True 4 saved {instructionIssued=1} Nothing===Right False
+           ,decideInstructionIssue True 4 saved (Just(readyIntake {intakeTime=201},["quote"],["quote","quote"]))===Left "scanners_not_fresh"]
+  , check "promotion preserves historical terms and refuses changed late additional or lost sources" $
+      forAll (chooseInteger (2,100000000)) $ \n -> forAll (chooseInteger (0,n-1)) $ \charge ->
+      forAll (elements [NativeToWrapped,WrappedToNative]) $ \direction ->
+        let facts=customerPromotion direction n charge
+            order=promotionOrder facts; receipt=promotionReceipt facts
+            approved=case good(decidePromotion "fixture" 300 facts) of Just p->p; Nothing->error "promotion rejected"
+            changed=receipt {W.depositAmount=money(n+1)}
+        in conjoin [paymentAmount approved===money(n-charge),paymentRecipient approved===W.recipient(W.request order)
+             ,decidePromotion "fixture" 301 facts===Right Nothing
+             ,decidePromotion "fixture" 100 facts {promotionReceipt=changed}===Right Nothing
+             ,decidePromotion "fixture" 100 facts {promotionReceipt=receipt {W.depositEligible=False}}===Right Nothing
+             ,decidePromotion "fixture" 100 facts {conversionExists=True}===Right Nothing
+             ,decidePromotion "other" 100 facts===Left "saved_order_terms_mismatch"]
+  , check "mixed conversion refunds and earned withdrawals retain full principal and separate costs" $
+      forAll (chooseInteger (2,1000000)) $ \n -> forAll (chooseInteger (1,1000)) $ \extra ->
+      forAll (elements [NativeToWrapped,WrappedToNative]) $ \direction ->
+        let order=promotionOrder $ customerPromotion direction n 1
+            asset=sourceAsset direction; feeAsset=if asset==Native then Native else Sol
+            allowance=if asset==Native then 10 else 20
+            receipt=W.Deposit "extra" (Just "order") asset (money extra) "anchor" 2 True 110
+            work=[("convert:order","original","paid")]
+            facts=RefundFacts False work "verified-owner" [(T.pack(show feeAsset),allowance,"released")]
+              (Just $ FeeBudget 1000 0 0 $ money 1000)
+            refunded=good $ decideRefund (W.request order) receipt customerCosts facts
+            withdrawn=good $ withdrawalInput (money 1000) 100 (T.replicate 64 "a") asset (money 1) "owner" "earned"
+            histories=History [Convert direction n 1,Return asset extra,Revenue asset 1] [0,1,1,2,0]
+        in conjoin [paymentAmount refunded===money extra,paymentAsset refunded===asset
+             ,aggregate(settlement refunded)===expected(Return asset extra)
+             ,decisions histories===Right(model histories)
+             ,decideRefund (W.request order) receipt customerCosts facts {refundUnresolved=True}===Left "refund_would_race_payment"
+             ,decideRefund (W.request order) receipt customerCosts facts {refundObligations=[("already","extra","paid")]}===Left "principal_already_resolved"
+             ,decideRefund (W.request order) receipt customerCosts facts {refundBudget=Just(FeeBudget 1000 990 0 $ money 1000)}
+                ===(if allowance>10 then Left "insufficient_fee_budget" else Right refunded)
+             ,decideWithdrawal withdrawn (PaymentTerms (W.policy order) customerCosts) "earned" Nothing (Just(readyOperator,0))===Left "insufficient_earned_fees"]
+  , check "expiry cannot free a received deposit or extend grace on clock rollback" $
+      forAll (chooseInteger (0,toInteger(maxBound::Int64)-1)) $ \time ->
+        let grace=fromInteger time in conjoin
+          [shouldExpireQuote grace grace False===Right False,shouldExpireQuote (grace+1) grace False===Right True
+          ,shouldExpireQuote (grace+1) grace True===Right False,shouldExpireQuote 0 grace False===Right False]
+  , check "earned cancellation requires unsigned cleanup and exact replay reason" $ once $
+      let outgoing=good $ withdrawalInput (money 1000) 100 (T.replicate 64 "a") Native (money 10) "owner" "earned"
+          terms=PaymentTerms (PolicySnapshot 2 "finalized" "fixture") customerCosts
+          saved=WithdrawalView outgoing terms "earned" 3 Nothing
+      in conjoin [decideWithdrawal outgoing terms "earned" (Just saved) Nothing===Right False
+           ,decideWithdrawal outgoing terms "changed" (Just saved) Nothing===Left "fee_withdrawal_conflict"
+           ,decideWithdrawalCancellation "cancel" saved (WithdrawalWork False True)===Left "fee_withdrawal_payment_exists"
+           ,decideWithdrawalCancellation "cancel" saved (WithdrawalWork True False)===Left "pause_before_operator_action"
+           ,decideWithdrawalCancellation "cancel" saved (WithdrawalWork True True)===Right True
+           ,decideWithdrawalCancellation "cancel" saved {withdrawalCancellation=Just("cancel",4)} UnpreparedWithdrawal===Right False]
+  , check "treasury splits conserve an unbound receipt and never spend protected balances" $
+      forAll (chooseInteger (1,1000000)) $ \n ->
+        let receipt=W.Deposit "native:receipt:0" Nothing Native (money(n+2)) "anchor" 2 True 100
+            facts=TreasuryFacts readyOperator receipt False False
+            entries=good $ decideTreasury (PolicySnapshot 2 "finalized" "fixture") [("float",money n),("operating",money 2)] facts
+            spent=good $ decideTreasurySpend (Native,money(n+1),money 1) n 1
+        in conjoin [aggregate entries===M.fromList [((Native,Unallocated),negate(n+2)),((Native,Float),n),((Native,Operating),2)]
+             ,sum(map postingDelta entries)===0,sum(map postingDelta spent)===0
+             ,decideTreasurySpend (Native,money(n+1),money 1) (n-1) 1===Left "treasury_spend_exceeds_free_allocation"
+             ,decideTreasury (PolicySnapshot 2 "finalized" "fixture") [("float",money(n+2))] facts {treasuryLinked=True}===Left "receipt_has_customer_obligation"
+             ,property $ all ((`notElem` [Principal,Backing,Liquidity,Earned]).postingAccount) spent]
   ]
  where
   check name test=putStrLn name >> quickCheckWithResult stdArgs {maxSuccess=300} test
@@ -310,3 +393,22 @@ money :: Integer -> Amount
 money = good . amount
 good :: Show e => Either e a -> a
 good = either (error . show) id
+
+
+customerCosts :: CostLimits
+customerCosts=CostLimits (money 10) (money 10) (money 10)
+customerLimits :: OrderLimits
+customerLimits=OrderLimits (money 2) (money 100000000) 100 100 100 (money 1000000000) (money 1000000000)
+customerAdmission :: OrderAdmissionFacts
+customerAdmission=OrderAdmissionFacts readyIntake 0 100000000 budget budget
+ where budget=FeeBudget 1000000000 0 0 (money 1000000000)
+readyOperator :: OperatorFacts
+readyOperator=OperatorFacts 100 True (Just(1,1,100))
+customerRequest :: Direction -> Integer -> W.OrderRequest
+customerRequest direction n=W.OrderRequest direction (money n) "recipient" (if direction==NativeToWrapped then "refund" else "") Nothing "key"
+customerPromotion :: Direction -> Integer -> Integer -> PromotionFacts
+customerPromotion direction n charge=PromotionFacts order receipt 300 False
+ where
+  order=W.OrderView "order" (customerRequest direction n) (good $ historicalQuote (money n) (money charge))
+    "AwaitingDeposit" 200 (Just "instruction") Nothing (PolicySnapshot 2 "finalized" "fixture")
+  receipt=W.Deposit "original" (Just "order") (sourceAsset direction) (money n) "anchor" 2 True 100
