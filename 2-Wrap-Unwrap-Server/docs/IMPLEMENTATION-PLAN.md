@@ -1,6 +1,6 @@
 # Auditable financial-core refactor: design and execution plan
 
-Status: **in progress; 90/120 steps verified (A–G, H85–90)**. This replaces the
+Status: **in progress; 94/120 steps verified (A–H)**. This replaces the
 completed implementation checklist, not its evidence. Execution baseline source is
 `3d4970b3e502de9d4c9a89803610df3802e3e322` (implementation `bc9713c`). The funded
 pilot stays on `548c509`. See [RELEASE-REVIEW.md](RELEASE-REVIEW.md) for the actual
@@ -519,8 +519,8 @@ The executor updates this table after verified checkpoints; not merely after edi
 | E. Customer funding/accounting | 47–56 | Complete | `01eb253`, `99b2657`; pure decisions and derived customer display, 4,500 generated cases, 27 real-PG history comparisons, rollback/restoration pass |
 | F. Recovery/reconciliation | 57–70 | Complete | `fb38ddb`, `2f35af4`; 7,800 generated cases, native/source decisions, shared generation checks, real-PG/HTTPS/process/fence/encrypted-custody restoration pass |
 | G. Schema 22 and migration | 71–84 | Complete | `249a4a4`; authoritative runtime, owner initialization and private legacy restoration; 16 roots/12 exact attempts/83 postings preserved, old/new customer/work-hash comparisons, interruption/rollback, actual PostgreSQL/Servant/HTTPS/fence and encrypted restore contracts pass; funded pilot unchanged |
-| H. Protocol/file simplification | 85–94 | In progress: 85–90 verified | `abee44a`; bounded numeric/base64 parsing, shared typed SPL account facts and HTTPS/genesis sessions; bridge/token/pool suites pass, 77 application lines removed. File-policy map complete; next descriptor-safe file mechanics and backup checks (91–94) |
-| I. Administration/UI/setup | 95–104 | Not started | Depends on H |
+| H. Protocol/file simplification | 85–94 | Complete | `abee44a`, `4f8c9e1`; shared bounded protocol/stream mechanics, fixed file policies and opened-descriptor checks; all three suites and actual PostgreSQL/HTTPS/fence/encrypted native/custody restore contracts pass. Net H: −52 application lines / +1 file |
+| I. Administration/UI/setup | 95–104 | In progress | Review remaining reuse, command compatibility, GHC-JavaScript browser and configure validation |
 | J. Consolidated review/release candidate | 105–120 | Not started | Depends on I |
 
 The numbered steps below implement the design above. They are not permission to

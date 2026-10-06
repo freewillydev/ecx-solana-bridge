@@ -9,8 +9,8 @@ tests does not certify later source or packages.
 
 ## Financial-core refactor execution
 
-Current checkpoint: **90/120 (A–G, H85–90)**. The chronological records below distinguish
-the verified source and scope of each stage. Protected-file consolidation is next; the
+Current checkpoint: **94/120 (A–H)**. The chronological records below distinguish
+the verified source and scope of each stage. Administration/UI/setup is next; the
 funded deployment has not been upgraded by this refactor.
 
 **12/120: checkpoint A complete, 2026-10-05.** Started from clean local/remote
@@ -681,6 +681,67 @@ All shared helpers counted, the changed production piece remains **13 files**,
 reduction is Token.Network **418 -> 354 (-64)**. H90 identifies pathname-only
 file authorization that H91 will replace with checks on the opened descriptor;
 different credential/archive/fence policies must not be merged to reduce lines.
+
+### Protected files and checkpoint H complete — 94/120
+
+Implementation `4f8c9e1db8afe966119ae58324ae6008cc16a8f7` completes H91–94.
+`Bridge.File` shares only opened-handle lifetime, bounded reads and streaming
+SHA-256. It takes no pathname or caller-selected ownership policy. AdminKey,
+Credentials, Recovery, Native, Backup and Fence keep their distinct fixed rules,
+validate the actual opened descriptor, reject symlink/hardlink/nonregular input
+and use nonblocking no-follow opens. Duplicated handles are marked close-on-exec.
+Immutable attempt publication, process locks, replaceable fence state and
+root-owned service inputs remain separate. Native/custody writers fsync the same
+descriptor they wrote; Backup consolidates its identical private staging writers
+and syncs downloaded ledger files/directories before returning.
+
+The first bridge run caught a changed symlink failure category after moving checks
+to the descriptor. Retaining the pathname precheck, followed by the descriptor
+check, preserves the stable policy error without trusting the earlier lookup.
+A direct local probe also confirmed that `dup` clears close-on-exec; the shared
+helper now sets it and its contract checks the duplicate. No signing vocabulary,
+database operation, credential, dependency or network retry policy changed.
+The sole critical dispatch and signer-client construction remain in Critical.
+
+Final commands, root caches and one compiler job as above:
+
+```sh
+cabal build ecx-bridge:exe:ecx-store-check -j1 --offline
+cabal test ecx-bridge:bridge-test ecx-token:token-test ecx-pool:pool-test -j1 --offline --test-show-details=direct
+```
+
+Both exited 0. The rebuilt `ecx-store-check` then exited 0 in default, fence,
+TLS and encrypted-native/full-custody modes, each on a fresh disposable database
+`ecx_rebuild_contract_h_{files,fence,tls,custody}_20261006`, respectively. Migrations
+001–008 were applied as fixed DDL; closed initialization installed 22. Reader
+`ecx_g_switch_reader_20261006` had schema USAGE and table/sequence SELECT only.
+SDK/executable/datadir settings were the same current Cabal outputs as G.
+
+Logs `/tmp/ecx-financial-core-h-files-{build,tests,schema,regression,fence,tls,custody}-release.log`
+record the final run. `ECX_REBUILD_FENCE_ONLY=1` and `ECX_REBUILD_TLS_ONLY=1` select
+their contracts. Native mode used `ECX_REBUILD_NATIVE_RECOVERY_ONLY=1`,
+`ECX_REBUILD_ENCRYPTED_NATIVE_ONLY=1`, `ECX_REBUILD_CUSTODY_ONLY=1` and the existing
+real L2L Signet node on port 29432. It created only random unfunded wallets, tested
+encrypted export/full restic download/relocated CLI restoration, descriptor/label/
+next-address continuity and actual private-key signing, then removed those wallets.
+
+The final batch covers exact archives/postings/signed attempts, full encrypted
+bundle readback after deleting temporary plaintext, permissions/link/size/collision
+refusal, changed manifests, stale identity/sequence/fence, process interruption,
+FIFO refusal, opened-inode hashing, close-on-exec, SDK signatures, terminal/offline
+key workflows and 8,100 generated lifecycle cases. Account-owner rules were
+rechecked in source; new cross-UID Linux acceptance remains in the final platform
+gate rather than being inferred from this same-UID macOS run. Prior D isolation
+evidence remains tied to D. Same-UID mutation, hostile ancestors, physical-host
+independence and real-chain reorg behavior are not proved by these contracts.
+Scope: I06–I10, I13–I15; funded custody and shared services were unchanged.
+
+The file piece is **7 files / 1,359 lines -> 8 files / 1,384 lines (+25 / +1)**,
+including the entire 33-line helper. Application/schema is now **71 files /
+16,337 lines**; tests remain **23 files plus embedded Rust / 10,674 lines (+32)**.
+All H together removes **52 application lines** and adds one source file; this
+checkpoint's additional checks deliberately cost more than the duplicated loops
+they replace. No size target is claimed from moving code between categories.
 
 ## Source and evidence boundaries
 
