@@ -31,6 +31,7 @@ import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString.Base64 as B64
 import qualified Data.Text.Encoding as TE
 import Bridge.Domain
+import qualified Bridge.Lifecycle as Life
 import Bridge.Wire (PaymentTerms(..),CostLimits(..),PolicySnapshot(..))
 import Bridge.Store
 import Bridge.Signer
@@ -1248,7 +1249,7 @@ ledgerMain = do
         evalRead reader PaymentCandidates >>= check . (==["fee:"<>withdrawalKey,intent])
         evalRead reader PendingAttempts >>= check . (==sort [signedId nativeSigned,"fixture-signed-solana"])
         let nativeTx=signedId nativeSigned; nativeCosts=W.PaymentCosts (money 3) (money 0)
-        expectStore "settlement_attempt_changed" (evalWrite writer $ SettlePayment nativeRecorded nativeCosts "{\"offline\":true}")
+        expectStore "settlement_attempt_changed" (compareSettlement fixtures reader writer nativeRecorded $ Life.Succeeded nativeCosts "{\"offline\":true}")
         fixture fixtures ReadyIntake
         expectStore "broadcast_intent_required" (evalWrite writer $ AuthorizeSend 100 nativeTx)
         broadcastSequence<-evalWrite writer (MarkBroadcast 100 nativeTx)
@@ -1261,15 +1262,15 @@ ledgerMain = do
         authorized<-evalWrite writer (AuthorizeSend 100 nativeTx)
         check (recordedSigned authorized==nativeSigned && recordedSequence authorized==Just broadcastSequence)
         beforeSettlement<-evalRead reader ReadBalances
-        expectStore "settlement_fee_or_evidence_invalid" (evalWrite writer $ SettlePayment authorized (W.PaymentCosts (money 3) (money 1)) "{\"offline\":true}")
-        expectStore "settlement_attempt_changed" (evalWrite writer $ SettlePayment authorized {recordedSigned=nativeSigned {signedBytes="changed"}} nativeCosts "{\"offline\":true}")
-        evalWrite writer (SettlePayment authorized nativeCosts "{\"offline\":true}")
+        expectStore "settlement_fee_or_evidence_invalid" (compareSettlement fixtures reader writer authorized $ Life.Succeeded (W.PaymentCosts (money 3) (money 1)) "{\"offline\":true}")
+        expectStore "settlement_attempt_changed" (compareSettlement fixtures reader writer authorized {recordedSigned=nativeSigned {signedBytes="changed"}} $ Life.Succeeded nativeCosts "{\"offline\":true}")
+        compareSettlement fixtures reader writer authorized (Life.Succeeded nativeCosts "{\"offline\":true}")
         afterSettlement<-evalRead reader ReadBalances
         let change account=M.findWithDefault 0 (Native,account) afterSettlement-M.findWithDefault 0 (Native,account) beforeSettlement
         check (change FeePending==(-10) && change Operating==(-3) && change External==13 && change Principal==0 && change Float==0 && change Earned==0)
-        evalWrite writer (SettlePayment authorized nativeCosts "{\"offline\":true}")
+        compareSettlement fixtures reader writer authorized (Life.Succeeded nativeCosts "{\"offline\":true}")
         evalRead reader ReadBalances >>= check . (==afterSettlement)
-        expectStore "settlement_evidence_conflict" (evalWrite writer $ SettlePayment authorized nativeCosts "changed-proof")
+        expectStore "settlement_evidence_conflict" (compareSettlement fixtures reader writer authorized $ Life.Succeeded nativeCosts "changed-proof")
         completed<-evalRead reader (ReadPayment $ "fee:"<>withdrawalKey)
         check (savedStatus completed==PaymentPaid)
         evalRead reader ReadNativeLockWork >>= check . (==Nothing)
@@ -1298,7 +1299,7 @@ ledgerMain = do
         fixture fixtures ReadyIntake
         authorized<-evalWrite writer (AuthorizeSend 100 "fixture-signed-solana")
         beforeSettlement<-evalRead reader ReadBalances
-        evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 3) (money 2)) "offline-conversion-proof")
+        compareSettlement fixtures reader writer authorized (Life.Succeeded (W.PaymentCosts (money 3) (money 2)) "offline-conversion-proof")
         afterSettlement<-evalRead reader ReadBalances
         let change asset account=M.findWithDefault 0 (asset,account) afterSettlement-M.findWithDefault 0 (asset,account) beforeSettlement
         check (change Native Principal==(-100) && change Native Float==93 && change Native Earned==7
@@ -1317,13 +1318,13 @@ ledgerMain = do
         fixture fixtures ReadyIntake
         failedAttempt<-evalWrite writer (AuthorizeSend 100 "fixture-failed-solana")
         beforeFailure<-evalRead reader ReadBalances
-        evalWrite writer (FailSolana failedAttempt (money 2) "offline-failure-proof")
+        compareSettlement fixtures reader writer failedAttempt (Life.Failed (money 2) "offline-failure-proof")
         afterFailure<-evalRead reader ReadBalances
         let expected=M.insertWith (+) (Sol,External) 2 $ M.insertWith (+) (Sol,Operating) (-2) beforeFailure
         check (afterFailure==expected)
-        evalWrite writer (FailSolana failedAttempt (money 2) "offline-failure-proof")
+        compareSettlement fixtures reader writer failedAttempt (Life.Failed (money 2) "offline-failure-proof")
         evalRead reader ReadBalances >>= check . (==afterFailure)
-        expectStore "failure_evidence_conflict" (evalWrite writer $ FailSolana failedAttempt (money 3) "offline-failure-proof")
+        expectStore "failure_evidence_conflict" (compareSettlement fixtures reader writer failedAttempt $ Life.Failed (money 3) "offline-failure-proof")
         failedView<-evalRead reader (ReadPayment ("convert:"<>failedPayment))
         check (savedStatus failedView==PaymentReview)
         evalRead reader PendingAttempts >>= check . null
@@ -1554,9 +1555,47 @@ expectStore expected action = do
     Left err -> fail ("expected "<>T.unpack expected<>", unexpected rejection: "<>show err<>"\n"<>prettyCallStack callStack)
     Right _ -> fail ("expected rejection: "<>T.unpack expected<>"\n"<>prettyCallStack callStack)
 
+-- Temporary differential adapter for checkpoint C: the unchanged schema-21
+-- interpreter remains the actual writer. Remove after D integrates the decision.
+compareSettlement :: PG.Connection -> Reader -> Writer -> RecordedAttempt -> Life.SettlementOutcome -> IO ()
+compareSettlement connection reader writer expected outcome = do
+  let txid=signedId(recordedSigned expected)
+      normalize=M.filter (/=0)
+      check ok=unless ok (fail "pure/legacy settlement comparison failed")
+  current<-evalRead reader (ReadAttempt txid)
+  view<-evalRead reader (ReadPayment $ recordedPayment current)
+  (held,winner,failedFee)<-fixture connection (SettlementEvidence current)
+  history<-fixture connection MigrationRecords
+  records@(_,_,postings)<-fixture connection ArchiveRecords
+  before<-evalRead reader ReadBalances
+  result<-try $ evalWrite writer $ case outcome of
+    Life.Succeeded costs proof->SettlePayment expected costs proof
+    Life.Failed cost proof->FailSolana expected cost proof
+  after<-evalRead reader ReadBalances
+  afterRecords@(_,_,afterPostings)<-fixture connection ArchiveRecords
+  let decision=Life.decideSettlement expected (Life.SettlementFacts current view held winner failedFee) outcome
+      unchanged=do
+        check (after==before && afterRecords==records)
+        fixture connection MigrationRecords >>= check . (==history)
+  case (decision,result) of
+    (Left code,Left failure@(BridgeError actual))->check (code==actual) >> unchanged >> throwIO failure
+    (Right Life.SettlementReplay,Right ())->unchanged
+    (Right (Life.ApplySettlement effects),Right ())->do
+      let costs=Life.outcomeCosts outcome
+          currency=if recordedChain current=="Native" then Native else Sol
+          cost=toInteger(units $ W.networkFee costs)+toInteger(units $ W.accountRent costs)
+          changes=Life.settlementPrincipal effects<>[Posting currency Operating (-cost),Posting currency External cost]
+          wanted=normalize $ M.unionWith (+) before $ M.fromListWith (+)
+            [((postingAsset entry,postingAccount entry),postingDelta entry) | entry<-changes]
+      check (normalize after==wanted && take (length postings) afterPostings==postings)
+      saved<-evalRead reader (ReadAttempt txid)
+      check (saved==current {recordedState=Life.outcomeState outcome,recordedObservation=Just $ Life.outcomeRecord outcome})
+    _->fail ("pure/legacy settlement refusal differs: "<>show decision<>" / "<>show (result :: Either BridgeError ()))
+
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  SettlementEvidence :: RecordedAttempt -> Fixture (Maybe (Asset,Amount),Maybe T.Text,Maybe Integer)
   PrimaryLink :: T.Text -> T.Text -> Fixture ()
   HistoricalRefundView :: T.Text -> T.Text -> Fixture ()
   LiveScanHealth :: Fixture [(T.Text,Maybe Int64,Maybe T.Text)]
@@ -1620,6 +1659,28 @@ data Fixture a where
   ProtectHolds :: T.Text -> Fixture ()
   CheckPhases :: T.Text -> T.Text -> Fixture Bool
 fixture :: PG.Connection -> Fixture a -> IO a
+fixture c (SettlementEvidence saved) = do
+  holds<-O.runSelect c $ O.limit 2 $ do
+    intent<-O.selectTable S.intents
+    (key,currency,n,released)<-O.selectTable S.feeHolds
+    O.where_ (S.intentId intent O..== O.sqlStrictText(recordedPayment saved) O..&& key O..== S.intentId intent
+      O..&& S.intentResolved intent O..== O.sqlInt8 0 O..&& released O..== O.sqlInt8 0)
+    pure(currency,n)
+    :: IO [(T.Text,Int64)]
+  winners<-O.runSelect c $ O.limit 1 $ do
+    row<-O.selectTable S.attempts
+    O.where_ (S.attemptIntent row O..== O.sqlStrictText(recordedPayment saved) O..&& S.attemptState row O..== O.sqlStrictText "settled")
+    pure(S.attemptId row)
+    :: IO [T.Text]
+  charged<-O.runSelect c $ O.limit 2 $ do
+    (_,event,_,account,n)<-O.selectTable S.postings
+    O.where_ (event O..== O.sqlStrictText("failed-fee:"<>signedId(recordedSigned saved)) O..&& account O..== O.sqlStrictText "external")
+    pure n
+    :: IO [Int64]
+  let held=case holds of
+        [(currency,n)]->(,) <$> lookup currency [("Native",Native),("Sol",Sol)] <*> either (const Nothing) Just (amount $ toInteger n)
+        _->Nothing
+  pure (held,case winners of [tx]->Just tx; _->Nothing,case charged of [n]->Just(toInteger n); _->Nothing)
 fixture c (SetPause paused) = void $ O.runUpdate c O.Update {O.uTable=S.deployment,
   O.uUpdateWith= \row->row {S.paused=O.sqlInt8 (if paused then 1 else 0)},
   O.uWhere= \row->S.singleton row O..== O.sqlInt8 1,O.uReturning=O.rCount}
@@ -2841,12 +2902,12 @@ paidRefundContract fixtures reader writer=do
   fixture fixtures ReadyIntake
   authorized<-evalWrite writer (AuthorizeSend 110 $ signedId signed)
   beforeRefund<-evalRead reader ReadBalances
-  evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 1) (money 0)) "{\"offlineExtraRefund\":true}")
+  compareSettlement fixtures reader writer authorized (Life.Succeeded (W.PaymentCosts (money 1) (money 0)) "{\"offlineExtraRefund\":true}")
   unchanged
   afterRefund<-evalRead reader ReadBalances
   check (M.findWithDefault 0 (Native,Principal) afterRefund==M.findWithDefault 0 (Native,Principal) beforeRefund-3)
   evalRead reader (ReadPayment refundKey) >>= check . (==PaymentPaid) . savedStatus
-  evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 1) (money 0)) "{\"offlineExtraRefund\":true}")
+  compareSettlement fixtures reader writer authorized (Life.Succeeded (W.PaymentCosts (money 1) (money 0)) "{\"offlineExtraRefund\":true}")
   evalRead reader ReadBalances >>= check . (==afterRefund)
   unchanged
   expectStore "pause_before_operator_action" (evalWrite writer $ RepairCompletedOrderView 110 paidOrder)
@@ -3785,12 +3846,12 @@ restorationContract fixtures reader writer=do
   authorized<-evalWrite writer (AuthorizeSend 110 "covered-conversion")
   check (recordedSigned authorized==recordedSigned signed)
   beforePaid<-evalRead reader ReadBalances
-  evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 1) (money 0)) "offline-covered-effect")
+  compareSettlement fixtures reader writer authorized (Life.Succeeded (W.PaymentCosts (money 1) (money 0)) "offline-covered-effect")
   afterPaid<-evalRead reader ReadBalances
   let delta asset account=M.findWithDefault 0 (asset,account) afterPaid-M.findWithDefault 0 (asset,account) beforePaid
   check (delta Native Principal==(-10) && delta Native Float==9 && delta Native Earned==1
     && delta Wrapped Float==(-9) && delta Sol Operating==(-1))
-  evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 1) (money 0)) "offline-covered-effect")
+  compareSettlement fixtures reader writer authorized (Life.Succeeded (W.PaymentCosts (money 1) (money 0)) "offline-covered-effect")
   evalRead reader ReadBalances >>= check . (==afterPaid)
   void restore
   returned<-evalRead reader ReadBalances
@@ -3906,7 +3967,7 @@ nativeReplacementContract fixtures reader writer=handle (\(BridgeError code)->fa
   authorized<-evalWrite writer (AuthorizeSend 110 $ signedId $ recordedSigned child)
   let anchor=T.replicate 64 "a"
       proof member block=encodeText $ object ["txid" .= signedId(recordedSigned member),"blockhash" .= block,"height" .= (100::Int),"requiredDepth" .= (2::Int)]
-  evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 2) (money 0)) $ proof child anchor)
+  compareSettlement fixtures reader writer authorized (Life.Succeeded (W.PaymentCosts (money 2) (money 0)) $ proof child anchor)
   evalRead reader PendingAttempts >>= check . all (`notElem` [signedId wire,signedId(recordedSigned child)])
   evalRead reader ReadNativeLockWork >>= check . (==Nothing)
   -- Actual PostgreSQL winner history with synthetic chain evidence: principal

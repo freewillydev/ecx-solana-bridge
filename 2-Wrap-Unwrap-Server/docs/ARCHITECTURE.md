@@ -584,11 +584,43 @@ bytes, generation, evidence or ordering to make differential tests pass.
 
 `LifecycleCheck` supplies bounded funding/delivery histories and validity-preserving
 shrinkers. Its expected account map and paid set are independent of production
-accounting. Initially the comparison adapter uses existing `Domain.settlement`
-with the already-tested Store replay contract; C replaces that adapter with actual
-pure lifecycle decisions. No new production replay claim follows from the adapter.
+accounting. The new adapter uses actual pure settlement decisions for replay;
+the baseline `Domain.settlement` adapter remains a test-only accounting comparison.
+The actual server continues using its old Store rules until checkpoint D.
 The existing real-PostgreSQL duplicate-settlement, extra-refund, stale-generation,
 missing-backup and native-source-refresh regressions remain the durable oracle.
 The separate HTTPS fixture suspends signing, invalidates custody, then proves the
 second read refuses and the held gate recovers. Negative accounting mutations must
 fail, demonstrating that the independent model is capable of detecting differences.
+
+The initial pure slice consists of `decidePreparation`, `decideQueue`, `decideSend`
+and `decideSettlement`. It has no IO, Store import, database callback or signer
+resource. It cannot reserve, sign or send anything. Snapshot constructors remain
+ordinary data; only specific Store leaves may reload and apply their results.
+
+| Previous decision owner | Pure owner / remaining boundary |
+| --- | --- |
+| `settlePayment` fee/rent/proof bounds | `decideSettlement`; chain finality/effects verification stays in the adapter |
+| `settlementContext` subject/replay/hold/winner checks | `decideSettlement`; Store loads current attempt/funding and at most one active hold/winner |
+| `failSolana` exact failed-charge replay | `decideSettlement`; only recorded external fee charge is supplied, no absence inferred |
+| `resolvePayment` customer outcome and paid-link precedence | `SettlementEffects`/`CustomerResolution`; applying a new outcome resolves intent/releases fee hold, success additionally releases customer reservations |
+| `preparePayment` reuse/generation/fee/source/capital/budget decisions | `decidePreparation`; closed readers still prove lineage/source/identity and bind exact reservation purpose/currency |
+| `intakeReady` snapshot predicates | `checkIntake`; readers must supply exactly the three named streams and error-free matching custody revision |
+| `markBroadcast`/`authorizeSend` state/coverage decisions | `decideQueue`/`decideSend`; Store owns queue sequence, adapters retain final live chain acceptance checks |
+
+Preparation budget input is the total before mutation. Subtract only this payment's
+transferred customer operating hold (initial preparation) or unreleased prior fee
+hold (authorized successor). A retired/expired hold already released is not subtracted
+twice. The rolling spend total uses the Store's existing durable operating clock.
+Live exact preparation replay deliberately does not require fresh admission; it
+grants no new signing/send authority. All such later operations recheck readiness.
+
+The temporary `StoreCheck.compareSettlement` adapter loads sanitized current facts
+using closed Opaleye operations, then compares the pure decision with the unchanged
+actual Store writer. Fifteen success/failure/replay/refusal calls cover native,
+Solana, earned, conversion, extra refund, covered source and native replacement.
+It compares exact refusal codes, balance movements, retained posting prefix and
+saved outcome; refusals/replays must leave the financial history unchanged. It
+neither runs a second paying server nor normalizes monetary values or signed bytes.
+Remove it when D replaces the old rules, retaining the independent model and
+original financial regression checks.

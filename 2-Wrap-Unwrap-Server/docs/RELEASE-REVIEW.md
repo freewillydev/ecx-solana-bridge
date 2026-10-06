@@ -99,6 +99,43 @@ total is 66 files/14,857 lines; test total is 23 files plus embedded Rust tests,
 9,378 lines (**+113**). Next: extract settlement, preparation and queue/send
 decisions using these facts on unchanged schema 21, removing their old rules.
 
+### Checkpoint C — 36/120
+
+Implemented the bounded pure payment slice in `Lifecycle.hs`: funded preparation,
+queue/send authorization and successful/failed settlement, for both chains and
+all three funding types. The ordinary Store still runs the baseline implementation
+until D. No schema, protocol, critical entry, chain send or funded runtime changed.
+ARCHITECTURE maps the old conditions to their pure owners and the remaining IO
+boundaries. This separation makes the rules readable without tracing queries or
+RPC calls; it deliberately does not replace independent chain validation.
+
+The bridge suite passed with **2,100 generated lifecycle cases**, fixed refusal
+vectors and two expected negative mutations. Coverage includes exact redelivery,
+original accounting comparison, historical fee terms, maximum amounts, generation
+0–7, approved successor holds, finalized failure costs, source review, wrong
+identity/generation/bytes, missing or wrong holds, insufficient/daily budgets,
+native replacement selection, missing/changed backup coverage and 60/61-second
+readiness boundaries. The new modules compile without added warnings.
+
+The default PostgreSQL suite then passed on fresh
+`ecx_rebuild_contract_core_c_20261005` with 15 differential settlement/failure calls
+against the still-unchanged actual Store writer. Pure and old decisions agreed on
+success/refusal/replay, exact fee behavior and retained history; existing refund,
+source/replacement, restart, role and encrypted archive tests also passed. Commands
+were the same one-job bridge-test and ecx-store-check invocations as A/B with the C
+database. Logs: `/tmp/ecx-financial-core-slice-tests.log` and
+`/tmp/ecx-financial-core-slice-store.log`. A final test-local variable rename only
+removes a shadowing warning; no behavior was changed by that cleanup.
+
+Slice size before integration: Lifecycle grew from 23 to **239 lines**; its model
+from 111 to **312**; the temporary PostgreSQL comparison adds **61** test lines.
+No new files in C. Application/schema total is **66 files / 15,073 lines**; tests
+are **23 files plus embedded Rust / 9,640 lines**. These are additions while the
+old implementation remains, not claimed savings. D removes the duplicate Store
+decisions and temporary comparison adapter, then measures the total replacement.
+The expansion gate is met for this bounded slice; broader recovery and schema
+work remain unverified, and no overall line-count target is guaranteed.
+
 ## Source and evidence boundaries
 
 | Version | Verified scope | Not established by that evidence |

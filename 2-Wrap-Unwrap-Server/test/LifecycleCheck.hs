@@ -1,9 +1,12 @@
 -- Independent accounting oracle for lifecycle extraction. Expected values never
--- call Domain.settlement. PostgreSQL contracts cover the durable replay gate;
--- the pure decision adapter will replace the baseline adapter during extraction.
+-- call Domain.settlement. PostgreSQL contracts cover durable commits; this model
+-- compares the extracted decisions with independent accounting and old histories.
 module LifecycleCheck (checks) where
 
-import Bridge.Domain
+import Bridge.Domain hiding (fee)
+import Bridge.Lifecycle
+import Bridge.Wire (PaymentTerms(..),CostLimits(..),PolicySnapshot(..),SignedAttempt(..),PaymentCosts(..))
+import Control.Monad (foldM)
 import Data.Int (Int64)
 import Data.List (nub)
 import qualified Data.Map.Strict as M
@@ -23,8 +26,8 @@ checks = sequence
         aggregate (settlement $ outgoing 0 funding) === expected funding
   , check "bounded delivery histories preserve principal identity and protected accounts" $
       forAllShrink histories shrinkHistory $ \history ->
-        let actual=baseline history; wanted=model history
-        in conjoin [actual===wanted, property $ all (==0)
+        let actual=good $ decisions history; wanted=model history
+        in conjoin [actual===wanted, actual===baseline history, property $ all (==0)
              [M.findWithDefault 0 (asset,account) actual | asset<-[Native,Wrapped,Sol],account<-[Backing,Liquidity,SourceDeficit]]]
   , check "model rejects deliberately duplicated principal" $ expectFailure $ once $
       let funding=Convert NativeToWrapped 100 1; history=History [funding] [0,0]
@@ -32,6 +35,74 @@ checks = sequence
   , check "model rejects deliberately altered fee accounting" $ expectFailure $ once $
       let funding=Convert WrappedToNative 100 1
       in M.adjust (+1) (Wrapped,Earned) (aggregate $ settlement $ outgoing 0 funding) === expected funding
+  , check "settlement snapshot preserves funding and separates verified network costs" $
+      forAllShrink fundingCases shrinkFunding $ \funding -> forAll (chooseInt (0,7)) $ \generation ->
+        let facts=snapshot 0 funding
+            queued=(settlementCurrent facts) {recordedGeneration=generation}
+            current=facts {settlementCurrent=queued}
+            outcome=successful current
+            effect=case good (decideSettlement queued current outcome) of ApplySettlement x->x; _->error "new settlement replayed"
+            expectedCustomer=case funding of
+              Convert{}->Just(CustomerResolution "order-payment-0" False "Paid")
+              Return{}->Just(CustomerResolution "order-payment-0" True "Refunded")
+              Revenue{}->Nothing
+        in conjoin [aggregate(settlementPrincipal effect)===expected funding
+             ,settlementOutcome effect===outcome,settlementCustomer effect===expectedCustomer
+             ,property $ all ((/=Operating).postingAccount) (settlementPrincipal effect)]
+  , check "finalized Solana failure books only its exact fee and replay requires it" $
+      forAll (chooseInteger (1,10)) $ \fee ->
+        let facts=snapshot 0 (Convert NativeToWrapped 100 1); queued=settlementCurrent facts
+            outcome=Failed (money fee) "failure-proof"
+            effect=case good(decideSettlement queued facts outcome) of ApplySettlement x->x; _->error "new failure replayed"
+            repeated=finished facts outcome
+        in conjoin [settlementPrincipal effect===[],outcomeCosts outcome===PaymentCosts (money fee) (money 0)
+             ,settlementCustomer effect===Just(CustomerResolution "order-payment-0" False "NeedsReview")
+             ,decideSettlement queued repeated outcome===Right SettlementReplay
+             ,decideSettlement queued repeated {settlementFailedCharge=Just(fee+1)} outcome===Left "failure_evidence_conflict"]
+  , check "settlement refuses changed identity generation bytes proof and missing authority" $ once $ property refusalCases
+  , check "preparation through queue and settlement preserves exact saved payment" $
+      forAllShrink fundingCases shrinkFunding $ \funding ->
+        let facts=initialPreparation funding
+            prepared=created $ good $ decidePreparation (money 10) "{}" facts
+            queued=sendFacts funding prepared
+            unsigned=queued {sendAttempt=(sendAttempt queued) {recordedState="signed",recordedSequence=Nothing}}
+            replay=facts {preparationPayment=preparedView prepared
+              ,preparationHistory=LivePreparation (recordedChain $ sendAttempt queued) prepared,preparationAdmission=Nothing}
+        in conjoin
+          [ savedPayment(preparedView prepared)===savedPayment(preparationPayment facts)
+          , decidePreparation (money 10) "{}" replay===Right(ReusePreparation prepared)
+          , decidePreparation (money 10) "{\"changed\":true}" replay===Left "preparation_conflict"
+          , decideQueue unsigned===Right CreateQueue
+          , decideQueue queued===Right(ReuseQueue 5)
+          , decideSend unsigned===Left "broadcast_intent_required"
+          , decideSend queued {sendBackupSequence=4}===Left "backup_pending"
+          , decideSend queued===Right(sendAttempt queued)
+          , decideSend queued {sendReviewSequence=6}===Left "backup_pending"
+          , decideSend queued {sendReviewSequence=6,sendBackupSequence=6}===Right(sendAttempt queued)
+          , decisions (History [funding] [0,0,0])===Right(expected funding) ]
+  , check "authorized retry replaces only its own prior fee hold" $
+      forAllShrink fundingCases shrinkFunding $ \funding -> forAll (chooseInt (1,7)) $ \generation ->
+      forAll arbitrary $ \expired ->
+        let original=initialPreparation funding; admission=admitted original
+            chain=recordedChain(settlementCurrent $ snapshot 0 funding)
+            currency=if chain=="Native" then Native else Sol
+            facts=original {preparationHistory=RetiredPreparation chain (Just generation)
+              ,preparationAdmission=Just admission {priorPreparationFee=Just(PriorFeeHold currency (money 10) expired expired)
+                ,customerOperatingHold=Nothing,preparationBudget=FeeBudget 1000 (if expired then 0 else 10) 0 (money 1000)}}
+            result=created $ good $ decidePreparation (money 10) "{}" facts
+        in conjoin [preparedGeneration result===generation,preparedFee result===money 10
+             ,savedPayment(preparedView result)===savedPayment(preparationPayment original)
+             ,decidePreparation (money 10) "{}" facts {preparationHistory=RetiredPreparation chain Nothing}===Left "preparation_retry_not_authorized"
+             ,decidePreparation (money 10) "{}" facts {preparationHistory=RetiredPreparation chain (Just 8)}===Left "preparation_generation_limit"]
+  , check "preparation rejects invalid plans missing holds and shared budget exhaustion" $ once preparationRefusals
+  , check "queue and send reject changed generation stale readiness and replacement selection" $ once sendRefusals
+  , check "readiness uses the exact sixty-second boundary without extending time" $
+      forAll (chooseInteger (0,toInteger(maxBound::Int64)-61)) $ \time ->
+        let now=fromInteger time
+            facts=readyIntake {intakeTime=now,intakeScans=Just((now,"n"),(now,"t"),(now,"s")),intakeCustody=Just(3,3,now)}
+        in conjoin [checkIntake facts===Right (),checkIntake facts {intakeTime=now+60}===Right ()
+             ,checkIntake facts {intakeTime=now+61}===Left "scanners_not_fresh"
+             ,checkIntake facts {intakeCustody=Just(4,3,now)}===Left "custody_not_reconciled"]
   ]
  where
   check name test=putStrLn name >> quickCheckWithResult stdArgs {maxSuccess=300} test
@@ -83,6 +154,136 @@ outgoing index funding = good $ do
 baseline :: History -> Balances
 baseline (History payments deliveries) = aggregate $
   concat [settlement(outgoing index $ payments!!index) | index<-nub deliveries]
+
+-- Unlike the baseline adapter, the new adapter delegates replay/authorization to
+-- decideSettlement. Updating the in-memory facts models only a committed result;
+-- actual all-or-nothing persistence is tested against PostgreSQL, not assumed here.
+decisions :: History -> Either T.Text Balances
+decisions (History payments deliveries) = snd <$> foldM step (initial,M.empty) deliveries
+ where
+  initial=M.fromList [(index,snapshot index funding) | (index,funding)<-zip [0..] payments]
+  step (states,balances) index = do
+    let facts=states M.! index; queued=settlementCurrent(initial M.! index); outcome=successful facts
+    decision<-decideSettlement queued facts outcome
+    case decision of
+      SettlementReplay->pure (states,balances)
+      ApplySettlement effects->pure (M.insert index (finished facts outcome) states,
+        normalize $ M.unionWith (+) balances (aggregate $ settlementPrincipal effects))
+
+snapshot :: Int -> FundingCase -> SettlementFacts
+snapshot index funding = SettlementFacts queued view (Just(currency,money 10)) Nothing Nothing
+ where
+  p=outgoing index funding; native=paymentAsset p==Native; currency=if native then Native else Sol
+  view=PaymentView p (PaymentTerms (PolicySnapshot 2 "finalized" "fixture") (CostLimits (money 10) (money 10) (money 10))) PaymentPaying
+  queued=RecordedAttempt (paymentId p) (if native then "Native" else "Solana") 0 (money 10) "broadcast_intent" (Just 5) Nothing
+    (SignedAttempt ("transaction-"<>T.pack(show index)) "exact-saved-bytes" "exact-saved-policy" Nothing)
+
+successful :: SettlementFacts -> SettlementOutcome
+successful facts = Succeeded (PaymentCosts (money 1) (money $ if recordedChain(settlementCurrent facts)=="Native" then 0 else 2)) "finality-proof"
+
+finished :: SettlementFacts -> SettlementOutcome -> SettlementFacts
+finished facts outcome = facts
+  { settlementCurrent=queued {recordedState=outcomeState outcome,recordedObservation=Just $ outcomeRecord outcome}
+  , settlementPayment=(settlementPayment facts) {savedStatus=if paid then PaymentPaid else PaymentReview}
+  , settlementHold=Nothing,settlementPriorWinner=if paid then Just(signedId $ recordedSigned queued) else Nothing
+  , settlementFailedCharge=case outcome of Failed cost _->Just(toInteger $ units cost); _->Nothing }
+ where queued=settlementCurrent facts; paid=case outcome of Succeeded{}->True; Failed{}->False
+
+refusalCases :: Bool
+refusalCases = and
+  [ reject "settlement_attempt_changed" queued {recordedGeneration=1} facts outcome
+  , reject "settlement_attempt_changed" queued {recordedState="signed"} facts outcome
+  , reject "settlement_attempt_changed" queued {recordedSequence=Nothing} facts outcome
+  , reject "settlement_attempt_changed" queued {recordedSigned=(recordedSigned queued) {signedBytes="other"}} facts outcome
+  , reject "settlement_attempt_changed" queued facts {settlementPayment=settlementPayment(snapshot 1 funding)} outcome
+  , reject "settlement_not_expected" queued facts {settlementPayment=(settlementPayment facts) {savedStatus=PaymentReady}} outcome
+  , reject "payment_intent_not_settleable" queued facts {settlementHold=Nothing} outcome
+  , reject "payment_intent_not_settleable" queued facts {settlementHold=Just(Native,money 10)} outcome
+  , reject "payment_intent_not_settleable" queued facts {settlementHold=Just(Sol,money 9)} outcome
+  , reject "payment_already_settled" queued facts {settlementPriorWinner=Just "other-winner"} outcome
+  , reject "settlement_fee_or_evidence_invalid" queued facts (Succeeded (PaymentCosts (money 0) (money 0)) "proof")
+  , reject "settlement_fee_or_evidence_invalid" queued facts (Succeeded (PaymentCosts (money 9) (money 2)) "proof")
+  , reject "settlement_fee_or_evidence_invalid" queued facts (Succeeded (PaymentCosts (money 1) (money 0)) "")
+  , reject "settlement_fee_or_evidence_invalid" queued facts (Succeeded (PaymentCosts (money 1) (money 0)) $ T.replicate 32769 "x")
+  , reject "settlement_evidence_conflict" queued (finished facts outcome) (Succeeded (outcomeCosts outcome) "changed")
+  , reject "settlement_evidence_conflict" queued (finished facts outcome) (Succeeded (PaymentCosts (money 2) (money 2)) "finality-proof")
+  , reject "settlement_fee_or_evidence_invalid" nativeQueued nativeFacts (Succeeded (PaymentCosts (money 1) (money 1)) "proof")
+  , reject "invalid_failure_evidence" nativeQueued nativeFacts (Failed (money 1) "proof")
+  , reject "invalid_failure_evidence" queued facts (Failed (money 0) "proof")
+  , reject "invalid_failure_evidence" queued facts (Failed (money 11) "proof")
+  , decideSettlement queued (facts {settlementPayment=(settlementPayment facts) {savedStatus=PaymentReview}}) outcome
+      ==decideSettlement queued facts outcome
+  ]
+ where
+  funding=Convert NativeToWrapped 100 1
+  facts=snapshot 0 funding; queued=settlementCurrent facts; outcome=successful facts
+  nativeFacts=snapshot 0 (Return Native 100); nativeQueued=settlementCurrent nativeFacts
+  reject code original current observed=decideSettlement original current observed==Left code
+
+readyIntake :: IntakeFacts
+readyIntake = IntakeFacts 100 False (Just((100,"native"),(100,"tokens"),(100,"sol"))) (Just(1,1,100))
+
+initialPreparation :: FundingCase -> PreparationFacts
+initialPreparation funding = PreparationFacts view InitialPreparation (Just admission)
+ where
+  view=(settlementPayment $ snapshot 0 funding) {savedStatus=PaymentReady}
+  revenue=case funding of Revenue{}->True; _->False
+  held=if revenue then 0 else 20
+  admission=PreparationAdmission readyIntake False True Nothing (if revenue then Nothing else Just $ money held)
+    (toInteger $ units $ paymentAmount $ savedPayment view) (FeeBudget 1000 held 0 (money 1000))
+
+admitted :: PreparationFacts -> PreparationAdmission
+admitted facts=case preparationAdmission facts of Just admission->admission; Nothing->error "fixture admission missing"
+created :: PreparationDecision -> PreparedPayment
+created (CreatePreparation prepared)=prepared
+created ReusePreparation{}=error "new preparation unexpectedly reused"
+
+sendFacts :: FundingCase -> PreparedPayment -> SendFacts
+sendFacts funding prepared = SendFacts readyIntake prepared queued True
+  (Just(signedId $ recordedSigned queued,False)) 0 True 5
+ where queued=settlementCurrent $ snapshot 0 funding
+
+preparationRefusals :: Property
+preparationRefusals = conjoin $
+  [counterexample (T.unpack code) $ decidePreparation quantity plan facts===Left code
+    | (code,quantity,plan,facts)<-
+      [("invalid_payment_record",money 10,"",base)
+      ,("invalid_payment_record",money 10,"null",base)
+      ,("invalid_saved_payment",money 10,"{",base)
+      ,("order_fee_limit_exceeded",money 0,"{}",base)
+      ,("order_fee_limit_exceeded",money 21,"{}",base)
+      ,("payment_not_ready",money 10,"{}",base {preparationPayment=(preparationPayment base) {savedStatus=PaymentReview}})
+      ,("preparation_retry_requires_recovery",money 10,"{}",base {preparationHistory=RetiredPreparation "wrong-chain" (Just 1)})]]
+  <>[counterexample (T.unpack code) $ decidePreparation (money 10) "{}" base {preparationAdmission=Just changed}===Left code
+    | (code,changed)<-
+      [("intake_paused",original {preparationIntake=readyIntake {intakePaused=True}})
+      ,("scanners_not_fresh",original {preparationIntake=readyIntake {intakeTime=161}})
+      ,("destination_payment_unresolved",original {destinationBusy=True})
+      ,("source_not_eligible",original {preparationSourceEligible=False})
+      ,("operating_reservation_missing",original {customerOperatingHold=Nothing})
+      ,("operating_reservation_missing",original {customerOperatingHold=Just $ money 9})
+      ,("insufficient_fee_budget",original {preparationBudget=FeeBudget 9 20 0 (money 1000)})
+      ,("operating_daily_limit",original {preparationBudget=FeeBudget 1000 20 991 (money 1000)})]]
+  <>[decidePreparation (money 10) "{}" earned {preparationAdmission=Just (admitted earned) {pendingEarnedBalance=99}}===Left "earned_reservation_missing"]
+ where
+  base=initialPreparation (Convert NativeToWrapped 100 1); original=admitted base
+  earned=initialPreparation (Revenue Native 100)
+
+sendRefusals :: Property
+sendRefusals = conjoin
+  [counterexample (T.unpack code) $ decideSend changed===Left code | (code,changed)<-
+    [("intake_paused",base {sendIntake=readyIntake {intakePaused=True}})
+    ,("scanners_not_fresh",base {sendIntake=readyIntake {intakeScans=Nothing}})
+    ,("custody_not_reconciled",base {sendIntake=readyIntake {intakeCustody=Just(2,1,100)}})
+    ,("payment_not_sendable",base {sendAttempt=(sendAttempt base) {recordedGeneration=1}})
+    ,("source_not_eligible",base {sendSourceEligible=False})
+    ,("native_replacement_not_current",base {sendNativeSelection=Just("old",False)})
+    ,("native_replacement_draft_pending",base {sendNativeSelection=Just("transaction-0",True)})
+    ,("broadcast_intent_required",base {sendAttempt=(sendAttempt base) {recordedSequence=Nothing}})]]
+ where
+  funding=Return Native 100
+  prepared=created $ good $ decidePreparation (money 10) "{}" (initialPreparation funding)
+  base=sendFacts funding prepared
 
 -- The model owns its paid set and independently calculates account changes.
 model :: History -> Balances
