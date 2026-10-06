@@ -12,6 +12,37 @@ startup. Constant-space global request/order admission budgets precede the exist
 body/concurrency controls in TLS mode. These controls grant no DSL authority and
 are not a separate process isolation boundary. The signer remains separate.
 
+## Start the audit here
+
+Follow one order through this path, then repeat it for refund and earned funding.
+The [source map](../README.md#audit-path), authoritative-fact table and invariant
+index below identify the concrete implementation and its checks. Historical test
+results belong in RELEASE-REVIEW; they are not assumptions that new code is safe.
+
+```mermaid
+flowchart TD
+  API["API.hs: pure Servant handler"] --> Request["Plan / Request → checkedRequest / command"]
+  Request --> Safe["evalSafe: authorized reads"]
+  Request --> Dispatch["runProcess: sole evalCritical call"]
+  Dispatch --> Critical["evalCritical: authorize + concrete operation"]
+  Critical --> Store["Store: locked facts → Lifecycle decision → Opaleye commit"]
+  Safe --> Reader["SELECT-only snapshot"]
+  Store --> DB[("PostgreSQL: roots, journal, saved work, evidence")]
+  Reader --> DB
+  Critical --> Client["Critical.hs: signer HTTPS client"]
+  Client --> Signer["Separate signer: authenticate → critical evaluator"]
+  Signer --> Check["SELECT-only saved-decision check → sign → recheck"]
+  Check --> Critical
+  Critical --> Chains["Chain adapters: submit only authorized saved bytes"]
+  Chains --> Observe["Verified final effects / source and custody observations"]
+  Observe --> Store
+```
+
+No database transaction spans signing, chain RPC or backup upload. A pure decision
+does not carry execution authority; the closed Store leaf obtains its facts under
+the database lock. The signer has no database writer and cannot broadcast. Saved
+bytes must be durably recorded and covered before the worker can submit them.
+
 ## Requests, dictionaries and evaluators
 
 The user's exact [Main.hs](reference/Main.hs) is preserved outside production
@@ -347,9 +378,9 @@ before any submission. Protected files and process locks prevent local branching
 RPC completeness and exclusion of other hosts holding keys remain trust assumptions.
 See the token/pool READMEs for commands, bounds and publication-crash handling.
 
-## Protocol simplification contracts (H85–89)
+## Shared protocol mechanics
 
-The inventory at `249a4a4` separates mechanics from authorization:
+Share parsing mechanics while retaining each caller's authorization rules:
 
 | Repeated responsibility | Shared owner / retained difference |
 | --- | --- |
@@ -366,19 +397,19 @@ does not prove freshness, ownership or authorization.
 
 ## Backup boundary
 
-### Protected-file policy map (H90)
+### Protected-file policy map
 
-The pre-extraction inventory at `abee44a` has these distinct policies. Here
+The current readers and writers retain these distinct policies. Here
 "private" means no group/other access, while service inputs can be root-owned.
 
 | Owner | Input policy and bound | Publication/locking policy |
 | --- | --- | --- |
 | AdminKey | Canonical absolute path, UID-owned private parent; keys exactly 0600/4 KiB; attempts exactly 0600/8 KiB and one link; opened-descriptor checks | Exclusive private staging, fsync, hard-link publication without replacement, parent fsync; persistent per-family fcntl lock |
-| Credentials / Signer | Absolute path, root/current UID and non-group-writable parent; signing key and unlock exactly 0600, auth also 0640, certificate non-writable by group/other; 4 KiB/1 KiB/66 bytes/8 KiB respectively | Read-only inputs; unlock already checks descriptor and one link; remaining key/auth/certificate reads need equivalent descriptor validation |
-| Recovery | UID-owned private files, one link; key 4 KiB, custody manifest 8 KiB; archives stream-hashed; canonical private staging parent | Exclusive files in new 0700 bundle, file and directory sync; before/after identity/sequence/key checks; opened-descriptor validation must replace pathname-only authorization |
-| Store.Backup | Canonical absolute root/UID private inputs, 8 KiB configuration/manifest; UID-owned private output directory; dump streamed | pg_dump snapshot, exclusive staging and authenticated restic download; descriptor checks needed for reading/hashing; the two identical staging writers can share one private implementation |
-| Native recovery | Canonical absolute path, UID-owned private parent, private regular nonempty single-link wallet/manifest; manifest 1 MiB | Node creates wallet; exclusive manifest; file/parent sync; exact descriptors and hash; descriptor checks needed when reading/hashing |
-| Fence | Canonical UID-owned private directory/files, 8 KiB state; opened lock descriptor | flock held for lifetime; monotonic state via private temp, fsync and rename under lock; state reads need descriptor check; never use exclusive attempt publication for a replaceable watermark |
+| Credentials / Signer | Absolute path, root/current UID and non-group-writable parent; signing key and unlock exactly 0600, auth also 0640, certificate non-writable by group/other; 4 KiB/1 KiB/66 bytes/8 KiB respectively | Validate opened regular-file descriptor and single link before reading; credential bytes remain private to their process |
+| Recovery | UID-owned private files, one link; key 4 KiB, custody manifest 8 KiB; archives stream-hashed; canonical private staging parent | Exclusive files in new 0700 bundle, file/directory sync, opened-descriptor and before/after identity/sequence/key checks |
+| Store.Backup | Canonical absolute root/UID private inputs, 8 KiB configuration/manifest; UID-owned private output directory; dump streamed | Consistent pg_dump snapshot, exclusive staging, descriptor-checked reads/hashes and authenticated restic download |
+| Native recovery | Canonical absolute path, UID-owned private parent, private regular nonempty single-link wallet/manifest; manifest 1 MiB | Node creates wallet; exclusive manifest; file/parent sync; opened-descriptor checks and exact wallet hash |
+| Fence | Canonical UID-owned private directory/files, 8 KiB state; opened lock descriptor | Lifetime flock; descriptor-checked reads; monotonic state via private temp, fsync and rename under lock |
 | Configure | AdminKey's fixed private-record policy; source references retained, no long-lived copied secrets | Existing exclusive publication and setup validation; public interface/config loading remains a separate non-secret contract |
 
 Share stream hashing/bounded handle reads only after each owner validates its
@@ -387,7 +418,7 @@ mode rules. Keep service credentials, operator archives, immutable attempts and
 replaceable fence state separate. Preserve immediate-parent checks and protected
 ancestor assumptions; consolidation alone does not prove hostile-ancestor safety.
 
-H91–94 implements this map with `Bridge.File`: a 33-line module operating only on
+`Bridge.File` supplies shared mechanics operating only on
 already-open descriptors/handles. It bounds reads, hashes streams and closes a
 temporary handle while retaining the caller's descriptor for fsync. The duplicate
 is marked close-on-exec. Fixed-purpose readers retain ownership/mode/size policy,
@@ -424,11 +455,11 @@ local retirement marker does not revoke copied keys elsewhere. Never replace a
 missing ledger with a new empty ledger for existing custody. See
 [OPERATIONS.md](OPERATIONS.md) for commands and old-host exclusion requirements.
 
-## Refactor baseline contract inventory
+## Entry points and compatibility contracts
 
-This inventory describes source `3d4970b` on schema 21. It remains the compatibility
-boundary for the financial-core refactor; the schema-22 ownership and migration
-changes are documented below. Names below are exact source constructors/commands.
+These are the current external contracts retained across the schema-22 refactor.
+Names below are source constructors/commands; historical schema fields appear only
+in the fact-ownership and offline-migration tables.
 
 ### Customer, worker and signer
 
@@ -508,7 +539,7 @@ Pool creation, full-range position/boundary initialization, deposits, withdrawal
 and collection are exercised in `pool-test`. Reinvestment is an explicit liquidity
 operation; unattended compounding, multisig and LP locking are not implemented scope.
 
-The I95–104 review retains the existing shared AdminKey publication/family locks
+Administration retains the shared AdminKey publication/family locks
 and AdminStatus status/retirement evidence. Token and pool archives, signatures,
 nonce behavior and finalized cost checks differ; combining those interpreters
 would obscure their authority. No generic signing callback or transaction builder
@@ -598,229 +629,89 @@ unsigned cancellations in both cancellation contracts, native family/source work
 in `archiveContract`/`fenceMain`. Reuse their closed Opaleye fixtures. Their literal
 keys, fake RPC responses and deterministic identifiers are never deployment data.
 
-### Concrete lifecycle extraction contracts
+### Authoritative facts and transition map
 
-`Lifecycle.hs` owns the existing `PaymentView`, `PreparedPayment` and
-`RecordedAttempt` records; Store reexports them to avoid a broad caller migration.
-These are the payment, preparation and attempt facts, not duplicate wire DTOs.
-`Payment` already owns `Funding` (conversion/refund/earned), recipient and amount;
-`PaymentTerms` owns policy/limits. Their constructors grant no execution authority.
-`PaymentStatus` remains an execution projection for callers. Schema 22 persists
-the separate economic phase and derives that status from phase and recovery facts.
+`Lifecycle.hs` owns payment, preparation and recorded-attempt facts and the pure
+financial decisions. Store reexports those records. `Payment` owns funding,
+recipient and amount; `PaymentTerms` owns saved policy and limits. Constructors
+are ordinary data and cannot reserve, sign, send or commit a precomputed decision.
 
-| Current field/fact | Owner and intended fate |
+| Fact | Sole durable owner / derived interpretation |
 | --- | --- |
-| `orders.status`, `orders.payout_tx` | Removed. `admission_state` owns admission/expiry/review only; progress/link derive from payments |
-| `obligations.status` | Removed. Obligation columns are immutable funding; execution derives from the root and restrictions |
-| `intents.resolved` | Removed. Root phase/generation/winner/original settlement event own economic progress |
-| Order request/quote/policy/costs, capability/deadlines/instruction | Immutable order facts; retain exact historical terms and scope |
-| Deposit anchor/depth/eligibility/allocation and source evidence | Receipt/execution eligibility; separate from whether principal was paid |
-| Preparation generation/policy/draft/retired/cancelled | Exact plan and allowed successor/cleanup; retain |
-| Attempt bytes/policy/generation/state/queue sequence/observation | Chain execution evidence; retain every byte and distinct phase |
-| Fee holds, principal/operating reservations | Capital ownership and release/transfer; retain, not another economic phase |
-| Journal events/postings, withdrawals/cancellations | Once-only economic effects and explicit earned funding; retain |
-| Replacement/expiry/source loss/cover/return/approvals | Recovery evidence bound to subject/work; retain separately |
-| Deployment/custody sequence, clock, scan origins/checkpoints/health | Shared authority/freshness bounds; retain, no parallel revision system |
+| Admission, capability, request, quote, policy, deadlines and instruction | Order; only `admission_state` describes admission/expiry/sticky review. Execution and payout links are derived. |
+| Customer or earned funding | Immutable obligation or withdrawal; no mutable obligation progress field. |
+| Economic progress | Payment root: ready, active generation, settled winner with original principal event, or proved cancelled. No separate `intents.resolved`. |
+| Deposit eligibility | Receipt and source evidence; separate from whether principal was paid. |
+| Executable plan | Preparation generation, exact policy/draft, retirement and cleanup; preserve all generations. |
+| Chain execution | Attempt bytes, generation, state, queue sequence and observation; retain uncertain outcomes. |
+| Capital ownership | Principal/operating reservations and fee holds; neither wallet balance nor payment status substitutes for these. |
+| Economic effects | Balanced append-only journal events/postings; original principal event survives winner changes. |
+| Recovery restrictions | Replacement, expiry, source loss/cover/return and immutable approvals bound to exact work. |
+| Shared authority and freshness | Deployment/backup/custody sequences, operating clock, scan origins/checkpoints/health and host fence. |
 
-Target phase validity is `Ready` with no active generation/winner, `Active g` with
-exactly one belonging preparation, `Settled tx` with a belonging retained attempt
-and immutable original settlement event, or `Cancelled` with cancellation evidence
-and no active work. Execution review is independent, including after settlement.
-Old-generation evidence cannot authorize the active generation. Schema-22 checks,
-belonging foreign keys and deferred consistency triggers enforce these combinations.
-Unknown or contradictory legacy states refuse conversion.
+Root validity is `Ready` with no active generation/winner, `Active g` with one
+belonging preparation, `Settled tx` with one belonging winner and immutable original
+settlement event, or `Cancelled` with cancellation evidence and no active work.
+Execution review remains independent, including after settlement. Foreign keys,
+phase constraints and deferred consistency triggers enforce these combinations;
+unknown legacy states refuse conversion.
 
-Each pure decision receives only the facts needed by its closed Store leaf:
+Every row in the transition map is a specific closed Store operation. It reloads
+current facts under the deployment-row lock, calls the pure decision, applies only
+its defined writes and checks required row counts. RPC/protocol verification remains
+in the adapters. There is no caller-supplied query, patch or commit callback.
 
-| Decision family | Actor / facts / result / idempotency |
-| --- | --- |
-| Settlement or finalized failure | Worker; expected/current queued attempt, funding, exact outcome/cost proof, unresolved fee hold, prior winner/failed cost. Replay or apply principal/cost/release/display effects. Same proof replays; changed proof/bytes/allowance conflicts. |
-| Preparation/draft/signature retention | Worker; funding, saved limits/source/readiness, current work, allowed next generation, holds/budget. Reuse exact plan or create one permitted generation; no external effect in the decision. |
-| Queue/send | Worker; current signed attempt/preparation/source, family selection, coverage, current readiness. Reuse queue or allocate its sequence / authorize exact saved bytes; no new bytes or signing. |
-| Admission/promotion/refund | Customer/worker/operator respectively; immutable terms/receipt ownership/deadlines, capacity and saved allocations. Reuse/create order, promote once, or bind full-principal refund. No caller-selected refund recipient. |
-| Treasury/earned fees | Operator; paused/fresh verified unbound receipt or free earned balance, exact split/recipient, current holds. Allocation/reservation/cancellation with balanced movements and immutable reason/replay identity. |
-| Cancellation/expiry/retry | Operator or observation worker; exact active unsigned work or proved nonexecution, cleanup/approval/generation/source. Begin/finish/retire/approve separately; no timeout-derived permission. |
-| Source/replacement/winner recovery | Operator/observation worker; exact bounded saved family, latest proof/approvals, source/custody and original postings. Preserve liabilities; apply only justified deficit/cover/return/cost adjustments. Principal never replays. |
-| Read/control/backup/setup/admin | Retain their specific closed operations and independent proof/resource contracts above. They do not gain a generic lifecycle commit method. |
-
-Pure results are narrow operation-specific data, not table patches or callbacks.
-Store gathers current facts and computes the result inside its locked transaction.
-The first slice uses `Either Text` with the existing exact refusal codes, avoiding
-a second competing error-to-wire translation table during extraction. The semantic
-categories remain the conflict/stale/unavailable/corrupt/uncertain mapping above;
-no catch-all success or retry is introduced.
-
-Stable comparisons include full payment ID/funding/recipient/terms, preparation
-generation/policy/draft/fee, exact attempt bytes and queue identity, current subject
-source/approval and its necessary freshness/coverage. Normalize only the old/new
-attempt state/observation when comparing an exact settlement replay, as the baseline
-does. Unrelated deployment sequence changes are not subject changes; current
-custody and scan checks still run independently. Do not normalize amounts, protocol
-bytes, generation, evidence or ordering to make differential tests pass.
-
-`LifecycleCheck` supplies bounded funding/delivery histories and validity-preserving
-shrinkers. Its expected account map and paid set are independent of production
-accounting. The new adapter uses actual pure settlement decisions for replay;
-the baseline `Domain.settlement` adapter remains a test-only accounting comparison.
-Settlement, preparation and queue/send now use the pure decisions in their closed
-Store operations. Current facts are loaded under the existing deployment lock; no
-caller may submit a precomputed decision or an arbitrary patch for commitment.
-The existing real-PostgreSQL duplicate-settlement, extra-refund, stale-generation,
-missing-backup and native-source-refresh regressions remain the durable oracle.
-The separate HTTPS fixture suspends signing, invalidates custody, then proves the
-second read refuses and the held gate recovers. Negative accounting mutations must
-fail, demonstrating that the independent model is capable of detecting differences.
-
-The initial pure slice consists of `decidePreparation`, `decideQueue`, `decideSend`
-and `decideSettlement`. It has no IO, Store import, database callback or signer
-resource. It cannot reserve, sign or send anything. Snapshot constructors remain
-ordinary data; only specific Store leaves may reload and apply their results.
-
-| Previous decision owner | Pure owner / remaining boundary |
-| --- | --- |
-| `settlePayment` fee/rent/proof bounds | `decideSettlement`; chain finality/effects verification stays in the adapter |
-| `settlementContext` subject/replay/hold/winner checks | `decideSettlement`; Store loads current attempt/funding and at most one active hold/winner |
-| `failSolana` exact failed-charge replay | `decideSettlement`; only recorded external fee charge is supplied, no absence inferred |
-| `resolvePayment` customer outcome and paid-link precedence | `SettlementEffects`/`CustomerResolution`; applying a new outcome resolves intent/releases fee hold, success additionally releases customer reservations |
-| `preparePayment` reuse/generation/fee/source/capital/budget decisions | `decidePreparation`; closed readers still prove lineage/source/identity and bind exact reservation purpose/currency |
-| `intakeReady` snapshot predicates | `checkIntake`; readers must supply exactly the three named streams and error-free matching custody revision |
-| `markBroadcast`/`authorizeSend` state/coverage decisions | `decideQueue`/`decideSend`; Store owns queue sequence, adapters retain final live chain acceptance checks |
-
-Preparation budget input is the total before mutation. Subtract only this payment's
-transferred customer operating hold (initial preparation) or unreleased prior fee
-hold (authorized successor). A retired/expired hold already released is not subtracted
-twice. The rolling spend total uses the Store's existing durable operating clock.
-Live exact preparation replay deliberately does not require fresh admission; it
-grants no new signing/send authority. All such later operations recheck readiness.
-
-Checkpoint C (`a4aa94f`) compared the extracted settlement decisions with the old
-Store writer across fifteen success/failure/replay/refusal paths. The temporary
-comparison adapter is now removed. The independent model and original durable
-assertions remain; no old/new runtime switch or second paying implementation exists.
-
-Preparation's reader projects exact lineage, source authorization, holds and the
-budget before mutation. Its writes consume only an approved `CreatePreparation`;
-replay retains the existing generation/draft. Successor holds are replaced directly
-after the decision, removing the old release/recheck/reset sequence. Required
-single-row writes are checked. Queue allocation similarly checks exactly one
-previously signed, unqueued attempt; send authorization returns its saved bytes.
-`checkSendPayment` also validates paused native replacement subjects without
-mistaking that permission for intake or broadcast authorization.
-
-The PostgreSQL contracts now inject preparation/settlement constraint failures and
-a deferred queue commit failure, comparing complete financial rows, holds, cost
-clock/history, attempts and postings after rollback. Unexpected errors fence the
-writer; ordinary policy refusals retain reuse after rollback. An independent
-connection holds the deployment row while requests wait, then commits a competing
-operating expenditure or recovery pause. Decisions must use those committed facts.
-Two same-order requests also race behind that database lock; the sole-writer
-advisory claim still excludes a second worker. These are bounded interleaving
-checks, not a proof of every possible schedule or real-chain recovery history.
-
-Customer funding decisions also live in `Lifecycle.hs`. `quoteOrder` is shared
-by network admission preview and locked order creation. Only new orders use it;
-capability/idempotency replay keeps the saved quote and deadlines. `decideOrder`
-checks free journal float and both operating budgets. `orderCostReservations`
-is the single conversion/refund cost formula used by admission, promotion and
-refund. Principal inventory, alternate operating allowances and prepared-payment
-fee holds remain distinct records with distinct transfer/release semantics.
-
-`decideNativeClaim`, instruction binding and issue decisions preserve the original
-saved label/reference and the backup-before-exposure gate. Retrying a saved claim
-never permits another address allocation. The real-chain ownership/solvability
-and ambiguous-allocation checks remain in `Order.hs` and the native adapter.
-
-`decidePromotion` retains historical terms and returns either the exact conversion
-payment or review; it never discards a receipt. The writer validates both saved
-holds before inserting the obligation. Quote expiry now requires that **no receipt
-has been observed** before releasing provisional holds. Partial, late and shallow
-receipts therefore retain their allocations pending review/refund; an operator may
-need to resolve them before that capacity becomes available again. Paid/prepared
-work retains its distinct non-provisional holds.
-
-Refund source/work checks and `decideRefund` preserve full-principal funding,
-verified destinations, and successful earlier conversions. The closed operation
-still verifies the actual Solana owner/reference evidence. It computes any fresh
-budget from the state before mutation, subtracting only fee/conversion holds that
-this same transaction will release. Receipt cancellation, refund insertion and
-hold changes remain atomic. Withdrawal decisions keep earned funds separate and
-require exact replay terms; cancellation requires verified unsigned cleanup.
-
-Treasury decisions calculate only balanced allocation/spend postings from eligible
-unbound receipts or free float/operating balances. The Store operation independently
-checks custody evidence, ownership attestation and replay identity before applying
-them. Pure posting values grant no authority to write, sign or broadcast.
-
-`projectCustomer` derives progress and payout from obligations, active preparations,
-retained attempts and original principal-settlement events. Applicable source/native
-review remains first; a paid conversion keeps precedence over extra refunds. During
-a new refund, the previous completed payout link remains visible. Multiple completed
-refunds use original settlement posting order, while their links use the current
-verified winner. A native winner change cannot move or repeat its principal event.
-Unknown or inconsistent combinations refuse instead of inventing a successful view.
-
-The closed `ReadOrder` operation reads ordered pages within its read snapshot and
-retains at most three display facts: conversion, unfinished work and latest refund.
-Older records remain in PostgreSQL; source-review checks cover the whole order.
-Admission and sticky review use only `admission_state`; reads never hide a retained
-review merely because another payment is active or paid. Validated funding,
-preparation, signature, settlement, cleanup or retry transitions may supersede
-admission review through the private `acceptCustomerPayment` helper. That helper
-stores no execution progress and cannot clear source, retry or winner evidence.
-No presentation result authorizes a write or signature. Real-PG comparisons retain
-a test-only schema-21 oracle, including a reviewed order with a completed payout.
-`RepairCompletedOrderView` validates a completed conversion without rewriting its
-status/link or advancing the financial sequence.
-
-Observation rules also have a pure owner. `checkScanBatch`/`checkScan` validate the
-closed stream, bound, asset, cursor and immutable origin; `checkObservation` fixes
-the evidence encoding. `observationNeedsReview` distinguishes a retained signature
-from an authorized observed outflow and preserves former native-winner/treasury
-evidence. The Store commits receipts, events, cursor and successful time atomically.
-Failed observations preserve prior successful coverage and require review; neither
-the pure result nor a successful scan grants payment or resume authority.
-
-`scanFacts`, `checkScans`, `checkCustody` and `checkIntake` share the exact freshness
-rules. The existing `freshIntake` remains the single bounded refresh workflow after
-slow IO; live acceptance/blockhash checks still follow it. Missing, duplicate,
-errored or future observations cannot satisfy readiness. Approval, budget, backup
-and profile checks retain their own subject-specific boundaries.
-
-`decideCancellation` distinguishes saving cleanup intent, completing it and exact
-replay. Its closed reader supplies current unsigned work; native cleanup happens
-between the two durable operations. Unknown cleanup leaves the first record pending.
-Completion does not need a new custody certification, but must match the saved
-cleanup/generation and paused authority. A completed old callback cannot affect a
-newer generation. Source eligibility and the eight-generation bound determine
-whether customer work returns to ready or remains under review.
-
-`decideSolanaExpiry` retires only an exact current attempt/preparation with no other
-unretired member. `decideSolanaRetry` separately checks paused/fresh authority,
-retained expiry, current generation/payment and source backing. The existing chain
-verifier still proves finalized complete absence using every required provider;
-these facts cannot be manufactured by an HTTP customer. Bytes, principal and old
-generations survive retirement. Approval does not reserve funds, sign or send; a
-new preparation must independently pass the normal budget/backup/signing gates.
-
-Native/source recovery now uses these pure decisions with closed Store readers
-and fixed writes. Protocol checks remain independently owned by the chain adapters:
-
-| Recovery operation | Pure decision | Retained durable/protocol boundary |
+| Transition / authority | Pure owner | Durable and external boundary |
 | --- | --- | --- |
-| Native replacement | `checkReplacementParent`, `checkReplacementDraft`, `checkReplacementSigning` | Current bounded family, exact work hash, paused/fresh authority; NativePayment validates identical inputs/recipient and allowed change/fee adjustment |
-| Settled native observation/winner | `decideNativeReview`, `decideNativeWinner` | Fresh actual winner/cost proof; immutable original settlement; winner changes post only Operating/External fee delta |
-| Source loss/return | `decideSourceCheck`, `sourceReturnPostings` | Atomic receipt/evidence sequence; unavailable retains previous loss; original coverage split returns once |
-| Source capital/approval | `decideLossCover`, `decideSourceApproval` | Current source proof/custody anchor and exact suspended-work hash; only free Float/Earned; no pending cleanup |
-| Native rebroadcast | `checkRebroadcast` | Paused settled review, retained source, exact saved family/bytes/digest, immutable approval and backup; live source/absence rechecked before send |
-| Successor generation | `successorGeneration` | Bounded contiguous history; wholly unsigned completed cleanup is distinct from independently proved and separately approved Solana expiry |
+| New order / customer | `quoteOrder`, `decideOrder`, `orderCostReservations` | Immutable terms/capability/idempotency; journal float and both operating allowances reserved atomically. Replays retain old terms. |
+| Deposit instructions / customer and worker | `decideNativeClaim`, `decideInstruction`, `decideInstructionIssue` | Persist unique allocation claim before RPC; recover the same owned label/address; backup before exposure. |
+| Deposit promotion / worker | `decidePromotion` | Exact qualifying receipt and both holds precede once-only conversion funding. Partial/late/shallow receipts retain liabilities and provisional holds. |
+| Refund / operator | `decideRefund` | Full principal to verified refund owner; receipt cancellation, new funding and hold transfer are atomic. Earlier paid conversion/link survives. |
+| Earned withdrawal / operator | `decideWithdrawal`, `decideWithdrawalCancellation` | Exact replay terms, earned-only reservation and verified unsigned cleanup before cancellation. |
+| Allocation or spend classification / operator | `decideTreasury`, `decideTreasurySpend` | Paused, fresh custody and verified unbound receipt/ownership; balanced postings from eligible free capital only. |
+| Preparation / worker | `decidePreparation`, `successorGeneration` | Exact lineage/source, saved limits, holds and budget; reuse existing plan or save one permitted generation. No signing inside the transaction. |
+| Queue / worker | `decideQueue` | Exactly one current signed unqueued attempt obtains a durable queue sequence; identical replay retains it. |
+| Send / worker | `decideSend` | Return only saved bytes after current source, readiness and backup checks; final live acceptance/blockhash check precedes RPC. |
+| Final success/failure / observation worker | `decideSettlement` | Actual verified outcome, current saved attempt and allowed cost; once-only principal/cost posting, hold release and exact replay. Final failure books verified costs without discarding liability. |
+| Unsigned cancellation / operator and cleanup worker | `decideCancellation` | Journal exact cleanup intent, perform native cleanup, then complete separately. Unknown cleanup remains pending; old callbacks cannot affect a successor. |
+| Solana expiry/retry / observation worker then operator | `decideSolanaExpiry`, `decideSolanaRetry` | Every provider must prove finalized complete absence; retain bytes, retire current work, then require a distinct paused approval. New preparation repeats all normal gates. |
+| Native replacement / operator | `checkReplacementParent`, `checkReplacementDraft`, `checkReplacementSigning` | Bounded saved family/work hash and paused/fresh authority; signer validates identical inputs/recipient and allowed change/fee adjustment. |
+| Native winner / observation worker | `decideNativeReview`, `decideNativeWinner` | Actual winner proof; preserve original settlement event and adjust only Operating/External costs. |
+| Source loss/return / observation worker | `decideSourceCheck`, `sourceReturnPostings` | Commit receipt/evidence sequence atomically; unavailable is not loss; original coverage split returns once. |
+| Source cover/approval / operator | `decideLossCover`, `decideSourceApproval` | Exact latest source proof/custody/work hash, no pending cleanup; only free Float/Earned capital. |
+| Native rebroadcast / operator | `checkRebroadcast` | Paused saved approval, retained family/source/bytes/digest and backup; recheck live source/absence before identical-byte submission. |
+| Observation and readiness / worker | `checkScanBatch`, `checkScan`, `checkObservation`, `observationNeedsReview`, `checkIntake` | Atomic evidence/page/cursor commit; immutable origins, exact three streams and current custody revision. No automatic resume. |
+| Customer display / safe reader | `projectCustomer` | Snapshot pages retain conversion, unfinished work and latest refund facts; no projection grants write or signer authority. |
 
-Generation readers fetch at most nine preparation rows to detect the eight-entry
-limit. Evidence constructors retain their different meaning: releasing an earned
-reservation accepts completed unsigned cleanup, while a new preparation can also
-accept proved and approved expiry. Old-generation callbacks cannot retire current
-work. Native accounting corrections, overlap exclusion, wallet anchors, pending
-credit restrictions and lock ownership remain in their existing adapter/reconciliation
-checks. Neither a timeout nor a partial history becomes absence or send permission.
+Preparation budgets use totals before mutation. Subtract only the customer hold
+transferred by this transaction or an unreleased prior fee hold; never subtract an
+already released hold twice. The durable operating clock controls the rolling
+window. Exact preparation replay need not refresh admission because it grants no
+new signing/send authority. Later stages recheck readiness independently.
+
+A quote expires unfunded only when no receipt was observed. Funding, signing or
+cleanup cannot silently release customer liability. Generation readers fetch nine
+rows to detect the eight-generation limit. Completed unsigned cleanup and proved,
+separately approved expiry are different successor evidence. Partial history and
+timeouts never become absence or permission to send.
+
+Customer projection gives applicable source/native review precedence. A paid
+conversion keeps its original payout link during additional refunds. Completed
+refund ordering uses original settlement posting order while links use the current
+verified winner. `ReadOrder` pages inside its read snapshot and retains at most three
+display facts; review queries still cover the whole order. Sticky admission review
+can be superseded only by a validated funding/execution/recovery transition; that
+never clears separate source, expiry or winner restrictions. Unknown combinations
+refuse. `RepairCompletedOrderView` validates settled conversion history without
+rewriting execution fields or advancing the financial sequence.
+
+The finite independent `LifecycleCheck` model uses a separate account map/paid set
+and validity-preserving shrinkers. Real PostgreSQL checks cover exact replay,
+constraint and deferred-commit rollback, subject changes while waiting on locks,
+concurrent requests, migrated history and fences. The HTTPS fixture changes custody
+while signing and requires the second read to refuse. Deliberate negative mutations
+prove these tests detect representative weakened checks; they do not prove every
+schedule or chain history. The old comparison writer is absent from production.
 
 ### Schema-22 dependency and conversion contract (G71–84)
 

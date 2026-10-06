@@ -9,7 +9,7 @@ tests does not certify later source or packages.
 
 ## Financial-core refactor execution
 
-Current checkpoint: **110/120 (A–I, J105–109, J111)**. The chronological records below distinguish
+Current checkpoint: **112/120 (A–I, J105–109, J111, J116–117)**. The chronological records below distinguish
 the verified source and scope of each stage. Real-chain acceptance and final release work remain; the
 funded deployment has not been upgraded by this refactor.
 
@@ -947,6 +947,60 @@ objects; no probe or weakened implementation entered the repository. The run use
 14 MiB total Haskell memory under a 256 MiB heap cap. Application and test source
 counts are unchanged. J110 and J112 remain open; independent release preparation
 continues without changing the funded pilot.
+
+**112/120: J116–117 audit guide and measured results, 2026-10-06.** The guide now
+starts with one request-to-effect/authority diagram and has one current fact-owner
+table, transition map and I01–I15 test index. It retains process/credential limits,
+interruption rules, protocol proof obligations and schema-conversion contracts.
+Historical extraction narratives are in this evidence record, not mixed into the
+current rules. ARCHITECTURE shrank from **914 to 805 lines**; no file was added.
+All new transition names were checked against production source and relative links
+resolved. The server source map now includes Lifecycle, Projection and Migration;
+two executable examples no longer contain an unsupported extra `--` argument.
+The user's reference Main.hs is unchanged at its recorded SHA-256.
+
+These physical source counts compare baseline `3d4970b` with frozen implementation
+`3174822`, including comments/blanks and all helper/schema cost. The unchanged 216
+embedded Rust test lines are assigned to tests in both versions.
+
+| Application responsibility | Baseline files / lines | Current files / lines | Line change |
+| --- | ---: | ---: | ---: |
+| Pure source | 6 / 601 | 7 / 1,508 | +907 |
+| Store, projections, conversion, archive and fence | 5 / 4,341 | 7 / 4,719 | +378 |
+| Schema DDL | 8 / 768 | 10 / 1,008 | +240 |
+| Chain/protocol/file adapters | 14 / 2,800 | 15 / 2,843 | +43 |
+| Server startup, API, workflow and browser | 19 / 3,448 | 19 / 3,477 | +29 |
+| Token administration | 6 / 1,206 | 6 / 1,141 | −65 |
+| Pool administration | 6 / 1,103 | 6 / 1,067 | −36 |
+| Rust SDK FFI, excluding embedded tests | 1 / 576 | 1 / 576 | 0 |
+| **Total application/schema** | **65 / 14,843** | **71 / 16,339** | **+1,496** |
+
+Tests/fixtures/formal grew from 22 files plus embedded tests / 9,265 lines to
+23 plus embedded tests / 10,704 lines (**+1,439**). Tooling/configuration/locks grew
+from 30 files / 3,316 lines to 31 / 3,366 (**+50**, including the shared local
+installer assembly entry). Required third-party notice/provenance files remain
+19 / 52,479. Native/browser freezes and Cargo.lock are unchanged: 191 / 76 / 150
+package records respectively, not unique combined dependency counts. No new
+runtime dependency or extra service process was introduced.
+
+**The source-size reduction target was not met:** application/schema is 10.1%
+larger, not near 9,000 lines. Lifecycle adds 899 lines, the retained schema-21
+converter 344 and new schema constraints 240; these are included above, not hidden
+as scaffolding. Store itself is 110 lines shorter, but moving decisions does not
+make their total audit cost disappear. A new reduction claim would need a separate
+measured change with preserved behavior, not deleting recovery/tests or renaming
+files to exclude them.
+
+The concrete improvement is authority over facts: four overlapping stored fields
+(`orders.status`, `orders.payout_tx`, `obligations.status`, `intents.resolved`) are
+replaced by admission plus one constrained economic root and derived views.
+Pure decisions are testable independently of IO; locked operations recheck current
+facts; custody files validate opened descriptors. The larger conversion/constraint
+surface is a real review cost. Full history, unknown-outcome and independent
+signer checks remain necessary; fewer lines would not alone prove stronger security.
+J105–111 evidence above describes passing checks and limits. Actual wallet approval,
+alternate chain histories, independent recovery and security/distribution review
+remain unverified release gates.
 
 ## Source and evidence boundaries
 

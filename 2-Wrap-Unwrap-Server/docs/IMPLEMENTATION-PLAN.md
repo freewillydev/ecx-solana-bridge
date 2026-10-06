@@ -1,6 +1,6 @@
 # Auditable financial-core refactor: design and execution plan
 
-Status: **in progress; 110/120 steps verified (A–I, J105–109, J111)**. This replaces the
+Status: **in progress; 112/120 steps verified (A–I, J105–109, J111, J116–117)**. This replaces the
 completed implementation checklist, not its evidence. Execution baseline source is
 `3d4970b3e502de9d4c9a89803610df3802e3e322` (implementation `bc9713c`). The funded
 pilot stays on `548c509`. See [RELEASE-REVIEW.md](RELEASE-REVIEW.md) for the actual
@@ -521,7 +521,7 @@ The executor updates this table after verified checkpoints; not merely after edi
 | G. Schema 22 and migration | 71–84 | Complete | `249a4a4`; authoritative runtime, owner initialization and private legacy restoration; 16 roots/12 exact attempts/83 postings preserved, old/new customer/work-hash comparisons, interruption/rollback, actual PostgreSQL/Servant/HTTPS/fence and encrypted restore contracts pass; funded pilot unchanged |
 | H. Protocol/file simplification | 85–94 | Complete | `abee44a`, `4f8c9e1`; shared bounded protocol/stream mechanics, fixed file policies and opened-descriptor checks; all three suites and actual PostgreSQL/HTTPS/fence/encrypted native/custody restore contracts pass. Net H: −52 application lines / +1 file |
 | I. Administration/UI/setup | 95–104 | Complete | `5fce544`; retained shared administration mechanics and projected browser state, unified setup credential validation; complete build/suites, actual GHC-JavaScript UI, mutated bundle refusal, fresh setup and both-profile server processes pass; +2 application lines, no new files |
-| J. Consolidated review/release candidate | 105–120 | 105–109, 111 complete | `222b133`; invariant trace, seven detected source mutations, type-boundary refusals, finite TLA+ checks, consolidated local acceptance and 1,001-refund workload. At `3ed3619`, real canonical snapshots 60/76 migrated in isolated copies, preserving exact records and work hashes, paused without signing authority. J110, J112 and final release gates remain |
+| J. Consolidated review/release candidate | 105–120 | 105–109, 111, 116–117 complete | `222b133`; invariant/mutation/type/formal checks and consolidated local acceptance. At `3ed3619`, canonical snapshots 60/76 migrated in isolated paused copies. Current audit guide and measured cost report complete; source-size target was not met. Linux candidate freezes implementation at `3174822`; J110, J112–115 and J118–120 remain |
 
 The numbered steps below implement the design above. They are not permission to
 reconsider every design choice while coding. Change the design only for a concrete
