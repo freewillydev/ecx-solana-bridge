@@ -126,3 +126,12 @@ customer custody. Trading links do not provide the native wrap/unwrap service.
 
 [Operations](docs/OPERATIONS.md) · [Development](docs/LOCAL-DEVELOPMENT.md) ·
 [Implementation plan](docs/IMPLEMENTATION-PLAN.md) · [Release review](docs/RELEASE-REVIEW.md)
+
+Check the installed package version without loading configuration or starting services:
+
+```sh
+ecx-bridge version
+# Also accepted: ecx-bridge --version
+```
+
+The version comes from the Cabal package metadata; it is not a Git commit identifier.
