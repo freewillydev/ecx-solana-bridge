@@ -33,7 +33,10 @@ are refused, and cancelled/failed collection removes only its newly created outp
 For a new Solana wallet, select **generate** (default). An interactive terminal is
 required. Setup generates 128 bits of cryptographic entropy and displays a 12-word
 BIP-39 English phrase directly on the controlling terminal, never on redirected
-stdout. Write it down and type `saved`. The derivation is SLIP-0010 ed25519 at
+stdout. Write it down and type `saved`. The wizard then clears the screen and
+requests deletion of terminal scrollback (also on interrupted acknowledgement).
+This requires a terminal supporting the standard erase-scrollback sequence; it
+cannot erase external recordings or a terminal that ignores that sequence. The derivation is SLIP-0010 ed25519 at
 `m/44'/501'/0'/0'`, with an **empty BIP-39 passphrase**. This is the recovery path;
 a wallet using a different path will show a different address.
 

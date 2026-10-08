@@ -12,7 +12,7 @@ import Crypto.Random (getRandomBytes)
 import Bridge.Error
 import Bridge.AdminKey (privateParent,readPrivate,savePrivate)
 import Bridge.Signer (verifySigningKey,verifyNativeUnlock)
-import Control.Exception (IOException,catch,onException,bracket)
+import Control.Exception (IOException,catch,onException,bracket,finally)
 import Control.Monad (foldM,forM_,when)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
@@ -34,7 +34,7 @@ import qualified Data.Text as T
 import System.Directory (makeAbsolute,canonicalizePath,removeDirectoryRecursive,doesFileExist)
 import System.FilePath ((</>),takeDirectory,addTrailingPathSeparator)
 import qualified System.Posix.Directory as P
-import System.IO (hFlush,stdout,stdin,isEOF,hIsTerminalDevice,withFile,IOMode(ReadWriteMode),hPutStrLn,hGetLine)
+import System.IO (hFlush,stdout,stdin,isEOF,hIsTerminalDevice,withFile,IOMode(ReadWriteMode),hPutStrLn,hPutStr,hGetLine)
 
 configure :: IO ()
 configure=do
@@ -222,7 +222,9 @@ prepareSeed directory asset mode=do
           hFlush terminal
           answer<-hGetLine terminal
           if answer=="saved" then pure () else acknowledge
-    acknowledge
+    -- Clear both visible text and saved scrollback on supporting terminals.
+    -- Also clear on an interrupted acknowledgement; never send this to stdout.
+    acknowledge `finally` (hPutStr terminal "\ESC[2J\ESC[3J\ESC[H" >> hFlush terminal)
   putStrLn "Recovery phrases do not recover the bridge ledger or in-flight obligations."
   pure (phraseFile,phrase)
 
