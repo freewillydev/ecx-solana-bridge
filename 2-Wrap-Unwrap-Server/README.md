@@ -31,6 +31,9 @@ mkdir ecash-bridge
 cd ecash-bridge
 git clone https://github.com/freewillydev/ecx-solana-bridge.git
 
+sudo apt update
+sudo apt install -y build-essential
+
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
 curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
