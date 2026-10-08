@@ -21,8 +21,8 @@ From the repository root:
 
 ```sh
 cd ~
-mkdir ecash
-cd ecash
+mkdir ecash-bridge
+cd ecash-bridge
 git clone https://github.com/freewillydev/ecx-solana-bridge.git
 
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
