@@ -194,3 +194,7 @@ for mint transaction fees. Keep one outstanding mint intent per nonce account.
    with a fresh signature. After a finalized result, prepare the next mint from the
    account's new nonce and use new filenames. Use `submit-file` for nonce status;
    the ordinary blockhash-based `status` command deliberately refuses nonce records.
+
+The shared token implementation is in `2-Wrap-Unwrap-Server/administration/`.
+This command and fresh bridge ATA setup use the same closed operations; the bridge
+worker and dedicated signer do not depend on this administration component.

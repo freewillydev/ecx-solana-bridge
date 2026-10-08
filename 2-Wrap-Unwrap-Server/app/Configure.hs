@@ -1,7 +1,12 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 -- Offline installation material only: wallet generation, no RPC/signing/activation.
-module Configure (configure,start,initializeNative) where
+module Configure (configure,configureAdvanced,start,initializeNative) where
 import qualified Bridge.Config as C
+import qualified Bootstrap
+import qualified NodeSetup
+import qualified Token
+import qualified Token.Operation as TokenOp
+import Bridge.RPC (independentHttps)
 import Bridge.SDKBuild (sdkLibraryPath,sdkSourceDirectory)
 import Bridge.BrowserBuild (browserAssetsDirectory)
 import System.Environment (getExecutablePath)
@@ -10,7 +15,7 @@ import qualified Bridge.Native as N
 import Bridge.SolanaMessage (base58)
 import Crypto.Random (getRandomBytes)
 import Bridge.Error
-import Bridge.AdminKey (privateParent,readPrivate,savePrivate)
+import Bridge.AdminKey (privateParent,readPrivate,savePrivate,withFamily)
 import Bridge.Signer (verifySigningKey,verifyNativeUnlock)
 import Control.Exception (IOException,catch,onException,bracket,finally)
 import Control.Monad (foldM,forM_,when)
@@ -19,7 +24,7 @@ import Data.Aeson.Types (parseEither)
 import Data.Maybe (fromMaybe)
 import Data.List (sort,isPrefixOf)
 import Control.Concurrent (threadDelay)
-import Network.HTTP.Client (HttpException,closeManager,newManager,defaultManagerSettings,managerSetProxy,noProxy,managerResponseTimeout,managerRetryableException,responseTimeoutNone)
+import Network.HTTP.Client (parseRequest,HttpException,closeManager,newManager,defaultManagerSettings,managerSetProxy,noProxy,managerResponseTimeout,managerRetryableException,responseTimeoutNone)
 import System.Process (rawSystem,readProcessWithExitCode)
 import System.Exit (ExitCode(..))
 import System.Info (os,arch)
@@ -31,13 +36,114 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as L
 import qualified Data.Text as T
-import System.Directory (makeAbsolute,canonicalizePath,removeDirectoryRecursive,doesFileExist)
+import System.Directory (makeAbsolute,canonicalizePath,removeDirectoryRecursive,doesFileExist,findExecutable)
 import System.FilePath ((</>),takeDirectory,addTrailingPathSeparator)
 import qualified System.Posix.Directory as P
 import System.IO (hFlush,stdout,stdin,isEOF,hIsTerminalDevice,withFile,IOMode(ReadWriteMode),hPutStrLn,hPutStr,hGetLine)
 
+-- The default path is fresh canonical custody. Advanced/recovery remains explicit.
 configure :: IO ()
 configure=do
+  protectWalletProcess
+  terminal<-hIsTerminalDevice stdin
+  require terminal "wallet_generation_requires_interactive_terminal"
+  directory<-makeAbsolute ".ecx-bridge"
+  P.createDirectory directory 0o700
+  simplified directory `onException` removeDirectoryRecursive directory
+
+simplified :: FilePath -> IO ()
+simplified directory=do
+  putStrLn "Fresh CanonicalBeta bridge: ECX betanet / Solana Mainnet, canonical mint, 1% each way."
+  putStrLn "Both wallets are generated. No payments or node changes occur during configure."
+  putStrLn "Fresh Ubuntu installation: run configure and start with sudo."
+  putStrLn "Use configure --advanced for other networks, existing wallets or installation choices."
+  primary<-prompt "Solana Mainnet RPC URL (or path to private URL file)" "" rpcInput
+  verifier<-prompt "Independent Mainnet RPC URL (or private URL file)" "" $ \input->do
+    url<-rpcInput input
+    independentHttps primary url
+    pure url
+  nodeConfig<-prompt "ECX node configuration file path" "/var/lib/ecx-betanet/bitcoin.conf" $ \input->do
+    file<-makeAbsolute input
+    NodeSetup.checkConfig file
+    pure file
+  nodeService<-prompt "ECX node systemd service" "ecx-betanet.service" NodeSetup.serviceName
+  (admin,worker,signer)<-NodeSetup.credentials directory
+  repository<-prompt "NEW HTTPS restic repository URL (or private URL file path)" "" $ \input->do
+    require (not $ null input) "backup_repository_required"
+    bytes<-if any (`isPrefixOf` input) ["rest:https://","https://"] then pure (B8.pack input)
+      else B8.strip <$> (makeAbsolute input >>= readPrivate)
+    require (any (`B.isPrefixOf` bytes) ["rest:https://","https://"] && not(B8.any (`elem` ['\r','\n',' ']) bytes)) "https_backup_repository_required"
+    let file=directory</>"backup.repository"
+    savePrivate file bytes
+    pure file
+  backupSecret<-getRandomBytes 32
+  let password=directory</>"backup.password"
+  savePrivate password (B8.pack $ T.unpack $ base58 backupSecret)
+  origin<-prompt "Public HTTPS origin (https://bridge.example.com), or - for local testing" "-" $ \input->do
+    let value=if input=="-" then Nothing else Just (T.pack input)
+    -- Validate presentation without accepting arbitrary schemes or URL credentials.
+    Bootstrap.validateOrigin value
+    pure value
+  tls<-case origin of
+    Nothing->pure []
+    Just _->do
+      cert<-prompt "TLS full-chain certificate file path" "" privateFile
+      key<-prompt "TLS private-key file path" "" privateFile
+      pure [("public-fullchain.pem",cert),("public-privkey.pem",key)]
+  root<-canonicalizePath (sdkSourceDirectory</>"../..")
+  defaultRestic<-findExecutable "restic"
+  restic<-case defaultRestic of
+    Just file->makeAbsolute file
+    Nothing->prompt "Reviewed restic executable path (not found on PATH)" "" $ \input->do
+      file<-makeAbsolute input
+      exists<-doesFileExist file
+      require exists "restic_executable_file_required"
+      pure file
+  (key,owner)<-prepareWallet directory "automatic"
+  (phraseFile,_)<-prepareSeed directory "ecx" "automatic"
+  unlockBytes<-getRandomBytes 32
+  let unlock=takeDirectory phraseFile</>"native-unlock"
+  savePrivate unlock (B8.pack $ T.unpack $ base58 unlockBytes)
+  ata<-TokenOp.runSafe (TokenOp.Request $ Token.AssociatedAddress sdkLibraryPath owner Bootstrap.canonicalMint)
+  let defaults=M.union (M.fromList
+        ["profile" .= String "CanonicalBeta","deploymentId" .= String ("ecx-"<>T.take 16 owner)
+        ,"nativeWallet" .= String ("ecx-bridge-"<>T.take 16 owner),"backupRequired" .= Bool True
+        ,"mint" .= String Bootstrap.canonicalMint,"custodyOwner" .= String owner,"custodyAta" .= String ata
+        ,"solanaRpc" .= primary,"solanaVerifierRpc" .= verifier
+        ,"nativeCookie" .= worker,"nativeUnlockFile" .= unlock
+        ,"solanaHistoryStart" .= String "","solanaOperatingHistoryStart" .= String ""]) template
+      setup=object ["existing" .= False,"method" .= String "source","sourceRoot" .= root,"restic" .= restic
+        ,"nodeConfig" .= nodeConfig,"nodeService" .= nodeService
+        ,"nativeSeedFile" .= phraseFile,"nativeAdminAuth" .= admin,"nativeRestore" .= False,"nativeRangeEnd" .= (999::Int)]
+      sources=object [K.fromString name .= path | (name,path)<-
+        [("solana.keypair.json",key),("native-worker.auth",worker),("native-signer.auth",signer)
+        ,("native-unlock",unlock),("backup.repository",repository),("backup.password",password)]<>tls]
+  mapM_ (\(name,value)->savePrivate (directory</>name) (L.toStrict $ encode value))
+    [("setup.json",setup),("sources.json",sources),("bootstrap.json",Object defaults)
+    ,("interface.json",Bootstrap.interface origin)]
+  putStrLn "Saved private setup. Runtime configuration is published only after verified funding/history."
+  putStrLn "Defaults: local ECX RPC http://127.0.0.1:28532; PostgreSQL and services installed automatically."
+  putStrLn "Order range: 0.00010000–0.00100000 ECX; 4 queued orders; 1 native confirmation."
+  putStrLn "Per-transaction caps: 1,000 native base units, 10,000 lamports fee, 2,100,000 lamports rent."
+  putStrLn "Daily cost caps: 10,000 native base units and 10,000,000 lamports. Review before funding."
+  putStrLn "Advanced values are in .ecx-bridge/bootstrap.json; never edit identity after bootstrap starts."
+  putStrLn "Next: sudo ecx-bridge start. It prints funding instructions and resumes safely on rerun."
+ where
+  privateFile input=do
+    require (not $ null input) "file_path_required"
+    file<-makeAbsolute input
+    bytes<-readPrivate file
+    require (not $ B.null bytes) "empty_private_file"
+    pure file
+  rpcInput input=do
+    require (not $ null input) "rpc_url_required"
+    url<-if "https://" `isPrefixOf` input then pure input else B8.unpack . B8.strip <$> (makeAbsolute input >>= readPrivate)
+    require ("https://" `isPrefixOf` url && not(any (`elem` ['\r','\n',' ']) url)) "solana_requires_https"
+    _<-parseRequest url
+    pure url
+
+configureAdvanced :: IO ()
+configureAdvanced=do
   protectWalletProcess
   putStrLn "For fresh Ubuntu installation, run configure and start with sudo; source secret files must be root-owned and private."
   putStrLn "Prepare NEW installation material. Existing deployments must use recovery/upgrade."
@@ -189,12 +295,12 @@ prepareWallet directory mode=do
   savePrivate key (L.toStrict $ encode $ B.unpack bytes)
   putStrLn $ "Solana custody owner / SOL funding address: "<>T.unpack owner
   putStrLn $ "Recovery derivation: "<>derivationPath
-  putStrLn "The custodyAta and history fields must describe this NEW wallet and its configured mint."
+  when (mode/="automatic") $ putStrLn "The custodyAta and history fields must describe this NEW wallet and its configured mint."
   pure (key,owner)
 
 prepareSeed :: FilePath -> String -> String -> IO (FilePath,String)
 prepareSeed directory asset mode=do
-  when (mode=="generate") $ do
+  when (mode/="restore") $ do
     terminal<-hIsTerminalDevice stdin
     require terminal "wallet_generation_requires_interactive_terminal"
   recovery<-if mode=="restore" then Just <$> prompt "Path to private 12-word recovery phrase file" "" (\path->do
@@ -203,7 +309,8 @@ prepareSeed directory asset mode=do
     _<-either reject pure (walletKey phrase)
     pure phrase) else pure Nothing
   settingsRoot<-canonicalizePath directory
-  output<-prompt "NEW private wallet directory (preserved if configuration is cancelled)" (directory<>"-"<>asset<>"-wallet") $ \path->do
+  let choose=if mode=="automatic" then (\_ fallback check->check fallback) else prompt
+  output<-choose "NEW private wallet directory (preserved if configuration is cancelled)" (directory<>"-"<>asset<>"-wallet") $ \path->do
     file<-makeAbsolute path >>= canonicalizePath
     require (file/=settingsRoot && not(addTrailingPathSeparator settingsRoot `isPrefixOf` file)) "wallet_directory_must_be_outside_settings"
     P.createDirectory file 0o700
@@ -214,7 +321,7 @@ prepareSeed directory asset mode=do
   let phraseFile=output</>asset<>"-recovery.txt"
   savePrivate phraseFile (B8.pack $ phrase<>"\n")
   putStrLn $ "Recovery file saved privately in "<>output<>". Preserve it even if setup is cancelled."
-  when (mode=="generate") $ withFile "/dev/tty" ReadWriteMode $ \terminal->do
+  when (mode/="restore") $ withFile "/dev/tty" ReadWriteMode $ \terminal->do
     hPutStrLn terminal $ "Write down these 12 "<>asset<>" recovery words in order. Anyone with them can spend this wallet's funds:"
     hPutStrLn terminal phrase
     let acknowledge=do
@@ -242,7 +349,7 @@ initializeNative path=do
     restoring<-field "nativeRestore" value
     rangeEnd<-field "nativeRangeEnd" value
     _<-readPrivate admin
-    config<-C.loadConfig (directory</>"signer.json")
+    config<-Bootstrap.setupConfig directory
     let native=(C.nativeSettings config) {N.nativeCookie=admin}
     putStrLn "Initializing/checking the ECX descriptor wallet; recovery may require a full blockchain rescan."
     let managerSettings=managerSetProxy noProxy defaultManagerSettings
@@ -322,6 +429,11 @@ template=case eitherDecodeStrict' "{\"profile\":\"ECXBetanetDevnet\",\"deploymen
 -- No shell interpolation, fresh-ledger fallback or automatic service activation on import.
 start :: FilePath -> IO ()
 start path=do
+  directory<-makeAbsolute path
+  withFamily (directory</>"start") (startUnlocked directory)
+
+startUnlocked :: FilePath -> IO ()
+startUnlocked path=do
   require (os=="linux") "start_requires_ubuntu_24_04"
   directory<-makeAbsolute path
   bytes<-readPrivate (directory</>"setup.json")
@@ -341,7 +453,13 @@ start path=do
       (parseEither (withObject "setup" (\o->o .:? "method" .!= ("release"::String))) value)
     -- Old setup files retain signed-release verification; never silently downgrade.
     require (uid==0) "fresh_install_run_sudo_ecx_bridge_configure_then_sudo_ecx_bridge_start"
+    residual<-doesFileExist config
+    require (not residual) "installed_material_exists_use_recovery_not_fresh"
+    Bootstrap.bind directory
+    Bootstrap.initializeBackup directory
+    NodeSetup.provision directory
     initializeNative directory
+    Bootstrap.complete directory
     case method of
       "source"->do
         root<-field "sourceRoot" value

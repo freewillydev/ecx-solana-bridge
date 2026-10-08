@@ -1518,3 +1518,42 @@ Production changes add approximately 300 Haskell lines across configuration,
 wallet derivation and the closed native setup evaluator, plus the 2,048-line
 standard data list; they add no daemon or runtime signing route. This is new
 functionality, not a claimed reduction of the financial core.
+
+
+## Streamlined generated-wallet setup (2026-10-08)
+
+Default `configure` now collects six external/environment inputs, optional public
+TLS files, and two terminal-only recovery acknowledgements. `--advanced` preserves
+the old detailed wizard. Native admin/worker/signer credentials, native unlock
+secret and fresh-backup encryption password are generated privately. A source
+build discovers its checkout and restic on PATH (with a path prompt if missing).
+The reviewed restic hash is enforced before it executes during bootstrap.
+
+`NodeSetup` preserves the original node configuration, installs separate salted
+RPC credential hashes and method allowlists, preserves prior RPC-user defaults,
+and uses durable atomic replacement. Retry rejects unrelated configuration edits.
+`Bootstrap` seals setup before effects, preserves saved ATA bytes across retries,
+checks independent finalized histories and zero opening balances, then publishes
+complete runtime configs exclusively. Runtime validation still rejects empty
+history anchors. Startup remains gated by ledger/custody/treasury/backup readiness;
+this change does not automatically allocate funds or approve setup costs in the ledger.
+
+Validation: `cabal test ecx-bridge:bridge-test ecx-token:token-test -j1 --offline
+--test-show-details=direct` passed; the bridge suite was rerun after final setup
+changes and passed. Its real pseudo-terminal wizard check writes no transcript,
+verifies generated wallet binding/private modes and distinct phrases, independently
+recomputes RPC password hashes, checks denied worker/signing methods, exercises
+repeat node provisioning against a disposable configuration with a stub systemctl,
+and rejects changed settings and divergent/missing/wrong-account history fixtures.
+`cabal sdist ecx-bridge ecx-token --list-only` and `git diff --check` passed.
+No live node restart, provider signup, real ATA spend, fresh Ubuntu installation,
+funded round trip, certificate issuance or independent-host restoration was performed.
+The existing Crypton secp256k1 key-derivation timing concern remains separate work.
+
+Setup code grows from **398 lines / 1 Haskell file to 865 lines / 3 files** (+467).
+This implements previously manual bootstrap/provisioning behavior, not a line-count
+reduction. The five token modules (887 lines) moved **byte-for-byte unchanged** into
+the shared administration component; ecx-token reexports them. Neither worker nor
+signer workflow links that component. Existing token checks continue to pass, and
+there is no duplicated transaction signer or package dependency cycle. Private
+`.ecx-bridge` settings and default recovery directories are now explicitly gitignored.

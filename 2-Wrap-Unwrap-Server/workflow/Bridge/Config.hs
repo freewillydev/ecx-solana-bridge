@@ -1,7 +1,7 @@
 {-# LANGUAGE DeriveAnyClass #-}
 -- One deployment configuration; financial identity retains the baseline hash.
 module Bridge.Config
-  ( Config(..),loadConfig,validateConfig,fingerprint,nativeSettings,solanaSettings
+  ( Config(..),loadConfig,validateConfig,validateSetupConfig,fingerprint,nativeSettings,solanaSettings
   , observerSettings,storePolicy,solanaPolicy,publicConfiguration
   , defaultInterface,loadInterface,validateInterface ) where
 import Bridge.Domain (Amount,amount,units)
@@ -78,6 +78,12 @@ loadConfig filename = do
   pure config
 validateConfig :: Config -> IO ()
 validateConfig c = do
+  validateSetupConfig c
+  mapM_ (either reject (const $ pure ()) . signatureBytes) [solanaHistoryStart c,solanaOperatingHistoryStart c]
+
+-- Fresh setup has no invented history anchors; runtime loading still requires them.
+validateSetupConfig :: Config -> IO ()
+validateSetupConfig c = do
   let identifier t=not(T.null t) && T.length t<=64 && T.all (`elem` ("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ-_"::String)) t
   require (identifier $ deploymentId c) "invalid_deployment_identifier"
   N.validateNativeSettings (nativeSettings c)
@@ -95,7 +101,6 @@ validateConfig c = do
   total<-either reject pure (amount $ toInteger(units $ maxSolFee c)+toInteger(units $ maxSolAccountRent c))
   require (maxNativeDailyCost c>=maxNativeFee c && maxSolDailyCost c>=total) "invalid_daily_budget"
   require (profile c/=CanonicalBeta || backupRequired c) "canonical_backup_required"
-  mapM_ (either reject (const $ pure ()) . signatureBytes) [solanaHistoryStart c,solanaOperatingHistoryStart c]
 
 -- Public presentation settings are separate from financial identity and orders.
 defaultInterface :: Profile -> InterfaceConfig

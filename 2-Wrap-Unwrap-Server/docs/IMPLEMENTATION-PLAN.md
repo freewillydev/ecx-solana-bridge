@@ -1555,3 +1555,16 @@ preparation and settlement, including its pure facts and all new helpers. Measur
 net source, query count and audit trace length and run the existing focused
 properties/PostgreSQL contracts. This must establish actual savings before a
 new whole-repository size forecast. Keep the existing product usable throughout.
+
+
+### Default CanonicalBeta setup checkpoint (2026-10-08)
+
+Implemented six-input generated-wallet configure, with advanced setup retained;
+generated restricted node credentials and fresh-repository encryption password;
+protected/replayable local node provisioning; saved ATA setup and independently
+verified history-origin discovery before runtime config publication. Shared the
+existing token operations without source duplication. Terminal, credential-policy,
+restart/refusal and history-fixture contracts pass under Cabal. Full funded Ubuntu
+bootstrap remains unverified; treasury allocation/setup-cost classification remain
+explicit operator work. See the release review entry for exact scope, counts and
+commands. No external gate or valuable-fund deployment is marked complete here.

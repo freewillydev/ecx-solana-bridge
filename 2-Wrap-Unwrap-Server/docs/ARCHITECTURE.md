@@ -569,6 +569,28 @@ files are disabled while handling seed material. Privileged host/terminal captur
 remains outside this guarantee. Native restoration requires complete chain history,
 an explicit bounded recovery range and separate ledger recovery, not fresh custody.
 
+Fresh default setup is now a distinct CanonicalBeta bootstrap; `configure --advanced`
+retains the existing detailed flows. `validateSetupConfig` validates everything
+except unavailable history origins, while **all runtime loading still uses
+`validateConfig`**, which requires real signatures. Pending setup cannot run as a
+worker config. `Bootstrap` seals inputs before mutation, reuses saved ATA attempts,
+checks both finalized histories, and exclusively publishes complete runtime files.
+It has no runtime HTTP route, database writer or arbitrary signing input. Setup uses
+the existing closed token-administration DSL for its sole ATA-creation request before
+installation; it does not contact or bypass the runtime signer. Token implementation
+modules now live in the shared `administration` Cabal component and `ecx-token`
+reexports them, avoiding package cycles and duplicate implementations. Worker and
+signer workflow libraries do not depend on that component.
+
+`NodeSetup` generates random per-role credentials and HMAC-SHA256 `rpcauth` hashes,
+installs fixed method allowlists while retaining existing users' default behavior,
+preserves the original configuration, and restarts the selected local node service.
+Config updates use exclusive staging, preserved ownership/mode, fsync and atomic
+rename. Changed settings/configuration refuse replay. This is privileged local
+installation, not an operator/customer runtime capability. Unknown configuration
+include trees require advanced setup. Full Ubuntu/service and funded bootstrap
+acceptance remains separate from the local terminal/provisioning contracts.
+
 ### Formats and failure semantics to retain
 
 `Wire.hs` is the exact HTTP field/enum codec contract: `OrderRequest` has

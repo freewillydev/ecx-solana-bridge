@@ -1,12 +1,22 @@
 module ConfigureCheck (contract,walletProperty) where
 import qualified Bridge.Config as C
+import qualified NodeSetup
+import qualified Bootstrap
+import System.Environment (getEnv,setEnv)
+import System.Info (os)
+import System.Timeout (timeout)
+import Control.Exception (evaluate,finally)
+import qualified Data.ByteString.Char8 as B8
+import Crypto.MAC.HMAC (hmac,HMAC)
+import Crypto.Hash (SHA256)
 import Bridge.AdminKey (savePrivate)
 import Bridge.Wallet (mnemonic,walletKey,nativeDescriptors)
 import qualified Bridge.Native as N
 import Bridge.Wire (Profile(..))
 import Bridge.Error (BridgeError(..))
+import qualified Data.Aeson.KeyMap as KM
 import Data.IORef
-import Control.Monad (unless)
+import Control.Monad (unless,forM)
 import qualified Data.ByteArray.Encoding as Hex
 import Data.Word (Word8)
 import Test.QuickCheck hiding ((.&.))
@@ -24,7 +34,7 @@ import Data.List (sort,isInfixOf)
 import Data.Bits ((.&.))
 import System.Directory
 import System.FilePath ((</>))
-import System.IO (openTempFile,hClose)
+import System.IO (openTempFile,hClose,hPutStrLn,hFlush,hGetChar,hGetContents)
 import System.Posix.Files (setFileMode,getFileStatus,fileMode)
 import System.Process
 import System.Exit (ExitCode(..))
@@ -38,7 +48,7 @@ contract=bracket temporary removeDirectoryRecursive $ \directory->do
   let public=BA.convert(Ed.toPublic secret)::B.ByteString
       owner=T.unpack(base58 public)
       history=T.unpack(base58 $ B.replicate 64 1)
-      run input=readCreateProcessWithExitCode ((proc executable ["configure"]) {cwd=Just directory}) input
+      run input=readCreateProcessWithExitCode ((proc executable ["configure","--advanced"]) {cwd=Just directory}) input
       key=directory</>"key.json"; worker=directory</>"worker.auth"; signer=directory</>"signer.auth"
       invalidUnlock=directory</>"invalid-unlock"; unlock=directory</>"unlock"
   savePrivate key (L.toStrict $ encode $ B.unpack(seed<>public))
@@ -92,9 +102,10 @@ contract=bracket temporary removeDirectoryRecursive $ \directory->do
     retainedKey<-B.readFile(retained</>"solana.keypair.json")
     settingsRemain<-doesDirectoryExist interrupted
     nativeChecked<-nativeSeedContract directory
+    simplifiedChecked<-simpleContract directory executable
     expectedKey<-either (const $ fail "fixture mnemonic") pure (walletKey phrase)
     let expectedSetup=object ["existing" .= False,"method" .= ("source"::String),"sourceRoot" .= directory,"restic" .= worker]
-    pure(nativeChecked && C.fingerprint config==C.fingerprint other && C.nativeCookie config/=C.nativeCookie other
+    pure(simplifiedChecked && nativeChecked && C.fingerprint config==C.fingerprint other && C.nativeCookie config/=C.nativeCookie other
       && sort entries==["interface.json","setup.json","signer.json","sources.json","worker.json"]
       && sources==M.fromList [("solana.keypair.json",key),("native-worker.auth",worker),("native-signer.auth",signer)]
       && originalKey==L.toStrict(encode $ B.unpack(seed<>public)) && originalWorker=="worker:password" && originalSigner=="signer:password"
@@ -199,3 +210,114 @@ nativeSeedContract directory=do
   pure (address==repeated && firstImports==1 && firstCreates==1 && finalImports==2 && finalCreates==2 && not checkpoint
     && refused "native_seed_wallet_mismatch" changed && refused "native_seed_import_or_rescan_failed" failed
     && refused "native_seed_wallet_exists_requires_review" retried)
+
+-- Real wizard on a disposable terminal; script writes to /dev/null, never a
+-- transcript. Recovery words are read only in memory and never printed by tests.
+simpleContract :: FilePath -> FilePath -> IO Bool
+simpleContract parent executable=do
+  let directory=parent</>"simple"
+      commands=directory</>"commands"
+      node=directory</>"bitcoin.conf"
+  createDirectory directory;setFileMode directory 0o700
+  createDirectory commands;setFileMode commands 0o700
+  savePrivate node "server=1\n"
+  savePrivate (commands</>"restic") "#!/bin/sh\nexit 0\n"
+  savePrivate (commands</>"systemctl") "#!/bin/sh\ncase \"$1\" in cat|restart) exit 0;; *) exit 1;; esac\n"
+  mapM_ (\name->setFileMode (commands</>name) 0o700) ["restic","systemctl"]
+  old<-getEnv "PATH"
+  let run=do
+        setEnv "PATH" (commands<> ":"<>old)
+        let args=if os=="darwin" then ["-q","/dev/null",executable,"configure"]
+                 else ["-q","-c","'"<>concatMap (\c->if c=='\'' then "'\\''" else [c]) executable<>"' configure","/dev/null"]
+        result<-timeout (45*1000000) $ withCreateProcess ((proc "script" args)
+          {cwd=Just directory,std_in=CreatePipe,std_out=CreatePipe,std_err=NoStream,create_group=True}) $ \input output _ process->do
+            let Just writer=input; Just reader=output
+                await needle=go "" (0::Int)
+                 where
+                  go found count=do
+                    unless (count<65536) (fail "wizard_output_bound")
+                    char<-hGetChar reader
+                    let next=drop (max 0 (length found+1-length needle)) (found<>[char])
+                    if next==needle then pure () else go next (count+1)
+                answer label value=await label >> await ": " >> hPutStrLn writer value >> hFlush writer
+                ack=await "Type saved once you have backed up the phrase:" >> hPutStrLn writer "saved" >> hFlush writer
+            answer "Solana Mainnet RPC URL" "https://primary.example.invalid/"
+            answer "Independent Mainnet RPC URL" "https://verifier.example.invalid/"
+            answer "ECX node configuration file path" node
+            answer "ECX node systemd service" "fixture.service"
+            answer "NEW HTTPS restic repository URL" "rest:https://backup.example.invalid/repository"
+            answer "Public HTTPS origin" "-"
+            ack;ack
+            hClose writer
+            remaining<-hGetContents reader
+            _<-evaluate(length remaining)
+            code<-waitForProcess process
+            pure(code==ExitSuccess && "Saved private setup" `isInfixOf` remaining)
+        case result of
+          Just True->verify directory node
+          _->pure False
+  run `finally` setEnv "PATH" old
+ where
+  verify directory node=do
+    let setup=directory</>".ecx-bridge"
+    c<-Bootstrap.setupConfig setup
+    runtimeExists<-doesFileExist(setup</>"worker.json")
+    rejected<-try(C.loadConfig(setup</>"bootstrap.json")) :: IO(Either BridgeError C.Config)
+    phraseA<-B8.strip <$> B.readFile(directory</>".ecx-bridge-solana-wallet/solana-recovery.txt")
+    phraseB<-B8.strip <$> B.readFile(directory</>".ecx-bridge-ecx-wallet/ecx-recovery.txt")
+    solana<-either (const $ fail "generated_phrase_invalid") pure (walletKey $ B8.unpack phraseA)
+    rules<-B8.lines <$> B.readFile(setup</>"native-rpc.conf")
+    valid<-forM ["admin","worker","signer"] $ \role->do
+      let path=setup</>"native-"<>role<>".auth"
+      auth<-B8.strip <$> B.readFile path
+      mode<-fileMode <$> getFileStatus path
+      let (user,tailBytes)=B8.break (==':') auth
+          password=B.drop 1 tailBytes
+          match=[B.drop (B.length user+9) line | line<-rules,("rpcauth="<>user<>":") `B.isPrefixOf` line]
+          whitelist=[B.drop (B.length user+14) line | line<-rules,("rpcwhitelist="<>user<>":") `B.isPrefixOf` line]
+      pure $ mode .&. 0o777==0o600 && B.length password>=40 && case (match,whitelist) of
+        ([value],[methods])->
+          let (salt,hashValue)=B8.break (=='$') value
+              expected=Hex.convertToBase Hex.Base16 (hmac salt password::HMAC SHA256)::B.ByteString
+          in B.drop 1 hashValue==expected
+                                && (role/="worker" || all (`notElem` B8.split ',' methods) ["walletprocesspsbt","dumpprivkey","listdescriptors","backupwallet"])
+                                && (role/="signer" || "sendrawtransaction" `notElem` B8.split ',' methods)
+        _->False
+    Bootstrap.bind setup
+    NodeSetup.provision setup
+    first<-B.readFile node
+    NodeSetup.provision setup
+    second<-B.readFile node
+    prior<-B.readFile(setup</>"node-config.before")
+    -- Changing settings after any bootstrap begins cannot silently change identity.
+    B.appendFile (setup</>"interface.json") " "
+    Bootstrap.bind setup -- whitespace is not a semantic change
+    B.writeFile (setup</>"interface.json") "{}"
+    changed<-try(Bootstrap.bind setup) :: IO(Either BridgeError ())
+    historyChecked<-originContract
+    B.appendFile node "# unexpected operator edit\n"
+    nodeChanged<-try(NodeSetup.provision setup) :: IO(Either BridgeError ())
+    pure(historyChecked && either (const True) (const False) nodeChanged && all id valid && not runtimeExists && either (const True) (const False) rejected
+      && C.profile c==CanonicalBeta && C.mint c==Bootstrap.canonicalMint && C.custodyOwner c==base58(B.drop 32 solana)
+      && phraseA/=phraseB && first==second && prior=="server=1\n" && "rpcwhitelistdefault=0" `B.isInfixOf` first
+      && either (const True) (const False) changed)
+
+-- Read-only RPC fixtures, not claims of real Mainnet acceptance.
+originContract :: IO Bool
+originContract=do
+  let address=base58(B.replicate 32 7)
+      signature=base58(B.replicate 64 1)
+      other=base58(B.replicate 64 2)
+      entry sig=object ["signature" .= sig,"slot" .= (12::Int),"err" .= Null,"confirmationStatus" .= String "finalized"]
+      request variant provider method args=case (method,args) of
+        ("getSignaturesForAddress",[_,Object options])->
+          if KM.member "before" options && variant/="repeat" then pure(toJSON ([]::[Value]))
+          else pure(toJSON [entry $ if variant=="disagree" && provider=="second" then other else signature])
+        ("getTransaction",_)->if variant=="missing" then pure Null else pure $ object
+          ["meta" .= object [],"transaction" .= object ["signatures" .= [signature],"message" .= object
+            ["accountKeys" .= [if variant=="wrong-account" then base58(B.replicate 32 8) else address]]]]
+        _->fail "unexpected_bootstrap_read"
+      run variant=try(Bootstrap.agreedOrigin ["first","second"] (request variant) address) :: IO(Either BridgeError T.Text)
+  good<-run "ok"
+  refused<-mapM run ["repeat","disagree","missing","wrong-account"]
+  pure(either (const False) (==signature) good && all (either (const True) (const False)) refused)

@@ -48,6 +48,15 @@ library chain
     filepath, http-client, http-client-tls, http-types, binary, containers, base58-bytestring,
     base64-bytestring, crypton, ram, unix, template-haskell
 
+-- Shared closed token operations: setup creates an ATA; ecx-token administers tokens.
+library administration
+  import: settings
+  visibility: public
+  hs-source-dirs: administration
+  exposed-modules: Token, Token.Signing, Token.Network, Token.Metadata, Token.Operation
+  build-depends: base, ecx-bridge, ecx-bridge:chain, aeson, bytestring, text,
+    binary, unix, filepath, crypton, ram, base64-bytestring, base58-bytestring, http-client
+
 library workflow
   import: settings
   visibility: private
@@ -63,24 +72,24 @@ test-suite bridge-test
   import: settings
   ghc-options: -threaded -rtsopts -with-rtsopts=-N1
   type: exitcode-stdio-1.0
-  hs-source-dirs: test
+  hs-source-dirs: test, app
   main-is: Main.hs
   build-tool-depends: ecx-bridge:ecx-bridge
-  other-modules: ConfigureCheck, ChainCheck, NativePaymentCheck, SolanaPaymentCheck, ObservationCheck, SigningTransportCheck, LifecycleCheck, Paths_ecx_bridge
+  other-modules: Bootstrap, NodeSetup, ConfigureCheck, ChainCheck, NativePaymentCheck, SolanaPaymentCheck, ObservationCheck, SigningTransportCheck, LifecycleCheck, Paths_ecx_bridge
   autogen-modules: Paths_ecx_bridge
   build-depends: base, ecx-bridge, ecx-bridge:customer-api, ecx-bridge:chain, ecx-bridge:store, ecx-bridge:workflow, servant, aeson, text, containers,
     QuickCheck >=2.15 && <2.19, bytestring, scientific, http-client, base64-bytestring, wai, wai-extra, http-types, directory, unix, filepath,
-    ecx-build-assets, process, async, network, crypton, ram, data-default, crypton-pem, crypton-x509, crypton-x509-validation, crypton-x509-store
+    ecx-build-assets, ecx-bridge:administration, process, async, network, crypton, ram, data-default, crypton-pem, crypton-x509, crypton-x509-validation, crypton-x509-store
 
 executable ecx-bridge
   import: settings
   hs-source-dirs: app
   main-is: Main.hs
-  other-modules: Configure
+  other-modules: Configure, Bootstrap, NodeSetup
   ghc-options: -threaded -rtsopts -with-rtsopts=-N2
   build-depends: base, ecx-bridge, ecx-bridge:workflow, ecx-bridge:chain,
     ecx-bridge:store, ecx-build-assets, aeson, bytestring, text,
-    postgresql-simple, http-client, unix, filepath, directory, process, crypton
+    postgresql-simple, http-client, unix, filepath, directory, process, crypton, ram, containers, ecx-bridge:administration
 
 -- Explicitly invoked against a disposable migrated database, never live custody.
 executable ecx-store-check
