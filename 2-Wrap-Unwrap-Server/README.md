@@ -5,10 +5,18 @@ and Solana SPL inventory. Customers receive deposit instructions; the website
 requires no wallet connection. New quotes charge **1% in each direction**, with
 network costs paid separately by the operator. Saved terms remain immutable.
 
-This is the only server implementation in the repository. It has completed real
+This is the only server implementation in the repository. Earlier versions completed real
 L2L Signet/Solana Devnet conversions, refunds, earned-fee withdrawals and scoped
 recovery checks. It is not yet a public or valuable-fund release. See the precise
 [evidence and remaining gates](docs/RELEASE-REVIEW.md).
+
+The current financial-core refactor uses schema 22: payment roots own execution,
+while immutable funding and retained chain/recovery evidence remain separate.
+This version passed local migration/restoration/process checks and real Signet/
+Devnet conversions, an additional-payment refund, payout restart and Solana expiry/
+retry. These used dedicated tester clients; wallet approval, external recovery and
+independent review remain. Historical canonical tests do not approve this refactor
+for valuable funds.
 
 ## Build and run
 
@@ -48,8 +56,8 @@ ghcup run --ghc 9.14.1 -- cabal build exe:ecx-bridge -j1
 export PATH="$(dirname "$(ghcup run --install --ghc 9.14.1 --cabal 3.16.1.0 -- cabal list-bin exe:ecx-bridge)"):$PATH"
 cd 2-Wrap-Unwrap-Server
 
-ecx-bridge -- check-config /absolute/private/config.json
-ecx-bridge -- observe /absolute/private/config.json
+ecx-bridge check-config /absolute/private/config.json
+ecx-bridge observe /absolute/private/config.json
 ```
 
 Startup requires a reviewed deployment configuration, migrated PostgreSQL ledger,
@@ -74,12 +82,14 @@ necessary.
 | Responsibility | Source |
 | --- | --- |
 | Amounts, quotes, funding and wire records | `src/Bridge/{Domain,Wire}.hs` |
+| Pure financial decisions and customer projection | `src/Bridge/Lifecycle.hs` |
 | Caller/severity GADTs and existential requests | `src/Bridge/Operation/Internal.hs` |
 | Four pure Servant handlers | `api/Bridge/API.hs` |
 | Operation instances, shared critical evaluator and signing | `workflow/Bridge/Critical.hs` |
 | Admission, orders and payment validation | `workflow/Bridge/{Admission,Order,Payment}.hs` |
 | Observation and custody reconciliation | `workflow/Bridge/{Observer,Reconciliation}.hs` |
-| Closed Opaleye operations and transactions | `runtime/Bridge/Store.hs`, `Store/{Schema,Catalog}.hs` |
+| Closed Opaleye operations and transactions | `runtime/Bridge/Store.hs`, `Store/{Schema,Catalog,Projection}.hs` |
+| Offline schema conversion with preserved history | `runtime/Bridge/Store/Migration.hs`, `migrations/009-*.sql` |
 | Native/Solana adapters and protocol codecs | `chain/Bridge/` |
 | Signer HTTPS transport and protected credentials | `workflow/Bridge/{Signer,Credentials}.hs` |
 | Local operator control and custody recovery | `workflow/Bridge/{Control,Recovery}.hs` |
@@ -93,7 +103,8 @@ closed DSL instructions. Separate evaluators enforce safe/critical authority.
 All application database access uses Opaleye inside specific closed operations.
 Only critical evaluation owns the signer client. The signer independently checks
 saved decisions and never broadcasts. [Architecture](docs/ARCHITECTURE.md)
-describes these boundaries, accounting invariants and the bounded TLA+ model.
+provides the request-to-effect diagram, authoritative facts, transition map,
+invariant/test index and bounded TLA+ model limits.
 
 ## Customer API
 

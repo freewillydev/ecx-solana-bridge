@@ -2,12 +2,12 @@
 module Bridge.Fence (initializeFence,adoptFence,retireFence,withFence) where
 
 import Bridge.Error
+import Bridge.File (withHandle,readBounded)
 import Control.Concurrent.MVar
 import Control.Exception
 import Control.Monad (when)
 import Data.Aeson
 import Data.Aeson.Types (Parser)
-import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Bits ((.&.))
 import Data.Int (Int64)
@@ -44,7 +44,8 @@ privateStatus :: Bool -> FileStatus -> IO ()
 privateStatus directory status=do
   uid <- getEffectiveUserID
   require ((if directory then isDirectory status else isRegularFile status) &&
-    fileOwner status==uid && fileMode status .&. 0o077==0) "unsafe_worker_fence_permissions"
+    fileOwner status==uid && fileMode status .&. 0o077==0
+    && (directory || linkCount status==1)) "unsafe_worker_fence_permissions"
 
 withLock :: FilePath -> IO a -> IO a
 withLock directory action=do
@@ -58,15 +59,16 @@ withLock directory action=do
       action
 
 readState :: FilePath -> IO State
-readState directory=bracket (openFd (directory </> "sequence.json") ReadOnly defaultFileFlags
-  {nofollow=True,cloexec=True} >>= fdToHandle) hClose $ \handle->do
-    bytes <- BS.hGet handle 8193
-    require (BS.length bytes<=8192) "invalid_worker_fence_state"
-    either (const $ reject "invalid_worker_fence_state") pure (eitherDecodeStrict' bytes)
+readState directory=do
+  let path=directory </> "sequence.json"
+  getSymbolicLinkStatus path >>= privateStatus False
+  bracket (openFd path ReadOnly defaultFileFlags {nofollow=True,cloexec=True,nonBlock=True}) closeFd $ \fd->do
+      getFdStatus fd >>= privateStatus False
+      bytes <- withHandle fd (readBounded 8192) >>= maybe (reject "invalid_worker_fence_state") pure
+      either (const $ reject "invalid_worker_fence_state") pure (eitherDecodeStrict' bytes)
 
 validateState :: FilePath -> Text -> IO Int64
 validateState directory identity=do
-  getSymbolicLinkStatus (directory </> "sequence.json") >>= privateStatus False
   State saved sequenceNo retired <- readState directory
   require (saved==identity) "worker_fence_identity_mismatch"
   require (not retired) "worker_fence_retired"
@@ -125,7 +127,6 @@ adoptFence directory identity sequenceNo=do
 -- This disables cooperating paying workers, not other software holding a key.
 retireFence :: FilePath -> Text -> Int64 -> IO ()
 retireFence directory identity sequenceNo=withLock directory $ do
-  getSymbolicLinkStatus (directory </> "sequence.json") >>= privateStatus False
   State saved previous retired <- readState directory
   require (saved==identity) "worker_fence_identity_mismatch"
   require (sequenceNo>=previous) "stale_ledger_below_worker_fence"

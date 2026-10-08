@@ -6,12 +6,12 @@ module Bridge.Recovery (CustodyRecovery(..),evalCustodyRecovery) where
 import qualified Bridge.Config as C
 import Bridge.Error
 import Bridge.Identity (digest)
+import Bridge.File (withHandle,readBounded,hashHandle)
 import qualified Bridge.Native as N
 import Bridge.Credentials (verifySigningKey,readNativeUnlock,withNativeUnlock)
 import Bridge.Store
 import Control.Exception (bracket,bracketOnError)
 import Control.Monad (forM,forM_,void,when)
-import Crypto.Hash (Context,Digest,SHA256,hashInit,hashUpdate,hashFinalize)
 import Crypto.Random (getRandomBytes)
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KM
@@ -28,7 +28,7 @@ import qualified Database.PostgreSQL.Simple as PG
 import Network.HTTP.Client (Manager)
 import System.Directory (removeDirectoryRecursive)
 import System.FilePath (isAbsolute,normalise,takeDirectory,takeFileName,(</>))
-import System.IO (Handle,hClose,hFlush)
+import System.IO (Handle,hFlush)
 import qualified System.Posix.Directory as PD
 import System.Posix.Files
 import System.Posix.IO hiding (sync)
@@ -160,30 +160,24 @@ privateDirectory path=do
   require (isDirectory status && fileOwner status==uid && fileMode status .&. 0o077==0) "unsafe_custody_backup_directory"
 withPrivate :: FilePath -> (Handle -> IO a) -> IO a
 withPrivate path action=do
-  status<-getSymbolicLinkStatus path
-  uid<-getEffectiveUserID
-  require (isRegularFile status && fileOwner status==uid && fileMode status .&. 0o077==0
-    && linkCount status==1) "unsafe_custody_backup_file"
-  bracket (openFd path ReadOnly defaultFileFlags {nofollow=True,cloexec=True} >>= fdToHandle) hClose action
-readPrivate :: Int -> FilePath -> IO BS.ByteString
-readPrivate limit path=withPrivate path $ \handle->do
-  bytes<-BS.hGet handle (limit+1)
-  require (BS.length bytes<=limit) "custody_backup_file_too_large"
-  pure bytes
-hashFile :: FilePath -> IO Text
-hashFile path=withPrivate path (go hashInit)
+  getSymbolicLinkStatus path >>= privateStatus
+  bracket (openFd path ReadOnly defaultFileFlags {nofollow=True,cloexec=True,nonBlock=True}) closeFd $ \fd->do
+    getFdStatus fd >>= privateStatus
+    withHandle fd action
  where
-  go :: Context SHA256 -> Handle -> IO Text
-  go context handle=do
-    bytes<-BS.hGet handle 65536
-    if BS.null bytes then pure (T.pack $ show (hashFinalize context :: Digest SHA256))
-      else go (hashUpdate context bytes) handle
+  privateStatus status=do
+    uid<-getEffectiveUserID
+    require (isRegularFile status && fileOwner status==uid && fileMode status .&. 0o077==0
+      && linkCount status==1) "unsafe_custody_backup_file"
+readPrivate :: Int -> FilePath -> IO BS.ByteString
+readPrivate limit path=withPrivate path (readBounded limit) >>= maybe (reject "custody_backup_file_too_large") pure
+hashFile :: FilePath -> IO Text
+hashFile path=withPrivate path hashHandle
 writePrivate :: FilePath -> BL.ByteString -> IO ()
 writePrivate path bytes=do
   bracket (openFd path WriteOnly defaultFileFlags
-    {creat=Just 0o600,exclusive=True,nofollow=True,cloexec=True} >>= fdToHandle) hClose $ \handle->do
-      BL.hPut handle bytes
-      hFlush handle
-  sync path
+    {creat=Just 0o600,exclusive=True,nofollow=True,cloexec=True}) closeFd $ \fd->do
+      withHandle fd $ \handle->BL.hPut handle bytes >> hFlush handle
+      fileSynchronise fd
 sync :: FilePath -> IO ()
 sync path=bracket (openFd path ReadOnly defaultFileFlags {nofollow=True,cloexec=True}) closeFd fileSynchronise

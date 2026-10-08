@@ -1,13 +1,15 @@
 # Auditable financial-core refactor: design and execution plan
 
-Status: **design/plan only; implementation has not started**. This replaces the
-completed implementation checklist, not its evidence. Baseline source is
-`6fa733483360da2414d120eb963025d87c3e0507` (implementation `bc9713c`). The funded
+Status: **117/120 steps verified (A–I, J105–111, J113–117, J120)**. Implementation and
+available acceptance are complete; external gates J112, J118 and J119 remain open.
+The source-size reduction target was not met; see the measured J117 results. This replaces the
+completed implementation checklist, not its evidence. Execution baseline source is
+`3d4970b3e502de9d4c9a89803610df3802e3e322` (implementation `bc9713c`). The funded
 pilot stays on `548c509`. See [RELEASE-REVIEW.md](RELEASE-REVIEW.md) for the actual
 acceptance record and open release gates. Do not relabel old tests as evidence
 for new code.
 
-This document is the implementation contract for a future Codex run. Its purpose
+This document is the implementation contract for this refactor. Its purpose
 is to make decisions explicit now, minimize interacting changes and leave working,
 reviewable code after each checkpoint. It cannot guarantee bug-free software or
 perfect security. Passing gates, retained financial evidence and independent
@@ -151,6 +153,7 @@ all existing IDs and funding foreign keys. Replace `resolved` with these columns
 
 | Column | Meaning / constraint |
 | --- | --- |
+| `deposit_id` | Present exactly for customer funding; immutable composite FK with `obligation_id` binds its existing receipt; partial uniqueness excludes cancelled roots |
 | `phase` | Closed values `ready`, `active`, `settled`, `cancelled` |
 | `active_generation` | Nonnegative bounded generation only when active; references that payment's preparation |
 | `settled_txid` | Present only when settled; references an attempt belonging to this payment |
@@ -160,6 +163,13 @@ Keep existing `id`, exactly-one `obligation_id`/`withdrawal_id`, chain and nativ
 common-input identity. Funding remains immutable. Do not duplicate amount,
 recipient and policy from their current immutable funding owners just to avoid
 a join. All payment-root rows are created atomically with their funding record.
+
+G71's concrete schema inventory found that removing obligation status also removes
+the partial receipt-allocation index. Retain that guarantee declaratively: add the
+immutable receipt reference above, constrained by `(obligation_id,deposit_id)` to
+the obligation's existing identity, and a unique `deposit_id` index for noncancelled
+roots. Earned funding has neither customer field. This constrained reference avoids
+custom cross-table locking/uniqueness code and cannot independently change funding.
 
 Preserve one active payment per destination chain using a partial unique index on
 `chain WHERE phase='active'`. The old `resolved=0` partial index must be replaced
@@ -486,7 +496,7 @@ Paths are relative to `2-Wrap-Unwrap-Server` unless marked otherwise.
 
 | Responsibility | Files |
 | --- | --- |
-| Pure amounts/funding/accounting | `src/Bridge/Domain.hs`, proposed `Lifecycle.hs` |
+| Pure amounts/funding/accounting/customer projection | `src/Bridge/Domain.hs`, `Lifecycle.hs` |
 | Wire records | `src/Bridge/Wire.hs` |
 | Existentials/GADTs/contexts | `src/Bridge/Operation/Internal.hs`, `Operation.hs` |
 | Customer API | `api/Bridge/API.hs` |
@@ -504,16 +514,16 @@ The executor updates this table after verified checkpoints; not merely after edi
 
 | Checkpoint | Steps | State | Evidence commit / next action |
 | --- | --- | --- | --- |
-| A. Baseline and contracts | 1–12 | Not started | Inventory |
-| B. Concrete types and regression harness | 13–24 | Not started | Depends on A |
-| C. Complete payment slice | 25–36 | Not started | Depends on B |
-| D. Existing-schema integration | 37–46 | Not started | Depends on C |
-| E. Customer funding/accounting | 47–56 | Not started | Depends on D |
-| F. Recovery/reconciliation | 57–70 | Not started | Depends on E |
-| G. Schema 22 and migration | 71–84 | Not started | Depends on F |
-| H. Protocol/file simplification | 85–94 | Not started | Depends on G |
-| I. Administration/UI/setup | 95–104 | Not started | Depends on H |
-| J. Consolidated review/release candidate | 105–120 | Not started | Depends on I |
+| A. Baseline and contracts | 1–12 | Complete | `4b8fa31`; baseline `3d4970b`, inventory and reproducible commands recorded |
+| B. Concrete types and regression harness | 13–24 | Complete | `a18b04b`; pure facts/accounting model, bridge and baseline TLS pass |
+| C. Complete payment slice | 25–36 | Complete | `a4aa94f`; pure decisions, 2,100 generated cases, real-PG settlement comparisons |
+| D. Existing-schema integration | 37–46 | Complete | `62a9c77`; preparation/send/settlement, explicit isolation, fault/race/HTTPS/role checks |
+| E. Customer funding/accounting | 47–56 | Complete | `01eb253`, `99b2657`; pure decisions and derived customer display, 4,500 generated cases, 27 real-PG history comparisons, rollback/restoration pass |
+| F. Recovery/reconciliation | 57–70 | Complete | `fb38ddb`, `2f35af4`; 7,800 generated cases, native/source decisions, shared generation checks, real-PG/HTTPS/process/fence/encrypted-custody restoration pass |
+| G. Schema 22 and migration | 71–84 | Complete | `249a4a4`; authoritative runtime, owner initialization and private legacy restoration; 16 roots/12 exact attempts/83 postings preserved, old/new customer/work-hash comparisons, interruption/rollback, actual PostgreSQL/Servant/HTTPS/fence and encrypted restore contracts pass; funded pilot unchanged |
+| H. Protocol/file simplification | 85–94 | Complete | `abee44a`, `4f8c9e1`; shared bounded protocol/stream mechanics, fixed file policies and opened-descriptor checks; all three suites and actual PostgreSQL/HTTPS/fence/encrypted native/custody restore contracts pass. Net H: −52 application lines / +1 file |
+| I. Administration/UI/setup | 95–104 | Complete | `5fce544`; retained shared administration mechanics and projected browser state, unified setup credential validation; complete build/suites, actual GHC-JavaScript UI, mutated bundle refusal, fresh setup and both-profile server processes pass; +2 application lines, no new files |
+| J. Consolidated review/release candidate | 105–120 | 105–109, 111, 113–117 complete | `222b133`; invariant/mutation/type/formal checks and consolidated local acceptance. At `3ed3619`, canonical snapshots 60/76 migrated in isolated paused copies. Audit guide and measured cost report complete; source-size target was not met. Linux builds/suites at `3174822`, packaged with installer fix `a55ec8b`; both artifacts/signatures and fresh configure/start, upgrade, cold boot and isolation verified. J110, J112 and J118–120 remain |
 
 The numbered steps below implement the design above. They are not permission to
 reconsider every design choice while coding. Change the design only for a concrete
@@ -1275,3 +1285,286 @@ Public release is a separate decision: actual customer-wallet approval,
 physically independent recovery, real L2L exceptional histories, production
 arrangements, independent security/distribution review and operator-controlled
 release signing/activation remain required as recorded in RELEASE-REVIEW.
+
+## 7. Reassessing the 7,000-line goal after the completed refactor
+
+Planning review, 2026-10-06, against `3aa5d8a`; no implementation change or new
+acceptance claim. This is a feasibility gate for further simplification, not an
+extension of the completed 120-step checklist. The three external release gates
+remain open. Recounting tracked application/schema files reproduces **71 files /
+16,339 physical lines**, including comments and blanks and assigning the 216
+embedded Rust test lines to tests. Tests, tooling and licenses remain separately
+reported; deleting them cannot meet this application target.
+
+### What the source actually supports
+
+Reaching 7,000 requires removing **9,339 lines (57.2%)**. Even deleting the entire
+899-line Lifecycle extraction, 344-line converter and 240-line net schema growth
+would leave 14,856 lines, and would break required behavior. Reversing the latest
+refactor is neither sufficient nor the proposed approach.
+
+The following are **required allocations to test feasibility**, not estimates of
+achievable sizes. They make the missing evidence visible instead of promising a
+7k outcome from unspecified cleanup.
+
+| Responsibility | Current | Hypothetical 7k allocation | Required reduction |
+| --- | ---: | ---: | ---: |
+| Pure source, including Operation grammar | 1,508 | 650 | 858 |
+| Store, projections, conversion, archive and fence | 4,719 | 1,800 | 2,919 |
+| All retained schema DDL | 1,008 | 450 | 558 |
+| Chain, protocol and protected-file adapters | 2,843 | 1,500 | 1,343 |
+| Startup, API, workflow and browser | 3,477 | 1,350 | 2,127 |
+| Token administration | 1,141 | 450 | 691 |
+| Pool administration | 1,067 | 400 | 667 |
+| Rust SDK FFI, excluding embedded tests | 576 | 400 | 176 |
+| **Total** | **16,339** | **7,000** | **9,339** |
+
+Shared replacements must be counted once in their actual owning component; moving
+code between rows is not a saving. New codecs, helpers, migration paths and build
+machinery count too. In particular, token/pool budgets are very aggressive given
+their nonce, offline signing, metadata, position and liquidity functionality.
+There is currently no demonstrated implementation meeting these allocations.
+
+### Specific simplification candidates
+
+1. **Remove obsolete representations left behind by schema 22.** In Lifecycle,
+   `CustomerResolution.preservePaidOrder` and `resolutionStatus` are constructed
+   and tested but have no production consumers. Store's `resolvePayment` uses
+   only `resolutionOrder`. Replace this effect with the actual customer identity
+   needed for reservation release/admission, while retaining paid/refund display
+   tests against `projectCustomer`. Check the other decision result records for
+   similarly obsolete payloads; do not assume they are all redundant. Keep the
+   `repair-completed-order` compatibility command's validation behavior unless
+   its removal is separately approved.
+2. **Reduce representation changes inside one authority boundary.** Today a
+   payment travels through SQL rows, decoded saved terms, PaymentView,
+   operation-specific Facts, Decision and write assembly. Reuse a small typed
+   payment/preparation/attempt representation where fields have identical meaning.
+   Keep wire encoding at HTTP/RPC/file boundaries and persistence encoding at the
+   store boundary. Avoid repeated JSON encode/decode between ordinary internal
+   functions. Never reuse a previously checked snapshot as live authorization
+   after RPC, backup or lock acquisition.
+3. **Simplify the closed Store operations themselves.** Store.hs is 3,296 lines;
+   Lifecycle adds 899. Preparation, queue and settlement are the first vertical
+   slice. Each operation should visibly load bounded current facts under the
+   existing transaction, call its pure rule, and execute its explicit Opaleye
+   changes. Consolidate repeated payment/hold/source joins and exact cardinality
+   checks privately. Keep operation-specific decisions; do not add a universal
+   patch/event interpreter or move all validation into database triggers.
+4. **Share the token/pool saved-attempt mechanics.** `Token.Network` and
+   `Pool.Signing` repeat family locking, parent traversal, successor exclusion,
+   publication and submission/status handling despite sharing AdminStatus.
+   A shared implementation is worthwhile only for identical mechanics; retain
+   distinct token/pool intent validators, signer counts, costs and offline/nonce
+   rules. It must remain behind the existing closed administration operations,
+   never expose arbitrary-message signing or accept caller-provided validation
+   callbacks. Count any new sum type/dispatch glue against the saving.
+5. **Collapse repeated worker orchestration, not freshness checks.** Critical.hs
+   is 905 lines. Queue, sign and send each refresh source/readiness because those
+   are different authorization moments. A private named preparation step may
+   share that sequence, but each boundary still executes it. Preserve the single
+   critical dispatch, unique signer outputs and worker/signer separation. Do not
+   add another interpreter class or generic workflow framework.
+6. **Treat schema and deployment compatibility honestly.** Fresh installation
+   currently builds 001–008 and then closed 009 conversion/activation. A direct
+   current-schema bootstrap could simplify installation, but is not a source
+   reduction if the old scripts/converter must remain for existing archives.
+   Count both until equivalent migration and restore behavior genuinely replaces
+   them. Do not ship a smaller runtime by silently abandoning old funded ledgers.
+7. **Leave already small components alone initially.** Customer API.hs is 25
+   lines, Signer.hs 85 and File.hs 33. Rewriting these cannot materially close the
+   gap. H-stage sharing saved only 52 net lines; I-stage changes added two. More
+   file reshuffling, generic parsers and UI/installer churn are not a 7k strategy.
+
+### Candidate architecture and non-negotiable boundaries
+
+Keep the existing process and capability architecture. The candidate improvement
+is fewer internal representations and repeated implementations, not fewer
+authorization boundaries:
+
+    Servant handler / operator / worker
+      -> existing existential Request and Operation.command
+      -> safe or sole critical dispatch
+      -> specific closed operation
+      -> locked typed facts -> pure decision -> explicit Opaleye writes
+      -> separately authorized external effect, using saved exact work
+
+Use named records for facts repeatedly reconstructed across store operations;
+avoid a giant eager snapshot or a new N+1 query pattern. Raw rows remain private.
+Pure decisions do not become externally supplied executable plans. Immutable
+chain evidence, customer liabilities, operating holds, signed bytes, generations,
+backup coverage and fencing retain their separate meanings. Keep the same schema
+for the first experiments, so a failed simplification does not require funded
+migration or another full installation campaign.
+
+Independent signer validation is deliberately repeated across a trust boundary.
+Database constraints defend committed shape while pure functions express business
+rules. Neither is redundant merely because it resembles the other. Native and
+Solana recovery differ; a shared parser or executor must not erase those differences.
+Keep comments that explain financial invariants and readable formatting.
+
+### Execution sequence: establish savings before expanding scope
+
+1. **Freeze measurement and behavior.** Use the above commit and category counts;
+   preserve existing tests and funded evidence. Reuse caches, one build job and no
+   new services for pure changes. Record source sizes, queries and authority paths
+   for each replacement slice before editing it.
+2. **First experiment: preparation through settlement.** Include the matching
+   Lifecycle facts/decisions, Store readers/writes and production consumers, not
+   just the file that becomes shorter. Remove the unused settlement payloads,
+   simplify internal representations and consolidate identical private queries.
+   Retain existing pure properties and actual PostgreSQL replay, locking,
+   changed-subject, constraint and rollback checks. Count all replacement code.
+   Aim for a substantial net reduction (at least 30% of the measured slice), not
+   a sequence of cosmetic commits. This threshold is a feasibility signal, not
+   permission to delete checks. If it fails, report the measured ceiling and
+   revise the 7k hypothesis before expanding to recovery.
+3. **Second experiment: token/pool attempt lifecycle.** Measure both old families
+   plus shared AdminStatus/AdminKey against their replacements. Retain exact
+   message/signature validation, crash-safe publication, offline nonce signing,
+   replay, expiry and finalized-failure tests. If the shared abstraction is longer
+   or harder to follow, discard it; no framework is justified by hoped-for future
+   callers.
+4. **Recalculate the whole-product budget.** Use actual net savings from both
+   experiments, not their target allocations. For each remaining area, name the
+   code that will disappear and the complete replacement that permits it. Do not
+   extrapolate happy-path savings to recovery validators or historical schema.
+   Proceed toward 7k only if this accounting closes the 9,339-line gap credibly.
+   Otherwise publish the supported target instead of another completion percentage.
+5. **Apply only proven patterns.** Extend the successful Store pattern to refunds,
+   treasury and recovery; then simplify worker orchestration and internal codecs.
+   Keep chain-specific proofs and external formats. Replace old implementations
+   as each slice passes, without maintaining two production engines. Commit/push
+   passing slices with before/after counts and invariant evidence.
+6. **One final integrated campaign.** After runtime inputs stabilize, run the full
+   suites, both builds and affected real-chain/restore acceptance once. Repeat
+   only for relevant changes or failures. Installation and independent release
+   work remain separate gates, not the main simplification activity.
+
+**Present conclusion:** concrete smaller replacements are identifiable, but a
+functionally equivalent, more auditable 7,000-line whole product is not yet proven.
+The best next implementation is the bounded financial-slice experiment, not a
+second wholesale rewrite or a promise that adding another abstraction will halve
+the project. Reject any numerical success obtained by scope loss, hidden code,
+weaker trust boundaries or deleting the tests needed to establish equivalence.
+
+### Source audit: actual reduction sites, not target allocations
+
+Static reduction audit on 2026-10-06, source unchanged from `3aa5d8a` (planning
+commit `b9f2a5d`). All 71 counted files were inventoried. The financial transition,
+administration, signer, projection, migration and recovery sites below were
+examined with their callers. This is not an independent security audit, full
+behavioral equivalence proof or a compiled replacement. Line ranges refer to this
+frozen source; they identify work, not lines already proved removable.
+
+The previous 7k allocation table is an aspiration, **not a supported estimate**.
+The audit does not substantiate its proposed 9,339-line reduction. Do not use it
+as a promise or infer savings by subtracting arbitrary targets from current sizes.
+
+#### Measurement checks
+
+- Recount: 16,339 lines, 71 files, exactly matching the recorded categories.
+- 917 lines are blank. A simple prefix scan finds 648 comment lines (`--`, `//`,
+  `/*`, `* ` or `<!--` after trimming); this is not a language-aware comment count.
+  Even removing all of those, which is not proposed, leaves 14,774 lines.
+- An exact-text scan of trimmed lines of at least 35 characters, excluding
+  imports, module declarations, pragmas and Haskell/Rust line comments, finds
+  587 repeated occurrences beyond the first. This is neither a bound on semantic
+  duplication nor 587 safe deletions. It includes deriving clauses, necessary
+  repeated boundary checks and historical SQL definitions.
+- A production-Haskell name-occurrence scan did not reveal a large obvious
+  collection of unused top-level functions. It is only a screening heuristic:
+  exports, comments, common names and dynamic entry points require caller review.
+- The obsolete settlement fields below are confirmed by production-reference
+  search, not merely inferred from low name counts.
+
+#### Where the 3,296 Store lines go
+
+These nonoverlapping regions cover all of `runtime/Bridge/Store.hs`. Most of its
+size is concrete behavior rather than scaffolding for a hypothetical framework.
+
+| Lines | Count | Responsibility |
+| --- | ---: | --- |
+| 1–314 | 314 | Closed operations, archive/restore/setup dispatch and handles |
+| 315–568 | 254 | Read/write dispatch and several concrete ledger operations |
+| 569–697 | 129 | Transaction, metadata, readiness and accounting primitives |
+| 698–982 | 285 | Customer reads, order creation, instructions and expiry |
+| 983–1393 | 411 | Receipt promotion, source evidence, work hashes and scans |
+| 1394–1644 | 251 | Payment reconstruction and preparation |
+| 1645–1984 | 340 | Drafts, attempts, send authority, settlement and source reads |
+| 1985–2225 | 241 | Custody reconciliation, work queues and resume |
+| 2226–2522 | 297 | Refund, unsigned cancellation and Solana expiry/retry |
+| 2523–2642 | 120 | Treasury allocation and outflow classification |
+| 2643–2849 | 207 | Source restoration, loss coverage and approval |
+| 2850–3296 | 447 | Native replacement families, winner changes and rebroadcast |
+| **Total** | **3,296** | |
+
+#### Audited candidates and required replacements
+
+Paths below are relative to `2-Wrap-Unwrap-Server` unless prefixed with `1/` or
+`3/`, which denote the token and pool product directories. Counts describe the
+old source under consideration, not savings. Overlapping sites must not be added.
+
+| Candidate / actual source | Finding and concrete replacement | What must survive / verdict |
+| --- | --- | --- |
+| `src/Bridge/Lifecycle.hs:94–99,137–143`; `Store.hs:1935–1953` | `CustomerResolution` still constructs `preservePaidOrder` and `resolutionStatus`; production consumes only `resolutionOrder`. Make the effect carry `Maybe OrderId` (using the existing identity representation) instead. Update pure tests to assert actual economic effects and retain customer projection tests. | Confirmed obsolete payload, small cut. Do not delete paid-conversion/additional-refund display behavior. |
+| `Store.hs:1396–1464,1549–1644` | `readPayment` already loads the root, yet preparation then reads it again. Return an internal loaded payment record containing its root/decoded phase and typed terms; reuse it only inside the same locked operation/read snapshot. Keep the public closed read's narrow result. | Concrete repeated query/representation. Need query-count and changed-subject tests; no cache across transactions or external effects. |
+| `Store.hs:1396–1447,2228–2320` | Payment reconstruction and refund each join orders/receipts/costs and decode request/policy/amounts. Use a private typed funding-row projection and a pure decoder; each operation retains its own eligibility, replay and reservation rules. | Share the fact decoding, not the whole refund/conversion decision. No generic query operation exposed to handlers. |
+| `Lifecycle.hs:117–156`; `Store.hs:1888–1953` | Settlement validates evidence before loading, then the pure decision validates it again. The current early check intentionally controls refusal order. Consolidate only if that behavior is preserved or explicitly revised; no material size saving is established. | Two calls to a shared check are not two implementations. This is not a large deletion opportunity. |
+| `Store.hs:1549–1644,1868–1953` | Preparation, queue and settlement can use one consistent private load/decide/write shape. Existing Opaleye writes are already compact, often one long line. Share exact row-cardinality and repeated fact readers, keep explicit writes next to the decision. | Best financial experiment; do not claim the whole region disappears. A generic patch interpreter would add authority and code. |
+| `Store/Projection.hs:62–142`; `Store.hs:1773–1816,2395–2425` | Projection filters and locked source/successor checks resemble each other but serve different purposes. A filter skips work; the locked operation establishes authority and checks full bounded history. | Reuse a relational predicate only after proving the same meaning. Do not remove the locked validation or eagerly fetch all histories for every customer page. |
+| `1/Token/Network.hs:233–254`; `3/Pool/Signing.hs:132–153` | The two saved-record readers plus parent traversals total **44 lines**. Both bound lineage; validators and error contracts differ. A shared closed family reader would still need both validators and dispatch. | Small potential saving, not hundreds of lines. If dispatch plus common code exceeds 44, retain these straightforward functions. |
+| `1/Token/Network.hs:276–319`; `3/Pool/Signing.hs:230–259` | Submission functions total **74 lines**. Both read status/transaction and compare saved bytes; token also handles nonce and operation-specific costs, while pool verifies total payer debit. Share read-only finalized evidence collection/decoding, keep each operation's cost checks and submission inside its evaluator. | Do not route through a generic arbitrary-transaction sender. Existing AdminStatus already owns much of the common history logic. |
+| `1/Token.hs:133–233`; `3/Pool.hs:75–94` | Both decode unsigned transactions and compare header, keys and instructions. Factor bounded instruction expansion/header mechanics only; retain explicit operation-specific expected accounts, writable roles, payload and signer shape. | Shared parsing can help clarity. Do not use SDK output as its own expected specification or relax nonce/pool signer rules. |
+| `workflow/Bridge/Critical.hs:201–267,347–577,578–754` | Signer read/sign/recheck is already consolidated as `withStableDecision`. Operator and worker branches repeat paused/readiness preparation at distinct authorization moments. A small private named readiness helper can remove repeated plumbing, but each call still runs. | Keep six Operation instances, exact contexts/results, sole dispatch and independent signer read/recheck. No cached readiness token, callback evaluator or extra interpreter class. |
+| `migrations/001.sql:275–328` and other custody trigger definitions | Across migrations, **20 functions have the exact same three-line definition body**, incrementing custody revision and returning NEW. One function plus the existing explicit trigger attachments would replace 60 definition lines with three: **57 gross lines** before rollout work. | Preserve every table/event/timing and transactional increment. Historical migration references/restore paths and any new migration must be included; 57 is not yet a verified net saving. |
+| `migrations/002.sql`, `003.sql`; `Store/Migration.hs` (344 lines) | Fourteen repeated function bodies include historical `CREATE OR REPLACE` definitions. They can be needed when upgrading an older database despite matching current bootstrap text. The converter validates old funded history. | No credit for deleting historical paths, moving them to another repository, or adding a fresh schema while retaining the originals. A replacement must support the same archives. |
+| `Store/Backup.hs:258–291,343–378` | Ledger and custody download paths have repeated repository/staging mechanics. Bundle identity, exact file sets and inspections differ; share fixed download/staging mechanics privately, retain distinct inspectors. | A modest candidate. Do not collapse full custody validation into a manifest check. Count new cleanup/error plumbing. |
+| `chain/Bridge/AdminKey.hs`, `workflow/Bridge/Credentials.hs`, `Recovery.hs`, `runtime/Bridge/Fence.hs`, `Store/Backup.hs` | Similar opened-file checks have deliberately different UID/mode/size/immutability requirements. `Bridge.File` already shares descriptor mechanics in 33 lines. | No large proven saving. Avoid a caller-selected security-policy framework or merging key access with worker file access. |
+| `app/Configure.hs:155–213`; `1/app/Main.hs:84–133` | Prompt loops overlap, but bridge handles bounded typed fields and filesystem/RPC errors; token selects a command and merges prior settings. Shared prompt mechanics can remain a small helper with fixed caller validation. | Preserve private paths, defaults, correction loops and secret handling. Not a financial rewrite prerequisite. |
+| `web/Main.hs` (339), `Browser.hs` (56), HTML (129), CSS (153) | Browser is **677 lines total**, already much smaller than the financial layer. Typed state rendering may simplify it; removing wallet connection is not available as a saving because it is already absent. | Keep capabilities, saved-order reload, pending/error states, QR/link/copy and 1% display. Wholesale browser replacement cannot account for 9k. |
+| `solana-helper/src/lib.rs:482–576` | A 95-line shared FFI boundary already handles six modes with pointer/length checks and panic containment. Three preparation modes repeat JSON decode/encode mechanics. A private Rust helper may reduce those branches. | Keep independent Haskell byte verification and ABI bounds. No evidence supports removing the 176 lines allocated in the aspiration table. |
+
+#### Piece-by-piece conclusion
+
+| Counted piece | Actual lines | Reduction assessment |
+| --- | ---: | --- |
+| Pure source | 1,508 | 899 are Lifecycle; its decisions are mostly short operation-specific rules. Remove obsolete payloads and unnecessary wrappers, not the entire layer. The other 609 include money, wire formats and the required Operation grammar. |
+| Store and infrastructure | 4,719 | 3,296 Store, 300 schema projections, 142 derived projections, 344 conversion, 418 archives, 149 fence, 70 privilege/catalog checks. Biggest candidate is repeated financial fact loading; the rest is not a 1,423-line dead tail. |
+| Schema | 1,008 | Some exact trigger duplication is real. Relational constraints, recovery views and old-version transitions remain necessary under current contracts. |
+| Adapters | 2,843 | NativePayment alone is 518, including actual replacement/family evidence; SolanaDeposit is 297 with distinct deposit/custody/lamport validation. Common parsing exists already. Broad deletion is unsupported. |
+| Server/workflow/browser | 3,477 | Critical 905, browser 677, app/configure 449; remaining 1,446 includes custody reconciliation, payment validation, backup, TLS/control/admission/configuration. No duplicate second customer server was found in the inspected dispatch. |
+| Token | 1,141 | Key import/offline signing, mint/burn, nonce, metadata, configuration and exact transaction validation are implemented functionality, not scaffolding. Shared attempt mechanics are a bounded candidate. |
+| Pool | 1,067 | Creation, positions, liquidity, inspection and guarded saved-attempt handling have distinct contracts. Replacing them with an external website would remove functionality. |
+| SDK FFI | 576 | Already one shared FFI implementation. Keep SDK protocol support and bounds; inspect the few repeated branch mechanics. |
+
+There is **no defensible whole-product 7k design established by this audit**.
+Named local opportunities plausibly concern hundreds to low thousands of lines;
+that is a sizing hypothesis, not a measured saving or a new completion promise.
+Even halving Store plus Lifecycle (4,195 combined) leaves roughly 14,242 total.
+Everything outside those two files is already 12,144 lines.
+
+To substantiate 7k without feature loss, a future design must demonstrate both a
+much smaller financial representation and major reductions in the other 12,144
+lines. A new event store, generic effects engine, opaque JSON ledger or removal of
+database defenses does not establish that. Do not approve another wholesale
+rewrite based on an unsupported aggregate estimate.
+
+The next concrete step remains a bounded replacement of payment loading,
+preparation and settlement, including its pure facts and all new helpers. Measure
+net source, query count and audit trace length and run the existing focused
+properties/PostgreSQL contracts. This must establish actual savings before a
+new whole-repository size forecast. Keep the existing product usable throughout.
+
+
+### Default CanonicalBeta setup checkpoint (2026-10-08)
+
+Implemented six-input generated-wallet configure, with advanced setup retained;
+generated restricted node credentials and fresh-repository encryption password;
+protected/replayable local node provisioning; saved ATA setup and independently
+verified history-origin discovery before runtime config publication. Shared the
+existing token operations without source duplication. Terminal, credential-policy,
+restart/refusal and history-fixture contracts pass under Cabal. Full funded Ubuntu
+bootstrap remains unverified; treasury allocation/setup-cost classification remain
+explicit operator work. See the release review entry for exact scope, counts and
+commands. No external gate or valuable-fund deployment is marked complete here.

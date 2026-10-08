@@ -15,14 +15,17 @@ import Bridge.Identity (bearerHash,digest,payInstruction,publicKey)
 import Text.Read (readMaybe)
 import qualified Bridge.Wire as W
 import Bridge.Domain
+import Bridge.Lifecycle
 import Bridge.Wire (PaymentTerms(..),PolicySnapshot(..),CostLimits(..),SignedAttempt(..))
 import qualified Bridge.Store.Schema as S
+import qualified Bridge.Store.Projection as P
+import qualified Bridge.Store.Migration as Migration
 import Bridge.Store.Catalog (claimWorker,verifyReadRole,exportSnapshot)
 import Bridge.Store.Backup (LedgerArchive(..),archiveLedger,BackupReceipt(..),loadRemoteBackup,uploadRemoteArchive,loadLedgerArchive,restoreLedger,discardRestore,downloadRemoteArchive,CustodyArchive(..),loadCustodyArchive,uploadRemoteCustody,downloadRemoteCustody)
 import Crypto.Random (getRandomBytes)
 import qualified Data.ByteString as BS
 import Data.List (nub,sortOn)
-import Data.Profunctor.Product (p3)
+import Data.Profunctor.Product (p2,p3)
 import Data.Scientific (Scientific,floatingOrInteger)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Control.Concurrent.MVar
@@ -49,79 +52,26 @@ import qualified Opaleye.Internal.Locking as Locking
 data LedgerState = LedgerState
   { ledgerSequence :: Int64, ledgerBackup :: Int64, ledgerPaused :: Bool, ledgerReason :: Text }
   deriving (Eq,Show)
-data WithdrawalView = WithdrawalView
-  { withdrawalPayment :: Payment, withdrawalTerms :: PaymentTerms, withdrawalReason :: Text
-  , withdrawalSequence :: Int64, withdrawalCancellation :: Maybe (Text,Int64) }
-  deriving (Eq,Show)
-
-data OrderLimits = OrderLimits
-  { orderMinimum :: Amount, orderMaximum :: Amount, quoteSeconds :: Int64
-  , graceSeconds :: Int64, maximumQueued :: Int, nativeDaily :: Amount, solanaDaily :: Amount }
-  deriving (Eq,Show)
-
 data StorePolicy = StorePolicy
   { executionTerms :: PaymentTerms, admissionLimits :: OrderLimits
   , deploymentName :: Text, requireBackup :: Bool } deriving (Eq,Show)
-data PaymentStatus = PaymentReady | PaymentPaying | PaymentPaid | PaymentReview | PaymentCancelled deriving (Eq,Show)
-data PaymentView = PaymentView
-  { savedPayment :: Payment, savedTerms :: PaymentTerms, savedStatus :: PaymentStatus } deriving (Eq,Show)
-data PreparedPayment = PreparedPayment
-  { preparedView :: PaymentView, preparedGeneration :: Int, preparedPolicy :: Text
-  , preparedDraft :: Maybe Text, preparedFee :: Amount } deriving (Eq,Show)
-data RecordedAttempt = RecordedAttempt
-  { recordedPayment :: Text, recordedChain :: Text, recordedGeneration :: Int
-  , recordedFee :: Amount, recordedState :: Text, recordedSequence :: Maybe Int64
-  , recordedObservation :: Maybe Text, recordedSigned :: SignedAttempt } deriving (Eq,Show)
-data AllocationClaim = AllocationClaim { allocationLabel :: Text, mayAllocate :: Bool }
-  deriving (Eq,Show)
-
 data NativeLockWork = NativeLockWork
   { lockPreparation :: PreparedPayment, lockCancelling :: Bool, lockAttempts :: [RecordedAttempt] } deriving (Eq,Show)
 
 data CustodySnapshot = CustodySnapshot
   { custodyRevision :: Int64, custodyTotals :: M.Map Asset Integer
   , custodyHeads :: [(Text,Text)], custodySlot :: Int64, custodyPending :: [RecordedAttempt] } deriving (Eq,Show)
-data NativeSettlementCheck = NativeConfirming | NativeUnavailable Text
-  | NativeReconfirmed W.PaymentCosts Text
-  | NativeWinnerChanged [RecordedAttempt] Text W.PaymentCosts Text deriving (Eq,Show)
 
--- Explicit fresh installation only. Schema DDL is applied separately; this
--- operation cannot restore funds, adopt a fence or make an existing ledger empty.
+-- Closed offline setup: initialization cannot replace recovery, and conversion
+-- requires a paused source and verified archive. Neither operation adopts a fence.
 data StoreSetup a where
   InitializeLedger :: Text -> StoreSetup ()
+  MigratePaymentRoots :: Text -> Int64 -> FilePath -> StoreSetup (Int64,Int)
 
 evalSetup :: PG.ConnectInfo -> StoreSetup a -> IO a
-evalSetup settings (InitializeLedger identity) = do
-  require (T.length identity==64 && T.all (`elem` ("0123456789abcdef"::String)) identity) "invalid_deployment_identity"
-  bracket (PG.connect settings) PG.close $ \c->PG.withTransaction c $ do
-    claimWorker c >>= flip require "worker_already_running"
-    existing<-O.runSelect c (O.selectTable S.deployment) :: IO [S.Deployment]
-    case existing of
-      []->do
-        let exists table=Exists.exists (O.selectTable table >> pure ())
-        occupied<-O.runSelect c $ foldr (O..||) (O.sqlBool False) <$> sequence
-          [exists S.withdrawals, exists S.cancellations, exists S.events
-          ,exists S.postings, exists S.audit, exists S.custody
-          ,exists S.intentIds, exists S.orders, exists S.deposits
-          ,exists S.obligations, exists S.reservations, exists S.orderCosts
-          ,exists S.operatingReservations, exists S.operatingClock, exists S.operatingCosts
-          ,exists S.scanHealth, exists S.checkpoints, exists S.nativeAllocations
-          ,exists S.sourceChecks, exists S.sourceReturns, exists S.sourceLossCovers
-          ,exists S.observationEvidence, exists S.treasuryAllocations, exists S.treasurySpends
-          ,exists S.scanOrigins, exists S.chainEvents, exists S.preparations
-          ,exists S.feeHolds, exists S.attempts, exists S.sourceRecoveryDecisions
-          ,exists S.preparationCancellations, exists S.solanaExpiries, exists S.solanaRetryApprovals
-          ,exists S.replacementDecisions, exists S.replacementCancellationRows, exists S.replacementMemberRows
-          ,exists S.nativeRecoveryRows, exists S.nativeWinnerChanges, exists S.legacyHints]
-        require (occupied==[False]) "initialization_requires_empty_ledger"
-        now<-floor <$> getPOSIXTime
-        _<-O.runInsert c O.Insert {O.iTable=S.deployment,
-          O.iRows=[S.Deployment (O.sqlInt8 1) (O.sqlInt8 21) (O.sqlStrictText identity) (O.sqlInt8 0) (O.sqlInt8 0) (O.sqlInt8 1) (O.sqlStrictText "installation_requires_reconciliation")],
-          O.iReturning=O.rCount,O.iOnConflict=Nothing}
-        _<-O.runInsert c O.Insert {O.iTable=S.custody,O.iRows=[(O.sqlInt8 1,O.sqlInt8 0,O.null,O.null,O.null)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-        _<-O.runInsert c O.Insert {O.iTable=S.operatingClock,O.iRows=[(O.sqlInt8 1,O.sqlInt8 now)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-        pure ()
-      _->void (metadata c identity)
+evalSetup settings (MigratePaymentRoots identity minimumSequence manifest) =
+  Migration.migratePaymentRoots settings identity minimumSequence manifest
+evalSetup settings (InitializeLedger identity) = Migration.initializeLedger settings identity
 
 -- Restoration needs database-creation authority; fence changes claim the paused
 -- ledger exclusively. No online handler receives these maintenance operations.
@@ -152,7 +102,20 @@ evalRestore settings (RecoverLedger configuration snapshot directory identity mi
       evalRestore settings (RestoreLedger (manifestPath archive) identity minimumSequence)
 evalRestore settings (RestoreLedger manifest identity minimumSequence) = do
   archive<-loadLedgerArchive identity minimumSequence manifest
-  bracketOnError (restoreLedger settings archive) discardRestore $ \target->
+  bracketOnError (restoreLedger settings archive) discardRestore $ \target->do
+   -- Legacy archives are upgraded only in the newly created, private restore
+   -- database. There is no signer, adopted fence or automatic resumption here.
+   when (archiveSchema archive==21) $ do
+    bracket (PG.connect target) PG.close $ \c->Tx.withTransaction c $ do
+      claimWorker c >>= flip require "worker_already_running"
+      rows<-O.runSelect c (O.selectTable S.deployment) :: IO [S.Deployment]
+      require (case rows of
+        [r]->S.singleton r==1 && S.schemaVersion r==21 && S.fingerprint r==identity && S.criticalSequence r==archiveSequence archive
+        _->False) "restored_schema_or_sequence_mismatch"
+      void $ O.runUpdate c O.Update {O.uTable=S.deployment,
+        O.uUpdateWith= \r->r {S.paused=O.sqlInt8 1,S.pauseReason=O.sqlStrictText "restored_requires_migration"},
+        O.uWhere= \r->S.singleton r O..== O.sqlInt8 1,O.uReturning=O.rCount}
+    void $ evalSetup target (MigratePaymentRoots identity minimumSequence manifest)
    bracket (PG.connect target) PG.close $ \c->Tx.withTransaction c $ do
     claimWorker c >>= flip require "worker_already_running"
     row<-metadata c identity
@@ -470,8 +433,8 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
     when (requireBackup config) $ require (S.backupSequence state>=S.criticalSequence state) "backup_pending"
     pure saved
   RecordNativeSettlement expected result -> recordNativeSettlement c (deploymentFingerprint $ paymentPolicy policy) expected result
-  SettlePayment expected costs proof -> settlePayment c (deploymentFingerprint $ paymentPolicy policy) expected costs proof
-  FailSolana expected fee proof -> failSolana c (deploymentFingerprint $ paymentPolicy policy) expected fee proof
+  SettlePayment expected costs proof -> settleOutcome c (deploymentFingerprint $ paymentPolicy policy) expected (Succeeded costs proof)
+  FailSolana expected fee proof -> settleOutcome c (deploymentFingerprint $ paymentPolicy policy) expected (Failed fee proof)
   RefreshPaymentSource expected observed -> do
     saved<-readSource c (W.depositId expected) >>= asDeposit
     require (saved==expected && observed {W.depositAnchor=W.depositAnchor expected,
@@ -498,36 +461,31 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
   PromoteDeposit now identifier -> promoteDeposit c policy now identifier
   CreateOrder now header request -> createOrder c policy limit now header request
   ClaimNative now header identifier -> do
-    row <- authorizedOrder c (deploymentFingerprint $ paymentPolicy policy) header identifier
-    request <- decodeSaved (S.requestJson row)
-    require (W.direction request==NativeToWrapped && S.instruction row==Nothing) "invalid_native_provisioning_order"
+    row<-authorizedOrder c (deploymentFingerprint $ paymentPolicy policy) header identifier
+    facts<-instructionFacts row
     let label="ecx-bridge:v1:"<>deploymentName config<>":order:"<>identifier
-    old <- allocation c identifier
-    case old of
-      Just saved -> require (saved==label) "allocation_label_mismatch" >> pure(AllocationClaim label False)
-      Nothing -> do
-        intakeReady c (deploymentFingerprint $ paymentPolicy policy) now
-        require (S.status row=="Provisioning" && now<=S.deadline row) "deposit_window_closed"
-        n <- nextSequence c
-        _ <- O.runInsert c O.Insert {O.iTable=S.nativeAllocations,
-          O.iRows=[(O.sqlStrictText identifier,O.sqlStrictText label,O.sqlInt8 n)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-        pure (AllocationClaim label True)
+    previous<-allocation c identifier
+    readiness<-if previous/=Nothing then pure Nothing else Just <$> readIntake c (deploymentFingerprint $ paymentPolicy policy) now
+    claim<-checked (decideNativeClaim label previous facts readiness)
+    when (mayAllocate claim) $ do
+      n<-nextSequence c
+      _<-O.runInsert c O.Insert {O.iTable=S.nativeAllocations,
+        O.iRows=[(O.sqlStrictText identifier,O.sqlStrictText label,O.sqlInt8 n)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      pure ()
+    pure claim
   RecordNative header identifier label address -> do
-    row <- authorizedOrder c (deploymentFingerprint $ paymentPolicy policy) header identifier
-    request <- decodeSaved (S.requestJson row)
-    saved <- allocation c identifier
-    require (saved==Just label && W.direction request==NativeToWrapped &&
-      not(T.null address) && T.length address<=128 && not(T.any (<= ' ') address)) "invalid_native_allocation_result"
-    saveInstruction c row address
+    row<-authorizedOrder c (deploymentFingerprint $ paymentPolicy policy) header identifier
+    facts<-instructionFacts row
+    previous<-allocation c identifier
+    checked (checkNativeAllocation previous label address facts)
+    saveInstruction c row facts address
   BindSolana now header identifier -> do
-    row <- authorizedOrder c (deploymentFingerprint $ paymentPolicy policy) header identifier
-    request <- decodeSaved (S.requestJson row)
-    require (W.direction request==WrappedToNative) "invalid_solana_provisioning_order"
-    instruction <- checked (payInstruction identifier)
-    when (S.instruction row==Nothing) $ do
-      intakeReady c (deploymentFingerprint $ paymentPolicy policy) now
-      require (S.status row=="Provisioning" && now<=S.deadline row) "deposit_window_closed"
-    saveInstruction c row instruction
+    row<-authorizedOrder c (deploymentFingerprint $ paymentPolicy policy) header identifier
+    facts<-instructionFacts row
+    readiness<-if savedInstruction facts/=Nothing then pure Nothing else Just <$> readIntake c (deploymentFingerprint $ paymentPolicy policy) now
+    checked (checkSolanaBinding facts readiness)
+    instruction<-checked (payInstruction identifier)
+    saveInstruction c row facts instruction
   IssueInstruction now header identifier -> issueInstruction c config now header identifier
   AcknowledgeBackup identity n snapshot -> do
     row <- metadata c identity
@@ -557,56 +515,56 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
   AllocateTreasury now receipt split reason -> allocateTreasury c policy now receipt split reason
   RepairCompletedOrderView now identifier -> repairCompletedOrderView c policy now identifier
   ReserveFees now key currency n destination explanation -> do
-    validReason explanation
-    require (now>=0 && T.length key==64 && T.all (`elem` ("0123456789abcdef"::String)) key && n<=orderMaximum limit) "invalid_fee_withdrawal"
-    funding <- checked (earnedFees key currency n)
-    outgoing <- checked (payment ("fee:"<>key) funding destination)
-    old <- readWithdrawal c key
-    case old of
-      Just saved -> do
-        require (withdrawalPayment saved==outgoing && withdrawalTerms saved==policy && withdrawalReason saved==explanation) "fee_withdrawal_conflict"
-        pure saved
-      Nothing -> do
-        d <- metadata c (deploymentFingerprint $ paymentPolicy policy)
-        require (S.paused d==1) "fee_withdrawal_requires_pause"
-        fresh c now
-        booked <- balances c
-        require (M.findWithDefault 0 (currency,Earned) booked>=toInteger(units n)) "insufficient_earned_fees"
-        sequenceNumber <- nextSequence c
-        let raw=TE.decodeUtf8 (BL.toStrict $ encode policy)
-        count <- O.runInsert c O.Insert {O.iTable=S.withdrawals,
-          O.iRows=[S.Withdrawal (O.sqlStrictText key) (O.sqlStrictText $ T.pack $ show currency)
-            (O.sqlInt8 $ units n) (O.sqlStrictText destination) (O.sqlStrictText raw)
-            (O.sqlStrictText explanation) (O.sqlInt8 sequenceNumber)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-        require (count==1) "withdrawal_insert_failed"
-        entries <- checked (reserveEarned funding)
-        post c ("fee-reserve:"<>key) "reserve earned fees for operator withdrawal" entries
-        pure (WithdrawalView outgoing policy explanation sequenceNumber Nothing)
+    outgoing<-checked (withdrawalInput (orderMaximum limit) now key currency n destination explanation)
+    old<-readWithdrawal c key
+    admission<-case old of
+      Just _->pure Nothing
+      Nothing->do
+        operator<-readOperator c (deploymentFingerprint $ paymentPolicy policy) now
+        booked<-balances c
+        pure $ Just(operator,M.findWithDefault 0 (currency,Earned) booked)
+    create<-checked (decideWithdrawal outgoing policy explanation old admission)
+    if not create then maybe (reject "fee_withdrawal_not_found") pure old else do
+      sequenceNumber<-nextSequence c
+      count<-O.runInsert c O.Insert {O.iTable=S.withdrawals,
+        O.iRows=[S.Withdrawal (O.sqlStrictText key) (O.sqlStrictText $ T.pack $ show currency)
+          (O.sqlInt8 $ units n) (O.sqlStrictText destination) (O.sqlStrictText $ encodeSaved policy)
+          (O.sqlStrictText explanation) (O.sqlInt8 sequenceNumber)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      require (count==1) "withdrawal_insert_failed"
+      createPaymentRoot c outgoing
+      entries<-checked (reserveEarned $ paymentFunding outgoing)
+      post c ("fee-reserve:"<>key) "reserve earned fees for operator withdrawal" entries
+      pure (WithdrawalView outgoing policy explanation sequenceNumber Nothing)
   CancelFees key explanation -> do
     validReason explanation
-    saved <- readWithdrawal c key >>= maybe (reject "fee_withdrawal_not_found") pure
-    case withdrawalCancellation saved of
-      Just (reason,_) -> require (reason==explanation) "fee_withdrawal_cancellation_conflict" >> pure saved
-      Nothing -> do
-        work <- O.runSelect c $ do
-          identifier <- O.selectTable S.intentIds
+    saved<-readWithdrawal c key >>= maybe (reject "fee_withdrawal_not_found") pure
+    work<-case withdrawalCancellation saved of
+      Just _->pure UnpreparedWithdrawal
+      Nothing->do
+        ids<-O.runSelect c $ O.limit 1 $ do
+          (identifier,_,_,_,_,_)<-S.workPreparations
           O.where_ (identifier O..== O.sqlStrictText ("fee:"<>key))
           pure identifier
           :: IO [Text]
-        unless (null work) $ do
+        if null ids then pure UnpreparedWithdrawal else do
           retry<-cancelledGeneration c ("fee:"<>key)
-          require (retry/=Nothing) "fee_withdrawal_payment_exists"
           state<-metadata c (deploymentFingerprint $ paymentPolicy policy)
-          require (S.paused state==1) "pause_before_operator_action"
-          _<-O.runUpdate c O.Update {O.uTable=S.feeHolds,O.uUpdateWith= \(identifier,a,n,_)->(identifier,a,n,O.sqlInt8 1),O.uWhere= \(identifier,_,_,_)->identifier O..== O.sqlStrictText("fee:"<>key),O.uReturning=O.rCount}
-          pure ()
-        n <- nextSequence c
-        count <- O.runInsert c O.Insert {O.iTable=S.cancellations,
-          O.iRows=[(O.sqlStrictText key,O.sqlStrictText explanation,O.sqlInt8 n)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-        require (count==1) "withdrawal_cancellation_insert_failed"
-        entries <- checked (releaseEarned $ paymentFunding $ withdrawalPayment saved)
-        post c ("fee-cancel:"<>key) "cancel unsigned operator fee reservation" entries
-        pure saved {withdrawalCancellation=Just(explanation,n)}
+          pure (WithdrawalWork (retry/=Nothing) (S.paused state==1))
+    cancel<-checked (decideWithdrawalCancellation explanation saved work)
+    if not cancel then pure saved else do
+      case work of
+        UnpreparedWithdrawal->pure ()
+        WithdrawalWork{}->void $ O.runUpdate c O.Update {O.uTable=S.feeHolds,
+          O.uUpdateWith= \(identifier,a,n,_)->(identifier,a,n,O.sqlInt8 1),
+          O.uWhere= \(identifier,_,_,_)->identifier O..== O.sqlStrictText("fee:"<>key),O.uReturning=O.rCount}
+      n<-nextSequence c
+      count<-O.runInsert c O.Insert {O.iTable=S.cancellations,
+        O.iRows=[(O.sqlStrictText key,O.sqlStrictText explanation,O.sqlInt8 n)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      require (count==1) "withdrawal_cancellation_insert_failed"
+      setPaymentPhase c ("fee:"<>key) Cancelled
+      entries<-checked (releaseEarned $ paymentFunding $ withdrawalPayment saved)
+      post c ("fee-cancel:"<>key) "cancel unsigned operator fee reservation" entries
+      pure saved {withdrawalCancellation=Just(explanation,n)}
 
 -- Serialize with the original worker's advisory-lock namespace and deployment
 -- row. Any unexpected failure fences this connection; only policy rejection
@@ -619,7 +577,7 @@ transaction (Writer cell config checkpoint) action = do
     Just c -> mask $ \restore -> do
       refused <- newIORef False
       result <- try $ do
-        PG.begin c
+        Tx.beginMode (Tx.TransactionMode Tx.ReadCommitted Tx.ReadWrite) c
         locked <- O.runSelect c $ Locking.forUpdate $ do
           r <- O.selectTable S.deployment
           O.where_ (S.singleton r O..== O.sqlInt8 1)
@@ -648,7 +606,7 @@ metadata :: PG.Connection -> Text -> IO S.Deployment
 metadata c identity = do
   rows <- O.runSelect c (O.selectTable S.deployment)
   case rows of
-    [r] | S.singleton r==1 && S.schemaVersion r==21 && S.fingerprint r==identity
+    [r] | S.singleton r==1 && S.schemaVersion r==22 && S.fingerprint r==identity
         && S.criticalSequence r>=0 && S.backupSequence r>=0 && S.backupSequence r<=S.criticalSequence r
         && S.paused r `elem` [0,1] -> pure r
     _ -> reject "ledger_profile_or_schema_mismatch"
@@ -660,11 +618,20 @@ nextSequence c = do
     O.uReturning=O.rReturning S.criticalSequence}
   case rows of [n]->pure n; _->reject "sequence_exhausted"
 fresh :: PG.Connection -> Int64 -> IO ()
-fresh c now = do
-  rows <- O.runSelect c (O.selectTable S.custody) :: IO [(Int64,Int64,Maybe Int64,Maybe Int64,Maybe Text)]
-  require (case rows of
-    [(1,revision,Just checkedRevision,Just at,Nothing)] -> checkedRevision==revision && at>=0 && at<=now && toInteger now-toInteger at<=60
-    _ -> False) "custody_not_reconciled"
+fresh c now = custodyFacts c >>= checked . checkCustody now
+
+readOperator :: PG.Connection -> Text -> Int64 -> IO OperatorFacts
+readOperator c identity now = do
+  state<-metadata c identity
+  OperatorFacts now (S.paused state==1) <$> custodyFacts c
+
+custodyFacts :: PG.Connection -> IO (Maybe (Int64,Int64,Int64))
+custodyFacts c = do
+  rows <- O.runSelect c $ O.limit 2 $ O.selectTable S.custody
+    :: IO [(Int64,Int64,Maybe Int64,Maybe Int64,Maybe Text)]
+  pure $ case rows of
+    [(1,revision,Just checkedRevision,Just at,Nothing)] -> Just(revision,checkedRevision,at)
+    _ -> Nothing
 readWithdrawal :: PG.Connection -> Text -> IO (Maybe WithdrawalView)
 readWithdrawal c key = do
   rows <- O.runSelect c $ do
@@ -726,7 +693,7 @@ parseAsset _=reject "unknown_ledger_asset"
 checked :: Either Text a -> IO a
 checked=either reject pure
 validReason :: Text -> IO ()
-validReason r=require (not(T.null $ T.strip r) && T.length r<=512) "invalid_reason"
+validReason=checked . checkReason
 
 -- Authorized saved view, never re-quote. The reader transaction keeps all
 -- recovery overlays and backup coverage in the same repeatable-read snapshot.
@@ -751,31 +718,73 @@ readOrder c identity coverage cap identifier = do
     (tx,state) <- S.nativeRecovery
     (attempt,intent) <- S.attemptIntents
     (intentId,obligation) <- S.intentObligations
-    (obligationId,order,_,_) <- S.orderObligations
+    (obligationId,order,_,_) <- P.orderObligations
     O.where_ (tx O..== attempt O..&& intent O..== intentId O..&& O.matchNullable (O.sqlBool False) (O..== obligationId) obligation
       O..&& order O..== O.sqlStrictText identifier O..&& state O../= O.sqlStrictText "reconfirmed")
     pure tx
     :: IO [Text]
-  obligations <- O.runSelect c $ do
-    (_,order,deposit,state) <- S.orderObligations
-    O.where_ (order O..== O.sqlStrictText identifier)
-    pure (deposit,state)
-    :: IO [(Text,Text)]
-  sources <- O.runSelect c $ do
-    (deposit,state) <- S.sourceRecovery
-    (depositId,order) <- S.orderDeposits
+  payments<-customerPayments c identifier
+  sources<-O.runSelect c $ O.limit 1 $ do
+    (deposit,state)<-S.sourceRecovery
+    (depositId,order)<-S.orderDeposits
     O.where_ (deposit O..== depositId O..&& state O../= O.sqlStrictText "restored"
       O..&& O.matchNullable (O.sqlBool False) (O..== O.sqlStrictText identifier) order)
+    accounted<-Exists.exists $ do
+      key<-S.accountedLosses
+      O.where_ (key O..== deposit)
+      pure ()
+    paid<-Exists.exists $ do
+      (_,owner,source,status)<-P.orderObligations
+      O.where_ (owner O..== O.sqlStrictText identifier O..&& source O..== deposit O..&& status O..== O.sqlStrictText "paid")
+      pure ()
+    O.where_ (O.not accounted O..|| O.not paid)
     pure deposit
     :: IO [Text]
-  accounted <- if null sources then pure [] else O.runSelect c (do
-    deposit <- S.accountedLosses
-    O.where_ (O.in_ (map O.sqlStrictText sources) deposit)
-    pure deposit) :: IO [Text]
-  let review=not(null native) || any ((=="review").snd) obligations ||
-        any (\deposit->deposit `notElem` accounted || (deposit,"paid") `notElem` obligations) sources
-  pure (W.OrderView identifier request savedQuote (if review then "NeedsReview" else S.status r)
-    (S.deadline r) visible (S.payoutTx r) policy)
+  let review=not(null native) || not(null sources)
+  (status,payout)<-checked (projectCustomer (S.admissionState r) review payments)
+  pure (W.OrderView identifier request savedQuote status (S.deadline r) visible payout policy)
+
+-- A page reads roots and their current generation directly. Refund ordering uses
+-- the immutable original principal event, even after a native winner changes.
+customerPayments :: PG.Connection -> Text -> IO [CustomerPayment]
+customerPayments c order = page "" []
+ where
+  page after retained = do
+    rows<-O.runSelect c $ O.limit 1000 $ O.orderBy (O.asc (\(ob,_,_,_)->S.obligationId ob)) $ do
+      ob<-O.selectTable S.obligations
+      (root,state)<-P.paymentStates
+      O.where_ (S.obligationOrder ob O..== O.sqlStrictText order O..&& S.obligationId ob O..> O.sqlStrictText after
+        O..&& S.rootId root O..== S.obligationId ob)
+      signed<-Exists.exists $ do
+        attempt<-O.selectTable S.attempts
+        O.where_ (S.attemptIntent attempt O..== S.rootId root
+          O..&& O.matchNullable (O.sqlBool False) (O..== S.attemptGeneration attempt) (S.rootGeneration root))
+        pure ()
+      pure (ob,root,state,signed)
+      :: IO [(S.Obligation,S.PaymentRoot,Text,Bool)]
+    if null rows then pure retained else do
+      original<-O.runSelect c $ O.aggregate (p2 (O.groupBy,O.max)) $ do
+        root<-O.selectTable S.paymentRoots
+        (ordinal,event,_,_,_)<-O.selectTable S.postings
+        O.where_ (O.in_ [O.sqlStrictText(S.rootId r) | (_,r,_,_)<-rows] (S.rootId root)
+          O..&& O.matchNullable (O.sqlBool False) (O..== event) (S.rootSettlementEvent root))
+        pure (S.rootId root,ordinal)
+        :: IO [(Text,Int64)]
+      current<-forM rows $ \(ob,root,state,signed)->do
+        economic<-rootPhase root
+        purpose<-case S.obligationKind ob of "conversion"->pure CustomerConversion; "refund"->pure CustomerRefund; _->reject "unknown_payment_funding"
+        status<-checked (parsePaymentStatus state)
+        settled<-case (economic,lookup (S.rootId root) original) of
+          (Settled tx _,Just ordinal)->pure(Just(tx,ordinal))
+          (Settled{},Nothing)->reject "customer_settlement_missing"
+          (_,Nothing)->pure Nothing
+          _->reject "customer_payment_state_inconsistent"
+        pure (CustomerPayment (S.obligationDeposit ob) purpose status (case economic of Active{}->Just signed; _->Nothing) settled)
+      summary<-checked (compactCustomerPayments $ retained<>current)
+      case reverse rows of
+        (ob,_,_,_):_ | length rows==1000->page (S.obligationId ob) summary
+        _->pure summary
+
 decodeSaved :: FromJSON a => Text -> IO a
 decodeSaved=either (const $ reject "corrupt_ledger_json") pure . eitherDecodeStrict' . TE.encodeUtf8
 
@@ -807,79 +816,67 @@ createOrder c terms limits now header request = do
   case previous of
     Just identifier->pure identifier
     Nothing -> do
-      intakeReady c identity now
-      require (W.input request>=orderMinimum limits && W.input request<=orderMaximum limits) "amount_outside_limits"
-      require (W.sourceOwner request==Nothing && (W.direction request/=WrappedToNative || T.null(W.refund request))) "invalid_connection_free_order"
-      let address t=not(T.null t) && T.length t<=128 && not(T.any (<= ' ') t)
-      require (address(W.recipient request) && (W.direction request/=NativeToWrapped || address(W.refund request))) "invalid_destination"
-      termsQuote <- checked (quote $ W.input request)
-      queued <- O.runSelect c $ do
-        row <- O.selectTable S.orders
-        O.where_ (O.not $ O.in_ (map O.sqlStrictText ["Paid","Refunded","ExpiredUnfunded"]) (S.status row))
-        pure (S.orderId row)
-        :: IO [Text]
-      unpaid <- O.runSelect c $ do
-        (_,order,_,state) <- S.orderObligations
-        O.where_ (O.not $ O.in_ (map O.sqlStrictText ["paid","cancelled"]) state)
-        pure order
-        :: IO [Text]
-      require (length(nub $ queued<>unpaid)<maximumQueued limits) "queue_full"
-      booked <- balances c
-      let destination=destinationAsset (W.direction request); name=T.pack(show destination)
-      holds <- O.runSelect c $ do
-        (_,asset,n,phase) <- O.selectTable S.reservations
-        O.where_ (asset O..== O.sqlStrictText name O..&& phase O../= O.sqlStrictText "released")
-        pure n
-        :: IO [Int64]
-      require (M.findWithDefault 0 (destination,Float) booked-sum(map toInteger holds)>=toInteger(units $ net termsQuote)) "insufficient_inventory"
-      let end=toInteger now+toInteger(quoteSeconds limits); grace=end+toInteger(graceSeconds limits)
-      require (now>=0 && grace<=toInteger(maxBound::Int64)) "invalid_order_time"
-      identifier <- digest <$> (getRandomBytes 32 :: IO BS.ByteString)
-      let text=O.sqlStrictText; num=O.sqlInt8
+      readiness<-readIntake c identity now
+      checked (checkIntake readiness)
+      _<-checked (quoteOrder limits request)
+      counts<-O.runSelect c $ O.aggregate O.count $ fmap S.orderId $ O.limit (maximumQueued limits) P.openOrders :: IO [Int64]
+      queued<-case counts of
+        []->pure 0 -- Opaleye aggregation preserves an empty input relation.
+        [n] | n>=0 && toInteger n<=toInteger(maxBound::Int)->pure(fromIntegral n)
+        _->reject "invalid_order_queue"
+      booked<-balances c
+      let destination=destinationAsset $ W.direction request
+      held<-principalHeld c destination
+      at<-operatingTime c
+      nativeBudget<-readFeeBudget c limits booked at Native
+      solanaBudget<-readFeeBudget c limits booked at Sol
+      admitted<-checked $ decideOrder limits (paymentLimits terms) request $ OrderAdmissionFacts readiness
+        queued (M.findWithDefault 0 (destination,Float) booked-held) nativeBudget solanaBudget
+      identifier<-digest <$> (getRandomBytes 32 :: IO BS.ByteString)
+      let text=O.sqlStrictText; num=O.sqlInt8; termsQuote=admittedQuote admitted
           row=S.Order (text identifier) (text cap) (text key) (text requestDigest) (text encoded)
             (text $ encodeSaved termsQuote) (text $ encodeSaved $ paymentPolicy terms) (text "Provisioning")
-            (num $ fromInteger end) (num $ fromInteger grace) O.null O.null O.null (num 0)
-      _ <- O.runInsert c O.Insert {O.iTable=S.orders,O.iRows=[row],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-      _ <- O.runInsert c O.Insert {O.iTable=S.reservations,O.iRows=[(text identifier,text name,num $ units $ net termsQuote,text "quote")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-      reserveOrderCosts c limits (paymentLimits terms) booked identifier (W.direction request)
+            (num $ admittedDeadline admitted) (num $ admittedGrace admitted) O.null O.null (num 0)
+      _<-O.runInsert c O.Insert {O.iTable=S.orders,O.iRows=[row],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      _<-O.runInsert c O.Insert {O.iTable=S.reservations,O.iRows=[(text identifier,text $ T.pack(show destination),num $ units $ net termsQuote,text "quote")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      reserveOrderCosts c (paymentLimits terms) identifier (admittedCosts admitted)
       pure identifier
 
 intakeReady :: PG.Connection -> Text -> Int64 -> IO ()
-intakeReady c identity now = do
+intakeReady c identity now = readIntake c identity now >>= checked . checkIntake
+
+readIntake :: PG.Connection -> Text -> Int64 -> IO IntakeFacts
+readIntake c identity now = do
   require (now>=0) "invalid_order_time"
   d <- metadata c identity
-  require (S.paused d==0) "intake_paused"
-  _<-scanHeads c now
-  fresh c now
+  scans<-scanFacts <$> readScans c
+  custody<-custodyFacts c
+  pure $ IntakeFacts now (S.paused d/=0) scans custody
 
 scanHeads :: PG.Connection -> Int64 -> IO [(Text,Text)]
 scanHeads c now = do
   require (now>=0) "invalid_custody_time"
-  scans <- O.runSelect c $ do
+  scans<-readScans c
+  checked (checkScans now $ scanFacts scans)
+  pure [(chain,anchor) | (chain,_,_,anchor)<-scans]
+
+readScans :: PG.Connection -> IO [(Text,Maybe Int64,Maybe Text,Text)]
+readScans c = sortOn (\(chain,_,_,_)->chain) <$> (O.runSelect c $ O.limit 4 $ do
     (chain,success,problem,_) <- O.selectTable S.scanHealth
     (stream,anchor) <- O.selectTable S.checkpoints
     O.where_ (chain O..== stream)
-    pure (chain,success,problem,anchor)
-    :: IO [(Text,Maybe Int64,Maybe Text,Text)]
-  let ordered=sortOn (\(chain,_,_,_)->chain) scans
-  require (map (\(chain,_,_,_)->chain) ordered==["Native","Solana","SolanaOperating"] &&
-    all (\(_,at,problem,anchor)->problem==Nothing && not(T.null anchor) &&
-      maybe False (\t->t>=0 && t<=now && toInteger now-toInteger t<=60) at) ordered) "scanners_not_fresh"
-  pure [(chain,anchor) | (chain,_,_,anchor)<-ordered]
+    pure (chain,success,problem,anchor))
 
-reserveOrderCosts :: PG.Connection -> OrderLimits -> CostLimits -> M.Map (Asset,Account) Integer -> Text -> Direction -> IO ()
-reserveOrderCosts c limits costs booked identifier direction = do
-  total <- checked $ amount (toInteger(units $ savedSolanaFee costs)+toInteger(units $ savedSolanaRent costs))
-  let allowances=[(Native,savedNativeFee costs),(Sol,total)]
-  operatingCapacity c limits booked allowances
+reserveOrderCosts :: PG.Connection -> CostLimits -> Text -> [(Text,Asset,Amount)] -> IO ()
+reserveOrderCosts c costs identifier allowances = do
   let text=O.sqlStrictText; num=O.sqlInt8
-  _ <- O.runInsert c O.Insert {O.iTable=S.orderCosts,
+  _<-O.runInsert c O.Insert {O.iTable=S.orderCosts,
     O.iRows=[(text identifier,num $ units $ savedNativeFee costs,num $ units $ savedSolanaFee costs,num $ units $ savedSolanaRent costs)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-  forM_ allowances $ \(asset,quantity)->do
-    let isConversion=(direction==NativeToWrapped && asset==Sol) || (direction==WrappedToNative && asset==Native)
-    _ <- O.runInsert c O.Insert {O.iTable=S.operatingReservations,
-      O.iRows=[(text identifier,text $ if isConversion then "conversion" else "refund",text $ T.pack(show asset),num $ units quantity,text "quote")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  forM_ allowances $ \(purpose,asset,quantity)->do
+    _<-O.runInsert c O.Insert {O.iTable=S.operatingReservations,
+      O.iRows=[(text identifier,text purpose,text $ T.pack(show asset),num $ units quantity,text "quote")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
     pure ()
+
 encodeSaved :: ToJSON a => a -> Text
 encodeSaved=TE.decodeUtf8 . BL.toStrict . encode
 
@@ -902,70 +899,81 @@ allocation c identifier = do
     O.where_ (key O..== O.sqlStrictText identifier)
     pure label
   case rows of []->pure Nothing; [label]->pure(Just label); _->reject "duplicate_native_allocation"
-saveInstruction :: PG.Connection -> S.Order -> Text -> IO Int64
-saveInstruction c row instruction = case (S.instruction row,S.instructionSequence row) of
-  (Just old,Just n) -> require (old==instruction && n>0) "instruction_is_immutable" >> pure n
-  (Nothing,Nothing) -> do
-    require (S.status row `elem` ["Provisioning","ExpiredUnfunded"]) "order_no_longer_provisioning"
-    n <- nextSequence c
-    _ <- O.runUpdate c O.Update {O.uTable=S.orders,
-      O.uUpdateWith= \r->r {S.instruction=O.toNullable $ O.sqlStrictText instruction,S.instructionSequence=O.toNullable $ O.sqlInt8 n,
-        S.status=O.ifThenElse (S.status r O..== O.sqlStrictText "Provisioning") (O.sqlStrictText "AwaitingDeposit") (S.status r)},
-      O.uWhere= \r->S.orderId r O..== O.sqlStrictText(S.orderId row),O.uReturning=O.rCount}
-    pure n
-  _ -> reject "invalid_instruction_state"
+instructionFacts :: S.Order -> IO InstructionFacts
+instructionFacts row = do
+  request<-decodeSaved (S.requestJson row)
+  pure $ InstructionFacts (W.direction request) (S.admissionState row) (S.deadline row)
+    (S.instruction row) (S.instructionSequence row) (S.instructionIssued row)
+
+saveInstruction :: PG.Connection -> S.Order -> InstructionFacts -> Text -> IO Int64
+saveInstruction c row facts instruction = do
+  decision<-checked (decideInstruction facts instruction)
+  case decision of
+    KeepInstruction n->pure n
+    SaveInstruction->do
+      n<-nextSequence c
+      count<-O.runUpdate c O.Update {O.uTable=S.orders,
+        O.uUpdateWith= \r->r {S.instruction=O.toNullable $ O.sqlStrictText instruction,S.instructionSequence=O.toNullable $ O.sqlInt8 n,
+          S.admissionState=O.ifThenElse (S.admissionState r O..== O.sqlStrictText "Provisioning") (O.sqlStrictText "AwaitingDeposit") (S.admissionState r)},
+        O.uWhere= \r->S.orderId r O..== O.sqlStrictText(S.orderId row),O.uReturning=O.rCount}
+      require (count==1) "instruction_update_failed"
+      pure n
 issueInstruction :: PG.Connection -> StorePolicy -> Int64 -> Text -> Text -> IO W.OrderView
 issueInstruction c config now header identifier = do
   let identity=deploymentFingerprint $ paymentPolicy $ executionTerms config
   row <- authorizedOrder c identity header identifier
-  n <- maybe (reject "instruction_not_recorded") pure (S.instructionSequence row)
-  require (n>0 && S.instruction row/=Nothing && S.instructionIssued row `elem` [0,1]) "invalid_instruction_state"
-  d <- metadata c identity
-  require (not(requireBackup config) || S.backupSequence d>=n) "backup_pending"
-  cap <- checked (bearerHash header)
-  view <- readOrder c identity Nothing cap identifier
-  when (S.instructionIssued row==0) $ do
-    intakeReady c identity now
-    require (W.status view=="AwaitingDeposit" && now<=S.deadline row) "deposit_window_closed"
-    held <- O.runSelect c $ do
-      (key,_,_,phase) <- O.selectTable S.reservations
+  facts<-instructionFacts row
+  state<-metadata c identity
+  cap<-checked (bearerHash header)
+  view<-readOrder c identity Nothing cap identifier
+  admission<-if S.instructionIssued row/=0 then pure Nothing else do
+    readiness<-readIntake c identity now
+    held<-O.runSelect c $ do
+      (key,_,_,phase)<-O.selectTable S.reservations
       O.where_ (key O..== O.sqlStrictText identifier)
       pure phase
       :: IO [Text]
-    costs <- O.runSelect c $ do
-      (key,_,_,_,phase) <- O.selectTable S.operatingReservations
+    costs<-O.runSelect c $ do
+      (key,_,_,_,phase)<-O.selectTable S.operatingReservations
       O.where_ (key O..== O.sqlStrictText identifier)
       pure phase
       :: IO [Text]
-    require (held==["quote"] && costs==["quote","quote"]) "quote_reservations_unavailable"
-    _ <- O.runUpdate c O.Update {O.uTable=S.orders,
+    pure $ Just(readiness,held,costs)
+  issued<-checked (decideInstructionIssue (requireBackup config) (S.backupSequence state)
+    facts {instructionStatus=W.status view} admission)
+  when issued $ do
+    count<-O.runUpdate c O.Update {O.uTable=S.orders,
       O.uUpdateWith= \r->r {S.instructionIssued=O.sqlInt8 1},O.uWhere= \r->S.orderId r O..== O.sqlStrictText identifier,O.uReturning=O.rCount}
+    require (count==1) "instruction_issue_failed"
     audit c "instruction_issued" identifier
   pure view {W.depositInstruction=S.instruction row}
+
 expireQuotes :: PG.Connection -> Int64 -> IO ()
 expireQuotes c now = do
   require (now>=0) "invalid_order_time"
   expired <- O.runSelect c $ do
     row <- O.selectTable S.orders
     O.where_ (S.graceDeadline row O..< O.sqlInt8 now)
-    pure (S.orderId row)
-    :: IO [Text]
-  forM_ expired $ \identifier -> do
-    _ <- O.runUpdate c O.Update {O.uTable=S.reservations,
-      O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,O.sqlStrictText "released"),
-      O.uWhere= \(key,_,_,phase)->key O..== O.sqlStrictText identifier O..&& phase O..== O.sqlStrictText "quote",O.uReturning=O.rCount}
-    _ <- O.runUpdate c O.Update {O.uTable=S.operatingReservations,
-      O.uUpdateWith= \(key,kind,asset,n,_)->(key,kind,asset,n,O.sqlStrictText "released"),
-      O.uWhere= \(key,_,_,_,phase)->key O..== O.sqlStrictText identifier O..&& phase O..== O.sqlStrictText "quote",O.uReturning=O.rCount}
+    pure (S.orderId row,S.graceDeadline row)
+    :: IO [(Text,Int64)]
+  forM_ expired $ \(identifier,grace) -> do
     deposits <- O.runSelect c $ O.limit 1 $ do
       (key,order) <- S.orderDeposits
       O.where_ (O.matchNullable (O.sqlBool False) (O..== O.sqlStrictText identifier) order)
       pure key
       :: IO [Text]
-    when (null deposits) $ do
-      _ <- O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=O.sqlStrictText "ExpiredUnfunded"},
-        O.uWhere= \r->S.orderId r O..== O.sqlStrictText identifier O..&& O.in_ (map O.sqlStrictText ["Provisioning","AwaitingDeposit"]) (S.status r),O.uReturning=O.rCount}
+    expire<-checked (shouldExpireQuote now grace $ not $ null deposits)
+    when expire $ do
+      _ <- O.runUpdate c O.Update {O.uTable=S.reservations,
+        O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,O.sqlStrictText "released"),
+        O.uWhere= \(key,_,_,phase)->key O..== O.sqlStrictText identifier O..&& phase O..== O.sqlStrictText "quote",O.uReturning=O.rCount}
+      _ <- O.runUpdate c O.Update {O.uTable=S.operatingReservations,
+        O.uUpdateWith= \(key,kind,asset,n,_)->(key,kind,asset,n,O.sqlStrictText "released"),
+        O.uWhere= \(key,_,_,_,phase)->key O..== O.sqlStrictText identifier O..&& phase O..== O.sqlStrictText "quote",O.uReturning=O.rCount}
+      _ <- O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.admissionState=O.sqlStrictText "ExpiredUnfunded"},
+        O.uWhere= \r->S.orderId r O..== O.sqlStrictText identifier O..&& O.in_ (map O.sqlStrictText ["Provisioning","AwaitingDeposit"]) (S.admissionState r),O.uReturning=O.rCount}
       pure ()
+
 audit :: PG.Connection -> Text -> Text -> IO ()
 audit c action detail = do
   _ <- O.runInsert c O.Insert {O.iTable=S.audit,O.iRows=[(Nothing,O.sqlStrictText action,O.sqlStrictText detail)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
@@ -979,7 +987,12 @@ promotionCandidates c = O.runSelect c $ fmap snd $ O.limit 1000 $ O.orderBy (O.a
   o <- O.selectTable S.orders
   O.where_ (O.matchNullable (O.sqlBool False) (O..== S.orderId o) (S.depositOrder d) O..&&
     S.depositEligible d O..== O.sqlInt8 1 O..&& S.depositAllocated d O..== O.sqlInt8 0 O..&&
-    (S.status o O..== O.sqlStrictText "Provisioning" O..|| S.status o O..== O.sqlStrictText "AwaitingDeposit"))
+    (S.admissionState o O..== O.sqlStrictText "Provisioning" O..|| S.admissionState o O..== O.sqlStrictText "AwaitingDeposit"))
+  funded<-Exists.exists $ do
+    ob<-O.selectTable S.obligations
+    O.where_ (S.obligationOrder ob O..== S.orderId o)
+    pure ()
+  O.where_ (O.not funded)
   pure (S.depositSeen d,S.depositId d)
 
 promoteDeposit :: PG.Connection -> PaymentTerms -> Int64 -> Text -> IO Bool
@@ -1004,47 +1017,45 @@ promoteDeposit c terms now identifier = do
       request <- decodeSaved (S.requestJson o)
       savedQuote <- decodeSaved (S.quoteJson o)
       policy <- decodeSaved (S.policyJson o)
-      require (W.input request==gross savedQuote && deploymentFingerprint policy==deploymentFingerprint(paymentPolicy terms)) "saved_order_terms_mismatch"
-      previous <- O.runSelect c $ do
+      previous <- O.runSelect c $ O.limit 1 $ do
         obligation <- O.selectTable S.obligations
         O.where_ (S.obligationOrder obligation O..== O.sqlStrictText oid O..&& S.obligationKind obligation O..== O.sqlStrictText "conversion")
         pure (S.obligationId obligation)
         :: IO [Text]
-      let exact=S.depositAmount d==units(gross savedQuote) && S.depositAsset d==T.pack(show $ sourceAsset $ W.direction request)
-          eligible=S.depositAsset d/="Native" || S.depositDepth d>=fromIntegral(nativeDepth policy)
-          timely=S.depositSeen d>=0 && S.depositSeen d<=S.deadline o && now<=S.graceDeadline o
-          pending=S.status o `elem` ["Provisioning","AwaitingDeposit"] && S.instruction o/=Nothing
-      if not (exact && eligible && timely && pending && null previous) then do
-        _ <- O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=O.sqlStrictText "NeedsReview"},
-          O.uWhere= \r->S.orderId r O..== O.sqlStrictText oid O..&& S.status r O../= O.sqlStrictText "Paid",O.uReturning=O.rCount}
+      receipt<-asDeposit d
+      payments<-customerPayments c oid
+      (status,payout)<-checked $ projectCustomer (S.admissionState o) False payments
+      let order=W.OrderView oid request savedQuote status (S.deadline o) (S.instruction o) payout policy
+      decision<-checked $ decidePromotion (deploymentFingerprint $ paymentPolicy terms) now
+        (PromotionFacts order receipt (S.graceDeadline o) (not $ null previous))
+      case decision of
+       Nothing->do
+        when (status/="Paid") $ void $ O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.admissionState=O.sqlStrictText "NeedsReview"},
+          O.uWhere= \r->S.orderId r O..== O.sqlStrictText oid,O.uReturning=O.rCount}
         pure False
-      else do
+       Just outgoing->do
         holds <- O.runSelect c $ do
           (key,asset,n,phase) <- O.selectTable S.reservations
           O.where_ (key O..== O.sqlStrictText oid)
           pure (asset,n,phase)
           :: IO [(Text,Int64,Text)]
-        require (holds==[(T.pack(show $ destinationAsset $ W.direction request),units(net savedQuote),"quote")]) "reservation_not_provisional"
         costs <- O.runSelect c $ do
           (key,nativeFee,solFee,rent) <- O.selectTable S.orderCosts
           O.where_ (key O..== O.sqlStrictText oid)
           pure (nativeFee,solFee,rent)
           :: IO [(Int64,Int64,Int64)]
         (nativeFee,solFee,rent) <- case costs of [one]->pure one; _->reject "missing_order_cost_policy"
-        solTotal <- checked (amount $ toInteger solFee+toInteger rent)
-        require (nativeFee>0 && solFee>0 && rent>=0) "invalid_order_cost_policy"
+        limits<-checked (savedCostLimits nativeFee solFee rent)
         allowances <- O.runSelect c $ do
           (key,kind,asset,n,phase) <- O.selectTable S.operatingReservations
           O.where_ (key O..== O.sqlStrictText oid)
           pure (kind,asset,n,phase)
           :: IO [(Text,Text,Int64,Text)]
-        let nativeKind=if W.direction request==NativeToWrapped then "refund" else "conversion"
-            solKind=if W.direction request==NativeToWrapped then "conversion" else "refund"
-        require (sortOn id allowances==sortOn id [(nativeKind,"Native",nativeFee,"quote"),(solKind,"Sol",units solTotal,"quote")]) "operating_reservation_not_provisional"
+        checked (checkPromotionHolds order limits holds allowances)
         _ <- O.runInsert c O.Insert {O.iTable=S.obligations,
-          O.iRows=[S.Obligation (O.sqlStrictText $ "convert:"<>oid) (O.sqlStrictText oid) (O.sqlStrictText identifier)
-            (O.sqlStrictText "conversion") (O.sqlStrictText $ T.pack $ show $ destinationAsset $ W.direction request)
-            (O.sqlInt8 $ units $ net savedQuote) (O.sqlStrictText $ W.recipient request) (O.sqlStrictText "ready")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+          O.iRows=[S.Obligation (O.sqlStrictText $ paymentId outgoing) (O.sqlStrictText oid) (O.sqlStrictText identifier)
+            (O.sqlStrictText "conversion") (O.sqlStrictText $ T.pack $ show $ paymentAsset outgoing)
+            (O.sqlInt8 $ units $ paymentAmount outgoing) (O.sqlStrictText $ paymentRecipient outgoing)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
         _ <- O.runUpdate c O.Update {O.uTable=S.deposits,O.uUpdateWith= \r->r {S.depositAllocated=O.sqlInt8 1},
           O.uWhere= \r->S.depositId r O..== O.sqlStrictText identifier,O.uReturning=O.rCount}
         _ <- O.runUpdate c O.Update {O.uTable=S.reservations,
@@ -1053,8 +1064,7 @@ promoteDeposit c terms now identifier = do
         _ <- O.runUpdate c O.Update {O.uTable=S.operatingReservations,
           O.uUpdateWith= \(key,kind,asset,n,_)->(key,kind,asset,n,O.sqlStrictText "obligation"),
           O.uWhere= \(key,_,_,_,phase)->key O..== O.sqlStrictText oid O..&& phase O..== O.sqlStrictText "quote",O.uReturning=O.rCount}
-        _ <- O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=O.sqlStrictText "Ready"},
-          O.uWhere= \r->S.orderId r O..== O.sqlStrictText oid,O.uReturning=O.rCount}
+        createPaymentRoot c outgoing
         pure True
 
 readSource :: PG.Connection -> Text -> IO S.Deposit
@@ -1085,7 +1095,6 @@ sourceProof = \case W.SourcePending p->p; W.SourceMissing p->p; W.SourceRestored
 recordSourceCheck :: PG.Connection -> S.Deposit -> W.SourceCheck -> IO ()
 recordSourceCheck c source check = do
   let did=S.depositId source
-      eligible=S.depositEligible source==1
   asset <- parseAsset (S.depositAsset source)
   history <- O.runSelect c $ O.limit 1 $ O.orderBy (O.desc (\(key,_,_,_,_,_)->key)) $ do
     row@(_,deposit,_,_,_,_) <- O.selectTable S.sourceChecks
@@ -1093,24 +1102,15 @@ recordSourceCheck c source check = do
     pure row
     :: IO [(Int64,Text,Text,Int64,Text,Int64)]
   let old=case history of [(_,_,state,loss,savedProof,_)]->Just(state,loss,savedProof); _->Nothing
-      previousLoss=maybe 0 (\(_,n,_)->n) old
-      proof=sourceProof check
-      evidence=encodeSaved proof
-  (state,loss) <- case check of
-    W.SourcePending _->require (not eligible && asset==Native) "source_recovery_scan_not_current" >> pure ("pending",0)
-    W.SourceMissing _->require (not eligible && asset==Native) "source_recovery_scan_not_current" >> pure ("missing",S.depositAmount source)
-    W.SourceRestored _->require eligible "source_recovery_scan_not_current" >> pure ("restored",0)
-    W.SourceUnavailable _->pure ("unavailable",previousLoss)
-  require (proof/=Null && T.length evidence<=16384) "invalid_source_recovery_evidence"
-  let ordinary=old==Nothing && S.depositAllocated source==0 && state=="pending"
-      unchanged=maybe False (\(s,n,p)->s==state && n==loss && (state/="unavailable" || p==evidence)) old
-  unless (ordinary || unchanged) $ do
+  deposit<-asDeposit source
+  effect<-checked (decideSourceCheck deposit (S.depositAllocated source==1) old check)
+  forM_ effect $ \decision->do
+    let state=sourceState decision; loss=sourceLoss decision; evidence=sourceCheckEvidence decision; delta=sourceLossDelta decision
     sequenceNo <- nextSequence c
     _ <- O.runInsert c O.Insert {O.iTable=S.sourceChecks,
       O.iRows=[(Nothing,O.sqlStrictText did,O.sqlStrictText state,O.sqlInt8 loss,O.sqlStrictText evidence,O.sqlInt8 sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-    let delta=toInteger loss-toInteger previousLoss
     when (delta/=0) $ post c ("source-recovery:"<>T.pack(show sequenceNo)) "change in verified missing source value"
-      [Posting asset SourceDeficit (negate delta),Posting asset External delta]
+      (sourcePostings decision)
     when (delta<0) $ do
       covers <- O.runSelect c $ do
         (key,deposit,n,capital,earned) <- S.activeSourceCovers
@@ -1118,10 +1118,10 @@ recordSourceCheck c source check = do
         pure (key,n,capital,earned)
         :: IO [(Int64,Int64,Int64,Int64)]
       forM_ covers $ \(covered,n,capital,earned)->do
-        require (toInteger n==negate delta) "source_loss_return_mismatch"
+        postings<-checked (sourceReturnPostings asset (negate delta) (n,capital,earned))
         _ <- O.runInsert c O.Insert {O.iTable=S.sourceReturns,O.iRows=[(O.sqlInt8 covered,O.sqlInt8 sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
         post c ("source-loss-return:"<>T.pack(show covered)) "restored source returns its operator loss allocation"
-          [Posting asset Float (toInteger capital),Posting asset Earned (toInteger earned),Posting asset SourceDeficit (negate $ toInteger n)]
+          postings
     _ <- O.runUpdate c O.Update {O.uTable=S.deployment,
       O.uUpdateWith= \row->row {S.paused=O.sqlInt8 1,S.pauseReason=O.sqlStrictText "source_recovery_review"},
       O.uWhere= \row->S.singleton row O..== O.sqlInt8 1,O.uReturning=O.rCount}
@@ -1141,7 +1141,7 @@ workHash includeReplacements c intent = do
     pure (S.obligationId r,S.obligationOrder r,S.obligationDeposit r,S.obligationKind r,S.obligationAsset r,S.obligationAmount r,S.obligationRecipient r)
     :: IO [(Text,Text,Text,Text,Text,Int64,Text)]
   work <- O.runSelect c $ do
-    (key,chain,resolved,common) <- S.workIntents
+    (key,chain,resolved,common) <- P.workIntents
     O.where_ (key O..== O.sqlStrictText intent)
     pure (chain,resolved O..== O.sqlInt8 1,common)
     :: IO [(Text,Bool,Maybe Text)]
@@ -1182,8 +1182,6 @@ workHash includeReplacements c intent = do
       base=hashJson (obligations,work,preparations,attempts,cancellations,fees)
   pure (if not includeReplacements || null drafts && null cancelled then base else digest $ BL.toStrict $ encode (base,drafts,cancelled))
 
-scanAssets :: [(Text,Asset)]
-scanAssets=[("Native",Native),("Solana",Wrapped),("SolanaOperating",Sol)]
 readCheckpoint :: PG.Connection -> Text -> IO (Maybe Text)
 readCheckpoint c chain = do
   require (chain `elem` map fst scanAssets) "invalid_scan_chain"
@@ -1224,17 +1222,17 @@ observeDeposit c deposit = do
       post c ("deposit:"<>did) "observed customer value"
         [Posting currency (maybe Unallocated (const Principal) oid) (toInteger $ units quantity),Posting currency External (negate $ toInteger $ units quantity)]
     [previous] -> do
+      reviewed<-if S.depositEligible previous==1 && not eligible then O.runSelect c (do
+        (key,_,receipt,state)<-P.orderObligations
+        O.where_ (receipt O..== text did O..&& O.in_ (map text ["ready","paying"]) state)
+        pure (key,state)) else pure []
+        :: IO [(Text,Text)]
       require (S.depositOrder previous==oid && S.depositAsset previous==T.pack(show currency) && S.depositAmount previous==units quantity) "conflicting_deposit_evidence"
       _ <- O.runUpdate c O.Update {O.uTable=S.deposits,
         O.uUpdateWith= \r->r {S.depositAnchor=text anchor,S.depositDepth=num $ fromIntegral depth,S.depositEligible=num bit},
         O.uWhere= \r->S.depositId r O..== text did,O.uReturning=O.rCount}
       current <- readSource c did
       when (S.depositEligible previous==1 && not eligible) $ do
-        reviewed <- O.runSelect c $ do
-          row <- O.selectTable S.obligations
-          O.where_ (S.obligationDeposit row O..== text did O..&& O.in_ (map text ["ready","paying"]) (S.obligationStatus row))
-          pure (S.obligationId row,S.obligationStatus row)
-          :: IO [(Text,Text)]
         work <- forM reviewed $ \(intent,state)->do
           hash <- sourceWorkHash c intent
           pure $ object ["intent" .= intent,"previousStatus" .= state,"workHash" .= hash]
@@ -1255,11 +1253,7 @@ observeDeposit c deposit = do
           O.where_ (key O..== text did)
           pure key
           :: IO [Text]
-        when (null covered) $ do
-          pauseScan c "source_reorg_review"
-          _ <- O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \r->r {S.obligationStatus=text "review"},
-            O.uWhere= \r->S.obligationDeposit r O..== text did O..&& O.not (O.in_ (map text ["paid","cancelled"]) (S.obligationStatus r)),O.uReturning=O.rCount}
-          pure ()
+        when (null covered) $ pauseScan c "source_reorg_review"
     _->reject "duplicate_deposit"
 
 pauseScan :: PG.Connection -> Text -> IO ()
@@ -1298,33 +1292,26 @@ commitScan :: PG.Connection -> W.ScanBatch -> IO ()
 commitScan c batch = do
   let chain=W.scanChain batch; now=W.scanTime batch; origin=W.scanOrigin batch; next=W.scanNext batch
       deposits=W.scanDeposits batch; events=W.scanEvents batch; text=O.sqlStrictText; num=O.sqlInt8
-  require (chain `elem` map fst scanAssets && now>=0 && length deposits<=1000 && length events<=1000) "invalid_scan_batch"
-  require (all (\anchor->not(T.null anchor) && T.length anchor<=128) [origin,next]) "invalid_scan_anchor"
-  require (all (\d->Just(W.depositAsset d)==lookup chain scanAssets) deposits) "scan_asset_mismatch"
+  -- Validate the envelope before selecting its closed stream; then bind current
+  -- cursor/origin before any deposit, evidence or coverage mutation.
+  checked (checkScanBatch batch)
   previous <- readCheckpoint c chain
-  require (previous==W.scanPrevious batch) "stale_scan_cursor"
   origins <- O.runSelect c $ do
     (key,anchor) <- O.selectTable S.scanOrigins
     O.where_ (key O..== text chain)
     pure anchor
     :: IO [Text]
-  case origins of
-    []->O.runInsert c O.Insert {O.iTable=S.scanOrigins,O.iRows=[(text chain,text origin)],O.iReturning=O.rCount,O.iOnConflict=Nothing} >> pure ()
-    [saved]->require (saved==origin) "scan_origin_mismatch"
-    _->reject "duplicate_scan_origin"
+  checked (checkScan batch previous origins)
+  when (null origins) $ void $ O.runInsert c O.Insert {O.iTable=S.scanOrigins,
+    O.iRows=[(text chain,text origin)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
   mapM_ (observeDeposit c) deposits
   forM_ events $ \event->do
     let identifier=W.chainEventId event; anchor=W.chainEventAnchor event; kind=W.chainEventKind event
-        proof=W.chainEventEvidence event
-        evidence=encodeSaved $ object ["chain" .= chain,"id" .= identifier,"anchor" .= anchor,"kind" .= kind,"proof" .= proof]
-        hash=digest (TE.encodeUtf8 evidence)
         paymentChain=if chain=="SolanaOperating" then "Solana" else chain
-    require (not(T.null identifier) && T.length identifier<=128 && T.length anchor<=128) "invalid_observation_identity"
-    require (kind `elem` ["incoming","unmatched_incoming","outgoing","failed","reference","unsupported","unclassified","awaiting_verifier","disputed"]) "invalid_observation_kind"
-    require (T.length evidence<=8192) "observation_evidence_too_large"
+    evidence<-checked (checkObservation chain event)
     attempts <- O.runSelect c $ do
       (tx,intent,state,_,sequenceNo,observation) <- S.workAttempts
-      (key,currency,_,_) <- S.workIntents
+      (key,currency,_,_) <- P.workIntents
       O.where_ (intent O..== key O..&& tx O..== text identifier O..&& currency O..== text paymentChain)
       pure (state,sequenceNo,observation)
       :: IO [(Text,Maybe Int64,Maybe Text)]
@@ -1338,11 +1325,8 @@ commitScan c batch = do
       O.where_ (currency O..== text chain O..&& key O..== text identifier)
       pure (approvedAnchor,economic)
       :: IO [(Text,Text)]
-    let known=any (\(state,sequenceNo,observation)->state `elem` ["broadcast_intent","settled","failed"] ||
-          state=="review" && paymentChain=="Native" && maybe False (>0) sequenceNo && maybe False (`elem` formerWinners) observation) attempts
-        approved=case W.economicOutflow chain proof of Right economic->treasury==[(anchor,encodeSaved economic)]; Left _->False
-        review=kind `elem` ["unsupported","unclassified","disputed"] || kind=="outgoing" && not known && not approved
-        bit=if review then 1 else 0
+    let review=observationNeedsReview chain event (ObservationFacts attempts formerWinners treasury)
+        bit=if review then 1 else 0; hash=digest (TE.encodeUtf8 evidence)
     proofs <- O.runSelect c $ do
       (key,_,_,_) <- O.selectTable S.observationEvidence
       O.where_ (key O..== text hash)
@@ -1411,6 +1395,7 @@ lookupReferences c keys = do
 -- signing: source/custody, active generation and backup are checked at that boundary.
 readPayment :: PG.Connection -> Text -> Text -> IO PaymentView
 readPayment c identity identifier = do
+  (root,state)<-readPaymentRoot c identifier
   obligations <- O.runSelect c $ do
     row <- O.selectTable S.obligations
     O.where_ (S.obligationId row O..== O.sqlStrictText identifier)
@@ -1444,61 +1429,91 @@ readPayment c identity identifier = do
         _ -> reject "unknown_payment_funding"
       outgoing <- checked (payment identifier funding (S.obligationRecipient ob))
       require (T.pack(show $ paymentAsset outgoing)==S.obligationAsset ob && units(paymentAmount outgoing)==S.obligationAmount ob) "payment_funding_mismatch"
-      state <- case S.obligationStatus ob of
-        "ready"->pure PaymentReady; "paying"->pure PaymentPaying; "paid"->pure PaymentPaid
-        "review"->pure PaymentReview; "cancelled"->pure PaymentCancelled
-        _->reject "unknown_payment_status"
       pure (PaymentView outgoing (PaymentTerms policy costs) state)
-    ([],Just saved) -> do
-      work <- O.runSelect c $ do
-        row <- O.selectTable S.intents
-        O.where_ (S.intentId row O..== O.sqlStrictText identifier)
-        pure (S.intentObligation row,S.intentWithdrawal row,S.intentResolved row)
-        :: IO [(Maybe Text,Maybe Text,Int64)]
-      state <- case (withdrawalCancellation saved,work) of
-        (Just _,[])->pure PaymentCancelled
-        (Just _,[(Nothing,Just key,1)]) | identifier=="fee:"<>key->do
-          retry<-cancelledGeneration c identifier
-          require (retry/=Nothing) "payment_funding_mismatch"
-          pure PaymentCancelled
-        (Nothing,[])->pure PaymentReady
-        (Nothing,[(Nothing,Just key,0)]) | identifier=="fee:"<>key->pure PaymentPaying
-        (Nothing,[(Nothing,Just key,1)]) | identifier=="fee:"<>key->do
-          winners <- O.runSelect c $ do
-            (tx,intent,status,_,_,_) <- S.workAttempts
-            O.where_ (intent O..== O.sqlStrictText identifier O..&& status O..== O.sqlStrictText "settled")
-            pure tx
-            :: IO [Text]
-          retry<-retryGeneration c identifier
-          pure (if length winners==1 then PaymentPaid else if maybe False (<8) retry then PaymentReady else PaymentReview)
-        _->reject "payment_funding_mismatch"
-      pure (PaymentView (withdrawalPayment saved) (withdrawalTerms saved) state)
+    ([],Just saved) -> pure (PaymentView (withdrawalPayment saved) (withdrawalTerms saved) state)
     ([],Nothing)->reject "payment_not_found"
     _->reject "ambiguous_payment_funding"
+  let outgoing=savedPayment result
+      (obligation,withdrawal,receipt)=case paymentFunding outgoing of
+        Conversion _ source _ _->(Just identifier,Nothing,Just source)
+        Refund _ source _ _->(Just identifier,Nothing,Just source)
+        EarnedFees key _ _->(Nothing,Just key,Nothing)
+  require (S.rootObligation root==obligation && S.rootWithdrawal root==withdrawal && S.rootDeposit root==receipt
+    && S.rootChain root==(if paymentAsset outgoing==Native then "Native" else "Solana")) "payment_funding_mismatch"
   require (deploymentFingerprint (paymentPolicy $ savedTerms result)==identity) "payment_profile_mismatch"
   pure result
  where quantity=checked . amount . toInteger
 
-operatingCapacity :: PG.Connection -> OrderLimits -> M.Map (Asset,Account) Integer -> [(Asset,Amount)] -> IO ()
-operatingCapacity c limits booked allowances = do
+-- These helpers are private to closed Store operations. They do not accept a
+-- query callback or grant a caller the ability to commit an arbitrary decision.
+readPaymentRoot :: PG.Connection -> Text -> IO (S.PaymentRoot,PaymentStatus)
+readPaymentRoot c key = do
+  rows<-O.runSelect c $ do
+    row@(root,_)<-P.paymentStates
+    O.where_ (S.rootId root O..== O.sqlStrictText key)
+    pure row
+    :: IO [(S.PaymentRoot,Text)]
+  case rows of
+    [(root,state)]->do
+      _<-rootPhase root
+      (root,) <$> checked (parsePaymentStatus state)
+    []->reject "payment_not_found"
+    _->reject "ambiguous_payment_funding"
+
+rootPhase :: S.PaymentRoot -> IO PaymentPhase
+rootPhase root=checked $ decodePaymentPhase (S.rootPhase root,S.rootGeneration root,S.rootWinner root,S.rootSettlementEvent root)
+
+createPaymentRoot :: PG.Connection -> Payment -> IO ()
+createPaymentRoot c outgoing = do
+  let key=paymentId outgoing; text=O.sqlStrictText; nullable=maybe O.null (O.toNullable.text)
+      (obligation,withdrawal,receipt)=case paymentFunding outgoing of
+        Conversion _ source _ _->(Just key,Nothing,Just source)
+        Refund _ source _ _->(Just key,Nothing,Just source)
+        EarnedFees identifier _ _->(Nothing,Just identifier,Nothing)
+      chain=if paymentAsset outgoing==Native then "Native" else "Solana"
+  n<-O.runInsert c O.Insert {O.iTable=S.paymentRoots,
+    O.iRows=[S.PaymentRoot (text key) (nullable obligation) (nullable withdrawal) (nullable receipt) (text chain) O.null (text "ready") O.null O.null O.null],
+    O.iReturning=O.rCount,O.iOnConflict=Nothing}
+  require (n==1) "payment_root_insert_failed"
+  forM_ (customerFunding $ paymentFunding outgoing) $ \(order,_)->acceptCustomerPayment c order
+
+-- Only a committed, validated payment transition supersedes admission review.
+-- Reads never hide a retained flag. Source/retry/winner restrictions are separate
+-- evidence and cannot be cleared here; this stores no execution progress.
+acceptCustomerPayment :: PG.Connection -> Text -> IO ()
+acceptCustomerPayment c order = void $ O.runUpdate c O.Update
+  {O.uTable=S.orders,O.uUpdateWith= \row->row {S.admissionState=O.sqlStrictText "AwaitingDeposit"},
+    O.uWhere= \row->S.orderId row O..== O.sqlStrictText order O..&& S.admissionState row O..== O.sqlStrictText "NeedsReview",O.uReturning=O.rCount}
+
+setPaymentPhase :: PG.Connection -> Text -> PaymentPhase -> IO ()
+setPaymentPhase c key economic = do
+  let (phase,generation,winner,event)=encodePaymentPhase economic
+      text=O.sqlStrictText; nullable=maybe O.null (O.toNullable.text)
+  n<-O.runUpdate c O.Update {O.uTable=S.paymentRoots,
+    O.uUpdateWith= \root->root {S.rootPhase=text phase,S.rootGeneration=maybe O.null (O.toNullable.O.sqlInt8) generation,
+      S.rootWinner=nullable winner,S.rootSettlementEvent=nullable event},
+    O.uWhere= \root->S.rootId root O..== text key,O.uReturning=O.rCount}
+  require (n==1) "payment_root_update_failed"
+
+operatingTime :: PG.Connection -> IO Int64
+operatingTime c = do
   wallTime <- floor <$> getPOSIXTime
   times <- O.runUpdate c O.Update {O.uTable=S.operatingClock,
     O.uUpdateWith= \(key,old)->(key,O.ifThenElse (old O..> O.sqlInt8 wallTime) old (O.sqlInt8 wallTime)),
     O.uWhere= \(key,_)->key O..== O.sqlInt8 1,O.uReturning=O.rReturning snd}
-  now <- case times of [t]->pure t; _->reject "operating_clock_missing"
-  forM_ allowances $ \(asset,quantity)->do
-    let daily=if asset==Native then nativeDaily limits else solanaDaily limits
-    let name=T.pack(show asset)
-    held<-operatingHolds c asset
-    spending <- O.runSelect c $ do
-      (posting,_,currency,_,delta) <- O.selectTable S.postings
-      (cost,at) <- O.selectTable S.operatingCosts
-      O.where_ (posting O..== cost O..&& currency O..== O.sqlStrictText name O..&& at O..> O.sqlInt8 (now-86400))
-      pure delta
-      :: IO [Int64]
-    let needed=toInteger(units quantity)
-    require (M.findWithDefault 0 (asset,Operating) booked-held>=needed) "insufficient_fee_budget"
-    require (negate(sum(map toInteger spending))+held+needed<=toInteger(units daily)) "operating_daily_limit"
+  case times of [t]->pure t; _->reject "operating_clock_missing"
+
+readFeeBudget :: PG.Connection -> OrderLimits -> M.Map (Asset,Account) Integer -> Int64 -> Asset -> IO FeeBudget
+readFeeBudget c limits booked now asset = do
+  held<-operatingHolds c asset
+  spending <- O.runSelect c $ do
+    (posting,_,currency,_,delta) <- O.selectTable S.postings
+    (cost,at) <- O.selectTable S.operatingCosts
+    O.where_ (posting O..== cost O..&& currency O..== O.sqlStrictText(T.pack $ show asset) O..&& at O..> O.sqlInt8 (now-86400))
+    pure delta
+    :: IO [Int64]
+  pure $ FeeBudget (M.findWithDefault 0 (asset,Operating) booked) held (negate $ sum $ map toInteger spending)
+    (if asset==Native then nativeDaily limits else solanaDaily limits)
 
 readPreparation :: PG.Connection -> Text -> Text -> IO PreparedPayment
 readPreparation c identity identifier = do
@@ -1511,11 +1526,13 @@ preparationState :: PG.Connection -> Text -> Text -> IO (PreparedPayment,Bool)
 preparationState c identity identifier = do
   view <- readPayment c identity identifier
   rows <- O.runSelect c $ do
-    intent <- O.selectTable S.intents
+    intent <- O.selectTable S.paymentRoots
     (key,generation,policy,draft,retired,cancelled) <- O.selectTable S.preparations
     (feeKey,asset,n,released) <- O.selectTable S.feeHolds
-    O.where_ (S.intentId intent O..== O.sqlStrictText identifier O..&& key O..== S.intentId intent O..&& feeKey O..== key
-      O..&& S.intentResolved intent O..== O.sqlInt8 0 O..&& O.isNull retired O..&& cancelled O..== O.sqlInt8 0 O..&& released O..== O.sqlInt8 0)
+    O.where_ (S.rootId intent O..== O.sqlStrictText identifier O..&& key O..== S.rootId intent O..&& feeKey O..== key
+      O..&& S.rootPhase intent O..== O.sqlStrictText "active"
+      O..&& O.matchNullable (O.sqlBool False) (O..== generation) (S.rootGeneration intent)
+      O..&& O.isNull retired O..&& cancelled O..== O.sqlInt8 0 O..&& released O..== O.sqlInt8 0)
     pure (generation,policy,draft,asset,n)
     :: IO [(Int64,Text,Maybe Text,Text,Int64)]
   (generation,policy,draft,asset,n) <- case rows of [row]->pure row; _->reject "preparation_not_found"
@@ -1534,78 +1551,101 @@ preparePayment c config now identifier allowance plan = do
   let identity=deploymentFingerprint $ paymentPolicy $ executionTerms config
       text=O.sqlStrictText; num=O.sqlInt8
   validateSavedJson 16384 plan
-  view <- readPayment c identity identifier
-  let outgoing=savedPayment view; funding=paymentFunding outgoing; chain=if paymentAsset outgoing==Native then "Native" else "Solana"
-      feeAsset=if chain=="Native" then Native else Sol; costs=paymentLimits $ savedTerms view
-      bound=if feeAsset==Native then toInteger(units $ savedNativeFee costs) else toInteger(units $ savedSolanaFee costs)+toInteger(units $ savedSolanaRent costs)
-  require (units allowance>0 && toInteger(units allowance)<=bound) "order_fee_limit_exceeded"
-  existing <- O.runSelect c $ do
-    intent <- O.selectTable S.intents
-    O.where_ (S.intentId intent O..== text identifier)
-    pure intent
-    :: IO [S.Intent]
-  let resolved=case existing of [i]->S.intentResolved i==1 && S.intentChain i==chain; _->False
-  case existing of
-    [intent] | S.intentResolved intent==0 -> do
-      saved <- readPreparation c identity identifier
-      require (preparedPolicy saved==plan && preparedFee saved==allowance && S.intentChain intent==chain) "preparation_conflict"
-      pure saved
-    previous | null previous || resolved -> do
-      generation<-if null previous then pure 0 else retryGeneration c identifier >>= maybe (reject "preparation_retry_not_authorized") pure
-      require (generation<8) "preparation_generation_limit"
-      intakeReady c identity now
-      require (savedStatus view==PaymentReady) "payment_not_ready"
-      busy <- O.runSelect c $ O.limit 1 $ do
-        intent <- O.selectTable S.intents
-        O.where_ (S.intentChain intent O..== text chain O..&& S.intentResolved intent O..== num 0)
-        pure (S.intentId intent)
+  view<-readPayment c identity identifier
+  checked (checkPreparationInput allowance plan view)
+  let outgoing=savedPayment view; funding=paymentFunding outgoing
+      chain=if paymentAsset outgoing==Native then "Native" else "Solana"
+      currency=if chain=="Native" then Native else Sol
+  (root,_)<-readPaymentRoot c identifier
+  economic<-rootPhase root
+  history<-case economic of
+    Active{}->LivePreparation (S.rootChain root) <$> readPreparation c identity identifier
+    Ready->do
+      existing<-O.runSelect c $ O.limit 1 $ do
+        (key,_,_,_,_,_)<-S.workPreparations
+        O.where_ (key O..== text identifier)
+        pure key
         :: IO [Text]
-      require (null busy) "destination_payment_unresolved"
-      unless (null previous) $ do
-        paymentSource c outgoing
-        fees<-O.runSelect c $ do
-          (key,asset,n,released)<-O.selectTable S.feeHolds
-          (p,g,_,_,retired,_)<-S.workPreparations
-          O.where_ (key O..== text identifier O..&& p O..== key O..&& g O..== num(fromIntegral generation-1))
-          pure(asset,n,released,retired)
-          :: IO [(Text,Int64,Int64,Maybe Text)]
-        require (case fees of [(asset,n,released,retired)]->asset==T.pack(show feeAsset) && n>0 && released==(if retired==Nothing then 0 else 1); _->False) "preparation_fee_hold_missing"
-        _<-O.runUpdate c O.Update {O.uTable=S.feeHolds,O.uUpdateWith= \(key,a,n,_)->(key,a,n,num 1),O.uWhere= \(key,_,_,_)->key O..== text identifier,O.uReturning=O.rCount}
-        pure ()
-      booked <- balances c
-      (obligation,withdrawal) <- case funding of
-        EarnedFees key asset n -> do
-          require (M.findWithDefault 0 (asset,FeePending) booked>=toInteger(units n)) "earned_reservation_missing"
-          pure (Nothing,Just key)
-        Conversion oid receipt _ _ -> when (null previous) (transfer oid receipt "conversion" feeAsset) >> pure (Just identifier,Nothing)
-        Refund oid receipt _ _ -> when (null previous) (transfer oid receipt "refund" feeAsset) >> pure (Just identifier,Nothing)
-      operatingCapacity c (admissionLimits config) booked [(feeAsset,allowance)]
-      _ <- nextSequence c
-      if null previous then do
-        _<-O.runInsert c O.Insert {O.iTable=S.intents,O.iRows=[S.Intent (text identifier) (nullable obligation) (nullable withdrawal) (text chain) O.null (num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-        _<-O.runInsert c O.Insert {O.iTable=S.feeHolds,O.iRows=[(text identifier,text $ T.pack(show feeAsset),num $ units allowance,num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-        pure ()
+      if null existing then pure InitialPreparation else RetiredPreparation chain <$> retryGeneration c identifier
+    _->reject "preparation_retry_requires_recovery"
+  admission<-case history of
+    LivePreparation{}->pure Nothing
+    RetiredPreparation _ Nothing->pure Nothing
+    _->Just <$> readPreparationAdmission c config now view history
+  decision<-checked (decidePreparation allowance plan $ PreparationFacts view history admission)
+  case decision of
+    ReusePreparation saved->pure saved
+    CreatePreparation prepared->do
+      let generation=preparedGeneration prepared; initial=generation==0
+      when initial $ forM_ (customerFunding funding) $ \(order,kind)->
+        one "operating_reservation_missing" $ O.runUpdate c O.Update {O.uTable=S.operatingReservations,
+          O.uUpdateWith= \(key,purpose,asset,n,_)->(key,purpose,asset,n,text "transferred"),
+          O.uWhere= \(key,purpose,asset,n,phase)->key O..== text order O..&& purpose O..== text kind
+            O..&& asset O..== text(T.pack $ show currency) O..&& n O..>= num(units allowance)
+            O..&& O.in_ (map text ["quote","obligation"]) phase,O.uReturning=O.rCount}
+      _<-nextSequence c
+      if initial then do
+        one "payment_fee_hold_insert_failed" $ O.runInsert c O.Insert {O.iTable=S.feeHolds,O.iRows=[(text identifier,text $ T.pack(show currency),num $ units allowance,num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
       else do
-        _<-O.runUpdate c O.Update {O.uTable=S.intents,O.uUpdateWith= \r->r {S.intentResolved=num 0,S.intentCommon=O.null},O.uWhere= \r->S.intentId r O..== text identifier,O.uReturning=O.rCount}
-        _<-O.runUpdate c O.Update {O.uTable=S.feeHolds,O.uUpdateWith= \(key,a,_,_)->(key,a,num $ units allowance,num 0),O.uWhere= \(key,_,_,_)->key O..== text identifier,O.uReturning=O.rCount}
-        pure ()
-      _<-O.runInsert c O.Insert {O.iTable=S.preparations,O.iRows=[(text identifier,num(fromIntegral generation),text plan,O.null,O.null,num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-      forM_ obligation $ \key -> do
-        _ <- O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \r->r {S.obligationStatus=text "paying"},O.uWhere= \r->S.obligationId r O..== text key,O.uReturning=O.rCount}
-        let oid=case funding of Conversion order _ _ _->order; Refund order _ _ _->order; EarnedFees{}->""
-        _ <- O.runUpdate c O.Update {O.uTable=S.reservations,O.uUpdateWith= \(order,asset,n,phase)->(order,asset,n,O.ifThenElse (phase O..== text "obligation") (text "payment") phase),O.uWhere= \(order,_,_,_)->order O..== text oid,O.uReturning=O.rCount}
-        _ <- O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text "Preparing"},O.uWhere= \r->S.orderId r O..== text oid O..&& S.status r O../= text "Paid",O.uReturning=O.rCount}
+        one "payment_fee_hold_update_failed" $ O.runUpdate c O.Update {O.uTable=S.feeHolds,O.uUpdateWith= \(key,a,_,_)->(key,a,num $ units allowance,num 0),O.uWhere= \(key,_,_,_)->key O..== text identifier,O.uReturning=O.rCount}
+      one "preparation_insert_failed" $ O.runInsert c O.Insert {O.iTable=S.preparations,O.iRows=[(text identifier,num(fromIntegral generation),text plan,O.null,O.null,num 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      setPaymentPhase c identifier (Active generation)
+      forM_ (customerFunding funding) $ \(order,_)->do
+        acceptCustomerPayment c order
+        _<-O.runUpdate c O.Update {O.uTable=S.reservations,O.uUpdateWith= \(key,asset,n,phase)->(key,asset,n,O.ifThenElse (phase O..== text "obligation") (text "payment") phase),O.uWhere= \(key,_,_,_)->key O..== text order,O.uReturning=O.rCount}
         pure ()
       readPreparation c identity identifier
-    _ -> reject "preparation_retry_requires_recovery"
  where
-  nullable=maybe O.null (O.toNullable . O.sqlStrictText)
-  transfer oid receipt kind currency = do
-    sourceAuthorized c identifier receipt >>= \authorized->require authorized "source_not_eligible"
-    count <- O.runUpdate c O.Update {O.uTable=S.operatingReservations,
-      O.uUpdateWith= \(order,purpose,asset,n,_)->(order,purpose,asset,n,O.sqlStrictText "transferred"),
-      O.uWhere= \(order,purpose,asset,n,phase)->order O..== O.sqlStrictText oid O..&& purpose O..== O.sqlStrictText kind O..&& asset O..== O.sqlStrictText(T.pack $ show currency) O..&& n O..>= O.sqlInt8(units allowance) O..&& O.in_ (map O.sqlStrictText ["quote","obligation"]) phase,O.uReturning=O.rCount}
-    require (count==1) "operating_reservation_missing"
+  one code action=action >>= \count->require (count==1) code
+
+-- Only this closed operation loads admission facts. In particular, the budget is
+-- read before transferring/replacing this payment's hold; the decision subtracts
+-- exactly that hold once. All reads and resulting writes share the deployment lock.
+readPreparationAdmission :: PG.Connection -> StorePolicy -> Int64 -> PaymentView -> PreparationHistory -> IO PreparationAdmission
+readPreparationAdmission c config now view history = do
+  let outgoing=savedPayment view; identifier=paymentId outgoing; funding=paymentFunding outgoing
+      identity=deploymentFingerprint $ paymentPolicy $ savedTerms view
+      native=paymentAsset outgoing==Native; chain=if native then "Native" else "Solana"
+      currency=if native then Native else Sol; text=O.sqlStrictText
+  readiness<-readIntake c identity now
+  busy<-O.runSelect c $ O.limit 1 $ do
+    row<-O.selectTable S.paymentRoots
+    O.where_ (S.rootChain row O..== text chain O..&& S.rootPhase row O..== O.sqlStrictText "active")
+    pure(S.rootId row)
+    :: IO [Text]
+  eligible<-paymentSourceEligible c outgoing
+  fees<-case history of
+    RetiredPreparation _ (Just generation)->O.runSelect c $ O.limit 2 $ do
+      (key,asset,n,released)<-O.selectTable S.feeHolds
+      (p,g,_,_,retired,_)<-S.workPreparations
+      O.where_ (key O..== text identifier O..&& p O..== key O..&& g O..== O.sqlInt8(fromIntegral generation-1))
+      pure(asset,n,released,retired)
+    _->pure []
+    :: IO [(Text,Int64,Int64,Maybe Text)]
+  holds<-case (history,customerFunding funding) of
+    (InitialPreparation,Just(order,kind))->O.runSelect c $ O.limit 2 $ do
+      (key,purpose,asset,n,phase)<-O.selectTable S.operatingReservations
+      O.where_ (key O..== text order O..&& purpose O..== text kind O..&& asset O..== text(T.pack $ show currency)
+        O..&& O.in_ (map text ["quote","obligation"]) phase)
+      pure n
+    _->pure []
+    :: IO [Int64]
+  let quantity=either (const Nothing) Just . amount . toInteger
+      previous=case fees of
+        [(asset,n,released,retired)] | released `elem` [0,1]->
+          PriorFeeHold <$> lookup asset [("Native",Native),("Sol",Sol)] <*> quantity n <*> pure(released==1) <*> pure(retired/=Nothing)
+        _->Nothing
+      held=case holds of [n]->quantity n; _->Nothing
+  booked<-balances c
+  at<-operatingTime c
+  budget<-readFeeBudget c (admissionLimits config) booked at currency
+  pure $ PreparationAdmission readiness (not $ null busy) eligible previous held
+    (M.findWithDefault 0 (paymentAsset outgoing,FeePending) booked) budget
+
+customerFunding :: Funding -> Maybe (Text,Text)
+customerFunding (Conversion order _ _ _) = Just(order,"conversion")
+customerFunding (Refund order _ _ _) = Just(order,"refund")
+customerFunding EarnedFees{} = Nothing
 
 validateSavedJson :: Int -> Text -> IO ()
 validateSavedJson limit value = do
@@ -1636,9 +1676,9 @@ readAttempt :: PG.Connection -> Text -> IO RecordedAttempt
 readAttempt c identifier = do
   rows <- O.runSelect c $ do
     attempt <- O.selectTable S.attempts
-    intent <- O.selectTable S.intents
-    O.where_ (S.attemptId attempt O..== O.sqlStrictText identifier O..&& S.attemptIntent attempt O..== S.intentId intent)
-    pure (attempt,S.intentChain intent,S.intentCommon intent)
+    intent <- O.selectTable S.paymentRoots
+    O.where_ (S.attemptId attempt O..== O.sqlStrictText identifier O..&& S.attemptIntent attempt O..== S.rootId intent)
+    pure (attempt,S.rootChain intent,S.rootCommon intent)
     :: IO [(S.Attempt,Text,Maybe Text)]
   case rows of
     [(row,chain,common)] -> do
@@ -1653,6 +1693,7 @@ unsignedPreparation :: PG.Connection -> Text -> Text -> Int -> IO PreparedPaymen
 unsignedPreparation c identity identifier generation = do
   prepared <- readPreparation c identity identifier
   require (generation==preparedGeneration prepared) "preparation_generation_changed"
+  paymentSource c (savedPayment $ preparedView prepared)
   require (savedStatus(preparedView prepared)==PaymentPaying && preparedDraft prepared/=Nothing) "payment_not_prepared"
   attempts <- O.runSelect c $ O.limit 1 $ do
     (tx,intent,_,g,_,_) <- S.workAttempts
@@ -1660,7 +1701,6 @@ unsignedPreparation c identity identifier generation = do
     pure tx
     :: IO [Text]
   require (null attempts) "attempt_already_recorded"
-  paymentSource c (savedPayment $ preparedView prepared)
   pure prepared
 
 -- The dedicated signer's read-only capability resolves durable IDs, never
@@ -1697,17 +1737,13 @@ recordAttempt c identity expected signed = do
       let native=paymentAsset(savedPayment $ preparedView current)==Native
       require (native==maybe False (const True) (commonInput signed)) "attempt_common_input_mismatch"
       _ <- nextSequence c
-      _ <- O.runUpdate c O.Update {O.uTable=S.intents,
-        O.uUpdateWith= \r->r {S.intentCommon=maybe O.null (O.toNullable . text) (commonInput signed)},
-        O.uWhere= \r->S.intentId r O..== text identifier,O.uReturning=O.rCount}
+      _ <- O.runUpdate c O.Update {O.uTable=S.paymentRoots,
+        O.uUpdateWith= \r->r {S.rootCommon=maybe O.null (O.toNullable . text) (commonInput signed)},
+        O.uWhere= \r->S.rootId r O..== text identifier,O.uReturning=O.rCount}
       _ <- O.runInsert c O.Insert {O.iTable=S.attempts,
         O.iRows=[S.Attempt (text $ signedId signed) (text identifier) (text $ signedBytes signed) (text $ signedPolicy signed)
           (num $ units $ preparedFee current) (text "signed") O.null O.null (num $ fromIntegral generation)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-      let funding=paymentFunding(savedPayment $ preparedView current)
-          order=case funding of Conversion oid _ _ _->Just oid; Refund oid _ _ _->Just oid; EarnedFees{}->Nothing
-      forM_ order $ \oid->do
-        _ <- O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text "Paying"},O.uWhere= \r->S.orderId r O..== text oid O..&& S.status r O../= text "Paid",O.uReturning=O.rCount}
-        pure ()
+      forM_ (customerFunding $ paymentFunding $ savedPayment $ preparedView current) $ \(order,_)->acceptCustomerPayment c order
       readAttempt c (signedId signed)
     _ -> reject "duplicate_attempt"
 
@@ -1715,9 +1751,9 @@ paymentWork :: PG.Connection -> Text -> Text -> IO (PaymentView,Maybe PreparedPa
 paymentWork c identity identifier = do
   view <- readPayment c identity identifier
   active <- O.runSelect c $ do
-    row <- O.selectTable S.intents
-    O.where_ (S.intentId row O..== O.sqlStrictText identifier O..&& S.intentResolved row O..== O.sqlInt8 0)
-    pure (S.intentId row)
+    row <- O.selectTable S.paymentRoots
+    O.where_ (S.rootId row O..== O.sqlStrictText identifier O..&& S.rootPhase row O..== O.sqlStrictText "active")
+    pure (S.rootId row)
     :: IO [Text]
   prepared <- case active of []->pure Nothing; [_]->Just <$> readPreparation c identity identifier; _->reject "duplicate_payment_intent"
   attempts <- O.runSelect c $ O.limit 1001 $ O.orderBy (O.asc id) $ do
@@ -1735,11 +1771,14 @@ paymentWork c identity identifier = do
 -- Sending is authorized from recorded bytes, never a request payload. Backup
 -- coverage and chain-family selection are rechecked at each boundary.
 paymentSource :: PG.Connection -> Payment -> IO ()
-paymentSource c outgoing = case paymentFunding outgoing of
-  EarnedFees{}->pure ()
+paymentSource c outgoing = paymentSourceEligible c outgoing >>= \eligible->require eligible "source_not_eligible"
+
+paymentSourceEligible :: PG.Connection -> Payment -> IO Bool
+paymentSourceEligible c outgoing = case paymentFunding outgoing of
+  EarnedFees{}->pure True
   Conversion _ receipt _ _->eligible receipt
   Refund _ receipt _ _->eligible receipt
- where eligible receipt=sourceAuthorized c (paymentId outgoing) receipt >>= \authorized->require authorized "source_not_eligible"
+ where eligible=sourceAuthorized c (paymentId outgoing)
 
 -- Physical eligibility or one still-active capital cover approved for this exact
 -- obligation. This checks backing, not execution state: each payment operation
@@ -1777,12 +1816,15 @@ sourceAuthorized c identifier receipt = do
 
 sendContext :: PG.Connection -> Text -> Text -> IO RecordedAttempt
 sendContext c identity txid = do
+  (prepared,saved,eligible,selection)<-readSendSubject c identity txid
+  checked (checkSendPayment prepared saved eligible selection)
+
+readSendSubject :: PG.Connection -> Text -> Text -> IO (PreparedPayment,RecordedAttempt,Bool,Maybe (Text,Bool))
+readSendSubject c identity txid = do
   saved<-readAttempt c txid
   prepared<-readPreparation c identity (recordedPayment saved)
-  require (savedStatus(preparedView prepared)==PaymentPaying && recordedGeneration saved==preparedGeneration prepared
-    && recordedFee saved==preparedFee prepared) "payment_not_sendable"
-  paymentSource c (savedPayment $ preparedView prepared)
-  when (recordedChain saved=="Native") $ do
+  eligible<-paymentSourceEligible c (savedPayment $ preparedView prepared)
+  selection<-if recordedChain saved/="Native" then pure Nothing else do
     family<-O.runSelect c $ do
       row<-O.selectTable S.attempts
       O.where_ (S.attemptIntent row O..== O.sqlStrictText(recordedPayment saved))
@@ -1793,170 +1835,132 @@ sendContext c identity txid = do
     cancelled<-O.runSelect c S.replacementCancellations :: IO [(Int64,Text,Int64)]
     let descendants=sortOn (\(_,_,n)->n) [m | m@(_,tx,_)<-members,tx `elem` family]
         latest=case reverse descendants of (_,tx,_):_->Just tx; []->case family of [tx]->Just tx; _->Nothing
-    require (latest==Just txid) "native_replacement_not_current"
-    require (all (\(n,parent,_,_,_,_)->parent `notElem` family || any (\(d,_,_)->d==n) (members<>cancelled)) drafts) "native_replacement_draft_pending"
-  pure saved
+        pending=any (\(n,parent,_,_,_,_)->parent `elem` family && all (\(d,_,_)->d/=n) (members<>cancelled)) drafts
+    pure $ fmap (\tx->(tx,pending)) latest
+  pure (prepared,saved,eligible,selection)
 
-broadcastCoverage :: PG.Connection -> RecordedAttempt -> IO Int64
-broadcastCoverage c saved = do
-  original<-maybe (reject "broadcast_intent_required") pure (recordedSequence saved)
+readSendFacts :: PG.Connection -> StorePolicy -> Int64 -> Text -> IO SendFacts
+readSendFacts c config now txid = do
+  let identity=deploymentFingerprint $ paymentPolicy $ executionTerms config
+  readiness<-readIntake c identity now
+  checked (checkIntake readiness)
+  (prepared,saved,eligible,selection)<-readSendSubject c identity txid
+  review<-broadcastReviewSequence c (recordedPayment saved)
+  row<-metadata c identity
+  pure $ SendFacts readiness prepared saved eligible selection review (requireBackup config) (S.backupSequence row)
+
+broadcastReviewSequence :: PG.Connection -> Text -> IO Int64
+broadcastReviewSequence c identifier = do
   approvals<-O.runSelect c $ do
-    (identifier,n)<-S.sourceApprovals
-    O.where_ (identifier O..== O.sqlStrictText(recordedPayment saved))
+    (key,n)<-S.sourceApprovals
+    O.where_ (key O..== O.sqlStrictText identifier)
     pure n
     :: IO [Int64]
   cancellations<-O.runSelect c $ do
     (decision,_,sequenceNo)<-S.replacementCancellations
     (n,parent,_,_,_,_)<-S.replacementDrafts
     (tx,intent,_,_,_,_)<-S.workAttempts
-    O.where_ (decision O..== n O..&& parent O..== tx O..&& intent O..== O.sqlStrictText(recordedPayment saved))
+    O.where_ (decision O..== n O..&& parent O..== tx O..&& intent O..== O.sqlStrictText identifier)
     pure sequenceNo
     :: IO [Int64]
-  pure (maximum $ original:approvals<>cancellations)
+  pure (maximum $ 0:approvals<>cancellations)
 
 markBroadcast :: PG.Connection -> StorePolicy -> Int64 -> Text -> IO Int64
 markBroadcast c config now txid = do
-  let identity=deploymentFingerprint $ paymentPolicy $ executionTerms config
-  intakeReady c identity now
-  saved<-sendContext c identity txid
-  case (recordedState saved,recordedSequence saved) of
-    ("broadcast_intent",Just _)->broadcastCoverage c saved
-    ("signed",Nothing)->do
+  facts<-readSendFacts c config now txid
+  decision<-checked (decideQueue facts)
+  case decision of
+    ReuseQueue n->pure n
+    CreateQueue->do
       n<-nextSequence c
-      _<-O.runUpdate c O.Update {O.uTable=S.attempts,
+      count<-O.runUpdate c O.Update {O.uTable=S.attempts,
         O.uUpdateWith= \r->r {S.attemptState=O.sqlStrictText "broadcast_intent",S.attemptSequence=O.toNullable $ O.sqlInt8 n},
-        O.uWhere= \r->S.attemptId r O..== O.sqlStrictText txid,O.uReturning=O.rCount}
+        O.uWhere= \r->S.attemptId r O..== O.sqlStrictText txid O..&& S.attemptState r O..== O.sqlStrictText "signed"
+          O..&& O.isNull(S.attemptSequence r),O.uReturning=O.rCount}
+      require (count==1) "broadcast_intent_update_failed"
       pure n
-    _->reject "attempt_not_sendable"
 
 authorizeSend :: PG.Connection -> StorePolicy -> Int64 -> Text -> IO RecordedAttempt
-authorizeSend c config now txid = do
-  let identity=deploymentFingerprint $ paymentPolicy $ executionTerms config
-  intakeReady c identity now
-  saved<-sendContext c identity txid
-  require (recordedState saved=="broadcast_intent") "broadcast_intent_required"
-  needed<-broadcastCoverage c saved
-  row<-metadata c identity
-  require (not(requireBackup config) || S.backupSequence row>=needed) "backup_pending"
-  pure saved
+authorizeSend c config now txid = readSendFacts c config now txid >>= checked . decideSend
 
 -- Settlement accepts only an independently verified outcome for the exact saved
 -- attempt. Pausing/source loss does not erase an already finalized liability.
-settlePayment :: PG.Connection -> Text -> RecordedAttempt -> W.PaymentCosts -> Text -> IO ()
-settlePayment c identity expected costs proof = do
-  let txid=signedId(recordedSigned expected)
-      saved=encodeSaved $ object ["costs" .= costs,"proof" .= proof]
-      actual=toInteger(units $ W.networkFee costs)+toInteger(units $ W.accountRent costs)
-  require (not(T.null proof) && T.length proof<=32768 && units(W.networkFee costs)>0
-    && actual<=toInteger(units $ recordedFee expected)
-    && (recordedChain expected=="Solana" || units(W.accountRent costs)==0)) "settlement_fee_or_evidence_invalid"
-  (current,view)<-settlementContext c identity expected "settled" saved
-  unless (recordedState current=="settled") $ do
-    post c ("settlement:"<>txid) "successful finalized payout" (settlement $ savedPayment view)
-    forM_ [("network-fee",W.networkFee costs),("account-rent",W.accountRent costs)] $ \(label,cost)->
-      when (units cost>0) $ paymentCost c current (label<>":"<>txid) label cost
-    resolvePayment c current view "settled" saved
-
-failSolana :: PG.Connection -> Text -> RecordedAttempt -> Amount -> Text -> IO ()
-failSolana c identity expected fee proof = do
-  require (recordedChain expected=="Solana" && units fee>0 && fee<=recordedFee expected
-    && not(T.null proof) && T.length proof<=32768) "invalid_failure_evidence"
-  let txid=signedId(recordedSigned expected)
-  (current,view)<-settlementContext c identity expected "failed" proof
-  if recordedState current=="failed" then do
-    charged<-O.runSelect c $ do
-      (_,event,_,account,n)<-O.selectTable S.postings
-      O.where_ (event O..== O.sqlStrictText("failed-fee:"<>txid) O..&& account O..== O.sqlStrictText "external")
-      pure n
-      :: IO [Int64]
-    require (charged==[units fee]) "failure_evidence_conflict"
-  else do
-    paymentCost c current ("failed-fee:"<>txid) "finalized Solana failure network fee" fee
-    resolvePayment c current view "failed" proof
-
-settlementContext :: PG.Connection -> Text -> RecordedAttempt -> Text -> Text -> IO (RecordedAttempt,PaymentView)
-settlementContext c identity expected state proof = do
-  current<-readAttempt c (signedId $ recordedSigned expected)
-  require (recordedState expected=="broadcast_intent" && recordedSequence expected/=Nothing
-    && current {recordedState=recordedState expected,recordedObservation=recordedObservation expected}==expected) "settlement_attempt_changed"
+settleOutcome :: PG.Connection -> Text -> RecordedAttempt -> SettlementOutcome -> IO ()
+settleOutcome c identity expected outcome = do
+  checked (checkSettlementEvidence expected outcome)
+  let txid=signedId(recordedSigned expected); text=O.sqlStrictText
+  current<-readAttempt c txid
   view<-readPayment c identity (recordedPayment current)
-  if recordedState current==state then require (recordedObservation current==Just proof) "settlement_evidence_conflict"
-  else do
-    require (current==expected && savedStatus view `elem` [PaymentPaying,PaymentReview]) "settlement_not_expected"
-    rows<-O.runSelect c $ do
-      intent<-O.selectTable S.intents
-      (key,currency,n,released)<-O.selectTable S.feeHolds
-      O.where_ (S.intentId intent O..== O.sqlStrictText(recordedPayment current) O..&& key O..== S.intentId intent)
-      pure (S.intentResolved intent,currency,n,released)
-      :: IO [(Int64,Text,Int64,Int64)]
-    let asset=if recordedChain current=="Native" then "Native" else "Sol"
-    require (case rows of [(0,currency,n,0)]->currency==asset && n>=units(recordedFee current); _->False) "payment_intent_not_settleable"
-    winners<-O.runSelect c $ do
-      r<-O.selectTable S.attempts
-      O.where_ (S.attemptIntent r O..== O.sqlStrictText(recordedPayment current) O..&& S.attemptState r O..== O.sqlStrictText "settled")
-      pure (S.attemptId r)
-      :: IO [Text]
-    require (null winners) "payment_already_settled"
-  pure (current,view)
+  holds<-O.runSelect c $ O.limit 2 $ do
+    intent<-O.selectTable S.paymentRoots
+    (key,currency,n,released)<-O.selectTable S.feeHolds
+    O.where_ (S.rootId intent O..== text(recordedPayment current) O..&& key O..== S.rootId intent
+      O..&& S.rootPhase intent O..== O.sqlStrictText "active" O..&& released O..== O.sqlInt8 0)
+    pure (currency,n)
+    :: IO [(Text,Int64)]
+  winners<-O.runSelect c $ O.limit 1 $ do
+    row<-O.selectTable S.attempts
+    O.where_ (S.attemptIntent row O..== text(recordedPayment current) O..&& S.attemptState row O..== text "settled")
+    pure(S.attemptId row)
+    :: IO [Text]
+  charged<-case outcome of
+    Failed{} | recordedState current=="failed"->O.runSelect c $ O.limit 2 $ do
+      (_,event,_,account,n)<-O.selectTable S.postings
+      O.where_ (event O..== text("failed-fee:"<>txid) O..&& account O..== text "external")
+      pure n
+    _->pure []
+    :: IO [Int64]
+  let held=case holds of
+        [(currency,n)]->(,) <$> lookup currency [("Native",Native),("Sol",Sol)] <*> either (const Nothing) Just (amount $ toInteger n)
+        _->Nothing
+      winner=case winners of [tx]->Just tx; _->Nothing
+      failedCharge=case charged of [n]->Just(toInteger n); _->Nothing
+  decision<-checked $ decideSettlement expected (SettlementFacts current view held winner failedCharge) outcome
+  case decision of
+    SettlementReplay->pure ()
+    ApplySettlement effects->do
+      case settlementOutcome effects of
+        Succeeded costs _->do
+          post c ("settlement:"<>txid) "successful finalized payout" (settlementPrincipal effects)
+          forM_ [("network-fee",W.networkFee costs),("account-rent",W.accountRent costs)] $ \(label,cost)->
+            when (units cost>0) $ paymentCost c current (label<>":"<>txid) label cost
+        Failed cost _->paymentCost c current ("failed-fee:"<>txid) "finalized Solana failure network fee" cost
+      resolvePayment c current effects
 
 paymentCost :: PG.Connection -> RecordedAttempt -> Text -> Text -> Amount -> IO ()
 paymentCost c saved event explanation quantity =
   let asset=if recordedChain saved=="Native" then Native else Sol; n=toInteger(units quantity)
   in post c event explanation [Posting asset Operating (-n),Posting asset External n]
 
-resolvePayment :: PG.Connection -> RecordedAttempt -> PaymentView -> Text -> Text -> IO ()
-resolvePayment c saved view state proof = do
-  let text=O.sqlStrictText; identifier=recordedPayment saved; paid=state=="settled"
-  _<-O.runUpdate c O.Update {O.uTable=S.attempts,O.uUpdateWith= \r->r {S.attemptState=text state,S.attemptObservation=O.toNullable $ text proof},O.uWhere= \r->S.attemptId r O..== text(signedId $ recordedSigned saved),O.uReturning=O.rCount}
-  _<-O.runUpdate c O.Update {O.uTable=S.intents,O.uUpdateWith= \r->r {S.intentResolved=O.sqlInt8 1},O.uWhere= \r->S.intentId r O..== text identifier,O.uReturning=O.rCount}
-  _<-O.runUpdate c O.Update {O.uTable=S.feeHolds,O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,O.sqlInt8 1),O.uWhere= \(key,_,_,_)->key O..== text identifier,O.uReturning=O.rCount}
-  let customer=case paymentFunding(savedPayment view) of Conversion order _ _ _->Just(order,False); Refund order _ _ _->Just(order,True); EarnedFees{}->Nothing
-  forM_ customer $ \(order,isRefund)->do
-    _<-O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \r->r {S.obligationStatus=text $ if paid then "paid" else "review"},O.uWhere= \r->S.obligationId r O..== text identifier,O.uReturning=O.rCount}
-    _<-O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text $ if not paid then "NeedsReview" else if isRefund then "Refunded" else "Paid",S.payoutTx=if paid then O.toNullable(text $ signedId $ recordedSigned saved) else S.payoutTx r},O.uWhere= \r->S.orderId r O..== text order O..&& (O.sqlBool(not isRefund) O..|| S.status r O../= text "Paid"),O.uReturning=O.rCount}
+resolvePayment :: PG.Connection -> RecordedAttempt -> SettlementEffects -> IO ()
+resolvePayment c saved effects = do
+  let text=O.sqlStrictText; identifier=recordedPayment saved; outcome=settlementOutcome effects
+      state=outcomeState outcome; proof=outcomeRecord outcome
+      paid=case outcome of Succeeded{}->True; Failed{}->False
+  requireOne "settlement_attempt_update_failed" $ O.runUpdate c O.Update {O.uTable=S.attempts,O.uUpdateWith= \r->r {S.attemptState=text state,S.attemptObservation=O.toNullable $ text proof},O.uWhere= \r->S.attemptId r O..== text(signedId $ recordedSigned saved),O.uReturning=O.rCount}
+  setPaymentPhase c identifier $ if paid then Settled (signedId $ recordedSigned saved) ("settlement:"<>signedId(recordedSigned saved)) else Ready
+  requireOne "settlement_fee_hold_update_failed" $ O.runUpdate c O.Update {O.uTable=S.feeHolds,O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,O.sqlInt8 1),O.uWhere= \(key,_,_,_)->key O..== text identifier,O.uReturning=O.rCount}
+  forM_ (settlementCustomer effects) $ \customer->do
+    let order=resolutionOrder customer
+    acceptCustomerPayment c order
     when paid $ do
       _<-O.runUpdate c O.Update {O.uTable=S.reservations,O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,text "released"),O.uWhere= \(key,_,_,_)->key O..== text order,O.uReturning=O.rCount}
       _<-O.runUpdate c O.Update {O.uTable=S.operatingReservations,O.uUpdateWith= \(key,kind,asset,n,_)->(key,kind,asset,n,text "released"),O.uWhere= \(key,_,_,_,phase)->key O..== text order O..&& O.in_ (map text ["quote","obligation"]) phase,O.uReturning=O.rCount}
       pure ()
+ where
+  requireOne code operation=operation >>= \count->require (count==1) code
 
--- Repair only the historical extra-refund projection bug. Both economic payments
--- must already be settled; the caller supplies neither status nor payout identity.
+-- Compatibility command: verify the historical completed conversion; the
+-- authoritative projection cannot be repaired by writing a status or payout ID.
 repairCompletedOrderView :: PG.Connection -> PaymentTerms -> Int64 -> Text -> IO ()
 repairCompletedOrderView c policy now identifier = do
-  let text=O.sqlStrictText; identity=deploymentFingerprint $ paymentPolicy policy
-      completed kind=do
-        ob<-O.selectTable S.obligations
-        intent<-O.selectTable S.intents
-        attempt<-O.selectTable S.attempts
-        O.where_ (S.obligationOrder ob O..== text identifier O..&& S.obligationKind ob O..== text kind
-          O..&& S.obligationStatus ob O..== text "paid" O..&& S.intentResolved intent O..== O.sqlInt8 1
-          O..&& O.matchNullable (O.sqlBool False) (O..== S.obligationId ob) (S.intentObligation intent)
-          O..&& S.attemptIntent attempt O..== S.intentId intent O..&& S.attemptState attempt O..== text "settled")
-        pure (S.obligationId ob,S.attemptId attempt)
+  let identity=deploymentFingerprint $ paymentPolicy policy
   state<-metadata c identity
   require (S.paused state==1) "pause_before_operator_action"
   fresh c now
-  orders<-O.runSelect c $ do row<-O.selectTable S.orders; O.where_ (S.orderId row O..== text identifier); pure row
-    :: IO [S.Order]
-  order<-case orders of [row]->pure row; _->reject "completed_order_repair_not_proven"
-  conversions<-O.runSelect c (O.limit 2 $ completed "conversion") :: IO [(Text,Text)]
-  (payment,transaction)<-case conversions of [row]->pure row; _->reject "completed_order_repair_not_proven"
-  view<-readPayment c identity payment
-  require (savedStatus view==PaymentPaid) "completed_order_repair_not_proven"
-  unless (S.status order=="Paid" && S.payoutTx order==Just transaction) $ do
-    require (S.status order=="Refunded") "completed_order_repair_not_proven"
-    previous<-maybe (reject "completed_order_repair_not_proven") pure (S.payoutTx order)
-    refunds<-O.runSelect c $ O.limit 2 $ do
-      row@(_,tx)<-completed "refund"
-      O.where_ (tx O..== text previous)
-      pure row
-      :: IO [(Text,Text)]
-    refundView<-case refunds of [(key,_)]->readPayment c identity key; _->reject "completed_order_repair_not_proven"
-    require (savedStatus refundView==PaymentPaid) "completed_order_repair_not_proven"
-    _<-nextSequence c
-    _<-O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text "Paid",S.payoutTx=O.toNullable $ text transaction},
-      O.uWhere= \r->S.orderId r O..== text identifier,O.uReturning=O.rCount}
-    audit c "completed_order_view_repaired" (encodeSaved $ object ["order" .= identifier,"previousPayout" .= S.payoutTx order,"payout" .= transaction])
+  payments<-customerPayments c identifier
+  require (length [() | p<-payments,customerKind p==CustomerConversion,customerState p==PaymentPaid,
+    Just{}<-[customerSettlement p]]==1) "completed_order_repair_not_proven"
 
 readPaymentSource :: PG.Connection -> Text -> Text -> IO (Maybe W.PaymentSource)
 readPaymentSource c identity identifier = do
@@ -2060,12 +2064,12 @@ custodySnapshot c now expectedOrigins inspectLosses = do
   require (length slots==2) "custody_history_anchor_missing"
   pendingIds<-O.runSelect c $ O.limit 1001 $ do
     a<-O.selectTable S.attempts
-    i<-O.selectTable S.intents
+    i<-O.selectTable S.paymentRoots
     expired<-Exists.exists $ do
       (key,_,_)<-O.selectTable S.solanaExpiries
-      O.where_ (key O..== S.attemptId a O..&& S.intentChain i O..== O.sqlStrictText "Solana")
+      O.where_ (key O..== S.attemptId a O..&& S.rootChain i O..== O.sqlStrictText "Solana")
       pure ()
-    O.where_ (S.attemptIntent a O..== S.intentId i O..&& S.intentResolved i O..== O.sqlInt8 0 O..&& O.not expired)
+    O.where_ (S.attemptIntent a O..== S.rootId i O..&& S.rootPhase i O..== O.sqlStrictText "active" O..&& O.not expired)
     pure (S.attemptId a)
     :: IO [Text]
   require (length pendingIds<=1000) "custody_attempt_bounds"
@@ -2112,87 +2116,31 @@ pendingAttempts :: PG.Connection -> IO [Text]
 pendingAttempts c = do
   rows<-O.runSelect c $ O.limit 1001 $ O.orderBy (O.asc id) $ do
     row<-O.selectTable S.attempts
-    intent<-O.selectTable S.intents
-    O.where_ (S.attemptIntent row O..== S.intentId intent O..&& S.intentResolved intent O..== O.sqlInt8 0)
+    intent<-O.selectTable S.paymentRoots
+    O.where_ (S.attemptIntent row O..== S.rootId intent O..&& S.rootPhase intent O..== O.sqlStrictText "active")
     O.where_ (O.in_ (map O.sqlStrictText ["signed","broadcast_intent"]) (S.attemptState row))
     pure (S.attemptId row)
   require (length rows<=1000) "pending_attempts_too_large"
   pure rows
 
--- Prefer the existing intent on each chain; never prepare a competing payment.
--- Resolved intents return only after cancellation or approved expiry; settled history and
--- cancelled withdrawals cannot fill the bounded queue. Candidates are revalidated.
+-- Active ownership always wins its chain; a reviewed active payment cannot be
+-- bypassed by a competing ready payment. Candidates are revalidated when prepared.
 paymentCandidates :: PG.Connection -> IO [Text]
 paymentCandidates c = do
-  active<-O.runSelect c $ O.limit 1001 $ do
-    row<-O.selectTable S.intents
-    O.where_ (S.intentResolved row O..== O.sqlInt8 0)
-    pure (S.intentId row,S.intentChain row)
-    :: IO [(Text,Text)]
-  let absent identifier=do
-        found<-Exists.exists $ do
-          row<-O.selectTable S.intents
-          O.where_ (S.intentId row O..== identifier)
-          pure ()
-        retry<-Exists.exists $ do
-          row<-O.selectTable S.intents
-          (key,g,_,_,retired,cancelled)<-S.workPreparations
-          O.where_ (S.intentId row O..== identifier O..&& S.intentResolved row O..== O.sqlInt8 1
-            O..&& key O..== identifier O..&& g O..< O.sqlInt8 7)
-          cancelledWork<-Exists.exists $ do
-            (other,generation,_,_,done)<-S.workCancellations
-            O.where_ (other O..== key O..&& generation O..== g O..&& done O..== O.sqlInt8 1 O..&& cancelled O..== O.sqlInt8 1 O..&& O.isNull retired)
-            pure ()
-          expiredWork<-Exists.exists $ do
-            (tx,_,_,_)<-O.selectTable S.solanaRetryApprovals
-            O.where_ (O.matchNullable (O.sqlBool False) (O..== tx) retired O..&& cancelled O..== O.sqlInt8 0)
-            pure ()
-          later<-Exists.exists $ do
-            (other,generation,_,_,_,_)<-S.workPreparations
-            O.where_ (other O..== key O..&& generation O..> g)
-            pure ()
-          pending<-Exists.exists $ do
-            (tx,other,_,_,_,_)<-S.workAttempts
-            expired<-Exists.exists $ do
-              (retiredId,_,_)<-O.selectTable S.solanaExpiries
-              O.where_ (retiredId O..== tx)
-              pure ()
-            O.where_ (other O..== key O..&& O.not expired)
-            pure ()
-          O.where_ ((cancelledWork O..|| expiredWork) O..&& O.not later O..&& O.not pending)
-          pure ()
-        O.where_ (O.not found O..|| retry)
-      orders=do
-        row<-O.selectTable S.obligations
-        O.where_ (S.obligationStatus row O..== O.sqlStrictText "ready")
-        absent (S.obligationId row)
-        pure (S.obligationId row,S.obligationAsset row)
-      fees=do
-        row<-O.selectTable S.withdrawals
-        let identifier=O.sqlStrictText "fee:" O..++ S.withdrawalId row
-        absent identifier
-        cancelled<-Exists.exists $ do
-          (key,_,_)<-O.selectTable S.cancellations
-          O.where_ (key O..== S.withdrawalId row)
-          pure ()
-        O.where_ (O.not cancelled)
-        pure (identifier,S.asset row)
-  ready<-O.runSelect c $ O.limit 1001 $ O.orderBy (O.asc fst) $ O.unionAll orders fees
-    :: IO [(Text,Text)]
+  active<-O.runSelect c P.activePayments :: IO [(Text,Text)]
+  ready<-O.runSelect c P.readyPayments :: IO [(Text,Text)]
   require (length ready<=1000 && length active<=2
-    && all ((`elem` ["Native","Solana"]).snd) active
-    && length(nub $ map snd active)==length active
-    && all ((`elem` ["Native","Wrapped"]).snd) ready) "payment_queue_requires_review"
-  let waiting=[(key,if asset=="Native" then "Native" else "Solana")|(key,asset)<-ready]
-  pure [key|chain<-["Native","Solana"],key<-take 1 ([i|(i,currency)<-active,currency==chain]<>[i|(i,currency)<-waiting,currency==chain])]
+    && all ((`elem` ["Native","Solana"]).snd) (active<>ready)
+    && length(nub $ map snd active)==length active) "payment_queue_requires_review"
+  pure [key | chain<-["Native","Solana"],key<-take 1 [identifier | (identifier,currency)<-active<>ready,currency==chain]]
 
 -- Saved native work only: no source/payment authorization is granted by this read.
 nativeLockWork :: PG.Connection -> Text -> IO (Maybe NativeLockWork)
 nativeLockWork c identity = do
   active<-O.runSelect c $ O.limit 2 $ do
-    row<-O.selectTable S.intents
-    O.where_ (S.intentChain row O..== O.sqlStrictText "Native" O..&& S.intentResolved row O..== O.sqlInt8 0)
-    pure (S.intentId row)
+    row<-O.selectTable S.paymentRoots
+    O.where_ (S.rootChain row O..== O.sqlStrictText "Native" O..&& S.rootPhase row O..== O.sqlStrictText "active")
+    pure (S.rootId row)
   case active of
     []->pure Nothing
     [identifier]->do
@@ -2206,6 +2154,15 @@ nativeLockWork c identity = do
       attempts<-if length ids>1 then map fst <$> nativeFamily c identity identifier else mapM (readAttempt c) ids
       pure (Just $ NativeLockWork prepared cancelling attempts)
     _->reject "native_lock_recovery_bounds"
+
+principalHeld :: PG.Connection -> Asset -> IO Integer
+principalHeld c asset = do
+  quantities<-O.runSelect c $ do
+    (_,currency,n,phase)<-O.selectTable S.reservations
+    O.where_ (currency O..== O.sqlStrictText(T.pack $ show asset) O..&& phase O../= O.sqlStrictText "released")
+    pure n
+    :: IO [Int64]
+  pure (sum $ map toInteger quantities)
 
 operatingHolds :: PG.Connection -> Asset -> IO Integer
 operatingHolds c asset = do
@@ -2235,28 +2192,23 @@ resumeLedger c config now origins reviewed = do
   require (sortOn txid (custodyPending snapshot)==sortOn txid reviewed
     && all ((`elem` ["signed","broadcast_intent"]).recordedState) reviewed) "resume_payment_changed"
   unresolved<-O.runSelect c $ do
-    row<-O.selectTable S.intents
-    O.where_ (S.intentResolved row O..== O.sqlInt8 0)
-    pure (S.intentId row)
+    row<-O.selectTable S.paymentRoots
+    O.where_ (S.rootPhase row O..== O.sqlStrictText "active")
+    pure (S.rootId row)
   require (all (`elem` map recordedPayment reviewed) unresolved) "unresolved_intents_require_review"
   problems<-O.runSelect c $ O.limit 1 $ do
-    row<-O.selectTable S.obligations
-    O.where_ (S.obligationStatus row O..== O.sqlStrictText "review")
-    pure (S.obligationId row)
+    (key,_,_,state)<-P.orderObligations
+    O.where_ (state O..== O.sqlStrictText "review")
+    pure key
     :: IO [Text]
   require (null problems) "obligations_require_review"
   legacy<-O.runSelect c $ O.limit 1 $ do
-    row<-O.selectTable S.orders
+    row<-P.openOrders
     costs<-Exists.exists $ do
       (key,_,_,_)<-O.selectTable S.orderCosts
       O.where_ (key O..== S.orderId row)
       pure ()
-    unpaid<-Exists.exists $ do
-      ob<-O.selectTable S.obligations
-      O.where_ (S.obligationOrder ob O..== S.orderId row
-        O..&& O.not(O.in_ (map O.sqlStrictText ["paid","cancelled"]) (S.obligationStatus ob)))
-      pure ()
-    O.where_ (O.not costs O..&& (unpaid O..|| O.not(O.in_ (map O.sqlStrictText ["Paid","Refunded","ExpiredUnfunded"]) (S.status row))))
+    O.where_ (O.not costs)
     pure (S.orderId row)
     :: IO [Text]
   require (null legacy) "legacy_order_cost_review_required"
@@ -2287,9 +2239,8 @@ authorizeRefund c config now receipt = do
   case existing of
     [ob]->result ob
     []->do
-      state<-metadata c identity
-      require (S.paused state==1) "pause_before_operator_action"
-      fresh c now
+      operator<-readOperator c identity now
+      checked (checkOperator "pause_before_operator_action" operator)
       rows<-O.runSelect c $ do
         d<-O.selectTable S.deposits
         q<-O.selectTable S.orders
@@ -2304,25 +2255,21 @@ authorizeRefund c config now receipt = do
       policy<-decodeSaved (S.policyJson q)
       let oid=S.orderId q; native=W.direction request==NativeToWrapped
           feeAsset=if native then Native else Sol
-      require (deploymentFingerprint policy==identity && S.depositAsset d==T.pack(show $ sourceAsset $ W.direction request)) "unsupported_refund_asset"
-      require (not native || S.depositDepth d>=fromIntegral(nativeDepth policy)) "source_not_eligible"
-      allowance<-checked $ amount $ if native then toInteger nativeFee else toInteger solFee+toInteger rent
-      require (nativeFee>0 && solFee>0 && rent>=0) "invalid_order_cost_policy"
+      source<-asDeposit d
+      checked (checkRefundSource identity request policy source)
+      costs<-checked (savedCostLimits nativeFee solFee rent)
       unresolved<-O.runSelect c $ do
-        i<-O.selectTable S.intents
+        i<-O.selectTable S.paymentRoots
         ob<-O.selectTable S.obligations
-        O.where_ (O.matchNullable (O.sqlBool False) (O..== S.obligationId ob) (S.intentObligation i) O..&& S.obligationOrder ob O..== text oid O..&& S.intentResolved i O..== num 0)
-        pure (S.intentId i)
+        O.where_ (O.matchNullable (O.sqlBool False) (O..== S.obligationId ob) (S.rootObligation i) O..&& S.obligationOrder ob O..== text oid O..&& S.rootPhase i O..== O.sqlStrictText "active")
+        pure (S.rootId i)
         :: IO [Text]
-      require (null unresolved) "refund_would_race_payment"
-      obligations<-O.runSelect c $ do
-        ob<-O.selectTable S.obligations
-        O.where_ (S.obligationOrder ob O..== text oid O..&& S.obligationStatus ob O../= text "cancelled")
-        pure ob
-        :: IO [S.Obligation]
-      require (all (\ob->S.obligationDeposit ob==receipt || S.obligationStatus ob=="paid") obligations) "other_obligation_must_resolve_before_refund"
-      let active=filter ((==receipt).S.obligationDeposit) obligations
-      require (length active<=1 && all ((`elem` ["ready","review"]).S.obligationStatus) active) "principal_already_resolved"
+      work<-O.runSelect c $ do
+        (key,order,deposit,state)<-P.orderObligations
+        O.where_ (order O..== text oid O..&& state O../= text "cancelled")
+        pure (key,deposit,state)
+        :: IO [(Text,Text,Text)]
+      active<-checked (refundableWork receipt (not $ null unresolved) work)
       destination<-if native then pure (W.refund request) else case W.sourceOwner request of
         Just owner->checked (publicKey owner) >> pure owner
         Nothing->do
@@ -2334,34 +2281,39 @@ authorizeRefund c config now receipt = do
           owner<-field "verifiedOwner" proof
           _<-checked (publicKey owner)
           pure owner
-      require (not(T.null destination) && T.length destination<=128) "invalid_destination"
+      holds<-O.runSelect c $ do
+        (key,kind,asset,n,phase)<-O.selectTable S.operatingReservations
+        O.where_ (key O..== text oid)
+        pure (kind,asset,n,phase)
+        :: IO [(Text,Text,Int64,Text)]
+      let refundHolds=[(asset,n,phase) | ("refund",asset,n,phase)<-holds]
+      budget<-if any (\(_,_,phase)->phase `notElem` ["quote","obligation"]) refundHolds then do
+        booked<-balances c
+        at<-operatingTime c
+        before<-readFeeBudget c (admissionLimits config) booked at feeAsset
+        released<-O.runSelect c $ do
+          (key,asset,n,done)<-O.selectTable S.feeHolds
+          O.where_ (O.in_ (map text active) key O..&& asset O..== text(T.pack $ show feeAsset) O..&& done O..== num 0)
+          pure n
+          :: IO [Int64]
+        let transferred=[n | ("conversion",asset,n,phase)<-holds,asset==T.pack(show feeAsset),phase `elem` ["quote","obligation"]]
+        pure $ Just before {operatingHeld=operatingHeld before-sum(map toInteger $ released<>transferred)}
+       else pure Nothing
+      outgoing<-checked $ decideRefund request source costs (RefundFacts (not $ null unresolved) work destination refundHolds budget)
       -- Resolved failed/cancelled preparations may retain unused operating holds.
       -- No unresolved intent survives the check above, so release only this work.
       forM_ active $ \old->do
-        _<-O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \r->r {S.obligationStatus=text "cancelled"},O.uWhere= \r->S.obligationId r O..== text(S.obligationId old),O.uReturning=O.rCount}
-        _<-O.runUpdate c O.Update {O.uTable=S.feeHolds,O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,num 1),O.uWhere= \(key,_,_,_)->key O..== text(S.obligationId old),O.uReturning=O.rCount}
+        setPaymentPhase c old Cancelled
+        _<-O.runUpdate c O.Update {O.uTable=S.feeHolds,O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,num 1),O.uWhere= \(key,_,_,_)->key O..== text old,O.uReturning=O.rCount}
         pure ()
       _<-O.runUpdate c O.Update {O.uTable=S.reservations,O.uUpdateWith= \(key,asset,n,_)->(key,asset,n,text "released"),O.uWhere= \(key,_,_,_)->key O..== text oid,O.uReturning=O.rCount}
       _<-O.runUpdate c O.Update {O.uTable=S.operatingReservations,O.uUpdateWith= \(key,kind,asset,n,_)->(key,kind,asset,n,text "released"),O.uWhere= \(key,kind,_,_,_)->key O..== text oid O..&& kind O..== text "conversion",O.uReturning=O.rCount}
-      holds<-O.runSelect c $ do
-        (key,kind,asset,n,phase)<-O.selectTable S.operatingReservations
-        O.where_ (key O..== text oid O..&& kind O..== text "refund")
-        pure (asset,n,phase)
-        :: IO [(Text,Int64,Text)]
-      phase<-case holds of
-        [(asset,n,phase)] | asset==T.pack(show feeAsset) && n==units allowance->pure phase
-        _->reject "operating_reservation_missing"
-      -- Expired quotes and additional receipts need a fresh budget reservation.
-      when (phase `notElem` ["quote","obligation"]) $ do
-        require (phase `elem` ["released","transferred"]) "invalid_reservation_phase"
-        booked<-balances c
-        operatingCapacity c (admissionLimits config) booked [(feeAsset,allowance)]
       _<-O.runUpdate c O.Update {O.uTable=S.operatingReservations,O.uUpdateWith= \(key,kind,asset,n,_)->(key,kind,asset,n,text "obligation"),O.uWhere= \(key,kind,_,_,_)->key O..== text oid O..&& kind O..== text "refund",O.uReturning=O.rCount}
       _<-nextSequence c
-      let ob=S.Obligation identifier oid receipt "refund" (S.depositAsset d) (S.depositAmount d) destination "ready"
-      _<-O.runInsert c O.Insert {O.iTable=S.obligations,O.iRows=[S.Obligation (text identifier) (text oid) (text receipt) (text "refund") (text $ S.depositAsset d) (num $ S.depositAmount d) (text destination) (text "ready")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      let ob=S.Obligation (paymentId outgoing) oid receipt "refund" (T.pack $ show $ paymentAsset outgoing) (units $ paymentAmount outgoing) (paymentRecipient outgoing)
+      _<-O.runInsert c O.Insert {O.iTable=S.obligations,O.iRows=[S.Obligation (text identifier) (text oid) (text receipt) (text "refund") (text $ S.obligationAsset ob) (num $ S.obligationAmount ob) (text $ S.obligationRecipient ob)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
       _<-O.runUpdate c O.Update {O.uTable=S.deposits,O.uUpdateWith= \r->r {S.depositAllocated=num 1},O.uWhere= \r->S.depositId r O..== text receipt,O.uReturning=O.rCount}
-      _<-O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text "Refunding"},O.uWhere= \r->S.orderId r O..== text oid O..&& S.status r O../= text "Paid",O.uReturning=O.rCount}
+      createPaymentRoot c outgoing
       audit c "refund_authorized" receipt
       result ob
     _->reject "duplicate_refund"
@@ -2397,50 +2349,48 @@ beginCancellation c config expected now reason cleanup = do
   validateSavedJson 32768 cleanup
   let identifier=paymentId(savedPayment $ preparedView expected); generation=preparedGeneration expected
       identity=deploymentFingerprint $ paymentPolicy $ executionTerms config
-  metadata c identity >>= \state->require (S.paused state==1) "pause_before_operator_action"
+  operator<-readOperator c identity now
+  require (operatorPaused operator) "pause_before_operator_action"
   previous<-readCancellation c identifier generation
-  case previous of
-    Just (old,plan,_)->require (old==reason && plan==cleanup) "preparation_cancellation_conflict"
-    Nothing->do
-      fresh c now
-      current<-cancellationPreparation c identity identifier
-      require (current==expected) "preparation_cancellation_not_expected"
-      sequenceNo<-nextSequence c
-      _<-O.runInsert c O.Insert {O.iTable=S.preparationCancellations,
-        O.iRows=[(O.sqlStrictText identifier,O.sqlInt8(fromIntegral generation),O.sqlStrictText reason,O.sqlStrictText cleanup,O.sqlInt8 sequenceNo,O.sqlInt8 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-      audit c "preparation_cancellation_requested" (identifier<>"@"<>T.pack(show generation))
+  current<-case previous of
+    Nothing->checked (checkOperator "pause_before_operator_action" operator) >> Just <$> cancellationPreparation c identity identifier
+    Just _->pure Nothing
+  decision<-checked $ decideCancellation BeginCleanup expected reason cleanup (CancellationFacts operator previous current False)
+  when (decision==RequestCancellation) $ do
+    sequenceNo<-nextSequence c
+    _<-O.runInsert c O.Insert {O.iTable=S.preparationCancellations,
+      O.iRows=[(O.sqlStrictText identifier,O.sqlInt8(fromIntegral generation),O.sqlStrictText reason,O.sqlStrictText cleanup,O.sqlInt8 sequenceNo,O.sqlInt8 0)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+    audit c "preparation_cancellation_requested" (identifier<>"@"<>T.pack(show generation))
 
 finishCancellation :: PG.Connection -> StorePolicy -> PreparedPayment -> Text -> Text -> IO ()
 finishCancellation c config expected reason cleanup = do
   let identifier=paymentId(savedPayment $ preparedView expected); generation=preparedGeneration expected
       identity=deploymentFingerprint $ paymentPolicy $ executionTerms config
       text=O.sqlStrictText; num=O.sqlInt8
-  metadata c identity >>= \state->require (S.paused state==1) "pause_before_operator_action"
+  state<-metadata c identity
+  let operator=OperatorFacts 0 (S.paused state==1) Nothing
+  require (operatorPaused operator) "pause_before_operator_action"
   saved<-readCancellation c identifier generation
-  case saved of
-    Just (old,plan,done)->do
-      require (old==reason && plan==cleanup) "preparation_cancellation_conflict"
-      unless done $ do
-        current<-cancellationPreparation c identity identifier
-        require (current==expected) "preparation_cancellation_not_expected"
-        let outgoing=savedPayment $ preparedView expected
-            binding=case paymentFunding outgoing of
-              Conversion oid receipt _ _->Just(oid,receipt,False)
-              Refund oid receipt _ _->Just(oid,receipt,True)
-              EarnedFees{}->Nothing
-        _<-nextSequence c
-        _<-O.runUpdate c O.Update {O.uTable=S.preparationCancellations,O.uUpdateWith= \(key,g,r,p,n,_)->(key,g,r,p,n,num 1),O.uWhere= \(key,g,_,_,_,_)->key O..== text identifier O..&& g O..== num(fromIntegral generation),O.uReturning=O.rCount}
-        _<-O.runUpdate c O.Update {O.uTable=S.preparations,O.uUpdateWith= \(key,g,p,d,r,_)->(key,g,p,d,r,num 1),O.uWhere= \(key,g,_,_,_,_)->key O..== text identifier O..&& g O..== num(fromIntegral generation),O.uReturning=O.rCount}
-        _<-O.runUpdate c O.Update {O.uTable=S.intents,O.uUpdateWith= \r->r {S.intentResolved=num 1},O.uWhere= \r->S.intentId r O..== text identifier,O.uReturning=O.rCount}
-        forM_ binding $ \(oid,receipt,isRefund)->do
-          eligible<-sourceAuthorized c identifier receipt
-          let retryable=eligible && generation<7
-          _<-O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \r->r {S.obligationStatus=text(if retryable then "ready" else "review")},O.uWhere= \r->S.obligationId r O..== text identifier,O.uReturning=O.rCount}
-          _<-O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text(if not retryable then "NeedsReview" else if isRefund then "Refunding" else "Ready")},O.uWhere= \r->S.orderId r O..== text oid O..&& S.status r O../= text "Paid",O.uReturning=O.rCount}
-          _<-O.runUpdate c O.Update {O.uTable=S.reservations,O.uUpdateWith= \(key,a,n,_)->(key,a,n,text "obligation"),O.uWhere= \(key,_,_,phase)->key O..== text oid O..&& phase O..== text "payment",O.uReturning=O.rCount}
-          pure ()
-        audit c "preparation_cancellation_completed" (identifier<>"@"<>T.pack(show generation))
-    Nothing->reject "preparation_cancellation_not_expected"
+  (current,eligible)<-case saved of
+    Just(old,plan,False) | old==reason && plan==cleanup->do
+      unsigned<-cancellationPreparation c identity identifier
+      source<-paymentSourceEligible c (savedPayment $ preparedView unsigned)
+      pure (Just unsigned,source)
+    _->pure (Nothing,False)
+  decision<-checked $ decideCancellation FinishCleanup expected reason cleanup (CancellationFacts operator saved current eligible)
+  case decision of
+    CompleteCancellation _->do
+      let binding=customerFunding (paymentFunding $ savedPayment $ preparedView expected)
+      _<-nextSequence c
+      _<-O.runUpdate c O.Update {O.uTable=S.preparationCancellations,O.uUpdateWith= \(key,g,r,p,n,_)->(key,g,r,p,n,num 1),O.uWhere= \(key,g,_,_,_,_)->key O..== text identifier O..&& g O..== num(fromIntegral generation),O.uReturning=O.rCount}
+      _<-O.runUpdate c O.Update {O.uTable=S.preparations,O.uUpdateWith= \(key,g,p,d,r,_)->(key,g,p,d,r,num 1),O.uWhere= \(key,g,_,_,_,_)->key O..== text identifier O..&& g O..== num(fromIntegral generation),O.uReturning=O.rCount}
+      setPaymentPhase c identifier Ready
+      forM_ binding $ \(oid,_)->do
+        acceptCustomerPayment c oid
+        _<-O.runUpdate c O.Update {O.uTable=S.reservations,O.uUpdateWith= \(key,a,n,_)->(key,a,n,text "obligation"),O.uWhere= \(key,_,_,phase)->key O..== text oid O..&& phase O..== text "payment",O.uReturning=O.rCount}
+        pure ()
+      audit c "preparation_cancellation_completed" (identifier<>"@"<>T.pack(show generation))
+    _->pure ()
 
 -- Fee-reservation release accepts only wholly unsigned cancellation history.
 -- Preparation retries also accept separately proved and approved Solana expiry.
@@ -2450,7 +2400,7 @@ retryGeneration :: PG.Connection -> Text -> IO (Maybe Int)
 retryGeneration=nextGeneration True
 nextGeneration :: Bool -> PG.Connection -> Text -> IO (Maybe Int)
 nextGeneration includeExpired c identifier = do
-  rows<-O.runSelect c $ O.orderBy (O.asc (\(g,_,_)->g)) $ do
+  rows<-O.runSelect c $ O.limit 9 $ O.orderBy (O.asc (\(g,_,_)->g)) $ do
     (key,g,_,_,retired,cancelled)<-S.workPreparations
     O.where_ (key O..== O.sqlStrictText identifier)
     pure (g,retired,cancelled)
@@ -2462,16 +2412,16 @@ nextGeneration includeExpired c identifier = do
     :: IO [(Text,Int64)]
   if null rows || length rows>8 || map (\(g,_,_)->g) rows/=[0..fromIntegral(length rows)-1]
     then pure Nothing else do
-      permitted<-forM rows $ \(g,retired,cancelled)->case (retired,cancelled) of
+      endings<-forM rows $ \(g,retired,cancelled)->(g,) <$> case (retired,cancelled) of
         (Nothing,1)->do
           done<-readCancellation c identifier (fromIntegral g)
-          pure (case done of Just(_,_,True)->all ((/=g).snd) attempts; _->False)
+          pure $ UnsignedCleanup (case done of Just(_,_,True)->True; _->False)
         (Just txid,0) | includeExpired->do
           expired<-expiryProof c txid
           approved<-retryReason c txid
-          pure (expired/=Nothing && approved/=Nothing && filter ((==g).snd) attempts==[(txid,g)])
-        _->pure False
-      pure $ if and permitted && all (\(_,g)->g>=0 && g<fromIntegral(length rows)) attempts then Just(length rows) else Nothing
+          pure $ SolanaRetired txid (expired/=Nothing) (approved/=Nothing)
+        _->pure OpenGeneration
+      pure (successorGeneration includeExpired endings attempts)
 
 expiryProof :: PG.Connection -> Text -> IO (Maybe Text)
 expiryProof c txid = do
@@ -2520,11 +2470,10 @@ recordSolanaExpiry c config expected proof = do
   require (recordedChain expected=="Solana" && recordedState expected `elem` ["signed","broadcast_intent"]) "invalid_solana_expiry"
   previous<-expiryProof c txid
   case previous of
-    Just old->require (old==proof) "expiry_evidence_conflict"
+    Just _->void $ checked (decideSolanaExpiry expected proof previous Nothing)
     Nothing->do
       current<-readAttempt c txid
       prepared<-readPreparation c identity identifier
-      require (current==expected && preparedGeneration prepared==recordedGeneration expected) "expiry_attempt_changed"
       family<-O.runSelect c $ do
         (key,intent,_,_,_,_)<-S.workAttempts
         expired<-Exists.exists $ do
@@ -2534,14 +2483,13 @@ recordSolanaExpiry c config expected proof = do
         O.where_ (intent O..== text identifier O..&& O.not expired)
         pure key
         :: IO [Text]
-      require (family==[txid]) "expiry_attempt_changed"
+      _<-checked (decideSolanaExpiry expected proof Nothing $ Just $ ExpiryFacts current prepared family)
       sequenceNo<-nextSequence c
       _<-O.runInsert c O.Insert {O.iTable=S.solanaExpiries,O.iRows=[(text txid,text proof,num sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
       _<-O.runUpdate c O.Update {O.uTable=S.preparations,O.uUpdateWith= \(key,g,p,d,_,cancelled)->(key,g,p,d,O.toNullable $ text txid,cancelled),O.uWhere= \(key,g,_,_,_,_)->key O..== text identifier O..&& g O..== num(fromIntegral $ recordedGeneration expected),O.uReturning=O.rCount}
       _<-O.runUpdate c O.Update {O.uTable=S.attempts,O.uUpdateWith= \r->r {S.attemptState=text "review",S.attemptObservation=O.toNullable $ text proof},O.uWhere= \r->S.attemptId r O..== text txid,O.uReturning=O.rCount}
       _<-O.runUpdate c O.Update {O.uTable=S.feeHolds,O.uUpdateWith= \(key,a,n,_)->(key,a,n,num 1),O.uWhere= \(key,_,_,_)->key O..== text identifier,O.uReturning=O.rCount}
-      _<-O.runUpdate c O.Update {O.uTable=S.intents,O.uUpdateWith= \r->r {S.intentResolved=num 1},O.uWhere= \r->S.intentId r O..== text identifier,O.uReturning=O.rCount}
-      setCustomerPaymentState c (savedPayment $ preparedView prepared) "review" "NeedsReview"
+      setPaymentPhase c identifier Ready
       audit c "solana_expiry_verified" txid
 
 approveSolanaRetry :: PG.Connection -> StorePolicy -> Int64 -> RecordedAttempt -> Text -> Text -> IO ()
@@ -2552,48 +2500,34 @@ approveSolanaRetry c config now expected reason proof = do
       identity=deploymentFingerprint $ paymentPolicy $ executionTerms config
   old<-retryReason c txid
   case old of
-    Just previous->require (previous==reason) "retry_approval_conflict"
+    Just _->void $ checked (decideSolanaRetry expected reason old Nothing)
     Nothing->do
-      metadata c identity >>= \state->require (S.paused state==1) "pause_before_operator_action"
-      fresh c now
+      operator<-readOperator c identity now
+      checked (checkOperator "pause_before_operator_action" operator)
       current<-readAttempt c txid
       expired<-expiryProof c txid
-      require (current==expected && recordedChain expected=="Solana" && recordedState expected=="review" && expired/=Nothing) "solana_retry_not_expected"
       rows<-O.runSelect c $ do
-        i<-O.selectTable S.intents
+        i<-O.selectTable S.paymentRoots
         (key,g,_,_,retired,cancelled)<-S.workPreparations
-        O.where_ (S.intentId i O..== O.sqlStrictText identifier O..&& key O..== S.intentId i)
-        pure (g,retired,cancelled,S.intentResolved i)
+        O.where_ (S.rootId i O..== O.sqlStrictText identifier O..&& key O..== S.rootId i)
+        pure (g,retired,cancelled,O.ifThenElse (S.rootPhase i O..== O.sqlStrictText "active") (O.sqlInt8 0) (O.sqlInt8 1))
         :: IO [(Int64,Maybe Text,Int64,Int64)]
-      require (not(null rows) && maximum(map (\(g,_,_,_)->g) rows)==fromIntegral(recordedGeneration expected)
-        && (fromIntegral(recordedGeneration expected),Just txid,0,1) `elem` rows && recordedGeneration expected<7) "solana_retry_not_expected"
       view<-readPayment c identity identifier
-      require (savedStatus view==PaymentReview) "solana_retry_not_expected"
-      paymentSource c (savedPayment view)
+      eligible<-paymentSourceEligible c (savedPayment view)
+      _<-checked (decideSolanaRetry expected reason Nothing $ Just $ RetryFacts operator current expired rows view eligible)
       sequenceNo<-nextSequence c
       _<-O.runInsert c O.Insert {O.iTable=S.solanaRetryApprovals,O.iRows=[(O.sqlStrictText txid,O.sqlStrictText reason,O.sqlStrictText proof,O.sqlInt8 sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-      setCustomerPaymentState c (savedPayment view) "ready" "Ready"
+      forM_ (customerFunding $ paymentFunding $ savedPayment view) $ \(order,_)->acceptCustomerPayment c order
       audit c "solana_retry_approved" txid
-
-setCustomerPaymentState :: PG.Connection -> Payment -> Text -> Text -> IO ()
-setCustomerPaymentState c outgoing obligationState orderState = do
-  let binding=case paymentFunding outgoing of Conversion oid _ _ _->Just oid; Refund oid _ _ _->Just oid; EarnedFees{}->Nothing
-      text=O.sqlStrictText
-      status=case paymentFunding outgoing of Refund{} | orderState=="Ready"->"Refunding"; _->orderState
-  forM_ binding $ \oid->do
-    _<-O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \r->r {S.obligationStatus=text obligationState},O.uWhere= \r->S.obligationId r O..== text(paymentId outgoing),O.uReturning=O.rCount}
-    _<-O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.status=text status},O.uWhere= \r->S.orderId r O..== text oid O..&& S.status r O../= text "Paid",O.uReturning=O.rCount}
-    pure ()
 
 -- Only verified unbound receipts may become operator capital. The attestation
 -- establishes ownership; it cannot supply amounts, chain effects or eligibility.
 allocateTreasury :: PG.Connection -> PaymentTerms -> Int64 -> Text -> [(Text,Amount)] -> Text -> IO Int64
 allocateTreasury c policy now receipt split reason = do
   validReason reason
-  let entries=sortOn fst split; names=map fst entries; encoded=encodeSaved entries
+  let entries=sortOn fst split; encoded=encodeSaved entries
       text=O.sqlStrictText; num=O.sqlInt8
-  require (not(null entries) && length entries<=4 && length(nub names)==length names
-    && all (`elem` ["float","backing","operating","lp"]) names && all ((>0).units.snd) entries) "invalid_treasury_allocation"
+  _<-checked (treasurySplit entries)
   old<-O.runSelect c $ do
     (key,allocation,proof,sequenceNo)<-O.selectTable S.treasuryAllocations
     O.where_ (key O..== text receipt)
@@ -2605,27 +2539,23 @@ allocateTreasury c policy now receipt split reason = do
       require (allocation==encoded && attestation==reason) "treasury_allocation_conflict"
       pure sequenceNo
     []->do
-      state<-metadata c (deploymentFingerprint $ paymentPolicy policy)
-      require (S.paused state==1) "treasury_allocation_requires_pause"
-      fresh c now
+      operator<-readOperator c (deploymentFingerprint $ paymentPolicy policy) now
+      checked (checkOperator "treasury_allocation_requires_pause" operator)
       source<-readSource c receipt
-      require (S.depositOrder source==Nothing && S.depositEligible source==1 && S.depositAllocated source==0) "receipt_not_available_for_treasury"
       currency<-parseAsset (S.depositAsset source)
       let quantity=S.depositAmount source
           (chain,prefix,key)=case currency of
             Native->("Native","native:",T.takeWhile (/=':') $ T.drop 7 receipt)
             Wrapped->("Solana","solana:",T.drop 7 receipt)
             Sol->("SolanaOperating","sol-operating:",T.drop 14 receipt)
-      require (prefix `T.isPrefixOf` receipt && not(T.null key)) "invalid_treasury_receipt_id"
-      require (currency/=Native || S.depositDepth source>=fromIntegral(nativeDepth $ paymentPolicy policy)) "treasury_receipt_underconfirmed"
-      require (sum(map (toInteger.units.snd) entries)==toInteger quantity) "treasury_allocation_amount_mismatch"
-      require (currency/=Sol || names==["operating"]) "sol_reserved_for_operating"
       linked<-O.runSelect c $ do
         row<-O.selectTable S.obligations
         O.where_ (S.obligationDeposit row O..== text receipt)
         pure (S.obligationId row)
         :: IO [Text]
-      require (null linked) "receipt_has_customer_obligation"
+      deposit<-asDeposit source
+      postings<-checked $ decideTreasury (paymentPolicy policy) entries (TreasuryFacts operator deposit (S.depositAllocated source/=0) (not $ null linked))
+      require (prefix `T.isPrefixOf` receipt && not(T.null key)) "invalid_treasury_receipt_id"
       (kind,anchor,proof)<-custodyEvent c chain key
       require (anchor==S.depositAnchor source && (kind=="unmatched_incoming" || currency==Native && kind=="incoming")) "verified_treasury_receipt_required"
       case currency of
@@ -2646,11 +2576,8 @@ allocateTreasury c policy now receipt split reason = do
           evidence=encodeSaved $ object ["ownershipAttestation" .= reason,"observation" .= envelope]
       require (T.length evidence<=8192) "treasury_proof_too_large"
       sequenceNo<-nextSequence c
-      postings<-forM entries $ \(name,n)->case lookup name accounts of
-        Just account->pure (Posting currency account $ toInteger $ units n)
-        Nothing->reject "invalid_treasury_allocation"
       post c ("treasury:"<>receipt) "operator allocation of verified treasury receipt"
-        (Posting currency Unallocated (negate $ toInteger quantity):postings)
+        postings
       inserted<-O.runInsert c O.Insert {O.iTable=S.treasuryAllocations,O.iRows=[(text receipt,text encoded,text evidence,num sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
       updated<-O.runUpdate c O.Update {O.uTable=S.deposits,O.uUpdateWith= \row->row {S.depositAllocated=num 1,S.depositState=text "treasury"},O.uWhere= \row->S.depositId row O..== text receipt,O.uReturning=O.rCount}
       require (inserted==1 && updated==1) "treasury_allocation_changed"
@@ -2676,7 +2603,7 @@ classifyTreasurySpend c policy chain key reason = do
   (anchor,raw)<-case rows of [row]->pure row; _->reject "treasury_spend_not_observed"
   observation<-decodeSaved raw
   proof<-field "proof" observation
-  economic@(currency,outflow,fee)<-checked (W.economicOutflow chain proof)
+  economic@(currency,_,_)<-checked (W.economicOutflow chain proof)
   attempts<-O.runSelect c $ do
     (tx,_,_,_,_,_)<-S.workAttempts
     O.where_ (tx O..== text key)
@@ -2694,21 +2621,14 @@ classifyTreasurySpend c policy chain key reason = do
       require (savedAnchor==anchor && effects==encodeSaved economic && attestation==reason) "treasury_spend_conflict"
       pure n
     []->do
-      let total=toInteger(units outflow); charge=toInteger(units fee)
-          costs=case currency of Native->[(Float,total-charge),(Operating,charge)]; Wrapped->[(Float,total)]; Sol->[(Operating,total)]
       booked<-balances c
-      inventory<-O.runSelect c $ do
-        (_,asset,n,phase)<-O.selectTable S.reservations
-        O.where_ (asset O..== text(T.pack $ show currency) O..&& phase O../= text "released")
-        pure n
-        :: IO [Int64]
+      inventory<-principalHeld c currency
       operating<-operatingHolds c currency
-      forM_ costs $ \(account,cost)->do
-        let held=if account==Float then sum(map toInteger inventory) else operating
-        require (cost>=0 && M.findWithDefault 0 (currency,account) booked-held>=cost) "treasury_spend_exceeds_free_allocation"
+      postings<-checked $ decideTreasurySpend economic
+        (M.findWithDefault 0 (currency,Float) booked-inventory) (M.findWithDefault 0 (currency,Operating) booked-operating)
       n<-nextSequence c
       post c ("treasury-spend:"<>chain<>":"<>key) "verified operator spend and network costs"
-        ([Posting currency account (-cost) | (account,cost)<-costs]<>[Posting currency External total])
+        postings
       let evidence=encodeSaved $ object ["ownershipAttestation" .= reason,"observation" .= observation]
       count<-O.runInsert c O.Insert {O.iTable=S.treasurySpends,O.iRows=[(text chain,text key,text anchor,text $ encodeSaved economic,text evidence,num n)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
       require (count==1) "treasury_spend_changed"
@@ -2753,11 +2673,10 @@ sourceRecovery c covered key restoration = do
     O.where_ (receipt O..== text(S.depositId deposit))
     pure row
     :: IO [(Int64,Text,Text,Int64,Text,Int64)]
-  require (S.obligationStatus obligation=="review" && case history of
-    (_,_,phase,shortfall,_,n):_->n==restoration && if covered
-      then S.depositAsset deposit=="Native" && S.depositEligible deposit==0 && phase=="missing" && shortfall==S.depositAmount deposit
-      else S.depositEligible deposit==1 && phase=="restored" && shortfall==0
-    _->False) "source_approval_not_expected"
+  source<-asDeposit deposit
+  (_,status)<-readPaymentRoot c key
+  let latest=case history of (_,_,phase,shortfall,_,n):_->Just(phase,shortfall,n); _->Nothing
+  checked (checkSourceApprovalSource covered restoration status source latest)
   cover<-if not covered then pure Nothing else do
     covers<-O.runSelect c $ do
       (n,receipt,quantity,_,_)<-S.activeSourceCovers
@@ -2783,17 +2702,14 @@ sourceRecovery c covered key restoration = do
           pure [(previous,n,hash)]
       require (length(concat matches)<=1) "source_review_context_missing"
       pure (concat matches)
-  (previous,loss,expected)<-case concat reviews of
-    row@(state,_,_):_ | state `elem` ["ready","paying"]->pure row
-    _->reject "source_review_context_missing"
+  let reviewed=case concat reviews of row:_->Just row; _->Nothing
   actual<-sourceWorkHash c key
-  require (expected==actual) "source_review_work_changed"
   pending<-O.runSelect c $ do
     (identifier,g,_,_,done)<-S.workCancellations
     O.where_ (identifier O..== text key O..&& done O..== num 0)
     pure g
     :: IO [Int64]
-  require (null pending) "preparation_cancellation_pending"
+  (previous,loss)<-checked (decideSourceApproval covered restoration $ SourceApprovalFacts status source latest cover reviewed actual (not $ null pending))
   pure (obligation,previous,loss,actual,cover)
  where field name value=either (const $ reject "invalid_source_recovery_evidence") pure (parseEither (withObject "recovery" (.: name)) value)
 
@@ -2823,8 +2739,7 @@ approveSourceRecovery c policy sourceProof now key restoration reason = do
       require (T.length proof<=32768) "source_approval_evidence_too_large"
       sequenceNo<-nextSequence c
       count<-O.runInsert c O.Insert {O.iTable=S.sourceRecoveryDecisions,O.iRows=[(text key,num restoration,num loss,text previous,text hash,text reason,text proof,num sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
-      updated<-O.runUpdate c O.Update {O.uTable=S.obligations,O.uUpdateWith= \row->row {S.obligationStatus=text previous},O.uWhere= \row->S.obligationId row O..== text key,O.uReturning=O.rCount}
-      require (count==1 && updated==1) "source_approval_changed"
+      require (count==1) "source_approval_changed"
       audit c "source_recovery_approved" key
 
 nativeSourceCandidates :: PG.Connection -> IO [W.Deposit]
@@ -2882,32 +2797,29 @@ coverSourceLoss c policy source recovery now capital earned reason proof (revisi
   case previous of
     Just saved->require (saved==(capital,earned,reason)) "source_loss_cover_conflict"
     Nothing->do
-      require (W.depositAsset source==Native && not(W.depositEligible source)) "source_loss_not_proven"
       current<-readSource c receipt >>= asDeposit
       history<-O.runSelect c $ O.limit 1 $ O.orderBy (O.desc (\(n,_,_,_,_,_)->n)) $ do
         row@(_,key,_,_,_,_)<-O.selectTable S.sourceChecks
         O.where_ (key O..== text receipt)
         pure row
         :: IO [(Int64,Text,Text,Int64,Text,Int64)]
-      require (current==source && case history of [(_,_,"missing",n,_,sequenceNo)]->n==quantity && sequenceNo==recovery; _->False) "source_loss_not_proven"
-      require (toInteger(units capital)+toInteger(units earned)==toInteger quantity) "source_loss_allocation_mismatch"
       covers<-O.runSelect c $ do
         (n,key,_,_,_)<-S.activeSourceCovers
         O.where_ (key O..== text receipt)
         pure n
         :: IO [Int64]
-      require (null covers) "source_loss_already_covered"
       verifyLossView c receipt proof report
       currentRevision<-readCustodyRevision c
-      require (matches && currentRevision==revision && at>=0 && at<=now && toInteger now-toInteger at<=60) "source_loss_custody_not_current"
       booked<-balances c
       holds<-O.runSelect c $ do
         (_,asset,n,phase)<-O.selectTable S.reservations
         O.where_ (asset O..== text "Native" O..&& phase O../= text "released")
         pure n
         :: IO [Int64]
-      require (M.findWithDefault 0 (Native,Float) booked-sum(map toInteger holds)>=toInteger(units capital)
-        && M.findWithDefault 0 (Native,Earned) booked>=toInteger(units earned)) "insufficient_loss_capital"
+      let latest=case history of [(_,_,"missing",n,_,sequenceNo)]->Just(n,sequenceNo); _->Nothing
+          checkedCustody=if matches then Just(currentRevision,revision,at) else Nothing
+      postings<-checked (decideLossCover source recovery now capital earned $ LossCoverFacts current latest (not $ null covers) checkedCustody
+        (M.findWithDefault 0 (Native,Float) booked-sum(map toInteger holds)) (M.findWithDefault 0 (Native,Earned) booked))
       let custody=object ["revision" .= revision,"checkedAt" .= at,"report" .= report]
           evidence=encodeSaved $ object ["source" .= proof,"custody" .= custody]
       require (T.length evidence<=32768) "source_loss_evidence_too_large"
@@ -2915,7 +2827,7 @@ coverSourceLoss c policy source recovery now capital earned reason proof (revisi
       count<-O.runInsert c O.Insert {O.iTable=S.sourceLossCovers,O.iRows=[(num sequenceNo,text receipt,num recovery,num quantity,num $ units capital,num $ units earned,text reason,text evidence)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
       require (count==1) "source_loss_cover_insert_failed"
       post c ("source-loss-cover:"<>T.pack(show sequenceNo)) "operator capital covers verified source shortfall"
-        [Posting Native Float (negate $ toInteger $ units capital),Posting Native Earned (negate $ toInteger $ units earned),Posting Native SourceDeficit (toInteger quantity)]
+        postings
       audit c "source_loss_covered" receipt
 
 -- Both capital coverage and payment approval bind to the same scanned outpoint
@@ -3013,20 +2925,20 @@ replacementDecision c parent fee reason = do
 -- a bounded replacement of the current, already broadcast family member.
 replacementDraftContext :: PG.Connection -> Text -> Int64 -> Text -> Amount -> IO [(RecordedAttempt,N.NativeSigned)]
 replacementDraftContext c identity now txid fee = do
-  metadata c identity >>= \state->require (S.paused state==1) "pause_before_operator_action"
+  operator<-readOperator c identity now
+  require (operatorPaused operator) "pause_before_operator_action"
   current<-sendContext c identity txid
   require (recordedChain current=="Native" && recordedState current=="broadcast_intent"
     && maybe False (>0) (recordedSequence current)) "native_replacement_not_expected"
   family<-nativeFamily c identity (recordedPayment current)
-  require (fst(last family)==current && length family<8) "native_replacement_not_current"
+  checked (checkReplacementParent current $ map fst family)
   _<-checked (N.replacementOutputs (snd $ last family) fee)
   drafts<-O.runSelect c $ do
     (n,parent,_,_,_,_)<-S.replacementDrafts
     O.where_ (O.in_ (map (O.sqlStrictText.signedId.recordedSigned.fst) family) parent)
     pure n
     :: IO [Int64]
-  require (length drafts<7) "native_replacement_draft_limit"
-  fresh c now
+  checked (checkReplacementDraft operator current (map fst family) $ length drafts)
   pure family
 
 saveReplacementDraft :: PG.Connection -> PaymentTerms -> Int64 -> RecordedAttempt -> N.NativeDraft -> Text -> IO Int64
@@ -3130,14 +3042,10 @@ replacementSigning c identity backed now decision = do
   parent<-readAttempt c txid
   let identifier=recordedPayment parent
   prepared<-readPreparation c identity identifier
-  require (recordedChain parent=="Native" && recordedState parent=="broadcast_intent"
-    && maybe False (>0) (recordedSequence parent) && recordedGeneration parent==preparedGeneration prepared
-    && savedStatus(preparedView prepared)==PaymentPaying && recordedFee parent==preparedFee prepared) "native_replacement_not_expected"
-  paymentSource c (savedPayment $ preparedView prepared)
+  eligible<-paymentSourceEligible c (savedPayment $ preparedView prepared)
   family<-nativeFamily c identity identifier
-  require (fst(last family)==parent) "native_replacement_not_current"
   currentHash<-paymentWorkHash c identifier
-  require (currentHash==hash) "native_replacement_work_changed"
+  checked (checkReplacementSigning prepared parent (map fst family) eligible (hash,currentHash))
   draft<-decodeSaved raw
   require (units(N.draftFee draft)==fee) "native_replacement_draft_changed"
   checked (N.validateNativeReplacementDraft (map snd family) (N.draftFee draft) draft)
@@ -3178,12 +3086,12 @@ nativeSettlementCandidates :: PG.Connection -> IO [RecordedAttempt]
 nativeSettlementCandidates c = do
   ids<-O.runSelect c $ O.limit 1001 $ O.orderBy (O.asc id) $ do
     saved<-O.selectTable S.attempts
-    intent<-O.selectTable S.intents
-    O.where_ (S.attemptIntent saved O..== S.intentId intent O..&& S.intentChain intent O..== text "Native"
+    intent<-O.selectTable S.paymentRoots
+    O.where_ (S.attemptIntent saved O..== S.rootId intent O..&& S.rootChain intent O..== text "Native"
       O..&& S.attemptState saved O..== text "settled")
     -- CASE protects the native-only inner codec even if PostgreSQL evaluates
     -- this expression before its WHERE filters (Solana proofs have another shape).
-    let proof=json $ O.ifThenElse (S.intentChain intent O..== text "Native" O..&& S.attemptState saved O..== text "settled")
+    let proof=json $ O.ifThenElse (S.rootChain intent O..== text "Native" O..&& S.attemptState saved O..== text "settled")
           (O.fromNullable (text "{}") (json (O.fromNullable (text "{}") $ S.attemptObservation saved) O..->> text "proof")) (text "{}")
         anchor=O.fromNullable (text "") (proof O..->> text "blockhash")
         depth=integer (proof O..->> text "requiredDepth") 0
@@ -3225,59 +3133,45 @@ recordNativeSettlement c identity expected result = do
   case result of
     NativeWinnerChanged expectedFamily winnerId costs proof->do
       family<-nativeFamily c identity identifier
-      require (map fst family==expectedFamily && winnerId/=txid && actual `elem` map fst family) "native_replacement_family_changed"
       (winner,signed)<-case [(a,s)|(a,s)<-family,signedId(recordedSigned a)==winnerId] of
         [member]->pure member; _->reject "native_family_winner_missing"
-      require (recordedState winner `elem` ["broadcast_intent","review"] && maybe False (>0) (recordedSequence winner)) "unrecorded_broadcast_observed"
       oldSigned<-decodeSaved (signedPolicy $ recordedSigned actual)
       oldCosts<-settledCosts actual oldSigned
       hash<-nativeSettlementProof c winner signed costs proof
-      let saved=encodeSaved $ object ["costs" .= costs,"proof" .= proof]
-          delta=toInteger(units $ W.networkFee costs)-toInteger(units $ W.networkFee oldCosts)
-      require (T.length saved<=32768 && delta/=0 && abs delta<=toInteger(maxBound::Int64)) "invalid_native_settlement"
+      effect<-checked (decideNativeWinner expectedFamily winnerId costs proof $ NativeWinnerFacts actual (map fst family) oldCosts)
+      let saved=changedObservation effect; delta=changedFee effect
       n<-nextSequence c
       inserted<-O.runInsert c O.Insert {O.iTable=S.nativeWinnerChanges,
         O.iRows=[(num n,text txid,text winnerId,text previous,text saved,text hash,num $ fromInteger delta)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
       require (inserted==1) "native_winner_record_failed"
       post c ("native-winner-fee:"<>T.pack(show n)) "canonical native winner fee adjustment"
-        [Posting Native Operating (negate delta),Posting Native External delta]
+        (winnerPostings effect)
       oldChanged<-O.runUpdate c O.Update {O.uTable=S.attempts,O.uUpdateWith= \r->r {S.attemptState=text "review"},O.uWhere= \r->S.attemptId r O..== text txid,O.uReturning=O.rCount}
       newChanged<-O.runUpdate c O.Update {O.uTable=S.attempts,O.uUpdateWith= \r->r {S.attemptState=text "settled",S.attemptObservation=O.toNullable $ text saved},O.uWhere= \r->S.attemptId r O..== text winnerId,O.uReturning=O.rCount}
       require (oldChanged==1 && newChanged==1) "native_winner_context_changed"
-      view<-readPayment c identity identifier
-      let customer=case paymentFunding(savedPayment view) of Conversion order _ _ _->Just order; Refund order _ _ _->Just order; EarnedFees{}->Nothing
-      forM_ customer $ \order->do
-        _<-O.runUpdate c O.Update {O.uTable=S.orders,O.uUpdateWith= \r->r {S.payoutTx=O.toNullable $ text winnerId},
-          O.uWhere= \r->S.orderId r O..== text order O..&& O.fromNullable (text "") (S.payoutTx r) O..== text txid,O.uReturning=O.rCount}
-        pure ()
+      changed<-O.runUpdate c O.Update {O.uTable=S.paymentRoots,
+        O.uUpdateWith= \r->r {S.rootWinner=O.toNullable $ text winnerId},
+        O.uWhere= \r->S.rootId r O..== text identifier O..&& O.matchNullable (O.sqlBool False) (O..== text txid) (S.rootWinner r),O.uReturning=O.rCount}
+      require (changed==1) "native_winner_context_changed"
       pauseScan c "native_winner_changed"
       audit c "native_winner_changed" (txid<>":"<>winnerId)
     _->do
-      (state,saved)<-case result of
-        NativeConfirming->pure ("confirming",encodeSaved $ object ["reason" .= ("native_confirmation_policy_pending"::Text)])
-        NativeUnavailable reason->do
-          require (not(T.null reason) && T.length reason<=160) "invalid_native_recovery_reason"
-          pure ("unavailable",encodeSaved $ object ["reason" .= reason])
+      case result of
         NativeReconfirmed costs proof->do
           family<-nativeFamily c identity identifier
           signed<-case [s|(a,s)<-family,a==actual] of [s]->pure s; _->reject "native_settlement_changed"
           oldCosts<-settledCosts actual signed
           require (costs==oldCosts) "native_recovery_cost_changed"
           _<-nativeSettlementProof c actual signed costs proof
-          pure ("reconfirmed",encodeSaved $ object ["costs" .= costs,"proof" .= proof])
-      validateSavedJson 32768 saved
+          pure ()
+        _->pure ()
       old<-O.runSelect c $ do
         (tx,_,status,proof,_)<-S.nativeRecoveryDetails
         O.where_ (tx O..== text txid)
         pure (status,proof)
         :: IO [(Text,Text)]
-      let base value=case value of Object fields->Object $ foldr KM.delete fields ["rebroadcastRecovery","operatorReason","rebroadcastProof"]; other->other
-      unchanged<-case old of
-        [(status,proof)] | status==state->(==) <$> (base <$> (decodeSaved proof :: IO Value)) <*> (decodeSaved saved :: IO Value)
-        []->pure (state=="reconfirmed" && previous==saved)
-        [_]->pure False
-        _->reject "duplicate_native_recovery_state"
-      unless unchanged $ do
+      decision<-checked (decideNativeReview result previous old)
+      forM_ decision $ \(state,saved)->do
         n<-nextSequence c
         _<-O.runInsert c O.Insert {O.iTable=S.nativeRecoveryRows,O.iRows=[(text txid,text previous,text state,text saved,num n)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
         when (state=="reconfirmed") $ do
@@ -3325,12 +3219,12 @@ nativeProofField key value=either (const $ reject "invalid_native_settlement") p
 nativeResolved :: PG.Connection -> RecordedAttempt -> IO ()
 nativeResolved c saved = do
   context<-O.runSelect c $ do
-    intent<-O.selectTable S.intents
+    intent<-O.selectTable S.paymentRoots
     (key,asset,quantity,released)<-O.selectTable S.feeHolds
-    O.where_ (S.intentId intent O..== O.sqlStrictText(recordedPayment saved) O..&& key O..== S.intentId intent)
-    pure (S.intentResolved intent,asset,quantity,released)
-    :: IO [(Int64,Text,Int64,Int64)]
-  require (context==[(1,"Native",units(recordedFee saved),1)]) "native_winner_context_changed"
+    O.where_ (S.rootId intent O..== O.sqlStrictText(recordedPayment saved) O..&& key O..== S.rootId intent)
+    pure (S.rootPhase intent,S.rootWinner intent,asset,quantity,released)
+    :: IO [(Text,Maybe Text,Text,Int64,Int64)]
+  require (context==[("settled",Just(signedId $ recordedSigned saved),"Native",units(recordedFee saved),1)]) "native_winner_context_changed"
 
 -- A rebroadcast repairs one already-booked native effect. It cannot reopen
 -- principal, acquire new inputs or turn an unresolved intent into a payment.
@@ -3343,10 +3237,8 @@ nativeRebroadcastContext c identity txid = do
     && maybe False (>0) (recordedSequence saved)) "native_rebroadcast_payment_changed"
   nativeResolved c saved
   view<-readPayment c identity (recordedPayment saved)
-  require (savedStatus view==PaymentPaid) "native_rebroadcast_payment_changed"
-  paymentSource c (savedPayment view)
+  eligible<-paymentSourceEligible c (savedPayment view)
   family<-nativeFamily c identity (recordedPayment saved)
-  require (saved `elem` map fst family) "native_replacement_family_changed"
   reviews<-O.runSelect c $ do
     (key,previous,status,proof,n)<-S.nativeRecoveryDetails
     O.where_ (key O..== O.sqlStrictText txid)
@@ -3355,9 +3247,7 @@ nativeRebroadcastContext c identity txid = do
   (previous,status,raw,n)<-case reviews of [row]->pure row; _->reject "native_rebroadcast_review_missing"
   value<-decodeSaved raw
   reason<-nativeProofField "reason" value :: IO Text
-  require (recordedObservation saved==Just previous
-    && (status=="confirming" && reason=="native_confirmation_policy_pending"
-      || status=="unavailable" && reason=="native_settled_payment_unseen")) "native_rebroadcast_not_missing"
+  checked (checkRebroadcast saved $ RebroadcastFacts (S.paused state==1) view eligible (map fst family) (previous,status,reason))
   pure (saved,family,status,value,n)
 
 nativeRebroadcastDecision :: PG.Connection -> Text -> Int64 -> Text -> IO (Maybe Int64)

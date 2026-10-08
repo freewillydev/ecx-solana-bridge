@@ -53,9 +53,9 @@ intentIds = O.table "intents" (O.requiredTableField "id")
 
 data OrderF t n nt nn = Order
   { orderId :: t, capabilityHash :: t, idempotencyKey :: t, requestHash :: t
-  , requestJson :: t, quoteJson :: t, policyJson :: t, status :: t
+  , requestJson :: t, quoteJson :: t, policyJson :: t, admissionState :: t
   , deadline :: n, graceDeadline :: n, instruction :: nt, instructionSequence :: nn
-  , payoutTx :: nt, instructionIssued :: n } deriving (Eq,Show)
+  , instructionIssued :: n } deriving (Eq,Show)
 $(makeAdaptorAndInstance "pOrder" ''OrderF)
 type Order = OrderF Text Int64 (Maybe Text) (Maybe Int64)
 type OrderFields = OrderF TextField IntField (O.FieldNullable O.SqlText) (O.FieldNullable O.SqlInt8)
@@ -64,10 +64,10 @@ orders = O.table "orders" $ pOrder Order
   { orderId=O.requiredTableField "id", capabilityHash=O.requiredTableField "capability_hash"
   , idempotencyKey=O.requiredTableField "idempotency_key", requestHash=O.requiredTableField "request_hash"
   , requestJson=O.requiredTableField "request_json", quoteJson=O.requiredTableField "quote_json"
-  , policyJson=O.requiredTableField "policy_json", status=O.requiredTableField "status"
+  , policyJson=O.requiredTableField "policy_json", admissionState=O.requiredTableField "admission_state"
   , deadline=O.requiredTableField "deadline", graceDeadline=O.requiredTableField "grace_deadline"
   , instruction=O.requiredTableField "instruction", instructionSequence=O.requiredTableField "instruction_sequence"
-  , payoutTx=O.requiredTableField "payout_tx", instructionIssued=O.requiredTableField "instruction_issued" }
+  , instructionIssued=O.requiredTableField "instruction_issued" }
 
 data DepositF t n nt = Deposit
   { depositId :: t, depositOrder :: nt, depositAsset :: t, depositAmount :: n
@@ -86,7 +86,7 @@ deposits = O.table "deposits" $ pDeposit Deposit
 
 data ObligationF t n = Obligation
   { obligationId :: t, obligationOrder :: t, obligationDeposit :: t, obligationKind :: t
-  , obligationAsset :: t, obligationAmount :: n, obligationRecipient :: t, obligationStatus :: t } deriving (Eq,Show)
+  , obligationAsset :: t, obligationAmount :: n, obligationRecipient :: t } deriving (Eq,Show)
 $(makeAdaptorAndInstance "pObligation" ''ObligationF)
 type Obligation = ObligationF Text Int64
 type ObligationFields = ObligationF TextField IntField
@@ -95,9 +95,12 @@ obligations = O.table "obligations" $ pObligation Obligation
   { obligationId=O.requiredTableField "id", obligationOrder=O.requiredTableField "order_id"
   , obligationDeposit=O.requiredTableField "deposit_id", obligationKind=O.requiredTableField "kind"
   , obligationAsset=O.requiredTableField "asset", obligationAmount=O.requiredTableField "amount"
-  , obligationRecipient=O.requiredTableField "recipient", obligationStatus=O.requiredTableField "status" }
+  , obligationRecipient=O.requiredTableField "recipient" }
 
 -- Read projections for recovery overlays. They grant no update capability.
+obligationReceipts :: O.Select (TextField,TextField)
+obligationReceipts = O.selectTable $ O.table "obligations" $ p2
+  (O.requiredTableField "id",O.requiredTableField "deposit_id")
 nativeRecovery, sourceRecovery :: O.Select (TextField,TextField)
 nativeRecovery = O.selectTable $ O.table "native_payment_recovery_state" $ p2
   (O.requiredTableField "txid",O.requiredTableField "state")
@@ -107,8 +110,6 @@ accountedLosses :: O.Select TextField
 accountedLosses = O.selectTable $ O.table "accounted_source_losses" (O.requiredTableField "deposit_id")
 orderDeposits :: O.Select (TextField,O.FieldNullable O.SqlText)
 orderDeposits = fmap (\row->(depositId row,depositOrder row)) (O.selectTable deposits)
-orderObligations :: O.Select (TextField,TextField,TextField,TextField)
-orderObligations = fmap (\row->(obligationId row,obligationOrder row,obligationDeposit row,obligationStatus row)) (O.selectTable obligations)
 intentObligations :: O.Select (TextField,O.FieldNullable O.SqlText)
 attemptIntents :: O.Select (TextField,TextField)
 intentObligations = O.selectTable $ O.table "intents" $ p2
@@ -163,9 +164,6 @@ observationEvidence = O.table "observation_evidence" $ p4
   (O.requiredTableField "hash",O.requiredTableField "chain",O.requiredTableField "event_id",O.requiredTableField "evidence_json")
 
 -- Fixed recovery projections. Only closed operations execute these queries.
-workIntents :: O.Select (TextField,TextField,IntField,O.FieldNullable O.SqlText)
-workIntents = O.selectTable $ O.table "intents" $ p4
-  (O.requiredTableField "id",O.requiredTableField "chain",O.requiredTableField "resolved",O.requiredTableField "common_input")
 workPreparations :: O.Select (TextField,IntField,TextField,O.FieldNullable O.SqlText,O.FieldNullable O.SqlText,IntField)
 workPreparations = O.selectTable $ O.table "preparations" $ p6
   (O.requiredTableField "intent_id",O.requiredTableField "generation",O.requiredTableField "policy_json",O.requiredTableField "draft_json",O.requiredTableField "retired_txid",O.requiredTableField "cancelled")
@@ -209,18 +207,22 @@ chainEvents = O.table "chain_events" $ pChainEvent ChainEvent
   , eventKind=O.requiredTableField "kind",eventAnchor=O.requiredTableField "anchor",eventHash=O.requiredTableField "evidence_hash"
   , eventFirstSeen=O.requiredTableField "first_seen",eventLastSeen=O.requiredTableField "last_seen",eventReview=O.requiredTableField "needs_review" }
 
--- Exactly one immutable funding source; no synthetic order for earned fees.
-data IntentF t nt n = Intent
-  { intentId :: t, intentObligation :: nt, intentWithdrawal :: nt
-  , intentChain :: t, intentCommon :: nt, intentResolved :: n } deriving (Eq,Show)
-$(makeAdaptorAndInstance "pIntent" ''IntentF)
-type Intent = IntentF Text (Maybe Text) Int64
-type IntentFields = IntentF TextField (O.FieldNullable O.SqlText) IntField
-intents :: O.Table IntentFields IntentFields
-intents = O.table "intents" $ pIntent Intent
-  { intentId=O.requiredTableField "id", intentObligation=O.requiredTableField "obligation_id"
-  , intentWithdrawal=O.requiredTableField "withdrawal_id", intentChain=O.requiredTableField "chain"
-  , intentCommon=O.requiredTableField "common_input", intentResolved=O.requiredTableField "resolved" }
+-- Authoritative economic phase with exactly one immutable funding source.
+data PaymentRootF t nt nn = PaymentRoot
+  { rootId :: t, rootObligation :: nt, rootWithdrawal :: nt, rootDeposit :: nt, rootChain :: t
+  , rootCommon :: nt, rootPhase :: t, rootGeneration :: nn
+  , rootWinner :: nt, rootSettlementEvent :: nt } deriving (Eq,Show)
+$(makeAdaptorAndInstance "pPaymentRoot" ''PaymentRootF)
+type PaymentRoot = PaymentRootF Text (Maybe Text) (Maybe Int64)
+type PaymentRootFields = PaymentRootF TextField (O.FieldNullable O.SqlText) (O.FieldNullable O.SqlInt8)
+paymentRoots :: O.Table PaymentRootFields PaymentRootFields
+paymentRoots = O.table "intents" $ pPaymentRoot PaymentRoot
+  { rootId=O.requiredTableField "id", rootObligation=O.requiredTableField "obligation_id"
+  , rootWithdrawal=O.requiredTableField "withdrawal_id", rootDeposit=O.requiredTableField "deposit_id"
+  , rootChain=O.requiredTableField "chain"
+  , rootCommon=O.requiredTableField "common_input", rootPhase=O.requiredTableField "phase"
+  , rootGeneration=O.requiredTableField "active_generation", rootWinner=O.requiredTableField "settled_txid"
+  , rootSettlementEvent=O.requiredTableField "settlement_event_id" }
 
 preparations :: O.Table (TextField,IntField,TextField,O.FieldNullable O.SqlText,O.FieldNullable O.SqlText,IntField)
                        (TextField,IntField,TextField,O.FieldNullable O.SqlText,O.FieldNullable O.SqlText,IntField)

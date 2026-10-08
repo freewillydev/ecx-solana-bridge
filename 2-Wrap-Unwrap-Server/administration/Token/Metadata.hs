@@ -1,6 +1,7 @@
 -- Narrow fungible-token metadata policy; no royalties, creators or authority changes.
 module Token.Metadata (Terms(..),program,checkTerms,validate,inspect) where
 import Bridge.SolanaMessage
+import Bridge.Domain (parseNatural)
 import Control.Monad (unless)
 import Data.Aeson
 import Data.Binary.Get
@@ -12,7 +13,6 @@ import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
 import Data.Word (Word64)
-import Text.Read (readMaybe)
 
 data Terms = Terms {create :: Bool,address :: Text,name :: Text,symbol :: Text,uri :: Text,maxCost :: Word64}
   deriving (Eq,Show)
@@ -23,8 +23,8 @@ instance FromJSON Terms where
   parseJSON=withObject "metadata" $ \o->do
     unless (length o==6) (fail "invalid_metadata_fields")
     raw<-o .: "max_cost"
-    cap<-case readMaybe (T.unpack raw) :: Maybe Integer of
-      Just n | n>0 && n<=toInteger(maxBound::Word64) && T.pack(show n)==raw->pure(fromInteger n)
+    cap<-case parseNatural (toInteger(maxBound::Word64)) raw of
+      Just n | n>0->pure(fromInteger n)
       _->fail "invalid_metadata_cost"
     m<-Terms <$> o .: "create" <*> o .: "address" <*> o .: "name" <*> o .: "symbol" <*> o .: "uri" <*> pure cap
     either (fail . T.unpack) (const $ pure m) (checkTerms m)

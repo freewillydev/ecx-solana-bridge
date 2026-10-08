@@ -13,14 +13,12 @@ import Control.Monad (unless)
 import Data.Aeson
 import Data.Aeson.Types (parseEither,Parser)
 import qualified Data.ByteString.Lazy as L
-import qualified Data.ByteString.Char8 as B
-import Data.Char (toLower)
 import Data.Int (Int64)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Data.Word (Word64)
 import GHC.Generics (Generic)
-import Network.HTTP.Client (parseRequest,secure,host,closeManager)
+import Network.HTTP.Client (parseRequest,secure,closeManager)
 import System.FilePath (isAbsolute,normalise)
 
 data Status = Pending | Finalized | Failed | Unseen | ExpiredUnseen deriving (Eq,Show)
@@ -34,13 +32,8 @@ name ExpiredUnseen="expired-unseen"
 
 -- Callers first verify the archived signatures and their closed operation intent.
 inspectStatus :: Text -> String -> Text -> Text -> Text -> IO Status
-inspectStatus genesis endpoint signature bytes blockhash=do
-  transport<-parseRequest endpoint
-  require (secure transport) "administration_requires_https"
-  bracket newRpcManager closeManager $ \manager->do
-    let call=rpc manager endpoint Nothing
-    actual<-call "getGenesisHash" [] >>= parseValue parseJSON
-    require (actual==genesis) "wrong_administration_network"
+inspectStatus genesis endpoint signature bytes blockhash=
+  withSolanaRpc endpoint genesis ("administration_requires_https","wrong_administration_network") $ \call->do
     values<-call "getSignatureStatuses" [toJSON [signature],object ["searchTransactionHistory" .= True]] >>= fieldValue "value"
     status<-case values of [value]->pure value; _->reject "invalid_administration_status"
     transaction<-call "getTransaction" [toJSON signature,object ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text),"maxSupportedTransactionVersion" .= (0::Int)]]
@@ -138,9 +131,7 @@ newRecoveryWith call genesis payer fee root=do
 
 renewRecovery :: String -> String -> Text -> Text -> Text -> Recovery -> IO Recovery
 renewRecovery primary verifier signature bytes parent old=do
-  first<-parseRequest primary; second<-parseRequest verifier
-  let hostname=B.dropWhileEnd (=='.') . B.map toLower . host
-  require (secure first && secure second && hostname first/=hostname second) "independent_https_providers_required"
+  independentHttps primary verifier
   either reject pure (validateRecovery (recoveryGenesis old) (recoveryPayer old) (recoveryFeeLimit old) (recoveryBlockhash old) old)
   require (recoveryGeneration old<7) "administration_generation_limit"
   -- A throttled verifier may take longer than the primary's keep-alive timeout.

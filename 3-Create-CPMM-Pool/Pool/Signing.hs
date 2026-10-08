@@ -9,9 +9,9 @@ import qualified Pool.Liquidity as Q
 import Bridge.AdminKey (readKey,readPrivate,savePrivate,newPrivatePath,withFamily)
 import Bridge.Identity (digest)
 import Bridge.Error (require,reject)
+import Bridge.Domain (parseNatural)
 import Bridge.RPC
 import Bridge.SolanaMessage (Transaction(..),Message(..),decodePoolTransaction,decodePositionTransaction,decodeLiquidityTransaction,base58)
-import Control.Exception (bracket)
 import Control.Monad (unless,when,zipWithM)
 import Crypto.Error (CryptoFailable(..))
 import qualified Crypto.PubKey.Ed25519 as Ed
@@ -25,9 +25,7 @@ import qualified Data.ByteString.Lazy as L
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import Data.Word (Word64)
-import Network.HTTP.Client (parseRequest,secure,closeManager)
 import System.Posix.Files (fileExist)
-import Text.Read (readMaybe)
 
 -- Closed alternatives share execution without a sign-arbitrary-message operation.
 data Action = Creation Create Prepared | Opening P.Request P.Prepared | Liquidity Q.Request Q.Prepared deriving (Eq,Show)
@@ -56,8 +54,8 @@ instance FromJSON Saved where
     fee<-o .: "feeLimit" >>= amount; cost<-o .: "costLimit" >>= amount
     Saved selected operation fee cost <$> o .: "signature" <*> o .: "transaction" <*> pure recovery
    where
-    amount text=case readMaybe text :: Maybe Integer of
-      Just n | n>0 && n<=toInteger(maxBound::Word64) && show n==text->pure(fromInteger n)
+    amount text=case parseNatural (toInteger(maxBound::Word64)) text of
+      Just n | n>0->pure(fromInteger n)
       _->fail "invalid pool cost limit"
 
 validateSaved :: Saved -> Either Text ()
@@ -232,14 +230,9 @@ signSaved library endpoint keyfiles draft=do
 submitSaved :: FilePath -> String -> Saved -> IO Value
 submitSaved library endpoint saved=do
   checkDerivation library (network saved) (action saved)
-  transport<-parseRequest endpoint
-  require (secure transport) "pool_requires_https"
-  bracket newRpcManager closeManager $ \manager->do
-    let call=rpc manager endpoint Nothing
-        name=identifier saved
+  withSolanaRpc endpoint (networkGenesis $ network saved) ("pool_requires_https","wrong_pool_network") $ \call->do
+    let name=identifier saved
         response state=object ["signature" .= name,"status" .= (state::Text)]
-    genesis<-call "getGenesisHash" [] >>= parseValue parseJSON
-    require (genesis==networkGenesis(network saved)) "wrong_pool_network"
     values<-call "getSignatureStatuses" [toJSON [name],object ["searchTransactionHistory" .= True]] >>= fieldValue "value" :: IO [Value]
     status<-case values of [value]->pure value; _->reject "invalid_pool_status"
     if status==Null then do

@@ -2,9 +2,10 @@
 module Bridge.Admission (checkOrderAdmission,checkSolanaQuoteWith,checkSolanaPayoutWith) where
 import Bridge.Domain (Direction(..),units,amount)
 import qualified Bridge.Domain as D
+import Bridge.Lifecycle (quoteOrder)
 import Bridge.Wire (OrderRequest(..),PaymentTerms(..),CostLimits(..),PolicySnapshot(..))
 import Bridge.Observer (ObserverSettings(..))
-import Bridge.Store (StorePolicy(..),OrderLimits(..))
+import Bridge.Store (StorePolicy(..))
 import qualified Bridge.Native as N
 import Bridge.NativePayment (previewNativePayment)
 import qualified Bridge.Solana as S
@@ -30,9 +31,7 @@ checkOrderAdmission manager settings config store sdk request = do
     && deploymentFingerprint(paymentPolicy $ executionTerms store)==fingerprint config
     && nativeDepth(paymentPolicy $ executionTerms store)==defaultNativeDepth settings
     && savedSolanaFee costs==maxSolFee config && savedSolanaRent costs==maxSolAccountRent config) "payment_profile_mismatch"
-  require (input request>=orderMinimum limits && input request<=orderMaximum limits) "amount_outside_limits"
-  require (sourceOwner request==Nothing && (wrapping || T.null(refund request))) "invalid_connection_free_order"
-  terms<-either reject pure (D.quote $ input request)
+  terms<-either reject pure (quoteOrder limits request)
   _<-N.nativeIdentity manager native
   previewNativePayment (N.nativeCall manager native) (N.profile native) (defaultNativeDepth settings)
     (savedNativeFee costs) (if wrapping then refund request else recipient request) (if wrapping then D.gross terms else D.net terms)

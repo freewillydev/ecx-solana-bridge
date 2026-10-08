@@ -2,7 +2,7 @@
 -- are private; adapters validate addresses and the store verifies funding proof.
 {-# LANGUAGE DeriveAnyClass, DerivingStrategies, PatternSynonyms #-}
 module Bridge.Domain
-  ( Amount, units, amount, parseUnits, parseCoins, renderCoins
+  ( Amount, units, amount, parseUnits, parseCoins, renderCoins, parseNatural
   , Asset(..), Direction(..), sourceAsset, destinationAsset
   , Quote, gross, fee, net, quote, historicalQuote
   , Funding(Conversion,Refund,EarnedFees), conversion, refund, earnedFees
@@ -28,9 +28,17 @@ amount :: Integer -> Either Text Amount
 amount n | n >= 0 && n <= toInteger (maxBound :: Int64) = Right (Amount (fromInteger n))
          | otherwise = Left "amount_out_of_range"
 parseUnits :: Text -> Either Text Amount
-parseUnits t
-  | T.null t || T.length t > 19 || not (T.all asciiDigit t) || (T.length t > 1 && T.head t == '0') = Left "invalid_base_units"
-  | otherwise = maybe (Left "invalid_base_units") amount (readMaybe (T.unpack t))
+parseUnits = maybe (Left "invalid_base_units") amount . parseNatural (10^(19::Int)-1)
+
+-- Reject oversized/noncanonical text before allocating an Integer. The explicit
+-- bound keeps SPL u64, liquidity u128 and signed ledger units distinct.
+parseNatural :: Integer -> Text -> Maybe Integer
+parseNatural bound t
+  | bound<0 || T.null t || T.length t>length(show bound) || not(T.all asciiDigit t)
+    || (T.length t>1 && T.head t=='0') = Nothing
+  | otherwise = case readMaybe (T.unpack t) of
+      Just n | n<=bound -> Just n
+      _ -> Nothing
 asciiDigit :: Char -> Bool
 asciiDigit c = c >= '0' && c <= '9'
 parseCoins :: Text -> Either Text Amount

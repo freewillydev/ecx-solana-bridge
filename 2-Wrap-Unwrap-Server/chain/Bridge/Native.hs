@@ -5,12 +5,16 @@ module Bridge.Native
   , NativeRecovery(..), evalNativeRecoveryWith
   , recoverNativeAddressWith, nativeHistory, nativeAmount, nativeNumber, signetChallenge ) where
 
+import qualified Bridge.AdminKey as Private
+import Bridge.Wallet (nativeDescriptors,protectWalletProcess)
+import qualified Data.Text.Encoding as TE
 import Bridge.Wire (Profile(..))
 import Bridge.RPC
 import Bridge.Error
+import Bridge.File (withHandle,readBounded,hashHandle)
 import Bridge.Domain
-import Control.Exception (IOException,bracket,catch,throwIO,try)
-import Crypto.Hash (Context,Digest,SHA256,hashInit,hashUpdate,hashFinalize)
+import Control.Monad (when)
+import Control.Exception (IOException,bracket,catch,throwIO,try,finally)
 import Data.Aeson
 import Data.Bits ((.&.))
 import qualified Data.Aeson.Key as K
@@ -23,7 +27,7 @@ import Data.Scientific (Scientific, coefficient, base10Exponent)
 import Data.Text (Text)
 import qualified Data.Text as T
 import Network.HTTP.Client (Manager,parseRequest,host,path,queryString,requestHeaders)
-import System.IO (Handle,withBinaryFile,IOMode(ReadMode),hClose,hFlush)
+import System.IO (withBinaryFile,IOMode(ReadMode),hFlush)
 import System.FilePath (isAbsolute,normalise,takeDirectory,takeFileName,(</>))
 import System.IO.Error (isDoesNotExistError)
 import System.Posix.Files
@@ -184,6 +188,7 @@ verifyNativeBoundaryWith call = mapM_ denied
 -- and this evaluator must share a private staging directory under the same UID.
 -- An encrypted wallet still requires its separately retained unlock material.
 data NativeRecovery a where
+  InitializeNativeWallet :: FilePath -> Maybe FilePath -> Bool -> Int -> NativeRecovery Text
   BackupNativeWallet :: FilePath -> NativeRecovery FilePath
   RestoreNativeWallet :: FilePath -> NativeRecovery ()
   InspectNativeWalletBackup :: FilePath -> NativeRecovery (Text,FilePath,Text)
@@ -192,6 +197,71 @@ evalNativeRecoveryWith :: (Bool -> Text -> [Value] -> IO Value) -> NativeSetting
 evalNativeRecoveryWith call c operation = do
   validateNativeSettings c
   case operation of
+    InitializeNativeWallet phraseFile unlockFile restoring rangeEnd -> Private.withFamily phraseFile $ do
+      protectWalletProcess
+      require (rangeEnd>=999 && rangeEnd<=1000000) "invalid_native_recovery_range"
+      -- Phrase stays in this process. RPC receives only derived descriptors.
+      phrase<-BC.unpack . BC.strip <$> Private.readPrivate phraseFile
+      privateDescriptors<-either reject pure (nativeDescriptors (profile c==L2LSignetDevnet) phrase)
+      chain<-nativeIdentityWith call c
+      when restoring $ do
+        pruned<-fieldValue "pruned" chain
+        require (not pruned) "native_seed_restore_requires_full_chain_history"
+      infos<-mapM (\desc->call False "getdescriptorinfo" [String desc]) privateDescriptors
+      publicDescriptors<-mapM (fieldValue "descriptor") infos :: IO [Text]
+      checksums<-mapM (fieldValue "checksum") infos :: IO [Text]
+      let expected=zip publicDescriptors [False,True]
+          checkpoint=phraseFile<>".initialized.json"
+          verify=do
+            _<-nativeWalletKeysWith call c
+            entries<-call True "listdescriptors" [Bool False] >>= fieldValue "descriptors" :: IO [Value]
+            actual<-mapM (\entry->do
+              active<-fieldValue "active" entry
+              require active "native_seed_inactive_descriptor"
+              (,) <$> fieldValue "desc" entry <*> fieldValue "internal" entry) entries
+            require (length actual==2 && all (`elem` actual) expected) "native_seed_wallet_mismatch"
+          binding address=object ["profile" .= profile c,"wallet" .= nativeWallet c
+            ,"checkpoint" .= nativeCheckpointHash c,"rangeEnd" .= rangeEnd,"restoring" .= restoring,"descriptors" .= publicDescriptors,"address" .= (address::Text)]
+      receiveDescriptor<-case publicDescriptors of [receive,_]->pure receive; _->reject "native_seed_descriptor_count"
+      initialAddresses<-call False "deriveaddresses" [String receiveDescriptor,toJSON ([0,0]::[Int])] >>= parseValue parseJSON :: IO [Text]
+      require (length initialAddresses==1) "native_seed_address_mismatch"
+      completed<-fileExist checkpoint
+      if completed then do
+        record<-Private.readPrivate checkpoint >>= either (const $ reject "invalid_native_seed_checkpoint") pure . eitherDecodeStrict'
+        address<-fieldValue "address" record
+        require (initialAddresses==[address]) "native_seed_address_mismatch"
+        require (record==binding address) "native_seed_checkpoint_mismatch"
+        verify
+        pure address
+       else do
+        wallets<-call False "listwalletdir" [] >>= fieldValue "wallets" :: IO [Value]
+        names<-mapM (fieldValue "name") wallets
+        require (nativeWallet c `notElem` names) "native_seed_wallet_exists_requires_review"
+        passphrase<-case unlockFile of
+          Nothing->pure ""
+          Just file->do
+            bytes<-Private.readPrivate file
+            require (not(BS.null bytes) && BS.length bytes<=1024 && not(BS.any (`elem` [0,10,13]) bytes)) "invalid_native_unlock_file"
+            either (const $ reject "invalid_native_unlock_file") pure (TE.decodeUtf8' bytes)
+        result<-call False "createwallet" [toJSON $ nativeWallet c,Bool False,Bool True,String passphrase,Bool False,Bool True,Bool True,Bool False]
+        name<-fieldValue "name" result
+        require (name==nativeWallet c) "native_seed_wallet_mismatch"
+        let populate=do
+              let requests=[object ["desc" .= (desc<>"#"<>checksum),"active" .= True
+                    ,"internal" .= internal,"range" .= ([0,rangeEnd]::[Int]),"next_index" .= (0::Int)
+                    ,"timestamp" .= (if restoring then Number 0 else String "now")]
+                    | ((desc,checksum),internal)<-zip (zip privateDescriptors checksums) [False,True]]
+              imported<-call True "importdescriptors" [toJSON requests] >>= parseValue parseJSON :: IO [Value]
+              succeeded<-mapM (fieldValue "success") imported
+              require (length succeeded==2 && and succeeded) "native_seed_import_or_rescan_failed"
+        if T.null passphrase then populate else
+          (call True "walletpassphrase" [String passphrase,Number 120] >> populate)
+            `finally` (call True "walletlock" [] >> pure ())
+        verify
+        address<-call True "getnewaddress" [String "bridge-initial-funding",String "bech32"] >>= parseValue parseJSON
+        require (initialAddresses==[address]) "native_seed_address_mismatch"
+        Private.savePrivate checkpoint (BL.toStrict $ encode $ binding address)
+        pure address
     BackupNativeWallet destination -> do
       _<-nativeIdentityWith call c
       privateParent destination
@@ -205,16 +275,15 @@ evalNativeRecoveryWith call c operation = do
       after<-descriptors
       require (before==after) "native_wallet_changed_during_backup"
       sync destination
-      checksum<-withBinaryFile destination ReadMode (hashChunks hashInit)
+      checksum<-withBackupFile destination hashHandle
       let evidence=manifestValue (profile c) (nativeCheckpointHeight c) (nativeCheckpointHash c)
             (nativeWallet c) (takeFileName destination) checksum before
           encoded=encode evidence
       require (BL.length encoded<=1048576) "native_backup_manifest_too_large"
       bracket (openFd manifest WriteOnly defaultFileFlags
-        {creat=Just 0o600,exclusive=True,nofollow=True,cloexec=True} >>= fdToHandle) hClose $ \handle->do
-          BL.hPut handle encoded
-          hFlush handle
-      sync manifest
+        {creat=Just 0o600,exclusive=True,nofollow=True,cloexec=True}) closeFd $ \fd->do
+          withHandle fd $ \handle->BL.hPut handle encoded >> hFlush handle
+          fileSynchronise fd
       sync (takeDirectory destination)
       pure manifest
     RestoreNativeWallet manifest -> do
@@ -235,9 +304,7 @@ evalNativeRecoveryWith call c operation = do
  where
   load manifest = do
     privateParent manifest
-    privateBackup manifest
-    bytes<-withBinaryFile manifest ReadMode (`BS.hGet` 1048577)
-    require (BS.length bytes<=1048576) "native_backup_manifest_too_large"
+    bytes<-withBackupFile manifest (readBounded 1048576) >>= maybe (reject "native_backup_manifest_too_large") pure
     value<-either (const $ reject "invalid_native_backup_manifest") pure (eitherDecodeStrict' bytes)
     version<-fieldValue "format" value :: IO Int
     savedProfile<-fieldValue "profile" value
@@ -255,8 +322,7 @@ evalNativeRecoveryWith call c operation = do
       && checkpoint==nativeCheckpointHash c) "native_backup_network_mismatch"
     validateNativeSettings c {nativeWallet=wallet}
     let backup=takeDirectory manifest </> name
-    privateBackup backup
-    actual<-withBinaryFile backup ReadMode (hashChunks hashInit)
+    actual<-withBackupFile backup hashHandle
     require (actual==checksum) "native_backup_hash_mismatch"
     pure (wallet,backup,checksum,expected)
   -- Only public descriptors and relative archive names enter the manifest;
@@ -308,14 +374,14 @@ evalNativeRecoveryWith call c operation = do
     status<-getSymbolicLinkStatus (takeDirectory path)
     uid<-getEffectiveUserID
     require (isDirectory status && fileOwner status==uid && fileMode status .&. 0o077==0) "unsafe_native_backup_directory"
-  privateBackup path = do
-    status<-getSymbolicLinkStatus path
+  privateBackup path = getSymbolicLinkStatus path >>= backupStatus
+  backupStatus status = do
     uid<-getEffectiveUserID
     require (isRegularFile status && fileOwner status==uid && fileMode status .&. 0o077==0
       && linkCount status==1 && fileSize status>0) "unsafe_native_backup_file"
-  hashChunks :: Context SHA256 -> Handle -> IO Text
-  hashChunks context handle = do
-    bytes<-BS.hGet handle 65536
-    if BS.null bytes then pure (T.pack $ show (hashFinalize context :: Digest SHA256))
-      else hashChunks (hashUpdate context bytes) handle
+  withBackupFile path action=do
+    privateBackup path
+    bracket (openFd path ReadOnly defaultFileFlags {nofollow=True,cloexec=True,nonBlock=True}) closeFd $ \fd->do
+        getFdStatus fd >>= backupStatus
+        withHandle fd action
   sync path=bracket (openFd path ReadOnly defaultFileFlags {nofollow=True,cloexec=True}) closeFd fileSynchronise

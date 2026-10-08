@@ -6,7 +6,7 @@ license: MIT
 license-file: LICENSE
 build-type: Simple
 data-files: test/fixtures/*.json, migrations/*.sql
-extra-source-files: test/formal/*.tla, test/formal/*.cfg, install/install, install/package, install/restic-security.patch
+extra-source-files: test/formal/*.tla, test/formal/*.cfg, install/install, install/package, install/source, install/restic-security.patch, chain/Bridge/bip39-english.txt
 
 common settings
   default-language: GHC2021
@@ -16,7 +16,7 @@ common settings
 library
   import: settings
   hs-source-dirs: src
-  exposed-modules: Bridge.Domain, Bridge.Error, Bridge.Identity, Bridge.Wire, Bridge.Operation, Bridge.Operation.Internal
+  exposed-modules: Bridge.Domain, Bridge.Error, Bridge.Identity, Bridge.Wire, Bridge.Lifecycle, Bridge.Operation, Bridge.Operation.Internal
   build-depends: base >=4.20 && <4.23, aeson >=2.2 && <2.4, text >=2.1 && <2.2, containers, bytestring, base16-bytestring, base58-bytestring, crypton >=1 && <1.2, ram >=0.22 && <0.23
 
 library customer-api
@@ -33,7 +33,8 @@ library store
   visibility: private
   hs-source-dirs: runtime
   exposed-modules: Bridge.Store, Bridge.Fence
-  other-modules: Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Store.Backup
+  other-modules: Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Store.Backup, Bridge.Store.Projection, Bridge.Store.Migration, Paths_ecx_bridge
+  autogen-modules: Paths_ecx_bridge
   build-depends: base, ecx-bridge, ecx-bridge:chain, aeson, bytestring, text, containers,
     crypton, base16-bytestring, time, directory, filepath, unix, process, http-client, network, scientific, opaleye ==0.10.8.0, postgresql-simple >=0.7 && <0.8,
     product-profunctors >=0.11 && <0.12
@@ -42,10 +43,19 @@ library chain
   import: settings
   visibility: public
   hs-source-dirs: chain
-  exposed-modules: Bridge.AdminStatus, Bridge.AdminKey, Bridge.RPC, Bridge.Native, Bridge.NativeObservation, Bridge.NativePayment, Bridge.Solana, Bridge.SolanaObservation, Bridge.SolanaMessage, Bridge.SolanaHelper, Bridge.SolanaPayment, Bridge.SolanaDeposit, Bridge.PaymentObservation, Bridge.PaymentSource
+  exposed-modules: Bridge.Wallet, Bridge.File, Bridge.AdminStatus, Bridge.AdminKey, Bridge.RPC, Bridge.Native, Bridge.NativeObservation, Bridge.NativePayment, Bridge.Solana, Bridge.SolanaObservation, Bridge.SolanaMessage, Bridge.SolanaHelper, Bridge.SolanaPayment, Bridge.SolanaDeposit, Bridge.PaymentObservation, Bridge.PaymentSource
   build-depends: base, ecx-bridge, aeson, bytestring, text, scientific,
     filepath, http-client, http-client-tls, http-types, binary, containers, base58-bytestring,
-    base64-bytestring, crypton, ram, unix
+    base64-bytestring, crypton, ram, unix, template-haskell
+
+-- Shared closed token operations: setup creates an ATA; ecx-token administers tokens.
+library administration
+  import: settings
+  visibility: public
+  hs-source-dirs: administration
+  exposed-modules: Token, Token.Signing, Token.Network, Token.Metadata, Token.Operation
+  build-depends: base, ecx-bridge, ecx-bridge:chain, aeson, bytestring, text,
+    binary, unix, filepath, crypton, ram, base64-bytestring, base58-bytestring, http-client
 
 library workflow
   import: settings
@@ -62,24 +72,24 @@ test-suite bridge-test
   import: settings
   ghc-options: -threaded -rtsopts -with-rtsopts=-N1
   type: exitcode-stdio-1.0
-  hs-source-dirs: test
+  hs-source-dirs: test, app
   main-is: Main.hs
   build-tool-depends: ecx-bridge:ecx-bridge
-  other-modules: ConfigureCheck, ChainCheck, NativePaymentCheck, SolanaPaymentCheck, ObservationCheck, SigningTransportCheck, Paths_ecx_bridge
+  other-modules: Bootstrap, NodeSetup, ConfigureCheck, ChainCheck, NativePaymentCheck, SolanaPaymentCheck, ObservationCheck, SigningTransportCheck, LifecycleCheck, Paths_ecx_bridge
   autogen-modules: Paths_ecx_bridge
   build-depends: base, ecx-bridge, ecx-bridge:customer-api, ecx-bridge:chain, ecx-bridge:store, ecx-bridge:workflow, servant, aeson, text, containers,
     QuickCheck >=2.15 && <2.19, bytestring, scientific, http-client, base64-bytestring, wai, wai-extra, http-types, directory, unix, filepath,
-    ecx-build-assets, process, async, network, crypton, ram, data-default, crypton-pem, crypton-x509, crypton-x509-validation, crypton-x509-store
+    ecx-build-assets, ecx-bridge:administration, process, async, network, crypton, ram, data-default, crypton-pem, crypton-x509, crypton-x509-validation, crypton-x509-store
 
 executable ecx-bridge
   import: settings
   hs-source-dirs: app
   main-is: Main.hs
-  other-modules: Configure
+  other-modules: Configure, Bootstrap, NodeSetup
   ghc-options: -threaded -rtsopts -with-rtsopts=-N2
   build-depends: base, ecx-bridge, ecx-bridge:workflow, ecx-bridge:chain,
     ecx-bridge:store, ecx-build-assets, aeson, bytestring, text,
-    postgresql-simple, http-client, unix, filepath, directory, process
+    postgresql-simple, http-client, unix, filepath, directory, process, crypton, ram, containers, ecx-bridge:administration
 
 -- Explicitly invoked against a disposable migrated database, never live custody.
 executable ecx-store-check
@@ -87,7 +97,7 @@ executable ecx-store-check
   ghc-options: -threaded -rtsopts -with-rtsopts=-N1
   hs-source-dirs: test, runtime, workflow
   main-is: StoreCheck.hs
-  other-modules: Bridge.Fence, Bridge.Store, Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Store.Backup, Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.Critical, Bridge.Reconciliation, Bridge.Admission, Bridge.Order, Bridge.Web, Bridge.Config, Bridge.Control, Bridge.Recovery, Bridge.Credentials, Paths_ecx_bridge
+  other-modules: Bridge.Fence, Bridge.Store, Bridge.Store.Schema, Bridge.Store.Catalog, Bridge.Store.Backup, Bridge.Store.Projection, Bridge.Store.Migration, Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.Critical, Bridge.Reconciliation, Bridge.Admission, Bridge.Order, Bridge.Web, Bridge.Config, Bridge.Control, Bridge.Recovery, Bridge.Credentials, Paths_ecx_bridge
   autogen-modules: Paths_ecx_bridge
   build-depends: base, async, ecx-bridge, ecx-bridge:customer-api, ecx-bridge:chain, http-client, servant, servant-server, aeson, bytestring,
     base64-bytestring, containers, text, crypton, base16-bytestring, time, directory, scientific, opaleye, postgresql-simple, product-profunctors, QuickCheck,

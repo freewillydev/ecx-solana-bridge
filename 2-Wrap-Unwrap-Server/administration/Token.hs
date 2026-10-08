@@ -3,6 +3,7 @@
 module Token (Action(..),Request(..),Safe(..),evalSafe,validate,mintAddress,nonceAddress,parseIntent) where
 import qualified Token.Metadata as M
 import Bridge.Error (require,reject)
+import Bridge.Domain (parseNatural)
 import Bridge.Solana (tokenProgram)
 import Bridge.SolanaMessage
 import Control.Exception (bracket)
@@ -14,7 +15,6 @@ import Data.List (nub,sort)
 import Crypto.Hash (hash,Digest,SHA256)
 import qualified Data.ByteArray as BA
 import qualified Data.Text.Encoding as TE
-import Text.Read (readMaybe)
 import Data.Binary.Put (runPut,putWord8,putWord32le,putWord64le,putByteString)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy as L
@@ -66,8 +66,8 @@ instance FromJSON Request where
     else do
       raw<-o .: (if verb `elem` (["create","associated","create_nonce"]::[Text]) then "rent" else "amount")
       unless (length o==(if verb `elem` ["associated","nonce_mint","create_nonce"] then 8 else 7)) (fail "invalid_token_fields")
-      n<-case readMaybe (T.unpack raw) :: Maybe Integer of
-        Just x | x>0 && x<=toInteger(maxBound::Word64) && T.pack(show x)==raw -> pure(fromInteger x)
+      n<-case parseNatural (toInteger(maxBound::Word64)) raw of
+        Just x | x>0 -> pure(fromInteger x)
         _->fail "invalid_token_amount"
       case (verb::Text) of
         "create_nonce"->CreateNonce <$> o .: "authority" <*> o .: "nonceAccount" <*> o .: "owner" <*> o .: "seed" <*> pure n <*> o .: "blockhash"

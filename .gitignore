@@ -21,3 +21,7 @@ __pycache__/
 2-Wrap-Unwrap-Server/web/node_modules/
 2-Wrap-Unwrap-Server/web/dist/
 2-Wrap-Unwrap-Server/config/local.json
+
+# Generated bridge setup, credentials and recovery phrases.
+.ecx-bridge/
+.ecx-bridge-*/

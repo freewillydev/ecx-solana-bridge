@@ -6,12 +6,14 @@ import qualified Bridge.Store as Store
 import qualified Bridge.SolanaHelper as Helper
 import qualified Bridge.Wire as W
 import qualified Bridge.AdminKey as AdminKey
+import qualified Bridge.File as File
 import qualified Bridge.AdminStatus as Admin
 import qualified Bridge.SolanaMessage as Message
 import Paths_ecx_bridge (getDataFileName)
-import System.Directory (removeFile,removeDirectoryRecursive,listDirectory)
+import System.Directory (removeFile,removeDirectoryRecursive,listDirectory,renameFile)
 import qualified System.Posix.Directory as PD
-import System.Posix.Files (setFileMode,createSymbolicLink,createLink)
+import System.Posix.Files (setFileMode,createSymbolicLink,createLink,createNamedPipe)
+import qualified System.Posix.IO as Posix
 import System.Posix.Process (forkProcess,getProcessStatus,exitImmediately,ProcessStatus(..))
 import System.Posix.Signals (signalProcess,sigKILL)
 import System.Exit (ExitCode(..))
@@ -25,7 +27,7 @@ import Bridge.Domain
 import Bridge.Error
 import Bridge.Native
 import qualified Bridge.Solana as Solana
-import Bridge.Identity (publicKey)
+import Bridge.Identity (publicKey,digest)
 import Bridge.RPC
 import Bridge.Wire (Profile(..))
 import Control.Exception (try,bracket,SomeException,throwIO)
@@ -38,6 +40,8 @@ import qualified Data.Aeson.KeyMap as KM
 import qualified Data.Aeson.Key as K
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Base64 as B64
+import qualified Data.Text.Encoding as TE
 import Data.IORef
 import Data.Int (Int64)
 import Data.Word (Word64)
@@ -102,6 +106,41 @@ checks = (\deployment native solana identity observation administration common->
         Right value->case nativeNumber value of Number decimal->property(nativeAmount decimal==Right value); _->property False
   , check "native decimal exponent and precision bounds" $ once $ property $
       all isLeft [nativeAmount(scientific 1 minBound),nativeAmount(scientific 1 maxBound),nativeAmount(scientific 1 (-9)),nativeAmount(scientific (-1) 0)]
+  , check "canonical unsigned parsers retain each ledger/SPL/liquidity bound" $
+      forAll (elements [toInteger(maxBound::Int64),toInteger(maxBound::Word64),2^(128::Int)-1]) $ \bound->
+      forAll (chooseInteger (0,bound)) $ \n->
+        let text=T.pack(show n)
+        in parseNatural bound text==Just n && parseNatural bound (T.pack(show(bound+1)))==Nothing
+          && all ((==Nothing) . parseNatural bound)
+            ["", "00", "01", "-1", "+1", " 1", "1 ", "1.0", "1e2", "１２", T.replicate 100000 "9"]
+  , check "bridge amount refusals keep canonical syntax distinct from ledger overflow" $ once $ property $
+      parseUnits "9223372036854775807"==amount (toInteger(maxBound::Int64))
+      && parseUnits "9223372036854775808"==Left "amount_out_of_range"
+      && parseUnits "18446744073709551615"==Left "invalid_base_units"
+  , check "SPL account facts retain u64 balances while custody narrows to Int64" $
+      forAll (chooseInteger (0,toInteger(maxBound::Word64))) $ \n->
+        let key=T.replicate 32 "1"
+            account=object ["owner" .= Solana.tokenProgram,"executable" .= False,"data" .= object
+              ["space" .= (165::Int),"parsed" .= object ["type" .= ("account"::Text),"info" .= object
+                ["owner" .= key,"mint" .= key,"state" .= ("initialized"::Text),"isNative" .= False
+                ,"tokenAmount" .= object ["decimals" .= (8::Int),"amount" .= T.pack(show n)]]]]]
+            expected=if n<=toInteger(maxBound::Int64) then amount n else Left "token_account_policy_mismatch"
+        in parseEither Solana.inspectClassicAccount account==Right(key,fromInteger n,key)
+          && Solana.inspectTokenAccount key key account==expected
+  , check "base64 bounds preserve exact binary bytes and reject oversized or malformed input" $
+      forAll (chooseInt (0,1232)) $ \n->forAll (vectorOf n arbitrary) $ \bytes->
+        let raw=BS.pack bytes; encoded=TE.decodeUtf8(B64.encode raw)
+        in Message.boundedBase64 n encoded==Right raw
+          && (n==0 || isLeft(Message.boundedBase64 (n-1) encoded))
+          && all (isLeft . Message.boundedBase64 1232) ["?", "Z", "Zm9v!", T.replicate 100000 "A"]
+  , check "shared RPC setup rejects insecure transport and aliased independent providers before action" $ once $ ioProperty $ do
+      called<-newIORef False
+      insecure<-rejects "transport-refused" $ withSolanaRpc "http://127.0.0.1:1" "expected" ("transport-refused","identity-refused") $ \_->writeIORef called True
+      aliases<-mapM (rejects "independent_https_providers_required" . independentHttps "https://rpc.example.invalid/a?key=first")
+        ["https://RPC.EXAMPLE.INVALID./b?key=second","https://rpc.example.invalid:8443/","http://different.invalid"]
+      independentHttps "https://one.invalid/" "https://two.invalid/"
+      ran<-readIORef called
+      pure (insecure && not ran && and aliases)
   , check "RPC bodies enforce byte bounds across chunks" $ once $ ioProperty $ do
       chunks <- newIORef ["abc","def",""]
       let readChunk=atomicModifyIORef' chunks $ \xs->case xs of []->([],BS.empty); x:rest->(rest,x)
@@ -475,6 +514,20 @@ administrationChecks=sequence
             [successor {Admin.recoveryRoot="/tmp/other-attempt"},successor {Admin.recoveryParent=Just(T.replicate 64 "b")}
             ,successor {Admin.recoveryGeneration=2},successor {Admin.recoveryBlockhash=recent},successor {Admin.recoverySlot=100}]
           && Admin.attemptPath successor==root<>".retry"
+  , check "stream helpers retain opened inode, close-on-exec and bounded reads" $ once $ ioProperty $
+      withPrivateDirectory $ \directory->do
+        let path=directory</>"source"; moved=directory</>"original"; bytes=BS.replicate 131073 42
+        BS.writeFile path bytes
+        actual<-bracket (Posix.openFd path Posix.ReadOnly Posix.defaultFileFlags) Posix.closeFd $ \fd->do
+          renameFile path moved
+          BS.writeFile path "replacement"
+          File.withHandle fd File.hashHandle
+        limits<-mapM (\bound->bracket (Posix.openFd moved Posix.ReadOnly Posix.defaultFileFlags) Posix.closeFd $ \fd->
+          File.withHandle fd (File.readBounded bound)) [131073,131072,-1,maxBound]
+        closeOnExec<-bracket (Posix.openFd moved Posix.ReadOnly Posix.defaultFileFlags) Posix.closeFd $ \fd->
+          File.withHandle fd $ \handle->bracket (Posix.handleToFd handle) Posix.closeFd
+            (`Posix.queryFdOption` Posix.CloseOnExec)
+        pure (actual==digest bytes && closeOnExec && limits==[Just bytes,Nothing,Nothing,Nothing])
   , check "private administration records publish exclusively and survive refused writes unchanged" $ once $ ioProperty $
       withPrivateDirectory $ \directory->do
         let path=directory </> "attempt"; symbolic=directory </> "symbolic"; hard=directory </> "hard"
@@ -495,9 +548,12 @@ administrationChecks=sequence
         BS.writeFile (directory </> "oversized") (BS.replicate 8193 32)
         setFileMode (directory </> "oversized") 0o600
         bound<-rejects "administration_attempt_too_large" (AdminKey.readPrivate $ directory </> "oversized")
+        let pipe=directory</>"pipe"
+        createNamedPipe pipe 0o600
+        pipeRefused<-timeout 1000000 (rejects "unsafe_administration_file" $ AdminKey.readPrivate pipe)
         names<-listDirectory directory
         pure (and [duplicate,symlinkRead,symlinkWrite,hardlinkRead,hardlinkWrite,permission,writeBound,bound]
-          && saved=="saved exact transaction bytes" && all (not . T.isInfixOf ".pending-" . T.pack) names)
+          && pipeRefused==Just True && saved=="saved exact transaction bytes" && all (not . T.isInfixOf ".pending-" . T.pack) names)
   , check "administration family locks exclude another process and release after failure" $ once $ ioProperty $
       withPrivateDirectory $ \directory->do
         let path=directory </> "attempt"

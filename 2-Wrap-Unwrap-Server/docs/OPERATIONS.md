@@ -6,6 +6,15 @@ All commands below run from the repository root using the sole server executable
 bridge() { cabal run -v0 exe:ecx-bridge -- "$@"; }
 ```
 
+For the installed package, use its matching data directory instead of Cabal:
+
+```sh
+bridge() { env ecx_bridge_datadir=/opt/ecx-bridge/current/share /opt/ecx-bridge/current/bin/ecx-bridge "$@"; }
+```
+
+Initialization and schema-21 restoration read migrations from that directory.
+Installed systemd services already set it; direct maintenance commands must too.
+
 `CONFIG`, `SIGNER_CONFIG`, `KEYFILE`, `BACKUP_CONFIG` and staging paths refer to
 reviewed private files/directories. Read [INSTALL.md](INSTALL.md) first. The candidate installer supports fresh installation and code-only upgrade; it
 does not provide an automatic wipe/reinstall recovery command.
@@ -265,7 +274,7 @@ Offline inspection never unlocks a wallet.
 
 ## Restore or upgrade
 
-1. Pause and quiesce the old worker. Record its identity and independently retained
+1. Pause and quiesce the old worker and signer. Record their identity and independently retained
    sequence. Export and verify the final snapshot; preserve all originals.
 2. Retire the old local fence and revoke old credentials/access. The fence marker
    cannot invalidate copied signing keys on another host. A lost host requires an
@@ -275,7 +284,10 @@ Offline inspection never unlocks a wallet.
 4. Restore the ledger and native wallet without overwriting existing destinations.
    Configure restored Solana/unlock material with separate signer permissions and
    fresh transport/RPC credentials. Retain financial identity while changing only
-   reviewed operational paths. Apply only missing forward migrations offline.
+   reviewed operational paths. Current ledger restoration automatically converts
+   schema 21 to 22 in the new private database and invalidates custody readiness.
+   Older baselines first require their missing reviewed 001–008 migrations on an
+   offline copy. Never run the 009 staging/activation files directly.
 5. Point the destination at the verified staged database, adopt the minimum sequence
    without lowering the fence and start in observation mode. Reconcile both real
    chains, full custody and all saved in-flight attempts. Resolve discrepancies.

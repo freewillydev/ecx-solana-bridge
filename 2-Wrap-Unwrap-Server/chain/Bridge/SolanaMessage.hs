@@ -1,7 +1,7 @@
 {-# LANGUAGE RecordWildCards #-}
 module Bridge.SolanaMessage
   ( Instruction(..), Message(..), Transaction(..), Expected(..), publicKey
-  , signatureBytes, base58, decodeTransaction, decodePoolTransaction, decodePositionTransaction, decodeLiquidityTransaction, validateTransaction ) where
+  , signatureBytes, base58, boundedBase64, decodeTransaction, decodePoolTransaction, decodePositionTransaction, decodeLiquidityTransaction, validateTransaction ) where
 
 import Bridge.Domain (Amount, units)
 import Bridge.Identity (publicKey)
@@ -31,6 +31,12 @@ signatureBytes t
       _ -> Left "invalid_signature"
 base58 :: BS.ByteString -> Text
 base58 = TE.decodeUtf8 . B58.encodeBase58 B58.bitcoinAlphabet
+boundedBase64 :: Int -> Text -> Either Text BS.ByteString
+boundedBase64 limit encoded = do
+  unless (limit>=0 && toInteger(T.length encoded)<=4*((toInteger limit+2) `div` 3)) (Left "base64_too_large")
+  bytes<-either (const $ Left "invalid_base64") Right (B64.decode $ TE.encodeUtf8 encoded)
+  unless (BS.length bytes<=limit) (Left "base64_too_large")
+  pure bytes
 short :: Get Int
 short = do
   a <- getWord8
@@ -53,8 +59,9 @@ decodeLiquidityTransaction = decodeLegacy 1 2 11
 decodeLegacy :: Int -> Int -> Int -> Text -> Either Text Transaction
 decodeLegacy signerCount instructionLimit accountLimit encoded = do
   unless (T.length encoded<=1644) (Left "transaction_too_large")
-  bytes <- either (const $ Left "invalid_base64") Right (B64.decode (TE.encodeUtf8 encoded))
-  unless (BS.length bytes<=1232) (Left "transaction_too_large")
+  bytes <- case boundedBase64 1232 encoded of
+    Left "base64_too_large" -> Left "transaction_too_large"
+    result -> result
   case runGetOrFail (parser bytes) (LBS.fromStrict bytes) of
     Left _ -> Left "invalid_legacy_transaction"
     Right (rest,_,tx) | LBS.null rest -> Right tx

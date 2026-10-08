@@ -1,0 +1,16 @@
+#!/bin/sh
+# Explicit trust in a local Cabal build; never a fallback from signature failure.
+# Uses the same package assembler and installer, without root compilation.
+set -eu
+umask 077
+[ "$#" = 5 ] || { echo 'usage: source EXECUTABLE SDK_LIBRARY BROWSER_DIRECTORY RESTIC MATERIAL' >&2; exit 1; }
+[ "$(id -u)" = 0 ] || { echo 'root required' >&2; exit 1; }
+root=$(CDPATH='' cd -- "$(dirname -- "$0")/../.." && pwd)
+staging=$(mktemp -d /tmp/ecx-source-install-XXXXXXXX)
+trap 'rm -rf -- "$staging"' EXIT
+trap 'exit 1' HUP INT TERM
+cd "$root"
+sh 2-Wrap-Unwrap-Server/install/package --local "$staging/candidate" "$4" "$1" "$2" "$3"
+artifact=$staging/candidate/ecx-bridge-ubuntu-24.04-$(uname -m).run
+# Execute only our root-private assembled copy; package checks OS/arch/restic pin.
+sh "$artifact" fresh "$5"

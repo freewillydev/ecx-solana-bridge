@@ -4,6 +4,7 @@ module Main (main) where
 import qualified ConfigureCheck
 import qualified SigningTransportCheck
 import qualified ChainCheck
+import qualified LifecycleCheck
 import Bridge.Identity (bearerHash,capabilityHash,payInstruction,payURIFor)
 import Bridge.API (customerServer)
 import Bridge.Signer (signingServer)
@@ -27,7 +28,8 @@ import Test.QuickCheck hiding (total,Result)
 main :: IO ()
 main = do
   results <- sequence
-    [ check "configure saves private validated material and refuses overwrite/interruption" $ once $ ioProperty ConfigureCheck.contract
+    [ check "BIP39 generation and Solana wallet recovery" ConfigureCheck.walletProperty
+    , check "configure saves private validated material and refuses overwrite/interruption" $ once $ ioProperty ConfigureCheck.contract
     , check "Solana Pay URI preserves exact units and rejects injectable keys" $ forAll amounts $ \n ->
         let key=T.replicate 32 "1"; quantity=good(amount n); instruction="solana-pay:"<>key
         in payURIFor key key instruction quantity==Right("solana:"<>key<>"?amount="<>renderCoins quantity<>"&spl-token="<>key<>"&reference="<>key<>"&label=ECX%20Bridge")
@@ -146,7 +148,8 @@ main = do
     ]
   chainResults <- ChainCheck.checks
   transportResults <- SigningTransportCheck.checks
-  if all isSuccess (results<>chainResults<>transportResults) then pure () else exitFailure
+  lifecycleResults <- LifecycleCheck.checks
+  if all isSuccess (results<>chainResults<>transportResults<>lifecycleResults) then pure () else exitFailure
  where
   check description p=putStrLn description >> quickCheckWithResult stdArgs{maxSuccess=300} p
   amounts=chooseInteger (0,toInteger(maxBound::Int64))

@@ -7,11 +7,11 @@ module Bridge.Store.Backup (LedgerArchive(..),archiveLedger,RemoteBackup,loadRem
 import Bridge.Wire (BackupReceipt(..))
 import Bridge.Error
 import Bridge.Identity (digest)
+import Bridge.File (withHandle,readBounded,hashHandle)
 import Control.Exception (IOException,bracket,bracketOnError,catch,onException,mask)
 import Control.Monad (when,void)
 import Crypto.Random (getRandomBytes)
 import qualified Data.ByteString.Base16 as Hex
-import Crypto.Hash (Context,Digest,SHA256,hashInit,hashUpdate,hashFinalize)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
 import Data.Bits ((.&.))
@@ -44,7 +44,7 @@ import System.Timeout (timeout)
 
 data LedgerArchive = LedgerArchive
   { archivePath :: FilePath, manifestPath :: FilePath, archiveHash :: Text
-  , archiveIdentity :: Text, archiveSequence :: Int64 } deriving (Eq,Show)
+  , archiveIdentity :: Text, archiveSequence :: Int64, archiveSchema :: Int64 } deriving (Eq,Show)
 
 -- The existing private directory is supplied by startup, never a customer.
 -- pg_dump streams to disk with bounded memory. Keeping the exporting read-only
@@ -58,14 +58,13 @@ archiveLedger settings directory identity version sequenceNo snapshot = do
       cleanup (path,handle) = do
         hClose handle `catch` (\(_::IOException)->pure ())
         removeFile path
-      syncFile path = bracket (openFd path ReadOnly defaultFileFlags {nofollow=True,cloexec=True}) closeFd fileSynchronise
   bracketOnError (openBinaryTempFile directory "ledger.dump-") cleanup $ \(path,handle) -> do
     setFileMode path 0o600
     run "pg_dump" ["--format=custom","--no-owner","--no-privileges","--no-password","--snapshot="<>T.unpack snapshot] (UseHandle handle)
     hClose handle
     syncFile path
     withBinaryFile "/dev/null" WriteMode $ \sink->run "pg_restore" ["--list",path] (UseHandle sink)
-    checksum <- withBinaryFile path ReadMode (hashChunks hashInit)
+    checksum <- withPrivate path hashHandle
     bracketOnError (openBinaryTempFile directory "ledger.manifest-") cleanup $ \(manifest,output) -> do
       setFileMode manifest 0o600
       BL.hPut output $ encode $ object
@@ -76,13 +75,7 @@ archiveLedger settings directory identity version sequenceNo snapshot = do
       hClose output
       syncFile manifest
       bracket (openFd directory ReadOnly defaultFileFlags {nofollow=True,cloexec=True,directory=True}) closeFd fileSynchronise
-      pure (LedgerArchive path manifest checksum identity sequenceNo)
-
-hashChunks :: Context SHA256 -> Handle -> IO Text
-hashChunks context handle = do
-  bytes <- BS.hGet handle 65536
-  if BS.null bytes then pure (T.pack $ show (hashFinalize context :: Digest SHA256))
-    else hashChunks (hashUpdate context bytes) handle
+      pure (LedgerArchive path manifest checksum identity sequenceNo version)
 
 -- Operational configuration is private and separate from the financial identity.
 -- No local repository constructor is exported by the Store component.
@@ -100,19 +93,34 @@ privateDirectory directory = do
   require (isDirectory status && fileOwner status==uid && fileMode status .&. 0o077==0) "unsafe_backup_directory"
 
 privateFile :: FilePath -> IO ()
-privateFile path = do
+privateFile path = withPrivate path (const $ pure ())
+
+withPrivate :: FilePath -> (Handle -> IO a) -> IO a
+withPrivate path action = do
   require (isAbsolute path && normalise path==path) "invalid_backup_file"
-  status<-getSymbolicLinkStatus path
-  uid<-getEffectiveUserID
-  require (isRegularFile status && fileOwner status `elem` [0,uid] && fileMode status .&. 0o077==0) "unsafe_backup_file"
+  getSymbolicLinkStatus path >>= privateStatus
+  bracket (openFd path ReadOnly defaultFileFlags {nofollow=True,cloexec=True,nonBlock=True}) closeFd $ \fd->do
+    getFdStatus fd >>= privateStatus
+    withHandle fd action
+ where
+  privateStatus status=do
+    uid<-getEffectiveUserID
+    require (isRegularFile status && fileOwner status `elem` [0,uid] && fileMode status .&. 0o077==0
+      && linkCount status==1) "unsafe_backup_file"
 
 readPrivate :: FilePath -> IO BS.ByteString
-readPrivate path = do
-  privateFile path
-  bracket (openFd path ReadOnly defaultFileFlags {nofollow=True,cloexec=True} >>= fdToHandle) hClose $ \handle->do
-    bytes<-BS.hGet handle 8193
-    require (BS.length bytes<=8192) "backup_file_too_large"
-    pure bytes
+readPrivate path = withPrivate path (readBounded 8192) >>= maybe (reject "backup_file_too_large") pure
+
+-- Staging is private and discarded as a whole on failure. Unlike immutable
+-- administration attempts, an empty download target is not a published record.
+writeStaged :: FilePath -> BS.ByteString -> IO ()
+writeStaged path bytes=bracket (openFd path WriteOnly defaultFileFlags
+  {creat=Just 0o600,exclusive=True,nofollow=True,cloexec=True}) closeFd $ \fd->do
+    withHandle fd $ \handle->BS.hPut handle bytes >> hFlush handle
+    fileSynchronise fd
+
+syncFile :: FilePath -> IO ()
+syncFile path=bracket (openFd path ReadOnly defaultFileFlags {nofollow=True,cloexec=True,nonBlock=True}) closeFd fileSynchronise
 
 loadRemoteBackup :: FilePath -> IO RemoteBackup
 loadRemoteBackup path = do
@@ -221,8 +229,7 @@ loadLedgerArchive identity minimumSequence manifest = do
   privateDirectory (takeDirectory manifest)
   bytes<-readPrivate manifest
   archive<-manifestArchive identity minimumSequence manifest bytes
-  privateFile (archivePath archive)
-  actual<-withBinaryFile (archivePath archive) ReadMode (hashChunks hashInit)
+  actual<-withPrivate (archivePath archive) hashHandle
   require (archiveHash archive==actual) "backup_archive_mismatch"
   pure archive
 
@@ -234,7 +241,7 @@ manifestArchive identity minimumSequence manifest bytes = do
     either (const $ reject "invalid_backup_manifest") pure $ parseEither
       (withObject "ledger manifest" $ \o->(,,,,,,) <$> o .: "format" <*> o .: "archive" <*> o .: "sha256"
         <*> o .: "fingerprint" <*> o .: "schemaVersion" <*> o .: "criticalSequence" <*> o .: "remoteDurabilityAcknowledged") value
-  require (version==(2::Int) && schema==(21::Int) && not remote && sequenceNo>=0
+  require (version==(2::Int) && schema `elem` ([21,22]::[Int64]) && not remote && sequenceNo>=0
     && name==takeFileName name && name `notElem` ["",".",".."])
     "invalid_backup_manifest"
   require (saved==identity) "backup_identity_mismatch"
@@ -244,7 +251,7 @@ manifestArchive identity minimumSequence manifest bytes = do
         ,"fingerprint" .= (saved::Text),"schemaVersion" .= schema,"criticalSequence" .= (sequenceNo::Int64)
         ,"remoteDurabilityAcknowledged" .= remote]
   require (value==expected) "invalid_backup_manifest"
-  pure (LedgerArchive path manifest checksum saved sequenceNo)
+  pure (LedgerArchive path manifest checksum saved sequenceNo schema)
 
 -- Authentication is provided by restic; only these two bound files are fetched,
 -- never a directory/tree extraction or an archive-selected local destination.
@@ -271,16 +278,14 @@ downloadArchive program repository password snapshot identity minimumSequence di
   suffix<-TE.decodeUtf8 . Hex.encode <$> (getRandomBytes 16 :: IO BS.ByteString)
   let stage=directory</>"recovery-"<>T.unpack suffix
       manifest=stage</>takeFileName manifestSource
-      writePrivate path bytes=bracket
-        (openFd path WriteOnly defaultFileFlags {creat=Just 0o600,exclusive=True,nofollow=True,cloexec=True} >>= fdToHandle)
-        hClose (\handle->BS.hPut handle bytes)
   archive<-manifestArchive identity minimumSequence manifest manifestBytes
   let expectedTags=["ecx-bridge-critical","deployment:"<>identity,"sequence:"<>T.pack(show $ archiveSequence archive)]
   require (takeFileName(archivePath archive)==takeFileName archiveSource && all (`elem` (tags::[Text])) expectedTags) "backup_snapshot_mismatch"
   bracketOnError (PosixDirectory.createDirectory stage 0o700 >> pure stage) removeDirectoryRecursive $ \_->do
-    writePrivate manifest manifestBytes
-    writePrivate (archivePath archive) BS.empty
+    writeStaged manifest manifestBytes
+    writeStaged (archivePath archive) BS.empty
     _<-run ["dump",T.unpack snapshot,archiveSource,"--target",archivePath archive]
+    mapM_ syncFile [archivePath archive,stage,directory]
     loadLedgerArchive identity minimumSequence manifest
 
 -- Seven fixed files, or eight for an encrypted native wallet, share one grammar for
@@ -354,24 +359,18 @@ downloadCustodyArchive program repository password snapshot identity minimumSequ
   suffix<-TE.decodeUtf8 . Hex.encode <$> (getRandomBytes 16 :: IO BS.ByteString)
   let stage=directory</>"custody-recovery-"<>T.unpack suffix
       manifest=stage</>"custody.json"
-      writePrivate path contents=bracket
-        (openFd path WriteOnly defaultFileFlags {creat=Just 0o600,exclusive=True,nofollow=True,cloexec=True} >>= fdToHandle)
-        hClose (\handle->BS.hPut handle contents)
-      sync path=bracket (openFd path ReadOnly defaultFileFlags {nofollow=True,cloexec=True}) closeFd fileSynchronise
   archive<-custodyArchive identity minimumSequence manifest bytes
   require (sort paths==sort(source:map (takeDirectory source</>) (M.keys $ custodyFiles archive))
     && all (`elem` (tags::[Text])) (custodyTags archive)) "backup_snapshot_mismatch"
   bracketOnError (PosixDirectory.createDirectory stage 0o700 >> pure stage) removeDirectoryRecursive $ \_->do
     mapM_ (\name->do
       let target=stage</>name
-      writePrivate target BS.empty
+      writeStaged target BS.empty
       _<-run ["dump",T.unpack snapshot,takeDirectory source</>name,"--target",target]
       privateFile target
-      sync target) (M.keys $ custodyFiles archive)
-    writePrivate manifest bytes
-    sync manifest
-    sync stage
-    sync directory
+      syncFile target) (M.keys $ custodyFiles archive)
+    writeStaged manifest bytes
+    mapM_ syncFile [stage,directory]
     -- The custody evaluator validates every component before returning success.
     pure archive
 
