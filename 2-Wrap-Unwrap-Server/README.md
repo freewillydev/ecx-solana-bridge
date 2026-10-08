@@ -47,7 +47,7 @@ source ./emsdk_env.sh
 ghcup config add-release-channel cross
 emconfigure ghcup install ghc --set javascript-unknown-ghcjs-9.12.2
 
-cd ~/ecash/ecx-solana-bridge/
+cd ~/ecash-bridge/ecx-solana-bridge/
 
 ghcup install cabal
 cabal update
