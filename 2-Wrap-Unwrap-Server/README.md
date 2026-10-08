@@ -56,8 +56,7 @@ ghcup run --ghc 9.14.1 -- cabal build exe:ecx-bridge -j1
 export PATH="$(dirname "$(ghcup run --install --ghc 9.14.1 --cabal 3.16.1.0 -- cabal list-bin exe:ecx-bridge)"):$PATH"
 cd 2-Wrap-Unwrap-Server
 
-ecx-bridge check-config /absolute/private/config.json
-ecx-bridge observe /absolute/private/config.json
+sudo env "PATH=$PATH" ecx-bridge configure
 ```
 
 Startup requires a reviewed deployment configuration, migrated PostgreSQL ledger,
