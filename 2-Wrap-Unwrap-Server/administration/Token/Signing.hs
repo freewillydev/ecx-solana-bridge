@@ -5,7 +5,7 @@ import Token
 import Bridge.Error (reject)
 import Bridge.SolanaMessage (Transaction(..),base58,publicKey,decodeTransaction)
 import Bridge.AdminKey (readPrivate,readKey,savePrivate,newPrivatePath)
-import Bridge.AdminStatus (Recovery(..),validateRecovery,validateSuccessor)
+import Bridge.AdminStatus (Recovery(..),validateRecovery,validateSuccessor,Archive(..))
 import Crypto.Random (getRandomBytes)
 import Crypto.Error (CryptoFailable(..))
 import qualified Crypto.PubKey.Ed25519 as Ed
@@ -26,6 +26,11 @@ import Data.Char (isSpace)
 data Saved = Saved
   { savedRequest :: Request, savedId :: Text, savedTransaction :: Text
   , savedRecovery :: Maybe Recovery } deriving (Eq,Show)
+instance Archive Saved where
+  archiveKind _="token"
+  archiveRecovery=savedRecovery
+  validateArchive=fmap (const ()) . validateSaved
+  validateArchiveChild=validateSuccessorSaved
 instance ToJSON Saved where
   toJSON saved=object $ ["request" .= savedRequest saved,"signature" .= savedId saved,"transaction" .= savedTransaction saved]
     <>["recovery" .= recovery | Just recovery<-[savedRecovery saved]]

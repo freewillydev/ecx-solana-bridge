@@ -1,8 +1,11 @@
-{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DeriveGeneric, ScopedTypeVariables, TypeApplications #-}
 -- Shared, bounded evidence for closed token/pool recovery operations.
 module Bridge.AdminStatus
   ( Status(..),inspectStatus,classifyStatus,Recovery(..),newRecovery,renewRecovery
-  , validateRecovery,validateSuccessor,attemptPath,newRecoveryWith,retirementWith ) where
+  , validateRecovery,validateSuccessor,attemptPath,newRecoveryWith,retirementWith
+  , Archive(..),readSaved,readFamily,withSavedFamily,successor
+  , DebitLimit(..),submitSavedWith ) where
+import Bridge.AdminKey (readPrivate,withFamily)
 import Bridge.Error (require,reject)
 import Bridge.RPC
 import Bridge.Identity (digest)
@@ -10,6 +13,8 @@ import Bridge.Solana (SignatureInfo(..),collectSignatures)
 import Bridge.SolanaMessage (publicKey,signatureBytes)
 import Control.Exception (bracket)
 import Control.Monad (unless)
+import qualified Data.ByteString as B
+import Data.Proxy (Proxy(..))
 import Data.Aeson
 import Data.Aeson.Types (parseEither,Parser)
 import qualified Data.ByteString.Lazy as L
@@ -20,6 +25,93 @@ import Data.Word (Word64)
 import GHC.Generics (Generic)
 import Network.HTTP.Client (parseRequest,secure,closeManager)
 import System.FilePath (isAbsolute,normalise)
+import System.Posix.Files (fileExist)
+
+-- File mechanics are shared; each archive type must validate its own signatures,
+-- closed intent and successor relation. These methods provide no signing authority.
+class FromJSON a => Archive a where
+  archiveKind :: proxy a -> Text
+  archiveRecovery :: a -> Maybe Recovery
+  validateArchive :: a -> Either Text ()
+  validateArchiveChild :: a -> Text -> a -> Either Text ()
+
+readSaved :: forall a. Archive a => FilePath -> IO (B.ByteString,a)
+readSaved path=do
+  raw<-readPrivate path
+  saved<-either (const $ reject $ "invalid_"<>kind<>"_attempt") pure (eitherDecodeStrict' raw)
+  either reject pure (validateArchive saved)
+  mapM_ (\r->require (path==attemptPath r) (kind<>"_attempt_path_mismatch")) (archiveRecovery saved)
+  pure (raw,saved)
+ where kind=archiveKind (Proxy @a)
+
+-- Check each parent before following it; validated generations bound the walk.
+readFamily :: Archive a => FilePath -> IO (B.ByteString,a)
+readFamily path=do
+  record<-readSaved path
+  ancestors (snd record)
+  pure record
+ where
+  ancestors saved=case archiveRecovery saved of
+    Just r | recoveryGeneration r>0->do
+      (raw,old)<-readSaved (attemptPath r {recoveryGeneration=recoveryGeneration r-1})
+      either reject pure (validateArchiveChild old (digest raw) saved)
+      ancestors old
+    _->pure ()
+
+withSavedFamily :: forall a b. Archive a => FilePath -> (B.ByteString -> a -> IO b) -> IO b
+withSavedFamily path action=do
+  (_,initial)<-readSaved @a path
+  withFamily (maybe path recoveryRoot $ archiveRecovery initial) $ do
+    (raw,saved)<-readFamily path
+    require (archiveRecovery saved==archiveRecovery initial) (archiveKind (Proxy @a)<>"_attempt_changed")
+    action raw saved
+
+successor :: Archive a => B.ByteString -> a -> IO (Maybe a)
+successor raw saved=case archiveRecovery saved of
+  Just r | recoveryGeneration r<7->do
+    let path=attemptPath r {recoveryGeneration=recoveryGeneration r+1}
+    exists<-fileExist path
+    if not exists then pure Nothing else do
+      (_,child)<-readFamily path
+      either reject pure (validateArchiveChild saved (digest raw) child)
+      pure (Just child)
+  _->pure Nothing
+
+data DebitLimit = FeeOnly | TotalDebit Word64 | RentAndFee Word64
+
+-- Called only after archive/intent validation under the family lock. Preflight
+-- remains specific to the closed token/pool operation and precedes any submission.
+-- No retry or replacement is performed here: a timeout leaves the saved bytes.
+submitSavedWith :: (Text -> [Value] -> IO Value) -> Text -> Text -> Word64 -> DebitLimit
+  -> IO () -> IO (Text,Maybe Integer)
+submitSavedWith call signature bytes feeLimit debitLimit preflight=do
+  require (feeLimit>0) "invalid_administration_fee_limit"
+  values<-call "getSignatureStatuses" [toJSON [signature],object ["searchTransactionHistory" .= True]] >>= fieldValue "value"
+  status<-case values of [value]->pure value; _->reject "invalid_administration_status"
+  if status==Null then do
+    preflight
+    returned<-call "sendTransaction" [toJSON bytes,object
+      ["encoding" .= ("base64"::Text),"skipPreflight" .= False,"preflightCommitment" .= ("finalized"::Text),"maxRetries" .= (0::Int)]] >>= parseValue parseJSON
+    require (returned==signature) "administration_submission_identifier_mismatch"
+    pure ("submitted",Nothing)
+  else do
+    commitment<-fieldValue "confirmationStatus" status :: IO (Maybe Text)
+    if commitment/=Just "finalized" then pure ("pending",Nothing) else do
+      result<-call "getTransaction" [toJSON signature,object ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text),"maxSupportedTransactionVersion" .= (0::Int)]]
+      encoded<-fieldValue "transaction" result :: IO [Text]
+      require (encoded==[bytes,"base64"]) "administration_finalized_bytes_mismatch"
+      meta<-fieldValue "meta" result
+      failure<-fieldValue "err" meta :: IO Value
+      statusFailure<-fieldValue "err" status :: IO Value
+      fee<-fieldValue "fee" meta :: IO Integer
+      require (failure==statusFailure && fee>=0 && fee<=toInteger feeLimit) "administration_finalized_metadata_mismatch"
+      let maximumDebit=case debitLimit of FeeOnly->Nothing; TotalDebit n->Just(toInteger n); RentAndFee n->Just(toInteger n+fee)
+      mapM_ (\limit->do
+        before<-fieldValue "preBalances" meta :: IO [Integer]
+        after<-fieldValue "postBalances" meta :: IO [Integer]
+        require (case (before,after) of (a:_,b:_)->a>=b && b>=0 && a-b>=fee && a-b<=limit; _->False)
+          "administration_finalized_cost_exceeded") maximumDebit
+      pure (if failure==Null then "finalized" else "failed",Just fee)
 
 data Status = Pending | Finalized | Failed | Unseen | ExpiredUnseen deriving (Eq,Show)
 instance ToJSON Status where toJSON=String . name

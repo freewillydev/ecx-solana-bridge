@@ -4,15 +4,16 @@ module Pool.Signing (Action(..),Safe(..),evalSafe,Critical(..),evalCritical,Save
 import Pool hiding (Safe,evalSafe)
 import qualified Pool
 import Bridge.AdminStatus (Status,inspectStatus,Recovery(..),newRecovery,renewRecovery,validateRecovery,validateSuccessor,attemptPath)
+import qualified Bridge.AdminStatus as Archive
 import qualified Pool.Position as P
 import qualified Pool.Liquidity as Q
-import Bridge.AdminKey (readKey,readPrivate,savePrivate,newPrivatePath,withFamily)
+import Bridge.AdminKey (readKey,savePrivate,newPrivatePath,withFamily)
 import Bridge.Identity (digest)
 import Bridge.Error (require,reject)
 import Bridge.Domain (parseNatural)
 import Bridge.RPC
 import Bridge.SolanaMessage (Transaction(..),Message(..),decodePoolTransaction,decodePositionTransaction,decodeLiquidityTransaction,base58)
-import Control.Monad (unless,when,zipWithM)
+import Control.Monad (unless,forM_,zipWithM)
 import Crypto.Error (CryptoFailable(..))
 import qualified Crypto.PubKey.Ed25519 as Ed
 import qualified Data.ByteArray as BA
@@ -25,12 +26,16 @@ import qualified Data.ByteString.Lazy as L
 import Data.Text (Text)
 import qualified Data.Text.Encoding as TE
 import Data.Word (Word64)
-import System.Posix.Files (fileExist)
 
 -- Closed alternatives share execution without a sign-arbitrary-message operation.
 data Action = Creation Create Prepared | Opening P.Request P.Prepared | Liquidity Q.Request Q.Prepared deriving (Eq,Show)
 data Saved = Saved {network :: Network,action :: Action,feeLimit :: Word64,costLimit :: Word64
   ,identifier :: Text,transaction :: Text,savedRecovery :: Maybe Recovery} deriving (Eq,Show)
+instance Archive.Archive Saved where
+  archiveKind _="pool"
+  archiveRecovery=savedRecovery
+  validateArchive=validateSaved
+  validateArchiveChild=validateChild
 instance ToJSON Saved where
   toJSON s=object $ ["network" .= (case network s of Devnet->"devnet"; Mainnet->"mainnet"::Text)
     ,"feeLimit" .= show(feeLimit s),"costLimit" .= show(costLimit s),"signature" .= identifier s,"transaction" .= transaction s]
@@ -129,31 +134,9 @@ refresh library selected recent operation=case operation of
   Opening r _->let next=r {P.blockhash=recent} in Opening next <$> P.evalSafe (P.Prepare library next)
   Liquidity r _->let next=r {Q.positionRequest=(Q.positionRequest r) {P.blockhash=recent}} in Liquidity next <$> Q.evalSafe (Q.Prepare library next)
 
-readSaved :: FilePath -> IO (B.ByteString,Saved)
-readSaved path=do
-  bytes<-readPrivate path
-  saved<-either (const $ reject "invalid_pool_attempt") pure (eitherDecodeStrict' bytes)
-  either reject pure (validateSaved saved)
-  mapM_ (\r->require (path==attemptPath r) "pool_attempt_path_mismatch") (savedRecovery saved)
-  pure(bytes,saved)
-
--- Validate backwards before following each parent; generation decreases strictly.
-readFamily :: FilePath -> IO (B.ByteString,Saved)
-readFamily path=do
-  record<-readSaved path
-  ancestors record
-  pure record
- where
-  ancestors (_,saved)=case savedRecovery saved of
-    Just r | recoveryGeneration r>0->do
-      parent@(raw,old)<-readSaved (attemptPath r {recoveryGeneration=recoveryGeneration r-1})
-      either reject pure (validateChild old (digest raw) saved)
-      ancestors parent
-    _->pure ()
-
 evalSafe :: Safe a -> IO a
 evalSafe (InspectSaved endpoint path)=do
-  (_,saved)<-readFamily path
+  (_,saved)<-Archive.readFamily path
   inspectStatus (networkGenesis $ network saved) endpoint (identifier saved) (transaction saved) (actionHash $ action saved)
 
 data Critical a where
@@ -169,39 +152,21 @@ evalCritical (Sign library selected endpoint fee cost operation keyfiles output)
   fresh<-refresh library selected (recoveryBlockhash context) operation
   require (sameIntent operation fresh) "pool_refreshed_intent_mismatch"
   signSaved library endpoint keyfiles (Saved selected fresh fee cost "" "" (Just context))
-evalCritical (Recover library endpoint verifier path keyfiles)=do
-  (_,initial)<-readSaved path
-  context<-maybe (reject "pool_legacy_attempt_not_recoverable") pure (savedRecovery initial)
-  withFamily (recoveryRoot context) $ do
-    (raw,old)<-readFamily path
-    require (savedRecovery old==Just context) "pool_attempt_changed"
-    require (recoveryGeneration context<7) "administration_generation_limit"
-    let childPath=attemptPath context {recoveryGeneration=recoveryGeneration context+1}
-    exists<-fileExist childPath
-    if exists then do
-      (_,child)<-readFamily childPath
-      either reject pure (validateChild old (digest raw) child)
-      pure(identifier child)
-    else do
+evalCritical (Recover library endpoint verifier path keyfiles)=Archive.withSavedFamily path $ \raw old->do
+  context<-maybe (reject "pool_legacy_attempt_not_recoverable") pure (savedRecovery old)
+  require (recoveryGeneration context<7) "administration_generation_limit"
+  child<-Archive.successor raw old
+  case child of
+    Just saved->pure(identifier saved)
+    Nothing->do
       next<-renewRecovery endpoint verifier (identifier old) (transaction old) (digest raw) context
       fresh<-refresh library (network old) (recoveryBlockhash next) (action old)
       require (sameIntent (action old) fresh) "pool_refreshed_intent_mismatch"
       signSaved library endpoint keyfiles old {action=fresh,identifier="",transaction="",savedRecovery=Just next}
-evalCritical (Submit library endpoint path)=do
-  (_,initial)<-readSaved path
-  withFamily (maybe path recoveryRoot $ savedRecovery initial) $ do
-    (raw,saved)<-readFamily path
-    require (savedRecovery saved==savedRecovery initial) "pool_attempt_changed"
-    case savedRecovery saved of
-      Just context | recoveryGeneration context<7->do
-        let childPath=attemptPath context {recoveryGeneration=recoveryGeneration context+1}
-        exists<-fileExist childPath
-        when exists $ do
-          (_,child)<-readFamily childPath
-          either reject pure (validateChild saved (digest raw) child)
-          reject "pool_attempt_superseded"
-      _->pure ()
-    submitSaved library endpoint saved
+evalCritical (Submit library endpoint path)=Archive.withSavedFamily path $ \raw saved->do
+  child<-Archive.successor raw saved
+  forM_ child $ \_->reject "pool_attempt_superseded"
+  submitSaved library endpoint saved
 
 -- No signature leaves memory before exclusive, durable publication succeeds.
 signSaved :: FilePath -> String -> [FilePath] -> Saved -> IO Text
@@ -231,29 +196,6 @@ submitSaved :: FilePath -> String -> Saved -> IO Value
 submitSaved library endpoint saved=do
   checkDerivation library (network saved) (action saved)
   withSolanaRpc endpoint (networkGenesis $ network saved) ("pool_requires_https","wrong_pool_network") $ \call->do
-    let name=identifier saved
-        response state=object ["signature" .= name,"status" .= (state::Text)]
-    values<-call "getSignatureStatuses" [toJSON [name],object ["searchTransactionHistory" .= True]] >>= fieldValue "value" :: IO [Value]
-    status<-case values of [value]->pure value; _->reject "invalid_pool_status"
-    if status==Null then do
+    (state,_)<-Archive.submitSavedWith call (identifier saved) (transaction saved) (feeLimit saved) (Archive.TotalDebit $ costLimit saved) $
       checkAction library (network saved) endpoint (feeLimit saved) (costLimit saved) (action saved)
-      returned<-call "sendTransaction" [toJSON(transaction saved),object
-        ["encoding" .= ("base64"::Text),"skipPreflight" .= False,"preflightCommitment" .= ("finalized"::Text),"maxRetries" .= (0::Int)]] >>= parseValue parseJSON
-      require (returned==name) "pool_submission_identifier_mismatch"
-      pure(response "submitted")
-    else do
-      commitment<-fieldValue "confirmationStatus" status :: IO (Maybe Text)
-      if commitment/=Just "finalized" then pure(response "pending") else do
-        result<-call "getTransaction" [toJSON name,object ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text),"maxSupportedTransactionVersion" .= (0::Int)]]
-        encoded<-fieldValue "transaction" result :: IO [Text]
-        require (encoded==[transaction saved,"base64"]) "pool_finalized_bytes_mismatch"
-        meta<-fieldValue "meta" result
-        failure<-fieldValue "err" meta :: IO Value
-        statusFailure<-fieldValue "err" status :: IO Value
-        fee<-fieldValue "fee" meta :: IO Integer
-        before<-fieldValue "preBalances" meta :: IO [Integer]
-        after<-fieldValue "postBalances" meta :: IO [Integer]
-        require (failure==statusFailure && fee>=0 && fee<=toInteger(feeLimit saved)
-          && case (before,after) of (a:_,b:_)->a>=b && b>=0 && a-b>=fee && a-b<=toInteger(costLimit saved); _->False)
-          "pool_finalized_cost_or_status_mismatch"
-        pure(response $ if failure==Null then "finalized" else "failed")
+    pure $ object ["signature" .= identifier saved,"status" .= state]

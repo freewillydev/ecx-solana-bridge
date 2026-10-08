@@ -369,8 +369,13 @@ create-with-seed and initialization; nonce authority is the explicit owner, not
 implicitly the payer.
 Import accepts
 base58 64-byte Solana keypairs with matching public halves, not seed phrases.
-Shared `Bridge.AdminStatus` collects read-only recovery evidence;
-it cannot sign or broadcast. Recovery binds a payer-history anchor to the actual
+Shared `Bridge.AdminStatus` owns archive lineage and status/recovery evidence,
+plus exact-byte submission mechanics called by the closed token/pool critical
+evaluators. It cannot sign. Each `Archive` instance validates its own signatures,
+intent and successor relation; the shared file code locks and rechecks the complete
+recovery context. Submission retains operation-specific preflight and debit limits.
+Shared submission failures use `administration_*` codes; CLI success JSON and saved
+archive formats are unchanged. Recovery binds a payer-history anchor to the actual
 block that produced the saved blockhash, then requires two providers to establish
 finalized failure or expiry with complete anchored absence. The sole successor
 changes only the blockhash, retains its predecessor hash and limits, and is saved

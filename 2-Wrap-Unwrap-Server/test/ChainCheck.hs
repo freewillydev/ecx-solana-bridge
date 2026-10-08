@@ -448,7 +448,46 @@ solanaIdentityChecks=sequence
 -- deliberately offline and make no assertion about real provider completeness.
 administrationChecks :: IO [Result]
 administrationChecks=sequence
-  [ check "administration anchors finalized history before acquiring and verifying its exact fresh blockhash" $ once $ ioProperty $ do
+  [ check "shared administration submission checks saved bytes, status, fee and debit without preflighting a finalized transaction" $
+      forAll (chooseInteger (0,100)) $ \fee->forAll (chooseInteger (0,150)) $ \debit->
+      forAll arbitrary $ \failed->ioProperty $ do
+        let err=if failed then failure else Null
+            status=replace ["err"] err failedStatus
+            transaction=object ["transaction" .= [bytes,"base64"],"meta" .= object
+              ["err" .= err,"fee" .= fee,"preBalances" .= [200::Integer],"postBalances" .= [200-debit]]]
+            run limit=adminScript (terminal status transaction) $ \call->
+              Admin.submitSavedWith call signature bytes 50 limit (fail "finalized transaction was preflighted")
+            expected valid result=case result of
+              Right value->valid && value==(if failed then "failed" else "finalized",Just fee)
+              Left (_::BridgeError)->not valid
+        total<-try (run $ Admin.TotalDebit 100)
+        rent<-try (run $ Admin.RentAndFee 25)
+        feeOnly<-try (run Admin.FeeOnly)
+        pure $ expected (fee<=50 && debit>=fee && debit<=100) total
+          && expected (fee<=50 && debit>=fee && debit<=25+fee) rent && expected (fee<=50) feeOnly
+  , check "shared administration refuses mismatched bytes/status and preflight failure before submission" $ once $ ioProperty $ do
+      let run status transaction=adminScript (terminal status transaction) $ \call->
+            Admin.submitSavedWith call signature bytes 50 Admin.FeeOnly (fail "unexpected preflight")
+      wrongBytes<-rejects "administration_finalized_bytes_mismatch" $
+        run failedStatus (replace ["transaction"] (toJSON ["different bytes","base64"::Text]) failedTransaction)
+      wrongStatus<-rejects "administration_finalized_metadata_mismatch" $
+        run failedStatus (replace ["meta","err"] Null failedTransaction)
+      blocked<-rejects "preflight_refused" $ adminScript (take 1 $ terminal Null Null) $ \call->
+        Admin.submitSavedWith call signature bytes 50 Admin.FeeOnly (reject "preflight_refused")
+      pendingResult<-adminScript (take 1 $ terminal pending Null) $ \call->
+        Admin.submitSavedWith call signature bytes 50 Admin.FeeOnly (fail "pending transaction was preflighted")
+      pure (wrongBytes && wrongStatus && blocked && pendingResult==("pending",Nothing))
+  , check "shared administration sends the saved transaction once after preflight and checks its returned identifier" $ once $ ioProperty $ do
+      let send returned=take 1 (terminal Null Null)<>
+            [("sendTransaction",[toJSON bytes,object ["encoding" .= ("base64"::Text),"skipPreflight" .= False,
+              "preflightCommitment" .= ("finalized"::Text),"maxRetries" .= (0::Int)]],String returned)]
+      preflight<-newIORef (0::Int)
+      result<-adminScript (send signature) $ \call->Admin.submitSavedWith call signature bytes 50 Admin.FeeOnly (modifyIORef' preflight (+1))
+      count<-readIORef preflight
+      mismatch<-rejects "administration_submission_identifier_mismatch" $ adminScript (send otherSignature) $ \call->
+        Admin.submitSavedWith call signature bytes 50 Admin.FeeOnly (pure ())
+      pure (result==("submitted",Nothing) && count==1 && mismatch)
+  , check "administration anchors finalized history before acquiring and verifying its exact fresh blockhash" $ once $ ioProperty $ do
       actual<-adminScript fresh $ \call->Admin.newRecoveryWith call genesis payer 50 root
       badBlock<-rejects "administration_blockhash_origin_mismatch" $ adminScript
         (take 3 fresh<>[("getBlock",blockArgs,replace ["blockhash"] (String otherHash) block)]) $ \call->

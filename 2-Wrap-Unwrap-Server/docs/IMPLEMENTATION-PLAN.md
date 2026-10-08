@@ -1568,3 +1568,30 @@ restart/refusal and history-fixture contracts pass under Cabal. Full funded Ubun
 bootstrap remains unverified; treasury allocation/setup-cost classification remain
 explicit operator work. See the release review entry for exact scope, counts and
 commands. No external gate or valuable-fund deployment is marked complete here.
+
+### Measured shared payment/administration replacement (2026-10-08)
+
+Against `082ed46`, Store is 3,296 → 3,293 physical lines. The private payment
+loader retains the already-validated root/order/deposit/request for the duration
+of one transaction. Source reads avoid two extra queries; active preparation replay
+and payment work avoid a second payment load and redundant root lookup. No facts
+are reused across an RPC, backup or signer boundary. Conversion/refund/earned
+progression was already shared; another wrapper would not remove an engine.
+
+Token.Network, Token.Signing, Pool.Signing and the complete shared AdminStatus
+module total 962 → 934 lines across the same four files, counting all new helpers.
+One archive class now supplies intent-specific validation to shared bounded lineage,
+locking and successor reads. One submission path retains preflight, saved bytes,
+identifier/status/fee/debit checks and the existing success JSON/archive formats.
+The locked token read additionally rejects changes to any recovery-context field.
+
+Net application reduction: 31 physical lines across five files; 39 test lines
+added. This is a verified consolidation, **not** evidence for the proposed 7k total
+or completion of the broader persistence rewrite. Cabal bridge/token suites pass;
+pool properties pass on rerun after a transient CLI timeout. New submission checks
+cover finalized success/failure, fee/debit limits, byte/status mismatch, pending
+without preflight, preflight refusal and exact-byte single submission. The complete
+disposable PostgreSQL contract passes, including rollback, concurrency, replay,
+customer projection, role isolation and real encrypted backup/restoration. Its
+initial backup failure was a missing sequence-SELECT grant on the fresh test role,
+corrected before rerunning. No funded service was changed.

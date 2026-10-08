@@ -1,11 +1,12 @@
 {-# LANGUAGE GADTs #-}
 -- Read-only preflight; simulation always contains zero signatures.
 module Token.Network (Network(..),Safe(..),Critical(..),evalSafe,evalCritical,inspectPolicy,inspectNonce) where
-import Bridge.AdminStatus (Status,inspectStatus,Recovery(..),newRecovery,renewRecovery,validateRecovery,attemptPath)
-import Bridge.AdminKey (readPrivate,readKey,savePrivate,newPrivatePath,withFamily)
+import Bridge.AdminStatus (Status,inspectStatus,Recovery(..),newRecovery,renewRecovery,validateRecovery,attemptPath,readFamily,withSavedFamily,successor)
+import qualified Bridge.AdminStatus as Admin
+import Bridge.AdminKey (readKey,savePrivate,newPrivatePath,withFamily)
 import Bridge.Identity (digest)
 import qualified Token.Metadata as M
-import Token.Signing (Saved(..),validateSaved,validateSuccessorSaved)
+import Token.Signing (Saved(..),validateSaved)
 import qualified Token
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as L
@@ -17,7 +18,6 @@ import Bridge.RPC
 import Bridge.Solana (inspectMint,inspectClassicAccount)
 import Bridge.SolanaMessage (Transaction(..),publicKey,base58,boundedBase64)
 import Control.Monad (unless,forM_)
-import System.Posix.Files (fileExist)
 import Data.Aeson
 import Data.Aeson.Types (Parser)
 import qualified Data.ByteString.Base64 as B64
@@ -52,7 +52,7 @@ evalSafe (RecentBlockhash network endpoint)=
       >>= fieldValue "value" >>= fieldValue "blockhash" >>= parseValue parseJSON
     either reject (const $ pure recent) (publicKey recent)
 evalSafe (InspectSaved network endpoint path)=do
-  (saved,_)<-loadFamily path
+  (_,saved)<-readFamily path
   case savedRequest saved of
     NonceMint{}->reject "nonce_status_requires_submit_file"
     _->pure ()
@@ -180,27 +180,23 @@ evalCritical (Sign library network endpoint feeLimit request unsigned key output
   _<-readKey (authority request) key
   recovery<-newRecovery (genesis network) endpoint (authority request) feeLimit output
   prepareAndSign library network endpoint key request recovery
-evalCritical (Recover library primary verifier path key)=withSavedFamily path $ \saved bytes->do
+evalCritical (Recover library primary verifier path key)=withSavedFamily path $ \bytes saved->do
   before<-maybe (reject "token_recovery_context_required") pure (savedRecovery saved)
   network<-networkFor (recoveryGenesis before)
   require (recoveryGeneration before<7) "administration_recovery_limit"
-  let child=attemptPath (before {recoveryGeneration=recoveryGeneration before+1})
-  exists<-fileExist child
-  if exists then do
-    (next,_)<-loadFamily child
-    either reject pure (validateSuccessorSaved saved (digest bytes) next)
-    pure (savedId next)
-  else do
-    _<-readKey (authority $ savedRequest saved) key
-    after<-renewRecovery primary verifier (savedId saved) (savedTransaction saved) (digest bytes) before
-    prepareAndSign library network primary key (savedRequest saved) after
-evalCritical (Submit network endpoint feeLimit path)=withSavedFamily path $ \saved _->do
+  child<-successor bytes saved
+  case child of
+    Just next->pure (savedId next)
+    Nothing->do
+      _<-readKey (authority $ savedRequest saved) key
+      after<-renewRecovery primary verifier (savedId saved) (savedTransaction saved) (digest bytes) before
+      prepareAndSign library network primary key (savedRequest saved) after
+evalCritical (Submit network endpoint feeLimit path)=withSavedFamily path $ \bytes saved->do
   forM_ (savedRecovery saved) $ \context->do
     either reject pure $ validateRecovery (genesis network) (authority $ savedRequest saved)
       feeLimit (blockhash $ savedRequest saved) context
-    whenSuccessor context $ \child->do
-      _<-loadFamily child
-      reject "token_attempt_superseded"
+  child<-successor bytes saved
+  forM_ child $ \_->reject "token_attempt_superseded"
   submitSaved network endpoint feeLimit saved
 
 prepareAndSign :: FilePath -> Network -> String -> FilePath -> Request -> Recovery -> IO Text
@@ -230,43 +226,6 @@ signPrepared keyfile request unsigned recovery=do
   savePrivate output record
   pure identifier
 
-readSaved :: FilePath -> IO (Saved,BS.ByteString)
-readSaved path=do
-  bytes<-readPrivate path
-  saved<-either (const $ reject "invalid_token_attempt") pure (eitherDecodeStrict' bytes)
-  _<-either reject pure (validateSaved saved)
-  forM_ (savedRecovery saved) $ \context->require (path==attemptPath context) "token_attempt_path_mismatch"
-  pure (saved,bytes)
-
--- Verify the direct parent before following it. The checked generation then
--- decreases on every read, bounding the complete family to eight archives.
-loadFamily :: FilePath -> IO (Saved,BS.ByteString)
-loadFamily path=do
-  current<-readSaved path
-  ancestors current
-  pure current
- where
-  ancestors (saved,_)=forM_ (savedRecovery saved) $ \context->
-    unless (recoveryGeneration context==0) $ do
-      parent@(before,bytes)<-readSaved (attemptPath (context {recoveryGeneration=recoveryGeneration context-1}))
-      either reject pure (validateSuccessorSaved before (digest bytes) saved)
-      ancestors parent
-
-withSavedFamily :: FilePath -> (Saved -> BS.ByteString -> IO a) -> IO a
-withSavedFamily path action=do
-  (initial,_)<-readSaved path
-  let root=maybe path recoveryRoot (savedRecovery initial)
-  withFamily root $ do
-    (saved,bytes)<-loadFamily path
-    require (maybe path recoveryRoot (savedRecovery saved)==root) "token_attempt_family_changed"
-    action saved bytes
-
-whenSuccessor :: Recovery -> (FilePath -> IO ()) -> IO ()
-whenSuccessor context action=unless (recoveryGeneration context>=7) $ do
-  let child=attemptPath (context {recoveryGeneration=recoveryGeneration context+1})
-  exists<-fileExist child
-  if exists then action child else pure ()
-
 networkFor :: Text -> IO Network
 networkFor value
   | value==genesis Devnet=pure Devnet
@@ -278,42 +237,16 @@ submitSaved network endpoint feeLimit saved=do
   unsigned<-either reject pure (validateSaved saved)
   require (feeLimit>0) "invalid_token_rpc_policy"
   withSolanaRpc endpoint (genesis network) ("invalid_token_rpc_policy","wrong_token_network") $ \call->do
-    let identifier=savedId saved
-    statuses<-call "getSignatureStatuses" [toJSON [identifier],object ["searchTransactionHistory" .= True]] >>= fieldValue "value"
-    status<-case statuses of [value]->pure value; _->reject "invalid_token_status"
-    if status/=Null then do
-      commitment<-fieldValue "confirmationStatus" status :: IO (Maybe Text)
-      failure<-fieldValue "err" status :: IO Value
-      if commitment/=Just "finalized" then pure $ object ["signature" .= identifier,"status" .= ("pending"::Text)] else do
-        result<-call "getTransaction" [toJSON identifier,object ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text),"maxSupportedTransactionVersion" .= (0::Int)]]
-        transaction<-fieldValue "transaction" result :: IO [Text]
-        require (transaction==[savedTransaction saved,"base64"]) "token_finalized_bytes_mismatch"
-        metadata<-fieldValue "meta" result
-        errorValue<-fieldValue "err" metadata :: IO Value
-        fee<-fieldValue "fee" metadata :: IO Integer
-        require (errorValue==failure && fee>=0 && fee<=toInteger feeLimit) "token_finalized_metadata_mismatch"
-        let costLimit=case savedRequest saved of
-              Metadata{metadata=terms}->Just (toInteger $ M.maxCost terms)
-              Associated{rent=lamports}->Just (toInteger lamports+fee)
-              CreateMint{rent=lamports}->Just (toInteger lamports+fee)
-              CreateNonce{rent=lamports}->Just (toInteger lamports+fee)
-              Request{}->Nothing
-              NonceMint{}->Nothing
-        case costLimit of
-          Just maximumDebit->do
-            before<-fieldValue "preBalances" metadata :: IO [Integer]
-            after<-fieldValue "postBalances" metadata :: IO [Integer]
-            require (case (before,after) of
-              (a:_,b:_)->a>=0 && b>=0 && a>=b && a-b>=fee && a-b<=maximumDebit
-              _->False) "token_finalized_cost_exceeded"
-          Nothing->pure ()
-        pure $ object ["signature" .= identifier,"status" .= (if failure==Null then "finalized" else "failed"::Text),"feeLamports" .= fee]
-    else do
-      _<-evalSafe (Check network endpoint feeLimit (savedRequest saved) unsigned)
-      result<-call "sendTransaction" [toJSON (savedTransaction saved),object
-        ["encoding" .= ("base64"::Text),"skipPreflight" .= False,"preflightCommitment" .= ("finalized"::Text),"maxRetries" .= (0::Int)]] >>= parseValue parseJSON
-      require (result==identifier) "token_submission_identifier_mismatch"
-      pure $ object ["signature" .= identifier,"status" .= ("submitted"::Text)]
+    let limit=case savedRequest saved of
+          Metadata{metadata=terms}->Admin.TotalDebit (M.maxCost terms)
+          Associated{rent=n}->Admin.RentAndFee n
+          CreateMint{rent=n}->Admin.RentAndFee n
+          CreateNonce{rent=n}->Admin.RentAndFee n
+          Request{}->Admin.FeeOnly
+          NonceMint{}->Admin.FeeOnly
+    (state,fee)<-Admin.submitSavedWith call (savedId saved) (savedTransaction saved) feeLimit limit $
+      evalSafe (Check network endpoint feeLimit (savedRequest saved) unsigned) >> pure ()
+    pure $ object $ ["signature" .= savedId saved,"status" .= state]<>["feeLamports" .= n | Just n<-[fee]]
 
 -- Exact current System Program nonce layout: version, initialized tag, authority,
 -- durable hash and fee calculator. Legacy nonce versions are not durable hashes.

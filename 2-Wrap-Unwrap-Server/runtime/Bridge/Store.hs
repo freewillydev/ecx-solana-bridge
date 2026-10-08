@@ -1395,6 +1395,13 @@ lookupReferences c keys = do
 -- signing: source/custody, active generation and backup are checked at that boundary.
 readPayment :: PG.Connection -> Text -> Text -> IO PaymentView
 readPayment c identity identifier = do
+  (_,view,_)<-loadPayment c identity identifier
+  pure view
+
+-- Transaction-local facts, never retained across signing, RPC or backup. Keeping
+-- the source rows avoids rebuilding the same payment for each use in an operation.
+loadPayment :: PG.Connection -> Text -> Text -> IO (S.PaymentRoot,PaymentView,Maybe (S.Order,S.Deposit,W.OrderRequest))
+loadPayment c identity identifier = do
   (root,state)<-readPaymentRoot c identifier
   obligations <- O.runSelect c $ do
     row <- O.selectTable S.obligations
@@ -1402,7 +1409,7 @@ readPayment c identity identifier = do
     pure row
     :: IO [S.Obligation]
   withdrawal <- maybe (pure Nothing) (readWithdrawal c) (T.stripPrefix "fee:" identifier)
-  result <- case (obligations,withdrawal) of
+  (result,source) <- case (obligations,withdrawal) of
     ([ob],Nothing) -> do
       rows <- O.runSelect c $ do
         order <- O.selectTable S.orders
@@ -1429,8 +1436,8 @@ readPayment c identity identifier = do
         _ -> reject "unknown_payment_funding"
       outgoing <- checked (payment identifier funding (S.obligationRecipient ob))
       require (T.pack(show $ paymentAsset outgoing)==S.obligationAsset ob && units(paymentAmount outgoing)==S.obligationAmount ob) "payment_funding_mismatch"
-      pure (PaymentView outgoing (PaymentTerms policy costs) state)
-    ([],Just saved) -> pure (PaymentView (withdrawalPayment saved) (withdrawalTerms saved) state)
+      pure (PaymentView outgoing (PaymentTerms policy costs) state,Just (order,deposit,request))
+    ([],Just saved) -> pure (PaymentView (withdrawalPayment saved) (withdrawalTerms saved) state,Nothing)
     ([],Nothing)->reject "payment_not_found"
     _->reject "ambiguous_payment_funding"
   let outgoing=savedPayment result
@@ -1441,7 +1448,7 @@ readPayment c identity identifier = do
   require (S.rootObligation root==obligation && S.rootWithdrawal root==withdrawal && S.rootDeposit root==receipt
     && S.rootChain root==(if paymentAsset outgoing==Native then "Native" else "Solana")) "payment_funding_mismatch"
   require (deploymentFingerprint (paymentPolicy $ savedTerms result)==identity) "payment_profile_mismatch"
-  pure result
+  pure (root,result,source)
  where quantity=checked . amount . toInteger
 
 -- These helpers are private to closed Store operations. They do not accept a
@@ -1516,15 +1523,21 @@ readFeeBudget c limits booked now asset = do
     (if asset==Native then nativeDaily limits else solanaDaily limits)
 
 readPreparation :: PG.Connection -> Text -> Text -> IO PreparedPayment
-readPreparation c identity identifier = do
-  (prepared,cancelling)<-preparationState c identity identifier
+readPreparation c identity identifier = readPayment c identity identifier >>= activePreparation c
+
+activePreparation :: PG.Connection -> PaymentView -> IO PreparedPayment
+activePreparation c view = do
+  (prepared,cancelling)<-preparationFor c view
   require (not cancelling) "preparation_cancellation_pending"
   pure prepared
 
 -- Recovery may inspect a pending cancellation, but ordinary signing may not.
 preparationState :: PG.Connection -> Text -> Text -> IO (PreparedPayment,Bool)
-preparationState c identity identifier = do
-  view <- readPayment c identity identifier
+preparationState c identity identifier = readPayment c identity identifier >>= preparationFor c
+
+preparationFor :: PG.Connection -> PaymentView -> IO (PreparedPayment,Bool)
+preparationFor c view = do
+  let identifier=paymentId (savedPayment view)
   rows <- O.runSelect c $ do
     intent <- O.selectTable S.paymentRoots
     (key,generation,policy,draft,retired,cancelled) <- O.selectTable S.preparations
@@ -1551,15 +1564,14 @@ preparePayment c config now identifier allowance plan = do
   let identity=deploymentFingerprint $ paymentPolicy $ executionTerms config
       text=O.sqlStrictText; num=O.sqlInt8
   validateSavedJson 16384 plan
-  view<-readPayment c identity identifier
+  (root,view,_)<-loadPayment c identity identifier
   checked (checkPreparationInput allowance plan view)
   let outgoing=savedPayment view; funding=paymentFunding outgoing
       chain=if paymentAsset outgoing==Native then "Native" else "Solana"
       currency=if chain=="Native" then Native else Sol
-  (root,_)<-readPaymentRoot c identifier
   economic<-rootPhase root
   history<-case economic of
-    Active{}->LivePreparation (S.rootChain root) <$> readPreparation c identity identifier
+    Active{}->LivePreparation (S.rootChain root) <$> activePreparation c view
     Ready->do
       existing<-O.runSelect c $ O.limit 1 $ do
         (key,_,_,_,_,_)<-S.workPreparations
@@ -1749,13 +1761,9 @@ recordAttempt c identity expected signed = do
 
 paymentWork :: PG.Connection -> Text -> Text -> IO (PaymentView,Maybe PreparedPayment,[Text])
 paymentWork c identity identifier = do
-  view <- readPayment c identity identifier
-  active <- O.runSelect c $ do
-    row <- O.selectTable S.paymentRoots
-    O.where_ (S.rootId row O..== O.sqlStrictText identifier O..&& S.rootPhase row O..== O.sqlStrictText "active")
-    pure (S.rootId row)
-    :: IO [Text]
-  prepared <- case active of []->pure Nothing; [_]->Just <$> readPreparation c identity identifier; _->reject "duplicate_payment_intent"
+  (root,view,_)<-loadPayment c identity identifier
+  phase<-rootPhase root
+  prepared<-case phase of Active{}->Just <$> activePreparation c view; _->pure Nothing
   attempts <- O.runSelect c $ O.limit 1001 $ O.orderBy (O.asc id) $ do
     row <- O.selectTable S.attempts
     expired<-Exists.exists $ do
@@ -1964,22 +1972,11 @@ repairCompletedOrderView c policy now identifier = do
 
 readPaymentSource :: PG.Connection -> Text -> Text -> IO (Maybe W.PaymentSource)
 readPaymentSource c identity identifier = do
-  view<-readPayment c identity identifier
-  let binding=case paymentFunding(savedPayment view) of
-        Conversion order receipt _ _->Just(order,receipt)
-        Refund order receipt _ _->Just(order,receipt)
-        EarnedFees{}->Nothing
-  forM binding $ \(order,receipt)->do
-    deposit<-readSource c receipt >>= asDeposit
-    rows<-O.runSelect c $ do
-      row<-O.selectTable S.orders
-      O.where_ (S.orderId row O..== O.sqlStrictText order)
-      pure (S.requestJson row,S.instruction row)
-      :: IO [(Text,Maybe Text)]
-    (request,instruction)<-case rows of
-      [(value,Just instruction)]->(,instruction) <$> decodeSaved value
-      _->reject "source_instruction_missing"
-    require (W.depositOrder deposit==Just order && W.depositAsset deposit==sourceAsset(W.direction request)) "source_binding_mismatch"
+  (_,view,source)<-loadPayment c identity identifier
+  forM source $ \(order,row,request)->do
+    deposit<-asDeposit row
+    instruction<-maybe (reject "source_instruction_missing") pure (S.instruction order)
+    require (W.depositOrder deposit==Just (S.orderId order) && W.depositAsset deposit==sourceAsset(W.direction request)) "source_binding_mismatch"
     pure (W.PaymentSource deposit request (paymentPolicy $ savedTerms view) instruction)
 
 readCustodyRevision :: PG.Connection -> IO Int64
