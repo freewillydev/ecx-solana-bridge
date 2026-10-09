@@ -43,7 +43,20 @@ data PublicConfiguration = PublicConfiguration
   , pubDecimals :: !Int, pubMinInput :: !Amount, pubMaxInput :: !Amount
   , pubFeesBps :: !(Map Text Int), pubIntakeEnabled :: !Bool
   , pubImplementationReady :: !Bool, pubAvailability :: !Availability
+  , pubReport :: !(Maybe PublicReport)
   } deriving (Eq, Show, Generic)
+
+-- Public aggregates only: no order identifiers, capabilities or customer addresses.
+-- Cumulative totals use decimal strings so they cannot lose precision in browsers.
+data PublicAssetReport = PublicAssetReport
+  { reportAsset :: !Asset, reportReserve :: !(Maybe Text), reportFloat :: !Text
+  , reportHeld :: !Text, reportLiability :: !Text, reportFees :: !Text }
+  deriving stock (Eq,Show,Generic) deriving anyclass (ToJSON,FromJSON)
+data PublicReport = PublicReport
+  { reportGeneratedAt :: !Int64, reportCustodyAt :: !(Maybe Int64), reportCustodyFresh :: !Bool
+  , reportAssets :: ![PublicAssetReport], reportWraps24h :: !Int64
+  , reportUnwraps24h :: !Int64, reportUndatedTransfers :: !Int64 }
+  deriving stock (Eq,Show,Generic) deriving anyclass (ToJSON,FromJSON)
 
 publicJSON :: Options
 publicJSON = defaultOptions { fieldLabelModifier = \field -> case drop 3 field of

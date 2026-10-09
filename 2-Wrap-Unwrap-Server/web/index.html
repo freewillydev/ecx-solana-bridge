@@ -28,6 +28,29 @@
         </details>
         <p id="network-note" class="small"></p>
       </section>
+      <details class="card">
+        <summary>Bridge information</summary>
+        <p id="report-note" class="small">Loading report…</p>
+        <div id="report-data" hidden>
+          <p>Completed in the last 24 hours: <strong id="report-wraps">—</strong> wraps,
+            <strong id="report-unwraps">—</strong> unwraps.</p>
+          <p id="report-undated" class="small"></p>
+          <div class="report-table">
+            <table>
+              <thead><tr><th>Asset</th><th>Custody reserves</th><th>Fees earned · lifetime</th><th>Free payout inventory</th><th>Reserved payouts</th><th>Customer principal</th></tr></thead>
+              <tbody>
+            <tr><th scope="row">ECX</th><td id="report-Native-reserve">—</td><td id="report-Native-fees">—</td><td id="report-Native-float">—</td><td id="report-Native-held">—</td><td id="report-Native-liability">—</td></tr>
+            <tr><th scope="row">Wrapped ECX</th><td id="report-Wrapped-reserve">—</td><td id="report-Wrapped-fees">—</td><td id="report-Wrapped-float">—</td><td id="report-Wrapped-held">—</td><td id="report-Wrapped-liability">—</td></tr>
+            <tr><th scope="row">SOL</th><td id="report-Sol-reserve">—</td><td id="report-Sol-fees">—</td><td id="report-Sol-float">—</td><td id="report-Sol-held">—</td><td id="report-Sol-liability">—</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="small">Reserves include funds owed to customers and operating funds;
+            they are not all available for payouts. Earned bridge fees exclude network
+            costs and are cumulative, including fees already withdrawn. Refunds and
+            unsuccessful transfers are excluded from completed-transfer counts.</p>
+        </div>
+      </details>
       <section class="card">
         <h2>Transfer</h2>
         <form id="order-form">

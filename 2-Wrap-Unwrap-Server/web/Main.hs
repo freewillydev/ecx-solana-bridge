@@ -180,6 +180,30 @@ loadConfig state = do
   text "availability" $ if available (pubAvailability cfg) then "Bridge is accepting orders."
     else "Deposits paused: " <> customerError (reason $ pubAvailability cfg)
   text "limits" $ "Amount limits: " <> renderCoins (pubMinInput cfg) <> "–" <> renderCoins (pubMaxInput cfg)
+  hidden "report-data" (not $ isJust $ pubReport cfg)
+  text "report-note" "Report unavailable."
+  forM_ (pubReport cfg) $ \report -> do
+    date<-B.text <$> B.dateText (fromIntegral $ reportGeneratedAt report)
+    custodyDate<-maybe (pure "not observed") (fmap B.text . B.dateText . fromIntegral) (reportCustodyAt report)
+    text "report-note" $ "Ledger report: "<>date<>". Custody checked: "<>custodyDate
+      <>if reportCustodyFresh report then "." else ". Reserves are stale or unverified; they are not a current balance guarantee."
+    text "report-wraps" (T.pack $ show $ reportWraps24h report)
+    text "report-unwraps" (T.pack $ show $ reportUnwraps24h report)
+    text "report-undated" $ if reportUndatedTransfers report==0 then "" else
+      T.pack(show $ reportUndatedTransfers report)<>" older/zero-fee transfers lack a settlement time and are excluded from the 24-hour counts."
+    forM_ (reportAssets report) $ \asset -> do
+      let key="report-"<>T.pack(show $ reportAsset asset)
+          places=if reportAsset asset==Domain.Sol then 9 else 8
+          coins raw=let (sign,digits)=if T.isPrefixOf "-" raw then ("-",T.drop 1 raw) else ("",raw)
+                        padded=T.justifyRight (places+1) '0' digits
+                        (whole,fraction)=T.splitAt (T.length padded-places) padded
+                        trimmed=T.dropWhileEnd (=='0') fraction
+                    in sign<>whole<>if T.null trimmed then "" else "."<>trimmed
+      text (key<>"-reserve") (maybe "Unknown" coins $ reportReserve asset)
+      text (key<>"-fees") (coins $ reportFees asset)
+      text (key<>"-float") (coins $ reportFloat asset)
+      text (key<>"-held") (coins $ reportHeld asset)
+      text (key<>"-liability") (coins $ reportLiability asset)
 
 clearPayment :: IORef State -> IO ()
 clearPayment state = do

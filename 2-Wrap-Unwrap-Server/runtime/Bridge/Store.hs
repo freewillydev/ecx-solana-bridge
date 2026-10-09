@@ -215,6 +215,7 @@ data StoreRead a where
   PendingAttempts :: StoreRead [Text]
   PaymentCandidates :: StoreRead [Text]
   ReadState :: StoreRead LedgerState
+  ReadPublicReport :: Int64 -> StoreRead W.PublicReport
   ReadBalances :: StoreRead (M.Map (Asset,Account) Integer)
   ReadPaymentWork :: Text -> StoreRead (PaymentView,Maybe PreparedPayment,[Text])
   ReadSigningDecision :: Int64 -> Text -> Int -> StoreRead PreparedPayment
@@ -329,6 +330,7 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
         pure (view,S.instructionSequence row)
       CheckIntake now -> intakeReady c identity now
       ReadCustodyRevision -> readCustodyRevision c
+      ReadPublicReport now -> publicReport c now
       ReadCustodySnapshot now origins losses -> custodySnapshot c now origins losses
       ReadCustodyEvent chain identifier -> custodyEvent c chain identifier
       HasCustodyEvent chain identifier -> do
@@ -656,6 +658,81 @@ readWithdrawal c key = do
       cancelled <- case cancellations of []->pure Nothing; [one]->pure(Just one); _->reject "duplicate_cancellation"
       pure (Just $ WithdrawalView outgoing policy (S.reason r) (S.sequenceNo r) cancelled)
     _ -> reject "duplicate_withdrawal"
+-- One read-only snapshot of cached custody and immutable accounting. No RPC,
+-- customer identifiers or full reconciliation evidence leave this operation.
+publicReport :: PG.Connection -> Int64 -> IO W.PublicReport
+publicReport c wallTime=do
+  clock<-O.runSelect c (O.selectTable S.operatingClock) :: IO [(Int64,Int64)]
+  now<-case clock of [(1,t)]->pure(max wallTime t); _->reject "operating_clock_missing"
+  booked<-balances c
+  holds<-O.runSelect c $ O.aggregate(p2(O.groupBy,O.sumInt8)) $ do
+    (_,asset,n,phase)<-O.selectTable S.reservations
+    O.where_ (phase O../= text "released")
+    pure(asset,n)
+    :: IO [(Text,Scientific)]
+  let conversions=do
+        root<-O.selectTable S.paymentRoots
+        ob<-O.selectTable S.obligations
+        O.where_ (S.rootId root O..== S.obligationId ob O..&& S.rootPhase root O..== text "settled"
+          O..&& S.obligationKind ob O..== text "conversion")
+        pure(root,ob)
+  earned<-O.runSelect c $ O.aggregate(p2(O.groupBy,O.sumInt8)) $ do
+    (root,_)<-conversions
+    (_,event,asset,account,n)<-O.selectTable S.postings
+    O.where_ (event O..== O.fromNullable (text "") (S.rootSettlementEvent root)
+      O..&& account O..== text "earned" O..&& n O..> O.sqlInt8 0)
+    pure(asset,n)
+    :: IO [(Text,Scientific)]
+  totals<-O.runSelect c $ O.aggregate O.count $ fmap (S.rootId.fst) conversions :: IO [Int64]
+  -- Network-fee booking shares the original settlement transaction. Bind to its
+  -- immutable event, not the mutable winner: replacement must not recount a sale.
+  dated<-O.runSelect c $ O.aggregate(p3(O.groupBy,O.count,O.sumInt8)) $ do
+    (root,ob)<-conversions
+    (tx,payment)<-S.attemptIntents
+    (posting,event,_,account,_)<-O.selectTable S.postings
+    (cost,at)<-O.selectTable S.operatingCosts
+    O.where_ (payment O..== S.rootId root O..&& O.fromNullable (text "") (S.rootSettlementEvent root) O..== (text "settlement:" O..++ tx)
+      O..&& event O..== (text "network-fee:" O..++ tx) O..&& account O..== text "operating" O..&& cost O..== posting)
+    pure(S.obligationAsset ob,S.rootId root,O.ifThenElse (at O..> O.sqlInt8(now-86400) O..&& at O..<= O.sqlInt8 now) (O.sqlInt8 1) (O.sqlInt8 0))
+    :: IO [(Text,Int64,Scientific)]
+  custody<-O.runSelect c $ do
+    (key,revision,checked,at,failure)<-O.selectTable S.custody
+    (other,encoded)<-O.selectTable S.custodyReport
+    O.where_ (key O..== other O..&& key O..== O.sqlInt8 1)
+    pure(revision,checked,at,failure,encoded)
+    :: IO [(Int64,Maybe Int64,Maybe Int64,Maybe Text,Maybe Text)]
+  (at,current,reserves)<-case custody of
+    [(revision,checkedRevision,at,failure,encoded)]->do
+      values<-case encoded of
+        Nothing->pure []
+        Just raw->do
+          value<-decodeSaved raw
+          either (const $ reject "invalid_public_custody_report") pure $ parseEither (withObject "custody" $ \o->do
+            rows<-maybe [] id <$> o .:? "assets"
+            mapM (withObject "asset" $ \r->(,) <$> r .: "asset" <*> r .: "observed") rows) value
+      forM_ values $ \(_,n)->checked(parseUnits n) >> pure ()
+      let complete=length values==3 && all (`M.member` M.fromList values) [Native,Wrapped,Sol]
+          fresh=complete && checkCustody wallTime ((,,) revision <$> checkedRevision <*> at)==Right () && failure==Nothing
+      pure(at,fresh,M.fromList values)
+    _->reject "custody_state_missing"
+  assets<-forM [Native,Wrapped,Sol] $ \asset->do
+    held<-exact $ maybe 0 id $ lookup (T.pack $ show asset) holds
+    fees<-exact $ maybe 0 id $ lookup (T.pack $ show asset) earned
+    let available=M.findWithDefault 0 (asset,Float) booked-held
+    pure $ W.PublicAssetReport asset (M.lookup asset reserves) (decimal available) (decimal held)
+      (decimal $ M.findWithDefault 0 (asset,Principal) booked) (decimal fees)
+  counts<-forM dated $ \(asset,_,n)->do value<-exact n; require (value<=toInteger(maxBound::Int64)) "public_count_overflow"; pure(asset,fromInteger value)
+  total<-case totals of [n]->pure n; _->reject "invalid_public_transfer_count"
+  let undated=total-sum [n|(_,n,_)<-dated]
+  require (undated>=0) "invalid_public_transfer_count"
+  pure $ W.PublicReport now at current assets (maybe 0 id $ lookup "Wrapped" counts) (maybe 0 id $ lookup "Native" counts) undated
+ where
+  text=O.sqlStrictText
+  decimal=T.pack.show
+  exact value=case floatingOrInteger value :: Either Double Integer of
+    Right n | n>=0->pure n
+    _->reject "invalid_public_report_amount"
+
 balances :: PG.Connection -> IO (M.Map (Asset,Account) Integer)
 balances c = do
   rows <- O.runSelect c $ O.aggregate (p3 (O.groupBy,O.groupBy,O.sumInt8)) $ do

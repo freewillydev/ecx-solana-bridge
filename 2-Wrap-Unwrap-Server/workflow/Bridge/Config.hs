@@ -60,7 +60,7 @@ storePolicy c=Store.StorePolicy
 publicConfiguration :: Config -> InterfaceConfig -> Bool -> PublicConfiguration
 publicConfiguration c links paying=PublicConfiguration (profile c) (if profile c==CanonicalBeta then "mainnet-beta" else "devnet")
   links (deploymentId c) (mint c) (custodyOwner c) 8 (minInput c) (maxInput c)
-  (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]) paying False (Availability False "starting")
+  (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]) paying False (Availability False "starting") Nothing
 
 fingerprint :: Config -> Text
 fingerprint c=digest . LBS.toStrict . encode $ object

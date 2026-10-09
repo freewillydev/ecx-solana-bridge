@@ -13,6 +13,9 @@ import Bridge.Recovery
 import Bridge.Control (runControl)
 import Bridge.Web (publicApplication,runPublicServer)
 import Data.Int (Int64)
+import Data.Word (Word64)
+import GHC.Clock (getMonotonicTimeNSec)
+import qualified Database.PostgreSQL.Simple as PG
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import Bridge.Error
@@ -42,7 +45,7 @@ import qualified Bridge.RPC as RPC
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (concurrently_)
 import System.IO (hPutStrLn,stderr)
-import Control.Concurrent.MVar (MVar,newMVar,withMVar)
+import Control.Concurrent.MVar (MVar,newMVar,withMVar,modifyMVar)
 import Control.Exception (bracket,onException,try,catch,throwIO,IOException)
 import Data.IORef (newIORef,atomicModifyIORef')
 import qualified Data.ByteString as BS
@@ -76,6 +79,24 @@ instruction (SigningDSL op) = Request (SignerAction op)
 
 -- Safe interpretation has no writer, signer transport, keys or RPC manager.
 data instance Evaluation 'Safe = SafeEnvironment Reader (Maybe W.PublicConfiguration)
+  (MVar (Maybe (Word64,Maybe W.PublicReport)))
+
+-- Coalesce public refreshes, including failures. This cache carries no authority;
+-- intake checks stay live and the report retains its actual observation times.
+cachedPublicReport :: Reader -> MVar (Maybe (Word64,Maybe W.PublicReport)) -> Int64 -> IO (Maybe W.PublicReport)
+cachedPublicReport reader cache now=modifyMVar cache $ \saved->do
+  tick<-getMonotonicTimeNSec
+  (stamp,report)<-case saved of
+    Just entry@(stamp,_) | tick-stamp<30000000000->pure entry
+    _->do
+      result<-(timeout 5000000 (Just <$> evalRead reader (ReadPublicReport now)))
+        `catch` (\(_::BridgeError)->pure Nothing)
+        `catch` (\(_::PG.SqlError)->pure Nothing)
+        `catch` (\(_::IOException)->pure Nothing)
+      pure(tick,maybe Nothing id result)
+  let aged value=value {W.reportCustodyFresh=W.reportCustodyFresh value
+        && maybe False (\at->at<=now && now-at<=60) (W.reportCustodyAt value)}
+  pure(Just(stamp,report),aged <$> report)
 
 evalSafe :: Evaluation 'Safe -> Request caller 'Safe a -> IO a
 evalSafe environment request=do
@@ -93,16 +114,18 @@ instance Operation 'Customer 'Safe CustomerCommand where
       Just Refl->Right dsl
       Nothing->Left "operation_dictionary_mismatch"
   authorizeOperation _ _=pure ()
-  evaluateOperation (SafeEnvironment reader public) (CustomerQuery operation)=run operation
+  evaluateOperation (SafeEnvironment reader public cache) (CustomerQuery operation)=run operation
    where
     run :: CustomerRead a -> IO a
     run PublicConfig=do
       configuration<-configured
-      if not(W.pubIntakeEnabled configuration) then pure configuration {W.pubAvailability=W.Availability False "observation_only"} else do
-        now<-floor <$> getPOSIXTime
+      now<-floor <$> getPOSIXTime
+      report<-cachedPublicReport reader cache now
+      let reported=configuration {W.pubReport=report}
+      if not(W.pubIntakeEnabled configuration) then pure reported {W.pubAvailability=W.Availability False "observation_only"} else do
         result<-try (evalRead reader $ CheckIntake now) :: IO (Either BridgeError ())
         let state=case result of Right ()->W.Availability True ""; Left (BridgeError code)->W.Availability False code
-        pure configuration {W.pubAvailability=state}
+        pure reported {W.pubAvailability=state}
     run (OrderStatus header identifier)=evalRead reader (ReadOrder header identifier)
     run (PaymentInstructions header identifier)=do
       configuration<-configured
@@ -123,7 +146,7 @@ instance Operation 'Operator 'Safe OperatorCommand where
       Just Refl->Right dsl
       Nothing->Left "operation_dictionary_mismatch"
   authorizeOperation _ _=pure ()
-  evaluateOperation (SafeEnvironment reader _) (OperatorQuery operation)=run operation
+  evaluateOperation (SafeEnvironment reader _ _) (OperatorQuery operation)=run operation
    where
     run :: OperatorRead a -> IO a
     run NativeReviews=evalRead reader ReadNativeReviews
@@ -189,7 +212,8 @@ runProcess rpc reader process=do
       credentials<-signerCredentials endpoint
       signingApplication credentials dispatch >>= runSigningServer endpoint
     WorkerProcess _ _ customerSettings _ _ port assets directory->do
-      let safeEnvironment=SafeEnvironment reader (publicConfiguration <$> customerSettings)
+      reportCache<-newMVar Nothing
+      let safeEnvironment=SafeEnvironment reader (publicConfiguration <$> customerSettings) reportCache
           evaluate :: forall caller a. Plan caller a -> IO a
           evaluate (SafePlan request)=evalSafe safeEnvironment request
           evaluate (CriticalPlan request)=dispatch request

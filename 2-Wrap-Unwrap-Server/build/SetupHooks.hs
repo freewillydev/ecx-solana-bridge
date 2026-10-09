@@ -136,7 +136,7 @@ compileBrowser destination = do
         : extras <> filter (\(key,_) -> key/="PATH" && key `notElem` map fst extras) environment
       args = ["exe:ecx-browser", "--project-dir=" <> source, "--builddir=" <> cache,
               "--with-compiler=" <> compiler,
-              "--with-hc-pkg=" <> (takeDirectory compiler </> "javascript-unknown-ghcjs-ghc-pkg"), "-j1"]
+              "--with-ghc-pkg=" <> (takeDirectory compiler </> "javascript-unknown-ghcjs-ghc-pkg"), "-j1"]
       command action = (proc "cabal" (action:args)){env=Just childEnv}
   (_,_,_,process) <- createProcess (command "build")
   status <- waitForProcess process

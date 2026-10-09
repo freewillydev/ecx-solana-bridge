@@ -1801,3 +1801,34 @@ create/import/sign operations are not retried. The fixture injects connection an
 warmup errors and retains the exactly-once create/import assertions. Actual Ubuntu
 full bridge-test and provisioning contracts passed in SSMaefbca10 in 2m46.5s with
 cached dependencies. No new funded payment has been made on AWS.
+
+
+## Public accounting report and corrected installer acceptance (2026-10-08)
+
+The public configuration now includes an optional closed-DSL report with reserves,
+allocations, cumulative settled conversion fees and 24-hour conversion counts.
+GHC JavaScript 9.12.2 browser compilation, native GHC 9.14.1 workflow compilation
+and the actual PostgreSQL contract passed locally with one build job. Disposable
+ledger `ecx_rebuild_contract_report_20261008` and SELECT-only role
+`ecx_report_reader_20261008` verified historical earned fee 7, one completed wrap,
+24-hour expiry, read-only state and unchanged totals after refund and replay.
+The wider contract also passed rollback, budget/recovery interleavings, writer
+fencing and encrypted restic archive readback/restoration. This is local contract
+evidence, not a new funded transfer or independent-host custody recovery.
+
+Report refreshes are coalesced for 30 seconds and bounded to five seconds; optional
+report failure leaves configuration available. This cache's concurrent failure
+behavior and the rendered public screen still require acceptance review. Older
+minimal custody records display unknown reserves. The Cabal browser hook now uses
+`--with-ghc-pkg`, the working cross-compiler package-tool selector. A complete local
+asset build was blocked by the full external Rust cache volume; browser and server
+components were compiled separately without deleting caches or starting VMs.
+
+Independent installer acceptance for source `71e327decc64735650b2f554c88ff321458f7d49`
+passed clean install, repeat install, reboot and upgrade from e603d17, with services
+paused and unfunded. Artifact SHA-256:
+`6c9b30e0573a483fbfdc46bf67d19f9f92cba57cb90c0cfdc9d5c0167d756413`.
+Clean install SSM `059a3262`, repeat `0920e9fe`, reboot `381a5d15`, upgrade
+`bb61892c-101c-4c16-bdd5-fa4d1a54e535`; both fixture services were stopped afterward.
+That artifact predates this report change. It does not establish funded readiness,
+customer wallet acceptance or recovery of a live ledger onto another host.

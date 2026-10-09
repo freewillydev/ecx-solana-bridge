@@ -151,3 +151,9 @@ select:focus {
 }
 
 #qr { max-width: 100%; height: auto; image-rendering: pixelated; }
+
+.report-table { overflow-x: auto; }
+.report-table table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.report-table th, .report-table td { padding: 10px 12px; text-align: right; border-bottom: 1px solid #53695c; }
+.report-table th:first-child { text-align: left; }
+summary { cursor: pointer; font-weight: 600; }

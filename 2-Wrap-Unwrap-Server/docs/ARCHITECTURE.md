@@ -877,6 +877,20 @@ diagram, authoritative facts, transition map, invariant/test index and bounded T
 | `GET /api/v1/orders/:id` | Authorized order status |
 | `POST /api/v1/orders/:id/transaction` | Authorized Solana Pay instructions |
 
+Configuration includes an optional public accounting report through the closed
+`ReadPublicReport` Opaleye operation. It returns one read-only snapshot: cached
+custody observations, journal allocations, cumulative settled conversion fees and
+24-hour completed conversion counts. Refunds and settlement replays do not count
+as conversions. Original immutable settlement events prevent replacement winners
+from recounting revenue. Missing settlement timestamps are explicitly excluded and
+counted separately; absent custody breakdowns show unknown reserves.
+
+The safe evaluator coalesces report refreshes for 30 seconds, including failures,
+and bounds each report query to five seconds. Optional report failure does not
+fail configuration. Intake checks remain live; cached reports never authorize a
+payment. Observation timestamps and stale labels accompany balances. No report
+refresh calls chain RPC, exposes order capabilities or gains signer authority.
+
 Amounts are integer base-unit strings. A saved private capability authorizes order
 access; an order ID alone does not. Wrapping binds a Solana destination and native
 refund address. Unwrapping uses a Solana Pay reference and derives refund ownership

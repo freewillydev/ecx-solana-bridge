@@ -3004,7 +3004,7 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       chainSettings=ObserverSettings native solana 2 "sol-origin" "opening-signature"
       config=H.SolanaPolicy "contract" "contract" key key key (money 10) (money 10)
       public=W.PublicConfiguration W.L2LSignetDevnet "devnet" (W.InterfaceConfig Nothing Nothing Nothing Nothing Nothing)
-        "contract" key key 8 (money 2) (money 1000) (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]) False False (W.Availability False "starting")
+        "contract" key key 8 (money 2) (money 1000) (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]) False False (W.Availability False "starting") Nothing
       customerSettings=CustomerSettings public storePolicy "/unused/sdk"
       endpoint=SigningEndpoint 9443 "/unused/auth"
   bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> reject "offline_process_rpc"}) closeManager $ \manager->do
@@ -3455,6 +3455,15 @@ paidRefundContract fixtures reader writer=do
   paidReceipt<-evalRead reader (ReadSource "historical-fee")
   paidOrder<-maybe (fail "missing paid order") pure (W.depositOrder paidReceipt)
   paidBefore<-evalRead reader (ReadOrder header paidOrder)
+  stateBeforeReport<-evalRead reader ReadState
+  reportBefore<-evalRead reader (ReadPublicReport 110)
+  let fees report=[(W.reportAsset row,W.reportFees row)|row<-W.reportAssets report]
+      counts report=(W.reportWraps24h report,W.reportUnwraps24h report,W.reportUndatedTransfers report)
+  check (lookup Native (fees reportBefore)==Just "7" && W.reportWraps24h reportBefore==1
+    && W.reportUnwraps24h reportBefore==0 && W.reportUndatedTransfers reportBefore==0)
+  evalRead reader ReadState >>= check . (==stateBeforeReport)
+  expiredReport<-evalRead reader (ReadPublicReport $ W.reportGeneratedAt reportBefore+86400)
+  check (W.reportWraps24h expiredReport==0 && W.reportUnwraps24h expiredReport==0)
   fixture fixtures (SeedReceipt "refund-after-paid" (Just paidOrder) Native 3 2 True 110)
   evalWrite writer (Pause "completed-order refund contract")
   fixture fixtures RefreshCustody
@@ -3490,6 +3499,9 @@ paidRefundContract fixtures reader writer=do
   evalWrite writer (SettlePayment authorized (W.PaymentCosts (money 1) (money 0)) "{\"offlineExtraRefund\":true}")
   evalRead reader ReadBalances >>= check . (==afterRefund)
   unchanged
+  reportAfter<-evalRead reader (ReadPublicReport 110)
+  check (fees reportAfter==fees reportBefore && counts reportAfter==counts reportBefore
+    && not(W.reportCustodyFresh reportAfter))
   expectStore "pause_before_operator_action" (evalWrite writer $ RepairCompletedOrderView 110 paidOrder)
   evalWrite writer (Pause "repair historical refund view")
   expectStore "custody_not_reconciled" (evalWrite writer $ RepairCompletedOrderView 110 paidOrder)
@@ -4202,7 +4214,7 @@ tlsMain=do
                   order=W.OrderRequest WrappedToNative (money 10) "native-recipient" "" Nothing "checkpoint-http"
                   publicConfig=W.PublicConfiguration profile cluster (W.InterfaceConfig Nothing Nothing Nothing Nothing Nothing)
                     "codec-fixture" mint owner 8 (money 2) (money 1000) (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)])
-                    True False (W.Availability False "starting")
+                    True False (W.Availability False "starting") Nothing
               writeFile cookie "fixture:fixture"; setFileMode cookie 0o600
               fixture fixtures ReadyIntake
               now<-floor <$> getPOSIXTime

@@ -152,7 +152,7 @@ checks=sequence
           request=W.OrderRequest D.NativeToWrapped amount "recipient" "refund" Nothing "key"
           order=W.OrderView "order" request quote "AwaitingDeposit" 200 (Just "instruction") Nothing (W.PolicySnapshot 2 "finalized" "deployment")
           config=W.PublicConfiguration W.L2LSignetDevnet "devnet" (W.InterfaceConfig Nothing Nothing Nothing Nothing Nothing)
-            "deployment" "mint" "owner" 8 amount amount M.empty False False (W.Availability False "paused")
+            "deployment" "mint" "owner" 8 amount amount M.empty False False (W.Availability False "paused") Nothing
           instruction=W.PaymentInstruction "solana:fixture" "reference" "mint" amount "verified_source_owner"
           evaluate :: forall a. Plan 'Customer a -> IO a
           evaluate (SafePlan value)=case resolve value of
