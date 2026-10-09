@@ -12,6 +12,8 @@ import Bridge.Domain (Amount)
 import Bridge.Error
 import Data.Int (Int64)
 import Data.Text (Text)
+import qualified Data.Text as T
+import System.IO (hPutStrLn,stderr)
 import Servant hiding (respond)
 import Bridge.Web (boundedApplication)
 import Control.Monad.IO.Class (liftIO)
@@ -70,7 +72,13 @@ signingApplication credentials evaluate = do
       interpret :: forall a. Request 'Signer 'Critical a -> Handler a
       interpret request = do
         result<-liftIO $ (Right <$> evaluate request) `catch` (\(BridgeError code)->pure $ Left code)
-        either (\code->throwError err409 {errBody=encode $ object ["error" .= code],errHeaders=[("Content-Type","application/json")]}) pure result
+        case result of
+          Right value->pure value
+          Left code->do
+            -- Log only a bounded machine code, never a request, key or RPC body.
+            let safe=T.length code<=96 && T.all (`elem` ("abcdefghijklmnopqrstuvwxyz0123456789_"::String)) code
+            liftIO $ hPutStrLn stderr $ "signer_refused: "<>if safe then T.unpack code else "redacted"
+            throwError err409 {errBody=encode $ object ["error" .= code],errHeaders=[("Content-Type","application/json")]}
       context=authenticate :. EmptyContext
       app=serveWithContext signingAPI context
         (hoistServerWithContext signingAPI (Proxy :: Proxy '[BasicAuthCheck ()]) interpret signingServer)
