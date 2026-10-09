@@ -129,15 +129,17 @@ checks root admin=bracket(PG.connect admin) PG.close $ \c->do
   -- the runtime reader. Back up that exact layout, not a migration-only fixture.
   let identity=T.replicate 64 "a"
       readerSettings=target {PG.connectUser="ecxbridger"}
+      receiptNames :: PG.Connection -> IO [T.Text]
       receiptNames db=O.runSelect db $ do
         (schema,name)<-O.selectTable tables
         O.where_ (schema O..== O.sqlStrictText "ecx_install")
         pure name
+      inventory :: PG.Connection -> IO [[T.Text]]
       inventory db=mapM (\(schema,table,namespace,column)->sort <$> O.runSelect db (do
         (space,name)<-O.selectTable $ O.tableWithSchema schema table $
           p2(O.requiredTableField namespace,O.requiredTableField column)
         O.where_ (space O..== O.sqlStrictText "public")
-        pure name))
+        pure (name :: O.Field O.SqlText)))
         [("information_schema","tables","table_schema","table_name")
         ,("pg_catalog","pg_sequences","schemaname","sequencename")
         ,("information_schema","routines","routine_schema","routine_name")
