@@ -323,6 +323,17 @@ last successful scan time. The next readiness refresh must observe that history;
 it cannot repeatedly certify the same old cursor. Native advancement invalidates
 the native scan; a Solana history mismatch invalidates both Solana streams.
 A completed scan still requires fresh custody reconciliation before authorization.
+The paired Solana scan shares one identity check within that invocation; both
+batches retain the timestamp captured before identity verification. Preparation or
+identity failure marks both streams failed. Standalone scans still verify identity.
+Reconciliation independently checks both genesis hashes, reads mint/token/owner
+accounts together at finalized commitment with the saved minimum slot, then checks
+both distinct history heads on each provider. No evidence survives into another cycle.
+For an idle cycle without pending work, this reduces primary calls from 16 to 11
+and verifier calls from 9 to 6. Transfers and recovery add calls; these counts are
+not a quota guarantee. ChainCheck covers invocation isolation and failure paths;
+StoreCheck covers the exact account/head requests, changed mint policy, stale slots,
+provider disagreement and preparation failure against PostgreSQL.
 Recovering native receipts are reread beyond the incremental
 cursor so their deposit state and matching evidence are committed together.
 
