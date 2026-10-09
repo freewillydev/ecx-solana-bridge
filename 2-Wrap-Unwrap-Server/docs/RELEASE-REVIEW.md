@@ -2366,3 +2366,31 @@ restored custody staging/database were untouched. Checkpoint marker files in thi
 component test were synthetic preconditions, **not** custody/checkpoint proof.
 This closes that specific publication interruption window, not funded upgrade
 resumption or all crash/reboot boundaries.
+
+### Funded round trip and activated recovery — 2026-10-09
+
+Tested runtime source `ef2f17d131ea50413b5835f11956b97dd13cc033`; Ubuntu artifact
+SHA-256 `2fa48bb4216f1dd028d512a44cd21d4d67358f9421050697f0774f64006110b2`.
+Build, core/transport/QuickCheck and full isolated PostgreSQL financial/backup
+contracts passed (`09fa82bc`). Checked upgrade completed before the payout.
+
+Both existing funded orders settled: 3,000 wrapped to 2,970 native units, then
+1,000 native to 990 wrapped units. Two independent providers verified the finalized
+990-unit receipt and actual 5,000-lamport fee (`e2e8ece8`). The expired prior signed
+attempt remained absent; its retained expiry proof and fresh independent checks
+preceded the closed retry approval. No new customer deposit or order was created.
+
+A full verified sequence-105 checkpoint was restored on the separate Ubuntu host
+only after the source ledger was retired and its custody/tunnel services masked.
+Guided restoration preserved the original wallet and used a new paused PostgreSQL
+database (`862a18c4`). Checked activation passed (`cdba8103`), then actual reboot,
+wallet autoload and explicit checked resume passed (`9bae1239`, `e49bed8e`). Both
+saved customer orders retained identical paid transaction IDs. The source remained
+retired and stopped (`1e390f55`). The restored node independently reported nine
+confirmations and no conflicts for the original 1,000-unit native deposit. A fresh
+full backup from the restored server also passed (`e7c415f2`), followed by checked
+resume at ledger/backup sequence 105/105. The existing Mac backups remain retained.
+
+These results cover funded recovery and reboot/resume; they do not establish a
+long-duration soak, manual customer-wallet acceptance, independent security review,
+external alert delivery, production release-signing trust, or final publication.
