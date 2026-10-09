@@ -1,5 +1,5 @@
 -- Root orchestration transfers only the native backup and public node settings.
-module RestoreNative (newStage,newLedgerStage,stageNative,stageLedger,nodeCommand,ledgerCommand,checkExecutable) where
+module RestoreNative (newStage,newLedgerStage,stageNative,stageLedger,nodeCommand,ledgerCommand,checkExecutable,checkRootAncestors,checkStages) where
 import Bridge.AdminKey (savePrivate,readPrivate)
 import qualified Bridge.Config as C
 import Bridge.Error (require,reject)
@@ -18,7 +18,7 @@ import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import System.Directory (doesDirectoryExist,doesFileExist)
 import System.Exit (ExitCode(..))
-import System.FilePath ((</>),takeDirectory,takeFileName)
+import System.FilePath ((</>),takeDirectory,takeFileName,isAbsolute,normalise)
 import qualified System.Posix.Directory as P
 import System.Posix.Files
 import System.Posix.IO hiding (sync)
@@ -27,9 +27,41 @@ import System.Posix.Types (UserID)
 import System.Posix.User (getUserEntryForName,userID,userGroupID)
 import System.Process (readProcessWithExitCode)
 
-base,ledgerBase :: FilePath
-base="/var/lib/ecx-betanet/bridge-restore"
-ledgerBase="/var/lib/postgresql/bridge-restore"
+stageRoot,base,ledgerBase :: FilePath
+stageRoot="/var/lib/ecx-bridge-restore-stage"
+base=stageRoot</>"native"
+ledgerBase=stageRoot</>"ledger"
+
+-- Validate from the root downward: no service account may rename an ancestor
+-- between this check and the privileged copies below. Symlinks are not ancestors.
+checkRootAncestors :: FilePath -> IO ()
+checkRootAncestors path=do
+  require (isAbsolute path && normalise path==path) "invalid_restore_ancestor"
+  unless (path=="/") $ checkRootAncestors(takeDirectory path)
+  status<-getSymbolicLinkStatus path
+  require (isDirectory status && fileOwner status==0 && fileMode status .&. 0o022==0) "unsafe_restore_ancestor"
+
+stageParent :: FilePath -> IO ()
+stageParent parent=do
+  checkRootAncestors(takeDirectory stageRoot)
+  forM_ [stageRoot,parent] $ \directory->do
+    exists<-doesDirectoryExist directory
+    unless exists $ do
+      P.createDirectory directory 0o700
+      setFileMode directory 0o711
+      sync directory; sync(takeDirectory directory)
+    checkRootAncestors directory
+    status<-getSymbolicLinkStatus directory
+    require (fileMode status .&. 0o777==0o711) "unsafe_restore_parent"
+checkStages :: FilePath -> FilePath -> IO ()
+checkStages native ledger=checkStage base native >> checkStage ledgerBase ledger
+checkStage :: FilePath -> FilePath -> IO ()
+checkStage parentBase staging=do
+  -- Never remap saved paths: effect journals bind exact arguments and replay
+  -- could create another database/wallet. Retain legacy plans for operator review.
+  require (takeDirectory staging `notElem` ["/var/lib/ecx-betanet/bridge-restore","/var/lib/postgresql/bridge-restore"]) "legacy_restore_staging_requires_review"
+  require (takeDirectory staging==parentBase && length(takeFileName staging)==64
+    && all (`elem` ("0123456789abcdef"::String)) (takeFileName staging)) "invalid_restore_staging"
 newStage :: IO FilePath
 newStage=(base</>) . T.unpack . digest <$> (getRandomBytes 32 :: IO B.ByteString)
 newLedgerStage :: IO FilePath
@@ -71,16 +103,14 @@ data StageOwner = Native | Ledger
 stageFiles :: StageOwner -> FilePath -> FilePath -> FilePath -> [FilePath] -> Maybe Value -> IO ()
 stageFiles owner journal source staging files node=do
   let (parentBase,role,label)=case owner of Native->(base,"ecxnode","native-stage"); Ledger->(ledgerBase,"postgres","ledger-stage")
-  require (takeDirectory staging==parentBase && length(takeFileName staging)==64
-    && all (`elem` ("0123456789abcdef"::String)) (takeFileName staging)) "invalid_restore_staging"
+  checkStage parentBase staging
   user<-getUserEntryForName role
-  parent<-getSymbolicLinkStatus(takeDirectory parentBase)
-  require (isDirectory parent && fileOwner parent==userID user && fileMode parent .&. 0o022==0) "unsafe_restore_role_directory"
   bundle<-readPrivate source >>= either (const $ reject "invalid_custody_manifest") pure . eitherDecodeStrict'
   hashes<-either (const $ reject "invalid_custody_hashes") pure $ parseEither (withObject "custody" (.: "files")) bundle
   let expected file=maybe (reject "missing_restore_file_hash") pure (M.lookup file (hashes :: M.Map FilePath T.Text))
       started=journal</>label<>".started"; completed=journal</>label<>".completed"
       verify=do
+        checkRootAncestors parentBase
         status<-getSymbolicLinkStatus staging
         require (isDirectory status && fileOwner status==userID user && fileMode status .&. 0o777==0o700) "unsafe_restore_staging"
         forM_ files $ \file->do
@@ -100,15 +130,7 @@ stageFiles owner journal source staging files node=do
     verify
   else do
     require (not began) "restore_stage_interrupted_requires_review"
-    exists<-doesDirectoryExist parentBase
-    unless exists $ do
-      P.createDirectory parentBase 0o700
-      -- Setup runs under umask 077; explicitly allow traversal of this empty
-      -- root-owned parent. Each role's actual staging directory stays 0700.
-      setFileMode parentBase 0o711
-      sync parentBase; sync(takeDirectory parentBase)
-    status<-getSymbolicLinkStatus parentBase
-    require (isDirectory status && fileOwner status==0 && fileMode status .&. 0o777==0o711) "unsafe_restore_parent"
+    stageParent parentBase
     savePrivate started (L.toStrict $ encode staging)
     P.createDirectory staging 0o700
     sync parentBase

@@ -115,6 +115,7 @@ prepare=do
 
 validate :: Plan -> IO ()
 validate plan=do
+  RestoreNative.checkStages (nativeStage plan) (ledgerStage plan)
   forM_ [config plan,manifest plan] $ \path->require (isAbsolute path && normalise path==path) "absolute_restore_path_required"
   readPrivate(config plan) >>= \bytes->require (digest bytes==configHash plan) "restore_configuration_changed"
   readPrivate(manifest plan) >>= \bytes->require (digest bytes==manifestHash plan) "restore_manifest_changed"

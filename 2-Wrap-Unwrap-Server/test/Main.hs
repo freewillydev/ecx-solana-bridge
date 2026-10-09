@@ -31,6 +31,7 @@ main :: IO ()
 main = getArgs >>= \args -> if args==["--configure-only"]
   then ConfigureCheck.contract >>= \ok -> if ok then putStrLn "Configure contract passed" else exitFailure
   else if args==["--funding-only"] then SigningTransportCheck.fundingCheck >>= \ok -> if ok then putStrLn "Funding contract passed" else exitFailure
+  else if args==["--restore-root-only"] then RestoreGuideCheck.rootContract >>= \ok -> if ok then putStrLn "Privileged restore staging contract passed" else exitFailure
   else if args==["--restore-only"] then RestoreGuideCheck.contract >>= \ok -> if ok then putStrLn "Restore journal contract passed" else exitFailure
   else fullSuite
 

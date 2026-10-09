@@ -1,23 +1,44 @@
 -- Real journal files and subprocesses, with fake service status/restore output.
 -- No database, node, root directory or live custody is accessed by this contract.
-module RestoreGuideCheck (contract) where
+module RestoreGuideCheck (contract,rootContract) where
 import RestoreGuide (restoreStep)
+import qualified RestoreNative
+import qualified Bridge.Config as C
+import Bridge.Identity (digest)
+import Paths_ecx_bridge (getDataFileName)
+import System.Info (os)
+import System.Posix.User (getEffectiveUserID,getUserEntryForName,userID,userGroupID)
+import System.Process (readProcessWithExitCode)
+import System.Exit (ExitCode(..))
+import qualified Data.Map.Strict as M
 import Bridge.AdminKey (savePrivate,readPrivate)
 import Bridge.Error (BridgeError(..))
 import Control.Exception (bracket,try,finally)
 import Control.Monad (forM)
-import Data.Aeson (Value,encode,object,(.=))
+import Data.Aeson (Value,encode,object,(.=),eitherDecodeStrict')
 import qualified Data.ByteString.Lazy as L
 import qualified Data.ByteString.Char8 as B
 import qualified Data.Text as T
 import System.Directory
 import System.Environment (lookupEnv,setEnv,unsetEnv)
-import System.FilePath ((</>))
+import System.FilePath ((</>),takeDirectory,takeFileName)
 import System.IO (openTempFile,hClose)
-import System.Posix.Files (setFileMode)
+import System.Posix.Files (setFileMode,setOwnerAndGroup,createSymbolicLink)
 
 contract :: IO Bool
 contract=bracket temporary removeDirectoryRecursive $ \directory->do
+  -- This is the production ancestry guard, before any ownership mutation.
+  RestoreNative.checkRootAncestors "/"
+  unsafeAncestor<-try (RestoreNative.checkRootAncestors directory) :: IO (Either BridgeError ())
+  nativeStage<-RestoreNative.newStage
+  ledgerStage<-RestoreNative.newLedgerStage
+  let ancestry=case unsafeAncestor of Left(BridgeError "unsafe_restore_ancestor")->True; _->False
+      stagePaths=takeDirectory nativeStage=="/var/lib/ecx-bridge-restore-stage/native"
+        && takeDirectory ledgerStage=="/var/lib/ecx-bridge-restore-stage/ledger"
+  RestoreNative.checkStages nativeStage ledgerStage
+  legacy<-try (RestoreNative.checkStages ("/var/lib/ecx-betanet/bridge-restore/"<>replicate 64 'a') ledgerStage) :: IO (Either BridgeError ())
+  legacyLedger<-try (RestoreNative.checkStages nativeStage ("/var/lib/postgresql/bridge-restore/"<>replicate 64 'b')) :: IO (Either BridgeError ())
+  let oldRefused result=case result of Left(BridgeError "legacy_restore_staging_requires_review")->True; _->False
   original<-lookupEnv "PATH"
   let restorePath=maybe (unsetEnv "PATH") (setEnv "PATH") original
       fake=directory</>"restore-child"
@@ -60,7 +81,7 @@ contract=bracket temporary removeDirectoryRecursive $ \directory->do
     savePrivate (orphan</>"ledger.completed") (L.toStrict $ encode response)
     rejectedOrphan<-refused "restore_completion_without_start" $ restoreStep orphan fake "ledger" args
     saved<-readPrivate(successDir</>"ledger.completed")
-    pure(first==response && again==response && missingChild==response && unchanged=="called\n" && changed
+    pure(ancestry && stagePaths && oldRefused legacy && oldRefused legacyLedger && first==response && again==response && missingChild==response && unchanged=="called\n" && changed
       && and outcomes && failed && retry && failureCalls==retryCalls && not falseSuccess
       && invalid && not invalidCompleted && rejectedOrphan && saved==L.toStrict(encode response))
 
@@ -78,3 +99,49 @@ temporary=do
   (path,handle)<-openTempFile base "ecx-restore-contract"
   hClose handle; removeFile path; createDirectory path; setFileMode path 0o700
   canonicalizePath path
+
+-- Explicit opt-in on a root-operated Linux test host with ecxnode/postgres and
+-- the managed node unit installed. Uses only generated dummy bytes; no RPC,
+-- wallet restoration, database access, custody keys or service changes.
+-- Keep the generated fixtures for inspection instead of deleting recovery data.
+rootContract :: IO Bool
+rootContract=do
+  uid<-getEffectiveUserID
+  if uid/=0 || os/="linux" then fail "root Linux recovery fixture required" else pure ()
+  native<-RestoreNative.newStage
+  ledger<-RestoreNative.newLedgerStage
+  let root="/var/lib/ecx-recovery-contract-"<>takeFileName native
+      journal=root</>"journal"
+      bytes=M.fromList [("native-wallet","dummy wallet"),("native-wallet.json","{}")
+        ,("ledger.json",L.toStrict $ encode $ object ["archive" .= ("ledger.dump"::String)])
+        ,("ledger.dump","dummy ledger")]
+  createDirectory root; setFileMode root 0o700
+  createDirectory journal; setFileMode journal 0o700
+  mapM_ (\(name,value)->savePrivate (root</>name) value) (M.toList bytes)
+  let source=root</>"custody.json"
+  savePrivate source (L.toStrict $ encode $ object ["files" .= M.map digest bytes])
+  fixture<-getDataFileName "test/fixtures/deployment-config.json" >>= B.readFile
+  config<-either fail pure (eitherDecodeStrict' fixture)
+  let nativeConfig=config {C.nativeRpc="http://127.0.0.1:28532"}
+  RestoreNative.stageNative journal source native nativeConfig
+  RestoreNative.stageLedger journal source ledger "ledger.json"
+  -- Completed replay verifies saved bytes; it must not perform new copies.
+  RestoreNative.stageNative journal source native nativeConfig
+  RestoreNative.stageLedger journal source ledger "ledger.json"
+  access<-forM [("ecxnode",native,"native-wallet"),("postgres",ledger,"ledger.dump")] $ \(role,stage,file)->do
+    (readCode,out,_)<-readProcessWithExitCode "/usr/sbin/runuser" ["-u",role,"--","/bin/cat",stage</>file] ""
+    (writeCode,_,_)<-readProcessWithExitCode "/usr/sbin/runuser" ["-u",role,"--","/usr/bin/test","-w",takeDirectory stage] ""
+    pure(readCode==ExitSuccess && Just(B.pack out)==M.lookup file bytes && writeCode/=ExitSuccess)
+  -- Alternate hostile ancestors: service-owned, root-owned writable, symlink.
+  outcomes<-forM ["owned","writable","symlink"] $ \kind->do
+    let path=root</>kind
+    if kind=="symlink" then createSymbolicLink "/" path else do
+      createDirectory path
+      if kind=="owned" then do
+        user<-getUserEntryForName "postgres"
+        setOwnerAndGroup path (userID user) (userGroupID user)
+      else setFileMode path 0o777
+    result<-try (RestoreNative.checkRootAncestors path) :: IO (Either BridgeError ())
+    pure $ case result of Left(BridgeError "unsafe_restore_ancestor")->True; _->False
+  putStrLn $ "Privileged recovery fixture retained: "<>root
+  pure(and access && and outcomes)

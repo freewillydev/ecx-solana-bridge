@@ -604,3 +604,20 @@ that build identity. Packaging used the existing locally trusted build path;
 source commit context is not a build-provenance attestation. SHA-256:
 `29d08ecfc37fce6431cb09b5bcf3e71e5df451bb051b73fc6e7f93d7c2b701b2`.
 Previous release assets and the deployed observation worker remain unchanged.
+
+### Recovery staging after the ancestry hardening change
+
+New recovery plans stage native and ledger files beneath the root-owned
+`/var/lib/ecx-bridge-restore-stage/native` and `ledger` directories. Every ancestor
+must be a real root-owned directory without group/other write permission. Shared
+parents are traversal-only (0711); each role's leaf remains private (0700).
+The private recovery journal remains `/var/lib/ecx-bridge-restore` (0700).
+
+Pending plans using the old service-owned parent paths refuse with
+`legacy_restore_staging_requires_review` before restoration setup proceeds. Keep
+all plans, markers, backups and created databases/wallets. Do not rewrite paths or
+delete started markers to force a retry: recorded command identity prevents duplicate
+restoration effects. Review the saved outcome and use the explicit activation flow
+only if staging and both restoration effects were already completed and verified.
+An interrupted legacy plan needs a separately reviewed recovery procedure; this
+change does not silently migrate it or claim it safe to replay.

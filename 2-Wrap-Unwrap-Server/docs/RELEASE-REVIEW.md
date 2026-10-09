@@ -8,9 +8,19 @@ and available acceptance; external recovery, independent review and activation g
 remain open. Its source-size reduction target was not met. Passing an older
 candidate's tests does not certify later source or packages.
 
-## Current production acceptance checklist
+## Current release pointer
 
-Current published installer: `7be97b4` (`review-2026-10-09-guided-console`),
+The current review candidate is `ef2f17d131ea50413b5835f11956b97dd13cc033`,
+release `review-2026-10-09-funded-recovery`, SHA-256
+`2fa48bb4216f1dd028d512a44cd21d4d67358f9421050697f0774f64006110b2`.
+It is unsigned and NOT production approved. Current acceptance criteria and open
+security findings are in [DONE.md](../../DONE.md); operational continuation is in
+[RESUME.md](../../RESUME.md). Later entries in this document record the funded
+restore and this candidate's acceptance. The older checklist below is historical.
+
+## Historical guided-console acceptance checklist
+
+Then-published installer: `7be97b4` (`review-2026-10-09-guided-console`),
 SHA-256 `09105b54e0d894b1c207c44b789a8c4a9f557d3b2ce502546c523491dfeaa9f3`,
 40,172,322 bytes. Native build/package passed (`c2af6bbd`); QuickCheck and the full
 isolated PostgreSQL contracts passed at `039c49a` (`16baae9c`). The final change
