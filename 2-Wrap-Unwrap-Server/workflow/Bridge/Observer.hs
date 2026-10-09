@@ -39,12 +39,17 @@ observeOnce manager settings reader writer = do
           Left (BridgeError code)->do now<-epoch; evalWrite writer (ScanFailed chain now code)
   nativeResult<-try (nativeScan `catch` (\(_::IOException)->reject "observer_io_unavailable"))
   commit "Native" nativeResult
-  tokenPrevious<-evalRead reader (ReadCheckpoint "Solana")
-  operatingPrevious<-evalRead reader (ReadCheckpoint "SolanaOperating")
-  pending<-evalRead reader PendingVerification
-  now<-epoch
-  scans<-scanSolanaPairWith call verifier solana (tokenOrigin settings,tokenPrevious)
-    (operatingOrigin settings,operatingPrevious) now pending lookupInstruction lookupReferences
+  scanned<-try $ (do
+    tokenPrevious<-evalRead reader (ReadCheckpoint "Solana")
+    operatingPrevious<-evalRead reader (ReadCheckpoint "SolanaOperating")
+    pending<-evalRead reader PendingVerification
+    now<-epoch
+    scanSolanaPairWith call verifier solana (tokenOrigin settings,tokenPrevious)
+      (operatingOrigin settings,operatingPrevious) now pending lookupInstruction lookupReferences)
+    `catch` (\(_::IOException)->reject "observer_io_unavailable")
+  let scans=case scanned of
+        Right results->results
+        Left problem->[("Solana",Left problem),("SolanaOperating",Left problem)]
   forM_ scans $ uncurry commit
   candidates<-evalRead reader PromotionCandidates
   now<-epoch
