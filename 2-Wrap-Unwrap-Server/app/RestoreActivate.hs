@@ -24,7 +24,7 @@ import System.Environment (getExecutablePath)
 import System.FilePath ((</>),takeDirectory)
 import System.Exit (ExitCode(..))
 import qualified System.Posix.Directory as P
-import System.Posix.IO
+import System.Posix.IO hiding (sync)
 import System.Posix.Unistd (fileSynchronise)
 import System.Process (readProcessWithExitCode)
 

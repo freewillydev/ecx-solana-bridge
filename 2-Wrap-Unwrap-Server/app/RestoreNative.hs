@@ -21,7 +21,7 @@ import System.Exit (ExitCode(..))
 import System.FilePath ((</>),takeDirectory,takeFileName)
 import qualified System.Posix.Directory as P
 import System.Posix.Files
-import System.Posix.IO
+import System.Posix.IO hiding (sync)
 import System.Posix.Unistd (fileSynchronise)
 import System.Posix.Types (UserID)
 import System.Posix.User (getUserEntryForName,userID,userGroupID)
