@@ -119,6 +119,15 @@ cycles/hour, roughly one every 162 seconds, and cannot meet this freshness polic
 Increasing the polling delay or adding cooldown does not make that plan adequate.
 Do not loosen verification or extend freshness to fit an undersized quota.
 
+Provider header units must be checked separately from RPC call counts. OnFinality
+[documents two response units per Solana call](https://documentation.onfinality.io/support/solana),
+so the verifier floor above is 1,080 response units/hour. A header allowance of
+200/hour is not evidence of 200 Solana calls/hour. Inspect the existing account's
+plan and key restrictions before buying capacity: advertised plan allowances can
+differ from the effective limits returned by an endpoint. Sharing duplicate
+identity reads alone still leaves five verifier calls per cycle (300/hour at the
+60-second boundary), so it cannot resolve this particular capacity mismatch.
+
 ### Installed monitoring and RPC budget
 
 Set the per-process RPC allowance with `sudo systemctl edit ecx-bridge-worker`
