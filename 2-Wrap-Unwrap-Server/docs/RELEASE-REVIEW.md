@@ -2001,3 +2001,36 @@ inside the existing closed authorities. Independent read-only review corrected
 post-resume replay, release-marker validation, fence binding and fsync ordering.
 Successful checkpoint→publication→resume, all phase killpoints, supported schema
 transition, and the funded/live/customer-wallet gates remain open.
+
+
+## Managed native-backup authority mismatch (2026-10-08)
+
+Further integration inspection found a release blocker missed by same-UID custody
+fixtures: the managed ECX node runs as `ecxnode` with only its native data directory
+writable, while `ExportCheckpoint` supplies a signer-owned 0700 directory to
+`BackupNativeWallet`. The latter invokes node `backupwallet`, then requires the
+result to be owned by the invoking signer and mode 0600. These contracts cannot
+both hold for the current separate users without a specific transfer mechanism.
+Changing both services to one UID would expose Solana/signing/backup material to
+the network-facing native node; that shortcut was rejected.
+
+Actual primary AWS node configuration confirmed the separate UID/sandbox
+(`4e972e18`). A controlled invocation using the existing locked dedicated native
+wallet and an empty root-owned 0700 destination inside the node's writable data
+filesystem was refused by the real node (`1c878db4`). No backup file was created;
+the temporary empty directory was removed and no transaction was sent. The test
+isolates DAC denial even where the node's mount sandbox permits the filesystem.
+
+The disposable installer-only host's bounded checkpoint returned
+`signer_outcome_unknown` (`3b72c4ec`); it has no configured running native node.
+This identifies its missing dependencies but is not itself proof of the above
+DAC error. Its signer was stopped after diagnosis and its upgrade journal remains.
+
+Release requires a narrowly scoped native-wallet export handoff, preserving
+separate identities, no arbitrary caller paths, bounded regular-file reads,
+exclusive private destination creation, fsync and existing descriptor/hash checks.
+Reverse restore needs the analogous explicit non-overwriting boundary. Verify
+both under real service users and systemd sandboxing, then complete an actual
+checkpoint, successful guided upgrade and funded recovery. Earlier backup transport,
+archive and failure/reboot passes remain valid within their stated scopes; they do
+not establish end-to-end managed custody backup.

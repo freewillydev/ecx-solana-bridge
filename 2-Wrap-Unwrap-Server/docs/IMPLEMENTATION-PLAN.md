@@ -33,7 +33,16 @@ results rather than adding it to that percentage.
    Ubuntu SSH and unavailable backup endpoints. Never reset an owned ledger merely
    to make installation pass. A new release is an explicit upgrade, not a silent
    consequence of rerunning setup.
-3. **Finish the funded AWS test and independent recovery.** Use only authorized
+3. **Finish the funded AWS test and independent recovery.** First fix the managed
+   node/signature-service backup boundary: the node runs as `ecxnode`, while custody
+   exports are signer-owned mode 0700/0600. `backupwallet` cannot write directly into
+   those directories. Keep OS identities separate; transfer only the configured
+   native wallet backup through a fixed-purpose, bounded local handoff. Do not give
+   the node access to Solana keys, signer authentication or restic credentials.
+   Retain descriptor/hash verification and exclusive signer-owned publication.
+   Test export and explicit non-overwriting restore under real service users and
+   systemd sandboxing before claiming a usable checkpoint or guided upgrade.
+   Use only authorized
    dedicated test funds, fence old signers, reconcile allocations and costs, execute
    both directions, then restore the actual ledger on another host. Backup fixture
    success does not certify recovery of custody. Batch remaining payment/restart/
