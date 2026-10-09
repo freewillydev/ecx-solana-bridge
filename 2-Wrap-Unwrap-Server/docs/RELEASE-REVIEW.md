@@ -2204,3 +2204,23 @@ bodies, exact body replay and cancellation/close ownership. Existing unavailable
 verifier scan-refusal contracts also passed. These are offline contracts, not a
 new funded retry or full PostgreSQL recovery run. Installed funded runtime remains
 the frozen `bb7b08f` release, stopped; the provider-capacity gate remains open.
+
+### Independent restoration of the funded checkpoint
+
+The existing inactive Ubuntu fixture retrieved snapshot
+`5036451ae1444523a81ed68c521649595a1f0d33b039ba6f45bc5f6029723514`
+from the separate HTTPS backup host using the frozen `bb7b08f` artifact (same
+SHA-256 as above). Transport credentials were transferred encrypted for that
+fixture; neither provider was called. Closed `recover-custody` verified the entire
+bundle, identity, sequence 76, and original custody manifest hash `a5fb1af3…19befe`
+(`fdeb0326`). An initial invocation correctly rejected a relative backup-config
+path before retrieval; the successful invocation used absolute paths.
+
+Closed `restore-ledger` then imported the contained schema-22 archive into a new
+private PostgreSQL database, verified sequence 76 and returned `paused=true`
+(`21f7ee14`). Both bridge services remained inactive, no host fence was adopted,
+and no key was loaded into a running signer or native node. The test database was
+retained and PostgreSQL stopped afterwards. This closes independent-host custody
+retrieval and ledger restoration for this snapshot; it does not prove a complete
+restored-node activation, reboot/resume under adequate RPC capacity, or funded
+operation on the recovery host. Those remain separate release gates.
