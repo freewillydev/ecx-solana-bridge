@@ -12,6 +12,7 @@ import Control.Monad (forM_,unless,when)
 import Data.Aeson
 import Data.Aeson.Types (parseEither)
 import Data.Bits ((.&.))
+import Data.List (isPrefixOf,isInfixOf)
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as L
@@ -116,8 +117,19 @@ continue plan start=do
     stopped "ecx-bridge-worker"
     checkpointed<-doesFileExist checkpointFile
     unless checkpointed $ do
-      -- The bounded process itself pauses and owns the existing writer/fence.
+      -- Older signers cannot export across the managed node UID boundary.
+      -- Transition only the verified same-schema signer while the worker remains
+      -- persistently blocked. Reentry stops it before republishing the same plan.
+      mark (blocked "signer") "upgrade\n"
+      command "systemctl" ["stop","ecx-bridge-signer"]
+      stopped "ecx-bridge-signer"
+      managed<-doesFileExist "/etc/systemd/system/ecx-betanet.service"
+      installSignerTransition prepared managed (phase ".signer-transition")
+      when managed $ command "/bin/sh" [prepared</>"native-backup"]
+      verifySignerCommand prepared managed
+      unblock "signer"
       command "systemctl" ["start","ecx-bridge-signer"]
+      -- The bounded process itself pauses and owns the existing writer/fence.
       result<-output "runuser" ["-u","ecxbridgew","--","env"
         ,"PGHOST=/var/run/postgresql","PGPORT=5432","PGDATABASE=ecx_bridge"
         ,"PGUSER=ecxbridgew","PGREADUSER=ecxbridger","ecx_bridge_datadir="<>(prepared</>"share")
@@ -140,11 +152,15 @@ continue plan start=do
     installedRelease<-T.strip . b8ToText <$> B.readFile installed
     actual<-canonicalizePath current >>= verifyBundle
     require (installedRelease==newRelease plan && actual==newRelease plan) "upgrade_publication_incomplete"
+    removeSignerTransition (phase ".signer-transition")
+    managed<-doesFileExist "/etc/systemd/system/ecx-betanet.service"
+    verifySignerCommand current managed
     savePrivate publishedFile (L.toStrict $ encode plan)
   recorded<-decodeRecord =<< readPrivate publishedFile
   require (recorded==plan) "upgrade_phase_conflict"
   actual<-canonicalizePath current >>= verifyBundle
   require (actual==newRelease plan) "upgrade_published_release_changed"
+  removeSignerTransition (phase ".signer-transition")
   markerNow<-T.strip . b8ToText <$> B.readFile installed
   require (markerNow==newRelease plan) "upgrade_installed_marker_changed"
   -- A crash may follow successful resume but precede the completion record.
@@ -225,6 +241,65 @@ installInterlock role=do
     B.readFile path >>= \value->require(value==bytes) "upgrade_interlock_changed"
     else command "install" ["-o","root","-g","root","-m","0644",staged,path]
   command "sync" ["-f",directory]
+
+-- A fixed service override, not a caller-selected command. All existing unit
+-- restrictions/credentials/SELECT-only role are retained. Record before publication.
+transitionPath :: FilePath
+transitionPath="/etc/systemd/system/ecx-bridge-signer.service.d/80-upgrade-executable.conf"
+installSignerTransition :: FilePath -> Bool -> FilePath -> IO ()
+installSignerTransition prepared managed record=do
+  backup<-doesFileExist "/etc/ecx-bridge/signer/backup.json"
+  require backup "custody_checkpoint_not_configured"
+  user<-output "systemctl" ["show","ecx-bridge-signer","--property=User","--value"]
+  require (words user==["ecxbridges"]) "upgrade_unrecognized_signer_service"
+  stopped "ecx-bridge-signer"
+  binding<-configurationHash
+  let bytes=B8.pack $ "# Configuration SHA256: "<>T.unpack binding<>"\n[Service]\nExecStart=\nExecStart="<>(prepared</>"bin/ecx-bridge")
+        <>" signer /etc/ecx-bridge/signer/config.json /etc/ecx-bridge/signer/solana.keypair.json"
+        <>" /etc/ecx-bridge/signer/backup.json /var/lib/ecx-bridge/signer\n"
+        <>"Environment=ecx_bridge_datadir="<>(prepared</>"share")<>"\n"
+        <>(if managed then "Environment=ECX_NATIVE_BACKUP_SERVICE=1\n" else "")
+  exists<-doesFileExist record
+  if exists then readPrivate record >>= \saved->require(saved==bytes) "upgrade_transition_changed"
+    else savePrivate record bytes
+  present<-doesFileExist transitionPath
+  if present then do
+    status<-getSymbolicLinkStatus transitionPath
+    require (isRegularFile status && fileOwner status==0 && fileMode status .&. 0o022==0) "unsafe_upgrade_transition"
+    B.readFile transitionPath >>= \saved->require(saved==bytes) "upgrade_transition_changed"
+    else command "install" ["-o","root","-g","root","-m","0644",record,transitionPath]
+  command "sync" ["-f",takeDirectory transitionPath]
+  command "systemctl" ["daemon-reload"]
+
+removeSignerTransition :: FilePath -> IO ()
+removeSignerTransition record=do
+  present<-doesFileExist transitionPath
+  when present $ do
+    saved<-readPrivate record
+    status<-getSymbolicLinkStatus transitionPath
+    require (isRegularFile status && fileOwner status==0 && fileMode status .&. 0o022==0) "unsafe_upgrade_transition"
+    actual<-B.readFile transitionPath
+    require (actual==saved) "upgrade_transition_changed"
+    stopped "ecx-bridge-signer"
+    removeFile transitionPath
+    command "sync" ["-f",takeDirectory transitionPath]
+    command "systemctl" ["daemon-reload"]
+
+-- Check systemd's merged unit, including later operator drop-ins. Do not print
+-- Environment: unrelated entries may contain credentials.
+verifySignerCommand :: FilePath -> Bool -> IO ()
+verifySignerCommand bundle managed=do
+  execution<-output "systemctl" ["show","ecx-bridge-signer","--property=ExecStart","--value"]
+  environment<-words <$> output "systemctl" ["show","ecx-bridge-signer","--property=Environment","--value"]
+  let binary=bundle</>"bin/ecx-bridge"
+      expected="{ path="<>binary<>" ; argv[]="<>binary
+        <>" signer /etc/ecx-bridge/signer/config.json /etc/ecx-bridge/signer/solana.keypair.json"
+        <>" /etc/ecx-bridge/signer/backup.json /var/lib/ecx-bridge/signer ; ignore_errors=no ;"
+  require (expected `isPrefixOf` execution && not ("} {" `isInfixOf` execution))
+    "upgrade_signer_command_changed"
+  require (("ecx_bridge_datadir="<>(bundle</>"share")) `elem` environment
+    && (not managed || "ECX_NATIVE_BACKUP_SERVICE=1" `elem` environment))
+    "upgrade_signer_environment_changed"
 
 stopped :: String -> IO ()
 stopped service=do

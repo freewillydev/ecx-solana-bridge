@@ -4,6 +4,9 @@ set -eu
 umask 077
 fail() { echo "Native backup setup: $*" >&2; exit 1; }
 [ "$#" = 0 ] && [ "$(id -u)" = 0 ] || fail 'root, no arguments required'
+bundle=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+case "$bundle" in /opt/ecx-bridge/releases/*) ;; *) fail 'installed verified release directory required';; esac
+(cd "$bundle" && sha256sum --check --status manifest.sha256) || fail 'release changed'
 config=/etc/ecx-bridge/signer/config.json
 [ -f "$config" ] && [ ! -L "$config" ] || fail 'installed signer configuration required'
 [ "$(systemctl show ecx-betanet --property=User --value)" = ecxnode ] || fail 'managed ecxnode service required'
@@ -41,7 +44,7 @@ MaxConnections=2
 [Install]
 WantedBy=sockets.target
 UNIT
-cat > "$staging/service" <<'UNIT'
+cat > "$staging/service" <<UNIT
 [Unit]
 Description=Bounded native wallet backup export
 After=ecx-betanet.service
@@ -49,7 +52,7 @@ Requires=ecx-betanet.service
 [Service]
 User=ecxnode
 Group=ecxnode
-ExecStart=/opt/ecx-bridge/current/bin/ecx-bridge native-backup-service /etc/ecx-native-backup/config.json /var/lib/ecx-betanet/bridge-backup
+ExecStart=$bundle/bin/ecx-bridge native-backup-service /etc/ecx-native-backup/config.json /var/lib/ecx-betanet/bridge-backup
 StandardInput=socket
 StandardOutput=socket
 StandardError=journal
@@ -67,6 +70,13 @@ MemoryMax=256M
 TasksMax=16
 LimitCORE=0
 UNIT
+# Drain the old executable before replacing its unit. An interrupted node RPC
+# keeps its bounded spool directory for explicit recovery; never delete it here.
+systemctl stop ecx-native-backup.socket 2>/dev/null || {
+  [ ! -e /etc/systemd/system/ecx-native-backup.socket ] || fail 'cannot stop backup socket'
+}
+systemctl stop 'ecx-native-backup@*.service'
+[ -z "$(systemctl list-units --all --state=active,activating,deactivating --no-legend 'ecx-native-backup@*.service')" ] || fail 'backup exporter still running'
 install -m 0644 "$staging/socket" /etc/systemd/system/ecx-native-backup.socket
 install -m 0644 "$staging/service" /etc/systemd/system/ecx-native-backup@.service
 sync -f "$base"

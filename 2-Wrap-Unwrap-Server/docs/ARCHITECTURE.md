@@ -144,6 +144,14 @@ database or constructs a signer client. After publication it stops any previousl
 resumed worker again, validates a nondecreasing fence and uses ordinary startup and
 checked resume against current chain state. Immutable phase records remain after
 completion. Same-schema upgrades reuse the database; unknown migrations refuse.
+For older installed signers, the same-schema candidate is staged as a temporary
+systemd executable override before checkpointing. The worker stays persistently
+blocked; signer exit is verified before changing the override. The journal binds
+its exact bytes, candidate path and configuration hash. The managed native helper
+is pinned to that candidate, and existing helper instances are stopped before unit
+replacement. Merged systemd command/environment checks precede signer restart.
+A saved checkpoint skips the transitional restart. Publication verifies the candidate
+before removing only the journal-owned override and checking the normal service.
 End-to-end interruption and version-transition acceptance remains required.
 
 `Signer.hs` owns Servant routes, authentication and TLS transport. Signer startup

@@ -2082,3 +2082,25 @@ Production Haskell changes total net +136 lines in four files (including the new
 fixed service installer. No generic privileged broker, shared custody UID or new
 signing API was introduced. This added boundary addresses a demonstrated real
 permissions failure rather than weakening existing private-file requirements.
+
+
+## Same-schema signer transition (2026-10-09)
+
+The guided upgrade now stages the verified candidate signer before the bounded
+checkpoint, allowing an older installed signer to use the managed-node backup
+handoff. Persistent worker blocking, stopped-signer verification, immutable override
+bytes/configuration binding, merged systemd command/environment verification and
+journal-owned cleanup preserve the interruption boundary. A saved checkpoint does
+not restart the transitional signer. The helper executable is pinned to the staged
+release; replacing its unit first stops the socket and drains helper instances.
+Publication verifies the installed candidate before removing the override.
+
+Ubuntu executable builds passed (`c667d310`, final `5aeae562`). The final check also
+passed shell syntax and verified empty helper drainage against actual systemd.
+These are build/infrastructure checks, **not** successful checkpoint/upgrade/resume
+acceptance. The restored funded AWS ledger is still isolated from installed runtime
+roles/services; no installed worker/signer configuration exists on that host.
+The installer-only fixture lacks a running native node. Neither has been silently
+converted into a successful upgrade claim. No signing or transfers were performed.
+Actual checkpoint/upload, successful version transition, interruption/reboot and
+post-publication reconciliation remain required against a complete deployment.
