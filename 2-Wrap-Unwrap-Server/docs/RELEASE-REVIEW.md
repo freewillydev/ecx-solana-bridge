@@ -1584,3 +1584,34 @@ exact candidate on AWS, finish funding/allocation/setup-cost flow, then validate
 three clean installation scenarios with the same final signed artifact. Preserve
 user-requested local operator menu and public read-only financial reports as
 explicit remaining product scope; do not silently count them as complete.
+### Native derivation primitive correction (2026-10-08)
+
+Based on `30e3c8797f70d9f985a97e117a25a67d6668cd2b`, isolated branch
+`codex/native-wallet-security`. Native BIP32 secret scalar arithmetic and public
+key generation now use Bitcoin Core libsecp256k1 through a fixed-buffer C shim.
+Each call creates and randomizes its own context; invalid parents, tweaks and
+zero children refuse. The Haskell boundary checks buffer lengths, copies results
+before releasing buffers and clears its temporary child buffer. No RPC, signing
+operation or shared context is added. Native descriptors now return in IO; the
+native initializer and configure validation await that result.
+
+Dependency: Cabal `pkgconfig-depends: libsecp256k1 >=0.4 && <0.9`; Ubuntu 24.04
+build package `libsecp256k1-dev` and runtime `libsecp256k1-1` must be installed.
+Local validation used Homebrew libsecp256k1 0.8.0 / GHC 9.14.1. Ubuntu validation
+and final artifact linkage belong to integration. C compilation is part of Cabal.
+
+Passed: `cabal build ecx-bridge:lib:chain -j1 --offline`; the exact updated
+`ConfigureCheck.walletProperty` extracted into a temporary Cabal-environment
+runner passed 100 QuickCheck cases. It retains the published BIP84 account vector
+and BIP39/Solana vectors and adds scalar zero/order, zero tweak, overflow-to-zero,
+wraparound, generator serialization and malformed-buffer checks. A temporary
+comparison runner compiled the baseline Wallet module separately and matched all
+20 descriptor pairs (ten phrases, both native profiles). Those are compatibility
+checks, not real-node acceptance. Full affected executable/test-suite acceptance
+is still pending at this checkpoint.
+
+This removes the identified generic ECC/Integer secret scalar operations. It does
+not establish whole-program constant-time behavior or complete memory erasure:
+mnemonic handling, HMAC/KDF, descriptor encoding, ByteString copies, host policy
+and downstream node key storage remain separate concerns. No funded wallet,
+deployment, chain transaction or KMS configuration was changed.

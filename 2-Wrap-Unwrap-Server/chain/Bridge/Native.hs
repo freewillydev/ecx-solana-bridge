@@ -202,7 +202,7 @@ evalNativeRecoveryWith call c operation = do
       require (rangeEnd>=999 && rangeEnd<=1000000) "invalid_native_recovery_range"
       -- Phrase stays in this process. RPC receives only derived descriptors.
       phrase<-BC.unpack . BC.strip <$> Private.readPrivate phraseFile
-      privateDescriptors<-either reject pure (nativeDescriptors (profile c==L2LSignetDevnet) phrase)
+      privateDescriptors<-nativeDescriptors (profile c==L2LSignetDevnet) phrase >>= either reject pure
       chain<-nativeIdentityWith call c
       when restoring $ do
         pruned<-fieldValue "pruned" chain
