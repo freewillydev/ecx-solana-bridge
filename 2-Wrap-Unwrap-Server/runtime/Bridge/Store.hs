@@ -67,10 +67,12 @@ data CustodySnapshot = CustodySnapshot
 -- requires a paused source and verified archive. Neither operation adopts a fence.
 data StoreSetup a where
   ProvisionDatabase :: Text -> StoreSetup ()
+  ProvisionRestoredDatabase :: Text -> Int64 -> StoreSetup ()
   InitializeLedger :: Text -> StoreSetup ()
   MigratePaymentRoots :: Text -> Int64 -> FilePath -> StoreSetup (Int64,Int)
 
 evalSetup :: PG.ConnectInfo -> StoreSetup a -> IO a
+evalSetup settings (ProvisionRestoredDatabase identity sequenceNo) = Provision.provisionRestoredDatabase settings identity sequenceNo
 evalSetup settings (ProvisionDatabase token) = Provision.provisionDatabase settings token
 evalSetup settings (MigratePaymentRoots identity minimumSequence manifest) =
   Migration.migratePaymentRoots settings identity minimumSequence manifest

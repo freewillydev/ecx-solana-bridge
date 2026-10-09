@@ -10,6 +10,7 @@ import qualified Bridge.Fence as Fence
 import Bridge.BrowserBuild (browserAssetsDirectory)
 import Bridge.Critical (Process(..),WorkerLifetime(..),runProcess,CustomerSettings(..),SignerSettings(..))
 import Bridge.Control (callControl)
+import qualified Bridge.AdminKey as Private
 import Bridge.Error
 import Bridge.RPC (newRpcManager,fieldValue)
 import qualified Bridge.Native as N
@@ -52,6 +53,17 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
       <*> fieldValue "nativeCheckpointHeight" value <*> fieldValue "nativeCheckpointHash" value
     bracket newRpcManager closeManager $ \manager->
       N.evalNativeRecoveryWith (N.nativeCall manager native) native (N.ServeNativeWalletBackup staging)
+  command [mode,path,manifest] | mode `elem` ["check-native-restore","native-restore-service"] = do
+    bytes<-Private.readPrivate path
+    value<-either (const $ reject "invalid_native_restore_configuration") pure (eitherDecodeStrict' bytes)
+    native<-N.NativeSettings <$> fieldValue "profile" value <*> fieldValue "nativeRpc" value
+      <*> fieldValue "nativeCookie" value <*> fieldValue "nativeWallet" value
+      <*> fieldValue "nativeCheckpointHeight" value <*> fieldValue "nativeCheckpointHash" value
+    bracket newRpcManager closeManager $ \manager->do
+      let run=N.evalNativeRecoveryWith (N.nativeCall manager native) native
+      run (N.CheckNativeRestore manifest)
+      if mode=="native-restore-service" then run (N.RestoreNativeWallet manifest) else pure ()
+      LBS.putStrLn $ encode $ object ["wallet" .= N.nativeWallet native]
   command ["check-fence",path]=do
     c<-C.loadConfig path
     sequenceNo<-Fence.inspectFence (C.fenceDirectory c) (C.fingerprint c)
@@ -92,6 +104,13 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
     bracket newRpcManager closeManager $ \manager->do
       (manifest,n)<-evalCustodyRecovery manager c (RecoverCustody backup (T.pack snapshot) directory minimumSequence)
       LBS.putStrLn $ encode $ object ["manifest" .= manifest,"criticalSequence" .= n]
+  command ["restore-ledger","--fingerprint",identity,manifest,minimumText]=do
+    require (length identity==64 && all (`elem` ("0123456789abcdef"::String)) identity) "invalid_restore_identity"
+    minimumSequence<-maybe (reject "invalid_restore_policy") pure (readMaybe minimumText)
+    require (minimumSequence>=0) "invalid_restore_policy"
+    database<-databaseSettings
+    (restored,sequenceNo)<-evalRestore database (RestoreLedger manifest (T.pack identity) minimumSequence)
+    LBS.putStrLn $ encode $ object ["database" .= restored,"criticalSequence" .= sequenceNo,"paused" .= True]
   command ["restore-ledger",path,manifest,minimumText]=restoreCommand path minimumText (\c->RestoreLedger manifest (C.fingerprint c))
   command ["recover-ledger",path,backup,snapshot,directory,minimumText]=
     restoreCommand path minimumText (\c->RecoverLedger backup (T.pack snapshot) directory (C.fingerprint c))
@@ -101,6 +120,11 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
     c<-C.loadConfig path
     initialize (C.fingerprint c)
   command ["initialize-ledger","--fingerprint",identity]=initialize (T.pack identity)
+  command ["provision-restored-database",identity,sequenceText]=do
+    sequenceNo<-maybe (reject "invalid_restore_policy") pure (readMaybe sequenceText)
+    database<-databaseSettings
+    evalSetup database (ProvisionRestoredDatabase (T.pack identity) sequenceNo)
+    putStrLn "Restored database roles provisioned; custody remains paused."
   command ["provision-database"]=do
     bytes<-BS.hGet stdin 34
     require (BS.length bytes==32 || (BS.length bytes==33 && BS.last bytes==10)) "invalid_installation_token"

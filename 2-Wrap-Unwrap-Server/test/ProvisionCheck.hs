@@ -2,6 +2,7 @@
 -- Owns an unfunded temporary PostgreSQL cluster; never uses the caller's PG* DB.
 module ProvisionCheck (contract,child) where
 import Bridge.Store
+import qualified Bridge.Store.Backup as Backup
 import qualified Bridge.Store.Schema as S
 import Bridge.Store.Catalog (verifyReadRole)
 import Control.Exception
@@ -9,6 +10,7 @@ import Control.Concurrent (threadDelay)
 import Control.Monad (forM_,void,unless)
 import qualified Data.ByteString.Char8 as B
 import Data.Profunctor.Product (p2,p3)
+import Data.List (sort,isInfixOf)
 import Data.Int (Int64)
 import qualified Data.Text as T
 import qualified Database.PostgreSQL.Simple as PG
@@ -22,7 +24,7 @@ import System.Posix.Files (setFileMode)
 import System.Posix.Signals (signalProcess,sigKILL)
 import System.Exit (ExitCode(..))
 import System.Timeout (timeout)
-import System.Process (callProcess,withCreateProcess,proc,env,getPid,waitForProcess)
+import System.Process (readProcess,callProcess,withCreateProcess,proc,env,getPid,waitForProcess)
 import Test.QuickCheck (quickCheckWithResult,stdArgs,maxSuccess,ioProperty,isSuccess)
 
 child :: FilePath -> IO ()
@@ -123,6 +125,51 @@ checks root admin=bracket(PG.connect admin) PG.close $ \c->do
       refused "installation_receipt_mismatch" run
   forM_ ["ecxbridger","ecxbridges"] $ \role->
     bracket(PG.connect target {PG.connectUser=role}) PG.close $ \db->verifyReadRole db >>= check
+  -- Real provisioning creates ecx_install.receipt, deliberately inaccessible to
+  -- the runtime reader. Back up that exact layout, not a migration-only fixture.
+  let identity=T.replicate 64 "a"
+      readerSettings=target {PG.connectUser="ecxbridger"}
+      receiptNames db=O.runSelect db $ do
+        (schema,name)<-O.selectTable tables
+        O.where_ (schema O..== O.sqlStrictText "ecx_install")
+        pure name
+      inventory db=mapM (\(schema,table,namespace,column)->sort <$> O.runSelect db (do
+        (space,name)<-O.selectTable $ O.tableWithSchema schema table $
+          p2(O.requiredTableField namespace,O.requiredTableField column)
+        O.where_ (space O..== O.sqlStrictText "public")
+        pure name))
+        [("information_schema","tables","table_schema","table_name")
+        ,("pg_catalog","pg_sequences","schemaname","sequencename")
+        ,("information_schema","routines","routine_schema","routine_name")
+        ,("information_schema","table_constraints","constraint_schema","constraint_name")
+        ,("information_schema","triggers","trigger_schema","trigger_name")
+        ,("pg_catalog","pg_indexes","schemaname","indexname")] :: IO [[T.Text]]
+  objects<-bracket(PG.connect target) PG.close $ \db->do
+    receiptNames db >>= check . (==["receipt"] :: [T.Text]->Bool)
+    inventory db
+  check(all (not . null) objects)
+  archive<-withReader readerSettings identity False $ \reader->evalBackup reader(ExportLedger root)
+  listing<-readProcess "pg_restore" ["--list",archivePath archive] ""
+  check(not $ "ecx_install" `isInfixOf` listing)
+  bracket (evalRestore admin $ RestoreLedger (manifestPath archive) identity 0)
+    (\(database,_)->Backup.discardRestore admin {PG.connectDatabase=T.unpack database}) $ \(database,n)->do
+      check(n==0 && database/="ecx_bridge")
+      let restoredSettings=admin {PG.connectDatabase=T.unpack database}
+      refused "restored_database_identity_or_state_mismatch" (evalSetup restoredSettings $ ProvisionRestoredDatabase "wrong" n)
+      refused "restored_database_identity_or_state_mismatch" (evalSetup restoredSettings $ ProvisionRestoredDatabase identity (n+1))
+      evalSetup restoredSettings (ProvisionRestoredDatabase identity n)
+      evalSetup restoredSettings (ProvisionRestoredDatabase identity n)
+      forM_ ["ecxbridger","ecxbridges"] $ \role->
+        bracket(PG.connect restoredSettings {PG.connectUser=role}) PG.close $ \db->verifyReadRole db >>= check
+
+      bracket(PG.connect admin {PG.connectDatabase=T.unpack database}) PG.close $ \db->do
+        inventory db >>= check . (==objects)
+        receiptNames db >>= check . null
+        restored<-(,) <$> (O.runSelect db $ O.selectTable S.deployment) <*> (O.runSelect db $ O.selectTable S.scanHealth)
+        let (rows,observations)=before
+        check(restored==([row {S.paused=1,S.pauseReason="restored_requires_reconciliation"} | row<-rows],observations))
+  bracket(PG.connect readerSettings) PG.close $ \db->verifyReadRole db >>= check
+  putStrLn "PASS: provisioned restricted-reader backup, installer receipt excluded, all public tables/sequences/functions/constraints/triggers/indexes restored, ledger and observation data preserved, paused isolated restore, reader remains restricted"
   putStrLn "PASS: foreign role/database refusal, migration rollback, SIGKILL during migration008 and successful retry, changed-migration refusal, read-only roles and initialized ledger/observation preservation"
  where
   check True=pure ()

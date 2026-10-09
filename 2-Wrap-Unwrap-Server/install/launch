@@ -10,7 +10,7 @@ bundle=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 release=$(sha256sum "$bundle/manifest.sha256" | cut -d' ' -f1)
 base=/opt/ecx-bridge-bootstrap
 [ ! -L "$base" ] || { echo 'Bootstrap directory must not be a symlink.' >&2; exit 1; }
-install -d -m 0700 "$base"
+install -d -m 0755 "$base"
 exec 9>/run/lock/ecx-bridge-bootstrap.lock
 flock -n 9 || { echo 'Another setup is running.' >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
@@ -34,7 +34,9 @@ if [ ! -e "$target" ]; then
   cp -R "$bundle/." "$staging/"
   chown -R root:root "$staging"
   chmod -R go-w "$staging"
-  chmod 0755 "$staging/bin/"*
+  find "$staging" -type d -exec chmod 0755 '{}' +
+  find "$staging" -type f -exec chmod 0644 '{}' +
+  chmod 0755 "$staging/bin/"* "$staging/lib/"*
   (cd "$staging" && sha256sum --check --status manifest.sha256)
   mv "$staging" "$target"
   staging=

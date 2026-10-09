@@ -56,6 +56,8 @@ withLifecycle directory start=do
     bracket (openFd (takeDirectory root) ReadOnly defaultFileFlags) closeFd fileSynchronise
   privateParent (root</>"pending")
   withFamily (root</>"lifecycle") $ do
+    restoring<-doesFileExist "/var/lib/ecx-bridge-restore/pending"
+    require (not restoring) "restore_pending_requires_reviewed_activation"
     pending<-doesFileExist(root</>"pending")
     completed<-doesFileExist installed
     if pending then do
@@ -131,8 +133,12 @@ continue plan start=do
       unblock "signer"
       command "systemctl" ["start","ecx-bridge-signer"]
       -- The bounded process itself pauses and owns the existing writer/fence.
+      databaseFile<-doesFileExist "/var/lib/ecx-bridge-install/database"
+      database<-if databaseFile then T.strip . b8ToText <$> readPrivate "/var/lib/ecx-bridge-install/database" else pure "ecx_bridge"
+      require (database=="ecx_bridge" || (T.length database==44 && "ecx_restore_" `T.isPrefixOf` database
+        && T.all (`elem` ("0123456789abcdef"::String)) (T.drop 12 database))) "invalid_installed_database"
       result<-output "runuser" ["-u","ecxbridgew","--","env"
-        ,"PGHOST=/var/run/postgresql","PGPORT=5432","PGDATABASE=ecx_bridge"
+        ,"PGHOST=/var/run/postgresql","PGPORT=5432","PGDATABASE="<>T.unpack database
         ,"PGUSER=ecxbridgew","PGREADUSER=ecxbridger","ecx_bridge_datadir="<>(prepared</>"share")
         ,binary,"checkpoint",workerConfig]
       receipt<-decodeRecord (B8.pack result)

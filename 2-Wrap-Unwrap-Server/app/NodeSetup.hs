@@ -1,5 +1,5 @@
 -- One-time local node provisioning, never a worker/signer runtime capability.
-module NodeSetup (credentials,checkConfig,serviceName,provision) where
+module NodeSetup (credentials,checkConfig,serviceName,provision,persistRestoredWallet) where
 import Bridge.AdminKey (savePrivate,readPrivate,withFamily)
 import Bridge.File (withHandle)
 import System.IO (hFlush)
@@ -138,3 +138,28 @@ readMethods="getblockchaininfo,getblockhash,getblockheader,getnetworkinfo,getcon
 workerMethods=readMethods<>",getnewaddress,getaddressesbylabel,getrawchangeaddress,walletcreatefundedpsbt,lockunspent,createpsbt,testmempoolaccept,sendrawtransaction"
 signerMethods=readMethods<>",walletcreatefundedpsbt,createpsbt,walletprocesspsbt,finalizepsbt,walletpassphrase,walletlock,backupwallet,listdescriptors"
 adminMethods=readMethods<>",getdescriptorinfo,deriveaddresses,listwalletdir,createwallet,importdescriptors,listdescriptors,getnewaddress,walletpassphrase,walletlock"
+
+-- Managed recovery only, with custody services stopped by the activation journal.
+-- Preserve all RPC restrictions; an unfamiliar scoped config requires review.
+persistRestoredWallet :: T.Text -> IO ()
+persistRestoredWallet wallet=do
+  let path="/var/lib/ecx-betanet/bitcoin.conf"
+      record=B8.pack $ "wallet="<>T.unpack wallet
+  require (not(T.null wallet) && T.all (`elem` ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"::String)) wallet) "invalid_recovered_wallet_name"
+  checkConfig path
+  bytes<-B.readFile path
+  require (not $ any (B8.isPrefixOf "[" . B8.strip) $ B8.lines bytes) "scoped_node_configuration_requires_review"
+  unless (record `elem` map B8.strip (B8.lines bytes)) $ do
+    let candidate=bytes<>"\n"<>record<>"\n"
+    status<-getFileStatus path
+    suffix<-base58 <$> getRandomBytes 8
+    let staging=path<>".recover-"<>T.unpack suffix
+    bracket (openFd staging WriteOnly defaultFileFlags {creat=Just 0o600,exclusive=True,nofollow=True,cloexec=True}) closeFd $ \fd->do
+      withHandle fd $ \h->B.hPut h candidate >> hFlush h
+      setFdOwnerAndGroup fd (fileOwner status) (fileGroup status)
+      setFdMode fd (fileMode status .&. 0o777)
+      fileSynchronise fd
+    renameFile staging path
+    bracket (openFd (takeDirectory path) ReadOnly defaultFileFlags) closeFd fileSynchronise
+  (code,_,_)<-readProcessWithExitCode "systemctl" ["restart","ecx-betanet.service"] ""
+  require (code==ExitSuccess) "recovered_node_restart_failed"

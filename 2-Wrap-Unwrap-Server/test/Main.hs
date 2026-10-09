@@ -1,6 +1,7 @@
 {-# LANGUAGE DataKinds, GADTs, TypeOperators, TypeFamilies, TypeApplications #-}
 module Main (main) where
 
+import qualified RestoreGuideCheck
 import qualified ConfigureCheck
 import qualified SigningTransportCheck
 import qualified ChainCheck
@@ -30,12 +31,14 @@ main :: IO ()
 main = getArgs >>= \args -> if args==["--configure-only"]
   then ConfigureCheck.contract >>= \ok -> if ok then putStrLn "Configure contract passed" else exitFailure
   else if args==["--funding-only"] then SigningTransportCheck.fundingCheck >>= \ok -> if ok then putStrLn "Funding contract passed" else exitFailure
+  else if args==["--restore-only"] then RestoreGuideCheck.contract >>= \ok -> if ok then putStrLn "Restore journal contract passed" else exitFailure
   else fullSuite
 
 fullSuite :: IO ()
 fullSuite = do
   results <- sequence
-    [ check "BIP39 generation and Solana wallet recovery" ConfigureCheck.walletProperty
+    [ check "Recovery step journals refuse uncertain replay" $ once $ ioProperty RestoreGuideCheck.contract
+    , check "BIP39 generation and Solana wallet recovery" ConfigureCheck.walletProperty
     , check "configure saves private validated material and refuses overwrite/interruption" $ once $ ioProperty ConfigureCheck.contract
     , check "Solana Pay URI preserves exact units and rejects injectable keys" $ forAll amounts $ \n ->
         let key=T.replicate 32 "1"; quantity=good(amount n); instruction="solana-pay:"<>key
