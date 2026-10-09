@@ -56,8 +56,8 @@ publicApplication assets evaluate = do
       _ | pathInfo request==["info"] && requestMethod request=="GET"->do
             c<-evaluate (safe PublicConfig)
             respond $ responseLBS HTTP.status200 [("Content-Type","text/html; charset=utf-8"),("Cache-Control","no-store")] $
-              BL.fromStrict $ TE.encodeUtf8 $ "<!doctype html><meta charset=utf-8><title>Bridge information</title><h1>Bridge information</h1>"<>
-              "<p>"<>escapeHTML (reason $ pubAvailability c)<>"</p>"<>reportHTML (pubReport c)<>"<p><a href=/>Bridge</a></p>"
+              BL.fromStrict $ TE.encodeUtf8 $ page "Info" "Bridge information" $
+              "<p>"<>escapeHTML (reason $ pubAvailability c)<>"</p>"<>reportHTML (pubReport c)
         | otherwise->customerRoutes evaluate request respond
   boundedApplication 32 "server_busy" site
 
@@ -142,7 +142,7 @@ fundingApplication configuration fallback=do
       require (BS.length salt==32 && BS.length expected==32 && all (\v->not(T.null v) && T.length v<=128) [native,owner,mint,ata]) "invalid_funding_configuration"
       next<-newTVarIO 0
       pure $ \request respond->if pathInfo request/=["funding"] then fallback request respond else do
-        let headers=[("Cache-Control","no-store"),("Content-Type","text/html; charset=utf-8"),("X-Content-Type-Options","nosniff"),("Referrer-Policy","no-referrer"),("Content-Security-Policy","default-src 'none'; frame-ancestors 'none'")]
+        let headers=[("Cache-Control","no-store"),("Content-Type","text/html; charset=utf-8"),("X-Content-Type-Options","nosniff"),("Referrer-Policy","no-referrer"),("Content-Security-Policy","default-src 'none'; style-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'")]
             reply status extra body=respond $ responseLBS status (headers<>extra) body
         if requestMethod request/="GET" then reply HTTP.status405 [("Allow","GET")] "Read-only page" else do
           now<-toInteger <$> getMonotonicTimeNSec
@@ -162,15 +162,22 @@ fundingApplication configuration fallback=do
             if not valid then reply HTTP.status401 [("WWW-Authenticate","Basic realm=\"Bridge funding\", charset=\"UTF-8\"")] "Authentication required." else do
               c<-configuration
               if pubCustodyOwner c/=owner || pubMint c/=mint then reply HTTP.status503 [] "Funding configuration does not match this bridge." else
-                reply HTTP.status200 [] $ BL.fromStrict $ TE.encodeUtf8 $
-                  "<!doctype html><html><meta charset=utf-8><title>Bridge funding</title><h1>Bridge funding</h1>"<>
+                reply HTTP.status200 [] $ BL.fromStrict $ TE.encodeUtf8 $ page "Funding" "Bridge funding" $
                   "<p>Operator deposits only. Funding does not automatically allocate treasury. Use the existing operator allocation workflow after confirmation and reconciliation.</p>"<>
                   row "ECX network" (T.pack $ show $ pubProfile c)<>row "ECX address" native<>
                   row "Solana network" (pubSolanaCluster c)<>row "SOL owner" owner<>row "Wrapped ECX mint" mint<>row "Wrapped ECX token account" ata<>
                   row "Readiness" (reason $ pubAvailability c)<>
-                  reportHTML (pubReport c)<>"<p><a href=/info>Public information</a> · <a href=/>Bridge</a></p></html>"
+                  reportHTML (pubReport c)
  where
   row label value="<h2>"<>label<>"</h2><p>"<>escapeHTML value<>"</p>"
+
+-- The static bridge page uses the same three links and shared stylesheet.
+page :: Text -> Text -> Text -> Text
+page active title body=
+  "<!doctype html><html lang=en><head><meta charset=utf-8><meta name=viewport content=\"width=device-width,initial-scale=1\"><title>"<>title<>
+  "</title><link rel=stylesheet href=/style.css></head><body><main><nav aria-label=\"Main navigation\">"<>
+  T.concat ["<a href=\""<>url<>"\""<>(if label==active then " aria-current=page" else "")<>">"<>label<>"</a>" | (label,url)<-[("Bridge","/"),("Info","/info"),("Funding","/funding")]]<>
+  "</nav><h1>"<>title<>"</h1><section class=card>"<>body<>"</section></main></body></html>"
 
 escapeHTML :: Text -> Text
 escapeHTML=T.concatMap $ \c->case c of '&'->"&amp;"; '<'->"&lt;"; '>'->"&gt;"; '"'->"&quot;"; '\''->"&#39;"; _->T.singleton c
@@ -182,10 +189,10 @@ reportHTML (Just report)=
   "<h2>Recorded reserves</h2><p>Custody observations are "<>(if reportCustodyFresh report then "fresh" else "stale")<>
   ". Observation time (Unix seconds): "<>maybe "unavailable" (T.pack.show) (reportCustodyAt report)<>
   ". These are recorded totals; deposits need confirmation and explicit allocation.</p>"<>
-  "<table><tr><th>Asset</th><th>Reserve</th><th>Available treasury</th><th>Held</th><th>Liabilities</th><th>Earned fees</th></tr>"<>
+  "<div class=report-table><table><tr><th>Asset</th><th>Reserve</th><th>Available treasury</th><th>Held</th><th>Liabilities</th><th>Earned fees</th></tr>"<>
   T.concat ["<tr><td>"<>T.pack(show $ reportAsset a)<>"</td>"<>
     T.concat ["<td>"<>maybe "unknown" (coins $ reportAsset a) value<>"</td>" | value<-[reportReserve a,Just $ reportFloat a,Just $ reportHeld a,Just $ reportLiability a,Just $ reportFees a]]<>"</tr>" | a<-reportAssets report]<>
-  "</table><p>Completed transfers (24h): "<>T.pack(show $ reportWraps24h report)<>" wraps, "<>T.pack(show $ reportUnwraps24h report)<>" unwraps.</p>"
+  "</table></div><p>Completed transfers (24h): "<>T.pack(show $ reportWraps24h report)<>" wraps, "<>T.pack(show $ reportUnwraps24h report)<>" unwraps.</p>"
  where
   coins asset value=escapeHTML $ either (const "unavailable") (format asset) (parseUnits value)
   format Sol amount=let raw=T.justifyRight 10 '0' (T.pack $ show $ units amount); (whole,fraction)=T.splitAt (T.length raw-9) raw in whole<>"."<>fraction

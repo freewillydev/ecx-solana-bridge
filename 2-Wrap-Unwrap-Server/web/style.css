@@ -157,3 +157,26 @@ select:focus {
 .report-table th, .report-table td { padding: 10px 12px; text-align: right; border-bottom: 1px solid #53695c; }
 .report-table th:first-child { text-align: left; }
 summary { cursor: pointer; font-weight: 600; }
+
+nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 28px;
+}
+nav a {
+  padding: 10px 16px;
+  border: 1px solid #35453d;
+  border-radius: 7px;
+  color: #b7d9c2;
+  text-decoration: none;
+}
+nav a[aria-current="page"] {
+  background: #c2e8ce;
+  color: #102018;
+}
+nav a:hover, nav a:focus-visible {
+  outline: 2px solid #bae7c7;
+  outline-offset: 2px;
+}
+.card p { overflow-wrap: anywhere; }
