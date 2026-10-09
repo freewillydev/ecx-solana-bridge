@@ -17,7 +17,8 @@ import qualified Data.ByteArray.Encoding as Hex
 import Crypto.KDF.PBKDF2 (Parameters(..),fastPBKDF2_SHA256)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
-import Bridge.Wire (pubProfile,pubSolanaCluster,pubMint,pubCustodyOwner,pubAvailability,pubReport)
+import Bridge.Wire (PublicReport(..),PublicAssetReport(..),Availability(..))
+import Bridge.Domain (Asset(Sol),parseUnits,renderCoins,units)
 import qualified Data.ByteString as BS
 import Data.IORef (newIORef,atomicModifyIORef')
 import Data.Text (Text)
@@ -52,7 +53,12 @@ publicApplication assets evaluate = do
   site<-fundingApplication (evaluate $ safe PublicConfig) $ \request respond->
     case [(file,mime)|(path,file,mime)<-files,pathInfo request==path,requestMethod request=="GET"] of
       [(file,mime)]->respond $ responseFile HTTP.status200 [("Content-Type",mime)] (assets</>file) Nothing
-      _->customerRoutes evaluate request respond
+      _ | pathInfo request==["info"] && requestMethod request=="GET"->do
+            c<-evaluate (safe PublicConfig)
+            respond $ responseLBS HTTP.status200 [("Content-Type","text/html; charset=utf-8"),("Cache-Control","no-store")] $
+              BL.fromStrict $ TE.encodeUtf8 $ "<!doctype html><meta charset=utf-8><title>Bridge information</title><h1>Bridge information</h1>"<>
+              "<p>"<>escapeHTML (reason $ pubAvailability c)<>"</p>"<>reportHTML (pubReport c)<>"<p><a href=/>Bridge</a></p>"
+        | otherwise->customerRoutes evaluate request respond
   boundedApplication 32 "server_busy" site
 
 -- Both HTTP surfaces share the same bounded body and concurrency behavior.
@@ -161,9 +167,26 @@ fundingApplication configuration fallback=do
                   "<p>Operator deposits only. Funding does not automatically allocate treasury. Use the existing operator allocation workflow after confirmation and reconciliation.</p>"<>
                   row "ECX network" (T.pack $ show $ pubProfile c)<>row "ECX address" native<>
                   row "Solana network" (pubSolanaCluster c)<>row "SOL owner" owner<>row "Wrapped ECX mint" mint<>row "Wrapped ECX token account" ata<>
-                  row "Readiness" (T.pack $ show $ pubAvailability c)<>
-                  "<h2>Recorded reserves and transfer report</h2><p>May be stale; observation timestamps and freshness are included below. Refresh to update.</p><pre>"<>
-                  escape (TE.decodeUtf8 $ BL.toStrict $ encode $ pubReport c)<>"</pre><a href=/>Bridge and public information</a></html>"
+                  row "Readiness" (reason $ pubAvailability c)<>
+                  reportHTML (pubReport c)<>"<p><a href=/info>Public information</a> · <a href=/>Bridge</a></p></html>"
  where
-  escape=T.concatMap $ \c->case c of '&'->"&amp;"; '<'->"&lt;"; '>'->"&gt;"; '"'->"&quot;"; '\''->"&#39;"; _->T.singleton c
-  row label value="<h2>"<>label<>"</h2><p>"<>escape value<>"</p>"
+  row label value="<h2>"<>label<>"</h2><p>"<>escapeHTML value<>"</p>"
+
+escapeHTML :: Text -> Text
+escapeHTML=T.concatMap $ \c->case c of '&'->"&amp;"; '<'->"&lt;"; '>'->"&gt;"; '"'->"&quot;"; '\''->"&#39;"; _->T.singleton c
+
+
+reportHTML :: Maybe PublicReport -> Text
+reportHTML Nothing="<p>Reserve observations are unavailable. Do not infer readiness from this page.</p>"
+reportHTML (Just report)=
+  "<h2>Recorded reserves</h2><p>Custody observations are "<>(if reportCustodyFresh report then "fresh" else "stale")<>
+  ". Observation time (Unix seconds): "<>maybe "unavailable" (T.pack.show) (reportCustodyAt report)<>
+  ". These are recorded totals; deposits need confirmation and explicit allocation.</p>"<>
+  "<table><tr><th>Asset</th><th>Reserve</th><th>Available treasury</th><th>Held</th><th>Liabilities</th><th>Earned fees</th></tr>"<>
+  T.concat ["<tr><td>"<>T.pack(show $ reportAsset a)<>"</td>"<>
+    T.concat ["<td>"<>maybe "unknown" (coins $ reportAsset a) value<>"</td>" | value<-[reportReserve a,Just $ reportFloat a,Just $ reportHeld a,Just $ reportLiability a,Just $ reportFees a]]<>"</tr>" | a<-reportAssets report]<>
+  "</table><p>Completed transfers (24h): "<>T.pack(show $ reportWraps24h report)<>" wraps, "<>T.pack(show $ reportUnwraps24h report)<>" unwraps.</p>"
+ where
+  coins asset value=escapeHTML $ either (const "unavailable") (format asset) (parseUnits value)
+  format Sol amount=let raw=T.justifyRight 10 '0' (T.pack $ show $ units amount); (whole,fraction)=T.splitAt (T.length raw-9) raw in whole<>"."<>fraction
+  format _ amount=renderCoins amount
