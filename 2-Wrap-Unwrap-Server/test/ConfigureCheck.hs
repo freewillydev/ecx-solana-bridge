@@ -11,6 +11,7 @@ import Crypto.MAC.HMAC (hmac,HMAC)
 import Crypto.Hash (SHA256)
 import Bridge.AdminKey (savePrivate)
 import Bridge.Wallet (mnemonic,walletKey,nativeDescriptors)
+import Bridge.NativeKey (deriveChild)
 import qualified Bridge.Native as N
 import Bridge.Wire (Profile(..))
 import Bridge.Error (BridgeError(..))
@@ -31,7 +32,7 @@ import qualified Data.Text as T
 import Data.Aeson (encode,eitherDecodeStrict',Value(..),object,(.=),toJSON)
 import qualified Data.Map.Strict as M
 import Data.List (sort,isInfixOf)
-import Data.Bits ((.&.))
+import Data.Bits ((.&.),shiftR)
 import System.Directory
 import System.FilePath ((</>))
 import System.IO (openTempFile,hClose,hPutStrLn,hFlush,hGetChar,hGetContents)
@@ -132,11 +133,14 @@ walletProperty=forAll (vectorOf 16 arbitrary) $ \(entropy::[Word8])->
   conjoin [case mnemonic (B.pack entropy) >>= walletKey of
              Right key->property (B.length key==64)
              Left _->property False
+          ,ioProperty (nativeScalarContract entropy)
           ,conjoin [counterexample "BIP39/SLIP10 known vector mismatch" $
              mnemonic (B.replicate 16 byte)==Right phrase &&
              fmap (Hex.convertToBase Hex.Base16 . B.take 32) (walletKey phrase)==Right expected
             | (byte,phrase,expected)<-vectors]
-          ,property (nativeDescriptors False (unwords $ replicate 11 "abandon"<>["about"])==Right
+          ,ioProperty $ do
+             actual<-nativeDescriptors False (unwords $ replicate 11 "abandon"<>["about"])
+             pure (actual==Right
               ["wpkh([73c5da0a/84h/0h/0h]xprv9ybY78BftS5UGANki6oSifuQEjkpyAC8ZmBvBNTshQnCBcxnefjHS7buPMkkqhcRzmoGZ5bokx7GuyDAiktd5HemohAU4wV1ZPMDRmLpBMm/0/*)","wpkh([73c5da0a/84h/0h/0h]xprv9ybY78BftS5UGANki6oSifuQEjkpyAC8ZmBvBNTshQnCBcxnefjHS7buPMkkqhcRzmoGZ5bokx7GuyDAiktd5HemohAU4wV1ZPMDRmLpBMm/1/*)"])
           ,property (case walletKey (unwords $ replicate 12 "abandon") of Left _->True; _->False)
           ,property (case mnemonic (B.replicate 15 0) of Left _->True; _->False)]
@@ -148,6 +152,26 @@ walletProperty=forAll (vectorOf 16 arbitrary) $ \(entropy::[Word8])->
     ,(128,"letter advice cage absurd amount doctor acoustic avoid letter advice cage above","8ab69a9cd074a86f71fea02a807dac8cc5d498f292844417640946f497117746")
     ,(255,unwords (replicate 11 "zoo"<>["wrong"]),"0b69a88e057a6ff3299f4adac3b04b0b24df114b3f3c21c5cefe0b89664b3bcf")]
 
+-- Integer arithmetic is an independent TEST oracle, never production key math.
+nativeScalarContract :: [Word8] -> IO Bool
+nativeScalarContract entropy=do
+  let order=0xfffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd0364141 :: Integer
+      bytes :: Integer -> B.ByteString
+      bytes value=B.pack [fromIntegral (value `shiftR` offset) | offset<-[248,240..0]]
+      randomScalar=1+B.foldl' (\n b->256*n+fromIntegral b) 0 (B.pack entropy)
+      generator="0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798" :: B.ByteString
+      cases=[(1,0,Just 1),(order-1,0,Just (order-1)),(0,1,Nothing),(order,0,Nothing)
+            ,(1,order,Nothing),(1,order-1,Nothing),(order-1,2,Just 1)
+            ,(randomScalar,order-randomScalar+1,Just 1)]
+  results<-forM cases $ \(parent,tweak,expected)->do
+    result<-deriveChild (bytes parent) (bytes tweak)
+    pure $ fmap fst result==fmap bytes expected && case result of
+      Just (_,public)->B.length public==33 && (parent/=1 || Hex.convertToBase Hex.Base16 public==generator)
+      Nothing->True
+  short<-deriveChild (B.replicate 31 0) (bytes 0)
+  long<-deriveChild (bytes 1) (B.replicate 33 0)
+  pure (and results && short==Nothing && long==Nothing)
+
 -- Closed native setup protocol: real-node descriptor compatibility is checked
 -- separately; these fixtures exercise interruption/refusal without chain effects.
 nativeSeedContract :: FilePath -> IO Bool
@@ -157,7 +181,7 @@ nativeSeedContract directory=do
       settings=N.NativeSettings L2LSignetDevnet "http://127.0.0.1:29432" (directory</>"worker.auth") "seed-test"
         16000 "00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47"
       public=["public-receive#checksum","public-change#checksum"]::[T.Text]
-  private<-either (const $ fail "fixture native mnemonic") pure (nativeDescriptors True phrase)
+  private<-nativeDescriptors True phrase >>= either (const $ fail "fixture native mnemonic") pure
   savePrivate seedFile (B.pack $ map (fromIntegral . fromEnum) phrase)
   exists<-newIORef False;imports<-newIORef (0::Int);creates<-newIORef (0::Int)
   broken<-newIORef False;failImport<-newIORef False;restoring<-newIORef False

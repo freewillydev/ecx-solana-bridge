@@ -213,7 +213,7 @@ build directory=do
     pure s
   nativeSetup<-if nativeMode=="existing" then pure [] else do
     (phraseFile,phrase)<-prepareSeed directory "ecx" nativeMode
-    _<-either reject pure (nativeDescriptors signet phrase)
+    _<-nativeDescriptors signet phrase >>= either reject pure
     putStrLn $ "ECX recovery path: m/84'/"<>(if signet then "1" else "0")<>"'/0'/0/* (receive), /1/* (change); empty BIP-39 passphrase."
     rangeEnd<-if nativeMode=="restore" then prompt "ECX recovery highest address index (cover ALL previously used receiving/change indexes)" "999" (\input->case readMaybe input of
       Just n | n>=999 && n<=1000000->pure (n::Int)
