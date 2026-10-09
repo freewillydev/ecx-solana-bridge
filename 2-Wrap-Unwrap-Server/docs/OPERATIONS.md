@@ -403,3 +403,25 @@ after provisioning or replacing this file. Missing configuration disables the
 route. Attempts share a two-second admission interval; responses are never cached.
 Funding still requires confirmed observations, reconciliation and explicit
 allocation through the existing operator workflow. Reserve timestamps may be stale.
+
+### October 9 review deployment
+
+`bridge.bitnames.info` serves the branch candidate `02ea70b` with Bridge, Info and
+password-protected Funding navigation. The worker runs `observe`: customer intake
+is disabled and the signer is stopped. Stale reserve observations remain visibly
+marked; this deployment does not establish transfer readiness. The published
+`review-2026-10-09-ubuntu` installer still contains the earlier `cae0681` baseline.
+
+The AWS signer now selects the Mac HTTPS restic repository through
+`/etc/systemd/system/ecx-bridge-signer.service.d/mac-backup.conf`. Original backup
+configuration and snapshots remain intact. A fresh sequence-76 checkpoint passed
+full restic data verification and isolated custody recovery, with matching manifest;
+no recovered wallet or ledger was activated. Checkpoint SSM evidence:
+`c005fd99-f91c-454f-8905-ead2d7b16fb5`; recovery:
+`f5376d64-d173-4367-8cd6-be5ce6faaec6`.
+
+The Mac must remain awake, online and logged in with its external drive attached.
+The repository has a 2 GiB initial cap. Before reinstalling, reconcile the runtime
+backup override with the recovered setup directory, which still names the original
+backup destination. This is a review deployment, not an unattended production
+backup service or independent security approval.
