@@ -352,6 +352,7 @@ evalRead (Reader settings identity remote) operation = bracket connect PG.close 
             pure ()
           O.where_ (O.not linked)
           pure (S.depositId row,S.depositAsset row,S.depositAmount row)
+          :: IO [(Text,Text,Int64)]
         forM rows $ \(key,asset,quantity)->(,,) key <$> parseAsset asset <*> checked(amount $ toInteger quantity)
       ReadNativeReviews -> do
         reviews<-O.runSelect c $ O.limit 1001 $ O.orderBy (O.desc $ \(_,_,n)->n) $ do
