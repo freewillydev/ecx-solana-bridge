@@ -1639,3 +1639,19 @@ Separate-host append-only TLS rest-server provisioning completed successfully
 restore and denial tests remain. No bridge custody keys or funds were deployed.
 Outstanding: interrupted configuration/install recovery, final Ubuntu bundle,
 three clean-install scenarios, real-chain acceptance and all external gates.
+
+Interrupted configuration follow-up: configuration now takes a private process
+lock, publishes setup.json last, and archives recognized incomplete settings
+before retrying. Generated wallets stay outside settings and retain their funding
+identity. Unknown directories and already completed setups refuse replacement.
+The disposable real-terminal contract starts with interrupted credentials and a
+saved recovery phrase, verifies preservation of both, then exercises node-role
+provisioning/idempotence. Full `bridge-test` passed after this change. This is a
+controlled partial-state test, not yet an OS-kill/power-loss Ubuntu acceptance.
+
+Integrated security c3ef8b8 as ab3ed9d: coherent restic0.19.1 patch/pins now use
+Go1.26.9 and x/net0.60.0 plus required module upgrades. Independently verified
+x86 binary SHA2560b9777171a216de85789286f976a8ca0ada550b1909288ebd2d474cce4c56c76
+and patch SHA2561195318dbdf1d8cdb30e9b658e1c6338f689ba49081b281b9102bc1a945563aa.
+Worker-reported source/binary scans and upstream REST backend test passed;
+actual Ubuntu backup/restore acceptance remains separate.

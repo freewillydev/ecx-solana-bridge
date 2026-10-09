@@ -31,7 +31,7 @@ import qualified Data.ByteString.Lazy as L
 import qualified Data.Text as T
 import Data.Aeson (encode,eitherDecodeStrict',Value(..),object,(.=),toJSON)
 import qualified Data.Map.Strict as M
-import Data.List (sort,isInfixOf)
+import Data.List (sort,isInfixOf,isPrefixOf)
 import Data.Bits ((.&.),shiftR)
 import System.Directory
 import System.FilePath ((</>))
@@ -243,6 +243,15 @@ simpleContract parent executable=do
       commands=directory</>"commands"
       node=directory</>"bitcoin.conf"
   createDirectory directory;setFileMode directory 0o700
+  -- A killed wizard left settings and an already-displayed wallet phrase.
+  -- Retrying must preserve the settings and keep the funding identity.
+  let interrupted=directory</>".ecx-bridge"
+      wallet=directory</>".ecx-bridge-solana-wallet"
+  mapM_ (\path->createDirectory path >> setFileMode path 0o700) [interrupted,wallet]
+  savePrivate (interrupted</>"configuring") "ecx-bridge-configuration-v1\n"
+  savePrivate (interrupted</>"retained-credential") "interrupted-fixture\n"
+  priorPhrase<-either (fail . T.unpack) pure (mnemonic $ B.replicate 16 1)
+  savePrivate (wallet</>"solana-recovery.txt") (B8.pack $ priorPhrase<>"\n")
   createDirectory commands;setFileMode commands 0o700
   savePrivate node "server=1\n"
   savePrivate (commands</>"restic") "#!/bin/sh\nexit 0\n"
@@ -289,6 +298,11 @@ simpleContract parent executable=do
     rejected<-try(C.loadConfig(setup</>"bootstrap.json")) :: IO(Either BridgeError C.Config)
     phraseA<-B8.strip <$> B.readFile(directory</>".ecx-bridge-solana-wallet/solana-recovery.txt")
     phraseB<-B8.strip <$> B.readFile(directory</>".ecx-bridge-ecx-wallet/ecx-recovery.txt")
+    expectedPhrase<-either (fail . T.unpack) pure (mnemonic $ B.replicate 16 1)
+    archives<-filter (".ecx-bridge-interrupted-" `isPrefixOf`) <$> listDirectory directory
+    retained<-case archives of
+      [archive]->(=="interrupted-fixture\n") <$> B.readFile(directory</>archive</>"retained-credential")
+      _->pure False
     solana<-either (const $ fail "generated_phrase_invalid") pure (walletKey $ B8.unpack phraseA)
     rules<-B8.lines <$> B.readFile(setup</>"native-rpc.conf")
     valid<-forM ["admin","worker","signer"] $ \role->do
@@ -332,7 +346,7 @@ simpleContract parent executable=do
     historyChecked<-originContract
     B.appendFile node "# unexpected operator edit\n"
     nodeChanged<-try(NodeSetup.provision setup) :: IO(Either BridgeError ())
-    pure(managedSelected && historyChecked && either (const True) (const False) nodeChanged && all id valid && not runtimeExists && either (const True) (const False) rejected
+    pure(retained && phraseA==B8.pack expectedPhrase && managedSelected && historyChecked && either (const True) (const False) nodeChanged && all id valid && not runtimeExists && either (const True) (const False) rejected
       && C.profile c==CanonicalBeta && C.mint c==Bootstrap.canonicalMint && C.custodyOwner c==base58(B.drop 32 solana)
       && phraseA/=phraseB && first==second && prior=="server=1\n" && "rpcwhitelistdefault=0" `B.isInfixOf` first
       && either (const True) (const False) changed)

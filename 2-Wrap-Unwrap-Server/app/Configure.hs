@@ -37,7 +37,7 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as L
 import qualified Data.Text as T
-import System.Directory (makeAbsolute,canonicalizePath,removeDirectoryRecursive,doesFileExist,doesDirectoryExist,setCurrentDirectory,findExecutable)
+import System.Directory (makeAbsolute,canonicalizePath,removeDirectoryRecursive,renameDirectory,doesFileExist,doesDirectoryExist,setCurrentDirectory,findExecutable)
 import System.FilePath ((</>),takeDirectory,addTrailingPathSeparator)
 import qualified System.Posix.Directory as P
 import System.IO (hFlush,stdout,stdin,isEOF,hIsTerminalDevice,withFile,IOMode(ReadWriteMode),hPutStrLn,hPutStr,hGetLine)
@@ -58,12 +58,24 @@ launch=do
 
 -- The default path is fresh canonical custody. Advanced/recovery remains explicit.
 configure :: IO ()
-configure=do
+configure=makeAbsolute ".ecx-bridge-configure" >>= \lock->withFamily lock $ do
   protectWalletProcess
   terminal<-hIsTerminalDevice stdin
   require terminal "wallet_generation_requires_interactive_terminal"
   directory<-makeAbsolute ".ecx-bridge"
+  exists<-doesDirectoryExist directory
+  when exists $ do
+    complete<-doesFileExist(directory</>"setup.json")
+    require (not complete) "setup_already_exists_use_start"
+    marker<-readPrivate(directory</>"configuring")
+    require (marker=="ecx-bridge-configuration-v1\n") "unrecognized_partial_setup_requires_review"
+    suffix<-T.unpack . base58 <$> getRandomBytes 12
+    -- Never discard interrupted credentials or operator files. Wallets live in
+    -- sibling directories and are reused below, so funding addresses stay fixed.
+    renameDirectory directory (directory<>"-interrupted-"<>suffix)
+    putStrLn "Preserved interrupted settings; resuming configuration with the same wallets."
   P.createDirectory directory 0o700
+  savePrivate (directory</>"configuring") "ecx-bridge-configuration-v1\n"
   simplified directory `onException` removeDirectoryRecursive directory
 
 simplified :: FilePath -> IO ()
@@ -136,8 +148,8 @@ simplified directory=do
         [("solana.keypair.json",key),("native-worker.auth",worker),("native-signer.auth",signer)
         ,("native-unlock",unlock),("backup.repository",repository),("backup.password",password)]<>tls]
   mapM_ (\(name,value)->savePrivate (directory</>name) (L.toStrict $ encode value))
-    [("setup.json",setup),("sources.json",sources),("bootstrap.json",Object defaults)
-    ,("interface.json",Bootstrap.interface origin)]
+    [("sources.json",sources),("bootstrap.json",Object defaults)
+    ,("interface.json",Bootstrap.interface origin),("setup.json",setup)]
   putStrLn "Saved private setup. Runtime configuration is published only after verified funding/history."
   putStrLn "Defaults: local ECX RPC http://127.0.0.1:28532; PostgreSQL and services installed automatically."
   putStrLn "Order range: 0.00010000–0.00100000 ECX; 4 queued orders; 1 native confirmation."
