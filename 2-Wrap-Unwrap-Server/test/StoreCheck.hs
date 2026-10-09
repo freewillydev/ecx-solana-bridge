@@ -19,7 +19,7 @@ import Crypto.Error (CryptoFailable(..))
 import qualified Crypto.PubKey.Ed25519 as Ed
 import qualified Data.ByteArray as BA
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (withAsync,wait,cancel,poll)
+import Control.Concurrent.Async (withAsync,wait,cancel,poll,mapConcurrently)
 import Control.Concurrent.MVar (newEmptyMVar,putMVar,takeMVar,tryPutMVar)
 import System.Timeout (timeout)
 import qualified Opaleye.Internal.Locking as Locking
@@ -45,7 +45,7 @@ import Network.HTTP.Types (statusCode,status200,status500)
 import Bridge.Order
 import qualified Bridge.Fence as Fence
 import System.Directory (createDirectory,removeDirectoryRecursive,removeFile,findExecutable,listDirectory,renameFile,renameDirectory)
-import System.IO (openTempFile,hClose,withFile,IOMode(WriteMode))
+import System.IO (openTempFile,hClose,withFile,IOMode(WriteMode),stdout,hSetBuffering,BufferMode(LineBuffering))
 import System.Posix.Files (setFileMode)
 import qualified System.Posix.Files as Posix
 import System.Posix.Signals (signalProcess,sigKILL)
@@ -99,6 +99,7 @@ main=lookupEnv "ECX_PROVISION_CHILD" >>= maybe normal ProvisionCheck.child
 contractMain :: IO ()
 contractMain = do
   credentialsContract
+  cacheOnly<-lookupEnv "ECX_REPORT_CACHE_ONLY"
   migration<-lookupEnv "ECX_REBUILD_MIGRATION_ONLY"
   roots<-lookupEnv "ECX_REBUILD_PAYMENT_ROOTS_ONLY"
   live<-lookupEnv "ECX_REBUILD_LIVE_OBSERVER_CONFIG"
@@ -111,7 +112,7 @@ contractMain = do
   custody<-lookupEnv "ECX_REBUILD_CUSTODY_ONLY"
   when (encrypted==Just "1" && (native/=Just "1" || custody/=Just "1"))
     (fail "encrypted native acceptance requires native recovery and custody modes")
-  if roots==Just "child" then paymentRootsChild else if roots==Just "1" then paymentRootsMain else if migration==Just "1" then migrationMain else case live of
+  if cacheOnly==Just "1" then reportCacheMain else if roots==Just "child" then paymentRootsChild else if roots==Just "1" then paymentRootsMain else if migration==Just "1" then migrationMain else case live of
     Just path->liveObserverMain path
     Nothing->if setup==Just "1" then setupMain else if native==Just "1" then nativeRecoveryMain else if tls==Just "1" then tlsMain else if fence==Just "1" then fenceMain else if server==Just "1" then serverMain else ledgerMain
 
@@ -891,6 +892,86 @@ testRepository directory=do
   protected configuration $ BL.toStrict $ encode $ object ["restic" .= program,"repositoryFile" .= repository,"passwordFile" .= password]
   Process.callProcess program ["--no-cache","--repository-file",repository,"--password-file",password,"init","--quiet"]
   pure (program,repository,password,configuration)
+
+-- Actual HTTP handlers and PostgreSQL lock waits exercise the private cache.
+-- No evaluator is exported and no fake report function replaces database IO.
+reportCacheMain :: IO ()
+reportCacheMain=do
+  hSetBuffering stdout LineBuffering
+  database<-getEnv "ECX_REBUILD_CONTRACT_DATABASE"
+  unless ("ecx_rebuild_contract_" `T.isPrefixOf` T.pack database) (fail "disposable database required")
+  user<-getEnv "USER"; role<-getEnv "ECX_REBUILD_CONTRACT_READER"
+  let settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
+      terms=PaymentTerms (PolicySnapshot 2 "finalized" "contract") (CostLimits (money 10) (money 10) (money 10))
+      limits=OrderLimits (money 2) (money 1000) 100 100 100 (money 100000) (money 100000)
+      store=StorePolicy terms limits "contract" True
+      key=T.replicate 32 "1"
+      native=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:29432" "/unused" "workflow" 1 (T.replicate 64 "0")
+      chain=ObserverSettings native (Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing key key key) 2 "sol-origin" "opening-signature"
+      policy=H.SolanaPolicy "contract" "contract" key key key (money 10) (money 10)
+      public=W.PublicConfiguration W.L2LSignetDevnet "devnet" (W.InterfaceConfig Nothing Nothing Nothing Nothing Nothing)
+        "contract" key key 8 (money 2) (money 1000) (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]) False False (W.Availability False "starting") Nothing
+      check message ok=unless ok (fail message)
+  bracket (PG.connect settings) PG.close $ \fixtures->do
+    fixture fixtures Initialize
+    fixture fixtures SeedIntake
+    withReader settings {PG.connectUser=role} "contract" True $ \reader->
+      withWriter settings store (const $ pure ()) $ \writer->
+      bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> reject "offline_process_rpc"}) closeManager $ \manager->
+      withWorkerProcess manager reader writer chain policy (Just $ CustomerSettings public store "/unused/sdk") (SigningEndpoint 9443 "/unused/auth") $ \port _->
+      bracket (newManager defaultManagerSettings {HTTP.managerConnCount=16}) closeManager $ \client->
+      bracket (PG.connect settings) PG.close $ \lock->do
+        let request=do
+              wire<-HTTP.parseRequest ("http://127.0.0.1:"<>show port<>"/api/v1/config")
+              response<-HTTP.httpLbs wire {HTTP.responseTimeout=HTTP.responseTimeoutMicro 10000000} client
+              check "optional report failure broke config" (statusCode(HTTP.responseStatus response)==200)
+              either fail pure (eitherDecodeStrict' $ BL.toStrict $ HTTP.responseBody response) :: IO W.PublicConfiguration
+            batch=mapConcurrently (const request) [1..8::Int]
+            lockReport=PG.begin lock >> void(PG.execute_ lock "LOCK TABLE custody_check IN ACCESS EXCLUSIVE MODE")
+            noWaiters=do
+              let cleared=fixture fixtures (ReportWaiters $ T.pack role) >>= \n->unless (null n) (threadDelay 50000 >> cleared)
+              finished<-timeout 2000000 cleared
+              when (finished/=Just ()) $ fixture fixtures (ReportWaiters $ T.pack role) >>= print
+              check "report backend still blocked two seconds after cancellation" (finished==Just ())
+        before<-evalRead reader ReadState
+        currentTime<-floor <$> getPOSIXTime
+        initialReport<-evalRead reader (ReadPublicReport currentTime)
+        check "fresh empty ledger must report zero completed transfers"
+          (W.reportWraps24h initialReport==0 && W.reportUnwraps24h initialReport==0 && W.reportUndatedTransfers initialReport==0
+            && all ((=="0").W.reportFees) (W.reportAssets initialReport))
+        putStrLn "cache test: direct empty-ledger report succeeded"
+        putStrLn "cache test: locking report"
+        lockReport
+        started<-getMonotonicTimeNSec
+        failed<-withAsync batch $ \pending->do
+          let waiting=fixture fixtures (ReportWaiters $ T.pack role) >>= \n->when (length n/=1) (threadDelay 50000 >> waiting)
+          ready<-timeout 3000000 waiting
+          check "one coalesced PostgreSQL refresh not observed" (ready==Just ())
+          threadDelay 200000
+          fixture fixtures (ReportWaiters $ T.pack role) >>= check "concurrent refreshes were not coalesced" . (==1) . length
+          timeout 8000000 (wait pending) >>= maybe (fail "report timeout/cleanup exceeded bound") pure
+        elapsed<-(\end->end-started) <$> getMonotonicTimeNSec
+        check "failed refresh should return missing reports" (all ((==Nothing).W.pubReport) failed && elapsed<8000000000)
+        putStrLn "cache test: timeout returned"
+        noWaiters
+        putStrLn "cache test: backend cleared"
+        cached<-timeout 1000000 batch >>= maybe (fail "failed cache refreshed again") pure
+        check "failure cache changed response" (all ((==Nothing).W.pubReport) cached)
+        noWaiters
+        PG.rollback lock
+        -- Expiry is real monotonic time: no test hook or altered production TTL.
+        putStrLn "cache test: waiting real TTL"
+        threadDelay 31000000
+        putStrLn "cache test: refreshing after expiry"
+        recovered<-request
+        report<-maybe (fail "cache did not recover after timed-out refresh") pure (W.pubReport recovered)
+        lockReport
+        success<-timeout 1000000 batch >>= maybe (fail "successful cache queried locked database") pure
+        check "successful cache changed report" (all ((==Just report).W.pubReport) success)
+        noWaiters
+        PG.rollback lock
+        evalRead reader ReadState >>= check "public cache changed ledger state" . (==before)
+        putStrLn "PASS real HTTP report cache: concurrent timeout coalesced, backend canceled, failure cached, TTL recovery, successful cache, unchanged ledger"
 
 ledgerMain :: IO ()
 ledgerMain = do
@@ -1858,6 +1939,7 @@ customerProjectionContract fixtures reader = do
 -- Fixture operations are closed and use Opaleye. They exist only in this test
 -- component; no arbitrary SQL or connection callback is available to handlers.
 data Fixture a where
+  ReportWaiters :: T.Text -> Fixture [T.Text]
   ArchiveLegacy :: PG.ConnectInfo -> FilePath -> Fixture LedgerArchive
   ReceiptPayment :: T.Text -> Fixture T.Text
   LegacyPaymentStates :: Fixture [(T.Text,T.Text)]
@@ -1944,6 +2026,13 @@ data Fixture a where
   ProtectHolds :: T.Text -> Fixture ()
   CheckPhases :: T.Text -> T.Text -> Fixture Bool
 fixture :: PG.Connection -> Fixture a -> IO a
+fixture c (ReportWaiters role) = O.runSelect c $ do
+    (user,event,query)<-O.selectTable $ O.tableWithSchema "pg_catalog" "pg_stat_activity" $ p3
+      (O.requiredTableField "usename",O.requiredTableField "wait_event_type",O.requiredTableField "query")
+    O.where_ (user O..== O.sqlStrictText role
+      O..&& O.matchNullable (O.sqlBool False) (O..== O.sqlStrictText "Lock") event)
+    pure query
+    :: IO [T.Text]
 fixture c (LegacyHash intent) = do
   let includeReplacements=True
   obligations <- O.runSelect c $ do
