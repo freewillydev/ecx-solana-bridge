@@ -427,3 +427,57 @@ The repository has a 2 GiB initial cap. Saved setup and installed backup credent
 backup override removed; upgrade retains the installed credentials. A wiped host
 still requires explicit custody/ledger recovery, never a fresh install over old funds. This is a review deployment, not an unattended production
 backup service or independent security approval.
+
+
+### Independent RPC remediation and release handoff (October 9)
+
+The observation-only AWS worker is active; its signer is stopped. Successful
+individual history reads do not establish sustainable capacity. The observed
+OnFinality endpoint advertises limits of 200/hour and 4,000/day; these header
+counter units have not been established. The current idle verifier floor is nine
+calls per cycle, or at least 540 calls/hour to maintain the 60-second freshness
+window. Transfers and recovery require additional capacity. Do not weaken
+freshness or provider independence to fit the observed limit.
+
+The existing key works through both documented authentication formats. The AWS
+worker has no proxy environment variables; a TLS handshake verifies the configured
+provider hostname against a public certificate. The account dashboard also records
+failed transaction reads. This establishes provider-facing throttling, not its
+internal entitlement cause. The 400,000-unit workspace allowance may coexist with
+endpoint limits. The Development label has no documented quota entitlement effect.
+The last bounded history read at 13:10:13 UTC returned 200, remaining-hour 2, and no
+Retry-After/reset headers. Do not infer an hourly reset time or force exhaustion.
+The application's stable error codes intentionally omit remote bodies; existing
+worker logs cannot recover an earlier raw 429 response.
+
+Before resuming:
+
+1. Obtain documented capacity for an independent provider covering finalized
+   transaction history, account reads and signature pagination, with headroom above
+   the application's measured total budget. Confirm any hourly/day restrictions.
+2. Validate the existing history anchors and sustained scanner freshness through
+   normal observation; retain redacted rejection diagnostics if one occurs.
+3. Checkpoint and align worker and signer to the same reviewed installer. Retain
+   funding configuration and backup credentials; enforce one active custody owner.
+4. Reconcile reserves and backup coverage before the existing minimal funded
+   acceptance. Record both directions, exact transaction IDs and 1% fees.
+
+Provider support draft — prepared only, not sent:
+
+> Our authenticated Solana archive endpoint returns intermittent HTTP 429 for
+> ordinary finalized reads. At 2026-10-09 13:10:13 UTC, a successful getTransaction
+> returned X-Ratelimit-Limit-Hour: 200, Limit-Day: 4000, Limit-Minute: 40 and
+> Limit-Sec: 25, with Remaining-Hour: 2. The Developer workspace shows a 400,000
+> response-unit daily allowance. Query and header API-key authentication behave
+> alike. Please identify the units, scope and reset policy of these counters;
+> explain which Solana entitlement enforces them; and identify a supported plan
+> or configuration sustaining at least 540 read calls/hour plus transfer headroom.
+> Are these endpoint, account, IP or upstream limits? No credentials are included.
+
+The published review installer has a SHA-256 checksum, not a production release
+signature or GitHub artifact attestation. The repository's `scripts/release-auth`
+can sign an immutable artifact index and verify it against a separately trusted
+Ed25519 public key. Existing development/acceptance keys do not authorize a public
+production release. The operator must designate the release-key owner and trusted
+public-key distribution channel; do not generate a new authority implicitly or
+trust a key supplied only alongside the candidate it authenticates.
