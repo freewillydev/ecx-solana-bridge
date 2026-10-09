@@ -8,6 +8,40 @@ and available acceptance; external recovery, independent review and activation g
 remain open. Its source-size reduction target was not met. Passing an older
 candidate's tests does not certify later source or packages.
 
+## Current production acceptance checklist
+
+Current published installer: `154b308` (`review-2026-10-09-boot-policy`),
+SHA-256 `29d08ecfc37fce6431cb09b5bcf3e71e5df451bb051b73fc6e7f93d7c2b701b2`.
+Compiled application/SDK/browser are unchanged from `07bf9bb`; the executable
+reports that build identity. Later documentation commits do not change those bytes.
+The live worker observes only; the signer is stopped and disabled.
+
+| Gate | Evidence retained / remaining acceptance |
+| --- | --- |
+| Installer integrity and boot policy | Passed exact manifest/hash checks, anonymous download and four enabled/disabled upgrade cases. Synthetic post-checkpoint component scope; see OPERATIONS. |
+| Existing application contracts | Reuse `07bf9bb` build/funding contract and unchanged earlier contracts. No unnecessary rebuild for the installer-only change. |
+| Current real transfers | Earlier canonical round trip is historical evidence. Complete both directions on the aligned current deployment, with fees, settlement and reconciliation, once independent RPC works. |
+| Customer interface | Live paused state disables creation; 0.00001000 previews fee 0.00000010 and net 0.00000990. Actual wallet signing/payment, saved-order reload and error flows still need complete acceptance; no order was created in this check. |
+| Upgrade and recovery | Sequence-76 isolated restore passed. Full guided checkpoint/upgrade/restore/reconcile/resume and reboot acceptance remain; the separate unfunded fixture now has a real syncing node and isolated HTTPS backup. |
+| Independent RPC | OnFinality returned actual 429/-32029 with hourly remaining 0 and minute/second headroom. PublicNode returned empty custody/operating heads and null for both configured historical anchors. Neither establishes usable sustained verification. |
+| Monitoring and TLS | Service restart configuration and present public TLS verified; Cloudflare owns public certificate renewal. Automated health/backup/disk/expiry alerts, delivered alert and coordinated signer certificate rotation remain unproven. |
+| Distribution and review | Checksum-only review release. Operator-controlled release authority/trusted public-key distribution and independent security/distribution review remain as required below. |
+
+Work that can continue without operator action: isolated fixture lifecycle and
+failure tests as its real dependencies become available, source/dependency review,
+and read-only compatibility checks with a justified new hypothesis. External inputs
+still needed are adequate independent RPC capacity, a real wallet's payment approval,
+a designated alert destination, release-key ownership and the existing independent
+review/production-policy decisions. Do not use absence of a paid SLA alone to
+reject an otherwise working endpoint for controlled acceptance.
+
+PublicNode compatibility evidence: SSM `2efef83c-0901-4fe8-976f-72ccf2c90a6e`
+returned HTTP 200 for canonical mint and both custody accounts, but zero rows for
+both finalized history heads and null transactions for both configured anchors.
+This is a failure for this deployment's required history at the time of the check,
+not proof that all PublicNode history is permanently unavailable. No runtime
+provider switch or funded action was performed.
+
 ## October 9 website and backup integration
 
 Candidate `07bf9bb6b639aa1dca71b79c497b0391ee2bb410` adds public Info,
