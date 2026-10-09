@@ -336,6 +336,40 @@ wallet before and after backup. After relocation, point the restored signer's
 `nativeUnlockFile` to that protected copied file. Unencrypted bundles retain format 1.
 Offline inspection never unlocks a wallet.
 
+## Guided recovery in the next candidate
+
+The recovery changes are implemented on the development branch; the published
+`guided-console` installer predates them. Exact-artifact acceptance is still required.
+
+From `sudo ecx-bridge`, choose **Backup and recovery**. Download/verify an exact
+snapshot with an independently retained minimum sequence, then select **Restore
+verified custody to staging**. Supply a root-private target configuration and the
+verified `custody.json`. The destination must have the managed ECX node and local
+PostgreSQL. The original native wallet name must be unused. The guide never
+reinitializes a ledger or regenerates recovered keys.
+
+Only the native backup is staged privately for `ecxnode`; only the ledger archive
+is staged privately for `postgres`. The complete bundle and Solana/unlock secrets
+remain root-private. Interrupted operations with an unknown outcome refuse blind
+repetition. Completed restore steps reuse their saved results. Preserve the journal
+at `/var/lib/ecx-bridge-restore` and do not delete its markers to force a retry.
+
+Select **Activate staged recovery** after permanently excluding the old signer.
+This is an operator confirmation, not remote proof that copied keys cannot spend.
+Provide private files containing the HTTPS backup repository URL and password.
+On a clean destination, activation installs the recovered keys, generates fresh
+transport/RPC credentials, grants restricted roles on the restored database, adopts
+the fence and enables native wallet loading on reboot. Services remain blocked
+until these steps complete. The existing resume operation then checks chain history,
+reserves, saved attempts and backup readiness; refusal stops both services and
+retains the recovery plan. Success registers this installation for future startup
+and upgrades. Public TLS/forwarding is separate destination configuration; the
+recovery defaults to the existing loopback listener without copying old TLS secrets.
+
+A previously installed destination must first have its old deployment explicitly
+retired and preserved. Recovery does not erase existing application directories,
+replace service accounts, overwrite a native wallet or drop a database.
+
 ## Restore or upgrade
 
 1. Pause and quiesce the old worker and signer. Record their identity and independently retained

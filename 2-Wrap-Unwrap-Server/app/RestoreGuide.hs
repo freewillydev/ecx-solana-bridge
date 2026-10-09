@@ -7,7 +7,7 @@ import qualified RestoreNative
 import Bridge.Error (require,reject)
 import Bridge.Identity (digest)
 import Control.Monad (unless,forM_,when)
-import Data.Aeson
+import Data.Aeson hiding (decode)
 import Data.Aeson.Types (parseEither,Parser)
 import qualified Data.ByteString.Lazy as L
 import Data.Int (Int64)
