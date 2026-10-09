@@ -1883,3 +1883,23 @@ The checksum-bound upload passed in SSM `59370157-e059-45b8-8d5b-228a1cdc18fd`;
 private location is `s3://ecx-build-242254325782-us-east-2/releases/4bcfaaa/`.
 Final-artifact upgrade/report acceptance was handed to the independent reviewer.
 This candidate remains unfunded and is not a public production release.
+
+Independent final-artifact acceptance passed (`071e837b`): manifest
+`6ade776caaf57e2b57979274c205029dc44e76ae49f10bb7987627fab45be748`;
+upgrade and repeat preserved the unfunded setup, wallet and configuration except
+the expected release receipt. Actual served configuration contained only the
+allowed aggregate report fields, zero counts/fees, stale indication and cached
+results; HTML included the information section. The ledger stayed paused at
+critical/backup sequence zero, and both services were stopped afterward. This is
+final-version upgrade/report evidence; previous clean-install/reboot checks on
+71e327d remain separate evidence.
+
+The artifact was downloaded and its checksum independently matched, then signed
+and verified using the existing **acceptance-only** Ed25519 key (public DER SHA-256
+`02aafe4fa0c12a4ecdc2848bd1e87983839b9b134df1d006cf787e7c0ae4da94`).
+Private GitHub draft `review-2026-10-08-4bcfaaa` contains the installer, checksum,
+index/signature, verifier and acceptance public key, with explicit open release
+gates. That bundled key is not a separately authenticated production trust root.
+The user subsequently authorized reuse of prior-funded wallets. Recovery of the
+old ledger and proof of available capital/fencing must precede spending old custody;
+no funds were moved during this release-artifact acceptance.
