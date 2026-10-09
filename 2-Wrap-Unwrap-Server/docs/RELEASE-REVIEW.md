@@ -1932,3 +1932,30 @@ AWS signing and transfers remain disabled. Full live custody reconciliation,
 deployment activation with a new verified independent backup, customer round trips,
 and remaining live acceptance gates are still required. These recovery checks do
 not replace those gates or establish a completed production release.
+
+## Bounded upgrade checkpoint (2026-10-08)
+
+The new `checkpoint CONFIG` process acquires the existing writer/fence and uses
+`CheckpointForUpgrade` through the sole critical dispatcher. It starts no customer,
+control or observer loop, requires paused intake, forces a fresh signer receipt
+at the frozen financial sequence, validates it, then acknowledges backup coverage.
+The ordinary customer checkpoint retains its original minimum-sequence behavior.
+No key access, new signer transport or generic database operation was introduced.
+
+Ubuntu GHC 9.14.1: the executable build passed (`a447554a`); `bridge-test` passed
+in `0bcf126a`. PostgreSQL/real HTTPS contracts passed for both Devnet and canonical
+Mainnet profiles in `fd9cb416`. They preserve saved native/Solana attempts, postings
+and reservation history, reject a competing writer and unpaused checkpoint, reject
+refused/malformed receipts, and force a fresh request even when backup already
+covers the sequence. The test fixture restores the rotated credential after an
+older test deliberately removes it. Chain responses and remote backup receipts are
+controlled fixtures: these tests are not funded transfers or an actual restic
+checkpoint. Temporary contract PostgreSQL is stopped on exit.
+
+Relative to `4bcfaaa`, this checkpoint changes three production Haskell files by
++33/-19 lines (net +14), and the existing contract file by +57/-4 (net +53).
+It reuses the existing checkpoint sequence instead of duplicating signer IO.
+The durable upgrade journal, startup interlock, guided version switch and actual
+interrupted-upgrade acceptance remain required; this command alone is not the
+finished operator workflow. The published review artifact remains `4bcfaaa` and
+does not contain this change.

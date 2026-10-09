@@ -1,7 +1,7 @@
 {-# LANGUAGE DataKinds, GADTs, RankNTypes, ScopedTypeVariables, TypeFamilies, TypeApplications, ConstraintKinds, PatternSynonyms, ViewPatterns #-}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
 -- The signer ClientM is constructed only inside this critical evaluator.
-module Bridge.Critical (Process(..),runProcess,CustomerSettings(..),SignerSettings(..),runWorkerLoop) where
+module Bridge.Critical (Process(..),WorkerLifetime(..),runProcess,CustomerSettings(..),SignerSettings(..),runWorkerLoop) where
 import Bridge.Operation.Internal hiding (customer)
 import Bridge.Domain (Asset(..),gross,paymentAsset,paymentId,units)
 import Bridge.Identity (payURIFor,digest)
@@ -165,10 +165,11 @@ data SignerSettings = SignerSettings
   , signingBackup :: Maybe (C.Config,FilePath,FilePath) }
 
 -- Concrete service lifetimes, never caller-supplied evaluator continuations.
--- Worker fields end with HTTP port, browser assets and operator-control directory.
+-- Checkpointing holds the same writer/fence without starting any background work.
 -- Signer startup cannot receive a writer or customer configuration.
+data WorkerLifetime = Serving Int FilePath FilePath | Checkpointing
 data Process
-  = WorkerProcess ObserverSettings H.SolanaPolicy (Maybe CustomerSettings) SigningEndpoint Writer Int FilePath FilePath
+  = WorkerProcess ObserverSettings H.SolanaPolicy (Maybe CustomerSettings) SigningEndpoint Writer WorkerLifetime
   | SignerProcess SignerSettings SigningEndpoint
 
 runProcess :: Manager -> Reader -> Process -> IO ()
@@ -184,7 +185,7 @@ runProcess rpc reader process=do
       verifySigningKey (S.custodyOwner solana) (signingKey settings)
       forM_ (signingNativeUnlock settings) $ \path->readNativeUnlock path >> pure ()
       pure $ SignerEvaluation rpc reader settings
-    WorkerProcess settings config customerSettings endpoint writer _ _ _->do
+    WorkerProcess settings config customerSettings endpoint writer _->do
       let native=nativeSettings settings; solana=solanaSettings settings
       require (N.profile native==S.solanaProfile solana && S.mint solana==H.mint config
         && S.custodyOwner solana==H.custodyOwner config && S.custodyAta solana==H.custodyAta config) "payment_profile_mismatch"
@@ -211,7 +212,9 @@ runProcess rpc reader process=do
     SignerProcess _ endpoint->do
       credentials<-signerCredentials endpoint
       signingApplication credentials dispatch >>= runSigningServer endpoint
-    WorkerProcess _ _ customerSettings _ _ port assets directory->do
+    WorkerProcess _ _ _ _ _ Checkpointing->
+      dispatch (workerRequest CheckpointForUpgrade) >>= BL.putStr . (<> "\n") . encode
+    WorkerProcess _ _ customerSettings _ _ (Serving port assets directory)->do
       reportCache<-newMVar Nothing
       let safeEnvironment=SafeEnvironment reader (publicConfiguration <$> customerSettings) reportCache
           evaluate :: forall caller a. Plan caller a -> IO a
@@ -621,18 +624,26 @@ instance Operation 'Worker 'Critical WorkerCommand where
    where
     native=nativeSettings settings
     solana=solanaSettings settings
+    checkpoint :: Int64 -> LedgerState -> IO W.BackupReceipt
+    checkpoint minimumSequence before=do
+      receipt<-checkpointOutput <$> evaluateSigning environment
+        (CheckpointSigning $ CheckpointCustody (H.fingerprint config) minimumSequence)
+      let hash value=T.length value==64 && T.all (`elem` ("0123456789abcdef"::String)) value
+      require (W.receiptIdentity receipt==H.fingerprint config && W.receiptSequence receipt==ledgerSequence before
+        && hash (W.receiptSnapshot receipt) && hash (W.receiptArchiveHash receipt)) "invalid_custody_checkpoint_receipt"
+      after<-evalRead reader ReadState
+      require (ledgerSequence after==ledgerSequence before) "custody_backup_changed"
+      evalWrite writer (AcknowledgeBackup (W.receiptIdentity receipt) (W.receiptSequence receipt) (W.receiptSnapshot receipt))
+      pure receipt
     run :: forall a. WorkerOperation a -> IO a
+    run CheckpointForUpgrade = guarded environment $ do
+      before<-evalRead reader ReadState
+      require (ledgerPaused before) "pause_before_upgrade_checkpoint"
+      checkpoint (ledgerSequence before) before
     run (CheckpointBackup minimumSequence) = guarded environment $ do
       before<-evalRead reader ReadState
       require (minimumSequence>=0 && minimumSequence<=ledgerSequence before) "invalid_custody_checkpoint"
-      when (ledgerBackup before<minimumSequence) $ do
-        receipt<-checkpointOutput <$> evaluateSigning environment (CheckpointSigning $ CheckpointCustody (H.fingerprint config) minimumSequence)
-        let hash value=T.length value==64 && T.all (`elem` ("0123456789abcdef"::String)) value
-        require (W.receiptIdentity receipt==H.fingerprint config && W.receiptSequence receipt==ledgerSequence before
-          && hash (W.receiptSnapshot receipt) && hash (W.receiptArchiveHash receipt)) "invalid_custody_checkpoint_receipt"
-        after<-evalRead reader ReadState
-        require (ledgerSequence after==ledgerSequence before) "custody_backup_changed"
-        evalWrite writer (AcknowledgeBackup (W.receiptIdentity receipt) (W.receiptSequence receipt) (W.receiptSnapshot receipt))
+      when (ledgerBackup before<minimumSequence) $ checkpoint minimumSequence before >> pure ()
     run RecoverNativeSettlements = guarded environment $ do
       candidates<-evalRead reader NativeSettlementCandidates
       outcomes<-forM candidates $ \saved->tryBridge $ do

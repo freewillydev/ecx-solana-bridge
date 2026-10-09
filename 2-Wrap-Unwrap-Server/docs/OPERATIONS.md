@@ -256,6 +256,13 @@ credentials plus native/key access. Destinations must be new private locations:
 | `recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE` | Retrieve a ledger-only archive and restore it into staging |
 | `adopt-ledger CONFIG MINIMUM_SEQUENCE` | Initialize/advance a matching nondecreasing host fence |
 | `retire-ledger CONFIG MINIMUM_SEQUENCE` | Permanently retire the matching local fence |
+| `checkpoint CONFIG` | With the worker stopped and signer running, save and verify a fresh custody checkpoint under exclusive worker ownership; emit its receipt and exit |
+
+`checkpoint` uses the worker's existing `PG*` settings, distinct `PGREADUSER`,
+host fence and signer credentials. It does not listen for requests, run observers,
+resume intake or submit payments. It is an upgrade building block, not yet the
+complete guided stop/upgrade/resume workflow. Preserve the returned receipt before
+stopping the signer; do not relaunch the worker between checkpoint and upgrade.
 
 Use a separately retained minimum critical sequence and exact 64-character snapshot
 ID, never `latest` or guessed zero. Ledger commands consume ledger manifests/snapshots;

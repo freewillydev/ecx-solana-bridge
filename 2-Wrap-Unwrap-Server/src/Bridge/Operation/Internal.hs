@@ -104,6 +104,7 @@ data SigningOperation a where
 
 data WorkerOperation a where
   CheckpointBackup :: Int64 -> WorkerOperation ()
+  CheckpointForUpgrade :: WorkerOperation BackupReceipt
   RecoverNativeSettlements :: WorkerOperation ()
   RecoverNativeSources :: WorkerOperation ()
   RecoverNativeLocks :: WorkerOperation ()

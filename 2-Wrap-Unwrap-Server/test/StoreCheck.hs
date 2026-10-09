@@ -4364,7 +4364,8 @@ tlsMain=do
               -- The upgrade checkpoint has no HTTP/control/observer lifetime.
               -- It must force a new authenticated receipt even at covered sequence,
               -- without changing the saved transactions or their reservations.
-              writeFile auth (replicate 64 'a'); setFileMode auth 0o600
+              -- The preceding missing-credential test removed the rotated token.
+              writeFile auth (replicate 64 'b'); setFileMode auth 0o600
               frozen<-evalRead reader ReadState
               (_,attemptsBefore,postingsBefore)<-fixture fixtures ArchiveRecords
               historyBefore<-fixture fixtures PaymentHistoryRecords
@@ -4385,7 +4386,7 @@ tlsMain=do
               withProcessListening (runSigningServer checkpointEndpoint checkpointApp) checkpointPort $ do
                 beforeRequests<-readIORef checkpoints
                 fixture fixtures ReadyIntake
-                expectStore "pause_before_upgrade" checkpoint
+                expectStore "pause_before_upgrade_checkpoint" checkpoint
                 readIORef checkpoints >>= check . (==beforeRequests)
                 evalWrite writer (Pause "upgrade checkpoint contract")
                 expectStore "worker_already_running" $

@@ -49,7 +49,22 @@ results rather than adding it to that percentage.
    Keep order capabilities, customer addresses and credentials private. Add simple
    daily charts only after the underlying totals reconcile. Integrate this view with
    the current interface rather than adding a dashboard service or frontend stack.
-5. **Freeze and review the operator experience.** Keep root/server READMEs short;
+5. **Integrate safe stop → upgrade → resume.** Preserve the existing wallets,
+   configuration, ledger, reservations and signed attempts. Pause intake, stop the
+   worker, then take a fresh verified custody checkpoint under its exclusive locks
+   while the signer remains available; persist the receipt before stopping the
+   signer. A private durable phase journal binds identity, frozen sequence, backup,
+   old/candidate releases and fence evidence. The same entry command continues an
+   interrupted upgrade and prevents ordinary startup while it is incomplete.
+   Verify artifact and reviewed migration compatibility before switching code;
+   refuse unknown migrations and never roll an advanced database back merely
+   because startup failed. Normal same-host upgrades reuse the existing database,
+   not a stale snapshot. Recover saved work, reconcile current chains and verify
+   backup/readiness before resuming. Preserve rollback material without re-enabling
+   the old signer. Test pending signed work, phase interruptions/reboot, incompatible
+   release rejection and a real supported version/schema transition. Checkpoint
+   support alone is not completion of this workflow.
+6. **Freeze and review the operator experience.** Keep root/server READMEs short;
    link detailed recovery, source builds and audit evidence. Verify setup using only
    that quickstart, then finish bounded soak and independent security review. Public
    release claims must name the artifact actually tested and its remaining limits.

@@ -6,7 +6,7 @@ import qualified Paths_ecx_bridge as Package
 import Configure (launch,configure,configureAdvanced,start,initializeNative)
 import qualified Bridge.Config as C
 import Bridge.BrowserBuild (browserAssetsDirectory)
-import Bridge.Critical (Process(..),runProcess,CustomerSettings(..),SignerSettings(..))
+import Bridge.Critical (Process(..),WorkerLifetime(..),runProcess,CustomerSettings(..),SignerSettings(..))
 import Bridge.Control (callControl)
 import Bridge.Error
 import Bridge.RPC (newRpcManager)
@@ -109,7 +109,7 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
     database<-databaseSettings
     withProcessResources c database mode $ \reader process->
       bracket newRpcManager closeManager $ \manager->runProcess manager reader process
-  command _=die "Usage: ecx-bridge version | configure [--advanced] | initialize-native-wallet DIRECTORY | start [DIRECTORY] | provision-database (postgres; installation token on stdin) | initialize-ledger CONFIG (fresh database owner; installer may pass --fingerprint ID) | upload-custody CONFIG BACKUP_CONFIG MANIFEST MINIMUM_SEQUENCE | recover-custody CONFIG BACKUP_CONFIG SNAPSHOT DIRECTORY MINIMUM_SEQUENCE | backup-custody CONFIG KEYFILE DIRECTORY (offline custody authority, PG* and PGREADUSER) | check-custody CONFIG MANIFEST MINIMUM_SEQUENCE | backup-native-wallet CONFIG DESTINATION | restore-native-wallet CONFIG MANIFEST (offline custody authority; never overwrites a wallet) | adopt-ledger CONFIG MINIMUM_SEQUENCE | retire-ledger CONFIG MINIMUM_SEQUENCE | recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE | restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE (offline database owner) | check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE [BACKUP_CONFIG STAGING] (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
+  command _=die "Usage: ecx-bridge version | configure [--advanced] | initialize-native-wallet DIRECTORY | start [DIRECTORY] | provision-database (postgres; installation token on stdin) | initialize-ledger CONFIG (fresh database owner; installer may pass --fingerprint ID) | upload-custody CONFIG BACKUP_CONFIG MANIFEST MINIMUM_SEQUENCE | recover-custody CONFIG BACKUP_CONFIG SNAPSHOT DIRECTORY MINIMUM_SEQUENCE | backup-custody CONFIG KEYFILE DIRECTORY (offline custody authority, PG* and PGREADUSER) | check-custody CONFIG MANIFEST MINIMUM_SEQUENCE | backup-native-wallet CONFIG DESTINATION | restore-native-wallet CONFIG MANIFEST (offline custody authority; never overwrites a wallet) | adopt-ledger CONFIG MINIMUM_SEQUENCE | retire-ledger CONFIG MINIMUM_SEQUENCE | recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE | restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE (offline database owner) | check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE [BACKUP_CONFIG STAGING] (SELECT-only PGUSER) | checkpoint CONFIG (stopped worker, running signer; PG* and distinct PGREADUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
   initialize identity=do
     database<-databaseSettings
     evalSetup database (InitializeLedger identity)
@@ -121,11 +121,12 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
     (restored,sequenceNo)<-evalRestore database (operation c minimumSequence)
     LBS.putStrLn $ encode $ object ["database" .= restored,"criticalSequence" .= sequenceNo,"paused" .= True]
 
-data ProcessMode = CustomerMode Bool | SigningMode FilePath (Maybe (FilePath,FilePath))
+data ProcessMode = CustomerMode Bool | CheckpointMode | SigningMode FilePath (Maybe (FilePath,FilePath))
 
 processArguments :: [String] -> Maybe (FilePath,ProcessMode)
 processArguments ["serve",path]=Just (path,CustomerMode True)
 processArguments ["observe",path]=Just (path,CustomerMode False)
+processArguments ["checkpoint",path]=Just (path,CheckpointMode)
 processArguments ["signer",path,key]=Just (path,SigningMode key Nothing)
 processArguments ["signer",path,key,backup,parent]=Just (path,SigningMode key $ Just (backup,parent))
 processArguments _=Nothing
@@ -134,20 +135,21 @@ processArguments _=Nothing
 -- inside runProcess; no callback here receives execution authority.
 withProcessResources :: C.Config -> PG.ConnectInfo -> ProcessMode -> (Reader -> Process -> IO ()) -> IO ()
 withProcessResources c database mode action=do
-  readerSettings<-case mode of CustomerMode _->readDatabaseSettings database; SigningMode{}->pure database
+  readerSettings<-case mode of SigningMode{}->pure database; _->readDatabaseSettings database
   let endpoint=SigningEndpoint (C.signerPort c) (C.signerAuthFile c)
   withReader readerSettings (C.fingerprint c) (C.backupRequired c) $ \reader->case mode of
     SigningMode key backup->action reader $ SignerProcess
       (SignerSettings (C.nativeSettings c) (C.solanaSettings c) (C.solanaPolicy c) (C.solanaSdkLibrary c)
         key (C.nativeUnlockFile c) ((\(configuration,parent)->(c,configuration,parent)) <$> backup)) endpoint
-    CustomerMode enabled->do
+    _->do
+      let enabled=case mode of CustomerMode paying->paying; _->True
       assets<-fromMaybe browserAssetsDirectory <$> lookupEnv "ECX_ASSETS"
       links<-lookupEnv "ECX_INTERFACE_CONFIG" >>= C.loadInterface c
       let policy=C.storePolicy c
           customer=CustomerSettings (C.publicConfiguration c links enabled) policy (C.solanaSdkLibrary c)
       withFencedWriter database policy (C.fenceDirectory c) $ \writer->action reader $
         WorkerProcess (C.observerSettings c) (C.solanaPolicy c) (Just customer) endpoint writer
-          (C.serverPort c) assets (C.fenceDirectory c)
+          (case mode of CheckpointMode->Checkpointing; _->Serving (C.serverPort c) assets (C.fenceDirectory c))
 
 databaseSettings :: IO PG.ConnectInfo
 databaseSettings = do

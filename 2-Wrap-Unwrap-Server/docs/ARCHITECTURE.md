@@ -128,6 +128,15 @@ worker and signer instructions pass `checkedRequest` and invoke the concrete met
 inside the already-held gate, without reacquiring it. Only that internal signer
 method constructs the HTTPS client; the signer context executes local signing.
 
+The bounded `checkpoint CONFIG` worker lifetime acquires the same writer/advisory
+lock and host fence, but starts no HTTP listener, control socket or observer loop.
+It dispatches only `CheckpointForUpgrade` through the existing critical call site.
+That closed operation requires a paused ledger and obtains a fresh verified custody
+receipt even when prior backup coverage is current. Receipt acknowledgement must
+complete before the command emits success. The signer remains a separate process;
+no signing keys or additional signer client are introduced. Guided upgrade
+orchestration must also prevent worker restart between checkpoint exit and upgrade.
+
 `Signer.hs` owns Servant routes, authentication and TLS transport. Signer startup
 and key operations live in `Critical.hs`. The dedicated signer independently
 authenticates requests and holds its gate across validation, signing and the
@@ -470,7 +479,8 @@ in the fact-ownership and offline-migration tables.
 | `GET /api/v1/orders/:id` | id + Authorization → `OrderView` | Safe capability-scoped read; applies source/payment review overlay | `ledgerMain`, `paidRefundContract` |
 | `POST /api/v1/orders/:id/transaction` | id + Authorization → `PaymentInstruction` | Safe read of saved payable order; no allocation, signing or send; refuses closed deposit window | `orderWorkflowContract`, `SigningTransportCheck` |
 
-The worker leaves are `CheckpointBackup Int64 -> ()`, `RecoverNativeSettlements`,
+The worker leaves include `CheckpointForUpgrade -> BackupReceipt`,
+`CheckpointBackup Int64 -> ()`, `RecoverNativeSettlements`,
 `RecoverNativeSources`, `RecoverNativeLocks`, `RunWorkerCycle`, `ObserveChains`,
 `ReconcileCustody` (all `-> ()`), `PrepareOutgoing payment -> ()`,
 `SignPreparedPayment payment -> transaction`, `ReconcilePayment transaction -> ()`,
