@@ -1655,3 +1655,29 @@ x86 binary SHA2560b9777171a216de85789286f976a8ca0ada550b1909288ebd2d474cce4c56c7
 and patch SHA2561195318dbdf1d8cdb30e9b658e1c6338f689ba49081b281b9102bc1a945563aa.
 Worker-reported source/binary scans and upstream REST backend test passed;
 actual Ubuntu backup/restore acceptance remains separate.
+
+### AWS independent-host backup transport acceptance (2026-10-08)
+
+Reviewed restic0b977717 and rest-server4a40de48 ran on separate Ubuntu instances
+in us-east-2a/us-east-2b. The backup listener is private8443, restricted to the
+bridge security group, with a dedicated CA/IP-SAN certificate and append-only
+worker authentication. The worker URL was transferred using RSA-OAEP/SHA256 to
+a root-private file; neither plaintext credentials nor wallet keys were printed
+or placed in SSM command inputs. The CA is installed in the bridge system trust
+store, consistent with the application's restricted backup environment.
+
+Actual network results: authenticated repository creation/upload, byte-for-byte
+restoration of two disposable files, full restic read-data check, authenticated
+snapshot-deletion refusal, unauthenticated-read refusal, and authenticated
+snapshot-overwrite refusal with unchanged saved bytes all passed.
+SSM acceptance: 20c4d665-a8d7-4560-b4c8-d43a335a14eb and
+8040eccb-0d9c-4ed2-a346-b026de90c3f4. Private fixture evidence is on the bridge
+host under /root/ecx-backup-client/acceptance-edIVNHI2. Earlier attempts exposed
+only harness issues: artifact upload had not finished, SSM lacked a cache/home,
+and restore paths were relative. Each was corrected before the passing checks.
+
+This is live independent-host storage evidence, not a funded-ledger restore,
+old-signer fencing acceptance or independence from AWS account compromise.
+No custody keys/funds were deployed. Initial Ubuntu source634be89 build passed;
+current source da2445c integration build/test is running separately and is not
+claimed passed here.
