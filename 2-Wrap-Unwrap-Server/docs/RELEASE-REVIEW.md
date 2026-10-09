@@ -2224,3 +2224,24 @@ retained and PostgreSQL stopped afterwards. This closes independent-host custody
 retrieval and ledger restoration for this snapshot; it does not prove a complete
 restored-node activation, reboot/resume under adequate RPC capacity, or funded
 operation on the recovery host. Those remain separate release gates.
+
+### Cooldown candidate and installer publication interruption
+
+Exact source `38c9c828807b9712261577e55d690acb497a75c5` contains the tested
+`342a65c` production change and documentation updates. Ubuntu packaging completed
+(`f82e649d`), retaining local-build provenance: artifact SHA-256
+`ca949673b01d6d472b393b57a88f05c3b6ae278dfce2cb2d121e0bb8587005f9`,
+manifest `538e71512a7d09b439b8a7ba75872e73add563891e2366e82058ae03c3e30a71`.
+`prepare-upgrade` verified/staged it on the primary (`cb9adc07`), leaving the funded
+installed release `da46d5c7…6ac2` and both stopped services unchanged.
+
+On the inactive test fixture, the actual candidate installer was killed immediately
+after renaming `current.new` to `current`, before publishing `installed`. The test
+observed new executable pointer/old installed marker, then reran the installer and
+verified both markers converged without changing protected configuration bytes or
+starting either service (`2d7061db`). Original fixture pointers, configuration,
+service files and prior upgrade journal were restored afterward; independently
+restored custody staging/database were untouched. Checkpoint marker files in this
+component test were synthetic preconditions, **not** custody/checkpoint proof.
+This closes that specific publication interruption window, not funded upgrade
+resumption or all crash/reboot boundaries.
