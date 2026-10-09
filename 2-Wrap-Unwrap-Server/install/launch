@@ -14,8 +14,18 @@ install -d -m 0700 "$base"
 exec 9>/run/lock/ecx-bridge-bootstrap.lock
 flock -n 9 || { echo 'Another setup is running.' >&2; exit 1; }
 export DEBIAN_FRONTEND=noninteractive
-apt-get update -qq
-apt-get install -y --no-install-recommends libpq5 libgmp10 libffi8 zlib1g libssl3t64 ca-certificates openssl jq curl unzip
+packages='libpq5 libgmp10 libffi8 zlib1g libssl3t64 ca-certificates openssl jq curl unzip'
+missing=false
+for package in $packages; do
+  [ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)" = 'install ok installed' ] || missing=true
+done
+if [ "$missing" = true ]; then
+  echo 'Installing required system packages (first setup only)...'
+  apt-get update -qq
+  # Fixed package names, deliberately split.
+  # shellcheck disable=SC2086
+  apt-get install -y --no-install-recommends $packages
+fi
 target=$base/$release
 if [ ! -e "$target" ]; then
   staging=$(mktemp -d "$base/.install-XXXXXXXX")

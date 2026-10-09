@@ -102,9 +102,11 @@ The advanced wizard retains the detailed field-by-field flow described below.
 Source secret files must belong to the invoking user with private permissions;
 when configuring as root, prepare root-owned inputs. Existing setup directories
 are refused when complete or unrecognized. Recognized interrupted default settings
-are preserved and recollected using the same generated wallets. Failed collection
-removes only newly created settings, while generated
-wallet recovery files remain in their separate private directories.
+resume in place: accepted answers, node credentials, backup password and wallet
+recovery acknowledgements are retained. Referenced private files are validated
+again. Generated wallet recovery files remain in separate private directories.
+The default wizard accepts plain `https://` backup URLs and saves the required
+`rest:https://` form. The advanced wizard requires that form in its repository file.
 
 For a new Solana wallet, select **generate** (default). An interactive terminal is
 required. Setup generates 128 bits of cryptographic entropy and displays a 12-word

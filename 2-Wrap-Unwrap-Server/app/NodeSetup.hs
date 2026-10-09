@@ -22,7 +22,7 @@ import Control.Monad (forM,unless,when)
 import System.Directory (doesFileExist,renameFile)
 import System.FilePath ((</>),takeDirectory)
 import System.Posix.Files
-import System.Process (readProcessWithExitCode)
+import System.Process (readProcessWithExitCode,rawSystem)
 import System.Exit (ExitCode(..))
 import Data.Bits ((.&.))
 
@@ -41,18 +41,29 @@ checkConfig path=do
 
 credentials :: FilePath -> IO (FilePath,FilePath,FilePath)
 credentials directory=do
-  rows<-forM [("admin",adminMethods),("worker",workerMethods),("signer",signerMethods)] $ \(role,methods)->do
-    password<-base58 <$> getRandomBytes 32
-    salt<-base58 <$> getRandomBytes 16
-    suffix<-base58 <$> getRandomBytes 8
-    let user="ecx_"<>role<>"_"<>T.unpack suffix
-        credential=directory</>"native-"<>role<>".auth"
-        digest=B8.unpack (Hex.convertToBase Hex.Base16 (hmac (B8.pack $ T.unpack salt) (B8.pack $ T.unpack password)::HMAC SHA256))
-        rule="rpcauth="<>user<>":"<>T.unpack salt<>"$"<>digest<>"\nrpcwhitelist="<>user<>":"<>methods<>"\n"
-    savePrivate credential (B8.pack $ user<>":"<>T.unpack password)
-    pure (credential,rule)
-  savePrivate (directory</>"native-rpc.conf") (B8.pack $ concatMap snd rows)
-  case map fst rows of
+  let roles=[("admin",adminMethods),("worker",workerMethods),("signer",signerMethods)]
+      files=[directory</>("native-"<>role<>".auth") | (role,_)<-roles]
+      config=directory</>"native-rpc.conf"
+  complete<-doesFileExist config
+  if complete then mapM_ readPrivate (config:files) else do
+    rows<-forM roles $ \(role,methods)->do
+      let credential=directory</>("native-"<>role<>".auth")
+      exists<-doesFileExist credential
+      auth<-if exists then readPrivate credential else do
+        password<-base58 <$> getRandomBytes 32
+        suffix<-base58 <$> getRandomBytes 8
+        let bytes=B8.pack $ "ecx_"<>role<>"_"<>T.unpack suffix<>":"<>T.unpack password
+        savePrivate credential bytes
+        pure bytes
+      let (user,tailBytes)=B8.break (==':') auth
+          password=B.drop 1 tailBytes
+      require ((B8.pack $ "ecx_"<>role<>"_") `B.isPrefixOf` user && B.length password>=40
+        && not(B8.any (`elem` ['\n','\r',':']) password)) "invalid_generated_credentials"
+      salt<-base58 <$> getRandomBytes 16
+      let digest=B8.unpack (Hex.convertToBase Hex.Base16 (hmac (B8.pack $ T.unpack salt) password::HMAC SHA256))
+      pure $ "rpcauth="<>B8.unpack user<>":"<>T.unpack salt<>"$"<>digest<>"\nrpcwhitelist="<>B8.unpack user<>":"<>methods<>"\n"
+    savePrivate config (B8.pack $ concat rows)
+  case files of
     [admin,worker,signer]->pure(admin,worker,signer)
     _->reject "invalid_generated_credentials"
 
@@ -73,7 +84,7 @@ provision directory=do
       require (method `elem` ["source","bundle"]) "managed_node_release_bootstrap_required"
       root<-fieldValue "sourceRoot" setup
       let installer=if method=="bundle" then root</>"node" else root</>"2-Wrap-Unwrap-Server/install/node"
-      (result,_,_)<-readProcessWithExitCode "/bin/sh" [installer] ""
+      result<-rawSystem "/bin/sh" [installer]
       require (result==ExitSuccess) "managed_node_install_failed_retry_start"
     checkConfig path
     (loaded,_,_)<-readProcessWithExitCode "systemctl" ["cat",service] ""

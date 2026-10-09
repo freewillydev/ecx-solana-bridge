@@ -23,10 +23,16 @@ import Data.Type.Equality ((:~:)(Refl))
 import qualified Data.Map.Strict as M
 import qualified Data.Text as T
 import System.Exit (exitFailure)
+import System.Environment (getArgs)
 import Test.QuickCheck hiding (total,Result)
 
 main :: IO ()
-main = do
+main = getArgs >>= \args -> if args==["--configure-only"]
+  then ConfigureCheck.contract >>= \ok -> if ok then putStrLn "Configure contract passed" else exitFailure
+  else fullSuite
+
+fullSuite :: IO ()
+fullSuite = do
   results <- sequence
     [ check "BIP39 generation and Solana wallet recovery" ConfigureCheck.walletProperty
     , check "configure saves private validated material and refuses overwrite/interruption" $ once $ ioProperty ConfigureCheck.contract

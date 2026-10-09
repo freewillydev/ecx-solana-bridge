@@ -15,6 +15,7 @@ import Control.Exception (evaluate,finally,AsyncException(ThreadKilled))
 import qualified Data.ByteString.Char8 as B8
 import Crypto.MAC.HMAC (hmac,HMAC)
 import Crypto.Hash (SHA256)
+import Crypto.Random (getRandomBytes)
 import Bridge.AdminKey (savePrivate)
 import Bridge.Wallet (mnemonic,walletKey,nativeDescriptors)
 import Bridge.NativeKey (deriveChild)
@@ -37,7 +38,7 @@ import qualified Data.ByteString.Lazy as L
 import qualified Data.Text as T
 import Data.Aeson (encode,eitherDecodeStrict',Value(..),object,(.=),toJSON)
 import qualified Data.Map.Strict as M
-import Data.List (sort,isInfixOf,isPrefixOf)
+import Data.List (sort,isInfixOf,isPrefixOf,isSuffixOf)
 import Data.Bits ((.&.),shiftR)
 import System.Directory
 import System.FilePath ((</>))
@@ -288,8 +289,17 @@ simpleContract parent executable=do
   mapM_ (\path->createDirectory path >> setFileMode path 0o700) [interrupted,wallet]
   savePrivate (interrupted</>"configuring") "ecx-bridge-configuration-v1\n"
   savePrivate (interrupted</>"retained-credential") "interrupted-fixture\n"
+  let primaryFile=directory</>"primary.url"
+      preserved=["native-admin.auth","native-worker.auth","native-signer.auth","native-rpc.conf","backup.password"]
+  savePrivate primaryFile "https://primary.example.invalid/"
+  savePrivate (interrupted</>"answer-primary.json") (L.toStrict $ encode primaryFile)
+  savePrivate (interrupted</>"answer-verifier.json") (L.toStrict $ encode ("https://verifier.example.invalid/"::String))
+  _<-NodeSetup.credentials interrupted
+  getRandomBytes 32 >>= savePrivate (interrupted</>"backup.password")
+  before<-mapM (B.readFile . (interrupted</>)) preserved
   priorPhrase<-either (fail . T.unpack) pure (mnemonic $ B.replicate 16 1)
   savePrivate (wallet</>"solana-recovery.txt") (B8.pack $ priorPhrase<>"\n")
+  savePrivate (wallet</>"solana-recovery.saved") "saved\n"
   createDirectory commands;setFileMode commands 0o700
   savePrivate node "server=1\n"
   savePrivate (commands</>"restic") "#!/bin/sh\nexit 0\n"
@@ -308,15 +318,16 @@ simpleContract parent executable=do
                   go found count=do
                     unless (count<65536) (fail "wizard_output_bound")
                     char<-hGetChar reader
-                    let next=drop (max 0 (length found+1-length needle)) (found<>[char])
-                    if next==needle then pure () else go next (count+1)
+                    let next=drop (max 0 (length found+1-max 256 (length needle))) (found<>[char])
+                    unless (not $ any (`isInfixOf` next)
+                      ["Solana Mainnet RPC URL","Independent Mainnet RPC URL","Write down these 12 solana recovery words",priorPhrase])
+                      (fail "wizard_repeated_completed_prompt_or_phrase")
+                    if needle `isSuffixOf` next then pure () else go next (count+1)
                 answer label value=await label >> await ": " >> hPutStrLn writer value >> hFlush writer
                 ack=await "Type saved once you have backed up the phrase:" >> hPutStrLn writer "saved" >> hFlush writer
-            answer "Solana Mainnet RPC URL" "https://primary.example.invalid/"
-            answer "Independent Mainnet RPC URL" "https://verifier.example.invalid/"
-            answer "NEW HTTPS restic repository URL" "rest:https://backup.example.invalid/repository"
+            answer "NEW HTTPS restic repository URL" "https://backup.example.invalid/repository"
             answer "Public HTTPS origin" "-"
-            ack;ack
+            ack
             -- EOF can make script terminate the child before setup saves.
             await "Saved private setup"
             hClose writer
@@ -325,7 +336,10 @@ simpleContract parent executable=do
             code<-waitForProcess process
             pure(code==ExitSuccess)
         case result of
-          Just True->verify directory node
+          Just True->do
+            after<-mapM (B.readFile . (interrupted</>)) preserved
+            checked<-verify directory node
+            pure (before==after && checked)
           _->pure False
   run `finally` setEnv "PATH" old
  where
@@ -338,9 +352,12 @@ simpleContract parent executable=do
     phraseB<-B8.strip <$> B.readFile(directory</>".ecx-bridge-ecx-wallet/ecx-recovery.txt")
     expectedPhrase<-either (fail . T.unpack) pure (mnemonic $ B.replicate 16 1)
     archives<-filter (".ecx-bridge-interrupted-" `isPrefixOf`) <$> listDirectory directory
-    retained<-case archives of
-      [archive]->(=="interrupted-fixture\n") <$> B.readFile(directory</>archive</>"retained-credential")
-      _->pure False
+    retained<-(=="interrupted-fixture\n") <$> B.readFile(setup</>"retained-credential")
+    repository<-B.readFile(setup</>"backup.repository")
+    acknowledgements<-mapM B.readFile
+      [directory</>(".ecx-bridge-"<>asset<>"-wallet")</>(asset<>"-recovery.saved") | asset<-["solana","ecx"]]
+    answerModes<-mapM (fmap ((.&. 0o777).fileMode) . getFileStatus . (setup</>))
+      ["answer-primary.json","answer-verifier.json","answer-backup.json","answer-origin.json"]
     solana<-either (const $ fail "generated_phrase_invalid") pure (walletKey $ B8.unpack phraseA)
     rules<-B8.lines <$> B.readFile(setup</>"native-rpc.conf")
     valid<-forM ["admin","worker","signer"] $ \role->do
@@ -384,7 +401,10 @@ simpleContract parent executable=do
     historyChecked<-originContract
     B.appendFile node "# unexpected operator edit\n"
     nodeChanged<-try(NodeSetup.provision setup) :: IO(Either BridgeError ())
-    pure(retained && phraseA==B8.pack expectedPhrase && managedSelected && historyChecked && either (const True) (const False) nodeChanged && all id valid && not runtimeExists && either (const True) (const False) rejected
+    pure(retained && null archives && repository=="rest:https://backup.example.invalid/repository"
+      && all (=="saved\n") acknowledgements && all (==0o600) answerModes
+      && C.solanaRpc c=="https://primary.example.invalid/" && C.solanaVerifierRpc c==Just "https://verifier.example.invalid/"
+      && phraseA==B8.pack expectedPhrase && managedSelected && historyChecked && either (const True) (const False) nodeChanged && all id valid && not runtimeExists && either (const True) (const False) rejected
       && C.profile c==CanonicalBeta && C.mint c==Bootstrap.canonicalMint && C.custodyOwner c==base58(B.drop 32 solana)
       && phraseA/=phraseB && first==second && prior=="server=1\n" && "rpcwhitelistdefault=0" `B.isInfixOf` first
       && either (const True) (const False) changed)

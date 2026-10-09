@@ -38,7 +38,7 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as L
 import qualified Data.Text as T
-import System.Directory (makeAbsolute,canonicalizePath,removeDirectoryRecursive,renameDirectory,doesFileExist,doesDirectoryExist,setCurrentDirectory,findExecutable)
+import System.Directory (makeAbsolute,canonicalizePath,removeDirectoryRecursive,doesFileExist,doesDirectoryExist,setCurrentDirectory,findExecutable)
 import System.FilePath ((</>),takeDirectory,addTrailingPathSeparator)
 import qualified System.Posix.Directory as P
 import System.IO (hFlush,stdout,stdin,isEOF,hIsTerminalDevice,withFile,IOMode(ReadWriteMode),hPutStrLn,hPutStr,hGetLine)
@@ -70,23 +70,40 @@ configure=makeAbsolute ".ecx-bridge-configure" >>= \lock->withFamily lock $ do
     require (not complete) "setup_already_exists_use_start"
     marker<-readPrivate(directory</>"configuring")
     require (marker=="ecx-bridge-configuration-v1\n") "unrecognized_partial_setup_requires_review"
-    suffix<-T.unpack . base58 <$> getRandomBytes 12
-    -- Never discard interrupted credentials or operator files. Wallets live in
-    -- sibling directories and are reused below, so funding addresses stay fixed.
-    renameDirectory directory (directory<>"-interrupted-"<>suffix)
-    putStrLn "Preserved interrupted settings; resuming configuration with the same wallets."
-  P.createDirectory directory 0o700
-  savePrivate (directory</>"configuring") "ecx-bridge-configuration-v1\n"
-  simplified directory `onException` removeDirectoryRecursive directory
+    putStrLn "Resuming saved configuration; completed answers and credentials are retained."
+  when (not exists) $ do
+    P.createDirectory directory 0o700
+    savePrivate (directory</>"configuring") "ecx-bridge-configuration-v1\n"
+  simplified directory
+
+-- Each accepted answer is an immutable private record, so interruption never
+-- repeats completed questions. Referenced files are validated again on resume.
+savedPrompt :: FilePath -> String -> String -> String -> (String -> IO a) -> IO a
+savedPrompt directory name label fallback validate=do
+  let file=directory</>("answer-"<>name<>".json")
+  exists<-doesFileExist file
+  if exists then do
+    input<-readPrivate file >>= either (const $ reject "invalid_saved_setup_answer") pure . eitherDecodeStrict'
+    validate input
+  else do
+    (input,value)<-prompt label fallback (\input->do value<-validate input; pure(input,value))
+    savePrivate file (L.toStrict $ encode input)
+    pure value
+
+publishSetup :: FilePath -> B.ByteString -> IO ()
+publishSetup file bytes=do
+  exists<-doesFileExist file
+  if exists then readPrivate file >>= \saved->require (saved==bytes) "saved_setup_changed_requires_review"
+    else savePrivate file bytes
 
 simplified :: FilePath -> IO ()
 simplified directory=do
   putStrLn "Fresh CanonicalBeta bridge: ECX betanet / Solana Mainnet, canonical mint, 1% each way."
   putStrLn "Both wallets are generated. No payments or node changes occur during configure."
-  putStrLn "Fresh Ubuntu installation: run configure and start with sudo."
+  putStrLn "Setup saves progress automatically. Use the same entry command after an interruption."
   putStrLn "Use configure --advanced for other networks, existing wallets or installation choices."
-  primary<-prompt "Solana Mainnet RPC URL (or path to private URL file)" "" rpcInput
-  verifier<-prompt "Independent Mainnet RPC URL (or private URL file)" "" $ \input->do
+  primary<-savedPrompt directory "primary" "Solana Mainnet RPC URL (or path to private URL file)" "" rpcInput
+  verifier<-savedPrompt directory "verifier" "Independent Mainnet RPC URL (or private URL file)" "" $ \input->do
     url<-rpcInput input
     independentHttps primary url
     pure url
@@ -94,18 +111,19 @@ simplified directory=do
       nodeService="ecx-betanet.service"::String
   putStrLn "A private pruned ECX node is installed automatically during start (Ubuntu 24.04 x86_64)."
   (admin,worker,signer)<-NodeSetup.credentials directory
-  repository<-prompt "NEW HTTPS restic repository URL (or private URL file path)" "" $ \input->do
+  repository<-savedPrompt directory "backup" "NEW HTTPS restic repository URL (or private URL file path)" "" $ \input->do
     require (not $ null input) "backup_repository_required"
     bytes<-if any (`isPrefixOf` input) ["rest:https://","https://"] then pure (B8.pack input)
       else B8.strip <$> (makeAbsolute input >>= readPrivate)
     require (any (`B.isPrefixOf` bytes) ["rest:https://","https://"] && not(B8.any (`elem` ['\r','\n',' ']) bytes)) "https_backup_repository_required"
     let file=directory</>"backup.repository"
-    savePrivate file bytes
+    publishSetup file (if "https://" `B.isPrefixOf` bytes then "rest:"<>bytes else bytes)
     pure file
-  backupSecret<-getRandomBytes 32
   let password=directory</>"backup.password"
-  savePrivate password (B8.pack $ T.unpack $ base58 backupSecret)
-  origin<-prompt "Public HTTPS origin (https://bridge.example.com), or - for local testing" "-" $ \input->do
+  passwordExists<-doesFileExist password
+  if passwordExists then readPrivate password >>= \bytes->require (not $ B.null bytes) "backup_password_required"
+    else getRandomBytes 32 >>= savePrivate password . B8.pack . T.unpack . base58
+  origin<-savedPrompt directory "origin" "Public HTTPS origin (https://bridge.example.com), or - for local testing" "-" $ \input->do
     let value=if input=="-" then Nothing else Just (T.pack input)
     -- Validate presentation without accepting arbitrary schemes or URL credentials.
     Bootstrap.validateOrigin value
@@ -113,15 +131,15 @@ simplified directory=do
   tls<-case origin of
     Nothing->pure []
     Just _->do
-      cert<-prompt "TLS full-chain certificate file path" "" privateFile
-      key<-prompt "TLS private-key file path" "" privateFile
+      cert<-savedPrompt directory "certificate" "TLS full-chain certificate file path" "" privateFile
+      key<-savedPrompt directory "tls-key" "TLS private-key file path" "" privateFile
       pure [("public-fullchain.pem",cert),("public-privkey.pem",key)]
   bundle<-SetupPaths.bundleRoot
   root<-maybe (canonicalizePath (sdkSourceDirectory</>"../..")) pure bundle
   defaultRestic<-maybe (findExecutable "restic") (pure . Just . (</>"bin/restic")) bundle
   restic<-case defaultRestic of
     Just file->makeAbsolute file
-    Nothing->prompt "Reviewed restic executable path (not found on PATH)" "" $ \input->do
+    Nothing->savedPrompt directory "restic" "Reviewed restic executable path (not found on PATH)" "" $ \input->do
       file<-makeAbsolute input
       exists<-doesFileExist file
       require exists "restic_executable_file_required"
@@ -148,7 +166,7 @@ simplified directory=do
       sources=object [K.fromString name .= path | (name,path)<-
         [("solana.keypair.json",key),("native-worker.auth",worker),("native-signer.auth",signer)
         ,("native-unlock",unlock),("backup.repository",repository),("backup.password",password)]<>tls]
-  mapM_ (\(name,value)->savePrivate (directory</>name) (L.toStrict $ encode value))
+  mapM_ (\(name,value)->publishSetup (directory</>name) (L.toStrict $ encode value))
     [("sources.json",sources),("bootstrap.json",Object defaults)
     ,("interface.json",Bootstrap.interface origin),("setup.json",setup)]
   putStrLn "Saved private setup. Runtime configuration is published only after verified funding/history."
@@ -157,7 +175,7 @@ simplified directory=do
   putStrLn "Per-transaction caps: 1,000 native base units, 10,000 lamports fee, 2,100,000 lamports rent."
   putStrLn "Daily cost caps: 10,000 native base units and 10,000,000 lamports. Review before funding."
   putStrLn "Advanced values are in .ecx-bridge/bootstrap.json; never edit identity after bootstrap starts."
-  putStrLn "Next: sudo ecx-bridge start. It prints funding instructions and resumes safely on rerun."
+  putStrLn $ "Continue/resume: sudo ecx-bridge start "<>show directory<>" (the one-command installer continues automatically)."
  where
   privateFile input=do
     require (not $ null input) "file_path_required"
@@ -262,7 +280,7 @@ build directory=do
     repository<-prompt "Initialized HTTPS restic repository FILE (private)" "" $ \path->do
       file<-makeAbsolute path
       bytes<-readPrivate file
-      require (any (`B.isPrefixOf` bytes) ["rest:https://","https://"]) "https_backup_repository_required"
+      require ("rest:https://" `B.isPrefixOf` B8.strip bytes) "repository_file_must_start_with_rest_https"
       pure file
     password<-prompt "Restic encryption password FILE (private)" "" $ \path->do
       file<-makeAbsolute path
@@ -360,7 +378,11 @@ prepareSeed directory asset mode=do
     Nothing->getRandomBytes 16 >>= either reject pure . mnemonic
   when (not saved) $ savePrivate phraseFile (B8.pack $ phrase<>"\n")
   putStrLn $ "Recovery file saved privately in "<>output<>". Preserve it even if setup is cancelled."
-  when (mode/="restore") $ withFile "/dev/tty" ReadWriteMode $ \terminal->do
+  let acknowledgement=output</>(asset<>"-recovery.saved")
+  acknowledged<-doesFileExist acknowledgement
+  when acknowledged $ readPrivate acknowledgement >>= \value->require (value=="saved\n") "invalid_recovery_acknowledgement"
+  when (mode/="restore" && not acknowledged) $ do
+   withFile "/dev/tty" ReadWriteMode $ \terminal->do
     hPutStrLn terminal $ "Write down these 12 "<>asset<>" recovery words in order. Anyone with them can spend this wallet's funds:"
     hPutStrLn terminal phrase
     let acknowledge=do
@@ -371,6 +393,7 @@ prepareSeed directory asset mode=do
     -- Clear both visible text and saved scrollback on supporting terminals.
     -- Also clear on an interrupted acknowledgement; never send this to stdout.
     acknowledge `finally` (hPutStr terminal "\ESC[2J\ESC[3J\ESC[H" >> hFlush terminal)
+   savePrivate acknowledgement "saved\n"
   putStrLn "Recovery phrases do not recover the bridge ledger or in-flight obligations."
   pure (phraseFile,phrase)
 
