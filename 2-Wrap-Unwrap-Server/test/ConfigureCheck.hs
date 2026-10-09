@@ -272,11 +272,13 @@ simpleContract parent executable=do
             answer "NEW HTTPS restic repository URL" "rest:https://backup.example.invalid/repository"
             answer "Public HTTPS origin" "-"
             ack;ack
+            -- EOF can make macOS script terminate the child before setup saves.
+            await "Saved private setup"
             hClose writer
             remaining<-hGetContents reader
             _<-evaluate(length remaining)
             code<-waitForProcess process
-            pure(code==ExitSuccess && "Saved private setup" `isInfixOf` remaining)
+            pure(code==ExitSuccess)
         case result of
           Just True->verify directory node
           _->pure False
