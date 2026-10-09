@@ -15,6 +15,7 @@ import qualified Bridge.SolanaHelper as H
 import qualified Bridge.Observer as O
 import qualified Bridge.Store as Store
 import Data.Aeson
+import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
 import qualified Data.ByteString.Lazy as LBS
 import Data.Int (Int64)
@@ -35,13 +36,25 @@ data Config = Config
   , custodyOwner :: !Text, custodyAta :: !Text
   , serverPort :: !Int, fenceDirectory :: !FilePath
   , signerPort :: !Int, signerAuthFile :: !FilePath, solanaSdkLibrary :: !FilePath
-  , minInput :: !Amount, maxInput :: !Amount, maxQueued :: !Int
+  , maxWithdrawal :: !Amount, maxQueued :: !Int
   , quoteSeconds :: !Int64, confirmationGraceSeconds :: !Int64
   , nativeConfirmations :: !Int, maxNativeFee :: !Amount, maxSolFee :: !Amount
   , backupRequired :: !Bool, solanaHistoryStart :: !Text, maxSolAccountRent :: !Amount
   , solanaOperatingHistoryStart :: !Text, maxNativeDailyCost :: !Amount, maxSolDailyCost :: !Amount
   } deriving (Eq,Show,Generic,ToJSON)
-instance FromJSON Config where parseJSON=genericParseJSON defaultOptions {rejectUnknownFields=True}
+-- Legacy order bounds never constrain swaps. Retain the old maximum only as
+-- its previously shared fee-withdrawal cap, without changing custody identity.
+instance FromJSON Config where
+  parseJSON=withObject "Config" $ \o->do
+    legacy<-o .:? "maxInput"
+    current<-o .:? "maxWithdrawal"
+    cap<-case (current,legacy) of
+      (Just a,Just b) | (a::Amount)/=b->fail "conflicting_withdrawal_limits"
+      (Just a,_)->pure a
+      (_,Just b)->pure b
+      _->either (fail . T.unpack) pure (amount 100000)
+    genericParseJSON defaultOptions {rejectUnknownFields=True} $
+      Object $ KM.insert "maxWithdrawal" (toJSON cap) $ KM.delete "minInput" $ KM.delete "maxInput" o
 
 nativeSettings :: Config -> N.NativeSettings
 nativeSettings c=N.NativeSettings (profile c) (nativeRpc c) (nativeCookie c) (nativeWallet c)
@@ -55,11 +68,11 @@ solanaPolicy c=H.SolanaPolicy (deploymentId c) (fingerprint c) (mint c) (custody
 storePolicy :: Config -> Store.StorePolicy
 storePolicy c=Store.StorePolicy
   (PaymentTerms (PolicySnapshot (nativeConfirmations c) "finalized" (fingerprint c)) (CostLimits (maxNativeFee c) (maxSolFee c) (maxSolAccountRent c)))
-  (Store.OrderLimits (minInput c) (maxInput c) (quoteSeconds c) (confirmationGraceSeconds c) (maxQueued c) (maxNativeDailyCost c) (maxSolDailyCost c))
+  (Store.OrderLimits (maxWithdrawal c) (quoteSeconds c) (confirmationGraceSeconds c) (maxQueued c) (maxNativeDailyCost c) (maxSolDailyCost c))
   (deploymentId c) (backupRequired c)
 publicConfiguration :: Config -> InterfaceConfig -> Bool -> PublicConfiguration
 publicConfiguration c links paying=PublicConfiguration (profile c) (if profile c==CanonicalBeta then "mainnet-beta" else "devnet")
-  links (deploymentId c) (mint c) (custodyOwner c) 8 (minInput c) (maxInput c)
+  links (deploymentId c) (mint c) (custodyOwner c) 8
   (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]) paying False (Availability False "starting") Nothing
 
 fingerprint :: Config -> Text
@@ -93,7 +106,7 @@ validateSetupConfig c = do
   mapM_ (\filename->require (isAbsolute filename && normalise filename==filename) "absolute_credential_path_required") (nativeUnlockFile c)
   require (all (\n->n>0 && n<=65535) [serverPort c,signerPort c] && serverPort c/=signerPort c
     && signerAuthFile c/=nativeCookie c) "invalid_server_endpoints"
-  require (units(minInput c)>=2 && minInput c<=maxInput c && units(maxInput c)<=1000000000000000) "invalid_limits"
+  require (units(maxWithdrawal c)>0) "invalid_withdrawal_limit"
   require (maxQueued c>0 && maxQueued c<=1000 && quoteSeconds c>0 && quoteSeconds c<=3600
     && confirmationGraceSeconds c>=0 && confirmationGraceSeconds c<=86400
     && nativeConfirmations c>0 && nativeConfirmations c<=1008) "invalid_policy"

@@ -135,6 +135,20 @@ checks = sequence
              ,admittedCosts admitted===expectedCosts
              ,decideOrder customerLimits customerCosts request customerAdmission {availableFloat=n-charged-1}===Left "insufficient_inventory"
              ,decideOrder customerLimits customerCosts request customerAdmission {nativeOrderBudget=FeeBudget 9 0 0 (money 1000000000)}===Left "insufficient_fee_budget"]
+  , check "swaps have no arbitrary size bounds while net, reserves and withdrawal caps remain enforced" $ once $
+      let largest=toInteger(maxBound::Int64)
+          accepted direction n=
+            let result=decideOrder customerLimits customerCosts (customerRequest direction n)
+                  customerAdmission {availableFloat=largest}
+            in case result of
+              Right admitted->units(net $ admittedQuote admitted)==fromInteger(n-(n+99) `div` 100)
+              Left _->False
+      in conjoin
+        [property $ and [accepted direction n | direction<-[NativeToWrapped,WrappedToNative],n<-[2,9999,100001,100000001,largest]]
+        ,property $ and [quoteOrder(customerRequest direction n)==Left "nonpositive_net"
+          | direction<-[NativeToWrapped,WrappedToNative],n<-[0,1]]
+        ,amount(largest+1)===Left "amount_out_of_range"
+        ,withdrawalInput (money 100) 100 (T.replicate 64 "a") Native (money 101) "owner" "earned"===Left "invalid_fee_withdrawal"]
   , check "native allocation retries never allocate twice or extend immutable instructions" $ once $
       let fresh=InstructionFacts NativeToWrapped "Provisioning" 200 Nothing Nothing 0
           saved=fresh {instructionStatus="AwaitingDeposit",savedInstruction=Just "owned-address",savedInstructionSequence=Just 4}
@@ -644,7 +658,7 @@ good = either (error . show) id
 customerCosts :: CostLimits
 customerCosts=CostLimits (money 10) (money 10) (money 10)
 customerLimits :: OrderLimits
-customerLimits=OrderLimits (money 2) (money 100000000) 100 100 100 (money 1000000000) (money 1000000000)
+customerLimits=OrderLimits (money 100000000) 100 100 100 (money 1000000000) (money 1000000000)
 customerAdmission :: OrderAdmissionFacts
 customerAdmission=OrderAdmissionFacts readyIntake 0 100000000 budget budget
  where budget=FeeBudget 1000000000 0 0 (money 1000000000)

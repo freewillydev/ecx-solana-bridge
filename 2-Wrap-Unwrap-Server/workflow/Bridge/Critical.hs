@@ -194,10 +194,9 @@ runProcess rpc reader process=do
       forM_ customerSettings $ \configured->do
         let public=publicConfiguration configured; store=customerPolicy configured
             policy=W.paymentPolicy(executionTerms store); costs=W.paymentLimits(executionTerms store)
-            limits=admissionLimits store
         require (W.pubProfile public==N.profile native && W.pubMint public==H.mint config
           && W.pubCustodyOwner public==H.custodyOwner config && W.pubDeployment public==H.deploymentId config
-          && W.pubDecimals public==8 && W.pubMinInput public==orderMinimum limits && W.pubMaxInput public==orderMaximum limits
+          && W.pubDecimals public==8
           && W.pubFeesBps public==M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]
           && W.pubSolanaCluster public==(if N.profile native==W.CanonicalBeta then "mainnet-beta" else "devnet")
           && W.deploymentFingerprint policy==H.fingerprint config && W.nativeDepth policy==defaultNativeDepth settings
@@ -463,7 +462,7 @@ instance Operation 'Operator 'Critical OperatorCommand where
       c<-customer environment
       require (T.length key==64 && T.all (`elem` ("0123456789abcdef"::String)) key
         && not(T.null $ T.strip reason) && T.length reason<=512
-        && units quantity>0 && quantity<=orderMaximum(admissionLimits $ customerPolicy c)
+        && units quantity>0 && quantity<=maximumWithdrawal(admissionLimits $ customerPolicy c)
         && asset `elem` [Native,Wrapped]) "invalid_fee_withdrawal"
       previous<-evalRead reader (ReadWithdrawal key)
       case previous of

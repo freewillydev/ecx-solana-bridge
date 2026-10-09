@@ -303,8 +303,7 @@ withWriter :: PG.ConnectInfo -> StorePolicy -> (Int64 -> IO ()) -> (Writer -> IO
 withWriter settings config checkpoint action = bracket (PG.connect settings) PG.close $ \c -> do
   let policy=executionTerms config; limit=admissionLimits config
   require (not(T.null $ deploymentName config) && T.length(deploymentName config)<=64 && not(T.any (<= ' ') $ deploymentName config)) "invalid_deployment_name"
-  minimumInput <- checked (amount 2)
-  require (orderMinimum limit>=minimumInput && orderMaximum limit>=orderMinimum limit
+  require (units (maximumWithdrawal limit)>0
     && quoteSeconds limit>0 && graceSeconds limit>=0 && maximumQueued limit>0
     && units (savedNativeFee $ paymentLimits policy)>0 && units (savedSolanaFee $ paymentLimits policy)>0
     && nativeDepth (paymentPolicy policy)>0 && solanaCommitment (paymentPolicy policy)=="finalized") "invalid_store_policy"
@@ -529,7 +528,7 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
   AllocateTreasury now receipt split reason -> allocateTreasury c policy now receipt split reason
   RepairCompletedOrderView now identifier -> repairCompletedOrderView c policy now identifier
   ReserveFees now key currency n destination explanation -> do
-    outgoing<-checked (withdrawalInput (orderMaximum limit) now key currency n destination explanation)
+    outgoing<-checked (withdrawalInput (maximumWithdrawal limit) now key currency n destination explanation)
     old<-readWithdrawal c key
     admission<-case old of
       Just _->pure Nothing
@@ -907,7 +906,7 @@ createOrder c terms limits now header request = do
     Nothing -> do
       readiness<-readIntake c identity now
       checked (checkIntake readiness)
-      _<-checked (quoteOrder limits request)
+      _<-checked (quoteOrder request)
       counts<-O.runSelect c $ O.aggregate O.count $ fmap S.orderId $ O.limit (maximumQueued limits) P.openOrders :: IO [Int64]
       queued<-case counts of
         []->pure 0 -- Opaleye aggregation preserves an empty input relation.

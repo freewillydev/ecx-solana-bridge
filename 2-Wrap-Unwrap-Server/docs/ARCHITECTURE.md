@@ -949,6 +949,17 @@ on the server. Optional report failure does not fail configuration. Intake check
 payment. Observation timestamps and stale labels accompany balances. No report
 refresh calls chain RPC, exposes order capabilities or gains signer authority.
 
+Swaps have no configured per-order minimum or maximum. Amounts must still fit
+signed 64-bit base units, leave a positive payout after the rounded-up 1% fee,
+pass actual native transaction feasibility, and fit available inventory and operating
+budgets. `maxWithdrawal` separately limits operator earned-fee withdrawals; it
+never limits customer swaps. Legacy `minInput` is ignored and `maxInput` migrates
+only to that withdrawal cap. Conflicting old/new withdrawal caps refuse startup;
+new configs default the withdrawal cap to 100,000 base units. Neither migration
+changes custody identity, saved quotes or database schema. Deploy matching browser
+and native versions together because public configuration no longer contains swap
+bounds; an old browser fails closed when decoding the new configuration.
+
 Amounts are integer base-unit strings. A saved private capability authorizes order
 access; an order ID alone does not. Wrapping binds a Solana destination and native
 refund address. Unwrapping uses a Solana Pay reference and derives refund ownership

@@ -320,7 +320,7 @@ decideSend facts = do
 -- Customer admission owns new terms only. An existing capability/idempotency
 -- match bypasses this decision and retains its original quote and deadlines.
 data OrderLimits = OrderLimits
-  { orderMinimum :: Amount, orderMaximum :: Amount, quoteSeconds :: Int64
+  { maximumWithdrawal :: Amount, quoteSeconds :: Int64
   , graceSeconds :: Int64, maximumQueued :: Int, nativeDaily :: Amount, solanaDaily :: Amount }
   deriving (Eq,Show)
 data OrderAdmissionFacts = OrderAdmissionFacts
@@ -330,9 +330,8 @@ data OrderAdmission = OrderAdmission
   { admittedQuote :: Quote, admittedDeadline :: Int64, admittedGrace :: Int64
   , admittedCosts :: [(Text,Asset,Amount)] } deriving (Eq,Show)
 
-quoteOrder :: OrderLimits -> W.OrderRequest -> Either Text Quote
-quoteOrder limits request = do
-  ensure (W.input request>=orderMinimum limits && W.input request<=orderMaximum limits) "amount_outside_limits"
+quoteOrder :: W.OrderRequest -> Either Text Quote
+quoteOrder request = do
   ensure (W.sourceOwner request==Nothing && (W.direction request/=WrappedToNative || T.null(W.refund request))) "invalid_connection_free_order"
   let address t=not(T.null t) && T.length t<=128 && not(T.any (<= ' ') t)
   ensure (address(W.recipient request) && (W.direction request/=NativeToWrapped || address(W.refund request))) "invalid_destination"
@@ -355,7 +354,7 @@ shouldExpireQuote now grace hasReceipt = do
 decideOrder :: OrderLimits -> CostLimits -> W.OrderRequest -> OrderAdmissionFacts -> Either Text OrderAdmission
 decideOrder limits costs request facts = do
   checkIntake (orderIntake facts)
-  quoted<-quoteOrder limits request
+  quoted<-quoteOrder request
   ensure (queuedOrders facts<maximumQueued limits) "queue_full"
   ensure (availableFloat facts>=toInteger(units $ net quoted)) "insufficient_inventory"
   let now=intakeTime $ orderIntake facts

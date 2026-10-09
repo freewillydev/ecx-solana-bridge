@@ -40,7 +40,7 @@ instance FromJSON InterfaceConfig where
 data PublicConfiguration = PublicConfiguration
   { pubProfile :: !Profile, pubSolanaCluster :: !Text, pubLinks :: !InterfaceConfig
   , pubDeployment :: !Text, pubMint :: !Text, pubCustodyOwner :: !Text
-  , pubDecimals :: !Int, pubMinInput :: !Amount, pubMaxInput :: !Amount
+  , pubDecimals :: !Int
   , pubFeesBps :: !(Map Text Int), pubIntakeEnabled :: !Bool
   , pubImplementationReady :: !Bool, pubAvailability :: !Availability
   , pubReport :: !(Maybe PublicReport)

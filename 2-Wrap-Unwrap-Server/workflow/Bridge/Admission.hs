@@ -24,14 +24,14 @@ import Network.HTTP.Client (Manager)
 checkOrderAdmission :: Manager -> ObserverSettings -> SolanaPolicy -> StorePolicy -> FilePath -> OrderRequest -> IO ()
 checkOrderAdmission manager settings config store sdk request = do
   let native=nativeSettings settings; solana=solanaSettings settings
-      limits=admissionLimits store; costs=paymentLimits(executionTerms store)
+      costs=paymentLimits(executionTerms store)
       wrapping=direction request==NativeToWrapped
   require (N.profile native==S.solanaProfile solana && S.mint solana==mint config
     && S.custodyOwner solana==custodyOwner config && S.custodyAta solana==custodyAta config
     && deploymentFingerprint(paymentPolicy $ executionTerms store)==fingerprint config
     && nativeDepth(paymentPolicy $ executionTerms store)==defaultNativeDepth settings
     && savedSolanaFee costs==maxSolFee config && savedSolanaRent costs==maxSolAccountRent config) "payment_profile_mismatch"
-  terms<-either reject pure (quoteOrder limits request)
+  terms<-either reject pure (quoteOrder request)
   _<-N.nativeIdentity manager native
   previewNativePayment (N.nativeCall manager native) (N.profile native) (defaultNativeDepth settings)
     (savedNativeFee costs) (if wrapping then refund request else recipient request) (if wrapping then D.gross terms else D.net terms)

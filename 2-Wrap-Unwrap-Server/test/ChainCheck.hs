@@ -852,19 +852,32 @@ deploymentChecks = do
             terms=Store.executionTerms store
         in W.deploymentFingerprint(W.paymentPolicy terms)==identity && Helper.fingerprint solana==identity
           && W.savedSolanaFee(W.paymentLimits terms)==Helper.maxSolFee solana
-          && Store.orderMinimum(Store.admissionLimits store)==W.pubMinInput public
+          && Store.maximumWithdrawal(Store.admissionLimits store)==Config.maxWithdrawal config
           && W.pubMint public==Helper.mint solana && W.pubCustodyOwner public==Helper.custodyOwner solana
           && W.pubIntakeEnabled public && not(W.pubImplementationReady public)
     , check "configuration rejects missing histories obsolete socket fields and unknown keys" $ once $
         invalid (replace ["solanaHistoryStart"] Null $ toJSON config)
         && invalid (replace ["customerSocket"] (String "/old.sock") $ toJSON config)
         && invalid (replace ["unknown"] (Bool True) $ toJSON config)
+    , check "legacy swap bounds migrate only the independent withdrawal cap without changing identity" $ once $
+        let base=case toJSON config of Object o->KM.delete "maxWithdrawal" o; _->error "config object"
+            decodeFields fields=eitherDecode (encode $ Object $ KM.union fields base) :: Either String Config.Config
+            legacy=decodeFields $ KM.fromList [("minInput",String "999999"),("maxInput",String "1000")]
+            fresh=decodeFields KM.empty
+            explicit=decodeFields $ KM.fromList [("maxWithdrawal",String "1000"),("maxInput",String "1000")]
+            conflicting=decodeFields $ KM.fromList [("maxWithdrawal",String "1000"),("maxInput",String "1001")]
+            matches cap result=case result of
+              Right c->Config.maxWithdrawal c==money cap && Config.fingerprint c==identity
+              Left _->False
+            public=case toJSON(Config.publicConfiguration config links True) of Object o->o; _->error "public object"
+        in matches 1000 legacy && matches 100000 fresh && matches 1000 explicit && isLeft conflicting
+          && not(KM.member "minInput" public || KM.member "maxInput" public)
     , check "configuration catches impossible limits endpoints and history anchors before startup" $ once $ ioProperty $
         and <$> mapM (\(code,value)->rejects code $ Config.validateConfig value)
           [("invalid_server_endpoints",config {Config.serverPort=Config.signerPort config})
           ,("invalid_server_endpoints",config {Config.signerPort=0})
           ,("absolute_paths_required",config {Config.fenceDirectory="relative"})
-          ,("invalid_limits",config {Config.minInput=money 1})
+          ,("invalid_withdrawal_limit",config {Config.maxWithdrawal=money 0})
           ,("invalid_policy",config {Config.nativeConfirmations=1009})
           ,("invalid_daily_budget",config {Config.maxNativeDailyCost=money 1})
           ,("invalid_signature",config {Config.solanaOperatingHistoryStart=""})]

@@ -182,7 +182,7 @@ loadConfig state = do
   hidden "trading" (not $ isJust (jupiterUrl links) || isJust (orcaUrl links))
   text "availability" $ if available (pubAvailability cfg) then "Bridge is accepting orders."
     else "Deposits paused: " <> customerError (reason $ pubAvailability cfg)
-  text "limits" $ "Amount limits: " <> renderCoins (pubMinInput cfg) <> "–" <> renderCoins (pubMaxInput cfg)
+  text "limits" "No fixed swap minimum or maximum. Network fees and available reserves still apply."
   hidden "report-data" (not $ isJust $ pubReport cfg)
   text "report-note" "Report unavailable."
   forM_ (pubReport cfg) $ \report -> do
@@ -289,7 +289,6 @@ createOrder state = do
     _ -> do
       d <- readDirection
       quantity <- value "amount" >>= either (const $ failWith "Enter a decimal amount with at most eight places.") pure . parseCoins
-      unless (quantity>=pubMinInput cfg && quantity<=pubMaxInput cfg) $ failWith "Amount outside displayed limits."
       destination <- T.strip <$> value "recipient"
       refundAddress <- if d==NativeToWrapped then T.strip <$> value "refund" else pure ""
       cap <- B.text <$> B.randomHex

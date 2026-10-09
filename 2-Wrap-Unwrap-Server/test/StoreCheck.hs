@@ -903,14 +903,14 @@ reportCacheMain=do
   user<-getEnv "USER"; role<-getEnv "ECX_REBUILD_CONTRACT_READER"
   let settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
       terms=PaymentTerms (PolicySnapshot 2 "finalized" "contract") (CostLimits (money 10) (money 10) (money 10))
-      limits=OrderLimits (money 2) (money 1000) 100 100 100 (money 100000) (money 100000)
+      limits=OrderLimits (money 1000) 100 100 100 (money 100000) (money 100000)
       store=StorePolicy terms limits "contract" True
       key=T.replicate 32 "1"
       native=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:29432" "/unused" "workflow" 1 (T.replicate 64 "0")
       chain=ObserverSettings native (Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing key key key) 2 "sol-origin" "opening-signature"
       policy=H.SolanaPolicy "contract" "contract" key key key (money 10) (money 10)
       public=W.PublicConfiguration W.L2LSignetDevnet "devnet" (W.InterfaceConfig Nothing Nothing Nothing Nothing Nothing)
-        "contract" key key 8 (money 2) (money 1000) (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]) False False (W.Availability False "starting") Nothing
+        "contract" key key 8 (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]) False False (W.Availability False "starting") Nothing
       check message ok=unless ok (fail message)
   bracket (PG.connect settings) PG.close $ \fixtures->do
     fixture fixtures Initialize
@@ -986,7 +986,7 @@ ledgerMain = do
   let settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
       readerSettings=settings {PG.connectUser=readRole}
       policy=PaymentTerms (PolicySnapshot 2 "finalized" "contract") (CostLimits (money 10) (money 10) (money 10))
-      limits=OrderLimits (money 2) (money 1000) 100 100 100 (money 100000) (money 100000)
+      limits=OrderLimits (money 1000) 100 100 100 (money 100000) (money 100000)
       store terms config=StorePolicy terms config "contract" True
       key=T.replicate 64 "a"
       reserve=ReserveFees 100 key Native (money 100) "recipient" "test owned revenue"
@@ -3144,7 +3144,7 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       chainSettings=ObserverSettings native solana 2 "sol-origin" "opening-signature"
       config=H.SolanaPolicy "contract" "contract" key key key (money 10) (money 10)
       public=W.PublicConfiguration W.L2LSignetDevnet "devnet" (W.InterfaceConfig Nothing Nothing Nothing Nothing Nothing)
-        "contract" key key 8 (money 2) (money 1000) (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]) False False (W.Availability False "starting") Nothing
+        "contract" key key 8 (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]) False False (W.Availability False "starting") Nothing
       customerSettings=CustomerSettings public storePolicy "/unused/sdk"
       endpoint=SigningEndpoint 9443 "/unused/auth"
   bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> reject "offline_process_rpc"}) closeManager $ \manager->do
@@ -3227,7 +3227,7 @@ fenceMain = do
   let identity=T.replicate 64 "a"
       settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
       terms=PaymentTerms (PolicySnapshot 2 "finalized" identity) (CostLimits (money 10) (money 10) (money 10))
-      limits=OrderLimits (money 2) (money 1000) 100 100 100 (money 100000) (money 100000)
+      limits=OrderLimits (money 1000) 100 100 100 (money 100000) (money 100000)
       policy=StorePolicy terms limits "fence-test" True
       key=T.replicate 64 "b"
       temporary=do
@@ -4114,7 +4114,7 @@ tlsMain=do
       identity="offline-policy"; encoded value=TE.decodeUtf8 (BL.toStrict $ encode value)
       settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
       policy=PaymentTerms (PolicySnapshot 1 "finalized" identity) (CostLimits (money 1) (money 10000) (money 2100000))
-      store=StorePolicy policy (OrderLimits (money 2) (money 1000) 100 100 100 (money 10000000) (money 10000000)) "codec-fixture" True
+      store=StorePolicy policy (OrderLimits (money 1000) 100 100 100 (money 10000000) (money 10000000)) "codec-fixture" True
       config=H.SolanaPolicy "codec-fixture" identity mint owner custody (money 10000) (money 2100000)
       plan=SP.SolanaPlan identity recipient (money 3) (payoutReference identity identifier) (SP.RecentBlockhash hash 1000 100) (money 10000) (money 2100000)
       native=N.NativeSettings profile "http://127.0.0.1:1" "/unused" "ecx-bridge-test"
@@ -4359,7 +4359,7 @@ tlsMain=do
                   header="Bearer "<>T.replicate 64 "c"
                   order=W.OrderRequest WrappedToNative (money 10) "native-recipient" "" Nothing "checkpoint-http"
                   publicConfig=W.PublicConfiguration profile cluster (W.InterfaceConfig Nothing Nothing Nothing Nothing Nothing)
-                    "codec-fixture" mint owner 8 (money 2) (money 1000) (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)])
+                    "codec-fixture" mint owner 8 (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)])
                     True False (W.Availability False "starting") Nothing
               writeFile cookie "fixture:fixture"; setFileMode cookie 0o600
               fixture fixtures ReadyIntake
