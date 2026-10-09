@@ -35,7 +35,7 @@ newStage=(base</>) . T.unpack . digest <$> (getRandomBytes 32 :: IO B.ByteString
 newLedgerStage :: IO FilePath
 newLedgerStage=(ledgerBase</>) . T.unpack . digest <$> (getRandomBytes 32 :: IO B.ByteString)
 ledgerCommand :: FilePath -> T.Text -> FilePath -> Int64 -> [String]
-ledgerCommand binary fingerprint manifest minimumValue=["-u","postgres","--","/usr/bin/env","-i","PATH=/usr/bin:/bin","PGHOST=/var/run/postgresql","PGPORT=5432","PGUSER=postgres","PGDATABASE=postgres",binary,"restore-ledger","--fingerprint",T.unpack fingerprint,manifest,show minimumValue]
+ledgerCommand binary fingerprint manifest minimumValue=["-u","postgres","--","/usr/bin/env","-i","PATH=/usr/bin:/bin","PGHOST=/var/run/postgresql","PGPORT=5432","PGUSER=postgres","PGDATABASE=postgres","ecx_bridge_datadir="<>(takeDirectory(takeDirectory binary)</>"share"),binary,"restore-ledger","--fingerprint",T.unpack fingerprint,manifest,show minimumValue]
 nodeCommand :: FilePath -> String -> FilePath -> [String]
 nodeCommand binary mode staging=nodeArguments binary [mode,staging</>"node.json",staging</>"native-wallet.json"]
 nodeArguments :: FilePath -> [String] -> [String]
