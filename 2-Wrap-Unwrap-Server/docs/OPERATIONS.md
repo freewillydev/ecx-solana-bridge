@@ -445,8 +445,13 @@ provider hostname against a public certificate. The account dashboard also recor
 failed transaction reads. This establishes provider-facing throttling, not its
 internal entitlement cause. The 400,000-unit workspace allowance may coexist with
 endpoint limits. The Development label has no documented quota entitlement effect.
-The last bounded history read at 13:10:13 UTC returned 200, remaining-hour 2, and no
-Retry-After/reset headers. Do not infer an hourly reset time or force exhaustion.
+A bounded history read at 13:10:13 UTC returned 200 with remaining-hour 2.
+A subsequent single normal read at 13:15:28 UTC returned HTTP 429 and JSON-RPC
+error -32029, with an OnFinality message requesting an API key or contact for
+higher limits. Remaining counters were hour 0, minute 38, second 23 and day 3336.
+This strongly implicates hourly exhaustion rather than a burst; it does not prove
+the internal entitlement cause or counter units. Neither response supplied
+Retry-After/reset headers. Do not infer a reset time or force exhaustion.
 The application's stable error codes intentionally omit remote bodies; existing
 worker logs cannot recover an earlier raw 429 response.
 
@@ -469,7 +474,9 @@ Provider support draft — prepared only, not sent:
 > returned X-Ratelimit-Limit-Hour: 200, Limit-Day: 4000, Limit-Minute: 40 and
 > Limit-Sec: 25, with Remaining-Hour: 2. The Developer workspace shows a 400,000
 > response-unit daily allowance. Query and header API-key authentication behave
-> alike. Please identify the units, scope and reset policy of these counters;
+> alike. At 13:15:28 UTC a normal read returned HTTP 429 / JSON-RPC -32029,
+> remaining-hour 0, minute 38, second 23 and day 3336, with no reset/Retry-After.
+> Please identify the units, scope and reset policy of these counters;
 > explain which Solana entitlement enforces them; and identify a supported plan
 > or configuration sustaining at least 540 read calls/hour plus transfer headroom.
 > Are these endpoint, account, IP or upstream limits? No credentials are included.
