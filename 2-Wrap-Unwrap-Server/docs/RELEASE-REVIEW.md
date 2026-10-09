@@ -2185,3 +2185,22 @@ were stopped to avoid continued quota consumption. Reboot/resume acceptance rema
 open until provider service permits fresh observations. Do not weaken freshness or
 credential-boundary checks, and do not reinterpret the earlier successful upgrade
 as a passed reboot test.
+
+RPC follow-up: a bounded one-request-per-provider probe (`a003ff6b`) succeeded.
+OnFinality reported 40/minute, 200/hour and 4,000/day, with 12 hourly requests
+remaining; it supplied no reset time. This does not prove exact exhaustion or a
+reset deadline. Source review establishes at least 16 primary/9 verifier requests
+per successful idle cycle, incompatible with continuous 60-second freshness on
+that hourly allowance (see OPERATIONS). No further live probes were made.
+
+Manager-scoped HTTP/JSON-RPC 429 cooldown now refuses subsequent calls to the same
+normalized host, preserves Retry-After, and leaves other providers independent.
+It does not cache proofs, advance partial scans, relax freshness or resume service.
+The pinned http-client response hook needs explicit exception cleanup before
+withResponse owns it; oversized/cancelled reads now close the response.
+Cabal `bridge-test` passed on Ubuntu/GHC 9.14.1 (`aee875b3`, one build job), including
+shared-host cooldown, concurrent waiting callers, deadline recovery, oversized
+bodies, exact body replay and cancellation/close ownership. Existing unavailable
+verifier scan-refusal contracts also passed. These are offline contracts, not a
+new funded retry or full PostgreSQL recovery run. Installed funded runtime remains
+the frozen `bb7b08f` release, stopped; the provider-capacity gate remains open.

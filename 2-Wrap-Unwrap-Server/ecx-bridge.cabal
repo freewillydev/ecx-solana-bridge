@@ -47,7 +47,7 @@ library chain
   exposed-modules: Bridge.NativeKey, Bridge.Wallet, Bridge.File, Bridge.AdminStatus, Bridge.AdminKey, Bridge.RPC, Bridge.Native, Bridge.NativeObservation, Bridge.NativePayment, Bridge.Solana, Bridge.SolanaObservation, Bridge.SolanaMessage, Bridge.SolanaHelper, Bridge.SolanaPayment, Bridge.SolanaDeposit, Bridge.PaymentObservation, Bridge.PaymentSource
   build-depends: base, ecx-bridge, aeson, bytestring, text, scientific,
     filepath, http-client, http-client-tls, http-types, binary, containers, base58-bytestring,
-    base64-bytestring, crypton, ram, unix, template-haskell, transformers, network, directory
+    base64-bytestring, crypton, ram, unix, template-haskell, transformers, network, directory, time
   c-sources: cbits/native_key.c
   pkgconfig-depends: libsecp256k1 >=0.4 && <0.9
 
@@ -82,7 +82,7 @@ test-suite bridge-test
   autogen-modules: Paths_ecx_bridge
   build-depends: base, ecx-bridge, ecx-bridge:customer-api, ecx-bridge:chain, ecx-bridge:store, ecx-bridge:workflow, servant, aeson, text, containers,
     QuickCheck >=2.15 && <2.19, bytestring, scientific, http-client, base64-bytestring, wai, wai-extra, http-types, directory, unix, filepath,
-    ecx-build-assets, ecx-bridge:administration, process, async, network, crypton, ram, data-default, crypton-pem, crypton-x509, crypton-x509-validation, crypton-x509-store
+    ecx-build-assets, ecx-bridge:administration, process, async, network, crypton, ram, time, data-default, crypton-pem, crypton-x509, crypton-x509-validation, crypton-x509-store
 
 executable ecx-bridge
   import: settings

@@ -98,6 +98,27 @@ all HTTPS attempts consume the budget. Timeouts, other transport failures, unkno
 methods, signing mutations and sends are not automatically retried.
 Pacing does not remove background observation or replace public-facing DDoS controls.
 
+An HTTP or JSON-RPC 429 also closes admission to that provider hostname within
+the same manager. Both token and SOL scans share this cooldown; the other provider
+and native HTTP RPC remain independent. `Retry-After` seconds and HTTP dates are
+honored; absent headers mean 60 seconds, and an unrecognized header closes that
+manager until restart. Cooldown refusals do not sleep in the critical evaluator,
+advance scan checkpoints, certify freshness, or automatically resume the ledger.
+Worker and signer managers remain separate: this is reactive backoff, not a
+provider-wide hourly quota allocator.
+
+A successful idle cycle currently needs **at least 16 primary and 9 verifier
+requests**, including identity checks, inclusive history anchors and independently
+checked custody balances/history heads. Payments, verified incoming anchors,
+pagination and retries add requests. Scans and custody must be at most 60 seconds
+old, so continuous readiness needs more than the theoretical floors of **960
+primary and 540 verifier requests/hour**, with headroom for cycle duration and
+payments. The worker sleeps 15 seconds *after* each cycle; actual demand depends
+on its duration. A 200/hour verifier allowance supports at most 22 complete idle
+cycles/hour, roughly one every 162 seconds, and cannot meet this freshness policy.
+Increasing the polling delay or adding cooldown does not make that plan adequate.
+Do not loosen verification or extend freshness to fit an undersized quota.
+
 ### Installed monitoring and RPC budget
 
 Set the per-process RPC allowance with `sudo systemctl edit ecx-bridge-worker`

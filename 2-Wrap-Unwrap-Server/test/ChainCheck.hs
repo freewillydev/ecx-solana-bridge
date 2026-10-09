@@ -30,8 +30,9 @@ import qualified Bridge.Solana as Solana
 import Bridge.Identity (publicKey,digest)
 import Bridge.RPC
 import Bridge.Wire (Profile(..))
-import Control.Exception (try,bracket,SomeException,throwIO)
+import Control.Exception (try,bracket,SomeException,throwIO,fromException,AsyncException(ThreadKilled))
 import Control.Concurrent (forkFinally,killThread)
+import Control.Concurrent.Async (mapConcurrently)
 import Control.Concurrent.MVar
 import Control.Monad (unless)
 import Data.Aeson hiding (Result)
@@ -49,6 +50,10 @@ import Data.Scientific (scientific)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Network.HTTP.Client as HTTP
+import qualified Network.HTTP.Client.Internal as HTTPInternal
+import Network.HTTP.Types (Status,ResponseHeaders,status200,status429,http11)
+import Data.Time.Clock (getCurrentTime,addUTCTime)
+import Data.Time.Format (formatTime,defaultTimeLocale)
 import Test.QuickCheck hiding (label)
 
 checks :: IO [Result]
@@ -207,6 +212,120 @@ checks = (\deployment native solana identity observation administration common->
       pure ([first,alias,verifier,sameHost,native,idle,next,independent]==
         [0,500000000,500000000,1000000000,1000000000,20000000000,20500000000,20500000000]
         && delays==[500000,500000,500000])
+  , check "provider cooldown blocks both scans without sleeping or touching independent hosts" $ forAll arbitrary $ \http429->ioProperty $ do
+      clock<-newIORef 0; sent<-newIORef (0::Int); waits<-newIORef []
+      let request=HTTP.defaultRequest {HTTP.secure=True,HTTP.host="rpc.example"}
+          bytes="{\"jsonrpc\":\"2.0\",\"id\":1,\"error\":{\"code\":429,\"message\":\"limit\"}}"
+          wait micros=modifyIORef' waits (<>[micros]) >> modifyIORef' clock (+toInteger micros*1000)
+      settings'<-rpcManagerSettings 2 (readIORef clock) wait
+      let admit r=HTTP.managerWrapException settings' r (modifyIORef' sent (+1) >> readIORef clock)
+      _<-admit request
+      raw<-rpcResponse request (if http429 then status429 else status200) [("Retry-After","120")] bytes
+      buffered<-HTTP.managerModifyResponse settings' raw
+      original<-boundedBody 4096 (HTTP.responseBody buffered)
+      token<-rejects "rpc_rate_limited" (admit request)
+      operating<-rejects "rpc_rate_limited" (admit request {HTTP.host="RPC.EXAMPLE.",HTTP.path="/other-key"})
+      _<-admit request {HTTP.host="independent.example"}
+      _<-admit request {HTTP.secure=False,HTTP.host="127.0.0.1"}
+      writeIORef clock 119000000000
+      early<-rejects "rpc_rate_limited" (admit request)
+      before<-readIORef sent
+      writeIORef clock 120000000000
+      resumed<-admit request
+      paced<-admit request
+      count<-readIORef sent; delays<-readIORef waits
+      pure (original==bytes && token && operating && early && before==3 && count==5
+        && resumed==120000000000 && paced==120500000000 && delays==[500000])
+  , check "provider cooldown honors dates, absent headers and unrecognized long delays" $ once $ ioProperty $ do
+      now<-getCurrentTime
+      let dated=TE.encodeUtf8 $ T.pack $ formatTime defaultTimeLocale "%a, %d %b %Y %H:%M:%S GMT" (addUTCTime 120 now)
+          cases=[([],59,61,True),([("Retry-After",dated)],118,122,True)
+            ,([("Retry-After","unrecognized")],86400,172800,False)]
+      results<-mapM (\(headers,before,after,expires)->do
+        clock<-newIORef 0
+        settings'<-rpcManagerSettings 2 (readIORef clock) (\_->fail "cooldown admission slept")
+        let request=HTTP.defaultRequest {HTTP.secure=True,HTTP.host="rpc.example"}
+            admit=HTTP.managerWrapException settings' request (pure ())
+        response<-rpcResponse request status429 headers "{}"
+        _<-HTTP.managerModifyResponse settings' response
+        writeIORef clock (before*1000000000)
+        early<-rejects "rpc_rate_limited" admit
+        writeIORef clock (after*1000000000)
+        final<-if expires then admit >> pure True else rejects "rpc_rate_limited" admit
+        pure(early && final)) cases
+      pure(and results)
+  , check "cooldown arriving during paced wait blocks queued concurrent scans" $ once $ ioProperty $ do
+      clock<-newIORef 0; sent<-newIORef (0::Int)
+      entered<-newEmptyMVar; release<-newEmptyMVar; finished<-newEmptyMVar
+      let request=HTTP.defaultRequest {HTTP.secure=True,HTTP.host="rpc.example"}
+          delay micros=putMVar entered () >> takeMVar release >> writeIORef clock (toInteger micros*1000)
+      settings'<-rpcManagerSettings 2 (readIORef clock) delay
+      let admit r=HTTP.managerWrapException settings' r (atomicModifyIORef' sent (\n->(n+1,())))
+      admit request
+      result<-timeout 3000000 $ bracket
+        (forkFinally (rejects "rpc_rate_limited" $ admit request) (putMVar finished)) killThread $ \_->do
+          takeMVar entered
+          response<-rpcResponse request status429 [("Retry-After","120")] "{}"
+          _<-HTTP.managerModifyResponse settings' response
+          -- The response hook must not wait behind the sleeping admission gate.
+          putMVar release ()
+          waiter<-takeMVar finished >>= either throwIO pure
+          blocked<-mapConcurrently (\n->rejects "rpc_rate_limited" $
+            admit request {HTTP.path=if even n then "/token" else "/operating"}) [1..8::Int]
+          before<-readIORef sent
+          admit request {HTTP.host="independent.example"}
+          writeIORef clock 120000000000
+          admit request
+          after<-readIORef sent
+          pure(waiter && and blocked && before==1 && after==3)
+      pure(result==Just True)
+  , check "oversized HTTP429 still installs cooldown before rejecting response body" $ once $ ioProperty $ do
+      clock<-newIORef 0; sent<-newIORef (0::Int)
+      let request=HTTP.defaultRequest {HTTP.secure=True,HTTP.host="rpc.example"}
+      settings'<-rpcManagerSettings 2 (readIORef clock) (\_->fail "cooldown must not sleep")
+      response<-rpcResponse request status429 [("Retry-After","120")] (BS.replicate (4*1024*1024+1) 32)
+      oversized<-rejects "rpc_response_too_large" (HTTP.managerModifyResponse settings' response)
+      let admit=HTTP.managerWrapException settings' request (modifyIORef' sent (+1))
+      blocked<-rejects "rpc_rate_limited" admit
+      before<-readIORef sent
+      writeIORef clock 120000000000
+      admit
+      after<-readIORef sent
+      pure(oversized && blocked && before==0 && after==1)
+  , check "response hook closes oversized bodies but leaves successful replay owned by caller" $ once $ ioProperty $ do
+      closed<-newIORef (0::Int)
+      settings'<-rpcManagerSettings 2 (pure 0) (\_->fail "response hook must not pace")
+      let request=HTTP.defaultRequest {HTTP.secure=True,HTTP.host="rpc.example"}
+          tracked response=response {HTTPInternal.responseClose'=HTTPInternal.ResponseClose(modifyIORef' closed (+1))}
+      oversized<-rpcResponse request status429 [] (BS.replicate (4*1024*1024+1) 32)
+      refused<-rejects "rpc_response_too_large" (HTTP.managerModifyResponse settings' $ tracked oversized)
+      afterFailure<-readIORef closed
+      original<-rpcResponse request status200 [] "{\"result\":42}"
+      replay<-HTTP.managerModifyResponse settings' (tracked original)
+      first<-HTTP.responseBody replay
+      eof<-HTTP.responseBody replay
+      beforeClose<-readIORef closed
+      HTTP.responseClose replay
+      afterClose<-readIORef closed
+      pure(refused && afterFailure==1 && first=="{\"result\":42}" && BS.null eof
+        && beforeClose==1 && afterClose==2)
+  , check "response hook cancellation closes response and preserves ThreadKilled" $ once $ ioProperty $ do
+      closed<-newIORef (0::Int); entered<-newEmptyMVar; blocked<-newEmptyMVar; finished<-newEmptyMVar
+      settings'<-rpcManagerSettings 2 (pure 0) (\_->fail "response hook must not pace")
+      original<-rpcResponse HTTP.defaultRequest {HTTP.secure=True,HTTP.host="rpc.example"} status200 [] "{}"
+      let response=original
+            {HTTP.responseBody=putMVar entered () >> takeMVar blocked >> pure BS.empty
+            ,HTTPInternal.responseClose'=HTTPInternal.ResponseClose(modifyIORef' closed (+1))}
+      result<-timeout 3000000 $ bracket
+        (forkFinally (HTTP.managerModifyResponse settings' response) (putMVar finished)) killThread $ \thread->do
+          takeMVar entered
+          killThread thread
+          outcome<-takeMVar finished
+          count<-readIORef closed
+          pure(count==1 && case outcome of
+            Left exception->case fromException exception of Just ThreadKilled->True; _->False
+            Right _->False)
+      pure(result==Just True)
   , check "RPC admission rounds spacing upward and rechecks delayed wakes" $ forAll (chooseInt (1,1000)) $ \rate->ioProperty $ do
       clock<-newIORef 0
       let wait micros=modifyIORef' clock (+(toInteger micros*1000+1234567))
@@ -687,3 +806,13 @@ deploymentChecks = do
           BS.writeFile file (BS.replicate 32769 32)
           rejects "config_too_large" (Config.loadConfig file)
     ]
+
+-- Real manager response hook with a bounded in-memory transport body; no network.
+rpcResponse :: HTTP.Request -> Status -> ResponseHeaders -> BS.ByteString -> IO (HTTP.Response HTTP.BodyReader)
+rpcResponse request status headers bytes=do
+  body<-newIORef bytes
+  pure HTTPInternal.Response
+    {HTTP.responseStatus=status,HTTP.responseVersion=http11,HTTP.responseHeaders=headers
+    ,HTTP.responseBody=atomicModifyIORef' body (\saved->(BS.empty,saved)),HTTP.responseCookieJar=mempty
+    ,HTTPInternal.responseClose'=HTTPInternal.ResponseClose(pure ())
+    ,HTTPInternal.responseOriginalRequest=request,HTTPInternal.responseEarlyHints=[]}

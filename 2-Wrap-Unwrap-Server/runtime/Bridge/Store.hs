@@ -1375,7 +1375,7 @@ scanFailed c chain now code = do
     :: IO [Maybe Text]
   when (old/=[Just code]) $ audit c "scanner_failure" (chain<>":"<>code)
   scanHealth c chain now (Just code)
-  pauseScan c ("scanner_unavailable:"<>chain)
+  pauseScan c ((if code=="rpc_rate_limited" then "rpc_rate_limited:" else "scanner_unavailable:")<>chain)
 
 commitScan :: PG.Connection -> W.ScanBatch -> IO ()
 commitScan c batch = do

@@ -2,11 +2,15 @@
 module Bridge.RPC (newRpcManager, rpcManagerSettings, rpcHost, withSolanaRpc, independentHttps, rpc, retryRpcRead, parseValue, fieldValue, boundedBody) where
 
 import Bridge.Error
-import Control.Exception (bracket, catch, try, throwIO)
+import Control.Exception (bracket, catch, try, throwIO, onException)
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.MVar
 import Control.Monad (when)
 import Data.Char (toLower)
+import Data.IORef
+import qualified Data.Aeson.KeyMap as KM
+import Data.Time.Clock (UTCTime,getCurrentTime,diffUTCTime)
+import Data.Time.Format (parseTimeM,defaultTimeLocale)
 import Data.Aeson
 import Data.Aeson.Types (Parser, parseEither)
 import qualified Data.ByteString as BS
@@ -58,20 +62,64 @@ rpcManagerSettings rate clock wait = do
       untilTime next=do
         now<-clock
         when (now<next) $ wait (fromInteger $ min 1000000 ((next-now+999) `div` 1000)) >> untilTime next
+      hostGate request=modifyMVar hosts $ \known->case M.lookup (rpcHost request) known of
+        Just existing->pure (known,existing)
+        Nothing->do gate<-newMVar 0; cooldown<-newIORef 0
+                    let fresh=(gate,cooldown)
+                    pure (M.insert (rpcHost request) fresh known,fresh)
       pace request=when (secure request) $ do
-        let key=rpcHost request
-        gate<-modifyMVar hosts $ \known->case M.lookup key known of
-          Just existing->pure (known,existing)
-          Nothing->do fresh<-newMVar 0; pure (M.insert key fresh known,fresh)
+        (gate,cooldown)<-hostGate request
         -- Hold only this host's gate while waiting. A delayed/cancelled caller
         -- cannot leave reserved future slots that later dispatch in a burst.
-        modifyMVar_ gate $ \next->untilTime next >> ((+interval) <$> clock)
+        modifyMVar_ gate $ \next->do
+          let allowed=do now<-clock; deadline<-readIORef cooldown
+                         require (now>=deadline) "rpc_rate_limited"
+          allowed
+          untilTime next
+          allowed
+          (+interval) <$> clock
+      cool response=do
+        seconds<-cooldownSeconds $ lookup "Retry-After" (responseHeaders response)
+        now<-clock
+        (_,cooldown)<-hostGate (getOriginalRequest response)
+        -- Do not queue this observation behind paced request waiters.
+        atomicModifyIORef' cooldown $ \prior->(max prior (now+seconds*1000000000),())
+      responseHook response
+        | not(secure $ getOriginalRequest response)=pure response
+        | otherwise=(do
+            -- Keep the same response bound and bytes. JSON-RPC can report 429
+            -- inside HTTP 200; observing only the HTTP status misses that case.
+            let httpLimited=statusCode(responseStatus response)==429
+            when httpLimited (cool response)
+            bytes<-boundedBody (4*1024*1024) (responseBody response)
+            let limited=case eitherDecodeStrict' bytes of
+                  Right(Object value) | Just(Object failure)<-KM.lookup "error" value
+                    ,Just(Number code)<-KM.lookup "code" failure->code==429
+                  _->False
+            when (limited && not httpLimited) (cool response)
+            body<-newIORef bytes
+            pure response {responseBody=atomicModifyIORef' body (\saved->(BS.empty,saved))})
+            -- This hook runs inside responseOpen, before withResponse's bracket
+            -- owns the response. Failed/cancelled reads must close it here.
+            `onException` responseClose response
       base=managerSetProxy noProxy tlsManagerSettings
         { managerRetryableException = const False, managerConnCount = 4
         , managerResponseTimeout = responseTimeoutMicro 15000000 }
   -- http-client calls managerModifyRequest twice. This wrapper is called once
   -- per responseOpen, including each explicit read retry; RPC redirects are off.
-  pure base {managerWrapException= \request action->managerWrapException base request (pace request >> action)}
+  pure base {managerWrapException= \request action->managerWrapException base request (pace request >> action)
+            ,managerModifyResponse=responseHook}
+
+-- A long provider delay rejects admissions promptly instead of holding the
+-- critical evaluator asleep. Unknown header forms stay closed for this session.
+-- No header means one minute, shared by every caller using this provider host.
+cooldownSeconds :: Maybe BS.ByteString -> IO Integer
+cooldownSeconds Nothing=pure 60
+cooldownSeconds (Just header)=case readMaybe (BSC.unpack header) of
+  Just seconds | seconds>=0->pure(max 1 seconds)
+  _->case parseTimeM True defaultTimeLocale "%a, %d %b %Y %H:%M:%S GMT" (BSC.unpack header) :: Maybe UTCTime of
+    Just at->do now<-getCurrentTime; pure(max 1 $ ceiling $ diffUTCTime at now)
+    Nothing->pure(toInteger(maxBound::Int))
 boundedBody :: Int -> BodyReader -> IO BS.ByteString
 boundedBody maximumBytes reader = require (maximumBytes>=0) "invalid_response_bound" >> go 0 []
  where
