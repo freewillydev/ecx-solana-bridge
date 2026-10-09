@@ -1,9 +1,12 @@
 {-# LANGUAGE DataKinds, GADTs, RankNTypes #-}
 -- Actual WAI/Servant boundary; the closed evaluator returns public fixture data.
 -- Public/generated test keys only; no chain RPC or funds are used here.
-module SigningTransportCheck (checks) where
+module SigningTransportCheck (checks,fundingCheck) where
 import Bridge.Critical (runWorkerLoop)
 import Bridge.Identity (digest)
+import Crypto.KDF.PBKDF2 (Parameters(..),fastPBKDF2_SHA256)
+import qualified Data.ByteArray.Encoding as Hex
+import qualified Data.Text.Encoding as TE
 import Crypto.Error (CryptoFailable(..))
 import qualified Crypto.PubKey.Ed25519 as Ed
 import qualified Data.ByteArray as BA
@@ -28,7 +31,7 @@ import qualified Bridge.Fence as Fence
 import qualified Data.Text as T
 import System.Posix.Process (forkProcess,getProcessStatus,exitImmediately,ProcessStatus(..))
 import System.Exit (ExitCode(..))
-import Bridge.Web (customerApplication,publicApplication,boundedApplication,runPublicServer,rateLimitedApplication)
+import Bridge.Web (customerApplication,publicApplication,boundedApplication,runPublicServer,rateLimitedApplication,fundingApplication)
 import qualified Bridge.Wire as W
 import qualified Bridge.Domain as D
 import qualified Data.Map.Strict as M
@@ -37,7 +40,7 @@ import Bridge.Critical ()
 import Bridge.Error
 import Bridge.Wire (SignedAttempt(..))
 import Control.Exception (bracket,try,throwIO,AsyncException(..))
-import Data.Aeson (encode,eitherDecode)
+import Data.Aeson (encode,eitherDecode,object,(.=))
 import Data.Either (isLeft)
 import qualified Data.ByteString.Lazy as BL
 import qualified Data.ByteString as BS
@@ -56,7 +59,8 @@ import Test.QuickCheck
 
 checks :: IO [Result]
 checks=sequence
-  [ check "public admission budgets are atomic, bounded and refill without per-client state" $ once $ ioProperty $ do
+  [ check "funding authentication, throttling, read-only behavior and destination binding" $ once $ ioProperty fundingCheck
+  , check "public admission budgets are atomic, bounded and refill without per-client state" $ once $ ioProperty $ do
       now<-newIORef 0
       app<-rateLimitedApplication (readIORef now) (\_ respond->respond $ responseLBS status200 [] "ok")
       let send method path=runSession (srequest $ SRequest ((setPath defaultRequest path) {requestMethod=method}) "") app
@@ -462,3 +466,40 @@ publicTLSContract dir = do
       (_,large,_)<-fetch "https" ["--data-binary",replicate 4097 'x']
       pure $ counterexample (show (serving,partial,unsafe,probe,plain,large)) (serving && isLeft partial && isLeft unsafe && not("tls-ok" `T.isInfixOf` T.pack plain)
         && "413" `T.isSuffixOf` T.pack large)
+
+
+fundingCheck :: IO Bool
+fundingCheck=bracket temporary removeDirectoryRecursive $ \dir->do
+  let path=dir</>"funding.json"; salt=BS.replicate 32 7
+      hashed=fastPBKDF2_SHA256 (Parameters 600000 32) ("test-only-password"::BS.ByteString) salt::BS.ByteString
+      hex value=TE.decodeUtf8 (Hex.convertToBase Hex.Base16 value)
+      amount=either (error . show) id (D.amount 100)
+      config=W.PublicConfiguration W.L2LSignetDevnet "devnet" (W.InterfaceConfig Nothing Nothing Nothing Nothing Nothing)
+        "deployment" "mint" "owner" 8 amount amount M.empty False False (W.Availability False "paused") Nothing
+      fallback _ respond=respond $ responseLBS status404 [] "missing"
+      send app method credentials=runSession (srequest $ SRequest ((setPath defaultRequest "/funding")
+        {requestMethod=method,requestHeaders=credentials}) "") app
+      auth password=[("Authorization","Basic "<>B64.encode("operator:"<>password))]
+  AdminKey.savePrivate path $ BL.toStrict $ encode $ object ["salt" .= hex salt,"hash" .= hex hashed,
+    "nativeAddress" .= ("<test-address>"::Text),"owner" .= ("owner"::Text),"mint" .= ("mint"::Text),"ata" .= ("ata"::Text)]
+  bracket (lookupEnv "ECX_FUNDING_CONFIG" <* setEnv "ECX_FUNDING_CONFIG" path)
+    (maybe (unsetEnv "ECX_FUNDING_CONFIG") (setEnv "ECX_FUNDING_CONFIG")) $ \_->do
+      calls<-newIORef (0::Int)
+      let build=fundingApplication (modifyIORef' calls (+1) >> pure config) fallback
+      app<-build
+      denied<-send app "GET" []
+      limited<-send app "GET" (auth "test-only-password")
+      wrongApp<-build; wrong<-send wrongApp "GET" (auth "wrong")
+      validApp<-build; valid<-send validApp "GET" (auth "test-only-password")
+      post<-send validApp "POST" (auth "test-only-password")
+      mismatchApp<-fundingApplication (pure config {W.pubMint="other"}) fallback
+      mismatch<-send mismatchApp "GET" (auth "test-only-password")
+      seen<-readIORef calls
+      pure (map (statusCode.simpleStatus) [denied,limited,wrong,valid,post,mismatch]==[401,429,401,200,405,503]
+        && seen==1 && all ((==Just "no-store").lookup "Cache-Control".simpleHeaders) [denied,valid]
+        && "&lt;test-address&gt;" `BS.isInfixOf` BL.toStrict(simpleBody valid)
+        && not("test-only-password" `BS.isInfixOf` BL.toStrict(simpleBody valid)))
+ where
+  temporary=do
+    (path,h)<-openTempFile "/tmp" "ecx-funding-contract"
+    hClose h;removeFile path;createDirectory path;setFileMode path 0o700;pure path

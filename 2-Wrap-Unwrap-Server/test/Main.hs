@@ -29,6 +29,7 @@ import Test.QuickCheck hiding (total,Result)
 main :: IO ()
 main = getArgs >>= \args -> if args==["--configure-only"]
   then ConfigureCheck.contract >>= \ok -> if ok then putStrLn "Configure contract passed" else exitFailure
+  else if args==["--funding-only"] then SigningTransportCheck.fundingCheck >>= \ok -> if ok then putStrLn "Funding contract passed" else exitFailure
   else fullSuite
 
 fullSuite :: IO ()

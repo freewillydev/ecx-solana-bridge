@@ -68,7 +68,7 @@ library workflow
   exposed-modules: Bridge.Observer, Bridge.Payment, Bridge.Signer, Bridge.Critical, Bridge.Reconciliation, Bridge.Admission, Bridge.Order, Bridge.Web, Bridge.Config, Bridge.Control, Bridge.Recovery
   build-depends: base, ecx-bridge, ecx-bridge:customer-api, ecx-bridge:store,
     ecx-bridge:chain, aeson, bytestring, text, time, containers, http-client, servant, servant-server,
-    async, transformers, stm, ram, crypton, crypton-pem, crypton-x509, http-types, wai, warp, warp-tls, filepath, unix,
+    async, transformers, stm, ram, base64-bytestring, crypton, crypton-pem, crypton-x509, http-types, wai, warp, warp-tls, filepath, unix,
     servant-client, http-client-tls, crypton-connection, tls, crypton-x509-store, directory, network, binary, postgresql-simple
 
 test-suite bridge-test

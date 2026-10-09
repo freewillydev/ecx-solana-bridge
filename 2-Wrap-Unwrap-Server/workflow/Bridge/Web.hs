@@ -1,14 +1,23 @@
 {-# LANGUAGE ConstraintKinds, DataKinds, RankNTypes #-}
-module Bridge.Web (customerApplication,publicApplication,boundedApplication,runPublicServer,rateLimitedApplication) where
+module Bridge.Web (customerApplication,publicApplication,boundedApplication,runPublicServer,rateLimitedApplication,fundingApplication) where
 import Bridge.API
-import Bridge.Operation (Plan,Caller(Customer),CustomerOperations)
-import Bridge.Credentials (protectedSignerFile)
+import Bridge.Operation (Plan,Caller(Customer),CustomerOperations,CustomerRead(PublicConfig),safe)
+import Bridge.Credentials (protectedSignerFile,readFundingConfig)
 import Bridge.Error
 import Control.Concurrent.STM
 import Control.Exception (bracket,catch)
 import Control.Monad (when)
 import Control.Monad.IO.Class (liftIO)
-import Data.Aeson (encode,object,(.=))
+import Data.Aeson (encode,object,(.=),eitherDecodeStrict',withObject,(.:))
+import Data.Aeson.Types (parseEither)
+import qualified Data.ByteString.Base64 as B64
+import qualified Data.ByteString.Lazy as BL
+import qualified Data.ByteArray as BA
+import qualified Data.ByteArray.Encoding as Hex
+import Crypto.KDF.PBKDF2 (Parameters(..),fastPBKDF2_SHA256)
+import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
+import Bridge.Wire (pubProfile,pubSolanaCluster,pubMint,pubCustodyOwner,pubAvailability,pubReport)
 import qualified Data.ByteString as BS
 import Data.IORef (newIORef,atomicModifyIORef')
 import Data.Text (Text)
@@ -40,10 +49,11 @@ publicApplication assets evaluate = do
   let files=[([],"index.html","text/html; charset=utf-8"),(["style.css"],"style.css","text/css; charset=utf-8"),
              (["wallet.js"],"dist/wallet.js","text/javascript; charset=utf-8")]
   mapM_ (\(_,file,_)->doesFileExist (assets</>file) >>= flip require "browser_assets_missing") files
-  boundedApplication 32 "server_busy" $ \request respond->
+  site<-fundingApplication (evaluate $ safe PublicConfig) $ \request respond->
     case [(file,mime)|(path,file,mime)<-files,pathInfo request==path,requestMethod request=="GET"] of
       [(file,mime)]->respond $ responseFile HTTP.status200 [("Content-Type",mime)] (assets</>file) Nothing
       _->customerRoutes evaluate request respond
+  boundedApplication 32 "server_busy" site
 
 -- Both HTTP surfaces share the same bounded body and concurrency behavior.
 -- This middleware carries no operation or evaluation authority.
@@ -109,3 +119,51 @@ rateLimitedApplication clock app = do
     if accepted then app request respond else respond $
       responseLBS HTTP.status429 [("Content-Type","application/json"),("Cache-Control","no-store"),("Retry-After","2")]
         "{\"error\":\"request_rate_limited\"}"
+
+-- Read-only funding view. No session, mutation, wallet RPC or signer capability.
+-- PublicConfig follows the same safe DSL/Opaleye snapshot as the customer report.
+fundingApplication :: IO PublicConfiguration -> Application -> IO Application
+fundingApplication configuration fallback=do
+  file<-lookupEnv "ECX_FUNDING_CONFIG"
+  case file of
+    Nothing->pure fallback
+    Just path->do
+      value<-readFundingConfig path >>= either (const $ reject "invalid_funding_configuration") pure . eitherDecodeStrict'
+      (saltText,hashText,native,owner,mint,ata)<-either (const $ reject "invalid_funding_configuration") pure $
+        parseEither (withObject "funding" $ \o->(,,,,,) <$> o .: "salt" <*> o .: "hash" <*> o .: "nativeAddress" <*> o .: "owner" <*> o .: "mint" <*> o .: "ata") value
+      let decode text= either (const $ reject "invalid_funding_hash") pure (Hex.convertFromBase Hex.Base16 (TE.encodeUtf8 text))
+      salt<-decode saltText; expected<-decode hashText
+      require (BS.length salt==32 && BS.length expected==32 && all (\v->not(T.null v) && T.length v<=128) [native,owner,mint,ata]) "invalid_funding_configuration"
+      next<-newTVarIO 0
+      pure $ \request respond->if pathInfo request/=["funding"] then fallback request respond else do
+        let headers=[("Cache-Control","no-store"),("Content-Type","text/html; charset=utf-8"),("X-Content-Type-Options","nosniff"),("Referrer-Policy","no-referrer"),("Content-Security-Policy","default-src 'none'; frame-ancestors 'none'")]
+            reply status extra body=respond $ responseLBS status (headers<>extra) body
+        if requestMethod request/="GET" then reply HTTP.status405 [("Allow","GET")] "Read-only page" else do
+          now<-toInteger <$> getMonotonicTimeNSec
+          admitted<-atomically $ do
+            at<-readTVar next
+            if at>now then pure False else writeTVar next (now+2000000000) >> pure True
+          if not admitted then reply HTTP.status429 [("Retry-After","2")] "Wait two seconds before trying again." else do
+            let supplied=do
+                  raw<-lookup "Authorization" (requestHeaders request)
+                  bytes<-BS.stripPrefix "Basic " raw
+                  if BS.length bytes>1024 then Nothing else either (const Nothing) Just (B64.decode bytes)
+                valid=case supplied of
+                  Just bytes->let (name,rest)=BS.break (==58) bytes
+                                  actual=fastPBKDF2_SHA256 (Parameters 600000 32) (BS.drop 1 rest) salt::BS.ByteString
+                              in name=="operator" && not(BS.null rest) && BA.constEq actual expected
+                  Nothing->False
+            if not valid then reply HTTP.status401 [("WWW-Authenticate","Basic realm=\"Bridge funding\", charset=\"UTF-8\"")] "Authentication required." else do
+              c<-configuration
+              if pubCustodyOwner c/=owner || pubMint c/=mint then reply HTTP.status503 [] "Funding configuration does not match this bridge." else
+                reply HTTP.status200 [] $ BL.fromStrict $ TE.encodeUtf8 $
+                  "<!doctype html><html><meta charset=utf-8><title>Bridge funding</title><h1>Bridge funding</h1>"<>
+                  "<p>Operator deposits only. Funding does not automatically allocate treasury. Use the existing operator allocation workflow after confirmation and reconciliation.</p>"<>
+                  row "ECX network" (T.pack $ show $ pubProfile c)<>row "ECX address" native<>
+                  row "Solana network" (pubSolanaCluster c)<>row "SOL owner" owner<>row "Wrapped ECX mint" mint<>row "Wrapped ECX token account" ata<>
+                  row "Readiness" (T.pack $ show $ pubAvailability c)<>
+                  "<h2>Recorded reserves and transfer report</h2><p>May be stale; observation timestamps and freshness are included below. Refresh to update.</p><pre>"<>
+                  escape (TE.decodeUtf8 $ BL.toStrict $ encode $ pubReport c)<>"</pre><a href=/>Bridge and public information</a></html>"
+ where
+  escape=T.concatMap $ \c->case c of '&'->"&amp;"; '<'->"&lt;"; '>'->"&gt;"; '"'->"&quot;"; '\''->"&#39;"; _->T.singleton c
+  row label value="<h2>"<>label<>"</h2><p>"<>escape value<>"</p>"

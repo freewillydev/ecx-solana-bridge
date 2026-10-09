@@ -1,5 +1,5 @@
 -- Private startup credential validation shared by signing and recovery.
-module Bridge.Credentials (verifySigningKey,protectedSignerFile,readSignerAuth,readSignerCertificate,readNativeUnlock,withNativeUnlock) where
+module Bridge.Credentials (readFundingConfig,verifySigningKey,protectedSignerFile,readSignerAuth,readSignerCertificate,readNativeUnlock,withNativeUnlock) where
 import Bridge.Error
 import Bridge.File (withHandle,readBounded)
 import qualified Bridge.Native as N
@@ -49,6 +49,9 @@ readSignerMaterial secret shared limit tooLarge path = do
   bracket (openFd path ReadOnly defaultFileFlags {nofollow=True,cloexec=True,nonBlock=True}) closeFd $ \fd->do
     getFdStatus fd >>= signerStatus secret shared
     withHandle fd (readBounded limit) >>= maybe (reject tooLarge) pure
+
+readFundingConfig :: FilePath -> IO BS.ByteString
+readFundingConfig = readSignerMaterial True False 4096 "funding_configuration_too_large"
 
 readSignerAuth, readSignerCertificate :: FilePath -> IO BS.ByteString
 readSignerAuth = readSignerMaterial True True 65 "invalid_signer_auth_token"
