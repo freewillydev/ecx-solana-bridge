@@ -722,7 +722,7 @@ publicReport c wallTime=do
     pure $ W.PublicAssetReport asset (M.lookup asset reserves) (decimal available) (decimal held)
       (decimal $ M.findWithDefault 0 (asset,Principal) booked) (decimal fees)
   counts<-forM dated $ \(asset,_,n)->do value<-exact n; require (value<=toInteger(maxBound::Int64)) "public_count_overflow"; pure(asset,fromInteger value)
-  total<-case totals of [n]->pure n; _->reject "invalid_public_transfer_count"
+  total<-case totals of []->pure 0; [n]->pure n; _->reject "invalid_public_transfer_count"
   let undated=total-sum [n|(_,n,_)<-dated]
   require (undated>=0) "invalid_public_transfer_count"
   pure $ W.PublicReport now at current assets (maybe 0 id $ lookup "Wrapped" counts) (maybe 0 id $ lookup "Native" counts) undated
