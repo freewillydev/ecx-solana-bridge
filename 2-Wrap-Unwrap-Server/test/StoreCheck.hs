@@ -3152,7 +3152,8 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       backup n=evalWrite writer (AcknowledgeBackup "contract" n $ T.replicate 64 "d")
       transport=OrderTransport (pure 110) (const $ modifyIORef' admissions (+1)) (modifyIORef' identities (+1)) call backup
       create=createCustomerOrderWith transport native True reader writer header
-      check ok=unless ok (fail "customer workflow contract failed")
+      check :: HasCallStack => Bool -> IO ()
+      check ok=unless ok (fail $ "customer workflow contract failed\n"<>prettyCallStack callStack)
   expectStore "invalid_idempotency_key" (create unwrap {W.idempotencyKey=""})
   missing<-evalRead reader (FindOrder header unwrap)
   check (missing==Nothing)
