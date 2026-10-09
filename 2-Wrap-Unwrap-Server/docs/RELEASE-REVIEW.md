@@ -1850,3 +1850,18 @@ browser archive: `6c18af7b996f56d886292525b10ec64695e7b75a718d27433d33f4ee4969f2
 No deployment or funded transfer was performed. Both independent Mainnet providers
 still reported zero finalized lamports for the fresh AWS owner at slots
 454732610/454732612; the funding request remains open.
+
+Focused real HTTP/PostgreSQL cache acceptance subsequently found and fixed two
+report defects: an empty aggregate now yields zero transfers (`6b3107e`), and
+report connections have server-side statement/lock/idle-transaction limits
+(`0c588a3`) so a client timeout cannot leave an indefinitely blocked query.
+The independent `ECX_REPORT_CACHE_ONLY=1` run passed in 35.3 seconds: empty-ledger
+zero counts/earnings; eight concurrent requests coalesced into one database waiter;
+HTTP 200 with an absent optional report on failure; backend clearance within two
+seconds; cached failure and success avoiding a held database lock; recovery after
+real 31-second TTL; unchanged financial balances, critical/backup sequences and
+paused state. The fixture permits the background worker's expected pause-reason
+change when its RPC manager refuses access. Disposable database/role were removed
+and the compiler stopped. This proves timeout cleanup for the tested lock-wait
+case, not arbitrary client-disconnect cancellation. Tests were integrated from
+reviewer commits `8c2d5ab` and `7396c7d`; there were no further production changes.

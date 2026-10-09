@@ -886,8 +886,10 @@ from recounting revenue. Missing settlement timestamps are explicitly excluded a
 counted separately; absent custody breakdowns show unknown reserves.
 
 The safe evaluator coalesces report refreshes for 30 seconds, including failures,
-and bounds each report query to five seconds. Optional report failure does not
-fail configuration. Intake checks remain live; cached reports never authorize a
+and sets a five-second client deadline. Report-only PostgreSQL connections also
+limit each statement to four seconds, lock waits to three seconds and idle
+transactions to five seconds, so abandoned client work cannot wait indefinitely
+on the server. Optional report failure does not fail configuration. Intake checks remain live; cached reports never authorize a
 payment. Observation timestamps and stale labels accompany balances. No report
 refresh calls chain RPC, exposes order capabilities or gains signer authority.
 
