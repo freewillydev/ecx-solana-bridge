@@ -3,7 +3,10 @@ import qualified Bridge.Config as C
 import qualified NodeSetup
 import qualified Bootstrap
 import System.Environment (getEnv,setEnv)
-import System.Info (os)
+import System.Info (os,arch)
+import Bridge.File (hashHandle)
+import qualified Data.Aeson.Key as Key
+import System.Posix.Signals (signalProcess,nullSignal)
 import System.Timeout (timeout)
 import Control.Exception (evaluate,finally)
 import qualified Data.ByteString.Char8 as B8
@@ -35,7 +38,7 @@ import Data.List (sort,isInfixOf,isPrefixOf)
 import Data.Bits ((.&.),shiftR)
 import System.Directory
 import System.FilePath ((</>))
-import System.IO (openTempFile,hClose,hPutStrLn,hFlush,hGetChar,hGetContents)
+import System.IO (openTempFile,hClose,hPutStrLn,hFlush,hGetChar,hGetContents,withBinaryFile,IOMode(ReadMode))
 import System.Posix.Files (setFileMode,getFileStatus,fileMode)
 import System.Process
 import System.Exit (ExitCode(..))
@@ -104,9 +107,10 @@ contract=bracket temporary removeDirectoryRecursive $ \directory->do
     settingsRemain<-doesDirectoryExist interrupted
     nativeChecked<-nativeSeedContract directory
     simplifiedChecked<-simpleContract directory executable
+    backupChecked<-backupTimeoutContract directory
     expectedKey<-either (const $ fail "fixture mnemonic") pure (walletKey phrase)
     let expectedSetup=object ["existing" .= False,"method" .= ("source"::String),"sourceRoot" .= directory,"restic" .= worker]
-    pure(simplifiedChecked && nativeChecked && C.fingerprint config==C.fingerprint other && C.nativeCookie config/=C.nativeCookie other
+    pure(backupChecked && simplifiedChecked && nativeChecked && C.fingerprint config==C.fingerprint other && C.nativeCookie config/=C.nativeCookie other
       && sort entries==["interface.json","setup.json","signer.json","sources.json","worker.json"]
       && sources==M.fromList [("solana.keypair.json",key),("native-worker.auth",worker),("native-signer.auth",signer)]
       && originalKey==L.toStrict(encode $ B.unpack(seed<>public)) && originalWorker=="worker:password" && originalSigner=="signer:password"
@@ -125,6 +129,30 @@ contract=bracket temporary removeDirectoryRecursive $ \directory->do
     (path,h)<-openTempFile parent "ecx-configure-test"
     hClose h;removeFile path;createDirectory path;setFileMode path 0o700
     pure path
+
+-- An unavailable backup must not stall setup or leave its subprocess running.
+-- This executable is a process fixture, not a simulated chain or accepted backup.
+backupTimeoutContract :: FilePath -> IO Bool
+backupTimeoutContract parent=do
+  let root=parent</>"backup-timeout"; executable=root</>"restic"
+      pidFile=root</>"pid"; phrase=root</>"recovery"
+  createDirectory root;createDirectory(root</>"share")
+  savePrivate executable (B8.pack $ "#!/bin/sh\necho $$ > '"<>pidFile<>"'\ntrap '' TERM\nexec sleep 600\n")
+  setFileMode executable 0o700
+  digest<-withBinaryFile executable ReadMode hashHandle
+  let record name value=savePrivate(root</>name)(L.toStrict $ encode value)
+  record "bootstrap.json" (object [])
+  record "setup.json" (object ["restic" .= executable,"sourceRoot" .= root,"method" .= ("bundle"::String)])
+  record "sources.json" (object ["backup.repository" .= (root</>"repository"),"backup.password" .= (root</>"password")])
+  record "share/toolchains.json" (object ["restic-reviewed" .= Object(KM.singleton(Key.fromString arch)(String digest))])
+  savePrivate phrase "preserved-recovery-fixture"
+  result<-try (Bootstrap.initializeBackup root) :: IO (Either BridgeError ())
+  pid<-read . B8.unpack <$> B.readFile pidFile
+  alive<-try (signalProcess nullSignal pid) :: IO (Either IOError ())
+  retained<-B.readFile phrase
+  pure (case (result,alive) of
+    (Left(BridgeError "backup_setup_timeout"),Left _)->retained=="preserved-recovery-fixture"
+    _->False)
 
 -- Published BIP-39 entropy/phrase vectors; SLIP-0010 Solana seeds independently
 -- cross-checked with Python hashlib/hmac (empty passphrase, m/44'/501'/0'/0').

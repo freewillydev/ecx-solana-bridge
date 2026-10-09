@@ -1745,3 +1745,41 @@ contract; that result and final installer SIGKILL/reboot/cut-point acceptance ar
 not claimed yet. Fresh acceptance host i-0fc7cf24ffe177dd2 is unfunded and separate
 from the synchronized test node. This checkpoint is implementation, not completed
 three-scenario release acceptance.
+
+
+### Exact Ubuntu candidate and read-only provider checks (2026-10-08)
+
+Candidate source e603d17 produced installer SHA256
+`ef24fc71f852b1f905610469a26f89a30b8cb27ff0e343478688d08737e03e27`.
+SSM185f6a28 completed the full bridge suite plus actual PostgreSQL provision contract
+in 2m45.9s with the existing build cache; this is not a clean build duration.
+The tests-only SIGKILL regression c2994f5 (integrated as35deb1c) additionally kills
+the provisioner during migration008, then verifies successful same-token recovery.
+The security worker's isolated PostgreSQL run passed; no production artifact is
+changed by that test-only commit.
+
+New operator-supplied Alchemy and OnFinality endpoints both passed Mainnet genesis,
+fresh finalized slot/time, custody account, signature history and transaction reads.
+Finalized account data agreed. An initial Python helper failed to decode OnFinality's
+gzip response; decoding it resolved the apparent transport error. This is bounded
+read-only qualification, not a sustained throughput/quota claim. Credentials remain
+outside Git in private files. No new payment was authorized by these checks.
+
+Exact-artifact unfunded installation testing preserved configuration and keys through
+cuts after account creation, config copying, database provisioning, runtime publication
+and ledger initialize/adopt. Missing completion receipt prevented manual service
+activation and an incomplete-install reboot preserved that refusal and saved files.
+Two concrete failures remain under correction: Ubuntu socket-activated SSH lacked
+`/run/sshd` when `sshd -t` ran; backup preflight had no timeout and depended on an
+ambient cache directory. Do not relabel the original candidate a clean acceptance pass.
+Further cut points, the corrected artifact and funded deployment still need acceptance.
+
+The correction batch (patch SHA256
+`4f5c97aa32333d83027552c2d9a1befdc6586f45d33da35846b075b6bbe28358`)
+passed actual Ubuntu full `bridge-test` and the PostgreSQL provisioning/SIGKILL
+contract in SSM94ceb2f1, 1m51.1s with cached dependencies. Backup setup now runs
+without a cache, announces its stage, bounds each restic call to 30 seconds and
+kills/reaps an unresponsive child. The regression uses a real process that ignores
+SIGTERM and confirms timeout refusal, no surviving child and preserved recovery
+material. The installer creates root-owned mode-0755 `/run/sshd` before policy
+validation. Packaging and fresh-host acceptance of these corrections remain open.

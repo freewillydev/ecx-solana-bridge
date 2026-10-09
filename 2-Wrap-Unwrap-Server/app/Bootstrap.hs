@@ -7,7 +7,9 @@ import Bridge.Domain (units)
 import Bridge.File (hashHandle)
 import System.IO (withBinaryFile,IOMode(ReadMode))
 import qualified Data.ByteString as B
-import System.Process (proc,readCreateProcessWithExitCode,CreateProcess(..))
+import System.Process (proc,withCreateProcess,CreateProcess(..),StdStream(..),waitForProcess,getProcessExitCode,getPid)
+import System.Posix.Signals (signalProcess,sigKILL)
+import System.Timeout (timeout)
 import System.Environment (getEnvironment)
 import System.Exit (ExitCode(..))
 import System.Info (arch)
@@ -24,7 +26,7 @@ import qualified Token
 import qualified Token.Network as TN
 import qualified Token.Signing as TS
 import qualified Token.Operation as TO
-import Control.Exception (bracket)
+import Control.Exception (bracket,onException)
 import Control.Monad (forM_,when)
 import Data.Aeson
 import qualified Data.ByteString.Lazy as L
@@ -225,11 +227,23 @@ initializeBackup directory=do
     password<-fieldValue "backup.password" sources
     environment<-getEnvironment
     let clean=filter (\(name,_)->not ("RESTIC_" `isPrefixOf` name)) environment
-        run args=readCreateProcessWithExitCode ((proc executable args)
-          {env=Just $ [("RESTIC_REPOSITORY_FILE",repository),("RESTIC_PASSWORD_FILE",password)]<>clean}) ""
-    (readable,_,_)<-run ["cat","config"]
+        run args=withCreateProcess ((proc executable ("--no-cache":args))
+          {env=Just $ [("RESTIC_REPOSITORY_FILE",repository),("RESTIC_PASSWORD_FILE",password)]<>clean
+          ,std_in=NoStream,std_out=NoStream,std_err=NoStream,close_fds=True}) $ \_ _ _ process->do
+            let kill=do
+                  running<-getProcessExitCode process
+                  when (running==Nothing) $ getPid process >>= mapM_ (signalProcess sigKILL)
+                expired=do
+                  kill
+                  putStrLn "Backup server did not respond within 30 seconds. Check its URL/access, then rerun the same start command; saved wallets and settings are preserved."
+                  reject "backup_setup_timeout"
+            (timeout (30*1000000) (waitForProcess process) >>= maybe expired pure) `onException` kill
+    putStrLn "Checking encrypted backup access (30-second limit per request)..."
+    readable<-run ["cat","config"]
     when (readable/=ExitSuccess) $ do
-      (created,_,_)<-run ["init"]
+      putStrLn "Opening existing repository failed; initializing the requested new repository..."
+      created<-run ["init"]
       require (created==ExitSuccess) "backup_initialization_failed_use_new_repository_or_advanced_setup"
-    (verified,_,_)<-run ["cat","config"]
+    verified<-run ["cat","config"]
     require (verified==ExitSuccess) "backup_repository_not_readable"
+    putStrLn "Encrypted backup repository is readable. Continuing node setup."

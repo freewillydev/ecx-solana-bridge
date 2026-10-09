@@ -15,6 +15,45 @@ reviewable code after each checkpoint. It cannot guarantee bug-free software or
 perfect security. Passing gates, retained financial evidence and independent
 review are required, especially before valuable-fund operation.
 
+## Current delivery order: managed Ubuntu setup and operator reports (2026-10-08)
+
+The earlier 117/120 count describes the financial-core refactor, not completion of
+these newer deployment and usability requirements. Track this work by acceptance
+results rather than adding it to that percentage.
+
+1. **Finish the actual installer path.** One reviewed command installs the pinned
+   pruned ECX node, PostgreSQL, bridge and signer on Ubuntu 24.04 x86_64. The same
+   `sudo ecx-bridge` entry resumes saved setup. Four basic inputs: two independent
+   Mainnet RPC URLs, a new HTTPS backup repository and public origin (or local-only).
+   Generated recovery phrases need explicit acknowledgement after backup. Show
+   progress and bounded prerequisite failures; retain wallets and signed attempts.
+2. **Complete fresh-host/interruption acceptance before publishing the command.**
+   Verify retries and reboots through configuration, database and unit publication;
+   incomplete installations must never activate signing. Include socket-activated
+   Ubuntu SSH and unavailable backup endpoints. Never reset an owned ledger merely
+   to make installation pass. A new release is an explicit upgrade, not a silent
+   consequence of rerunning setup.
+3. **Finish the funded AWS test and independent recovery.** Use only authorized
+   dedicated test funds, fence old signers, reconcile allocations and costs, execute
+   both directions, then restore the actual ledger on another host. Backup fixture
+   success does not certify recovery of custody. Batch remaining payment/restart/
+   outage checks against the resulting fixed version.
+4. **Add the requested small public information screen.** Show readiness with
+   observation time, ECX/wrapped-ECX/SOL custody balances, earned 1% fees per asset,
+   and completed wraps/unwraps over the last 24 hours. Distinguish total custody,
+   reserved customer obligations and available inventory. Fees are journaled earned
+   fees, not an estimate from wallet balances; network costs are separate. Do not
+   count quotes, abandoned orders or refunds as completed conversions. Use existing
+   closed read DSL/Opaleye projections, fixed aggregate windows and cached results;
+   public page refreshes must not trigger new RPC scans or grant signing authority.
+   Keep order capabilities, customer addresses and credentials private. Add simple
+   daily charts only after the underlying totals reconcile. Integrate this view with
+   the current interface rather than adding a dashboard service or frontend stack.
+5. **Freeze and review the operator experience.** Keep root/server READMEs short;
+   link detailed recovery, source builds and audit evidence. Verify setup using only
+   that quickstart, then finish bounded soak and independent security review. Public
+   release claims must name the artifact actually tested and its remaining limits.
+
 ## 1. Objective, boundaries and execution rules
 
 The objective is fewer independently mutable financial facts, explicit authority,
