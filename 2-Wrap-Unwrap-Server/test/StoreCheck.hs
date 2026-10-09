@@ -1,5 +1,6 @@
 {-# LANGUAGE DataKinds, GADTs, ScopedTypeVariables #-}
 module Main (main) where
+import qualified ProvisionCheck
 import qualified Bridge.Config as Config
 import qualified Bridge.AdminKey as AdminKey
 import qualified Bridge.Credentials as Credentials
@@ -90,7 +91,8 @@ import System.Exit (ExitCode(..))
 import System.Environment (getEnv,lookupEnv,getEnvironment,getExecutablePath)
 
 main :: IO ()
-main=lookupEnv "ECX_FUNDED_RECOVERY_CONFIG" >>= maybe contractMain fundedRecoveryMain
+main=lookupEnv "ECX_PROVISION_TEST" >>= \mode->if mode==Just "1" then ProvisionCheck.contract
+  else lookupEnv "ECX_FUNDED_RECOVERY_CONFIG" >>= maybe contractMain fundedRecoveryMain
 
 contractMain :: IO ()
 contractMain = do

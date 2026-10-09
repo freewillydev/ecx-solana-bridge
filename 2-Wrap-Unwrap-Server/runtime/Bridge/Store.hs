@@ -20,6 +20,7 @@ import Bridge.Wire (PaymentTerms(..),PolicySnapshot(..),CostLimits(..),SignedAtt
 import qualified Bridge.Store.Schema as S
 import qualified Bridge.Store.Projection as P
 import qualified Bridge.Store.Migration as Migration
+import qualified Bridge.Store.Provision as Provision
 import Bridge.Store.Catalog (claimWorker,verifyReadRole,exportSnapshot)
 import Bridge.Store.Backup (LedgerArchive(..),archiveLedger,BackupReceipt(..),loadRemoteBackup,uploadRemoteArchive,loadLedgerArchive,restoreLedger,discardRestore,downloadRemoteArchive,CustodyArchive(..),loadCustodyArchive,uploadRemoteCustody,downloadRemoteCustody)
 import Crypto.Random (getRandomBytes)
@@ -65,10 +66,12 @@ data CustodySnapshot = CustodySnapshot
 -- Closed offline setup: initialization cannot replace recovery, and conversion
 -- requires a paused source and verified archive. Neither operation adopts a fence.
 data StoreSetup a where
+  ProvisionDatabase :: Text -> StoreSetup ()
   InitializeLedger :: Text -> StoreSetup ()
   MigratePaymentRoots :: Text -> Int64 -> FilePath -> StoreSetup (Int64,Int)
 
 evalSetup :: PG.ConnectInfo -> StoreSetup a -> IO a
+evalSetup settings (ProvisionDatabase token) = Provision.provisionDatabase settings token
 evalSetup settings (MigratePaymentRoots identity minimumSequence manifest) =
   Migration.migratePaymentRoots settings identity minimumSequence manifest
 evalSetup settings (InitializeLedger identity) = Migration.initializeLedger settings identity
