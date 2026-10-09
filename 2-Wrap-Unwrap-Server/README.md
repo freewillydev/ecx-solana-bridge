@@ -32,7 +32,8 @@ cd ecash-bridge
 git clone https://github.com/freewillydev/ecx-solana-bridge.git
 
 sudo apt update
-sudo apt install -y build-essential
+sudo apt install -y build-essential pkg-config libpq-dev libgmp-dev libffi-dev \
+  zlib1g-dev libssl-dev libsecp256k1-dev
 
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
