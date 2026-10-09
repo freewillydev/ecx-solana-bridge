@@ -1116,7 +1116,7 @@ ledgerMain = do
         evalRead reader ReadState >>= check . ledgerPaused
         evalRead reader ReadBalances >>= check . (==beforeResume)
         -- Isolate resume from the unrelated review orders seeded below.
-        let resumeKey=T.replicate 64 "e"
+        let resumeKey=digest "native-preparation-resume-contract"
             identifier="fee:"<>resumeKey
         fixture fixtures RefreshCustody
         void $ evalWrite writer (ReserveFees 100 resumeKey Native (money 10) "recipient" "resume contract")
@@ -1147,6 +1147,7 @@ ledgerMain = do
         fixture fixtures RefreshCustody
         void $ evalWrite writer (CancelFees resumeKey "fixture cleanup")
         evalRead reader ReadBalances >>= check . (==beforeResume)
+        putStrLn "PASS: native preparation resume preserves exact work and refuses changed or cancelling evidence"
       fixture fixtures SeedOrders
       let auth="Bearer "<>T.replicate 64 "0"
       hidden <- evalRead reader (ReadOrder auth "hidden")
