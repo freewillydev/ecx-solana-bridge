@@ -3082,6 +3082,16 @@ nativeCustodyFamilies fixtures reader writer settings config base solana=do
   void $ evalWrite writer (MarkBroadcast 100 $ txid child)
   mapM_ evidence [parent,child]
   fixture fixtures (FreshAt 100)
+  -- Changed depth/anchor invalidates scans; changed money remains a hard error.
+  let observeParent=inspect $ call [parent,child] True False (Just $ txid parent) 2089 0
+      changedProof anchor depth fee=fixture fixtures $ SeedTreasuryEvidence "Native" (txid parent) anchor "outgoing" 0
+        (object ["confirmations" .= (depth::Int),"walletNetUnits" .= ("-10"::T.Text),"feeUnits" .= money fee])
+  forM_ [("unconfirmed",1),(block,0)] $ \(anchor,depth)->do
+    changedProof anchor depth 1
+    expectStore "custody_native_history_advanced" observeParent
+  changedProof block 1 2
+  expectStore "custody_payment_observation_mismatch" observeParent
+  evidence parent
   assertReport [parent,child] True False (Just $ txid parent) 2089 0 [] (-11) True
   assertReport [parent,child] True False (Just $ txid child) 2088 0 [] (-12) True
   -- Both replacement alternatives exclude the same two whole prevouts once.

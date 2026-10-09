@@ -197,8 +197,11 @@ nativeObservedEffect reader saved signed depth value=do
   fee<-fieldValue "feeUnits" proof
   let n=toInteger $ units $ planAmount $ signedNativePlan signed
       cost=toInteger $ units $ signedNativeFee signed
-  require (kind=="outgoing" && anchor==maybe "unconfirmed" id actualAnchor && oldDepth==depth
-    && net==T.pack(show $ negate n) && fee==signedNativeFee signed) "custody_payment_observation_mismatch"
+  require (kind=="outgoing" && net==T.pack(show $ negate n)
+    && fee==signedNativeFee signed) "custody_payment_observation_mismatch"
+  -- The node may advance between the observer and this independent read. Keep
+  -- readiness closed until rescanned; a new depth/anchor is not a changed payment.
+  require (anchor==maybe "unconfirmed" id actualAnchor && oldDepth==depth) "custody_native_history_advanced"
   pure [(txid,Native,negate $ n+cost)]
 
 pendingSolanaEffect :: NativeRPC -> SolanaRPC -> Profile -> H.SolanaPolicy -> Reader -> RecordedAttempt -> IO [(Text,Asset,Integer)]
