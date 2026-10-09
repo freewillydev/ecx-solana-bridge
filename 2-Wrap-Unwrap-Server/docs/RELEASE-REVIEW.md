@@ -1903,3 +1903,32 @@ gates. That bundled key is not a separately authenticated production trust root.
 The user subsequently authorized reuse of prior-funded wallets. Recovery of the
 old ledger and proof of available capital/fencing must precede spending old custody;
 no funds were moved during this release-artifact acceptance.
+
+## Funded deployment recovery (2026-10-08)
+
+Read-only inspection recovered the authoritative stopped VM ledger at schema 21,
+critical/backup sequence 76. The current release restored its verified archive into
+a new isolated AWS database and migrated it to schema 22 (`d94ec0f9`). Closed
+Opaleye inspection confirmed unchanged account balances, obligation totals, all
+12 attempt identities/states, and principal/operating/fee reservations (`c434b3c3`,
+comparison `31db7a0f`). The database remains paused for reconciliation; eight
+historical review attempts are retained, not cleared from null RPC results.
+
+The recorded sequence-76 restic custody snapshot was recovered from the original
+backup repository. All eight files passed hash checks and the current release's
+`check-custody` on AWS (`fd34f16d`). Its native wallet restored without overwriting
+an existing wallet (`8a2bef40`): saved height 971187 was within the node's retained
+history. After rescan, the locked wallet reported 95,778 native base units, exactly
+matching the recovered ledger, with no pending balance (`f166dba6`).
+
+The old VM was never booted. A temporary rescue mounted its disk as secondary
+storage, ran the existing retirement operation against the original fence at
+sequence 76, masked both services, and disabled executable permissions. Independent
+offline readback confirmed retirement; source ledger/configuration/key hashes were
+unchanged. The rescue and temporary database were stopped. This fences accidental
+service restart, not an administrator who deliberately restores key access.
+
+AWS signing and transfers remain disabled. Full live custody reconciliation,
+deployment activation with a new verified independent backup, customer round trips,
+and remaining live acceptance gates are still required. These recovery checks do
+not replace those gates or establish a completed production release.
