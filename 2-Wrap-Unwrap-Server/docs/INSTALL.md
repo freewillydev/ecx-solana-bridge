@@ -35,6 +35,19 @@ It asks for four inputs (Enter accepts displayed defaults):
 
 The managed pruned ECX node is automatic: `/var/lib/ecx-betanet/bitcoin.conf`,
 `ecx-betanet.service`, and loopback RPC port 28532. No node-path prompt is needed.
+Fresh managed ECX nodes bootstrap from a checksum-pinned, chain-only snapshot by
+default, then catch up and verify the configured checkpoint before bridge startup.
+The download is approximately 11 GB and needs 27 GiB total staging space including
+its retained cache. Existing node data and wallets are never overwritten. This
+trusts the published operator snapshot; it is not validation from genesis. To
+choose full synchronization for a new installation, run the installer with
+`sudo env ECX_NODE_SYNC=full sh ./ecx-bridge-ubuntu-24.04-x86_64.run`.
+Interrupted downloads/extractions can be retried; partially promoted directories
+resume from the private journal. Unexpected existing data fails closed for review.
+The snapshot is public blockchain data in a separate bucket; custody backups and
+keys remain private. Hosting it incurs storage and download-transfer costs; monitor
+usage and configure S3 access logging or CloudTrail data events for deployment.
+
 Pruning limits retained block data; initial synchronization still takes time and
 additional disk space is needed for chainstate, the database and temporary work.
 

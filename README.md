@@ -9,13 +9,13 @@ The installer sets up the bridge, dedicated signer, PostgreSQL and pruned ECX no
 No Haskell build or Nginx installation is needed.
 
 **Review candidate, not production assurance.** See the
-[release](https://github.com/freewillydev/ecx-solana-bridge/releases/tag/review-2026-10-09-funded-recovery)
+[release](https://github.com/freewillydev/ecx-solana-bridge/releases/tag/review-2026-10-09-security-remediation)
 for verification information. Download and run:
 
 ```sh
 curl --fail --location --proto '=https' --tlsv1.2 \
   -o ecx-bridge-ubuntu-24.04-x86_64.run \
-  https://github.com/freewillydev/ecx-solana-bridge/releases/download/review-2026-10-09-funded-recovery/ecx-bridge-ubuntu-24.04-x86_64.run
+  https://github.com/freewillydev/ecx-solana-bridge/releases/download/review-2026-10-09-security-remediation/ecx-bridge-ubuntu-24.04-x86_64.run
 sudo sh ./ecx-bridge-ubuntu-24.04-x86_64.run
 ```
 
@@ -40,6 +40,23 @@ verification/download, staged restoration and checked activation. Status and exi
 never start services. Restoration requires permanent exclusion of the old signer;
 verification alone does not activate recovered custody. Advanced CLI commands remain
 available.
+
+## Upgrade the server
+
+Download the reviewed new `.run` installer from [Releases](https://github.com/freewillydev/ecx-solana-bridge/releases)
+and verify its published digest and release signature before running it:
+
+```sh
+sudo sh ./ecx-bridge-ubuntu-24.04-x86_64.run
+```
+
+Choose **Upgrade** and confirm the displayed release. The checked upgrade saves and
+verifies a custody backup, stops services, installs the new version, and reconciles
+saved work before resuming. It retains wallets, the ledger and settings—do not wipe
+the server or run fresh setup. If interrupted, reopen `sudo ecx-bridge` and choose
+**Continue** to resume the saved plan. Then use **Status** to check services and backup coverage; **Upgrade** displays
+the installed release. Unsigned review candidates
+are for testing; see [the detailed procedure](2-Wrap-Unwrap-Server/docs/INSTALL.md#guided-console-and-provider-preflight).
 
 [Setup and recovery](2-Wrap-Unwrap-Server/docs/INSTALL.md) ·
 [Upgrade and operation](2-Wrap-Unwrap-Server/docs/OPERATIONS.md) ·

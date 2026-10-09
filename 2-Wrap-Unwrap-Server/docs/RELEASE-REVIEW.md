@@ -10,13 +10,18 @@ candidate's tests does not certify later source or packages.
 
 ## Current release pointer
 
-The current review candidate is `ef2f17d131ea50413b5835f11956b97dd13cc033`,
-release `review-2026-10-09-funded-recovery`, SHA-256
-`2fa48bb4216f1dd028d512a44cd21d4d67358f9421050697f0774f64006110b2`.
+The current review candidate and funded deployment are
+`8c18bd88c0d65b2291802d805a246a754b5d61c0`, release
+`review-2026-10-09-security-remediation`, SHA-256
+`1adc398d1a45a7da34f2ee184da7a7cae282eca0c7259bd2b9b4eeb948fd10b9`.
 It is unsigned and NOT production approved. Current acceptance criteria and open
 security findings are in [DONE.md](../../DONE.md); operational continuation is in
-[RESUME.md](../../RESUME.md). Later entries in this document record the funded
-restore and this candidate's acceptance. The older checklist below is historical.
+[RESUME.md](../../RESUME.md). The exact candidate passed the build, core suites,
+ten-mode PostgreSQL matrix and a separate scoped review of both security fixes.
+Its checked upgrade preserved the original Paid orders and backed-up sequence 105.
+Full production approval remains FAIL. Later entries below retain the earlier
+`ef2f17d` funded restore evidence; they do not certify this newer candidate.
+The older checklist below is historical.
 
 ## Historical guided-console acceptance checklist
 

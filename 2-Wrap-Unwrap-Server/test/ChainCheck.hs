@@ -883,11 +883,18 @@ deploymentChecks = do
           ,("invalid_daily_budget",config {Config.maxNativeDailyCost=money 1})
           ,("invalid_signature",config {Config.solanaOperatingHistoryStart=""})]
     , check "real ECX profile checkpoint and canonical backup requirements are preserved" $ once $ ioProperty $ do
-        let beta=config {Config.profile=ECXBetanetDevnet,Config.nativeCheckpointHeight=967680,
+        let beta=config {Config.profile=ECXBetanetDevnet,Config.nativeConfirmations=6,Config.nativeCheckpointHeight=967680,
               Config.nativeCheckpointHash="00000000000000030101ba5cfea54b22becc79f95dc6040beb76e01dd9d04042"}
             canonical=beta {Config.profile=CanonicalBeta,Config.mint="EVHqNdzjCupKi4rQkbuYw52sa1m8A7jeUAMP23S9AVVq",
               Config.solanaRpc="https://api.mainnet-beta.solana.com",Config.solanaVerifierRpc=Just "https://independent.example"}
         Config.validateConfig beta
+        shallow<-and <$> mapM (\c->rejects "invalid_policy" $
+          Config.validateConfig c {Config.nativeConfirmations=5})
+          [beta,canonical {Config.backupRequired=True}]
+        let oldTerms=Store.executionTerms (Config.storePolicy config)
+            newTerms=Store.executionTerms (Config.storePolicy config {Config.nativeConfirmations=6})
+            unchangedIdentity=Config.fingerprint config==Config.fingerprint config {Config.nativeConfirmations=6}
+        Config.validateConfig beta {Config.nativeConfirmations=7}
         refused<-rejects "canonical_backup_required" (Config.validateConfig canonical)
         Config.validateConfig canonical {Config.backupRequired=True}
         missingVerifier<-rejects "canonical_identity_or_verifier_required" $
@@ -895,7 +902,9 @@ deploymentChecks = do
         wrongMint<-rejects "canonical_identity_or_verifier_required" $
           Config.validateConfig canonical {Config.backupRequired=True,Config.mint=Config.mint config}
         let public=Config.publicConfiguration canonical (Config.defaultInterface CanonicalBeta) True
-        pure (refused && missingVerifier && wrongMint && W.pubIntakeEnabled public
+        pure (shallow && unchangedIdentity && W.nativeDepth (W.paymentPolicy newTerms)==6
+          && W.nativeDepth (W.paymentPolicy oldTerms)==Config.nativeConfirmations config
+          && refused && missingVerifier && wrongMint && W.pubIntakeEnabled public
           && W.pubProfile public==CanonicalBeta && W.pubSolanaCluster public=="mainnet-beta")
     , check "presentation rejects unsafe URLs and mainnet trading links on devnet" $ once $ ioProperty $ do
         Config.validateInterface config links

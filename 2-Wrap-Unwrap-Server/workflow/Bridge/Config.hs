@@ -109,7 +109,7 @@ validateSetupConfig c = do
   require (units(maxWithdrawal c)>0) "invalid_withdrawal_limit"
   require (maxQueued c>0 && maxQueued c<=1000 && quoteSeconds c>0 && quoteSeconds c<=3600
     && confirmationGraceSeconds c>=0 && confirmationGraceSeconds c<=86400
-    && nativeConfirmations c>0 && nativeConfirmations c<=1008) "invalid_policy"
+    && nativeConfirmations c>=(if profile c==L2LSignetDevnet then 1 else 6) && nativeConfirmations c<=1008) "invalid_policy"
   require (units(maxNativeFee c)>0 && units(maxSolFee c)>0) "invalid_fee_budget"
   total<-either reject pure (amount $ toInteger(units $ maxSolFee c)+toInteger(units $ maxSolAccountRent c))
   require (maxNativeDailyCost c>=maxNativeFee c && maxSolDailyCost c>=total) "invalid_daily_budget"

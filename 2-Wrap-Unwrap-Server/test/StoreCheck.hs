@@ -3477,7 +3477,7 @@ serverMain = do
       NS.bind sock (NS.SockAddrInet 0 (NS.tupleToHostAddress (127,0,0,1)))
       address<-NS.getSocketName sock
       case address of NS.SockAddrInet n _->pure (fromIntegral n); _->fail "unexpected listener address"
-    let network=if canonical then base {Config.profile=W.CanonicalBeta,Config.backupRequired=True,
+    let network=if canonical then base {Config.profile=W.CanonicalBeta,Config.backupRequired=True,Config.nativeConfirmations=6,
           Config.nativeCheckpointHeight=967680,Config.nativeCheckpointHash="00000000000000030101ba5cfea54b22becc79f95dc6040beb76e01dd9d04042",
           Config.mint="EVHqNdzjCupKi4rQkbuYw52sa1m8A7jeUAMP23S9AVVq",Config.solanaVerifierRpc=Just "https://localhost:1"} else base
         config=network {Config.serverPort=port,Config.fenceDirectory=directory<>"/fence",

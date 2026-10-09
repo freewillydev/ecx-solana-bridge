@@ -70,7 +70,12 @@ is separate from signer HTTPS.
 For canonical ECX/Solana Mainnet, adapt the ECX betanet example with reviewed
 deployment values. Set `profile` to `CanonicalBeta`, `mint` to
 `EVHqNdzjCupKi4rQkbuYw52sa1m8A7jeUAMP23S9AVVq`, and `backupRequired` to `true`.
-Retain the pinned ECX checkpoint at height 967680. Both Solana RPC endpoints must
+Retain the pinned ECX checkpoint at height 967680. ECX setup defaults to six
+confirmations; both ECX profiles require at least six (higher values remain
+configurable). Existing orders keep their saved confirmation terms. For an older
+installation configured below six, pause intake and update both service
+configurations and the retained setup before upgrading; never edit saved ledger
+terms or an unfinished upgrade plan. L2L Signet retains its test default of one. Both Solana RPC endpoints must
 use HTTPS, have different hostnames and report Mainnet genesis; configure an
 independent provider, not two URLs for one service. Use the actual Mainnet custody
 owner/ATA and token/SOL history origins, matching native wallet and deployment
