@@ -10,7 +10,7 @@ import Bridge.BrowserBuild (browserAssetsDirectory)
 import Bridge.Critical (Process(..),WorkerLifetime(..),runProcess,CustomerSettings(..),SignerSettings(..))
 import Bridge.Control (callControl)
 import Bridge.Error
-import Bridge.RPC (newRpcManager)
+import Bridge.RPC (newRpcManager,fieldValue)
 import qualified Bridge.Native as N
 import Bridge.Recovery (CustodyRecovery(..),evalCustodyRecovery)
 import Bridge.Signer
@@ -43,19 +43,27 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
   command ["initialize-native-wallet",directory]=initializeNative directory
   command ["start"]=start ".ecx-bridge"
   command ["start",directory]=start directory
+  command ["native-backup-service",path,staging]=do
+    bytes<-BS.readFile path
+    value<-either (const $ reject "invalid_native_backup_configuration") pure (eitherDecodeStrict' bytes)
+    native<-N.NativeSettings <$> fieldValue "profile" value <*> fieldValue "nativeRpc" value
+      <*> fieldValue "nativeCookie" value <*> fieldValue "nativeWallet" value
+      <*> fieldValue "nativeCheckpointHeight" value <*> fieldValue "nativeCheckpointHash" value
+    bracket newRpcManager closeManager $ \manager->
+      N.evalNativeRecoveryWith (N.nativeCall manager native) native (N.ServeNativeWalletBackup staging)
   command ["check-fence",path]=do
     c<-C.loadConfig path
     sequenceNo<-Fence.inspectFence (C.fenceDirectory c) (C.fingerprint c)
     LBS.putStrLn $ encode $ object ["fingerprint" .= C.fingerprint c,"sequence" .= sequenceNo]
   command ["check-config",path]=C.loadConfig path >>= LBS.putStrLn . encode . object . pure . ("fingerprint" .=) . C.fingerprint
   command ["check-signer",path,key]=C.loadConfig path >>= \c->verifySigningKey (C.custodyOwner c) key >> putStrLn "Custody signer valid"
-  command [mode,path,file] | mode `elem` ["backup-native-wallet","restore-native-wallet"] = do
+  command [mode,path,file] | mode `elem` ["backup-native-wallet","backup-native-wallet-via-service","restore-native-wallet"] = do
     c<-C.loadConfig path
     bracket newRpcManager closeManager $ \manager->do
       let native=C.nativeSettings c
           run=N.evalNativeRecoveryWith (N.nativeCall manager native) native
-      if mode=="backup-native-wallet"
-        then run (N.BackupNativeWallet file) >>= LBS.putStrLn . encode . object . pure . ("manifest" .=)
+      if mode/="restore-native-wallet"
+        then run ((if mode=="backup-native-wallet-via-service" then N.ReceiveNativeWalletBackup else N.BackupNativeWallet) file) >>= LBS.putStrLn . encode . object . pure . ("manifest" .=)
         else run (N.RestoreNativeWallet file) >> LBS.putStrLn (encode $ object ["wallet" .= C.nativeWallet c])
   command ["backup-custody",path,key,directory]=do
     c<-C.loadConfig path

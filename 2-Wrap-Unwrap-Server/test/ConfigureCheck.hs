@@ -5,10 +5,13 @@ import qualified Bootstrap
 import System.Environment (getEnv,setEnv)
 import System.Info (os,arch)
 import Bridge.File (hashHandle)
+import Bridge.Identity (digest)
+import qualified Data.Text.Encoding as TE
+import GHC.IO.Handle (hDuplicate,hDuplicateTo)
 import qualified Data.Aeson.Key as Key
 import System.Posix.Signals (signalProcess,nullSignal)
 import System.Timeout (timeout)
-import Control.Exception (evaluate,finally)
+import Control.Exception (evaluate,finally,AsyncException(ThreadKilled))
 import qualified Data.ByteString.Char8 as B8
 import Crypto.MAC.HMAC (hmac,HMAC)
 import Crypto.Hash (SHA256)
@@ -38,7 +41,7 @@ import Data.List (sort,isInfixOf,isPrefixOf)
 import Data.Bits ((.&.),shiftR)
 import System.Directory
 import System.FilePath ((</>))
-import System.IO (openTempFile,hClose,hPutStrLn,hFlush,hGetChar,hGetContents,withBinaryFile,IOMode(ReadMode))
+import System.IO (openTempFile,hClose,hPutStrLn,hFlush,hGetChar,hGetContents,withBinaryFile,stdin,IOMode(ReadMode))
 import System.Posix.Files (setFileMode,getFileStatus,fileMode)
 import System.Process
 import System.Exit (ExitCode(..))
@@ -108,9 +111,10 @@ contract=bracket temporary removeDirectoryRecursive $ \directory->do
     nativeChecked<-nativeSeedContract directory
     simplifiedChecked<-simpleContract directory executable
     backupChecked<-backupTimeoutContract directory
+    handoffChecked<-backupHandoffCancellation directory
     expectedKey<-either (const $ fail "fixture mnemonic") pure (walletKey phrase)
     let expectedSetup=object ["existing" .= False,"method" .= ("source"::String),"sourceRoot" .= directory,"restic" .= worker]
-    pure(backupChecked && simplifiedChecked && nativeChecked && C.fingerprint config==C.fingerprint other && C.nativeCookie config/=C.nativeCookie other
+    pure(handoffChecked && backupChecked && simplifiedChecked && nativeChecked && C.fingerprint config==C.fingerprint other && C.nativeCookie config/=C.nativeCookie other
       && sort entries==["interface.json","setup.json","signer.json","sources.json","worker.json"]
       && sources==M.fromList [("solana.keypair.json",key),("native-worker.auth",worker),("native-signer.auth",signer)]
       && originalKey==L.toStrict(encode $ B.unpack(seed<>public)) && originalWorker=="worker:password" && originalSigner=="signer:password"
@@ -404,3 +408,37 @@ originContract=do
   good<-run "ok"
   refused<-mapM run ["repeat","disagree","missing","wrong-account"]
   pure(either (const False) (==signature) good && all (either (const True) (const False)) refused)
+
+
+-- Losing the caller during backupwallet must retain the directory: the node RPC
+-- may still be writing after the Haskell helper has been cancelled.
+backupHandoffCancellation :: FilePath -> IO Bool
+backupHandoffCancellation parent=do
+  let spool=parent</>"native-spool"; input=parent</>"native-request"
+      settings=N.NativeSettings ECXBetanetDevnet "http://127.0.0.1:28532" (parent</>"cookie") "backup-test"
+        967680 "00000000000000030101ba5cfea54b22becc79f95dc6040beb76e01dd9d04042"
+      binding=digest . L.toStrict . encode $ object ["profile" .= N.profile settings,"wallet" .= N.nativeWallet settings
+        ,"height" .= N.nativeCheckpointHeight settings,"checkpoint" .= N.nativeCheckpointHash settings]
+      call _ method _=case method of
+        "getblockchaininfo"->pure $ object ["chain" .= ("main"::T.Text),"initialblockdownload" .= False,"blocks" .= (967681::Int)]
+        "getblockhash"->pure $ String $ N.nativeCheckpointHash settings
+        "getconnectioncount"->pure $ Number 1
+        "getwalletinfo"->pure $ object ["walletname" .= N.nativeWallet settings,"descriptors" .= True
+          ,"scanning" .= False,"private_keys_enabled" .= True,"external_signer" .= False]
+        "listdescriptors"->pure $ object ["wallet_name" .= N.nativeWallet settings,"descriptors" .= [object ["desc" .= ("public"::T.Text)]]]
+        "backupwallet"->throwIO ThreadKilled
+        _->fail "unexpected backup fixture RPC"
+      run=bracket (hDuplicate stdin) hClose $ \saved->
+        withBinaryFile input ReadMode $ \source->
+          (hDuplicateTo source stdin >> N.evalNativeRecoveryWith call settings (N.ServeNativeWalletBackup spool))
+            `finally` hDuplicateTo saved stdin
+  createDirectory spool;setFileMode spool 0o700
+  savePrivate input ("ECX-NATIVE-BACKUP/1 "<>TE.encodeUtf8 binding<>"\n")
+  first<-try run :: IO (Either AsyncException ())
+  second<-try run :: IO (Either AsyncException ())
+  before<-sort <$> listDirectory spool
+  third<-try run :: IO (Either BridgeError ())
+  after<-sort <$> listDirectory spool
+  pure (first==Left ThreadKilled && second==Left ThreadKilled && before==after
+    && length (filter (isPrefixOf "export-") before)==2
+    && case third of Left (BridgeError "native_backup_spool_requires_cleanup")->True; _->False)

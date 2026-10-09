@@ -6,6 +6,11 @@ module Bridge.Native
   , recoverNativeAddressWith, nativeHistory, nativeAmount, nativeNumber, signetChallenge ) where
 
 import qualified Bridge.AdminKey as Private
+import qualified Bridge.NativeBackup as BackupTransfer
+import Bridge.Identity (digest)
+import Crypto.Random (getRandomBytes)
+import System.Directory (removeDirectoryRecursive,listDirectory)
+import qualified System.Posix.Directory as PD
 import Bridge.Wallet (nativeDescriptors,protectWalletProcess)
 import qualified Data.Text.Encoding as TE
 import Bridge.Wire (Profile(..))
@@ -192,6 +197,8 @@ verifyNativeBoundaryWith call = mapM_ denied
 data NativeRecovery a where
   InitializeNativeWallet :: FilePath -> Maybe FilePath -> Bool -> Int -> NativeRecovery Text
   BackupNativeWallet :: FilePath -> NativeRecovery FilePath
+  ReceiveNativeWalletBackup :: FilePath -> NativeRecovery FilePath
+  ServeNativeWalletBackup :: FilePath -> NativeRecovery ()
   RestoreNativeWallet :: FilePath -> NativeRecovery ()
   InspectNativeWalletBackup :: FilePath -> NativeRecovery (Text,FilePath,Text)
 
@@ -273,30 +280,26 @@ evalNativeRecoveryWith call c operation = do
         require (initialAddresses==[address]) "native_seed_address_mismatch"
         Private.savePrivate checkpoint (BL.toStrict $ encode $ binding address)
         pure address
-    BackupNativeWallet destination -> do
-      _<-nativeIdentityWith call c
-      privateParent destination
-      let manifest=destination<>".json"
-      absent destination
-      absent manifest
-      before<-descriptors
-      result<-call True "backupwallet" [toJSON destination]
-      require (result==Null) "unexpected_rpc_schema"
-      privateBackup destination
-      after<-descriptors
-      require (before==after) "native_wallet_changed_during_backup"
-      sync destination
-      checksum<-withBackupFile destination hashHandle
-      let evidence=manifestValue (profile c) (nativeCheckpointHeight c) (nativeCheckpointHash c)
-            (nativeWallet c) (takeFileName destination) checksum before
-          encoded=encode evidence
-      require (BL.length encoded<=1048576) "native_backup_manifest_too_large"
-      bracket (openFd manifest WriteOnly defaultFileFlags
-        {creat=Just 0o600,exclusive=True,nofollow=True,cloexec=True}) closeFd $ \fd->do
-          withHandle fd $ \handle->BL.hPut handle encoded >> hFlush handle
-          fileSynchronise fd
-      sync (takeDirectory destination)
-      pure manifest
+    ServeNativeWalletBackup parent -> Private.withFamily (parent</>"export") $ do
+      result<-timeout 240000000 $ do
+        BackupTransfer.request backupIdentity
+        -- A killed helper may leave a node RPC still copying. Never unlink that
+        -- output on a guessed timeout; bound retained orphans and refuse instead.
+        entries<-listDirectory parent
+        let orphans=filter (/="export.lock") entries
+            valid name=length name==71 && take 7 name=="export-"
+              && all (`elem` ("0123456789abcdef"::String)) (drop 7 name)
+        require (all valid orphans && length orphans<2) "native_backup_spool_requires_cleanup"
+        nonce<-digest <$> (getRandomBytes 16 :: IO BS.ByteString)
+        let directory=parent</>("export-"<>T.unpack nonce)
+        PD.createDirectory directory 0o700
+        -- RPC failure/cancellation is not proof the node stopped writing. Retain
+        -- that directory; cleanup is safe only after a fully validated backup.
+        _<-evalNativeRecoveryWith call c (BackupNativeWallet $ directory</>"wallet")
+        BackupTransfer.send (directory</>"wallet") `finally` removeDirectoryRecursive directory
+      require (result==Just ()) "native_backup_service_timeout"
+    ReceiveNativeWalletBackup destination -> backup destination True
+    BackupNativeWallet destination -> backup destination False
     RestoreNativeWallet manifest -> do
       (_,backup,_,expected)<-load manifest
       _<-nativeIdentityWith call c
@@ -313,6 +316,33 @@ evalNativeRecoveryWith call c operation = do
       (wallet,backup,checksum,_)<-load manifest
       pure (wallet,backup,checksum)
  where
+  backupIdentity=digest . BL.toStrict . encode $ object
+    ["profile" .= profile c,"wallet" .= nativeWallet c,"height" .= nativeCheckpointHeight c,"checkpoint" .= nativeCheckpointHash c]
+  backup destination transferred = do
+      _<-nativeIdentityWith call c
+      privateParent destination
+      let manifest=destination<>".json"
+      absent destination
+      absent manifest
+      before<-descriptors
+      if transferred then BackupTransfer.receive backupIdentity destination else do
+        result<-call True "backupwallet" [toJSON destination]
+        require (result==Null) "unexpected_rpc_schema"
+      privateBackup destination
+      after<-descriptors
+      require (before==after) "native_wallet_changed_during_backup"
+      sync destination
+      checksum<-withBackupFile destination hashHandle
+      let evidence=manifestValue (profile c) (nativeCheckpointHeight c) (nativeCheckpointHash c)
+            (nativeWallet c) (takeFileName destination) checksum before
+          encoded=encode evidence
+      require (BL.length encoded<=1048576) "native_backup_manifest_too_large"
+      bracket (openFd manifest WriteOnly defaultFileFlags
+        {creat=Just 0o600,exclusive=True,nofollow=True,cloexec=True}) closeFd $ \fd->do
+          withHandle fd $ \handle->BL.hPut handle encoded >> hFlush handle
+          fileSynchronise fd
+      sync (takeDirectory destination)
+      pure manifest
   load manifest = do
     privateParent manifest
     bytes<-withBackupFile manifest (readBounded 1048576) >>= maybe (reject "native_backup_manifest_too_large") pure

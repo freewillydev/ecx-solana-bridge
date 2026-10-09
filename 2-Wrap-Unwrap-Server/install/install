@@ -302,6 +302,7 @@ for role in worker signer; do
     account=$worker; args="serve $config/worker/config.json"; extra="Environment=PGREADUSER=$reader"
   else
     account=$signer; args="signer $config/signer/config.json $config/signer/solana.keypair.json"; extra=
+    if [ -f "$config/signer/backup.json" ] && [ -f /etc/systemd/system/ecx-betanet.service ]; then extra="Environment=ECX_NATIVE_BACKUP_SERVICE=1"; fi
     if [ -f "$config/signer/backup.json" ]; then args="$args $config/signer/backup.json $state/signer"; fi
   fi
   cat > "/etc/systemd/system/ecx-bridge-$role.service" <<UNIT
@@ -370,6 +371,9 @@ if [ -x /usr/sbin/sshd ]; then
     case " $denied " in *" $account "*) ;; *) fail 'sshd must include bridge account denial';; esac
   done
   systemctl try-reload-or-restart ssh.service
+fi
+if [ -f /etc/systemd/system/ecx-betanet.service ] && [ -f "$config/signer/backup.json" ]; then
+  sh "$target/native-backup"
 fi
 systemctl daemon-reload
 systemctl enable ecx-bridge-worker ecx-bridge-signer

@@ -454,6 +454,24 @@ ledger files and staging directories are synced before returning. Full decrypted
 bundle validation, exact file sets, sequence/fingerprint, wallet/key identity and
 encrypted-wallet unlock verification remain unchanged.
 
+Managed native exports use a fixed socket-activated helper under `ecxnode`, separate
+from `ecxbridges`. The root-owned socket admits only the signer group. Its protocol
+accepts a version token bound to the configured wallet/profile/checkpoint, never a
+caller path, RPC method or command. The closed native recovery operation backs up
+inside the node-owned spool, verifies descriptors, then streams a length/hash header
+and bounded chunks. The signer creates an exclusive 0600 destination, verifies
+length, hash and EOF, and retains its existing descriptor/manifest checks. The helper
+cannot read signer or PostgreSQL directories; signer HTTPS remains unchanged.
+The 256 MiB bound limits transfer, not the native daemon's backup disk consumption.
+
+Normal/error completion cleans the spool. An abruptly killed helper can leave a
+native RPC copying after the client disappears: the next request does not delete
+that file on a guessed timeout. Two retained exports cause an explicit cleanup
+refusal before another backup. Maintenance cleanup requires stopping socket/helper
+instances and the native node, verifying no writer survives, then removing only
+validated abandoned spool directories. This is an explicit operational limitation;
+it is not yet seamless crash cleanup. Restore remains a separate offline operation.
+
 Required instruction/sign/send coverage acknowledges the exact durable sequence.
 A checkpoint exports a consistent PostgreSQL snapshot plus native wallet, Solana
 key, configuration and manifests, uploads via restic and verifies the downloaded

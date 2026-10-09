@@ -43,10 +43,11 @@ library chain
   import: settings
   visibility: public
   hs-source-dirs: chain
+  other-modules: Bridge.NativeBackup
   exposed-modules: Bridge.NativeKey, Bridge.Wallet, Bridge.File, Bridge.AdminStatus, Bridge.AdminKey, Bridge.RPC, Bridge.Native, Bridge.NativeObservation, Bridge.NativePayment, Bridge.Solana, Bridge.SolanaObservation, Bridge.SolanaMessage, Bridge.SolanaHelper, Bridge.SolanaPayment, Bridge.SolanaDeposit, Bridge.PaymentObservation, Bridge.PaymentSource
   build-depends: base, ecx-bridge, aeson, bytestring, text, scientific,
     filepath, http-client, http-client-tls, http-types, binary, containers, base58-bytestring,
-    base64-bytestring, crypton, ram, unix, template-haskell, transformers
+    base64-bytestring, crypton, ram, unix, template-haskell, transformers, network, directory
   c-sources: cbits/native_key.c
   pkgconfig-depends: libsecp256k1 >=0.4 && <0.9
 

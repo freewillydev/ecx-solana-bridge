@@ -1,0 +1,76 @@
+#!/bin/sh
+# Fixed managed-node export only. No caller-supplied paths, wallet or command.
+set -eu
+umask 077
+fail() { echo "Native backup setup: $*" >&2; exit 1; }
+[ "$#" = 0 ] && [ "$(id -u)" = 0 ] || fail 'root, no arguments required'
+config=/etc/ecx-bridge/signer/config.json
+[ -f "$config" ] && [ ! -L "$config" ] || fail 'installed signer configuration required'
+[ "$(systemctl show ecx-betanet --property=User --value)" = ecxnode ] || fail 'managed ecxnode service required'
+[ "$(jq -r .nativeRpc "$config")" = http://127.0.0.1:28532 ] || fail 'managed node RPC required'
+base=/etc/ecx-native-backup
+spool=/var/lib/ecx-betanet/bridge-backup
+for directory in "$base" "$spool" /run/ecx-native-backup; do
+  [ ! -L "$directory" ] || fail 'symlink directory refused'
+done
+install -d -o root -g ecxnode -m 0750 "$base"
+install -d -o ecxnode -g ecxnode -m 0700 "$spool"
+staging=$(mktemp -d "$base/.install-XXXXXXXX")
+trap 'rm -rf -- "$staging"' EXIT
+jq '{profile,nativeRpc,nativeWallet,nativeCheckpointHeight,nativeCheckpointHash,nativeCookie:"/var/lib/ecx-betanet/.cookie"}' "$config" > "$staging/config.json"
+if [ -e "$base/config.json" ]; then
+  [ ! -L "$base/config.json" ] && cmp -s "$base/config.json" "$staging/config.json" || fail 'native backup identity changed'
+else
+  install -o root -g ecxnode -m 0640 "$staging/config.json" "$base/config.json"
+fi
+cat > "$staging/tmpfiles" <<'CONF'
+d /run/ecx-native-backup 0750 root ecxbridges -
+CONF
+install -m 0644 "$staging/tmpfiles" /etc/tmpfiles.d/ecx-native-backup.conf
+systemd-tmpfiles --create /etc/tmpfiles.d/ecx-native-backup.conf
+cat > "$staging/socket" <<'UNIT'
+[Unit]
+Description=Private ECX native wallet backup export
+[Socket]
+ListenStream=/run/ecx-native-backup/export.sock
+SocketUser=root
+SocketGroup=ecxbridges
+SocketMode=0660
+Accept=yes
+MaxConnections=2
+[Install]
+WantedBy=sockets.target
+UNIT
+cat > "$staging/service" <<'UNIT'
+[Unit]
+Description=Bounded native wallet backup export
+After=ecx-betanet.service
+Requires=ecx-betanet.service
+[Service]
+User=ecxnode
+Group=ecxnode
+ExecStart=/opt/ecx-bridge/current/bin/ecx-bridge native-backup-service /etc/ecx-native-backup/config.json /var/lib/ecx-betanet/bridge-backup
+StandardInput=socket
+StandardOutput=socket
+StandardError=journal
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+InaccessiblePaths=-/etc/ecx-bridge -/var/lib/ecx-bridge -/var/lib/postgresql -/run/postgresql
+ReadWritePaths=/var/lib/ecx-betanet/bridge-backup
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RuntimeMaxSec=250
+TimeoutStopSec=5
+MemoryMax=256M
+TasksMax=16
+LimitCORE=0
+UNIT
+install -m 0644 "$staging/socket" /etc/systemd/system/ecx-native-backup.socket
+install -m 0644 "$staging/service" /etc/systemd/system/ecx-native-backup@.service
+sync -f "$base"
+sync -f /etc/systemd/system
+systemctl daemon-reload
+systemctl enable --now ecx-native-backup.socket
+echo 'Installed bounded native wallet backup handoff; node and signer identities remain separate.'

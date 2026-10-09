@@ -27,6 +27,7 @@ import qualified Data.Text.Encoding as TE
 import qualified Database.PostgreSQL.Simple as PG
 import Network.HTTP.Client (Manager)
 import System.Directory (removeDirectoryRecursive)
+import System.Environment (lookupEnv)
 import System.FilePath (isAbsolute,normalise,takeDirectory,takeFileName,(</>))
 import System.IO (Handle,hFlush)
 import qualified System.Posix.Directory as PD
@@ -132,7 +133,10 @@ evalCustodyRecovery manager config operation = do
       let validateUnlock=withNativeUnlock call native ((const $ directory </> "native-unlock") <$> unlock) (pure ())
       validateUnlock
       archive<-evalBackup reader (ExportLedger directory)
-      void $ N.evalNativeRecoveryWith call native (N.BackupNativeWallet $ directory </> "native-wallet")
+      transfer<-lookupEnv "ECX_NATIVE_BACKUP_SERVICE"
+      require (transfer `elem` [Nothing,Just "1"]) "invalid_native_backup_service_setting"
+      let backup=if transfer==Just "1" then N.ReceiveNativeWalletBackup else N.BackupNativeWallet
+      void $ N.evalNativeRecoveryWith call native (backup $ directory </> "native-wallet")
       validateUnlock
       currentUnlock<-unlockMaterial
       require (currentUnlock==unlock) "custody_backup_key_changed"

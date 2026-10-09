@@ -329,3 +329,21 @@ This path currently accepts identical migration inventories only. A schema chang
 still requires the reviewed offline conversion/recovery procedure; automatic
 schema-21 to schema-22 integration and full interrupted-upgrade acceptance remain
 release gates. Earlier installer evidence does not prove this new workflow.
+
+
+### Managed native backup handoff
+
+The installer configures a socket-activated, export-only native backup helper.
+`ecxnode` retains ownership of native files; `ecxbridges` alone may request the fixed
+wallet export through `/run/ecx-native-backup/export.sock`. No ordinary operator
+needs to run its internal `native-backup-service` command. The signer checkpoint
+uses it when `ECX_NATIVE_BACKUP_SERVICE=1`; signer HTTPS and database roles remain
+unchanged. The export has a 240-second deadline and a 256 MiB streamed-transfer cap.
+
+`native_backup_spool_requires_cleanup` means retained interrupted exports need
+maintenance. Do not delete them while the native daemon may still be copying.
+Stop the backup socket, all helper instances and the native node; verify they have
+no remaining processes before inspecting/removing abandoned `export-<64 hex>`
+directories in `/var/lib/ecx-betanet/bridge-backup`. Preserve `export.lock` and all
+unrelated files. Resume the node and socket afterward. Automated recovery of this
+hard-kill case and the reverse restore handoff remain acceptance/integration work.

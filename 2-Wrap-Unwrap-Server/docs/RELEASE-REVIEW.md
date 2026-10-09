@@ -2034,3 +2034,51 @@ both under real service users and systemd sandboxing, then complete an actual
 checkpoint, successful guided upgrade and funded recovery. Earlier backup transport,
 archive and failure/reboot passes remain valid within their stated scopes; they do
 not establish end-to-end managed custody backup.
+
+## Native-wallet backup handoff implementation (2026-10-08)
+
+The closed native recovery grammar now has export-service and receive-backup
+operations. The private transport accepts only a fixed version/identity token,
+streams at most 256 MiB in 64 KiB chunks, checks length/hash/EOF and exclusively
+creates a private recipient file. Socket ownership/group/mode are checked and the
+socket-to-handle transfer has one owner. The socket-activated helper runs as
+`ecxnode`, cannot access signer/PostgreSQL paths, and receives no caller-selected
+wallet, path, RPC method or command. Existing descriptor and backup manifest checks
+remain on both sides. Managed signer checkpoints select this transport through a
+fixed service environment setting. Signer HTTPS and critical dispatch are unchanged.
+
+Ubuntu build `b6be76ac` passed. Actual locked recovered-native-wallet export
+`e26b0c1c` passed through real systemd socket activation into a separate
+`ecxbackupcheck` UID, mode 0600; source spool cleanup completed. Its archive hash was
+`cd145ca3dbd8501645e4ffbb6673a422b1a41010f2eb1696ff8f3d940314eb03`.
+After socket trust/lifetime hardening, `498954c7` passed another actual export,
+unchanged descriptor/wallet identity, denied connection for `nobody`, malformed
+request refusal with no protocol output, and normal spool cleanup. These tests
+used the fixed helper binary/config locations under `/opt/ecx-backup-acceptance`;
+they did not activate the bridge signer/worker, sign or broadcast a transaction.
+The temporary native credential copy was removed and the test socket stopped.
+
+Abrupt death can leave a native backup RPC writing after its helper is gone.
+The implementation retains those files and refuses new exports after two retained
+spool entries; it does not invent a completion proof or delete a potentially live
+output. The cap bounds retained attempts, not a malicious/oversized native wallet's
+on-disk copy size. Explicit stopped-node cleanup remains necessary; kill/reboot,
+truncated transfer and full installer/checkpoint integration still need acceptance.
+Review found that an unconditional finalizer could remove a directory during an
+uncertain node RPC. It was corrected: cleanup begins only after backup construction
+and validation return successfully; RPC/async failure retains the bounded orphan.
+The ConfigureCheck regression injects cancellation specifically inside backupwallet
+and checks two retained directories plus refusal of a third request without deletion.
+The final Ubuntu build and bridge suite passed (`6f576a9c`), including that regression.
+Controlled real-service orphan-budget refusal also passed (`b9a48467`). The test
+socket was disabled after acceptance; no helper is kept running.
+
+Existing old signers without this transport also need a reviewed compatibility
+transition before a managed checkpoint; this component does not by itself prove
+that upgrade. Reverse native restore remains a separate offline handoff gate.
+
+Production Haskell changes total net +136 lines in four files (including the new
+94-line private transport); install scripts add 81 lines, including a new 76-line
+fixed service installer. No generic privileged broker, shared custody UID or new
+signing API was introduced. This added boundary addresses a demonstrated real
+permissions failure rather than weakening existing private-file requirements.
