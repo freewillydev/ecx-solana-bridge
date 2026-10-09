@@ -497,8 +497,9 @@ active and enabled, with on-failure restart delays of 5, 10 and 10 seconds.
 The signer was inactive but enabled. Its boot enablement was disabled to preserve
 the observation-only state across reboot; it remains inactive with PID 0
 (SSM `09166268-69ce-4824-b084-f1a16109abe3`). Reviewed activation must deliberately
-restore signer startup only after readiness and custody ownership checks. A future
-installer may enable it again; check that state before any reboot during review.
+restore signer startup only after readiness and custody ownership checks. Installer candidate `154b308` now preserves existing enabled/disabled states on
+upgrade; older installers may enable it again. Fresh installation still enables
+both services. Check boot policy before any reboot during review.
 No live reboot or crash-recovery test is claimed by this configuration inspection.
 
 The tunnel routes only `bridge.bitnames.info` to loopback port 61992, with a 404
@@ -518,3 +519,24 @@ needs an external health check (including unavailable/stale readiness, not only
 HTTP 200), backup/disk alarms, certificate-expiry checks and a delivered test alert.
 Do not create an unapproved messaging destination or automatically resume custody
 in response to a health failure.
+
+
+### Installer boot-policy regression and review artifact
+
+Candidate `154b308` changes only installer enablement behavior: fresh installation
+still enables services, while upgrade leaves existing enablement links unchanged.
+The actual installer passed all four worker/signer enabled/disabled combinations,
+retaining each state and keeping both PIDs zero; custody/configuration hashes were
+unchanged. Matrix assertions passed in SSM `e2715806-0307-4d3b-abf9-59dc3d5a5ade`.
+Its cleanup encountered a socket-file issue; separate repair/check
+`25392366-c7b5-4458-b162-f368173b28d0` verified original files and release markers
+restored. The fixture was deliberately left stopped and disabled.
+
+This used a synthetic post-checkpoint journal for installer component acceptance;
+it is not full checkpoint/upgrade/recovery/resume evidence. The new
+`review-2026-10-09-boot-policy` artifact reuses the unchanged reviewed `07bf9bb`
+application executable, SDK and browser payload, so the executable still reports
+that build identity. Packaging used the existing locally trusted build path;
+source commit context is not a build-provenance attestation. SHA-256:
+`29d08ecfc37fce6431cb09b5bcf3e71e5df451bb051b73fc6e7f93d7c2b701b2`.
+Previous release assets and the deployed observation worker remain unchanged.
