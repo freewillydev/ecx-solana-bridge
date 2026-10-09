@@ -341,7 +341,8 @@ for role in worker signer; do
     if [ -f "$config/signer/backup.json" ] && [ -f /etc/systemd/system/ecx-betanet.service ]; then extra="Environment=ECX_NATIVE_BACKUP_SERVICE=1"; fi
     if [ -f "$config/signer/backup.json" ]; then args="$args $config/signer/backup.json $state/signer"; fi
   fi
-  cat > "/etc/systemd/system/ecx-bridge-$role.service" <<UNIT
+  unit_pending=$(mktemp /etc/systemd/system/.ecx-bridge-unit-XXXXXXXX)
+  cat > "$unit_pending" <<UNIT
 [Unit]
 Description=ECX bridge $role
 ConditionPathExists=$config/installed
@@ -392,7 +393,10 @@ UNIT
     } > "$dropin/30-configure.conf"
     chmod 0644 "$dropin/30-configure.conf"
   fi
-  chmod 0644 "/etc/systemd/system/ecx-bridge-$role.service"
+  chmod 0644 "$unit_pending"
+  sync -f "$unit_pending"
+  mv -Tf "$unit_pending" "/etc/systemd/system/ecx-bridge-$role.service"
+  sync -f /etc/systemd/system
 done
 # A no-login shell alone still permits SSH forwarding with an authorized key.
 if [ -x /usr/sbin/sshd ]; then

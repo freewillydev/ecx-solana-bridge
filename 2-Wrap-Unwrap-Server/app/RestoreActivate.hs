@@ -57,6 +57,12 @@ activate=withFamily "/var/lib/ecx-bridge-upgrade/lifecycle" $ do
   require (answer=="SOURCE EXCLUDED") "restore_activation_cancelled"
   mark "source-excluded" (L.toStrict $ encode $ object ["identity" .= R.identity plan,"sequence" .= sequenceNo])
   mark "activation-release" (B8.pack $ T.unpack release)
+  attempted<-doesFileExist(root</>"activation.started")
+  when attempted $ do
+    installedConfig<-C.loadConfig worker
+    require (C.fingerprint installedConfig==R.identity plan) "recovery_active_identity_changed"
+    mark "services.blocked" "restore\n"
+    checked "systemctl" ["stop","ecx-bridge-worker","ecx-bridge-signer"]
   forM_ ["ecx-bridge-worker","ecx-bridge-signer"] $ \service->do
     (code,out,_)<-readProcessWithExitCode "systemctl" ["show",service,"--property=MainPID,ActiveState,LoadState"] ""
     require (code==ExitSuccess && ("LoadState=not-found" `elem` lines out || ("MainPID=0" `elem` lines out && any (`elem` lines out) ["ActiveState=inactive","ActiveState=failed"]))) "stop_custody_before_recovery_activation"
@@ -78,6 +84,13 @@ activate=withFamily "/var/lib/ecx-bridge-upgrade/lifecycle" $ do
     NodeSetup.persistRestoredWallet (C.nativeWallet c)
     mark "native-autoload.completed" (L.toStrict $ encode $ C.nativeWallet c)
   checked "systemctl" ["unmask","ecx-bridge-worker","ecx-bridge-signer"]
+  let registry="/var/lib/ecx-bridge-setup"
+  exists<-doesDirectoryExist registry
+  unless exists $ P.createDirectory registry 0o700
+  saved<-doesFileExist(registry</>"installed-directory.json")
+  if saved then json(registry</>"installed-directory.json") >>= \path->require (path==material) "installed_setup_registry_conflict"
+    else savePrivate(registry</>"installed-directory.json") (L.toStrict $ encode material)
+  mark "activation.started" (L.toStrict $ encode $ object ["identity" .= R.identity plan,"database" .= database])
   removeFile(root</>"services.blocked")
   sync root
   let stop=do
@@ -96,12 +109,6 @@ activate=withFamily "/var/lib/ecx-bridge-upgrade/lifecycle" $ do
     require (not $ W.paused state) "restored_server_still_paused"
     mark "activation.completed" (L.toStrict $ encode $ object ["identity" .= R.identity plan,"database" .= database,"minimumSequence" .= sequenceNo])
     checked "systemctl" ["enable","ecx-bridge-worker","ecx-bridge-signer"]
-    let registry="/var/lib/ecx-bridge-setup"
-    exists<-doesDirectoryExist registry
-    unless exists $ P.createDirectory registry 0o700
-    saved<-doesFileExist(registry</>"installed-directory.json")
-    if saved then json(registry</>"installed-directory.json") >>= \path->require (path==material) "installed_setup_registry_conflict"
-      else savePrivate(registry</>"installed-directory.json") (L.toStrict $ encode material)
     renameFile(root</>"pending") (root</>"completed-plan")
     sync root
     putStrLn "Recovery complete: restored custody is running and checked resume passed. Keep this recovery journal and independent backups."
