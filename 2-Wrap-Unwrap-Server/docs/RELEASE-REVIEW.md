@@ -1832,3 +1832,21 @@ Clean install SSM `059a3262`, repeat `0920e9fe`, reboot `381a5d15`, upgrade
 `bb61892c-101c-4c16-bdd5-fa4d1a54e535`; both fixture services were stopped afterward.
 That artifact predates this report change. It does not establish funded readiness,
 customer wallet acceptance or recovery of a live ledger onto another host.
+
+Follow-up on `ac9ae8a`: root `cabal build ecx-build-assets -j1` passed using
+existing `CARGO_HOME`/`CARGO_TARGET_DIR` on Crucial X9; no reinstall or cache
+removal was needed. The generated browser manifest was retained. A read-only
+localhost UI fixture exercised the actual compiled Haskell browser: 11,970 ECX,
+3,780 wrapped ECX, 0.0783 SOL, 119.23/68.235 earned fees, 32/12 conversion counts
+and the stale/undated warnings rendered correctly. This is display evidence only,
+not chain balances. Preview tab and fixture server were closed afterward.
+Independent source review found no demonstrated accounting/security blocker;
+concurrent/failure/cancellation cache acceptance remains a separate pending check.
+
+The exact source bundle and generated browser assets were staged on the AWS build
+host with SHA-256 verification (SSM `10d46192-7005-4757-9f6a-972330ce3b63`).
+Source bundle: `28258d0eb99e593f71d62ba503d5fa7f81ccf48d081d2cfd83afb3a8c39882b8`;
+browser archive: `6c18af7b996f56d886292525b10ec64695e7b75a718d27433d33f4ee4969f2e3`.
+No deployment or funded transfer was performed. Both independent Mainnet providers
+still reported zero finalized lamports for the fresh AWS owner at slots
+454732610/454732612; the funding request remains open.
