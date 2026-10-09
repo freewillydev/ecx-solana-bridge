@@ -211,6 +211,7 @@ clearPayment state = do
   link "payment-link" Nothing
   forM_ ["qr","copy-payment"] $ \key -> hidden key True
   text "deposit-address" ""
+  text "deposit-deadline" ""
 showQR :: Text -> IO ()
 showQR instruction = case encodeText (defaultQRCodeOptions M) Utf8WithoutECI instruction of
   Nothing -> text "message" "QR unavailable. Copy the payment instructions below."
@@ -242,12 +243,11 @@ refresh state = do
       , ("ExpiredUnfunded","Order expired. Do not pay."), ("NeedsReview","Operator review required. Do not send another payment.") ]
     text "order-short" ("Order " <> orderId o)
     text "order-summary" $ if refunding then "Refunds return the deposit to its verified refund destination with no bridge fee. The refund transaction shows the actual amount and recipient."
-      else "Send " <> renderCoins (gross q) <> "; receive " <> renderCoins (net q) <> ". Fee " <> renderCoins (fee q) <> ". Destination: " <> recipient (request o)
+      else "Deposit " <> renderCoins (gross q) <> "; payout " <> renderCoins (net q) <> ". Fee " <> renderCoins (fee q) <> ". Destination: " <> recipient (request o)
     hidden "order-details" False
     now <- B.now
     let awaiting = status o=="AwaitingDeposit" && now < fromIntegral (deadline o)
     expiry <- B.text <$> B.dateText (fromIntegral $ deadline o)
-    text "deposit-deadline" $ if awaiting then "Pay before " <> expiry <> ". Send the exact amount once." else ""
     forM_ (configuration s) $ \cfg -> do
       when (awaiting && available (pubAvailability cfg)) $ forM_ (depositInstruction o) $ \instruction -> do
         paymentText <- if direction (request o)==NativeToWrapped then pure instruction else do
@@ -262,6 +262,7 @@ refresh state = do
           pure (instructionUri instructions)
         modifyIORef' state $ \old -> old{payment=paymentText}
         text "deposit-address" paymentText
+        text "deposit-deadline" ("Pay before " <> expiry <> ". Send the exact amount once.")
         hidden "copy-payment" False
         showQR paymentText
       text "payout-link" $ if refunding then "View refund transaction" else "View payout transaction"
