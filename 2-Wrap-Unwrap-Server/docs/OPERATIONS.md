@@ -385,3 +385,21 @@ no remaining processes before inspecting/removing abandoned `export-<64 hex>`
 directories in `/var/lib/ecx-betanet/bridge-backup`. Preserve `export.lock` and all
 unrelated files. Resume the node and socket afterward. Automated recovery of this
 hard-kill case and the reverse restore handoff remain acceptance/integration work.
+
+
+## Password-protected funding view
+
+`/info` exposes only the existing safe public reserve/readiness report. Optional
+`/funding` is a read-only page protected by HTTP Basic authentication (username
+`operator`). Serve it over HTTPS, directly or through an encrypted tunnel to the
+loopback listener. It cannot allocate treasury, sign or send transactions.
+
+Set `ECX_FUNDING_CONFIG` to an absolute private mode-0600 JSON file with `salt`
+(32 random bytes as hex), `hash` (32-byte PBKDF2-HMAC-SHA256 result, 600,000 rounds,
+hex), `nativeAddress`, `owner`, `mint` and `ata`. Store no plaintext password.
+Verify the native address belongs to the configured wallet before provisioning;
+the page additionally refuses mismatched Solana owner/mint. Restart the worker
+after provisioning or replacing this file. Missing configuration disables the
+route. Attempts share a two-second admission interval; responses are never cached.
+Funding still requires confirmed observations, reconciliation and explicit
+allocation through the existing operator workflow. Reserve timestamps may be stale.
