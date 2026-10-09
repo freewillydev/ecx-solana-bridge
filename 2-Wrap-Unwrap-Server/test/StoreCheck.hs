@@ -934,6 +934,7 @@ reportCacheMain=do
               when (finished/=Just ()) $ fixture fixtures (ReportWaiters $ T.pack role) >>= print
               check "report backend still blocked two seconds after cancellation" (finished==Just ())
         before<-evalRead reader ReadState
+        bookedBefore<-evalRead reader ReadBalances
         currentTime<-floor <$> getPOSIXTime
         initialReport<-evalRead reader (ReadPublicReport currentTime)
         check "fresh empty ledger must report zero completed transfers"
@@ -970,7 +971,10 @@ reportCacheMain=do
         check "successful cache changed report" (all ((==Just report).W.pubReport) success)
         noWaiters
         PG.rollback lock
-        evalRead reader ReadState >>= check "public cache changed ledger state" . (==before)
+        after<-evalRead reader ReadState
+        check "public cache changed financial sequence or resumed intake"
+          (ledgerSequence after==ledgerSequence before && ledgerBackup after==ledgerBackup before && ledgerPaused after)
+        evalRead reader ReadBalances >>= check "public cache changed financial balances" . (==bookedBefore)
         putStrLn "PASS real HTTP report cache: concurrent timeout coalesced, backend canceled, failure cached, TTL recovery, successful cache, unchanged ledger"
 
 ledgerMain :: IO ()
@@ -2031,7 +2035,7 @@ fixture c (ReportWaiters role) = O.runSelect c $ do
       (O.requiredTableField "usename",O.requiredTableField "wait_event_type",O.requiredTableField "query")
     O.where_ (user O..== O.sqlStrictText role
       O..&& O.matchNullable (O.sqlBool False) (O..== O.sqlStrictText "Lock") event)
-    pure query
+    pure (query :: O.Field O.SqlText)
     :: IO [T.Text]
 fixture c (LegacyHash intent) = do
   let includeReplacements=True
