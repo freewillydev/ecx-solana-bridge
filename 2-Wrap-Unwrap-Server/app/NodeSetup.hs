@@ -100,8 +100,10 @@ provision directory=do
     signerAuth<-readPrivate (directory</>"native-signer.auth")
     (migrating,rules)<-either reject pure (signerPolicy signerAuth originalRules)
     current<-B.readFile path
-    wallet<-fieldValue "nativeWallet" =<< decode =<< readPrivate (directory</>"worker.json")
-    require (not(T.null wallet) && T.all (`elem` ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"::String)) wallet) "invalid_recovered_wallet_name"
+    autoload<-if not migrating then pure B.empty else do
+      wallet<-fieldValue "nativeWallet" =<< decode =<< readPrivate (directory</>"worker.json")
+      require (not(T.null wallet) && T.all (`elem` ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"::String)) wallet) "invalid_recovered_wallet_name"
+      pure $ "\nwallet="<>B8.pack(T.unpack wallet)<>"\n"
     let settings=map option $ B8.lines before
         priorWhitelist="rpcwhitelist" `elem` settings
         explicitDefault="rpcwhitelistdefault" `elem` settings
@@ -111,7 +113,6 @@ provision directory=do
         header="# Generated ECX bridge RPC roles\n"<>preserve
         updated=header<>rules<>"\n"<>before
         legacyExpected=header<>originalRules<>"\n"<>before
-        autoload="\nwallet="<>B8.pack(T.unpack wallet)<>"\n"
         retained=if current `elem` [legacyExpected<>autoload,updated<>autoload] then autoload else ""
         expected=updated<>retained
         suffix=if migrating then "-signer-validation" else ""
