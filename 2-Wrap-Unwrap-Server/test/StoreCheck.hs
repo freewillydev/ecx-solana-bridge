@@ -3997,11 +3997,13 @@ treasuryContract fixtures reader writer=do
       split=[("float",money 4),("operating",money 3),("backing",money 2),("lp",money 1)]
   seed native Native
   evidence "Native" "treasury-ok" (proof native)
+  evalRead reader ReadTreasuryReceipts >>= check . elem (native,Native,money 10)
   fixture fixtures ReadyIntake
   expectStore "treasury_allocation_requires_pause" (allocate native split "owned treasury")
   ready
   before<-evalRead reader ReadBalances
   first<-allocate native split "owned treasury"
+  evalRead reader ReadTreasuryReceipts >>= check . not . any (\(key,_,_)->key==native)
   after<-evalRead reader ReadBalances
   check (M.findWithDefault 0 (Native,Unallocated) after==M.findWithDefault 0 (Native,Unallocated) before-10)
   forM_ [(Float,4),(Operating,3),(Backing,2),(Liquidity,1)] $ \(account,n)->

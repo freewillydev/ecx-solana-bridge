@@ -1,7 +1,7 @@
 {-# LANGUAGE GADTs #-}
 -- Fresh generated custody only, before installation. No customer or runtime entry.
 -- Reuse token administration's closed, saved-before-send ATA operation; never mint.
-module Bootstrap (canonicalMint,interface,validateOrigin,setupConfig,bind,complete,initializeBackup,agreedOrigin) where
+module Bootstrap (preflight,checkHistoryWith,canonicalMint,interface,validateOrigin,setupConfig,bind,complete,initializeBackup,agreedOrigin) where
 import qualified Bridge.Config as C
 import Bridge.Domain (units)
 import Bridge.File (hashHandle)
@@ -67,6 +67,24 @@ setupConfig directory=do
     pure c
   else C.loadConfig (directory</>"signer.json")
 
+-- Qualify required history before sealing setup, node mutation or ATA spending.
+-- Actual custody origins are still verified later; this is capability preflight.
+preflight :: FilePath -> IO ()
+preflight directory=do
+  pending<-doesFileExist(directory</>"bootstrap.json")
+  when pending $ setupConfig directory >>= evalSetup . CheckProviders
+
+checkHistoryWith :: (T.Text -> [Value] -> IO Value) -> IO ()
+checkHistoryWith call=do
+  rows<-call "getSignaturesForAddress" [toJSON canonicalMint,object ["limit" .= (1::Int),"commitment" .= String "finalized"]] >>= parseValue parseJSON :: IO [Value]
+  signature<-case rows of [row]->fieldValue "signature" row; _->reject "rpc_required_history_unavailable"
+  tx<-call "getTransaction" [toJSON(signature::T.Text),object ["encoding" .= String "json","commitment" .= String "finalized","maxSupportedTransactionVersion" .= (0::Int)]]
+  require (tx/=Null) "rpc_required_history_unavailable"
+  keys<-either reject pure (transactionKeys tx)
+  transaction<-fieldValue "transaction" tx
+  signatures<-fieldValue "signatures" transaction :: IO [T.Text]
+  require (canonicalMint `elem` keys && take 1 signatures==[signature]) "rpc_required_history_mismatch"
+
 -- Seal the full setup before node mutation, not just before Solana signing.
 bind :: FilePath -> IO ()
 bind directory=do
@@ -110,9 +128,22 @@ complete directory=do
     publish (directory</>"signer.json") (toJSON $ ready {C.nativeCookie=signer})
 
 data Setup a where
+  CheckProviders :: C.Config -> Setup ()
   FundCustody :: FilePath -> C.Config -> FilePath -> Setup C.Config
 
 evalSetup :: Setup a -> IO a
+evalSetup (CheckProviders c)=bracket newRpcManager closeManager $ \manager->do
+  verifier<-maybe (reject "independent_rpc_required") pure (C.solanaVerifierRpc c)
+  independentHttps (C.solanaRpc c) verifier
+  forM_ (zip ["primary","independent verifier"] [C.solanaRpc c,verifier]) $ \(label,url)->do
+    putStrLn $ "Checking "<>label<>" RPC history access (60-second limit; no payments)..."
+    let call=rpc manager url Nothing
+    result<-timeout 60000000 $ do
+      genesis<-call "getGenesisHash" [] >>= parseValue parseJSON
+      require (genesis==S.solanaGenesis CanonicalBeta) "wrong_solana_genesis"
+      checkHistoryWith call
+    require (result==Just ()) "rpc_preflight_timeout"
+  putStrLn "Both RPC providers support the required history reads. Custody and funding checks still follow."
 evalSetup (FundCustody directory c key)=bracket newRpcManager closeManager $ \manager->do
   verifier<-maybe (reject "independent_rpc_required") pure (C.solanaVerifierRpc c)
   independentHttps (C.solanaRpc c) verifier

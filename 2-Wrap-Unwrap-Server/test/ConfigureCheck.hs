@@ -111,11 +111,12 @@ contract=bracket temporary removeDirectoryRecursive $ \directory->do
     settingsRemain<-doesDirectoryExist interrupted
     nativeChecked<-nativeSeedContract directory
     simplifiedChecked<-simpleContract directory executable
+    historyPreflight<-preflightContract
     backupChecked<-backupTimeoutContract directory
     handoffChecked<-backupHandoffCancellation directory
     expectedKey<-either (const $ fail "fixture mnemonic") pure (walletKey phrase)
     let expectedSetup=object ["existing" .= False,"method" .= ("source"::String),"sourceRoot" .= directory,"restic" .= worker]
-    pure(handoffChecked && backupChecked && simplifiedChecked && nativeChecked && C.fingerprint config==C.fingerprint other && C.nativeCookie config/=C.nativeCookie other
+    pure(historyPreflight && handoffChecked && backupChecked && simplifiedChecked && nativeChecked && C.fingerprint config==C.fingerprint other && C.nativeCookie config/=C.nativeCookie other
       && sort entries==["interface.json","setup.json","signer.json","sources.json","worker.json"]
       && sources==M.fromList [("solana.keypair.json",key),("native-worker.auth",worker),("native-signer.auth",signer)]
       && originalKey==L.toStrict(encode $ B.unpack(seed<>public)) && originalWorker=="worker:password" && originalSigner=="signer:password"
@@ -429,6 +430,25 @@ originContract=do
   refused<-mapM run ["repeat","disagree","missing","wrong-account"]
   pure(either (const False) (==signature) good && all (either (const True) (const False)) refused)
 
+
+-- Provider plan refusal and missing/misbound history must fail before setup spends.
+preflightContract :: IO Bool
+preflightContract=do
+  let signature=base58(B.replicate 64 1)
+      request variant method args=case (method,args) of
+        ("getSignaturesForAddress",[String mint,_]) | mint==Bootstrap.canonicalMint->
+          if variant=="forbidden" then throwIO(BridgeError "rpc_method_forbidden")
+          else pure $ toJSON (if variant=="empty" then [] else [object ["signature" .= signature]])
+        ("getTransaction",[String sig,_]) | sig==signature->
+          if variant=="missing" then pure Null else pure $ object
+            ["meta" .= object [],"transaction" .= object
+              ["signatures" .= [if variant=="wrong-signature" then base58(B.replicate 64 2) else signature]
+              ,"message" .= object ["accountKeys" .= [if variant=="wrong-account" then base58(B.replicate 32 8) else Bootstrap.canonicalMint]]]]
+        _->fail "unexpected_preflight_read"
+      run variant=try(Bootstrap.checkHistoryWith $ request variant) :: IO(Either BridgeError ())
+  good<-run "ok"
+  refused<-mapM run ["forbidden","empty","missing","wrong-signature","wrong-account"]
+  pure(either (const False) (const True) good && all (either (const True) (const False)) refused)
 
 -- Losing the caller during backupwallet must retain the directory: the node RPC
 -- may still be writing after the Haskell helper has been cancelled.

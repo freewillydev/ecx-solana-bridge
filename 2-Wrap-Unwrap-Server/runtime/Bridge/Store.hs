@@ -182,6 +182,7 @@ evalBackup (Reader settings identity _) (ExportLedger directory) =
 
 data StoreRead a where
   ReadNativeReviews :: StoreRead [(Text,Text,Int64)]
+  ReadTreasuryReceipts :: StoreRead [(Text,Asset,Amount)]
   ReadNativeRebroadcastContext :: Text -> StoreRead (RecordedAttempt,[(RecordedAttempt,N.NativeSigned)],Int64)
   ReadNativeRebroadcastDecision :: Text -> Int64 -> Text -> StoreRead (Maybe Int64)
   NativeSettlementCandidates :: StoreRead [RecordedAttempt]
@@ -338,6 +339,20 @@ evalRead (Reader settings identity remote) operation = bracket connect PG.close 
           O.where_ (S.eventId event O..== O.sqlStrictText identifier O..&& O.in_ (map O.sqlStrictText $ if chain=="Solana" then ["Solana","SolanaOperating"] else [chain]) (S.eventChain event))
           pure (S.eventId event)
         pure (not $ null (rows :: [Text]))
+      ReadTreasuryReceipts -> do
+        -- A bounded selection aid, never allocation authority. The write leaf
+        -- rechecks ownership evidence, obligations, readiness and exact amounts.
+        rows<-O.runSelect c $ O.limit 100 $ O.orderBy (O.asc $ \(key,_,_)->key) $ do
+          row<-O.selectTable S.deposits
+          O.where_ (O.isNull(S.depositOrder row) O..&& S.depositEligible row O..== O.sqlInt8 1
+            O..&& S.depositAllocated row O..== O.sqlInt8 0)
+          linked<-Exists.exists $ do
+            obligation<-O.selectTable S.obligations
+            O.where_ (S.obligationDeposit obligation O..== S.depositId row)
+            pure ()
+          O.where_ (O.not linked)
+          pure (S.depositId row,S.depositAsset row,S.depositAmount row)
+        forM rows $ \(key,asset,quantity)->(,,) key <$> parseAsset asset <*> checked(amount $ toInteger quantity)
       ReadNativeReviews -> do
         reviews<-O.runSelect c $ O.limit 1001 $ O.orderBy (O.desc $ \(_,_,n)->n) $ do
           (tx,_,state,_,n)<-S.nativeRecoveryDetails

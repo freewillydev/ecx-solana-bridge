@@ -500,3 +500,25 @@ or replace a ledger with a fresh initialization to satisfy the new version check
 
 [OPERATIONS.md](OPERATIONS.md) covers process startup, funding, operator commands
 and restore. Deleting or reinstalling a server is not itself a recovery procedure.
+
+### Guided console and provider preflight
+
+`sudo ecx-bridge` opens a numbered menu; Status and Exit do not start services.
+Continue retains saved setup and requires confirmation before checked startup.
+Upgrade shows the selected and installed release and retains any unfinished plan.
+Funding shows configured network/address information and permits explicit allocation
+of selected unbound receipts through the existing operator DSL. It never decides
+that an incoming deposit belongs to the operator. Pause before allocating capital.
+
+Fresh startup checks canonical genesis and real transaction-history access on both
+providers before node provisioning or spending. The check is bounded to 60 seconds
+per provider; actual custody history and independent reconciliation remain required.
+On 2026-10-09, Alchemy, Helius and QuickNode's free trial passed actual AWS custody
+history checks. Chainstack's free plan returned a forbidden archive-history method;
+OnFinality's 200/hour key allowance was insufficient for this deployment. These are
+observations about tested plans, not permanent endorsements or guarantees. Review
+provider allowances for sustained use; no paid upgrades are performed automatically.
+
+Backup menu actions verify or download an exact snapshot with an independently
+retained minimum sequence. They do not activate recovered custody. Full restoration
+still requires the explicit fencing/database/wallet procedure in OPERATIONS.

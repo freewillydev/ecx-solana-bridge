@@ -3,7 +3,8 @@
 module Main (main) where
 import Data.Version (showVersion)
 import qualified Paths_ecx_bridge as Package
-import Configure (launch,configure,configureAdvanced,start,initializeNative)
+import Menu (launch)
+import Configure (configure,configureAdvanced,start,initializeNative)
 import qualified Bridge.Config as C
 import qualified Bridge.Fence as Fence
 import Bridge.BrowserBuild (browserAssetsDirectory)

@@ -23,16 +23,23 @@ Have two independent Solana Mainnet HTTPS RPC URLs and a **new HTTPS restic back
 repository with access credentials**. For public HTTPS, also have a domain and
 certificate/key files; otherwise choose local testing.
 
-Answer the prompts, save both recovery phrases and the backup encryption password,
-then follow the funding and allocation instructions for ECX, wrapped ECX and SOL.
+Choose **Set up this server**, answer the prompts and save both recovery phrases
+and the backup encryption password. Use **Funding** for addresses and explicit
+allocation of your verified deposits; use **Continue** for checked startup.
 Node synchronization takes time. Orders stay paused until readiness checks pass.
 Keep independent ledger backups: wallet keys alone do not recover pending transfers.
 
-After interruption or funding, resume from any directory:
+Open the same numbered menu from any directory, including after interruption:
 
 ```sh
 sudo ecx-bridge
 ```
+
+The menu offers status, saved setup, funding, pause, reviewed upgrades and backup
+verification/download. Status and exit never start services. State changes require
+confirmation. Full custody restoration remains an explicit recovery procedure;
+backup verification does not activate a recovered server. Advanced CLI commands
+remain available.
 
 [Setup and recovery](2-Wrap-Unwrap-Server/docs/INSTALL.md) ·
 [Upgrade and operation](2-Wrap-Unwrap-Server/docs/OPERATIONS.md) ·

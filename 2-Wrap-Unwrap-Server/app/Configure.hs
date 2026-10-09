@@ -1,6 +1,6 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 -- Offline installation material only: wallet generation, no RPC/signing/activation.
-module Configure (launch,configure,configureAdvanced,start,initializeNative) where
+module Configure (configure,configureAdvanced,start,initializeNative) where
 import qualified Bridge.Config as C
 import qualified Bootstrap
 import qualified NodeSetup
@@ -38,24 +38,10 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as L
 import qualified Data.Text as T
-import System.Directory (makeAbsolute,canonicalizePath,removeDirectoryRecursive,doesFileExist,doesDirectoryExist,setCurrentDirectory,findExecutable)
+import System.Directory (makeAbsolute,canonicalizePath,removeDirectoryRecursive,doesFileExist,doesDirectoryExist,findExecutable)
 import System.FilePath ((</>),takeDirectory,addTrailingPathSeparator)
 import qualified System.Posix.Directory as P
 import System.IO (hFlush,stdout,stdin,isEOF,hIsTerminalDevice,withFile,IOMode(ReadWriteMode),hPutStrLn,hPutStr,hGetLine)
-
--- One stable entry point; services continue independently after the console exits.
-launch :: IO ()
-launch=do
-  require (os=="linux") "setup_requires_ubuntu_24_04"
-  getEffectiveUserID >>= \uid->require (uid==0) "run_sudo_ecx_bridge"
-  let home="/var/lib/ecx-bridge-setup"
-  exists<-doesDirectoryExist home
-  when (not exists) $ P.createDirectory home 0o700
-  privateParent (home</>"state")
-  setCurrentDirectory home
-  configured<-doesFileExist(".ecx-bridge"</>"setup.json")
-  when (not configured) configure
-  start ".ecx-bridge"
 
 -- The default path is fresh canonical custody. Advanced/recovery remains explicit.
 configure :: IO ()
@@ -171,7 +157,7 @@ simplified directory=do
     ,("interface.json",Bootstrap.interface origin),("setup.json",setup)]
   putStrLn "Saved private setup. Runtime configuration is published only after verified funding/history."
   putStrLn "Defaults: local ECX RPC http://127.0.0.1:28532; PostgreSQL and services installed automatically."
-  putStrLn "Order range: 0.00010000–0.00100000 ECX; 4 queued orders; 1 native confirmation."
+  putStrLn "No fixed swap minimum or maximum; available reserves and network feasibility apply. 4 queued orders; 1 native confirmation."
   putStrLn "Per-transaction caps: 1,000 native base units, 10,000 lamports fee, 2,100,000 lamports rent."
   putStrLn "Daily cost caps: 10,000 native base units and 10,000,000 lamports. Review before funding."
   putStrLn "Advanced values are in .ecx-bridge/bootstrap.json; never edit identity after bootstrap starts."
@@ -523,6 +509,7 @@ startUnlocked path=do
       root<-field "sourceRoot" value
       (verified,_,_)<-readCreateProcessWithExitCode ((proc "sha256sum" ["--check","--status","manifest.sha256"]) {cwd=Just root}) ""
       require (verified==ExitSuccess) "installed_setup_bundle_changed"
+    Bootstrap.preflight directory
     Bootstrap.bind directory
     Bootstrap.initializeBackup directory
     NodeSetup.provision directory
@@ -553,6 +540,12 @@ startUnlocked path=do
   sourceInterface<-B.readFile(directory</>"interface.json")
   installedInterface<-B.readFile "/etc/ecx-bridge/worker/interface.json"
   require (sourceInterface==installedInterface) "installed_material_differs_updated_package_required"
+  let registry="/var/lib/ecx-bridge-setup"
+  registryExists<-doesDirectoryExist registry
+  when (not registryExists) $ P.createDirectory registry 0o700
+  privateParent (registry</>"installed-directory.json")
+  registered<-doesFileExist (registry</>"installed-directory.json")
+  when (not registered) $ savePrivate (registry</>"installed-directory.json") (L.toStrict $ encode directory)
   sourceBytes<-readPrivate(directory</>"sources.json")
   sources<-either (const $ reject "invalid_source_references") pure (eitherDecodeStrict' sourceBytes :: Either String Object)
   forM_ ["public-fullchain.pem","public-privkey.pem"] $ \name->

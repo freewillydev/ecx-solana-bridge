@@ -41,6 +41,7 @@ data CustomerWrite a where
 data OperatorRead a where
   NativeReviews :: OperatorRead [(Text,Text,Int64)]
   ServiceState :: OperatorRead ServiceStatus
+  TreasuryReceipts :: OperatorRead [(Text,Asset,Amount)]
 
 data OperatorWrite a where
   RepairCompletedOrder :: Text -> OperatorWrite ()

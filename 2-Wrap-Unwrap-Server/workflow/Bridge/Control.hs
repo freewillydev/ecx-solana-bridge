@@ -36,6 +36,7 @@ controlPlan=withObject "operator command" $ \o->do
       fields ["operation","transaction","recovery","reason"]
       ControlPlan . operator <$> (RebroadcastNative <$> o .: "transaction" <*> o .: "recovery" <*> o .: "reason")
     "repair-completed-order"->fields ["operation","order"] >> (ControlPlan . operator . RepairCompletedOrder <$> o .: "order")
+    "treasury-receipts"->fields ["operation"] >> pure (ControlPlan $ operatorRead TreasuryReceipts)
     "status"->fields ["operation"] >> pure (ControlPlan $ operatorRead ServiceState)
     "pause"->fields ["operation","reason"] >> (ControlPlan . operator . PauseService <$> o .: "reason")
     "cover-source-loss"->do
