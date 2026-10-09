@@ -3194,6 +3194,12 @@ orderWorkflowContract fixtures reader writer storePolicy = do
         "contract" key key 8 (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]) False False (W.Availability False "starting") Nothing
       customerSettings=CustomerSettings public storePolicy "/unused/sdk"
       endpoint=SigningEndpoint 9443 "/unused/auth"
+  -- The worker uses wall time, unlike the provisioning fixture's clock above.
+  -- Establish expiry before comparing separate HTTP/reader snapshots, and pause
+  -- explicitly rather than racing the worker's first rejected offline scan.
+  now<-floor <$> getPOSIXTime
+  evalWrite writer (ExpireQuotes now)
+  evalWrite writer (Pause "offline customer HTTP contract")
   bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> reject "offline_process_rpc"}) closeManager $ \manager->do
     forM_ [False,True] $ \paying->
       withWorkerProcess manager reader writer chainSettings config
