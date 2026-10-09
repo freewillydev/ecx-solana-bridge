@@ -10,16 +10,25 @@ candidate's tests does not certify later source or packages.
 
 ## Current production acceptance checklist
 
-Current published installer: `154b308` (`review-2026-10-09-boot-policy`),
-SHA-256 `29d08ecfc37fce6431cb09b5bcf3e71e5df451bb051b73fc6e7f93d7c2b701b2`.
-Compiled application/SDK/browser are unchanged from `07bf9bb`; the executable
-reports that build identity. Later documentation commits do not change those bytes.
-The live worker observes only; the signer is stopped and disabled.
+Current published installer: `513ac1d` (`review-2026-10-09-rpc-cycle`),
+SHA-256 `6d0ed90a73cd7108b6e1bdbd702ee866d40cce369e4f860800586b72a4f0cef4`.
+Production code was compiled at `1a5ae45`; subsequent source changes are tests/docs.
+The executable reports `0.1.0.0`; SDK/browser inputs are unchanged and checked by
+packaging. This locally trusted artifact is not signed or independently attested.
+The live worker remains observation-only on `07bf9bb`; the signer is stopped and disabled.
+
+The RPC change reduces idle primary/verifier calls from 16/9 to 11/6 without
+cross-cycle caching. Build and QuickCheck passed (SSM `96553503`); the final
+isolated PostgreSQL suite passed at `513ac1d` (SSM `a53e2650`), including account/head
+validation, failed preparation marking both streams, zero network calls on that
+failure path, and encrypted archive restoration. Independent source/contract review
+approved this narrow change. All 55 artifact manifest entries were verified.
+This does not establish new funded acceptance or sufficient provider quotas.
 
 | Gate | Evidence retained / remaining acceptance |
 | --- | --- |
 | Installer integrity and boot policy | Passed exact manifest/hash checks, anonymous download and four enabled/disabled upgrade cases. Synthetic post-checkpoint component scope; see OPERATIONS. |
-| Existing application contracts | Reuse `07bf9bb` build/funding contract and unchanged earlier contracts. No unnecessary rebuild for the installer-only change. |
+| Existing application contracts | New RPC build, QuickCheck and full PostgreSQL ledger contracts passed as recorded above. Earlier installer/funding evidence remains limited to its unchanged component scope. |
 | Current real transfers | Earlier canonical round trip is historical evidence. Complete both directions on the aligned current deployment, with fees, settlement and reconciliation, once independent RPC works. |
 | Customer interface | Live paused state disables creation; 0.00001000 previews fee 0.00000010 and net 0.00000990. Actual wallet signing/payment, saved-order reload and error flows still need complete acceptance; no order was created in this check. |
 | Upgrade and recovery | Sequence-76 isolated restore passed. Full guided checkpoint/upgrade/restore/reconcile/resume and reboot acceptance remain; the separate unfunded fixture now has a real syncing node and isolated HTTPS backup. |
