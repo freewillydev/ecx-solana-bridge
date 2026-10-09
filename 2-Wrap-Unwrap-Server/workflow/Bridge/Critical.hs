@@ -599,8 +599,17 @@ instance Operation 'Operator 'Critical OperatorCommand where
       backupDecisions environment
       evalWorker environment ObserveChains
       evalWorker environment ReconcileCustody
+      -- Revalidate unknown native signing outcomes without signing or changing
+      -- the saved generation. Resume commits only if this exact work remains.
+      nativeWork<-evalRead reader ReadNativeLockWork
+      unsigned<-case nativeWork of
+        Just work | null(lockAttempts work) && not(lockCancelling work)
+          && preparedDraft(lockPreparation work)/=Nothing->do
+            _<-restoreNativeWork (N.nativeCall rpc native) native config nativeWork
+            pure nativeWork
+        _->pure Nothing
       now<-floor <$> getPOSIXTime
-      evalWrite writer (ResumeLedger now [("Native",N.nativeCheckpointHash native),("Solana",tokenOrigin settings),("SolanaOperating",operatingOrigin settings)] reviewed)
+      evalWrite writer (ResumeLedger now [("Native",N.nativeCheckpointHash native),("Solana",tokenOrigin settings),("SolanaOperating",operatingOrigin settings)] reviewed unsigned)
 
 instance Operation 'Worker 'Critical WorkerCommand where
   type OperationContext 'Worker 'Critical WorkerCommand = Operation 'Worker 'Critical WorkerCommand

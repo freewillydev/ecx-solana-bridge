@@ -535,6 +535,12 @@ They are critical worker-only instructions, implemented by `Critical.hs` and
 specific Store operations. The cycle observes/reconciles while paused; preparation,
 queue/send and signing require their saved policy/readiness checks. The guarded
 payment boundary pauses on failure. Recovery never implicitly resumes intake.
+Explicit resume also handles a complete native preparation with a lost signing
+reply: it validates the saved PSBT and unspent prevouts using paused lock recovery,
+then atomically compares the exact preparation, cancellation flag and empty attempt
+set before resuming. The normal worker reuses that generation and PSBT. Resume
+neither signs nor cancels it; missing attempts alone never establish that no
+signature was produced. Changed or spent inputs keep the service paused.
 
 The four signer leaves and result constructors are listed above. Their payloads
 are respectively `(deployment,payment,generation)`, `(deployment,decision)`,

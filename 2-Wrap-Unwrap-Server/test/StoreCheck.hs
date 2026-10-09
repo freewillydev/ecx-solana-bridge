@@ -1108,11 +1108,11 @@ ledgerMain = do
       withWriter settings (store policy limits) (const $ pure ()) $ \writer->do
         fixture fixtures RefreshCustody
         beforeResume<-evalRead reader ReadBalances
-        evalWrite writer (ResumeLedger 100 origins [])
+        evalWrite writer (ResumeLedger 100 origins [] Nothing)
         evalRead reader ReadState >>= check . not . ledgerPaused
-        expectStore "pause_before_operator_action" (evalWrite writer $ ResumeLedger 100 origins [])
+        expectStore "pause_before_operator_action" (evalWrite writer $ ResumeLedger 100 origins [] Nothing)
         evalWrite writer (Pause "resume contract")
-        expectStore "scanners_not_fresh" (evalWrite writer $ ResumeLedger 161 origins [])
+        expectStore "scanners_not_fresh" (evalWrite writer $ ResumeLedger 161 origins [] Nothing)
         evalRead reader ReadState >>= check . ledgerPaused
         evalRead reader ReadBalances >>= check . (==beforeResume)
       fixture fixtures SeedOrders
@@ -1130,14 +1130,14 @@ ledgerMain = do
       check (W.depositInstruction visible==Just "instruction-visible" && W.status visible=="AwaitingDeposit")
       withWriter settings (store policy limits) (const $ pure ()) $ \writer->do
         fixture fixtures RefreshCustody
-        expectStore "legacy_order_cost_review_required" (evalWrite writer $ ResumeLedger 100 origins [])
+        expectStore "legacy_order_cost_review_required" (evalWrite writer $ ResumeLedger 100 origins [] Nothing)
         evalRead reader ReadState >>= check . ledgerPaused
       fixture fixtures SeedReview
       reviewed <- evalRead reader (ReadOrder auth "visible")
       check (W.status reviewed=="NeedsReview")
       withWriter settings (store policy limits) (const $ pure ()) $ \writer->do
         fixture fixtures RefreshCustody
-        expectStore "obligations_require_review" (evalWrite writer $ ResumeLedger 100 origins [])
+        expectStore "obligations_require_review" (evalWrite writer $ ResumeLedger 100 origins [] Nothing)
         evalRead reader ReadState >>= check . ledgerPaused
       snapshot<-evalRead reader (ReadCustodySnapshot 100 origins False)
       check (custodyTotals snapshot==M.fromList [(Native,2100),(Wrapped,1000),(Sol,100)]
@@ -2963,7 +2963,24 @@ nativeCustodyFamilies fixtures reader writer settings config base solana=do
         void $ evalWrite writer (PreparePayment 100 identifier (money 5) $ encodeText plan)
         evalWrite writer (SaveDraft identifier 0 $ encodeText $ draft s)
         prepared<-evalRead reader (ReadPreparation identifier)
-        void $ evalWrite writer (RecordAttempt prepared $ wire s)
+        -- An unknown signing outcome must retain exactly the saved native work.
+        -- Store receives runtime-reviewed work, never permission to skip review.
+        paused
+        let origins=[("Native","scan-origin"),("Solana","sol-origin"),("SolanaOperating","opening-signature")]
+        work<-evalRead reader ReadNativeLockWork
+        beforeResume<-evalRead reader ReadBalances
+        expectStore "unresolved_intents_require_review" (evalWrite writer $ ResumeLedger 100 origins [] Nothing)
+        forM_ work $ \saved->do
+          let changed= saved {lockPreparation=prepared {preparedDraft=Just "changed"}}
+          expectStore "resume_preparation_changed" (evalWrite writer $ ResumeLedger 100 origins [] (Just changed))
+          expectStore "resume_preparation_changed" (evalWrite writer $ ResumeLedger 100 origins [] (Just saved {lockCancelling=True}))
+        evalWrite writer (ResumeLedger 100 origins [] work)
+        evalRead reader ReadState >>= check . not . ledgerPaused
+        evalRead reader ReadBalances >>= check . (==beforeResume)
+        evalRead reader (ReadPreparation identifier) >>= check . (==prepared)
+        recorded<-evalWrite writer (RecordAttempt prepared $ wire s)
+        paused
+        expectStore "resume_preparation_changed" (evalWrite writer $ ResumeLedger 100 origins [recorded] work)
         ready
         void $ evalWrite writer (MarkBroadcast 100 $ txid s)
         pure identifier

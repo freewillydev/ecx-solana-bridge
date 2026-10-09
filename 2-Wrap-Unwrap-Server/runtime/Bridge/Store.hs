@@ -257,7 +257,7 @@ data StoreWrite a where
   BeginCancellation :: PreparedPayment -> Int64 -> Text -> Text -> StoreWrite ()
   FinishCancellation :: PreparedPayment -> Text -> Text -> StoreWrite ()
   AuthorizeRefund :: Int64 -> Text -> StoreWrite W.RefundAuthorization
-  ResumeLedger :: Int64 -> [(Text,Text)] -> [RecordedAttempt] -> StoreWrite ()
+  ResumeLedger :: Int64 -> [(Text,Text)] -> [RecordedAttempt] -> Maybe NativeLockWork -> StoreWrite ()
   RecordNativeLockRestore :: NativeLockWork -> Int -> StoreWrite ()
   RecordCustody :: Int64 -> Int64 -> Maybe Text -> Maybe Value -> StoreWrite ()
   MarkBroadcast :: Int64 -> Text -> StoreWrite Int64
@@ -442,7 +442,7 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
   BeginCancellation expected now reason cleanup -> beginCancellation c config expected now reason cleanup
   FinishCancellation expected reason cleanup -> finishCancellation c config expected reason cleanup
   AuthorizeRefund now receipt -> authorizeRefund c config now receipt
-  ResumeLedger now origins reviewed -> resumeLedger c config now origins reviewed
+  ResumeLedger now origins reviewed nativeWork -> resumeLedger c config now origins reviewed nativeWork
   RecordNativeLockRestore expected count -> do
     current<-nativeLockWork c (deploymentFingerprint $ paymentPolicy policy)
     require (current==Just expected && not(lockCancelling expected) && preparedDraft(lockPreparation expected)/=Nothing && count>0 && count<=100) "native_lock_work_changed"
@@ -2287,8 +2287,8 @@ operatingHolds c asset = do
 
 -- One atomic resume after the runtime has verified the exact saved attempts.
 -- Reuse custody's review/source/journal checks instead of maintaining a second set.
-resumeLedger :: PG.Connection -> StorePolicy -> Int64 -> [(Text,Text)] -> [RecordedAttempt] -> IO ()
-resumeLedger c config now origins reviewed = do
+resumeLedger :: PG.Connection -> StorePolicy -> Int64 -> [(Text,Text)] -> [RecordedAttempt] -> Maybe NativeLockWork -> IO ()
+resumeLedger c config now origins reviewed nativeWork = do
   let identity=deploymentFingerprint $ paymentPolicy $ executionTerms config
       txid=signedId.recordedSigned
   state<-metadata c identity
@@ -2301,7 +2301,21 @@ resumeLedger c config now origins reviewed = do
     row<-O.selectTable S.paymentRoots
     O.where_ (S.rootPhase row O..== O.sqlStrictText "active")
     pure (S.rootId row)
-  require (all (`elem` map recordedPayment reviewed) unresolved) "unresolved_intents_require_review"
+  -- A lost native signing reply may leave a complete durable PSBT but no
+  -- attempt. The runtime revalidates its exact template and unspent prevouts;
+  -- bind that evidence here under the same lock as resume. Never reprepare it.
+  preparedIds<-case nativeWork of
+    Nothing->pure []
+    Just expected->do
+      current<-nativeLockWork c identity
+      require (current==Just expected && not(lockCancelling expected)
+        && null(lockAttempts expected)) "resume_preparation_changed"
+      let prepared=lockPreparation expected
+          identifier=paymentId $ savedPayment $ preparedView prepared
+      actual<-unsignedPreparation c identity identifier (preparedGeneration prepared)
+      require (actual==prepared) "resume_preparation_changed"
+      pure [identifier]
+  require (all (`elem` (map recordedPayment reviewed<>preparedIds)) unresolved) "unresolved_intents_require_review"
   problems<-O.runSelect c $ O.limit 1 $ do
     (key,_,_,state)<-P.orderObligations
     O.where_ (state O..== O.sqlStrictText "review")
