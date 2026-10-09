@@ -1233,7 +1233,7 @@ ledgerMain = do
         fixture fixtures StaleCustody
         rejected "custody_not_reconciled" newRequest {W.idempotencyKey="stale"}
         fixture fixtures ReadyIntake
-        rejected "amount_outside_limits" newRequest {W.idempotencyKey="small",W.input=money 1}
+        rejected "nonpositive_net" newRequest {W.idempotencyKey="small",W.input=money 1}
         rejected "invalid_connection_free_order" newRequest {W.idempotencyKey="connected",W.sourceOwner=Just "owner"}
         rejected "insufficient_inventory" newRequest {W.idempotencyKey="large",W.input=money 1000}
         let unwrap=newRequest {W.idempotencyKey="new-unwrap",W.direction=WrappedToNative,W.refund="",W.input=money 201}

@@ -86,7 +86,7 @@ customerError code = fromMaybe code $ lookup code
   , ("insufficient_custody_tokens", "The bridge needs more wrapped-token liquidity. Try later.")
   , ("insufficient_operating_sol", "The bridge needs more SOL for transaction fees. Try later.")
   , ("invalid_public_key", "Enter a valid Solana address.")
-  , ("amount_outside_limits", "Enter an amount within the displayed limits.")
+  , ("nonpositive_net", "Enter an amount that leaves a positive payout after the 1% fee.")
   , ("deposit_window_closed", "This order has expired. Do not pay; create a new order.")
   , ("payouts_paused", "The bridge is paused. Refresh for its current status.")
   , ("scanners_not_fresh", "Waiting for fresh chain observations. Try again shortly.") ]
