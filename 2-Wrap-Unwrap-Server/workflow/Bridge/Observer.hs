@@ -42,15 +42,26 @@ observeOnce manager settings reader writer = do
   scanned<-try $ (do
     tokenPrevious<-evalRead reader (ReadCheckpoint "Solana")
     operatingPrevious<-evalRead reader (ReadCheckpoint "SolanaOperating")
+    tokenProgress<-evalRead reader (ReadHistoryProgress "Solana")
+    operatingProgress<-evalRead reader (ReadHistoryProgress "SolanaOperating")
     pending<-evalRead reader PendingVerification
     now<-epoch
-    scanSolanaPairWith call verifier solana (tokenOrigin settings,tokenPrevious)
-      (operatingOrigin settings,operatingPrevious) now pending lookupInstruction lookupReferences)
+    results<-scanSolanaPairProgressWith call verifier solana (tokenOrigin settings,tokenPrevious,tokenProgress)
+      (operatingOrigin settings,operatingPrevious,operatingProgress) now pending lookupInstruction lookupReferences
+    pure [(chain,if chain=="Solana" then tokenProgress else operatingProgress,result) | (chain,result)<-results])
     `catch` (\(_::IOException)->reject "observer_io_unavailable")
   let scans=case scanned of
         Right results->results
-        Left problem->[("Solana",Left problem),("SolanaOperating",Left problem)]
-  forM_ scans $ uncurry commit
+        Left problem->[("Solana",Nothing,Left problem),("SolanaOperating",Nothing,Left problem)]
+  forM_ scans $ \(chain,expected,result)->do
+    saved<-try $ (case result of
+      Left(BridgeError code)->reject code
+      Right(ObservationMore next)->evalWrite writer (RecordHistoryProgress chain expected next)
+      Right(ObservationReady batch complete)->evalWrite writer (CommitHistoryScan expected batch complete))
+      `catch` (\(_::IOException)->reject "observer_io_unavailable")
+    case saved of
+      Right ()->pure ()
+      Left(BridgeError code)->do now<-epoch; evalWrite writer (ScanFailed chain now code)
   candidates<-evalRead reader PromotionCandidates
   now<-epoch
   forM_ candidates $ \identifier->evalWrite writer (PromoteDeposit now identifier) >> pure ()

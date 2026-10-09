@@ -7,6 +7,7 @@ module Bridge.Store
   , StoreBackup(..), LedgerArchive(..), BackupReceipt(..), evalBackup, StoreRestore(..), evalRestore, CustodyArchive(..)
   , withReader, withWriter, withFencedWriter, evalRead, evalWrite ) where
 
+import qualified Bridge.Solana as Solana
 import qualified Bridge.NativePayment as N
 import Bridge.Error
 import Bridge.Fence (withFence)
@@ -238,6 +239,7 @@ data StoreRead a where
   MaximumNativeDepth :: Int -> StoreRead Int
   ReadSourceWorkHash :: Text -> StoreRead Text
   ReadCheckpoint :: Text -> StoreRead (Maybe Text)
+  ReadHistoryProgress :: Text -> StoreRead (Maybe Solana.HistoryProgress)
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
@@ -270,6 +272,8 @@ data StoreWrite a where
   PreparePayment :: Int64 -> Text -> Amount -> Text -> StoreWrite PreparedPayment
   SaveDraft :: Text -> Int -> Text -> StoreWrite ()
   CommitScan :: W.ScanBatch -> StoreWrite ()
+  RecordHistoryProgress :: Text -> Maybe Solana.HistoryProgress -> Solana.HistoryProgress -> StoreWrite ()
+  CommitHistoryScan :: Maybe Solana.HistoryProgress -> W.ScanBatch -> Bool -> StoreWrite ()
   ScanFailed :: Text -> Int64 -> Text -> StoreWrite ()
   RecordSourceCheck :: W.Deposit -> W.SourceCheck -> StoreWrite ()
   PromoteDeposit :: Int64 -> Text -> StoreWrite Bool
@@ -419,6 +423,7 @@ evalRead (Reader settings identity remote) operation = bracket connect PG.close 
       MaximumNativeDepth minimumDepth -> maximumNativeDepth c minimumDepth
       ReadSourceWorkHash identifier -> sourceWorkHash c identifier
       ReadCheckpoint chain -> readCheckpoint c chain
+      ReadHistoryProgress chain -> readHistoryProgress c chain
       ReadSource identifier -> readSource c identifier >>= asDeposit
       ReadSourceEvidence txid -> sourceEvidence c txid
       PromotionCandidates -> promotionCandidates c
@@ -484,6 +489,20 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
   PreparePayment now identifier allowance plan -> preparePayment c config now identifier allowance plan
   SaveDraft identifier generation draft -> saveDraft c (deploymentFingerprint $ paymentPolicy policy) identifier generation draft
   CommitScan batch -> commitScan c batch
+  RecordHistoryProgress chain expected next -> do
+    require (Solana.historyProgressValid next) "invalid_solana_history_progress"
+    checkHistoryProgress c chain expected (Solana.progressOrigin next) (Solana.progressPrevious next)
+    forM_ expected $ \old->require (Solana.progressTime old==Solana.progressTime next
+      && Solana.progressHead old==Solana.progressHead next) "solana_history_progress_changed"
+    saveHistoryProgress c chain (Just next)
+    scanFailed c chain (Solana.progressTime next) "solana_history_catching_up"
+  CommitHistoryScan expected batch complete -> do
+    let chain=W.scanChain batch
+    checkHistoryProgress c chain expected (W.scanOrigin batch) (W.scanPrevious batch)
+    forM_ expected $ \old->require (W.scanTime batch==Solana.progressTime old) "solana_history_progress_changed"
+    commitScan c batch
+    saveHistoryProgress c chain Nothing
+    unless complete $ scanFailed c chain (W.scanTime batch) "solana_history_catching_up"
   ScanFailed chain now code -> scanFailed c chain now code
   RecordSourceCheck expected check -> do
     current <- readSource c (W.depositId expected)
@@ -1305,6 +1324,48 @@ readCheckpoint c chain = do
     O.where_ (key O..== O.sqlStrictText chain)
     pure anchor
   case rows of []->pure Nothing; [anchor]->pure(Just anchor); _->reject "duplicate_checkpoint"
+
+-- Two reserved, versioned checkpoint records; never real coverage heads.
+-- All access is through the closed history operations, under the existing writer
+-- transaction. Old readers join only real scan_health streams. Old observers
+-- still fail closed at their original cap rather than interpreting these rows.
+historyKey :: Text -> IO Text
+historyKey chain=do
+  require (chain `elem` ["Solana","SolanaOperating"]) "invalid_history_stream"
+  pure("history-progress-v1:"<>chain)
+readHistoryProgress :: PG.Connection -> Text -> IO (Maybe Solana.HistoryProgress)
+readHistoryProgress c chain=do
+  key<-historyKey chain
+  rows<-O.runSelect c $ do
+    (stream,value)<-O.selectTable S.checkpoints
+    O.where_ (stream O..== O.sqlStrictText key)
+    pure value
+  case rows of
+    []->pure Nothing
+    [raw]->do
+      require (T.length raw<=131072) "history_progress_too_large"
+      progress<-decodeSaved raw
+      cursor<-readCheckpoint c chain
+      -- An older binary can finish a strict complete scan while leaving this
+      -- auxiliary row. Its committed coverage wins; the next closed write
+      -- replaces the obsolete scratch state without rewinding any effects.
+      pure(if Solana.progressPrevious progress==cursor then Just progress else Nothing)
+    _->reject "duplicate_history_progress"
+checkHistoryProgress :: PG.Connection -> Text -> Maybe Solana.HistoryProgress -> Text -> Maybe Text -> IO ()
+checkHistoryProgress c chain expected origin previous=do
+  actual<-readHistoryProgress c chain
+  require (actual==expected) "stale_history_progress"
+  cursor<-readCheckpoint c chain
+  require (cursor==previous) "stale_scan_cursor"
+  forM_ expected $ \p->require (Solana.progressOrigin p==origin && Solana.progressPrevious p==previous) "solana_history_progress_changed"
+saveHistoryProgress :: PG.Connection -> Text -> Maybe Solana.HistoryProgress -> IO ()
+saveHistoryProgress c chain progress=do
+  key<-historyKey chain
+  -- Delete+insert and final receipts/checkpoint are in one locked transaction;
+  -- interruption cannot retire progress without committing its classified batch.
+  void $ O.runDelete c O.Delete {O.dTable=S.checkpoints,O.dWhere= \(name,_)->name O..== O.sqlStrictText key,O.dReturning=O.rCount}
+  forM_ progress $ \p->void $ O.runInsert c O.Insert {O.iTable=S.checkpoints
+    ,O.iRows=[(O.sqlStrictText key,O.sqlStrictText $ encodeSaved p)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
 
 observeDeposit :: PG.Connection -> W.Deposit -> IO ()
 observeDeposit c deposit = do

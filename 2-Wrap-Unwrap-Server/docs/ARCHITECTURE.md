@@ -974,3 +974,30 @@ from verified deposit effects. Only actual chain observations credit deposits.
 [Token administration](../../../1-Make-Wrapped-ECX/README.md) and
 [liquidity operations](../../../3-Create-CPMM-Pool/README.md) use separate keys outside
 customer custody. Trading links do not provide the native wrap/unwrap service.
+
+### Bounded Solana observation catch-up
+
+Observation scans retain at most 500 oldest fetched signatures and fetch at most
+four 100-signature pages per cycle. Two versioned bounded progress records use
+reserved `history-progress-v1:` keys in `checkpoints`; only the closed
+ReadHistoryProgress, RecordHistoryProgress and CommitHistoryScan operations access
+them. They are scratch pagination state, never coverage heads or financial facts.
+Normal scan health joins only the three real streams.
+
+The exact previous signature/origin must be found before any retained receipts are
+posted. A complete contiguous oldest window advances coverage; discarded newer
+history is rediscovered in later cycles. This bounds memory/database state at the
+cost of refetching deep histories. Each progress write compares the expected saved
+state and current real checkpoint under the ordinary deployment lock. Classified
+receipts, evidence, coverage and scratch retirement commit atomically. Partial
+coverage keeps health failed and intake paused. Completed coverage uses its original
+scan-start time; customer receipt observation time remains the classification time.
+A complete scan never automatically resumes the ledger.
+
+Pending independent verification has a reserved 500-entry share; remaining entries
+stay queued and suppress readiness. Expiry/absence proofs continue to use the strict
+all-or-error collector, never these partial results. An older binary can advance
+coverage while ignoring auxiliary rows. On re-upgrade, scratch bound to a different
+real checkpoint is obsolete and ignored; only a subsequent closed write replaces
+it, with no rewind or replay of accounting. Backups include the ordinary checkpoints
+table, including these records; final acceptance must verify their restoration.

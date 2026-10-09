@@ -59,7 +59,8 @@ import Test.QuickCheck hiding (label)
 
 checks :: IO [Result]
 checks = (\deployment native solana identity observation administration common->deployment<>native<>solana<>identity<>observation<>administration<>common) <$> deploymentChecks <*> NativePaymentCheck.checks <*> SolanaPaymentCheck.checks <*> ((<>) <$> solanaIdentityChecks <*> solanaPairChecks) <*> ObservationCheck.checks <*> administrationChecks <*> sequence
-  [ check "native observation requires the correct ready descriptor wallet, without signing authority" $ \(sameName::Bool) (descriptors::Bool) (scanning::Bool)->ioProperty $ do
+  [ check "durable bounded Solana observation catch-up preserves anchored order and strict absence proofs" $ once $ ioProperty historyCatchupContract
+  , check "native observation requires the correct ready descriptor wallet, without signing authority" $ \(sameName::Bool) (descriptors::Bool) (scanning::Bool)->ioProperty $ do
       let wallet=object ["walletname" .= (if sameName then nativeWallet settings else "other"),"descriptors" .= descriptors,"scanning" .= scanning]
           call scoped method args=if (scoped,method,args)==(True,"getwalletinfo",[]) then pure wallet else fail "unexpected wallet RPC"
           expected=sameName && descriptors && not scanning
@@ -916,3 +917,48 @@ rpcResponse request status headers bytes=do
     ,HTTP.responseBody=atomicModifyIORef' body (\saved->(BS.empty,saved)),HTTP.responseCookieJar=mempty
     ,HTTPInternal.responseClose'=HTTPInternal.ResponseClose(pure ())
     ,HTTPInternal.responseOriginalRequest=request,HTTPInternal.responseEarlyHints=[]}
+
+historyCatchupContract :: IO Bool
+historyCatchupContract=do
+  let item n=Solana.SignatureInfo (Message.base58 $ BS.replicate 62 0<>BS.pack [fromIntegral(n `div` 256),fromIntegral n]) (fromIntegral $ n `div` 7) False
+      origin=Solana.historySignature(item 0)
+      ordered n=map item [0..n]
+      page rows before=pure $ take 100 $ case before of
+        Nothing->reverse rows
+        Just sig->drop 1 $ dropWhile ((/=sig).Solana.historySignature) (reverse rows)
+      refused code action=do
+        outcome<-try action
+        pure $ case outcome of Left(BridgeError actual)->actual==code; Right _->False
+  rows<-newIORef(ordered 1600)
+  calls<-newIORef(0::Int)
+  inserted<-newIORef False
+  let fetch before=modifyIORef' calls (+1) >> readIORef rows >>= \xs->page xs before
+      loop ticks previous progress received
+        | ticks>200=fail "bounded catch-up made no progress"
+        | otherwise=do
+            before<-readIORef calls
+            result<-Solana.collectObservationHistory origin previous 100 progress fetch
+            after<-readIORef calls
+            unless (after-before<=4) (fail "unbounded history requests")
+            case result of
+              Solana.HistoryMore next->do
+                unless (length(Solana.progressWindow next)<=500 && BL.length(encode next)<=131072) (fail "unbounded history state")
+                restored<-either fail pure (eitherDecode $ encode next)
+                added<-readIORef inserted
+                unless added $ writeIORef rows (ordered 1650) >> writeIORef inserted True
+                loop (ticks+1) previous (Just restored) received
+              Solana.HistoryReady history _ complete->do
+                unless (not(null history) && Solana.historySignature(head history)==maybe origin id previous) (fail "missing overlap")
+                let accumulated=received<>(if null received then history else drop 1 history)
+                if complete then pure accumulated
+                else loop (ticks+1) (Just $ Solana.historySignature $ last history) Nothing accumulated
+  received<-loop (0::Int) Nothing Nothing []
+  strict<-refused "solana_history_batch_too_large" $ Solana.collectSignatures origin Nothing (page $ ordered 1600)
+  repeated<-refused "solana_history_repeated_page" $ Solana.collectObservationHistory origin Nothing 100 Nothing (const $ pure $ reverse $ map item [101..200])
+  gap<-refused "solana_history_gap" $ Solana.collectObservationHistory origin Nothing 100 Nothing (const $ pure [])
+  first<-Solana.collectObservationHistory origin Nothing 100 Nothing (page $ ordered 1600)
+  changed<-case first of
+    Solana.HistoryMore saved->refused "solana_history_progress_changed" $
+      Solana.collectObservationHistory origin (Just $ Solana.historySignature $ item 1) 100 (Just saved) (page $ ordered 1600)
+    _->pure False
+  pure(received==ordered 1650 && strict && repeated && gap && changed)

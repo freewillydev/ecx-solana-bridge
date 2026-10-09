@@ -1,7 +1,7 @@
 module Bridge.Solana
   ( SolanaSettings(..),validateSolanaSettings,solanaCall,solanaIdentity,solanaIdentityWith,solanaGenesisWith,inspectMintAccount
   , inspectMint,inspectClassicAccount,inspectTokenAccount,finalizedTransaction,finalizedTransactionWith,solanaHistory,solanaAddressHistory,solanaAddressHistoryWith
-  , SignatureInfo(..), collectSignatures, tokenProgram,solanaGenesis ) where
+  , SignatureInfo(..), HistoryProgress(..), HistoryStep(..), historyProgressValid, collectObservationHistory, collectSignatures, tokenProgram,solanaGenesis ) where
 
 import Bridge.Wire (Profile(..))
 import Bridge.RPC
@@ -195,3 +195,70 @@ collectSignatures origin previous fetch = go Nothing [] Set.empty 0
     case break ((==target) . historySignature) page of
       (prefix,anchor:_) -> pure (reverse $ accumulated<>prefix<>[anchor])
       (_,[]) -> go (Just $ last ids) combined (Set.union seen $ Set.fromList ids) (pages+1::Int)
+
+-- Observation catch-up only. Absence/expiry proofs MUST retain collectSignatures.
+-- The bounded oldest window trades refetching for constant memory and storage.
+-- It is never eligible for accounting until the exact previous anchor is found.
+data HistoryProgress = HistoryProgress
+  { progressOrigin :: !Text, progressPrevious :: !(Maybe Text), progressTime :: !Int64
+  , progressHead :: !SignatureInfo, progressWindow :: ![SignatureInfo], progressDropped :: !Bool
+  } deriving (Eq,Show)
+data HistoryStep = HistoryMore !HistoryProgress | HistoryReady ![SignatureInfo] !Int64 !Bool
+  deriving (Eq,Show)
+instance ToJSON SignatureInfo where
+  toJSON h=object ["signature" .= historySignature h,"slot" .= historySlot h
+    ,"confirmationStatus" .= ("finalized"::Text),"err" .= if historyFailed h then Bool True else Null]
+instance ToJSON HistoryProgress where
+  toJSON p=object ["version" .= (1::Int),"origin" .= progressOrigin p,"previous" .= progressPrevious p
+    ,"time" .= progressTime p,"head" .= progressHead p,"window" .= progressWindow p,"dropped" .= progressDropped p]
+instance FromJSON HistoryProgress where
+  parseJSON=withObject "observation history progress" $ \o->do
+    version<-o .: "version" :: Parser Int
+    p<-HistoryProgress <$> o .: "origin" <*> o .: "previous" <*> o .: "time"
+      <*> o .: "head" <*> o .: "window" <*> o .: "dropped"
+    if version==1 && historyProgressValid p then pure p else fail "invalid observation history progress"
+
+historyProgressValid :: HistoryProgress -> Bool
+historyProgressValid p=progressTime p>=0 && not(null window) && length window<=500
+  && all valid (progressOrigin p:maybe [] pure (progressPrevious p)<>ids<>[historySignature $ progressHead p])
+  && length ids==Set.size(Set.fromList ids) && target `notElem` ids
+  && all ((>=0).historySlot) window && historySlot(progressHead p)>=historySlot(head window)
+  && and(zipWith (>=) slots (drop 1 slots))
+  && (progressDropped p || head window==progressHead p)
+ where
+  window=progressWindow p; ids=map historySignature window; slots=map historySlot window
+  target=maybe (progressOrigin p) id (progressPrevious p)
+  valid sig=case signatureBytes sig of Right _->True; Left _->False
+
+collectObservationHistory :: Text -> Maybe Text -> Int64 -> Maybe HistoryProgress
+  -> (Maybe Text -> IO [SignatureInfo]) -> IO HistoryStep
+collectObservationHistory origin previous now saved fetch=do
+  require (now>=0) "invalid_scan_time"
+  mapM_ (either reject (const $ pure ()) . signatureBytes) (origin:maybe [] pure previous)
+  case saved of
+    Nothing->go 0 [] Nothing False now
+    Just p->do
+      require (historyProgressValid p && progressOrigin p==origin && progressPrevious p==previous
+        && progressTime p<=now) "solana_history_progress_changed"
+      go 0 (progressWindow p) (Just $ progressHead p) (progressDropped p) (progressTime p)
+ where
+  target=maybe origin id previous
+  go pages window headSeen dropped started=do
+    page<-fetch (if null window then Nothing else Just $ historySignature $ last window)
+    require (not(null page) && length page<=100) "solana_history_gap"
+    let joined=window<>page; ids=map historySignature joined; slots=map historySlot joined
+    require (length ids==Set.size(Set.fromList ids)) "solana_history_repeated_page"
+    require (all (>=0) slots && and(zipWith (>=) slots (drop 1 slots))) "solana_history_order_invalid"
+    mapM_ (either reject (const $ pure ()) . signatureBytes) ids
+    let first=maybe (head page) id headSeen
+        trim xs=drop (max 0 $ length xs-500) xs
+    case break ((==target).historySignature) page of
+      (prefix,anchor:_)->do
+        let reached=window<>prefix<>[anchor]; lost=dropped || length reached>500
+        pure(HistoryReady (reverse $ trim reached) started (not lost))
+      (_,[])->do
+        let next=trim joined; lost=dropped || length joined>500
+            p=HistoryProgress origin previous started first next lost
+        require (historyProgressValid p) "invalid_solana_history_progress"
+        if pages+1>=4 then pure(HistoryMore p)
+        else go (pages+1::Int) next (Just first) lost started

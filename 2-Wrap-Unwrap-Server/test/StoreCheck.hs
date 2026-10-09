@@ -99,6 +99,7 @@ main=lookupEnv "ECX_PROVISION_CHILD" >>= maybe normal ProvisionCheck.child
 contractMain :: IO ()
 contractMain = do
   credentialsContract
+  historyOnly<-lookupEnv "ECX_REBUILD_HISTORY_ONLY"
   cacheOnly<-lookupEnv "ECX_REPORT_CACHE_ONLY"
   migration<-lookupEnv "ECX_REBUILD_MIGRATION_ONLY"
   roots<-lookupEnv "ECX_REBUILD_PAYMENT_ROOTS_ONLY"
@@ -112,7 +113,7 @@ contractMain = do
   custody<-lookupEnv "ECX_REBUILD_CUSTODY_ONLY"
   when (encrypted==Just "1" && (native/=Just "1" || custody/=Just "1"))
     (fail "encrypted native acceptance requires native recovery and custody modes")
-  if cacheOnly==Just "1" then reportCacheMain else if roots==Just "child" then paymentRootsChild else if roots==Just "1" then paymentRootsMain else if migration==Just "1" then migrationMain else case live of
+  if historyOnly==Just "1" then historyProgressMain else if cacheOnly==Just "1" then reportCacheMain else if roots==Just "child" then paymentRootsChild else if roots==Just "1" then paymentRootsMain else if migration==Just "1" then migrationMain else case live of
     Just path->liveObserverMain path
     Nothing->if setup==Just "1" then setupMain else if native==Just "1" then nativeRecoveryMain else if tls==Just "1" then tlsMain else if fence==Just "1" then fenceMain else if server==Just "1" then serverMain else ledgerMain
 
@@ -2065,6 +2066,7 @@ data Fixture a where
   RefundProof :: T.Text -> T.Text -> T.Text -> Fixture ()
   SeedReceipt :: T.Text -> Maybe T.Text -> Asset -> Int64 -> Int64 -> Bool -> Int64 -> Fixture ()
   CheckPromotion :: T.Text -> T.Text -> Asset -> Int64 -> T.Text -> Fixture Bool
+  HistoryCheckpointRows :: Fixture [(T.Text,T.Text)]
   Initialize :: Fixture ()
   InitializeIdentity :: T.Text -> Fixture ()
   RefreshCustody :: Fixture ()
@@ -2478,6 +2480,7 @@ fixture c LockRestoreAudits = O.runSelect c $ do
   (_,kind,subject)<-O.selectTable S.audit
   O.where_ (kind O..== O.sqlStrictText "native_locks_restored")
   pure subject
+fixture c HistoryCheckpointRows = O.runSelect c (O.selectTable S.checkpoints)
 fixture c Initialize = fixture c (InitializeIdentity "contract")
 fixture c (InitializeIdentity identity) = PG.withTransaction c $ do
   void $ O.runInsert c O.Insert {O.iTable=S.deployment,O.iRows=[S.Deployment (O.sqlInt8 1) (O.sqlInt8 2200) (O.sqlStrictText identity) (O.sqlInt8 0) (O.sqlInt8 0) (O.sqlInt8 1) (O.sqlStrictText "test")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
@@ -5120,3 +5123,73 @@ archiveContract settings fixtures reader = do
     fixture fixtures ArchiveRecords >>= check . (==records)
     fixture fixtures MigrationRecords >>= check . (==history)
     putStrLn "PASS: same-count financial change excluded by exported snapshot, complete financial records restored, same-length archive corruption refused, authenticated download, restricted paused restore, stale/identity/schema/hash refusal, failed-stage cleanup, private snapshot, real restic encryption/readback/restore, repository/permission/integrity/password refusal, unchanged coverage, exact signed attempts and every ledger posting"
+
+-- Dedicated disposable-DB regression for durable observation progress and atomic
+-- retirement. No chain/network calls, signer, payment or generic database escape.
+historyProgressMain :: IO ()
+historyProgressMain=do
+  database<-getEnv "ECX_REBUILD_CONTRACT_DATABASE"
+  unless ("ecx_rebuild_contract_" `T.isPrefixOf` T.pack database) (fail "disposable database required")
+  user<-getEnv "USER"; role<-getEnv "ECX_REBUILD_CONTRACT_READER"
+  let settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
+      policy=StorePolicy (PaymentTerms (PolicySnapshot 2 "finalized" "contract") (CostLimits (money 10) (money 10) (money 10)))
+        (OrderLimits (money 1000) 100 100 100 (money 100000) (money 100000)) "contract" True
+      sig n=SolanaMessage.base58 (BS.replicate 63 0<>BS.singleton n)
+      progress=Solana.HistoryProgress (sig 0) Nothing 100 (Solana.SignatureInfo (sig 2) 2 False)
+        [Solana.SignatureInfo (sig 2) 2 False,Solana.SignatureInfo (sig 1) 1 False] False
+      batch=W.ScanBatch "Solana" (sig 0) Nothing (sig 2) 100
+        [W.Deposit ("solana:"<>sig 1) Nothing Wrapped (money 10) "1" 1 True 100] []
+      check condition=unless condition (fail "history progress contract failed")
+      writing=withWriter settings policy (const $ pure ())
+  bracket (PG.connect settings) PG.close $ \c->fixture c Initialize
+  withReader (settings {PG.connectUser=role}) "contract" True $ \reader->do
+    initial<-evalRead reader ReadBalances
+    writing $ \writer->do
+      evalWrite writer (RecordHistoryProgress "Solana" Nothing progress)
+      evalRead reader (ReadHistoryProgress "Solana") >>= check . (==Just progress)
+      evalRead reader (ReadCheckpoint "Solana") >>= check . (==Nothing)
+      evalRead reader ReadState >>= check . ledgerPaused
+      evalRead reader ReadBalances >>= check . (==initial)
+      expectStore "stale_history_progress" (evalWrite writer $ RecordHistoryProgress "Solana" Nothing progress)
+      expectStore "invalid_history_stream" (evalRead reader $ ReadHistoryProgress "Native")
+    -- Production archive/restore must preserve the bounded scratch rows too.
+    nonce<-digest <$> (getRandomBytes 32 :: IO BS.ByteString)
+    let directory="/tmp/ecx-history-backup-"<>T.unpack nonce
+    createDirectory directory; setFileMode directory 0o700
+    archive<-evalBackup reader (ExportLedger directory)
+    (restored,_)<-evalRestore settings (RestoreLedger (manifestPath archive) "contract" (archiveSequence archive))
+    originalRows<-bracket (PG.connect settings) PG.close (\c->fixture c HistoryCheckpointRows)
+    restoredRows<-bracket (PG.connect settings {PG.connectDatabase=T.unpack restored}) PG.close (\c->fixture c HistoryCheckpointRows)
+    check(sort originalRows==sort restoredRows)
+    putStrLn $ "History restore fixture retained: "<>T.unpack restored<>"; "<>directory
+    -- Reopen both writer and its transaction resources, retaining database state.
+    writing $ \writer->do
+      saved<-evalRead reader (ReadHistoryProgress "Solana")
+      check(saved==Just progress)
+      expectStore "invalid_observation_kind" $ evalWrite writer $ CommitHistoryScan saved
+        batch {W.scanEvents=[W.ChainEvent (sig 1) "invalid" "1" Null]} False
+      evalRead reader ReadBalances >>= check . (==initial)
+      evalRead reader (ReadCheckpoint "Solana") >>= check . (==Nothing)
+      evalRead reader (ReadHistoryProgress "Solana") >>= check . (==saved)
+      evalWrite writer (CommitHistoryScan saved batch False)
+      evalRead reader (ReadHistoryProgress "Solana") >>= check . (==Nothing)
+      evalRead reader (ReadCheckpoint "Solana") >>= check . (==Just(sig 2))
+      state<-evalRead reader ReadState
+      check(ledgerPaused state && "scanner_unavailable:" `T.isPrefixOf` ledgerReason state)
+      balances<-evalRead reader ReadBalances
+      check(M.findWithDefault 0 (Wrapped,Unallocated) balances==M.findWithDefault 0 (Wrapped,Unallocated) initial+10)
+      expectStore "stale_history_progress" $ evalWrite writer (CommitHistoryScan saved batch False)
+      evalRead reader ReadBalances >>= check . (==balances)
+      evalWrite writer (CommitHistoryScan Nothing batch {W.scanPrevious=Just(sig 2),W.scanTime=101} True)
+      evalRead reader ReadBalances >>= check . (==balances)
+      evalRead reader ReadState >>= check . ledgerPaused
+      let later=progress {Solana.progressPrevious=Just(sig 2),Solana.progressHead=Solana.SignatureInfo (sig 3) 3 False
+            ,Solana.progressWindow=[Solana.SignatureInfo (sig 3) 3 False],Solana.progressTime=102}
+      evalWrite writer (RecordHistoryProgress "Solana" Nothing later)
+      -- Older binaries use the unchanged strict CommitScan and ignore auxiliary
+      -- progress. Re-upgrading must use their newer committed coverage.
+      evalWrite writer (CommitScan batch {W.scanPrevious=Just(sig 2),W.scanNext=sig 3,W.scanTime=103})
+      evalRead reader (ReadHistoryProgress "Solana") >>= check . (==Nothing)
+      evalWrite writer (CommitHistoryScan Nothing batch {W.scanPrevious=Just(sig 3),W.scanNext=sig 3,W.scanTime=104} True)
+      evalRead reader ReadBalances >>= check . (==balances)
+  putStrLn "PASS history progress: restart, stale CAS, rollback, contiguous checkpoint, no duplicate posting, no automatic resume"
