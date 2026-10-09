@@ -336,10 +336,11 @@ wallet before and after backup. After relocation, point the restored signer's
 `nativeUnlockFile` to that protected copied file. Unencrypted bundles retain format 1.
 Offline inspection never unlocks a wallet.
 
-## Guided recovery in the next candidate
+## Guided recovery
 
-The recovery changes are implemented on the development branch; the published
-`guided-console` installer predates them. Exact-artifact acceptance is still required.
+The `review-2026-10-09-funded-recovery` installer includes this flow. Its funded
+restoration, checked activation and reboot/resume acceptance are recorded in
+RELEASE-REVIEW.md. It remains a review prerelease with separate production gates.
 
 From `sudo ecx-bridge`, choose **Backup and recovery**. Download/verify an exact
 snapshot with an independently retained minimum sequence, then select **Restore

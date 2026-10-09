@@ -268,9 +268,9 @@ through an independently verified maintainer channel. Publishing a public key be
 an installer on GitHub is convenient distribution, not independent establishment of
 trust. Only public material, the index and signature leave the signing machine.
 
-For the current `review-2026-10-09-guided-console` candidate, authorize only the actual
-x86_64 artifact: 40,172,322 bytes, SHA-256
-`09105b54e0d894b1c207c44b789a8c4a9f557d3b2ce502546c523491dfeaa9f3`.
+For the current `review-2026-10-09-funded-recovery` candidate, authorize only the actual
+x86_64 artifact: 40,254,658 bytes, SHA-256
+`2fa48bb4216f1dd028d512a44cd21d4d67358f9421050697f0774f64006110b2`.
 Keep its `.run` bytes unchanged. Once signed, publish the index and signature beside
 those bytes; re-download and verify with the separately pinned public key before
 advertising the release as authenticated. A signature authorizes those bytes; it
@@ -526,5 +526,7 @@ observations about tested plans, not permanent endorsements or guarantees. Revie
 provider allowances for sustained use; no paid upgrades are performed automatically.
 
 Backup menu actions verify or download an exact snapshot with an independently
-retained minimum sequence. They do not activate recovered custody. Full restoration
-still requires the explicit fencing/database/wallet procedure in OPERATIONS.
+retained minimum sequence. Separate menu actions stage the original wallet and a new
+paused database, then activate through checked reconciliation after permanent source
+exclusion. Follow the recovery procedure in OPERATIONS; verification alone does not
+activate custody.

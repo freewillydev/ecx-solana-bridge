@@ -9,13 +9,13 @@ The installer sets up the bridge, dedicated signer, PostgreSQL and pruned ECX no
 No Haskell build or Nginx installation is needed.
 
 **Review candidate, not production assurance.** See the
-[release](https://github.com/freewillydev/ecx-solana-bridge/releases/tag/review-2026-10-09-guided-console)
+[release](https://github.com/freewillydev/ecx-solana-bridge/releases/tag/review-2026-10-09-funded-recovery)
 for verification information. Download and run:
 
 ```sh
 curl --fail --location --proto '=https' --tlsv1.2 \
   -o ecx-bridge-ubuntu-24.04-x86_64.run \
-  https://github.com/freewillydev/ecx-solana-bridge/releases/download/review-2026-10-09-guided-console/ecx-bridge-ubuntu-24.04-x86_64.run
+  https://github.com/freewillydev/ecx-solana-bridge/releases/download/review-2026-10-09-funded-recovery/ecx-bridge-ubuntu-24.04-x86_64.run
 sudo sh ./ecx-bridge-ubuntu-24.04-x86_64.run
 ```
 
@@ -36,10 +36,10 @@ sudo ecx-bridge
 ```
 
 The menu offers status, saved setup, funding, pause, reviewed upgrades and backup
-verification/download. Status and exit never start services. State changes require
-confirmation. Full custody restoration remains an explicit recovery procedure;
-backup verification does not activate a recovered server. Advanced CLI commands
-remain available.
+verification/download, staged restoration and checked activation. Status and exit
+never start services. Restoration requires permanent exclusion of the old signer;
+verification alone does not activate recovered custody. Advanced CLI commands remain
+available.
 
 [Setup and recovery](2-Wrap-Unwrap-Server/docs/INSTALL.md) ·
 [Upgrade and operation](2-Wrap-Unwrap-Server/docs/OPERATIONS.md) ·
