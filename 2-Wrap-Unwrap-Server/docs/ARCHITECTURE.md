@@ -1,6 +1,6 @@
 # Architecture and financial contracts
 
-The source map is in the [server README](../README.md). This guide defines the
+The source map is in the [audit path](#audit-path) below. This guide defines the
 boundaries a reviewer must trace; [release review](RELEASE-REVIEW.md) records what
 is actually verified. There is one Servant HTTP/worker process and one dedicated
 signer. PostgreSQL, the native daemon, Solana RPC and restic are dependencies.
@@ -15,7 +15,7 @@ are not a separate process isolation boundary. The signer remains separate.
 ## Start the audit here
 
 Follow one order through this path, then repeat it for refund and earned funding.
-The [source map](../README.md#audit-path), authoritative-fact table and invariant
+The [source map](#audit-path), authoritative-fact table and invariant
 index below identify the concrete implementation and its checks. Historical test
 results belong in RELEASE-REVIEW; they are not assumptions that new code is safe.
 
@@ -839,3 +839,49 @@ restricted signer reads, HTTPS signing for both real network profiles (offline
 RPC fixtures), restart recovery, fences and encrypted schema-22 ledger restoration
 pass their local contracts. No funded deployment is converted or resumed by these
 tests; real-chain and independent-host acceptance remain release gates.
+
+## Audit path
+
+| Responsibility | Source |
+| --- | --- |
+| Amounts, quotes, funding and wire records | `src/Bridge/{Domain,Wire}.hs` |
+| Pure financial decisions and customer projection | `src/Bridge/Lifecycle.hs` |
+| Caller/severity GADTs and existential requests | `src/Bridge/Operation/Internal.hs` |
+| Four pure Servant handlers | `api/Bridge/API.hs` |
+| Operation instances, shared critical evaluator and signing | `workflow/Bridge/Critical.hs` |
+| Admission, orders and payment validation | `workflow/Bridge/{Admission,Order,Payment}.hs` |
+| Observation and custody reconciliation | `workflow/Bridge/{Observer,Reconciliation}.hs` |
+| Closed Opaleye operations and transactions | `runtime/Bridge/Store.hs`, `Store/{Schema,Catalog,Projection}.hs` |
+| Offline schema conversion with preserved history | `runtime/Bridge/Store/Migration.hs`, `migrations/009-*.sql` |
+| Native/Solana adapters and protocol codecs | `chain/Bridge/` |
+| Signer HTTPS transport and protected credentials | `workflow/Bridge/{Signer,Credentials}.hs` |
+| Local operator control and custody recovery | `workflow/Bridge/{Control,Recovery}.hs` |
+| Host fence and encrypted archives | `runtime/Bridge/{Fence,Store/Backup}.hs` |
+| Startup, configuration and browser serving | `app/Main.hs`, `workflow/Bridge/{Config,Web}.hs` |
+| Haskell browser and Cabal asset hooks | `web/`, `build/` |
+| QuickCheck and PostgreSQL contracts | `test/Main.hs`, `test/StoreCheck.hs` |
+
+Servant handlers package typed requests; `Operation.command` resolves them into
+closed DSL instructions. Separate evaluators enforce safe/critical authority.
+All application database access uses Opaleye inside specific closed operations.
+Only critical evaluation owns the signer client. The signer independently checks
+saved decisions and never broadcasts. The sections above provide the request-to-effect
+diagram, authoritative facts, transition map, invariant/test index and bounded TLA+ limits.
+
+## Customer API
+
+| Route | Result |
+| --- | --- |
+| `GET /api/v1/config` | Identity, limits, fees, links and availability |
+| `POST /api/v1/orders` | Create/recover an immutable order |
+| `GET /api/v1/orders/:id` | Authorized order status |
+| `POST /api/v1/orders/:id/transaction` | Authorized Solana Pay instructions |
+
+Amounts are integer base-unit strings. A saved private capability authorizes order
+access; an order ID alone does not. Wrapping binds a Solana destination and native
+refund address. Unwrapping uses a Solana Pay reference and derives refund ownership
+from verified deposit effects. Only actual chain observations credit deposits.
+
+[Token administration](../../../1-Make-Wrapped-ECX/README.md) and
+[liquidity operations](../../../3-Create-CPMM-Pool/README.md) use separate keys outside
+customer custody. Trading links do not provide the native wrap/unwrap service.

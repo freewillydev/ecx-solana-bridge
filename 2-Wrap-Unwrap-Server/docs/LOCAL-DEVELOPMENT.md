@@ -64,6 +64,48 @@ between prebuilt and source mode, because environment changes alone need not
 invalidate Cabal's cache. The bundle files are tracked dependencies once selected.
 Without `ECX_BROWSER_PREBUILT`, Cabal retains the full GHC JavaScript source build.
 
+## Ubuntu source toolchain
+
+For contributors building from source; installer users do not need these tools.
+The pinned static secp256k1 prerequisite avoids Ubuntu 24.04's older library.
+
+```sh
+cd ~
+mkdir ecash-bridge
+cd ecash-bridge
+git clone https://github.com/freewillydev/ecx-solana-bridge.git
+
+sudo apt update
+sudo apt install -y build-essential cmake jq curl pkg-config libpq-dev libgmp-dev libffi-dev \
+  zlib1g-dev libssl-dev
+sh ecx-solana-bridge/2-Wrap-Unwrap-Server/install/secp256k1 "$HOME/.local/share/ecx-secp256k1"
+export PKG_CONFIG_PATH="$HOME/.local/share/ecx-secp256k1/prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
+source "$HOME/.cargo/env"
+curl --proto '=https' --tlsv1.2 -sSf https://get-ghcup.haskell.org | sh
+
+git clone https://github.com/emscripten-core/emsdk.git \
+  "$HOME/.local/share/ecx-emsdk"
+
+cd "$HOME/.local/share/ecx-emsdk"
+./emsdk install 3.1.74
+./emsdk activate 3.1.74
+source ./emsdk_env.sh
+ghcup config add-release-channel cross
+emconfigure ghcup install ghc --set javascript-unknown-ghcjs-9.12.2
+
+cd ~/ecash-bridge/ecx-solana-bridge/
+
+ghcup install cabal
+cabal update
+ghcup run --install --ghc 9.14.1 --cabal 3.16.1.0 -- cabal build exe:ecx-bridge -j1
+export PATH="$(dirname "$(ghcup run --install --ghc 9.14.1 --cabal 3.16.1.0 -- cabal list-bin exe:ecx-bridge)"):$PATH"
+cd 2-Wrap-Unwrap-Server
+
+sudo env "PATH=$PATH" ecx-bridge configure
+```
+
 ## Running
 
 With reviewed private configuration, migrated ledger, host fence and database

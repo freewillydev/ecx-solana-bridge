@@ -1,35 +1,42 @@
 # Installation prerequisites
 
-The current server is built through Cabal. The candidate installer under `install/`
-targets the rebuilt server; it is **not yet a certified release**. Do not use an old
-release built for the retired server. The schema-22 candidates packaged at
-`a55ec8b` pass fresh configure/start, repeated upgrades, restart without source keys,
-cold boot, HTTPS/443 and service isolation on both ARM64 and x86-64. These latest
-installation checks used unfunded custody and intentionally unavailable native RPC;
-checked resume correctly left orders paused. Earlier native-node/HTTPS-backup
-integration and encrypted wallet restoration are recorded separately in
-[release review](RELEASE-REVIEW.md). Funded clean-host restoration and independent
-storage remain open.
+The current Ubuntu 24.04 x86_64 candidate bundles the bridge, dedicated signer,
+pruned ECX node installer and database provisioning. It is under acceptance testing,
+**not a certified public release**. Use [RELEASE-REVIEW.md](RELEASE-REVIEW.md) for
+version-specific evidence; results from earlier installers do not certify this one.
 
 ## Interactive setup
 
-From a built checkout, run `cabal run exe:ecx-bridge -- configure`. With the
-executable on PATH, fresh Ubuntu setup is:
+For a reviewed candidate already downloaded:
 
 ```sh
-sudo ecx-bridge configure
-sudo ecx-bridge start
+sudo sh ./ecx-bridge-ubuntu-24.04-x86_64.run
 ```
 
-The default wizard is **fresh CanonicalBeta custody with two generated wallets**.
-It asks for six inputs (Enter accepts the displayed defaults):
+The launcher installs its verified bundle in a stable private location, collects
+settings and starts setup. After interruption or funding, resume from any directory:
+
+```sh
+sudo ecx-bridge
+```
+
+This resumes the existing setup; it does not silently upgrade an installed runtime.
+Use the reviewed upgrade procedure in [OPERATIONS.md](OPERATIONS.md) for upgrades.
+From a built source checkout, the explicit `configure` then `start` commands remain
+available; see [LOCAL-DEVELOPMENT.md](LOCAL-DEVELOPMENT.md) for prerequisites.
+
+The default wizard creates **fresh CanonicalBeta custody with two generated wallets**.
+It asks for four inputs (Enter accepts displayed defaults):
 
 1. Primary Solana Mainnet HTTPS RPC URL, or a private file containing it.
 2. Independent provider's Mainnet HTTPS RPC URL, or a private file containing it.
-3. Local ECX node configuration path (default `/var/lib/ecx-betanet/bitcoin.conf`).
-4. Its systemd service (default `ecx-betanet.service`).
-5. A **new** HTTPS restic repository URL, or a private file containing it.
-6. Public HTTPS origin, or `-` for loopback-only testing.
+3. A **new** HTTPS restic repository URL, or a private file containing it.
+4. Public HTTPS origin, or `-` for loopback-only testing.
+
+The managed pruned ECX node is automatic: `/var/lib/ecx-betanet/bitcoin.conf`,
+`ecx-betanet.service`, and loopback RPC port 28532. No node-path prompt is needed.
+Pruning limits retained block data; initial synchronization still takes time and
+additional disk space is needed for chainstate, the database and temporary work.
 
 Public HTTPS adds the certificate-chain and TLS-key paths. A missing `restic` on
 PATH adds a reviewed executable-path prompt. Certificate issuance/renewal and
@@ -47,7 +54,9 @@ keys or passwords need to be manually created or entered for these internal role
 Defaults and funding instructions are displayed. Configure itself performs no RPC,
 node changes, signing or payments.
 
-Settings live in `./.ecx-bridge`. `bootstrap.json` is deliberately **not a runnable
+The no-argument launcher keeps settings in `/var/lib/ecx-bridge-setup/.ecx-bridge`.
+Explicit `configure` keeps settings in `./.ecx-bridge` relative to its working directory.
+`bootstrap.json` is deliberately **not a runnable
 worker configuration**: both history anchors remain empty until discovered from
 real finalized history. Edit advanced settings there before first start. First
 start seals the settings; subsequent changes require review rather than silently
@@ -71,7 +80,8 @@ Both independent providers must agree on bounded finalized address histories,
 and the origins must resolve to transactions involving the right accounts. Only
 then are validated `worker.json` and `signer.json` published. Partial publication
 can be resumed without overwriting changed files. Funding delays are handled by
-rerunning the same `sudo ecx-bridge start`; do not rerun configure or generate new wallets.
+rerunning `sudo ecx-bridge` after a launcher-based install, or `sudo ecx-bridge start`
+from the original working directory after explicit configure. Do not generate new wallets.
 
 Startup still enforces the existing custody, treasury-allocation and backup gates.
 Creating an ATA does not supply wrapped ECX inventory, allocate operator capital,
@@ -91,7 +101,9 @@ sudo ecx-bridge configure --advanced
 The advanced wizard retains the detailed field-by-field flow described below.
 Source secret files must belong to the invoking user with private permissions;
 when configuring as root, prepare root-owned inputs. Existing setup directories
-are refused. Failed collection removes only newly created settings, while generated
+are refused when complete or unrecognized. Recognized interrupted default settings
+are preserved and recollected using the same generated wallets. Failed collection
+removes only newly created settings, while generated
 wallet recovery files remain in their separate private directories.
 
 For a new Solana wallet, select **generate** (default). An interactive terminal is
@@ -345,8 +357,9 @@ that file is not an installation command or release certificate.
 ## Required host configuration
 
 Building source does not provision database roles/ACLs, native RPC restrictions,
-signer TLS/authentication files, service supervision or public TLS certificates. The candidate installer supplies local service/database policy; native-node,
-backup-destination and public HTTPS provisioning remain required.
+signer TLS/authentication files, service supervision or public TLS certificates.
+The candidate installer supplies local service/database policy and the default
+managed native node. Backup-destination and public HTTPS provisioning remain required.
 
 - Run the HTTP/worker and signer as separate OS users. Only the signer may read the
   custody key, full native credential, TLS private key and optional wallet passphrase.
