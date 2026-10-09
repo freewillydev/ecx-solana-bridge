@@ -63,3 +63,5 @@ How a stranger verifies DONE.md:
 - VERIFY: a fresh verifier records per-row PASS/FAIL, evidence and overall verdict in the owner's audit trail. The owner records their findings without rewriting failures as passes.
 
 Do not expose configuration secrets, wallet keys, bearer capabilities or authenticated RPC URLs in any evidence file. Failed/deferred checks remain FAIL with their unblock condition.
+
+Never log a backup repository URL or an unvalidated URL component. Restic URLs may wrap HTTPS as `rest:https://...`; ordinary URL parsing then places credentials inside the apparent path. Keep diagnostic output to fixed status fields and rotate any credential accidentally disclosed.

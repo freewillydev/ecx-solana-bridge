@@ -7,6 +7,15 @@ and ran cargo-audit 0.22.2 against RustSec commit
 `ef6173cbc5c50ec8166f9a5b28f07834144373ee` (1,290 advisories).
 These are version/source checks, not independent security certification.
 
+Rechecked against the primary advisory pages on 2026-10-09:
+[bincode](https://rustsec.org/advisories/RUSTSEC-2025-0141.html) still lists no patched version;
+[Cabal](https://haskell.github.io/security-advisories/advisory/HSEC-2026-0006.html)
+still lists versions >=2.2 as affected;
+[base](https://haskell.github.io/security-advisories/advisory/HSEC-2023-0007.html)
+still lists versions >=3.0.3.1 as affected. No new patched-version claim justifies
+changing the pinned toolchain. The scoped mitigations below remain evidence for
+release review, not acceptance or waiver of these advisories.
+
 | Inputs checked | Result after remediation |
 | --- | --- |
 | Native plan: 193 package/compiler versions, including build/test inputs | `base` HSEC-2023-0007; build-time `Cabal` HSEC-2026-0006 |
