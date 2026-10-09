@@ -3142,7 +3142,7 @@ orderWorkflowContract fixtures reader writer storePolicy = do
           control (object ["operation" .= ("pause"::T.Text),"reason" .= ("operator contract"::T.Text)]) >> pure ()
     expectStore "customer_configuration_mismatch" $
       runProcess manager reader (WorkerProcess chainSettings config
-        (Just customerSettings {publicConfiguration=public {W.pubMint="wrong"}}) endpoint writer 1 "/unused" "/unused")
+        (Just customerSettings {publicConfiguration=public {W.pubMint="wrong"}}) endpoint writer (Serving 1 "/unused" "/unused"))
 
   -- A slow checkpoint neither exposes stale instructions nor renews a quote.
   -- Clock/freshness changes are fixtures; this is a PostgreSQL workflow contract.
@@ -3288,7 +3288,7 @@ withWorkerProcess manager reader writer settings policy customer endpoint action
   createDirectory assets; createDirectory (assets</>"dist")
   mapM_ (\file->writeFile (assets</>file) "process contract fixture") ["index.html","style.css","dist/wallet.js"]
   port<-freePort
-  withProcessListening (runProcess manager reader $ WorkerProcess settings policy customer endpoint writer port assets directory)
+  withProcessListening (runProcess manager reader $ WorkerProcess settings policy customer endpoint writer (Serving port assets directory))
     port $ do
       awaitCondition "operator listener" $ do
         exists<-Posix.fileExist (directory</>"operator.sock")
@@ -4320,11 +4320,13 @@ tlsMain=do
                   receipt=W.BackupReceipt identity sequenceNo (T.replicate 64 "a") (T.replicate 64 "b")
               check (required>covered && required<=sequenceNo)
               checkpointReply<-newIORef (Nothing::Maybe W.BackupReceipt)
+              checkpointMinimum<-newIORef required
               checkpoints<-newIORef (0::Int)
               let fixtureCheckpoint :: forall a. Op.Request 'Op.Signer 'Op.Critical a -> IO a
                   fixtureCheckpoint request=case Op.resolve request of
                     Op.SigningDSL (Op.CheckpointSigning (Op.CheckpointCustody fingerprint minimumSequence))->do
-                      check (fingerprint==identity && minimumSequence==required)
+                      expectedMinimum<-readIORef checkpointMinimum
+                      check (fingerprint==identity && minimumSequence==expectedMinimum)
                       modifyIORef' checkpoints (+1)
                       Op.CheckpointResult <$> (readIORef checkpointReply >>= maybe (reject "checkpoint_fixture_refused") pure)
                     _->reject "checkpoint_fixture_only"
@@ -4359,6 +4361,56 @@ tlsMain=do
                     readIORef checkpoints >>= check . (==callsBefore)
                     evalRead reader (ReadOrder header orderId) >>= check . (==Nothing) . W.depositInstruction
                     evalRead reader ReadBalances >>= check . (==original)
+              -- The upgrade checkpoint has no HTTP/control/observer lifetime.
+              -- It must force a new authenticated receipt even at covered sequence,
+              -- without changing the saved transactions or their reservations.
+              writeFile auth (replicate 64 'a'); setFileMode auth 0o600
+              frozen<-evalRead reader ReadState
+              (_,attemptsBefore,postingsBefore)<-fixture fixtures ArchiveRecords
+              historyBefore<-fixture fixtures PaymentHistoryRecords
+              let frozenSequence=ledgerSequence frozen
+                  frozenReceipt=receipt {W.receiptSequence=frozenSequence}
+                  checkpoint=runProcess manager reader $ WorkerProcess
+                    (ObserverSettings configuredNative solana 1 "origin" "origin") config
+                    (Just $ CustomerSettings publicConfig store sdk) checkpointEndpoint writer Checkpointing
+                  preserved=do
+                    current<-evalRead reader ReadState
+                    check (ledgerPaused current && ledgerSequence current==frozenSequence)
+                    (_,attemptsAfter,postingsAfter)<-fixture fixtures ArchiveRecords
+                    check (attemptsAfter==attemptsBefore && postingsAfter==postingsBefore)
+                    fixture fixtures PaymentHistoryRecords >>= check . (==historyBefore)
+              check (not $ null attemptsBefore)
+              writeIORef checkpointMinimum frozenSequence
+              writeIORef calls []
+              withProcessListening (runSigningServer checkpointEndpoint checkpointApp) checkpointPort $ do
+                beforeRequests<-readIORef checkpoints
+                fixture fixtures ReadyIntake
+                expectStore "pause_before_upgrade" checkpoint
+                readIORef checkpoints >>= check . (==beforeRequests)
+                evalWrite writer (Pause "upgrade checkpoint contract")
+                expectStore "worker_already_running" $
+                  withWriter settings store (const $ pure ()) $ const checkpoint
+                readIORef checkpoints >>= check . (==beforeRequests)
+                writeIORef checkpointReply Nothing
+                expectStore "signer_outcome_unknown" checkpoint
+                preserved
+                forM_ [frozenReceipt {W.receiptIdentity="other"}
+                  ,frozenReceipt {W.receiptSequence=frozenSequence-1}
+                  ,frozenReceipt {W.receiptSequence=frozenSequence+1}
+                  ,frozenReceipt {W.receiptSnapshot="latest"}
+                  ,frozenReceipt {W.receiptArchiveHash=T.replicate 64 "A"}] $ \bad->do
+                    writeIORef checkpointReply (Just bad)
+                    expectStore "invalid_custody_checkpoint_receipt" checkpoint
+                    preserved
+                writeIORef checkpointReply (Just frozenReceipt)
+                checkpoint
+                preserved
+                evalRead reader ReadState >>= check . (==frozenSequence) . ledgerBackup
+                coveredRequests<-readIORef checkpoints
+                checkpoint
+                readIORef checkpoints >>= check . (==coveredRequests+1)
+                preserved
+                readIORef calls >>= check . null
         -- Retrying reopens the same intent. Proved expired signatures remain
         -- history, not a second live transaction or a native replacement family.
         fixture fixtures SeedCustodyHeads
@@ -4390,7 +4442,7 @@ tlsMain=do
         evalWrite writer (RecordSolanaExpiry successor proof)
         pending []
         evalRead reader (ReadAttempt $ signedId $ recordedSigned old) >>= check . (==retired)
-  putStrLn $ "PASS: "<>(if canonical then "canonical Mainnet profile" else "Devnet profile")<>", real process HTTPS signing, auth/certificate refusal and rotation, serialized concurrent requests, second-read refusal and gate recovery, exact SDK output, durable ledger replay, pending-payment recovery and HTTP-triggered checkpoint receipt validation/acknowledgment/replay; offline fixtures only"
+  putStrLn $ "PASS: "<>(if canonical then "canonical Mainnet profile" else "Devnet profile")<>", real process HTTPS signing, auth/certificate refusal and rotation, serialized concurrent requests, second-read refusal and gate recovery, exact SDK output, durable ledger replay, pending-payment recovery and HTTP-triggered checkpoint and bounded upgrade checkpoint preservation/refusal/forced replay; offline fixtures only"
 
 restorationContract :: PG.Connection -> Reader -> Writer -> IO ()
 restorationContract fixtures reader writer=do
