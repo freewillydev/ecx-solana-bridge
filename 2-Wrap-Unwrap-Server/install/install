@@ -13,7 +13,7 @@ absent() { [ ! -e "$1" ] && [ ! -L "$1" ]; }
 [ "$ID:$VERSION_ID" = ubuntu:24.04 ] || fail 'Ubuntu 24.04 required'
 mode=${1:-}; material=${2:-}
 case "$mode" in fresh) [ "$#" = 2 ] || fail 'fresh requires a private material directory';;
-  upgrade) [ "$#" = 1 ] || fail 'upgrade takes no material; existing custody is retained';;
+  upgrade|prepare-upgrade) [ "$#" = 1 ] || fail 'upgrade takes no material; existing custody is retained';;
   *) fail 'usage: fresh PRIVATE_MATERIAL_DIRECTORY | upgrade';;
 esac
 bundle=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
@@ -55,6 +55,16 @@ if [ "$mode" = fresh ]; then
 else
   [ -f "$config/installed" ] && [ -L "$prefix/current" ] || fail 'no completed installation'
   cmp "$bundle/migrations.sha256" "$prefix/current/migrations.sha256" >/dev/null || fail 'schema change requires reviewed offline migration before upgrade'
+  if [ "$mode" = upgrade ]; then
+    lifecycle=/var/lib/ecx-bridge-upgrade
+    [ -d "$lifecycle" ] && [ ! -L "$lifecycle" ] && [ "$(stat -c '%u:%a' "$lifecycle")" = 0:700 ] || fail 'run the candidate ecx-bridge entry command for a checkpointed upgrade'
+    [ -f "$lifecycle/pending" ] && [ ! -L "$lifecycle/pending" ] && [ "$(stat -c '%u:%a' "$lifecycle/pending")" = 0:600 ] || fail 'verified pending upgrade required'
+    jq -e --arg release "$release" '.newRelease == $release and (.oldRelease | test("^[0-9a-f]{64}$"))' "$lifecycle/pending" >/dev/null || fail 'different upgrade is pending'
+    previous=$(jq -er .oldRelease "$lifecycle/pending")
+    for phase in "$previous-$release.checkpoint" worker.blocked signer.blocked; do
+      [ -f "$lifecycle/$phase" ] && [ ! -L "$lifecycle/$phase" ] && [ "$(stat -c '%u:%a' "$lifecycle/$phase")" = 0:600 ] || fail 'checkpoint and service interlocks required'
+    done
+  fi
 fi
 # No source compilation or unpinned application download occurs under root.
 export DEBIAN_FRONTEND=noninteractive
@@ -167,6 +177,10 @@ if [ ! -e "$target" ]; then
 fi
 (cd "$target" && sha256sum -c manifest.sha256 >/dev/null) || fail 'installed release changed'
 "$target/bin/restic" version | grep -q '^restic 0.19.1 ' || fail 'tested restic 0.19.1 required'
+if [ "$mode" = prepare-upgrade ]; then
+  echo "Verified candidate staged at $target; services unchanged."
+  exit 0
+fi
 if [ "$mode" = fresh ]; then
   if [ ! -f "$journal/configured.sha256" ]; then
   for role in worker signer; do
@@ -268,9 +282,12 @@ else
   systemctl stop ecx-bridge-worker ecx-bridge-signer
 fi
 # Publishing a release never changes keys, configuration, ledger or saved attempts.
+# Sync candidate data before its pointer, including when /opt is a separate filesystem.
+sync -f "$prefix"
 [ ! -e "$prefix/current.new" ] || [ -L "$prefix/current.new" ] || fail 'unexpected current staging path'
 ln -sfn "$target" "$prefix/current.new"
 mv -Tf "$prefix/current.new" "$prefix/current"
+sync -f "$prefix"
 if [ "$mode" = fresh ]; then
   deployment_identity=$("$prefix/current/bin/ecx-bridge" check-config "$config/worker/config.json" | jq -er .fingerprint)
   # Only the offline database owner installs constraints. The worker keeps DML

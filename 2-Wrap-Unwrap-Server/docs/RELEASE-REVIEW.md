@@ -1959,3 +1959,45 @@ The durable upgrade journal, startup interlock, guided version switch and actual
 interrupted-upgrade acceptance remain required; this command alone is not the
 finished operator workflow. The published review artifact remains `4bcfaaa` and
 does not contain this change.
+
+## Guided upgrade implementation and failure-path acceptance (2026-10-08)
+
+`Upgrade.withLifecycle` connects the normal root entry command to an immutable
+pending plan and phase records. It binds old/candidate release hashes, configuration
+and identity, stages verified tools, blocks worker restart persistently, obtains the
+closed checkpoint receipt, validates the exact locked fence, then stops the signer
+and switches the release. The published continuation accepts a nondecreasing fence
+and restarts paused before ordinary recovery/reconciliation/resume. This also handles
+interruption after resume but before recording completion without rewinding the DB.
+Raw installer upgrade now requires the pending plan, receipt and interlocks. This
+version still deliberately refuses changed migration inventories; automatic reviewed
+schema transition is not yet implemented.
+
+Ubuntu executable builds passed (`d09583a1`, `634734af`). Extended actual PostgreSQL
+fence tests passed (`6df8d844`), covering unchanged inspection, sequence advancement,
+wrong identity, active-lock and retired-fence refusal. The bridge suite and integrated
+executable passed (`ca8bf6dc`). A final review added explicit filesystem synchronization
+before/after release-pointer publication and after creating the journal directory;
+this narrow durability delta compiled in `720e8e59`; shell syntax validation passed
+and disposable PostgreSQL was confirmed stopped.
+
+Disposable Ubuntu host `i-05a1d37ba2560b807`, previously installed with the unfunded
+`4bcfaaa` fixture, tested a local-build candidate SHA-256
+`6f67c58b65531cf6aa47114793365c34b5318a5a72148397ad8a2dbf019cf483`.
+The actual command failed before a checkpoint receipt on its incomplete setup;
+it retained the old release and exact installed config/key hashes, retained its
+pending plan and prevented real `systemctl start` from activating the worker
+(`002dbaa4`). An actual reboot retained that interlock and the same files (`b5705e6d`).
+The same command retried without replacing its plan or custody (`d0f240b4`). Both
+fixture services were stopped afterward. This candidate predates the final sanitized
+error reporting and extra fsync corrections; it is controlled failure-path evidence,
+not a published release or successful custody backup/upgrade. Funded services were
+not activated or modified by these tests.
+
+Relative to `5428281`, production Haskell adds net 261 lines across four files,
+including the new 251-line root-only orchestration module; the installer adds net
+17 lines and existing fence contracts add net six. Financial queries/signing remain
+inside the existing closed authorities. Independent read-only review corrected
+post-resume replay, release-marker validation, fence binding and fsync ordering.
+Successful checkpoint→publication→resume, all phase killpoints, supported schema
+transition, and the funded/live/customer-wallet gates remain open.

@@ -4,6 +4,7 @@ module Configure (launch,configure,configureAdvanced,start,initializeNative) whe
 import qualified Bridge.Config as C
 import qualified Bootstrap
 import qualified NodeSetup
+import qualified Upgrade
 import qualified SetupPaths
 import qualified Token
 import qualified Token.Operation as TokenOp
@@ -468,7 +469,7 @@ template=case eitherDecodeStrict' "{\"profile\":\"ECXBetanetDevnet\",\"deploymen
 start :: FilePath -> IO ()
 start path=do
   directory<-makeAbsolute path
-  withFamily (directory</>"start") (startUnlocked directory)
+  Upgrade.withLifecycle directory $ withFamily (directory</>"start") (startUnlocked directory)
 
 startUnlocked :: FilePath -> IO ()
 startUnlocked path=do

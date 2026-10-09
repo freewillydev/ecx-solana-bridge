@@ -3203,10 +3203,13 @@ fenceMain = do
       expectStore "pause_before_fence_change" (adopt 0)
       bracket (PG.connect settings) PG.close (\c->fixture c $ SetPause True)
       adopt 0 >>= check . (==(T.pack database,0))
+      Fence.inspectFence directory identity >>= check . (==0)
       original<-BS.readFile (directory</>"sequence.json")
       _<-adopt 0
       BS.readFile (directory</>"sequence.json") >>= check . (==original)
-      Fence.withFence directory identity $ \_->expectStore "worker_fence_locked" (adopt 0)
+      Fence.withFence directory identity $ \_->do
+        expectStore "worker_fence_locked" (adopt 0)
+        expectStore "worker_fence_locked" (Fence.inspectFence directory identity)
       withWriter settings policy (const $ pure ()) $ \_->expectStore "worker_already_running" (adopt 0)
       withFencedWriter settings policy directory $ \writer->do
         expectStore "worker_already_running" (adopt 0)
@@ -3217,6 +3220,7 @@ fenceMain = do
       before<-evalRead reader ReadState
       unless (ledgerSequence before==1) (fail "missing committed sequence")
       _<-adopt 1
+      Fence.inspectFence directory identity >>= check . (==1)
       let other=directory</>"retired"
       Fence.initializeFence other identity 0
       _<-evalRestore settings (AdoptLedger other identity 1)
@@ -3226,6 +3230,7 @@ fenceMain = do
       expectStore "worker_fence_retired" (evalRestore settings $ AdoptLedger other identity 1)
       wrong<-pure (directory</>"wrong")
       Fence.initializeFence wrong (T.replicate 64 "b") 0
+      expectStore "worker_fence_identity_mismatch" (Fence.inspectFence wrong identity)
       expectStore "worker_fence_identity_mismatch" (evalRestore settings $ AdoptLedger wrong identity 1)
       Fence.withFence directory identity $ \advance->do
         let uncertain n=do
@@ -3251,6 +3256,7 @@ fenceMain = do
         expectStore "stale_ledger_below_worker_fence" (advance 1)
         advance 2
       Fence.retireFence directory identity 2
+      expectStore "worker_fence_retired" (Fence.inspectFence directory identity)
       expectStore "worker_fence_retired" (withFencedWriter settings policy directory $ const $ pure ())
   putStrLn "PASS: offline adoption/retirement, pause/identity/sequence/ownership checks, real host fence, durable uncertain-commit watermark, rollback, stale restart refusal"
 

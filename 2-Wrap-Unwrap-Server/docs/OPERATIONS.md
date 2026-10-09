@@ -305,3 +305,27 @@ No command overwrites a wallet, automatically activates restored custody or eras
 unknown outcomes. Seeds alone cannot recover order history or authorization. Never
 restore an older ledger over newer activity or initialize a fresh ledger with old
 custody keys. Clean-host/off-host funded restoration remains a release gate.
+
+
+### Guided same-schema upgrades (implementation under acceptance)
+
+Run the newly reviewed Ubuntu installer with `sudo`, then use the same
+`sudo ecx-bridge` entry command on every retry. The candidate must be a verified,
+root-owned bundle. Existing setup, keys, addresses and database are retained.
+A new candidate now enters a root-only upgrade journal; normal start cannot skip
+an unfinished upgrade. It stops the worker, obtains a fresh verified checkpoint
+through the critical evaluator, records the receipt and fence, stops the signer,
+and switches the immutable release before performing the normal checked resume.
+Persistent systemd conditions prevent worker restart during the frozen interval.
+
+A failed step leaves its journal at `/var/lib/ecx-bridge-upgrade` and preserves the
+original release and state. Rerun the same entry command after resolving the stated
+prerequisite. Do not delete the journal or unblock services manually. A failure
+after resume can safely stop/restart and reconcile the advanced ledger; it never
+restores the pre-upgrade database. The fixed `check-fence CONFIG` command reads a
+stopped worker's validated, nonretired fence under its lock without modifying it.
+
+This path currently accepts identical migration inventories only. A schema change
+still requires the reviewed offline conversion/recovery procedure; automatic
+schema-21 to schema-22 integration and full interrupted-upgrade acceptance remain
+release gates. Earlier installer evidence does not prove this new workflow.

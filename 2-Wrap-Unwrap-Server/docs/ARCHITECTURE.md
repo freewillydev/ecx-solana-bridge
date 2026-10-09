@@ -135,7 +135,16 @@ That closed operation requires a paused ledger and obtains a fresh verified cust
 receipt even when prior backup coverage is current. Receipt acknowledgement must
 complete before the command emits success. The signer remains a separate process;
 no signing keys or additional signer client are introduced. Guided upgrade
-orchestration must also prevent worker restart between checkpoint exit and upgrade.
+orchestration prevents worker restart between checkpoint exit and upgrade using
+root-owned persistent systemd conditions. `Upgrade.withLifecycle` holds a global
+setup lock and journals candidate/current release hashes, identity, configuration,
+checkpoint receipt and validated fence evidence. It stages the candidate before
+running the closed checkpoint command as the worker identity. It never queries the
+database or constructs a signer client. After publication it stops any previously
+resumed worker again, validates a nondecreasing fence and uses ordinary startup and
+checked resume against current chain state. Immutable phase records remain after
+completion. Same-schema upgrades reuse the database; unknown migrations refuse.
+End-to-end interruption and version-transition acceptance remains required.
 
 `Signer.hs` owns Servant routes, authentication and TLS transport. Signer startup
 and key operations live in `Critical.hs`. The dedicated signer independently

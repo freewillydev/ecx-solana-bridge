@@ -1,5 +1,5 @@
 {-# LANGUAGE ForeignFunctionInterface,ScopedTypeVariables #-}
-module Bridge.Fence (initializeFence,adoptFence,retireFence,withFence) where
+module Bridge.Fence (initializeFence,adoptFence,retireFence,inspectFence,withFence) where
 
 import Bridge.Error
 import Bridge.File (withHandle,readBounded)
@@ -122,6 +122,10 @@ adoptFence directory identity sequenceNo=do
         previous<-validateState directory identity
         require (sequenceNo>=previous) "stale_ledger_below_worker_fence"
         when (sequenceNo>previous) $ writeState directory (State identity sequenceNo False)
+
+-- Read-only upgrade evidence; uses the same lock, opened-file checks and retirement guard.
+inspectFence :: FilePath -> Text -> IO Int64
+inspectFence directory identity=withLock directory (validateState directory identity)
 
 -- Explicit offline retirement. A subsequent initializer cannot erase it.
 -- This disables cooperating paying workers, not other software holding a key.
