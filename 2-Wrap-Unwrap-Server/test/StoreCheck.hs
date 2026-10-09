@@ -91,8 +91,10 @@ import System.Exit (ExitCode(..))
 import System.Environment (getEnv,lookupEnv,getEnvironment,getExecutablePath)
 
 main :: IO ()
-main=lookupEnv "ECX_PROVISION_TEST" >>= \mode->if mode==Just "1" then ProvisionCheck.contract
-  else lookupEnv "ECX_FUNDED_RECOVERY_CONFIG" >>= maybe contractMain fundedRecoveryMain
+main=lookupEnv "ECX_PROVISION_CHILD" >>= maybe normal ProvisionCheck.child
+ where
+  normal=lookupEnv "ECX_PROVISION_TEST" >>= \mode->if mode==Just "1" then ProvisionCheck.contract
+    else lookupEnv "ECX_FUNDED_RECOVERY_CONFIG" >>= maybe contractMain fundedRecoveryMain
 
 contractMain :: IO ()
 contractMain = do
