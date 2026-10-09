@@ -726,7 +726,7 @@ instance Operation 'Worker 'Critical WorkerCommand where
           freshIntake environment
           case reply of
             NativeReply signed->checkNativeAcceptance (N.nativeCall rpc native) signed
-            SolanaReply signed->checkBlockhashWindow (S.solanaCall rpc solana) (solPlanRecent $ signedSolanaPlan signed)
+            SolanaReply signed->checkBlockhashForSend (S.solanaCall rpc solana) (solPlanRecent $ signedSolanaPlan signed)
           now<-floor <$> getPOSIXTime
           authorized<-evalWrite writer (AuthorizeSend now txid)
           require (authorized==recorded) "saved_payment_changed"

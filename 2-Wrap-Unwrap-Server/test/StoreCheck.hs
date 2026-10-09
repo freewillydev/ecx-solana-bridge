@@ -3973,6 +3973,7 @@ expiryContract fixtures reader writer=do
   evalRead reader PendingAttempts >>= check . notElem "expiry-signed-0"
   (view,active,attempts)<-evalRead reader (ReadPaymentWork identifier)
   check (savedStatus view==PaymentReview && active==Nothing && null attempts)
+  evalRead reader (ReadPaymentAttempts identifier) >>= check . (==["expiry-signed-0"])
   evalRead reader ReadBalances >>= check . (==before)
   ready
   expectStore "preparation_retry_not_authorized" (evalWrite writer $ PreparePayment 110 identifier (money 20) "{}")

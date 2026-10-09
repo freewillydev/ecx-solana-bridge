@@ -221,6 +221,7 @@ data StoreRead a where
   ReadPublicReport :: Int64 -> StoreRead W.PublicReport
   ReadBalances :: StoreRead (M.Map (Asset,Account) Integer)
   ReadPaymentWork :: Text -> StoreRead (PaymentView,Maybe PreparedPayment,[Text])
+  ReadPaymentAttempts :: Text -> StoreRead [Text]
   ReadSigningDecision :: Int64 -> Text -> Int -> StoreRead PreparedPayment
   ReadAttempt :: Text -> StoreRead RecordedAttempt
   ReadPreparation :: Text -> StoreRead PreparedPayment
@@ -398,6 +399,14 @@ evalRead (Reader settings identity remote) operation = bracket connect PG.close 
       ReadCancellation identifier generation -> readCancellation c identifier generation
       ReadUnsignedPreparation identifier -> cancellationPreparation c identity identifier
       ReadPaymentWork identifier -> paymentWork c identity identifier
+      ReadPaymentAttempts identifier -> do
+        _<-readPayment c identity identifier
+        rows<-O.runSelect c $ O.limit 1001 $ O.orderBy (O.asc id) $ do
+          row<-O.selectTable S.attempts
+          O.where_ (S.attemptIntent row O..== O.sqlStrictText identifier)
+          pure (S.attemptId row)
+        require (length rows<=1000) "payment_history_too_large"
+        pure rows
       ReadSigningDecision now identifier generation -> signingDecision c identity remote now identifier generation
       ReadAttempt identifier -> readAttempt c identifier
       ReadPreparation identifier -> readPreparation c identity identifier
