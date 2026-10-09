@@ -63,8 +63,8 @@ contract=bracket temporary removeDirectoryRecursive $ \directory->do
   savePrivate worker "worker:password";savePrivate signer "signer:password"
   savePrivate invalidUnlock (B.singleton 255);savePrivate unlock " exact unlock secret "
   -- Field order is explicitly sorted, and booleans/numbers retain their JSON types.
-  let fields=["false","1200",owner,owner,"test-deployment","100000","10000","1000"
-        ,"invalid-number","4","2100000","10000000","10000","10000",owner
+  let fields=["false","1200",owner,owner,"test-deployment","10000","1000"
+        ,"invalid-number","4","2100000","10000000","10000","100000",owner
         ,"00000047dcc9d64b767687d6a5e610c411dd85db5460e824c0f7284f5514bc47"
         ,"16000","1","http://127.0.0.1:29432","test-wallet","300","8080","8081"
         ,history,history,"https://api.devnet.solana.com","-"]
