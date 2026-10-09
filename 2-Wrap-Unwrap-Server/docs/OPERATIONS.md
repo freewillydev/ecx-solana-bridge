@@ -488,3 +488,33 @@ Ed25519 public key. Existing development/acceptance keys do not authorize a publ
 production release. The operator must designate the release-key owner and trusted
 public-key distribution channel; do not generate a new authority implicitly or
 trust a key supplied only alongside the candidate it authenticates.
+
+
+### Deployed service persistence and monitoring check (October 9)
+
+Read-only inspection found the AWS tunnel, observation worker and pruned node
+active and enabled, with on-failure restart delays of 5, 10 and 10 seconds.
+The signer was inactive but enabled. Its boot enablement was disabled to preserve
+the observation-only state across reboot; it remains inactive with PID 0
+(SSM `09166268-69ce-4824-b084-f1a16109abe3`). Reviewed activation must deliberately
+restore signer startup only after readiness and custody ownership checks. A future
+installer may enable it again; check that state before any reboot during review.
+No live reboot or crash-recovery test is claimed by this configuration inspection.
+
+The tunnel routes only `bridge.bitnames.info` to loopback port 61992, with a 404
+fallback. Public TLS verified successfully; its current certificate expires
+December 25, 2026. Cloudflare owns edge certificate issuance/renewal, as described
+in its [Universal SSL documentation](https://developers.cloudflare.com/ssl/edge-certificates/universal-ssl/).
+The local HTTP hop needs no public certificate renewal. The separate pinned signer
+TLS certificate expires October 9, 2027; rotation must update worker trust and
+signer credentials together using the procedure above. These observations do not
+prove a future certificate renewal or pin rotation succeeds.
+
+No local monitoring timer, service OnFailure handler, CloudWatch agent service or
+regional CloudWatch alarm was found. Journals and public readiness reports exist,
+but unattended alert delivery is not configured or tested. An operator must choose
+an alert recipient/channel and authorize its use. Production acceptance still
+needs an external health check (including unavailable/stale readiness, not only
+HTTP 200), backup/disk alarms, certificate-expiry checks and a delivered test alert.
+Do not create an unapproved messaging destination or automatically resume custody
+in response to a health failure.
