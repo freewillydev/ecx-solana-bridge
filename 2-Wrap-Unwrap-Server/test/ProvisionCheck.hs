@@ -50,7 +50,7 @@ checks root admin=bracket(PG.connect admin) PG.close $ \c->do
   let token="0123456789abcdef0123456789abcdef"
       run=evalSetup admin(ProvisionDatabase token)
       ddl sql=void(PG.execute_ c sql)
-      refused expected action=(action >> fail "expected refusal") `catch` \(BridgeError actual)->check(actual==expected)
+      refused expected action=(action >> fail "expected refusal") `catch` \(BridgeError actual)->unless(actual==expected)(fail $ "expected "<>T.unpack expected<>"; received "<>T.unpack actual)
       target=admin {PG.connectDatabase="ecx_bridge"}
   ddl "CREATE ROLE ecxbridgew NOLOGIN"
   refused "foreign_installation_roles" run
@@ -147,40 +147,48 @@ checks root admin=bracket(PG.connect admin) PG.close $ \c->do
         ,("information_schema","triggers","trigger_schema","trigger_name")
         ,("pg_catalog","pg_indexes","schemaname","indexname")] :: IO [[T.Text]]
   objects<-bracket(PG.connect target) PG.close $ \db->do
-    receiptNames db >>= check . ((==["receipt"]) :: [T.Text]->Bool)
+    receiptNames db >>= same "source installer receipt" ["receipt"]
     inventory db
-  check(all (not . null) objects)
+  unless(all (not . null) objects)(fail $ "empty source inventory category; counts="<>show(map length objects))
   archive<-withReader readerSettings identity False $ \reader->evalBackup reader(ExportLedger root)
   listing<-readProcess "pg_restore" ["--list",archivePath archive] ""
-  check(not $ "ecx_install" `isInfixOf` listing)
+  unless(not $ "ecx_install" `isInfixOf` listing)(fail "installer schema present in archive")
   bracket (evalRestore target $ RestoreLedger (manifestPath archive) identity 0)
     (\(database,_)->Backup.discardRestore admin {PG.connectDatabase=T.unpack database}) $ \(database,n)->do
-      check(n==0 && database/="ecx_bridge")
+      unless(n==0 && database/="ecx_bridge")(fail $ "restore target/sequence: "<>show(database,n))
       let restoredSettings=admin {PG.connectDatabase=T.unpack database}
       refused "restored_database_identity_or_state_mismatch" (evalSetup restoredSettings $ ProvisionRestoredDatabase "wrong" n)
       refused "restored_database_identity_or_state_mismatch" (evalSetup restoredSettings $ ProvisionRestoredDatabase identity (n+1))
       evalSetup restoredSettings (ProvisionRestoredDatabase identity n)
       evalSetup restoredSettings (ProvisionRestoredDatabase identity n)
       forM_ ["ecxbridger","ecxbridges"] $ \role->
-        bracket(PG.connect restoredSettings {PG.connectUser=role}) PG.close $ \db->verifyReadRole db >>= check
+        bracket(PG.connect restoredSettings {PG.connectUser=role}) PG.close $ \db->verifyReadRole db >>= same "reader privileges after restore" True
 
       bracket(PG.connect admin {PG.connectDatabase=T.unpack database}) PG.close $ \db->do
-        inventory db >>= check . (==objects)
-        receiptNames db >>= check . null
+        inventory db >>= sameInventory objects
+        receiptNames db >>= same "restored installer receipt must be absent" []
         restored<-(,) <$> (O.runSelect db $ O.selectTable S.deployment) <*> (O.runSelect db $ O.selectTable S.scanHealth)
         let (rows,observations)=before
-        check(restored==([row {S.paused=1,S.pauseReason="restored_requires_reconciliation"} | row<-rows],observations))
+        same "restored deployment and observation rows" ([row {S.paused=1,S.pauseReason="restored_requires_reconciliation"} | row<-rows],observations) restored
   -- Supplying the existing source DB cannot select it as a restore/cleanup target.
   refused "invalid_restore_database" (Backup.discardRestore target)
   bracket(PG.connect target) PG.close $ \db->do
-    inventory db >>= check . (==objects)
-    receiptNames db >>= check . ((==["receipt"]) :: [T.Text]->Bool)
+    inventory db >>= sameInventory objects
+    receiptNames db >>= same "source installer receipt" ["receipt"]
     original<-(,) <$> (O.runSelect db $ O.selectTable S.deployment) <*> (O.runSelect db $ O.selectTable S.scanHealth)
-    check(original==before)
-  bracket(PG.connect readerSettings) PG.close $ \db->verifyReadRole db >>= check
+    same "source deployment and observation rows unchanged" before original
+  bracket(PG.connect readerSettings) PG.close $ \db->verifyReadRole db >>= same "reader privileges after restore" True
   putStrLn "PASS: provisioned restricted-reader backup, installer receipt excluded, all public tables/sequences/functions/constraints/triggers/indexes restored, ledger and observation data preserved, paused isolated restore, reader remains restricted"
   putStrLn "PASS: foreign role/database refusal, migration rollback, SIGKILL during migration008 and successful retry, changed-migration refusal, read-only roles and initialized ledger/observation preservation"
  where
+  same :: (Eq a,Show a) => String -> a -> a -> IO ()
+  same label expected actual=unless(expected==actual)(fail $ label<>" expected="<>show expected<>" actual="<>show actual)
+  sameInventory :: [[T.Text]] -> [[T.Text]] -> IO ()
+  sameInventory expected actual=do
+    same "inventory category count" (length expected) (length actual)
+    forM_ (zip3 ["tables/views","sequences","functions","constraints","triggers","indexes"] expected actual) $ \(label,old,new)->
+      unless(old==new)(fail $ "inventory "<>label<>" counts="<>show(length old,length new)
+        <>" missing="<>show(take 8 $ filter (`notElem` new) old)<>" added="<>show(take 8 $ filter (`notElem` old) new))
   check True=pure ()
   check False=fail "provisioning invariant failed"
   tables :: O.Table (O.Field O.SqlText,O.Field O.SqlText) (O.Field O.SqlText,O.Field O.SqlText)
