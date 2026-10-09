@@ -2394,3 +2394,14 @@ resume at ledger/backup sequence 105/105. The existing Mac backups remain retain
 These results cover funded recovery and reboot/resume; they do not establish a
 long-duration soak, manual customer-wallet acceptance, independent security review,
 external alert delivery, production release-signing trust, or final publication.
+
+The exact artifact is published as `review-2026-10-09-funded-recovery`; public HTTPS
+re-download matched the deployed checksum. A bounded 15-minute idle funded-runtime
+soak passed all 31 samples (`a806f632`): ready105/105, unchanged paid order IDs and
+no service restarts. Eight read-only HTTP boundary checks and oversized/cross-site
+write rejections passed without creating orders (`b2716c75`, `d10be729`). The worker
+could not read signer keys, unlock or backup credentials; critical listeners were
+loopback-only. These checks are integrator evidence, not independent review.
+The release assets contain the review brief and OSV results/triage for 149 crate
+and 213 Hackage lockfile entries. Advisory findings and untested scope remain
+explicit; no production signing authority or independent audit is claimed.
