@@ -1865,3 +1865,21 @@ change when its RPC manager refuses access. Disposable database/role were remove
 and the compiler stopped. This proves timeout cleanup for the tested lock-wait
 case, not arbitrary client-disconnect cancellation. Tests were integrated from
 reviewer commits `8c2d5ab` and `7396c7d`; there were no further production changes.
+
+## Ubuntu report candidate 4bcfaaa (2026-10-08)
+
+Built exact source `4bcfaaa85e4d6aaf008a46c5ca07d25d60a05a24` on Ubuntu 24.04
+x86_64. The initial all-suite run (`a3cd0e69`) passed pool-test but failed bridge-test
+because the backup-timeout fixture created directories under umask 022 without
+setting mode 0700. Test-only fix `4bcfaaa` made those directory permissions explicit;
+no production permission checks were relaxed. Bridge-test rerun and packaging
+passed (`91506e44-0417-451a-b8d5-47674f43276f`); token-test, previously skipped after
+the failure, passed separately (`01cc86e6-c186-4209-b8ce-071014ec7c03`). Passing
+unaffected suites were not repeated.
+
+Artifact: `ecx-bridge-ubuntu-24.04-x86_64.run`, SHA-256
+`d3eeb92c78358d7b69859e1779456a611aebdb6f017a21a03233b7a6dafde80a`.
+The checksum-bound upload passed in SSM `59370157-e059-45b8-8d5b-228a1cdc18fd`;
+private location is `s3://ecx-build-242254325782-us-east-2/releases/4bcfaaa/`.
+Final-artifact upgrade/report acceptance was handed to the independent reviewer.
+This candidate remains unfunded and is not a public production release.
