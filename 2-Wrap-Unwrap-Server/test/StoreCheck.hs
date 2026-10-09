@@ -1115,6 +1115,38 @@ ledgerMain = do
         expectStore "scanners_not_fresh" (evalWrite writer $ ResumeLedger 161 origins [] Nothing)
         evalRead reader ReadState >>= check . ledgerPaused
         evalRead reader ReadBalances >>= check . (==beforeResume)
+        -- Isolate resume from the unrelated review orders seeded below.
+        let resumeKey=T.replicate 64 "e"
+            identifier="fee:"<>resumeKey
+        fixture fixtures RefreshCustody
+        void $ evalWrite writer (ReserveFees 100 resumeKey Native (money 10) "recipient" "resume contract")
+        fixture fixtures ReadyIntake
+        void $ evalWrite writer (PreparePayment 100 identifier (money 5) "{}")
+        evalWrite writer (SaveDraft identifier 0 "{\"fixture\":1}")
+        prepared<-evalRead reader (ReadPreparation identifier)
+        work<-evalRead reader ReadNativeLockWork
+        check (work==Just(NativeLockWork prepared False []))
+        evalWrite writer (Pause "unknown native signing outcome")
+        fixture fixtures RefreshCustody
+        held<-evalRead reader ReadBalances
+        expectStore "unresolved_intents_require_review" (evalWrite writer $ ResumeLedger 100 origins [] Nothing)
+        forM_ work $ \saved->do
+          forM_ [prepared {preparedDraft=Just "changed"},prepared {preparedGeneration=1}] $ \changed->
+            expectStore "resume_preparation_changed" (evalWrite writer $ ResumeLedger 100 origins [] (Just saved {lockPreparation=changed}))
+          expectStore "resume_preparation_changed" (evalWrite writer $ ResumeLedger 100 origins [] (Just saved {lockCancelling=True}))
+        evalWrite writer (ResumeLedger 100 origins [] work)
+        evalRead reader ReadState >>= check . not . ledgerPaused
+        evalRead reader (ReadPreparation identifier) >>= check . (==prepared)
+        evalRead reader ReadBalances >>= check . (==held)
+        -- This synthetic fixture never called a signer; clean up via closed DSL.
+        evalWrite writer (Pause "resume fixture cleanup")
+        fixture fixtures RefreshCustody
+        evalWrite writer (BeginCancellation prepared 100 "fixture cleanup" "{}")
+        expectStore "resume_preparation_changed" (evalWrite writer $ ResumeLedger 100 origins [] work)
+        evalWrite writer (FinishCancellation prepared "fixture cleanup" "{}")
+        fixture fixtures RefreshCustody
+        void $ evalWrite writer (CancelFees resumeKey "fixture cleanup")
+        evalRead reader ReadBalances >>= check . (==beforeResume)
       fixture fixtures SeedOrders
       let auth="Bearer "<>T.replicate 64 "0"
       hidden <- evalRead reader (ReadOrder auth "hidden")
@@ -2963,24 +2995,7 @@ nativeCustodyFamilies fixtures reader writer settings config base solana=do
         void $ evalWrite writer (PreparePayment 100 identifier (money 5) $ encodeText plan)
         evalWrite writer (SaveDraft identifier 0 $ encodeText $ draft s)
         prepared<-evalRead reader (ReadPreparation identifier)
-        -- An unknown signing outcome must retain exactly the saved native work.
-        -- Store receives runtime-reviewed work, never permission to skip review.
-        paused
-        let origins=[("Native","scan-origin"),("Solana","sol-origin"),("SolanaOperating","opening-signature")]
-        work<-evalRead reader ReadNativeLockWork
-        beforeResume<-evalRead reader ReadBalances
-        expectStore "unresolved_intents_require_review" (evalWrite writer $ ResumeLedger 100 origins [] Nothing)
-        forM_ work $ \saved->do
-          let changed= saved {lockPreparation=prepared {preparedDraft=Just "changed"}}
-          expectStore "resume_preparation_changed" (evalWrite writer $ ResumeLedger 100 origins [] (Just changed))
-          expectStore "resume_preparation_changed" (evalWrite writer $ ResumeLedger 100 origins [] (Just saved {lockCancelling=True}))
-        evalWrite writer (ResumeLedger 100 origins [] work)
-        evalRead reader ReadState >>= check . not . ledgerPaused
-        evalRead reader ReadBalances >>= check . (==beforeResume)
-        evalRead reader (ReadPreparation identifier) >>= check . (==prepared)
-        recorded<-evalWrite writer (RecordAttempt prepared $ wire s)
-        paused
-        expectStore "resume_preparation_changed" (evalWrite writer $ ResumeLedger 100 origins [recorded] work)
+        void $ evalWrite writer (RecordAttempt prepared $ wire s)
         ready
         void $ evalWrite writer (MarkBroadcast 100 $ txid s)
         pure identifier
