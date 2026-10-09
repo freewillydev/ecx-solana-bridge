@@ -19,11 +19,12 @@ import qualified Data.ByteString.Lazy as L
 import qualified Data.Text as T
 import qualified Data.Aeson.KeyMap as KM
 import GHC.Generics (Generic)
-import System.Directory (canonicalizePath,doesDirectoryExist,doesFileExist,listDirectory,removeFile)
+import System.Directory (canonicalizePath,doesDirectoryExist,doesFileExist,listDirectory,removeFile,renameFile)
 import System.Exit (ExitCode(..))
 import System.FilePath ((</>),takeDirectory)
 import System.Info (arch,os)
-import System.Posix.Files (getSymbolicLinkStatus,isDirectory,isRegularFile,fileOwner,fileMode)
+import System.IO.Error (tryIOError,isDoesNotExistError)
+import System.Posix.Files (getSymbolicLinkStatus,isDirectory,isRegularFile,fileOwner,fileMode,linkCount)
 import qualified System.Posix.Directory as P
 import System.Posix.IO (openFd,closeFd,OpenMode(ReadOnly),defaultFileFlags)
 import System.Posix.Unistd (fileSynchronise)
@@ -163,6 +164,8 @@ continue plan start=do
   removeSignerTransition (phase ".signer-transition")
   markerNow<-T.strip . b8ToText <$> B.readFile installed
   require (markerNow==newRelease plan) "upgrade_installed_marker_changed"
+  managed<-doesFileExist "/etc/systemd/system/ecx-betanet.service"
+  verifySignerCommand current managed
   -- A crash may follow successful resume but precede the completion record.
   -- Stop again to obtain a fresh paused boot; never reset advanced durable state.
   mark (blocked "worker") "upgrade\n"
@@ -239,7 +242,7 @@ installInterlock role=do
     status<-getSymbolicLinkStatus path
     require (isRegularFile status && fileOwner status==0 && fileMode status .&. 0o022==0) "unsafe_upgrade_interlock"
     B.readFile path >>= \value->require(value==bytes) "upgrade_interlock_changed"
-    else command "install" ["-o","root","-g","root","-m","0644",staged,path]
+    else publishUnit staged path
   command "sync" ["-f",directory]
 
 -- A fixed service override, not a caller-selected command. All existing unit
@@ -267,7 +270,7 @@ installSignerTransition prepared managed record=do
     status<-getSymbolicLinkStatus transitionPath
     require (isRegularFile status && fileOwner status==0 && fileMode status .&. 0o022==0) "unsafe_upgrade_transition"
     B.readFile transitionPath >>= \saved->require(saved==bytes) "upgrade_transition_changed"
-    else command "install" ["-o","root","-g","root","-m","0644",record,transitionPath]
+    else publishUnit record transitionPath
   command "sync" ["-f",takeDirectory transitionPath]
   command "systemctl" ["daemon-reload"]
 
@@ -283,13 +286,33 @@ removeSignerTransition record=do
     stopped "ecx-bridge-signer"
     removeFile transitionPath
     command "sync" ["-f",takeDirectory transitionPath]
-    command "systemctl" ["daemon-reload"]
+  -- Also reload after a crash between unlink and the previous reload.
+  command "systemctl" ["daemon-reload"]
+
+-- Same-directory atomic publication: an interrupted copy never becomes the live
+-- unit. Only this fixed, journal-owned staging path may be replaced on retry.
+publishUnit :: FilePath -> FilePath -> IO ()
+publishUnit source destination=do
+  let pending=destination<>".ecx-pending"
+  old<-tryIOError $ getSymbolicLinkStatus pending
+  case old of
+    Left failure->unless (isDoesNotExistError failure) $ ioError failure
+    Right status->do
+      require (isRegularFile status && fileOwner status==0 && linkCount status==1
+        && fileMode status .&. 0o022==0) "unsafe_upgrade_staging"
+      removeFile pending
+  command "install" ["-o","root","-g","root","-m","0644",source,pending]
+  command "sync" ["-f",pending]
+  renameFile pending destination
+  command "sync" ["-f",takeDirectory destination]
 
 -- Check systemd's merged unit, including later operator drop-ins. Do not print
 -- Environment: unrelated entries may contain credentials.
 verifySignerCommand :: FilePath -> Bool -> IO ()
 verifySignerCommand bundle managed=do
   execution<-output "systemctl" ["show","ecx-bridge-signer","--property=ExecStart","--value"]
+  files<-output "systemctl" ["show","ecx-bridge-signer","--property=EnvironmentFiles","--value"]
+  require (null $ words files) "upgrade_unrecognized_signer_environment_file"
   environment<-words <$> output "systemctl" ["show","ecx-bridge-signer","--property=Environment","--value"]
   let binary=bundle</>"bin/ecx-bridge"
       expected="{ path="<>binary<>" ; argv[]="<>binary

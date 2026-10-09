@@ -7,6 +7,24 @@ fail() { echo "Native backup setup: $*" >&2; exit 1; }
 bundle=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 case "$bundle" in /opt/ecx-bridge/releases/*) ;; *) fail 'installed verified release directory required';; esac
 (cd "$bundle" && sha256sum --check --status manifest.sha256) || fail 'release changed'
+exec 9>/run/lock/ecx-native-backup-install.lock
+flock -n 9 || fail 'another native backup installation is running'
+# Publish on the destination filesystem. A partial staging copy is never live;
+# retry may replace only our fixed root-owned, single-link staging file.
+publish() {
+  source=$1; destination=$2; group=$3; mode=$4
+  pending=$destination.ecx-pending
+  if [ -e "$pending" ] || [ -L "$pending" ]; then
+    [ -f "$pending" ] && [ ! -L "$pending" ] && [ "$(stat -c '%u:%h' "$pending")" = 0:1 ] || fail 'unsafe publication staging file'
+    permissions=$(stat -c %a "$pending")
+    [ "$((0$permissions & 022))" = 0 ] || fail 'unsafe publication staging permissions'
+    rm -- "$pending"
+  fi
+  install -o root -g "$group" -m "$mode" "$source" "$pending"
+  sync -f "$pending"
+  mv -Tf "$pending" "$destination"
+  sync -f "$(dirname -- "$destination")"
+}
 config=/etc/ecx-bridge/signer/config.json
 [ -f "$config" ] && [ ! -L "$config" ] || fail 'installed signer configuration required'
 [ "$(systemctl show ecx-betanet --property=User --value)" = ecxnode ] || fail 'managed ecxnode service required'
@@ -24,12 +42,12 @@ jq '{profile,nativeRpc,nativeWallet,nativeCheckpointHeight,nativeCheckpointHash,
 if [ -e "$base/config.json" ]; then
   [ ! -L "$base/config.json" ] && cmp -s "$base/config.json" "$staging/config.json" || fail 'native backup identity changed'
 else
-  install -o root -g ecxnode -m 0640 "$staging/config.json" "$base/config.json"
+  publish "$staging/config.json" "$base/config.json" ecxnode 0640
 fi
 cat > "$staging/tmpfiles" <<'CONF'
 d /run/ecx-native-backup 0750 root ecxbridges -
 CONF
-install -m 0644 "$staging/tmpfiles" /etc/tmpfiles.d/ecx-native-backup.conf
+publish "$staging/tmpfiles" /etc/tmpfiles.d/ecx-native-backup.conf root 0644
 systemd-tmpfiles --create /etc/tmpfiles.d/ecx-native-backup.conf
 cat > "$staging/socket" <<'UNIT'
 [Unit]
@@ -77,8 +95,8 @@ systemctl stop ecx-native-backup.socket 2>/dev/null || {
 }
 systemctl stop 'ecx-native-backup@*.service'
 [ -z "$(systemctl list-units --all --state=active,activating,deactivating --no-legend 'ecx-native-backup@*.service')" ] || fail 'backup exporter still running'
-install -m 0644 "$staging/socket" /etc/systemd/system/ecx-native-backup.socket
-install -m 0644 "$staging/service" /etc/systemd/system/ecx-native-backup@.service
+publish "$staging/socket" /etc/systemd/system/ecx-native-backup.socket root 0644
+publish "$staging/service" /etc/systemd/system/ecx-native-backup@.service root 0644
 sync -f "$base"
 sync -f /etc/systemd/system
 systemctl daemon-reload

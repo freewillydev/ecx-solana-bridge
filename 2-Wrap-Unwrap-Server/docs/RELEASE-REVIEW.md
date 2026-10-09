@@ -2104,3 +2104,19 @@ The installer-only fixture lacks a running native node. Neither has been silentl
 converted into a successful upgrade claim. No signing or transfers were performed.
 Actual checkpoint/upload, successful version transition, interruption/reboot and
 post-publication reconciliation remain required against a complete deployment.
+
+
+Review follow-up found a crash-resumability defect in direct unit-file copying:
+partial live files could cause every later retry to refuse. Unit/interlock and
+native-helper configuration publication now uses same-directory staging, file
+sync, atomic rename and directory sync. Retry only removes a fixed root-owned,
+single-link staging file; mismatching live signer overrides remain refusals.
+Override cleanup reloads systemd even if an interrupted prior cleanup already
+unlinked the file. Unrecognized signer EnvironmentFiles are refused.
+
+Ubuntu build `9e9e5fd` passed. Real-filesystem SIGKILL publication acceptance
+`bc5d8da9` retained the complete old live unit during a partial copy, successfully
+published on retry, and refused a staging symlink. The preceding harness run used
+an incorrect returning failure stub; it was corrected to the actual exit behavior.
+This tests the shell publication function, not a whole-host power failure or the
+complete financial upgrade. No service was started by that publication test.
