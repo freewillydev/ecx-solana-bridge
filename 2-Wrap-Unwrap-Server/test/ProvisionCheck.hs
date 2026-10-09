@@ -145,7 +145,7 @@ checks root admin=bracket(PG.connect admin) PG.close $ \c->do
         ,("information_schema","triggers","trigger_schema","trigger_name")
         ,("pg_catalog","pg_indexes","schemaname","indexname")] :: IO [[T.Text]]
   objects<-bracket(PG.connect target) PG.close $ \db->do
-    receiptNames db >>= check . (==["receipt"] :: [T.Text]->Bool)
+    receiptNames db >>= check . ((==["receipt"]) :: [T.Text]->Bool)
     inventory db
   check(all (not . null) objects)
   archive<-withReader readerSettings identity False $ \reader->evalBackup reader(ExportLedger root)
