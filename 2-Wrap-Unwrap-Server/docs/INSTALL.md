@@ -353,27 +353,33 @@ Setting both enables IPv4 public HTTPS on `serverPort`; setting only one refuses
 startup, without downgrading to HTTP. The separate signer keeps its own loopback
 HTTPS listener and credentials.
 
-Obtain a valid certificate/full chain for your domain and a **separate public TLS
-private key**. Do not reuse the custody key or signer's TLS key. Store both under
-a root-owned directory without group/other write permission. The TLS private key
-must be a regular, non-symlink file owned by the worker (mode 0600); the certificate
-must be owned by root or the worker and not group/other writable. Make the paths
-readable within the worker's systemd sandbox. Configure `serverPort` in the worker
-configuration and add a worker service drop-in using `sudo systemctl edit
-ecx-bridge-worker`:
+For guided setup, enter the public HTTPS origin and the two certificate source
+paths when asked. Use a certificate/full chain valid for that hostname and a
+**separate public TLS private key**, never a custody or signer key. Source files
+must be root-owned regular files, mode 0600, in a root-owned mode 0700 directory;
+certificate-manager symlinks are not accepted directly. The installer makes the
+protected worker copies, configures the TLS service environment and grants the
+worker permission to bind the configured privileged port when needed. No manual
+systemd drop-in is needed for this path.
 
-```ini
-[Service]
-Environment=ECX_PUBLIC_TLS_CERT=/etc/ecx-bridge/public-tls/fullchain.pem
-Environment=ECX_PUBLIC_TLS_KEY=/etc/ecx-bridge/public-tls/privkey.pem
-```
+Installed copies are `/etc/ecx-bridge/worker/public-fullchain.pem` (root-owned,
+worker-readable) and `/etc/ecx-bridge/worker/public-privkey.pem` (worker-owned,
+mode 0600). Renewing only the original source certificate does **not** renew these
+copies. Renewal must deploy a matching certificate/key pair to the installed
+locations, preserve ownership and permissions, and use a controlled worker restart:
+pause, replace the files, restart, verify HTTPS, then use checked resume. Retain the
+old pair until the replacement is verified. Do not reset custody or ledger state.
 
-For port 443, also grant only the worker `AmbientCapabilities=CAP_NET_BIND_SERVICE`
-and `CapabilityBoundingSet=CAP_NET_BIND_SERVICE` in that drop-in. Alternatively use
-an unprivileged HTTPS port. Pause before restarting; run daemon-reload, restart the
-worker and check HTTPS and the existing checked-resume prerequisites. Provision
-certificate renewal; new certificate bytes require a controlled worker restart.
-The installer does not acquire certificates or configure your domain automatically.
+DNS, certificate issuance and a working renewal/deployment procedure remain
+prerequisites. The installer does not acquire certificates automatically. Choose
+local testing if these are not ready; local testing does not expose a public site.
+
+For advanced manually configured installations, set both `ECX_PUBLIC_TLS_CERT`
+and `ECX_PUBLIC_TLS_KEY` in the worker service environment to protected files
+readable inside its systemd sandbox. A privileged port additionally requires
+`AmbientCapabilities=CAP_NET_BIND_SERVICE` and
+`CapabilityBoundingSet=CAP_NET_BIND_SERVICE`. Follow the same pause, restart,
+HTTPS verification and checked-resume procedure above.
 
 Public TLS mode adds constant-space global admission budgets: approximately
 30 requests/second (burst 60) and 30 order creations/minute (burst 2), including
