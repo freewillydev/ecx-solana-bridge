@@ -1557,3 +1557,30 @@ the shared administration component; ecx-token reexports them. Neither worker no
 signer workflow links that component. Existing token checks continue to pass, and
 there is no duplicated transaction signer or package dependency cycle. Private
 `.ecx-bridge` settings and default recovery directories are now explicitly gitignored.
+
+## Ubuntu one-command integration — 2026-10-08
+
+Integration base: `30e3c8797f70d9f985a97e117a25a67d6668cd2b`, branch
+`codex/ubuntu-one-command`. Optional `4220d9b` administration consolidation is
+excluded. The separate security worktree owns Wallet/native crypto changes.
+
+First verified checkpoint: `install/node` installs checksum-pinned ECX betanet
+31.1.0-ca64033c1374 on Ubuntu 24.04 x86_64, creates a private dedicated node user,
+loopback RPC on 28532, 2000 MiB pruning, and a hardened systemd service. It does
+not create wallets. Existing service differences are refused and configuration is
+preserved. Initial archive-layout failure was corrected against the actual verified
+vendor archive (executables are at its root, not in bin).
+
+AWS host `i-0a62cafbef864b8a7` in us-east-2: SSM command
+`3ee99df8-a244-41a6-a5ed-6ba8dc67f5c0` succeeded for installation, immediate rerun,
+service-active check and real `getblockchaininfo`. RPC reported `pruned=true`,
+`automatic_pruning=true`, target 2097152000 bytes and initial block download.
+The ECX binary reports chain `main`; the bridge must still verify its ECX checkpoint
+at height 967680. Genesis alone is not network acceptance. No wallets/funds moved.
+This is not a full clean bridge installation or a completed live-chain gate.
+
+Next: integrate this node provisioning into the default guided setup, build the
+exact candidate on AWS, finish funding/allocation/setup-cost flow, then validate
+three clean installation scenarios with the same final signed artifact. Preserve
+user-requested local operator menu and public read-only financial reports as
+explicit remaining product scope; do not silently count them as complete.

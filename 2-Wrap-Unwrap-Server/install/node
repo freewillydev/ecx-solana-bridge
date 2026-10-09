@@ -1,0 +1,83 @@
+#!/bin/sh
+# Managed ECX betanet node for the Ubuntu x86_64 installation. No wallet creation.
+set -eu
+umask 077
+fail() { echo "ECX node setup: $*" >&2; exit 1; }
+[ "$#" = 0 ] || fail 'no arguments accepted'
+[ "$(id -u)" = 0 ] || fail 'root required'
+. /etc/os-release
+[ "$ID:$VERSION_ID:$(uname -m)" = ubuntu:24.04:x86_64 ] || fail 'Ubuntu 24.04 x86_64 required'
+exec 9>/run/lock/ecx-node-install.lock
+flock -n 9 || fail 'another node installation is running'
+version=L1-ecash-bitcoin-31.1.0-ca64033c1374-x86_64-unknown-linux-gnu
+checksum=1fcdaad74888f8d445a335c54102ffe540d17e8942d6939713d4c5d71c31a17e
+url=https://releases.ecash.com/L1-ecash-bitcoin/betanet/ca64033c1374/L1-ecash-bitcoin-x86_64-unknown-linux-gnu.zip
+base=/opt/ecx-node
+home=/var/lib/ecx-betanet
+unit=/etc/systemd/system/ecx-betanet.service
+for path in "$base" "$home" "$unit"; do [ ! -L "$path" ] || fail "symlink refused: $path"; done
+command -v curl >/dev/null && command -v unzip >/dev/null || fail 'install curl and unzip first'
+install -d -m 0755 "$base"
+staging=$(mktemp -d "$base/.install-XXXXXXXX")
+trap 'rm -rf -- "$staging"' EXIT
+trap 'exit 1' HUP INT TERM
+if [ ! -d "$base/$version" ]; then
+  echo 'Downloading the pinned ECX betanet node.'
+  curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --connect-timeout 20 --max-time 600 "$url" -o "$staging/node.zip"
+  printf '%s  %s\n' "$checksum" "$staging/node.zip" | sha256sum --check --status || fail 'download checksum mismatch'
+  unzip -q "$staging/node.zip" -d "$staging/unpacked"
+  [ -x "$staging/unpacked/$version/bitcoind" ] || fail 'unexpected node archive layout'
+  chown -R root:root "$staging/unpacked/$version"
+  chmod -R go-w "$staging/unpacked/$version"
+  mv "$staging/unpacked/$version" "$base/$version"
+fi
+if ! getent passwd ecxnode >/dev/null; then
+  useradd --system --user-group --home-dir "$home" --shell /usr/sbin/nologin ecxnode
+fi
+install -d -o ecxnode -g ecxnode -m 0700 "$home"
+[ ! -L "$home/bitcoin.conf" ] || fail 'configuration symlink refused'
+if [ ! -e "$home/bitcoin.conf" ]; then
+  # Never adopt an unidentified old data directory as a fresh installation.
+  [ -z "$(find "$home" -mindepth 1 -maxdepth 1 -print -quit)" ] || fail 'existing node data requires explicit configuration'
+  cat > "$staging/bitcoin.conf" <<'CONFIG'
+# Managed ECX betanet; this is the ECX binary, not Bitcoin mainnet.
+server=1
+prune=2000
+dbcache=450
+listen=0
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
+rpcport=28532
+CONFIG
+  install -o ecxnode -g ecxnode -m 0600 "$staging/bitcoin.conf" "$home/bitcoin.conf"
+fi
+cat > "$staging/service" <<UNIT
+[Unit]
+Description=ECX betanet pruned node
+Wants=network-online.target
+After=network-online.target
+[Service]
+User=ecxnode
+Group=ecxnode
+ExecStart=$base/$version/bitcoind -datadir=$home -conf=$home/bitcoin.conf -printtoconsole=0
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=300
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=$home
+[Install]
+WantedBy=multi-user.target
+UNIT
+if [ -e "$unit" ]; then
+  cmp -s "$unit" "$staging/service" || fail 'existing service differs; refusing to overwrite'
+else
+  install -m 0644 "$staging/service" "$unit"
+fi
+systemctl daemon-reload
+systemctl enable ecx-betanet.service
+systemctl start ecx-betanet.service
+echo 'ECX node started. Initial synchronization can take substantial time; orders must remain paused until verified.'
