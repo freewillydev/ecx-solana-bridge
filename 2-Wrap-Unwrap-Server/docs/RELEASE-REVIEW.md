@@ -2120,3 +2120,48 @@ published on retry, and refused a staging symlink. The preceding harness run use
 an incorrect returning failure stub; it was corrected to the actual exit behavior.
 This tests the shell publication function, not a whole-host power failure or the
 complete financial upgrade. No service was started by that publication test.
+
+
+## Restored funded checkpoint, upgrade and resume (2026-10-09)
+
+The sequence-76 ledger restored from the original schema-21 archive was already
+validated and converted to schema 22. Offline handoff attached **that database**
+to the standard `ecx_bridge` name and restricted worker/reader/signer roles;
+it did not initialize a fresh ledger or generate custody wallets. The original
+host remains retired/fenced. The new host adopted fingerprint
+`87570fb9723c263b6832a597f7a4bcc3fe42dd8546f55266b6b1d1e9751fe368`,
+sequence 76, with both services blocked/stopped (`a8bb694e`). An initial artifact
+copy lacked runtime-readable modes; applying the existing installer's artifact
+modes fixed the handoff without changing keys or accounting. This offline recovery
+handoff was explicit operator work, not proof of an automatic restore installer.
+
+The actual candidate `start` completed checkpoint, publication, reconciliation and
+resume (`3e8f337d`, exit 0):
+
+- Source: `bb7b08f` (frozen tracked source; local-build provenance marker retained).
+- Ubuntu artifact SHA-256:
+  `24469c20c537a6f95872834a4b2bb60cc0ffb72eed0268e608ea21bd136035f7`.
+- Release manifest: old `6ade776caaf57e2b57979274c205029dc44e76ae49f10bb7987627fab45be748`
+  to `da46d5c704c64b5020a007d66bf766d219a7b40c1471ab81a0bdbff3c3006ac2`.
+- Independent restic custody snapshot:
+  `5036451ae1444523a81ed68c521649595a1f0d33b039ba6f45bc5f6029723514`.
+- Receipt: sequence 76, custody manifest hash
+  `a5fb1af3fcefa10e7f6d966db8593f73cf25f609b0f987b7b636551b8419befe`.
+
+The checkpoint path downloads/validates the complete custody bundle before
+acknowledgement. Post-upgrade status reports critical/backup sequence 76,
+`paused=false`, reason `ready`. Both services are active; signer restarts were zero.
+The transition override, pending journal pointer and service blockers were removed;
+immutable phase records remain. Original Solana key/native-unlock bytes match;
+worker and node UIDs cannot read signer keys (`84074310`).
+
+A SELECT-only, repeatable-read Opaleye inspection compared the restored baseline
+with the live database (`24f8b28b`): every account balance, obligation total,
+attempt identity/count, principal/operating/fee reservation, intent association,
+review-evidence record and preparation generation matched. Public reporting showed
+fresh reserves of 95,778 native units, 3,004,020 wrapped units and 4,990,000 lamports;
+native/wrapped earned fees remained 20/60 units. No transaction was signed or sent
+by these acceptance steps. This proves a successful same-schema upgrade after
+explicit legacy-ledger recovery; it does not establish guided schema-21 migration,
+all interruption windows, separate-host restoration of this new snapshot, customer
+wallet acceptance or production release readiness.
