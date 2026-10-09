@@ -46,7 +46,7 @@ else
 fi
 # No source compilation or unpinned application download occurs under root.
 export DEBIAN_FRONTEND=noninteractive
-packages='postgresql-16 postgresql-client-16 libpq5 libgmp10 libffi8 zlib1g libssl3t64 libsecp256k1-1 ca-certificates openssl jq'
+packages='postgresql-16 postgresql-client-16 libpq5 libgmp10 libffi8 zlib1g libssl3t64 ca-certificates openssl jq'
 missing=false
 for package in $packages; do
   [ "$(dpkg-query -W -f='${Status}' "$package" 2>/dev/null || true)" = 'install ok installed' ] || missing=true

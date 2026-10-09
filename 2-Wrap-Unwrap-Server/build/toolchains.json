@@ -55,5 +55,9 @@
     "patchSha256": "1195318dbdf1d8cdb30e9b658e1c6338f689ba49081b281b9102bc1a945563aa",
     "aarch64": "d67592900b7c87f28bc0618ed3b2937f645630b8b1194a43a4cde36f5f3ad8eb",
     "x86_64": "0b9777171a216de85789286f976a8ca0ada550b1909288ebd2d474cce4c56c76"
-  }
+  },
+  "secp256k1": [
+    "https://codeload.github.com/bitcoin-core/secp256k1/tar.gz/6e2c8bc4ecdc6e71dbe7a368f360d8d453ce435d",
+    "3fe9fd705f4fdf2fe90d6e04b6c1fedd7e8f244a119315886f6468f52c2dfc33"
+  ]
 }

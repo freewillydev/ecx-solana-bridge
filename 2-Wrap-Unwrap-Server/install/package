@@ -52,6 +52,10 @@ assets=$(jq -er '[."install-plan"[] | select(."pkg-name"=="ecx-build-assets" and
   sdk=$assets/libecx_solana_sdk.so
   web=$assets/web
 fi
+# The pinned library is a build prerequisite, never a host-selected runtime
+# dependency. Refuse a package that would silently use Ubuntu's older library.
+linkage=$(ldd "$binary") || fail 'cannot inspect executable linkage'
+case "$linkage" in *libsecp256k1*) fail 'build with the pinned static secp256k1 prefix';; esac
 mkdir -m 0700 "$output"
 staging=$(mktemp -d "$output/.bundle-XXXXXXXX")
 trap 'rm -rf -- "$staging"' EXIT

@@ -1,0 +1,27 @@
+#!/bin/sh
+# Build prerequisite for release builders; end-user artifacts link it statically.
+set -eu
+[ "$#" = 1 ] || { echo 'Usage: secp256k1 ABSOLUTE_BUILD_DIRECTORY' >&2; exit 1; }
+case "$1" in /*) ;; *) exit 1;; esac
+pins=$(CDPATH='' cd -- "$(dirname -- "$0")/../build" && pwd)/toolchains.json
+mkdir -p "$1"
+cd "$1"
+url=$(jq -er '.secp256k1[0]' "$pins")
+checksum=$(jq -er '.secp256k1[1]' "$pins")
+if ! printf '%s  %s\n' "$checksum" source.tar.gz | sha256sum --check --status 2>/dev/null; then
+  curl -fLsS --proto '=https' --proto-redir '=https' "$url" -o source.tar.gz
+fi
+printf '%s  %s\n' "$checksum" source.tar.gz | sha256sum --check --status
+mkdir -p source
+tar -xzf source.tar.gz -C source --strip-components=1
+cmake -S source -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$1/prefix" \
+  -DCMAKE_INSTALL_LIBDIR=lib -DBUILD_SHARED_LIBS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+  -DSECP256K1_BUILD_BENCHMARK=OFF -DSECP256K1_BUILD_EXHAUSTIVE_TESTS=OFF \
+  -DSECP256K1_ENABLE_MODULE_ECDH=OFF -DSECP256K1_ENABLE_MODULE_RECOVERY=OFF \
+  -DSECP256K1_ENABLE_MODULE_EXTRAKEYS=OFF -DSECP256K1_ENABLE_MODULE_SCHNORRSIG=OFF \
+  -DSECP256K1_ENABLE_MODULE_MUSIG=OFF -DSECP256K1_ENABLE_MODULE_ELLSWIFT=OFF \
+  -DSECP256K1_ENABLE_MODULE_SILENTPAYMENTS=OFF
+cmake --build build -j1
+ctest --test-dir build --output-on-failure
+cmake --install build
+printf 'Set PKG_CONFIG_PATH to %s/prefix/lib/pkgconfig before cabal build.\n' "$1"

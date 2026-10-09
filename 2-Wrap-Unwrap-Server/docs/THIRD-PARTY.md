@@ -1,5 +1,12 @@
 # Dependency notices
 
+`third-party/secp256k1/COPYING` preserves the MIT license for the pinned
+Bitcoin Core libsecp256k1 v0.8.0 source (commit
+`6e2c8bc4ecdc6e71dbe7a368f360d8d453ce435d`). Its source checksum is in
+`build/toolchains.json`; `install/secp256k1` builds the static release prerequisite
+with upstream tests enabled. Release builders must verify that the executable
+does not depend on a host-installed libsecp256k1 shared library.
+
 `third-party/THIRD_PARTY_NOTICES.txt` preserves original upstream license texts.
 `third-party/coverage.json` records build-plan/lock hashes, source checksums,
 individual notice hashes and collection scope. Its `currentSourceGraph` section

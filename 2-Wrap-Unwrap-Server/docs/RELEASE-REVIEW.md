@@ -1681,3 +1681,20 @@ old-signer fencing acceptance or independence from AWS account compromise.
 No custody keys/funds were deployed. Initial Ubuntu source634be89 build passed;
 current source da2445c integration build/test is running separately and is not
 claimed passed here.
+
+### Ubuntu native-key dependency correction (2026-10-08)
+
+Actual Ubuntu24.04 libsecp256k1-dev is0.2.0-2, below the reviewed Cabal bound.
+The first integrated build correctly refused it. Keep >=0.4; do not silently
+accept the older library. Release prerequisite is now pinned upstream v0.8.0
+(commit6e2c8bc4ecdc6e71dbe7a368f360d8d453ce435d, source archive SHA256
+3fe9fd705f4fdf2fe90d6e04b6c1fedd7e8f244a119315886f6468f52c2dfc33).
+`install/secp256k1` records the static PIC build with optional modules disabled,
+upstream tests enabled, one build job and private pkg-config prefix. License bytes
+are preserved; packaging refuses a dynamic libsecp dependency and installer no
+longer requests the older distro runtime library. Shell syntax/diff checks pass.
+
+Security worker reports122 upstream tests and production-shim boundary checks
+passed locally with this source. Actual Ubuntu prerequisite build progressed
+successfully into Cabal compilation (SSM18468708); full bridge-test and final ldd
+are still pending. Do not describe final artifact linkage as verified yet.

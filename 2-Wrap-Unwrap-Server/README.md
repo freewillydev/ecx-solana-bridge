@@ -32,8 +32,10 @@ cd ecash-bridge
 git clone https://github.com/freewillydev/ecx-solana-bridge.git
 
 sudo apt update
-sudo apt install -y build-essential pkg-config libpq-dev libgmp-dev libffi-dev \
-  zlib1g-dev libssl-dev libsecp256k1-dev
+sudo apt install -y build-essential cmake jq curl pkg-config libpq-dev libgmp-dev libffi-dev \
+  zlib1g-dev libssl-dev
+sh ecx-solana-bridge/2-Wrap-Unwrap-Server/install/secp256k1 "$HOME/.local/share/ecx-secp256k1"
+export PKG_CONFIG_PATH="$HOME/.local/share/ecx-secp256k1/prefix/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
 
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 source "$HOME/.cargo/env"
