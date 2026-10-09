@@ -18,6 +18,7 @@ import Control.Exception (bracket,catch)
 import Data.Aeson (Value(..),encode,object,(.=),eitherDecodeStrict')
 import qualified Data.Aeson.KeyMap as KM
 import qualified Data.ByteString as BS
+import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy.Char8 as LBS
 import qualified Data.Text as T
 import Data.Maybe (fromMaybe)
@@ -86,6 +87,12 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
     c<-C.loadConfig path
     initialize (C.fingerprint c)
   command ["initialize-ledger","--fingerprint",identity]=initialize (T.pack identity)
+  command ["provision-database"]=do
+    bytes<-BS.hGet stdin 34
+    require (BS.length bytes==32 || (BS.length bytes==33 && BS.last bytes==10)) "invalid_installation_token"
+    database<-databaseSettings
+    evalSetup database (ProvisionDatabase $ T.pack $ B8.unpack $ BS.take 32 bytes)
+    putStrLn "Database provisioned; ledger remains inactive."
   command ["operator",path]=do
     c<-C.loadConfig path
     bytes<-BS.hGet stdin 4097
@@ -102,7 +109,7 @@ main=(getArgs >>= command) `catch` (\(BridgeError code)->
     database<-databaseSettings
     withProcessResources c database mode $ \reader process->
       bracket newRpcManager closeManager $ \manager->runProcess manager reader process
-  command _=die "Usage: ecx-bridge version | configure [--advanced] | initialize-native-wallet DIRECTORY | start [DIRECTORY] | initialize-ledger CONFIG (fresh database owner; installer may pass --fingerprint ID) | upload-custody CONFIG BACKUP_CONFIG MANIFEST MINIMUM_SEQUENCE | recover-custody CONFIG BACKUP_CONFIG SNAPSHOT DIRECTORY MINIMUM_SEQUENCE | backup-custody CONFIG KEYFILE DIRECTORY (offline custody authority, PG* and PGREADUSER) | check-custody CONFIG MANIFEST MINIMUM_SEQUENCE | backup-native-wallet CONFIG DESTINATION | restore-native-wallet CONFIG MANIFEST (offline custody authority; never overwrites a wallet) | adopt-ledger CONFIG MINIMUM_SEQUENCE | retire-ledger CONFIG MINIMUM_SEQUENCE | recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE | restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE (offline database owner) | check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE [BACKUP_CONFIG STAGING] (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
+  command _=die "Usage: ecx-bridge version | configure [--advanced] | initialize-native-wallet DIRECTORY | start [DIRECTORY] | provision-database (postgres; installation token on stdin) | initialize-ledger CONFIG (fresh database owner; installer may pass --fingerprint ID) | upload-custody CONFIG BACKUP_CONFIG MANIFEST MINIMUM_SEQUENCE | recover-custody CONFIG BACKUP_CONFIG SNAPSHOT DIRECTORY MINIMUM_SEQUENCE | backup-custody CONFIG KEYFILE DIRECTORY (offline custody authority, PG* and PGREADUSER) | check-custody CONFIG MANIFEST MINIMUM_SEQUENCE | backup-native-wallet CONFIG DESTINATION | restore-native-wallet CONFIG MANIFEST (offline custody authority; never overwrites a wallet) | adopt-ledger CONFIG MINIMUM_SEQUENCE | retire-ledger CONFIG MINIMUM_SEQUENCE | recover-ledger CONFIG BACKUP_CONFIG SNAPSHOT STAGING MINIMUM_SEQUENCE | restore-ledger CONFIG MANIFEST MINIMUM_SEQUENCE (offline database owner) | check-config CONFIG | check-signer CONFIG KEYFILE | signer CONFIG KEYFILE [BACKUP_CONFIG STAGING] (SELECT-only PGUSER) | operator CONFIG (JSON on stdin) | serve CONFIG | observe CONFIG (PG* and distinct PGREADUSER; existing migrated ledger and host fence required)"
   initialize identity=do
     database<-databaseSettings
     evalSetup database (InitializeLedger identity)
