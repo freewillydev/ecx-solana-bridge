@@ -26,6 +26,14 @@ state=/var/lib/ecx-bridge
 worker=ecxbridgew
 signer=ecxbridges
 reader=ecxbridger
+journal=/var/lib/ecx-bridge-install
+exec 9>/run/lock/ecx-bridge-install.lock
+flock -n 9 || fail 'another installation is running'
+resuming=false
+if [ -e "$journal" ] || [ -L "$journal" ]; then
+  [ -d "$journal" ] && [ ! -L "$journal" ] && [ "$(stat -c '%u:%a' "$journal")" = 0:700 ] || fail 'unsafe installation journal'
+  resuming=true
+fi
 if [ "$mode" = fresh ]; then
   case "$material" in /*) ;; *) fail 'material directory must be absolute';; esac
   [ -d "$material" ] && [ ! -L "$material" ] || fail 'material directory required'
@@ -38,8 +46,12 @@ if [ "$mode" = fresh ]; then
     [ "$parent" != / ] || break
     parent=$(dirname -- "$parent")
   done
-  absent "$config" && absent "$state" && absent "$prefix" || fail 'existing deployment: use upgrade or explicit recovery'
-  ! getent passwd "$worker" >/dev/null && ! getent passwd "$signer" >/dev/null || fail 'service identities already exist'
+  if [ "$resuming" = false ]; then
+    absent "$config" && absent "$state" && absent "$prefix" || fail 'existing deployment: use upgrade or explicit recovery'
+    for account in "$worker" "$signer"; do
+      ! getent passwd "$account" >/dev/null && ! getent group "$account" >/dev/null || fail 'service identities already exist'
+    done
+  fi
 else
   [ -f "$config/installed" ] && [ -L "$prefix/current" ] || fail 'no completed installation'
   cmp "$bundle/migrations.sha256" "$prefix/current/migrations.sha256" >/dev/null || fail 'schema change requires reviewed offline migration before upgrade'
@@ -57,31 +69,6 @@ if [ "$missing" = true ]; then
   # shellcheck disable=SC2086
   apt-get install -y --no-install-recommends $packages
 fi
-command -v flock >/dev/null || fail 'flock required'
-exec 9>/run/lock/ecx-bridge-install.lock
-flock -n 9 || fail 'another installation is running'
-# Recheck after acquiring the lock, before any deployment mutation.
-if [ "$mode" = fresh ]; then
-  absent "$config" && absent "$state" && absent "$prefix" || fail 'deployment appeared during preflight'
-fi
-install -d -m 0755 "$prefix" "$prefix/releases"
-target=$prefix/releases/$release
-if [ ! -e "$target" ]; then
-  staging=$(mktemp -d "$prefix/releases/.install-XXXXXXXX")
-  trap 'rm -rf -- "${staging:-}"' EXIT
-  trap 'exit 1' HUP INT TERM
-  cp -R "$bundle/." "$staging/"
-  chown -R root:root "$staging"
-  chmod -R go-w "$staging"
-  chmod 0755 "$staging" "$staging/bin" "$staging/lib" "$staging/share" "$staging/share/web" "$staging/share/web/dist" "$staging/share/migrations"
-  chmod 0755 "$staging/bin/"* "$staging/lib/"*
-  find "$staging/share" -type f -exec chmod 0644 '{}' +
-  (cd "$staging" && sha256sum -c manifest.sha256 >/dev/null)
-  mv "$staging" "$target"
-  staging=
-fi
-(cd "$target" && sha256sum -c manifest.sha256 >/dev/null) || fail 'installed release changed'
-"$target/bin/restic" version | grep -q '^restic 0.19.1 ' || fail 'tested restic 0.19.1 required'
 if [ "$mode" = fresh ]; then
   # Inputs are data, never sourced shell. Refuse symlinks and exposed material.
   [ "$(stat -c '%u:%a' "$material")" = 0:700 ] || fail 'material must be root-owned mode 0700'
@@ -120,12 +107,75 @@ if [ "$mode" = fresh ]; then
   fi
   if [ -e "$material/interface.json" ]; then private_source "$material/interface.json"; fi
   # Validate supplied identity/key/policy before creating accounts or databases.
-  "$target/bin/ecx-bridge" check-config "$material/worker.json" >/dev/null
-  "$target/bin/ecx-bridge" check-signer "$material/signer.json" "$key_source" >/dev/null
+  "$bundle/bin/ecx-bridge" check-config "$material/worker.json" >/dev/null
+  "$bundle/bin/ecx-bridge" check-signer "$material/signer.json" "$key_source" >/dev/null
   [ "$(jq -Sc 'del(.nativeCookie,.nativeUnlockFile,.signerAuthFile)' "$material/worker.json")" = "$(jq -Sc 'del(.nativeCookie,.nativeUnlockFile,.signerAuthFile)' "$material/signer.json")" ] || fail 'worker/signer policies differ'
   ! cmp -s "$worker_source" "$signer_source" || fail 'worker needs distinct restricted native credentials'
-  useradd --system --user-group --home-dir "$state/worker" --shell /usr/sbin/nologin "$worker"
-  useradd --system --user-group --home-dir "$state/signer" --shell /usr/sbin/nologin "$signer"
+  if [ "$(jq -r .backupRequired "$material/worker.json")" = true ]; then
+    for name in backup.repository backup.password; do
+      source=$(source_file "$name") || fail "missing $name reference"
+      private_source "$source"
+    done
+  fi
+  identity_file=$(mktemp /run/ecx-install-material-XXXXXXXX)
+  {
+    printf '%s\n%s\n' "$release" "$material"
+    for name in worker.json signer.json sources.json interface.json; do
+      if [ -f "$material/$name" ]; then sha256sum "$material/$name"; fi
+    done
+    for source in "$key_source" "$worker_source" "$signer_source" "$unlock_source" "$cert_source" "$tls_source"; do
+      if [ -n "$source" ] && [ -f "$source" ]; then sha256sum "$source"; fi
+    done
+    for name in backup.repository backup.password; do
+      source=$(source_file "$name" 2>/dev/null) || source=
+      if [ -n "$source" ] && [ -f "$source" ]; then private_source "$source"; sha256sum "$source"; fi
+    done
+  } > "$identity_file"
+  identity=$(sha256sum "$identity_file" | cut -d' ' -f1)
+  rm "$identity_file"
+  if [ "$resuming" = true ]; then
+    [ -f "$journal/identity" ] && [ ! -L "$journal/identity" ] && [ "$(cat "$journal/identity")" = "$identity" ] || fail 'installation inputs changed; restore original inputs before retry'
+  else
+    pending=$(mktemp -d /var/lib/.ecx-bridge-install-XXXXXXXX)
+    printf '%s\n' "$identity" > "$pending/identity"
+    openssl rand -hex 16 > "$pending/owner"
+    sync -f "$pending"
+    mv -T "$pending" "$journal"
+    sync -f /var/lib
+  fi
+  if [ -f "$config/installed" ]; then
+    [ "$(cat "$config/installed")" = "$release" ] || fail 'installed release differs; use explicit upgrade'
+    echo 'This exact installation is already complete.'
+    exit 0
+  fi
+fi
+install -d -m 0755 "$prefix" "$prefix/releases"
+target=$prefix/releases/$release
+if [ ! -e "$target" ]; then
+  staging=$(mktemp -d "$prefix/releases/.install-XXXXXXXX")
+  trap 'rm -rf -- "${staging:-}"' EXIT
+  trap 'exit 1' HUP INT TERM
+  cp -R "$bundle/." "$staging/"
+  chown -R root:root "$staging"
+  chmod -R go-w "$staging"
+  chmod 0755 "$staging" "$staging/bin" "$staging/lib" "$staging/share" "$staging/share/web" "$staging/share/web/dist" "$staging/share/migrations"
+  chmod 0755 "$staging/bin/"* "$staging/lib/"*
+  find "$staging/share" -type f -exec chmod 0644 '{}' +
+  (cd "$staging" && sha256sum -c manifest.sha256 >/dev/null)
+  mv "$staging" "$target"
+  staging=
+fi
+(cd "$target" && sha256sum -c manifest.sha256 >/dev/null) || fail 'installed release changed'
+"$target/bin/restic" version | grep -q '^restic 0.19.1 ' || fail 'tested restic 0.19.1 required'
+if [ "$mode" = fresh ]; then
+  if [ ! -f "$journal/configured.sha256" ]; then
+  for role in worker signer; do
+    if [ "$role" = worker ]; then account=$worker; else account=$signer; fi
+    getent group "$account" >/dev/null || groupadd --system "$account"
+    getent passwd "$account" >/dev/null || useradd --system --gid "$account" --home-dir "$state/$role" --shell /usr/sbin/nologin "$account"
+    [ "$(getent passwd "$account" | cut -d: -f1,6,7)" = "$account:$state/$role:/usr/sbin/nologin" ] || fail 'service account changed'
+    [ "$(id -Gn "$account")" = "$account" ] || fail 'unexpected service group membership'
+  done
   install -d -m 0755 "$config" "$state"
   for role in worker signer; do
     if [ "$role" = worker ]; then account=$worker; else account=$signer; fi
@@ -154,9 +204,16 @@ if [ "$mode" = fresh ]; then
     install -o root -g "$worker" -m 0640 "$cert_source" "$config/worker/public-fullchain.pem"
     install -o "$worker" -g "$worker" -m 0600 "$tls_source" "$config/worker/public-privkey.pem"
   fi
-  openssl rand -hex 32 | tr -d '\n' > "$config/signer/signer.auth"
-  openssl req -x509 -newkey ed25519 -nodes -keyout "$config/signer/signer.auth.key" -out "$config/signer/signer.auth.pem" -days 365 \
-    -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 >/dev/null 2>&1
+  if [ ! -f "$config/signer/signer.auth" ]; then
+    openssl rand -hex 32 | tr -d '\n' > "$config/signer/signer.auth.pending"
+    mv "$config/signer/signer.auth.pending" "$config/signer/signer.auth"
+  fi
+  if [ ! -f "$config/signer/signer.auth.pem" ]; then
+    openssl req -x509 -newkey ed25519 -nodes -keyout "$config/signer/signer.auth.key.pending" -out "$config/signer/signer.auth.pem.pending" -days 365 \
+      -subj /CN=127.0.0.1 -addext subjectAltName=IP:127.0.0.1 >/dev/null 2>&1
+    mv "$config/signer/signer.auth.key.pending" "$config/signer/signer.auth.key"
+    mv "$config/signer/signer.auth.pem.pending" "$config/signer/signer.auth.pem"
+  fi
   for name in signer.auth signer.auth.pem; do
     install -o root -g "$worker" -m 0640 "$config/signer/$name" "$config/worker/$name"
   done
@@ -181,37 +238,38 @@ if [ "$mode" = fresh ]; then
     [ "$(jq -r .$field "$config/worker/config.json")" = "$(jq -r .$field "$config/signer/config.json")" ] || fail 'service ports differ'
   done
   runuser -u "$signer" -- "$target/bin/ecx-bridge" check-signer "$config/signer/config.json" "$config/signer/solana.keypair.json"
+  [ -z "$(find "$config" -type l -print)" ] || fail 'unexpected configuration symlink'
+  find "$config" -printf '%p %u:%g:%m %n\n' | LC_ALL=C sort > "$journal/permissions.pending"
+  find "$config" -type f -exec sha256sum '{}' + > "$journal/configured.pending"
+  sync -f "$config"
+  mv "$journal/permissions.pending" "$journal/permissions"
+  mv "$journal/configured.pending" "$journal/configured.sha256"
+  sync -f "$journal"
+  fi
+  # A crash while publishing completion may leave only this owned temporary file.
+  rm -f -- "$config/installed.pending"
+  [ -z "$(find "$config" -type l -print)" ] || fail 'unexpected configuration symlink'
+  find "$config" -printf '%p %u:%g:%m %n\n' | LC_ALL=C sort > "$journal/permissions.check"
+  cmp -s "$journal/permissions" "$journal/permissions.check" || fail 'configuration permissions changed during interrupted setup'
+  rm "$journal/permissions.check"
+  sha256sum --check --status "$journal/configured.sha256" || fail 'installed configuration changed during interrupted setup'
   systemctl start postgresql
-  runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d postgres <<'SQL'
-CREATE ROLE ecxbridgew LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
-CREATE ROLE ecxbridger LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
-CREATE ROLE ecxbridges LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION;
-SQL
-  runuser -u postgres -- createdb ecx_bridge
-  for migration in 001 002 003 004 005 006 007 008; do
-    runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 -d ecx_bridge -f "$target/share/migrations/$migration.sql"
-  done
-  runuser -u postgres -- psql -X -v ON_ERROR_STOP=1 -d ecx_bridge <<'SQL'
-REVOKE ALL ON DATABASE ecx_bridge FROM PUBLIC;
-REVOKE ALL ON SCHEMA public FROM PUBLIC;
-REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC;
-REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
-GRANT CONNECT ON DATABASE ecx_bridge TO ecxbridgew,ecxbridger,ecxbridges;
-GRANT USAGE ON SCHEMA public TO ecxbridgew,ecxbridger,ecxbridges;
-GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO ecxbridgew;
-GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO ecxbridgew;
-GRANT SELECT ON ALL TABLES IN SCHEMA public TO ecxbridger,ecxbridges;
-GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO ecxbridger,ecxbridges;
-SQL
+  runuser -u postgres -- env PGHOST=/var/run/postgresql PGPORT=5432 PGDATABASE=postgres PGUSER=postgres ecx_bridge_datadir="$target/share" \
+    "$target/bin/ecx-bridge" provision-database < "$journal/owner"
   # Ordered, database-specific peer rules. No password or broad trust rule.
-  sed -i '1i local ecx_bridge all peer map=ecx_bridge_install' /etc/postgresql/16/main/pg_hba.conf
-  printf '%s\n' 'ecx_bridge_install postgres postgres' 'ecx_bridge_install ecxbridgew ecxbridgew' 'ecx_bridge_install ecxbridgew ecxbridger' 'ecx_bridge_install ecxbridges ecxbridges' >> /etc/postgresql/16/main/pg_ident.conf
+  if ! grep -qxF 'local ecx_bridge all peer map=ecx_bridge_install' /etc/postgresql/16/main/pg_hba.conf; then
+    sed -i '1i local ecx_bridge all peer map=ecx_bridge_install' /etc/postgresql/16/main/pg_hba.conf
+  fi
+  for rule in 'ecx_bridge_install postgres postgres' 'ecx_bridge_install ecxbridgew ecxbridgew' 'ecx_bridge_install ecxbridgew ecxbridger' 'ecx_bridge_install ecxbridges ecxbridges'; do
+    grep -qxF "$rule" /etc/postgresql/16/main/pg_ident.conf || printf '%s\n' "$rule" >> /etc/postgresql/16/main/pg_ident.conf
+  done
   pg_ctlcluster 16 main reload
 else
   systemctl stop ecx-bridge-worker ecx-bridge-signer
 fi
 # Publishing a release never changes keys, configuration, ledger or saved attempts.
-ln -s "$target" "$prefix/current.new"
+[ ! -e "$prefix/current.new" ] || [ -L "$prefix/current.new" ] || fail 'unexpected current staging path'
+ln -sfn "$target" "$prefix/current.new"
 mv -Tf "$prefix/current.new" "$prefix/current"
 if [ "$mode" = fresh ]; then
   deployment_identity=$("$prefix/current/bin/ecx-bridge" check-config "$config/worker/config.json" | jq -er .fingerprint)
@@ -232,6 +290,7 @@ for role in worker signer; do
   cat > "/etc/systemd/system/ecx-bridge-$role.service" <<UNIT
 [Unit]
 Description=ECX bridge $role
+ConditionPathExists=$config/installed
 After=postgresql.service network-online.target
 Requires=postgresql.service
 Wants=network-online.target
@@ -295,5 +354,8 @@ if [ -x /usr/sbin/sshd ]; then
 fi
 systemctl daemon-reload
 systemctl enable ecx-bridge-worker ecx-bridge-signer
-printf '%s\n' "$release" > "$config/installed"
+printf '%s\n' "$release" > "$config/installed.pending"
+sync -f "$config"
+mv "$config/installed.pending" "$config/installed"
+sync -f "$config"
 echo 'Installed. Services are STOPPED. Configure native wallet backup staging/HTTPS, verify backup and isolation, then start services; the worker starts paused. Explicit checked resume is required.'

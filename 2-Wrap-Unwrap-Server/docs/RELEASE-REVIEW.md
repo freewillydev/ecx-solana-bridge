@@ -1717,3 +1717,31 @@ verificationprogress=1, pruned=true, zero loaded wallets. RPC reports chain=main
 the ECX-specific checkpoint establishes the intended betanet identity. This is
 local trusted chain-data acceleration for the test host, not a public snapshot
 bootstrap or proof of cold-sync duration.
+
+### Resumable installer implementation checkpoint (2026-10-08)
+
+Integrated security050227c asca58a43: the closed offline ProvisionDatabase
+operation reads a32hex ownership token from stdin, uses Opaleye for catalog and
+receipt access, creates reserved roles with ownership comments transactionally,
+and atomically binds CREATE DATABASE to a unique NOLOGIN owner. Migrations001..008
+and the private token/digest receipt commit together. Existing/foreign objects
+refuse; reruns preserve initialized ledger data. DDL remains infrastructure.
+Worker's disposable PG16 contract passed foreign-role/database refusal, migration
+rollback, same-token retries, changed-digest refusal, read-role isolation and
+preservation of initialized schema22 plus a saved observation.
+
+The shell now records private immutable input/ownership receipts before mutations,
+resumes account/config steps, preserves signer auth, checks configuration bytes
+and permissions, and calls that operation before existing initialize/adopt.
+PostgreSQL peer rules do not accumulate on retry. Both systemd units require an
+atomically published completed-install receipt; Configure.start checks that receipt
+rather than treating unit-file presence as completed setup. No reset/drop path is
+added. A changed artifact or material requires explicit review, not silent adoption.
+
+Actual Ubuntu full bridge-test passed for ca58a43 plus exact filesystem patch
+SHA191580f1d7a9632c774d793c6202f84f285ca8a653b681d3c4a5bea95389cdb2.
+Shell syntax/diff checks pass. SSM185f6a28 is also running the isolated provisioning
+contract; that result and final installer SIGKILL/reboot/cut-point acceptance are
+not claimed yet. Fresh acceptance host i-0fc7cf24ffe177dd2 is unfunded and separate
+from the synchronized test node. This checkpoint is implementation, not completed
+three-scenario release acceptance.

@@ -482,7 +482,8 @@ startUnlocked path=do
         result<-if uid==0 then rawSystem program args else rawSystem "sudo" (program:args)
         require (result==ExitSuccess) "setup_command_failed_state_preserved"
   (present,_,_)<-readProcessWithExitCode "systemctl" ["cat","ecx-bridge-worker.service","ecx-bridge-signer.service"] ""
-  when (present/=ExitSuccess) $ do
+  completed<-doesFileExist "/etc/ecx-bridge/installed"
+  when (present/=ExitSuccess || not completed) $ do
     require (not existing) "existing_services_missing_use_recovery_not_fresh"
     restored<-either (const $ reject "invalid_setup_json") pure
       (parseEither (withObject "setup" (\o->o .:? "restoredCustody" .!= False)) value)
@@ -492,7 +493,8 @@ startUnlocked path=do
     -- Old setup files retain signed-release verification; never silently downgrade.
     require (uid==0) "fresh_install_run_sudo_ecx_bridge_configure_then_sudo_ecx_bridge_start"
     residual<-doesFileExist config
-    require (not residual) "installed_material_exists_use_recovery_not_fresh"
+    journal<-doesFileExist "/var/lib/ecx-bridge-install/identity"
+    require (not residual || journal) "installed_material_exists_use_recovery_not_fresh"
     when (method=="bundle") $ do
       root<-field "sourceRoot" value
       (verified,_,_)<-readCreateProcessWithExitCode ((proc "sha256sum" ["--check","--status","manifest.sha256"]) {cwd=Just root}) ""
