@@ -185,6 +185,9 @@ the sanitized report on stdin when the issue set changes, including recovery.
 It must finish within 20 seconds; failure is retried on the next check. Store its
 credentials privately in `/etc`, not command arguments or journal output. After
 configuring a destination, test it with the report and verify actual receipt.
+Invalid private monitor settings produce an unhealthy local report and a failed
+oneshot; they do not invoke the notification hook. Monitor the timer/report age
+from outside the host as well.
 The monitor never passes RPC URLs, custody keys or customer/order information.
 A pending notification is retried without re-running any financial operation.
 
