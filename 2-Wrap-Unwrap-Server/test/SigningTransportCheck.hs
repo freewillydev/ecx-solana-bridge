@@ -494,8 +494,12 @@ fundingCheck=bracket temporary removeDirectoryRecursive $ \dir->do
       post<-send validApp "POST" (auth "test-only-password")
       mismatchApp<-fundingApplication (pure config {W.pubMint="other"}) fallback
       mismatch<-send mismatchApp "GET" (auth "test-only-password")
+      unsetEnv "ECX_FUNDING_CONFIG"
+      absentApp<-build
+      absent<-send absentApp "GET" []
+      absentPost<-send absentApp "POST" []
       seen<-readIORef calls
-      pure (map (statusCode.simpleStatus) [denied,limited,wrong,valid,post,mismatch]==[401,429,401,200,405,503]
+      pure (map (statusCode.simpleStatus) [denied,limited,wrong,valid,post,mismatch,absent,absentPost]==[401,429,401,200,405,503,503,405]
         && seen==1 && all ((==Just "no-store").lookup "Cache-Control".simpleHeaders) [denied,valid]
         && "&lt;test-address&gt;" `BS.isInfixOf` BL.toStrict(simpleBody valid)
         && not("test-only-password" `BS.isInfixOf` BL.toStrict(simpleBody valid)))

@@ -132,7 +132,11 @@ fundingApplication :: IO PublicConfiguration -> Application -> IO Application
 fundingApplication configuration fallback=do
   file<-lookupEnv "ECX_FUNDING_CONFIG"
   case file of
-    Nothing->pure fallback
+    Nothing->pure $ \request respond->if pathInfo request/=["funding"] then fallback request respond else
+      respond $ responseLBS (if requestMethod request=="GET" then HTTP.status503 else HTTP.status405)
+        [("Content-Type","text/html; charset=utf-8"),("Cache-Control","no-store"),("Allow","GET")]
+        (BL.fromStrict $ TE.encodeUtf8 $ page "Funding" "Bridge funding"
+          "<p>The operator has not configured this optional funding page. Customer wrapping and unwrapping use the Bridge tab.</p>")
     Just path->do
       value<-readFundingConfig path >>= either (const $ reject "invalid_funding_configuration") pure . eitherDecodeStrict'
       (saltText,hashText,native,owner,mint,ata)<-either (const $ reject "invalid_funding_configuration") pure $

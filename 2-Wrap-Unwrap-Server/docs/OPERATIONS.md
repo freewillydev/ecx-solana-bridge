@@ -394,13 +394,14 @@ hard-kill case and the reverse restore handoff remain acceptance/integration wor
 `operator`). Serve it over HTTPS, directly or through an encrypted tunnel to the
 loopback listener. It cannot allocate treasury, sign or send transactions.
 
-Set `ECX_FUNDING_CONFIG` to an absolute private mode-0600 JSON file with `salt`
+Set `ECX_FUNDING_CONFIG` to an absolute private mode-0600 JSON file owned by
+`ecxbridgew`, in a directory that user can traverse and other users cannot modify, with `salt`
 (32 random bytes as hex), `hash` (32-byte PBKDF2-HMAC-SHA256 result, 600,000 rounds,
 hex), `nativeAddress`, `owner`, `mint` and `ata`. Store no plaintext password.
 Verify the native address belongs to the configured wallet before provisioning;
 the page additionally refuses mismatched Solana owner/mint. Restart the worker
-after provisioning or replacing this file. Missing configuration disables the
-route. Attempts share a two-second admission interval; responses are never cached.
+after provisioning or replacing this file. Missing configuration shows an explicit optional-page-not-configured message
+(HTTP 503), without reading any custody data. Attempts share a two-second admission interval; responses are never cached.
 Funding still requires confirmed observations, reconciliation and explicit
 allocation through the existing operator workflow. Reserve timestamps may be stale.
 
@@ -412,8 +413,8 @@ is disabled and the signer is stopped. Stale reserve observations remain visibly
 marked; this deployment does not establish transfer readiness. The published
 `review-2026-10-09-ubuntu` installer still contains the earlier `cae0681` baseline.
 
-The AWS signer now selects the Mac HTTPS restic repository through
-`/etc/systemd/system/ecx-bridge-signer.service.d/mac-backup.conf`. Original backup
+The AWS signer selects the Mac HTTPS restic repository through the standard
+`/etc/ecx-bridge/signer/backup.json` paths, also referenced by saved setup. Original backup
 configuration and snapshots remain intact. A fresh sequence-76 checkpoint passed
 full restic data verification and isolated custody recovery, with matching manifest;
 no recovered wallet or ledger was activated. Checkpoint SSM evidence:
@@ -421,7 +422,7 @@ no recovered wallet or ledger was activated. Checkpoint SSM evidence:
 `f5376d64-d173-4367-8cd6-be5ce6faaec6`.
 
 The Mac must remain awake, online and logged in with its external drive attached.
-The repository has a 2 GiB initial cap. Before reinstalling, reconcile the runtime
-backup override with the recovered setup directory, which still names the original
-backup destination. This is a review deployment, not an unattended production
+The repository has a 2 GiB initial cap. Saved setup and installed backup credentials were reconciled and the temporary
+backup override removed; upgrade retains the installed credentials. A wiped host
+still requires explicit custody/ledger recovery, never a fresh install over old funds. This is a review deployment, not an unattended production
 backup service or independent security approval.
