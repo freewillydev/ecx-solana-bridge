@@ -1698,3 +1698,22 @@ Security worker reports122 upstream tests and production-shim boundary checks
 passed locally with this source. Actual Ubuntu prerequisite build progressed
 successfully into Cabal compilation (SSM18468708); full bridge-test and final ldd
 are still pending. Do not describe final artifact linkage as verified yet.
+
+### Ubuntu static-crypto and synchronized-node evidence (2026-10-08)
+
+SSM18468708 completed successfully. Bounded follow-up0f7c97b6 confirms actual
+Ubuntu24.04 x86_64 full `bridge-test` PASS at application source da2445c with
+libsecp256k1 v0.8.0 built statically. The upstream library's122 tests also passed.
+`/home/ubuntu/ecx/bridge-linkage.txt` shows no libsecp shared dependency. This is
+application build/test evidence; pending installer-resumption changes still need
+integration and clean-host acceptance on their own exact artifact.
+
+Chain-only archive SHA25687e21e2cb2054fa079f1873e42dee555de2f1631eadf4e09e7dab376ea172428
+was verified before applying blocks+chainstate from the stopped local ECX node.
+Original AWS sync directories were preserved. No wallets/config/credentials were
+copied. Job30a752dc completed; read-only RPC job8d60dd95 verified the exact ECX
+checkpoint at967680 and observed blocks=headers=971478, initialblockdownload=false,
+verificationprogress=1, pruned=true, zero loaded wallets. RPC reports chain=main;
+the ECX-specific checkpoint establishes the intended betanet identity. This is
+local trusted chain-data acceleration for the test host, not a public snapshot
+bootstrap or proof of cold-sync duration.
