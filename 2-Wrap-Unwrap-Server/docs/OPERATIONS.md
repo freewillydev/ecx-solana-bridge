@@ -344,8 +344,10 @@ The recovery changes are implemented on the development branch; the published
 From `sudo ecx-bridge`, choose **Backup and recovery**. Download/verify an exact
 snapshot with an independently retained minimum sequence, then select **Restore
 verified custody to staging**. Supply a root-private target configuration and the
-verified `custody.json`. The destination must have the managed ECX node and local
-PostgreSQL. The original native wallet name must be unused. The guide never
+verified `custody.json`. The packaged launcher installs local PostgreSQL; guided
+CanonicalBeta recovery installs the pinned pruned ECX node if absent. Node
+synchronization must finish before restoration. The original native wallet name
+must be unused. The guide never
 reinitializes a ledger or regenerates recovered keys.
 
 Only the native backup is staged privately for `ecxnode`; only the ledger archive
