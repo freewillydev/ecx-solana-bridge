@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module Bridge.SolanaObservation (scanSolanaWith,scanSolanaOperatingWith) where
+module Bridge.SolanaObservation (scanSolanaWith,scanSolanaOperatingWith,scanSolanaPairWith) where
 import Bridge.Domain
 import Bridge.Wire
 import Bridge.Solana
@@ -8,7 +8,7 @@ import Bridge.SolanaMessage (signatureBytes)
 import Bridge.RPC
 import Bridge.Error
 import Bridge.Identity (digest)
-import Control.Exception (try)
+import Control.Exception (try,catch,IOException)
 import Control.Monad (forM,when)
 import Data.Aeson
 import qualified Data.Aeson.KeyMap as KM
@@ -26,6 +26,12 @@ scanSolanaWith :: Call -> Maybe Call -> SolanaSettings -> Text -> Maybe Text -> 
 scanSolanaWith call verifier c origin previous now pending lookupInstruction lookupReferences = do
   validateCursor origin previous now
   _ <- solanaIdentityWith call verifier c
+  scanToken call verifier c origin previous now pending lookupInstruction lookupReferences
+
+scanToken :: Call -> Maybe Call -> SolanaSettings -> Text -> Maybe Text -> Int64
+  -> [Text] -> (Text -> IO (Maybe Binding)) -> ([Text] -> IO (Maybe (Text,OrderRequest,PolicySnapshot,Text))) -> IO ScanBatch
+scanToken call verifier c origin previous now pending lookupInstruction lookupReferences = do
+  validateCursor origin previous now
   require (length pending<=1000) "solana_verification_backlog"
   mapM_ (either reject (const $ pure ()) . signatureBytes) pending
   history <- collectSignatures origin previous $ \before ->
@@ -100,6 +106,11 @@ scanSolanaOperatingWith :: Call -> Maybe Call -> SolanaSettings -> Text -> Maybe
 scanSolanaOperatingWith call verifier c origin previous now = do
   validateCursor origin previous now
   _ <- solanaIdentityWith call verifier c
+  scanOperating call c origin previous now
+
+scanOperating :: Call -> SolanaSettings -> Text -> Maybe Text -> Int64 -> IO ScanBatch
+scanOperating call c origin previous now = do
+  validateCursor origin previous now
   history <- collectSignatures origin previous $ \before ->
     solanaAddressHistoryWith call (custodyOwner c) before Nothing >>= parseValue parseJSON
   observations <- forM history $ \h -> do
@@ -131,6 +142,25 @@ scanSolanaOperatingWith call verifier c origin previous now = do
             pure (receipts,ChainEvent sig kind anchor evidence)
   pure (ScanBatch "SolanaOperating" origin previous (historySignature $ last history) now
     (concatMap fst observations) (map snd observations))
+
+-- One invocation owns the shared identity and both scans. No proof or cached
+-- response escapes; standalone scans retain their complete identity checks.
+-- The caller captures now BEFORE entry, so a slow first scan cannot refresh the
+-- second scan's identity timestamp. Custody reconciliation reads fresh accounts.
+scanSolanaPairWith :: Call -> Maybe Call -> SolanaSettings
+  -> (Text,Maybe Text) -> (Text,Maybe Text) -> Int64 -> [Text]
+  -> (Text -> IO (Maybe Binding)) -> ([Text] -> IO (Maybe (Text,OrderRequest,PolicySnapshot,Text)))
+  -> IO [(Text,Either BridgeError ScanBatch)]
+scanSolanaPairWith call verifier c (tokenOrigin,tokenPrevious) (operatingOrigin,operatingPrevious) now pending lookupInstruction lookupReferences = do
+  identity <- checked $ solanaIdentityWith call verifier c
+  case identity of
+    Left problem -> pure [("Solana",Left problem),("SolanaOperating",Left problem)]
+    Right _ -> do
+      token <- checked $ scanToken call verifier c tokenOrigin tokenPrevious now pending lookupInstruction lookupReferences
+      operating <- checked $ scanOperating call c operatingOrigin operatingPrevious now
+      pure [("Solana",token),("SolanaOperating",operating)]
+ where
+  checked action=try (action `catch` (\(_::IOException)->reject "observer_io_unavailable"))
 
 validateCursor :: Text -> Maybe Text -> Int64 -> IO ()
 validateCursor origin previous now = do

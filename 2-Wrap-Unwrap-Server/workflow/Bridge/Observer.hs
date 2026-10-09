@@ -31,20 +31,21 @@ observeOnce manager settings reader writer = do
         recovering<-evalRead reader NativeSourceCandidates
         now<-epoch
         scanNativeWith (nativeCall manager native) native (defaultNativeDepth settings) depth previous now recovering lookupInstruction
-      tokenScan = do
-        previous<-evalRead reader (ReadCheckpoint "Solana")
-        pending<-evalRead reader PendingVerification
-        now<-epoch
-        scanSolanaWith call verifier solana (tokenOrigin settings) previous now pending lookupInstruction lookupReferences
-      operatingScan = do
-        previous<-evalRead reader (ReadCheckpoint "SolanaOperating")
-        now<-epoch
-        scanSolanaOperatingWith call verifier solana (operatingOrigin settings) previous now
-  forM_ [("Native",nativeScan),("Solana",tokenScan),("SolanaOperating",operatingScan)] $ \(chain,scan)->do
-    result<-try ((scan >>= evalWrite writer . CommitScan) `catch` (\(_::IOException)->reject "observer_io_unavailable"))
-    case result of
-      Right ()->pure ()
-      Left (BridgeError code)->do now<-epoch; evalWrite writer (ScanFailed chain now code)
+      commit chain result=do
+        saved<-try ((either (\(BridgeError code)->reject code) (evalWrite writer . CommitScan) result)
+          `catch` (\(_::IOException)->reject "observer_io_unavailable"))
+        case saved of
+          Right ()->pure ()
+          Left (BridgeError code)->do now<-epoch; evalWrite writer (ScanFailed chain now code)
+  nativeResult<-try (nativeScan `catch` (\(_::IOException)->reject "observer_io_unavailable"))
+  commit "Native" nativeResult
+  tokenPrevious<-evalRead reader (ReadCheckpoint "Solana")
+  operatingPrevious<-evalRead reader (ReadCheckpoint "SolanaOperating")
+  pending<-evalRead reader PendingVerification
+  now<-epoch
+  scans<-scanSolanaPairWith call verifier solana (tokenOrigin settings,tokenPrevious)
+    (operatingOrigin settings,operatingPrevious) now pending lookupInstruction lookupReferences
+  forM_ scans $ uncurry commit
   candidates<-evalRead reader PromotionCandidates
   now<-epoch
   forM_ candidates $ \identifier->evalWrite writer (PromoteDeposit now identifier) >> pure ()

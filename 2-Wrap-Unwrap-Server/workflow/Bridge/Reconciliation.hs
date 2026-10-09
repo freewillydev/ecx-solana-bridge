@@ -45,7 +45,7 @@ inspectCustody :: Bool -> Manager -> ObserverSettings -> H.SolanaPolicy -> Reade
 inspectCustody losses manager settings config reader = do
   let native=nativeSettings settings; solana=solanaSettings settings
       verifier=fmap (\url->rpc manager url Nothing) (S.solanaVerifierRpc solana)
-      identity=N.nativeIdentity manager native >> S.solanaIdentity manager solana >> pure ()
+      identity=N.nativeIdentity manager native >> S.solanaGenesisWith (S.solanaCall manager solana) verifier solana
   inspectCustodyWith (floor <$> getPOSIXTime) identity (N.nativeCall manager native) (S.solanaCall manager solana)
     verifier settings config reader losses
 
@@ -74,11 +74,15 @@ inspectCustodyWith clock identity native solana verifier settings config reader 
   -- Independent read-only providers share a snapshot, not a DB connection.
   -- Both must finish successfully; an exception cancels the other inspection.
   (slot,wrapped,sol)<-case verifier of
-    Nothing->require (N.profile n/=CanonicalBeta) "independent_rpc_required" >> balances solana
+    Nothing->do
+      require (N.profile n/=CanonicalBeta) "independent_rpc_required"
+      (slot,w,supply,_)<-balances solana
+      pure (slot,w,supply)
     Just verify->do
-      (primary@(_,w,supply),(_,vw,vs))<-concurrently (balances solana) (balances verify)
+      ((slot,w,supply,authority),(_,vw,vs,otherAuthority))<-concurrently (balances solana) (balances verify)
+      require (authority==otherAuthority) "mint_verifier_policy_mismatch"
       require ((w,supply)==(vw,vs)) "custody_verifier_disagreement"
-      pure primary
+      pure (slot,w,supply)
   cursor<-headFor view "Native"
   depth<-evalRead reader (MaximumNativeDepth $ defaultNativeDepth settings)
   history<-native True "listsinceblock" [toJSON cursor,toJSON depth,Bool False,Bool True]
@@ -146,12 +150,13 @@ headFor :: CustodySnapshot -> Text -> IO Text
 headFor view stream=maybe (reject "custody_history_anchor_missing") pure (lookup stream $ custodyHeads view)
 
 solanaBalances :: SolanaRPC -> H.SolanaPolicy -> CustodySnapshot
-  -> (Text -> Text -> IO (Text,Text,Value)) -> IO (Int64,Integer,Integer)
+  -> (Text -> Text -> IO (Text,Text,Value)) -> IO (Int64,Integer,Integer,Maybe Text)
 solanaBalances call config view evidence = do
-  (slot,value)<-call "getMultipleAccounts" [toJSON [H.custodyAta config,H.custodyOwner config],object
+  (slot,value)<-call "getMultipleAccounts" [toJSON [H.mint config,H.custodyAta config,H.custodyOwner config],object
     ["commitment" .= ("finalized"::Text),"encoding" .= ("jsonParsed"::Text),"minContextSlot" .= custodySlot view]] >>= contextValue (custodySlot view)
   accounts<-parseValue parseJSON value
-  (token,owner)<-case accounts of [a,b]->pure(a,b); _->reject "custody_accounts_missing"
+  (mintAccount,token,owner)<-case accounts of [m,a,b]->pure(m,a,b); _->reject "custody_accounts_missing"
+  (authority,_)<-S.inspectMintAccount mintAccount
   wrapped<-either reject pure (S.inspectTokenAccount (H.mint config) (H.custodyOwner config) token)
   sol<-systemLamports owner
   forM_ [("Solana",H.custodyAta config),("SolanaOperating",H.custodyOwner config)] $ \(stream,address)->do
@@ -161,7 +166,7 @@ solanaBalances call config view evidence = do
     h<-case response of [a]->pure a; _->reject "custody_history_head_unavailable"
     (_,anchor,_)<-evidence stream signature
     require (S.historySignature h==signature && T.pack(show $ S.historySlot h)==anchor && S.historySlot h<=slot) "custody_solana_history_advanced"
-  pure (slot,toInteger $ units wrapped,toInteger $ units sol)
+  pure (slot,toInteger $ units wrapped,toInteger $ units sol,authority)
 
 -- One verified spender contributes one adjustment, irrespective of how many
 -- signed replacement alternatives share its inputs. The Store proves lineage.

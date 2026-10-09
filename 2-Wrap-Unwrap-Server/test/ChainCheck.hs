@@ -27,6 +27,7 @@ import Bridge.Domain
 import Bridge.Error
 import Bridge.Native
 import qualified Bridge.Solana as Solana
+import qualified Bridge.SolanaObservation as Scan
 import Bridge.Identity (publicKey,digest)
 import Bridge.RPC
 import Bridge.Wire (Profile(..))
@@ -57,7 +58,7 @@ import Data.Time.Format (formatTime,defaultTimeLocale)
 import Test.QuickCheck hiding (label)
 
 checks :: IO [Result]
-checks = (\deployment native solana identity observation administration common->deployment<>native<>solana<>identity<>observation<>administration<>common) <$> deploymentChecks <*> NativePaymentCheck.checks <*> SolanaPaymentCheck.checks <*> solanaIdentityChecks <*> ObservationCheck.checks <*> administrationChecks <*> sequence
+checks = (\deployment native solana identity observation administration common->deployment<>native<>solana<>identity<>observation<>administration<>common) <$> deploymentChecks <*> NativePaymentCheck.checks <*> SolanaPaymentCheck.checks <*> ((<>) <$> solanaIdentityChecks <*> solanaPairChecks) <*> ObservationCheck.checks <*> administrationChecks <*> sequence
   [ check "native observation requires the correct ready descriptor wallet, without signing authority" $ \(sameName::Bool) (descriptors::Bool) (scanning::Bool)->ioProperty $ do
       let wallet=object ["walletname" .= (if sameName then nativeWallet settings else "other"),"descriptors" .= descriptors,"scanning" .= scanning]
           call scoped method args=if (scoped,method,args)==(True,"getwalletinfo",[]) then pure wallet else fail "unexpected wallet RPC"
@@ -498,6 +499,92 @@ replace [] replacement _=replacement
 replace (key:rest) replacement (Object fields)=Object $ KM.insert key
   (replace rest replacement $ maybe Null id $ KM.lookup key fields) fields
 replace _ _ value=value
+
+
+-- Captured Devnet transactions exercise both streams; transports count reads,
+-- not a fabricated network or a claim of live financial acceptance.
+solanaPairChecks :: IO [Result]
+solanaPairChecks=do
+  let fixture name=getDataFileName ("test/fixtures/"<>name) >>= BS.readFile >>= either fail pure . eitherDecodeStrict'
+  deposit<-fixture "solana-devnet-order-deposit.json"
+  binding<-fieldValue "binding" deposit
+  mint<-fieldValue "mint" binding; owner<-fieldValue "custodyOwner" binding; ata<-fieldValue "custody" binding
+  tokenSig<-fieldValue "signature" binding
+  tokenTx<-fieldValue "transaction" deposit
+  operatingTx<-fixture "solana-devnet-existing-payment.json" >>= fieldValue "transaction"
+  signatures<-fieldValue "transaction" operatingTx >>= fieldValue "signatures" :: IO [Text]
+  operatingSig<-case signatures of [sig]->pure sig; _->fail "captured operating signature missing"
+  let config=Solana.SolanaSettings L2LSignetDevnet "https://primary.example" (Just "https://verifier.example") mint owner ata
+      mintAccount=object ["owner" .= Solana.tokenProgram,"executable" .= False,"data" .= object
+        ["space" .= (82::Int),"parsed" .= object ["type" .= ("mint"::Text),"info" .= object
+          ["decimals" .= (8::Int),"isInitialized" .= True,"freezeAuthority" .= Null,"mintAuthority" .= owner,"supply" .= ("100"::Text)]]]]
+      tokenAccount=object ["owner" .= Solana.tokenProgram,"executable" .= False,"data" .= object
+        ["space" .= (165::Int),"parsed" .= object ["type" .= ("account"::Text),"info" .= object
+          ["owner" .= owner,"mint" .= mint,"state" .= ("initialized"::Text),"isNative" .= False
+          ,"tokenAmount" .= object ["decimals" .= (8::Int),"amount" .= ("10"::Text)]]]]]
+      reply method args=case (method,args) of
+        ("getGenesisHash",[])->pure $ String $ Solana.solanaGenesis L2LSignetDevnet
+        ("getAccountInfo",[String address,options])->do
+          fieldValue "commitment" options >>= \x->require (x==("finalized"::Text)) "test_commitment"
+          require (address==mint || address==ata) "test_account"
+          pure $ object ["value" .= if address==mint then mintAccount else tokenAccount]
+        ("getSignaturesForAddress",[String address,options])->do
+          fieldValue "commitment" options >>= \x->require (x==("finalized"::Text)) "test_commitment"
+          require (address==ata || address==owner) "test_history_address"
+          let (sig,tx)=if address==ata then (tokenSig,tokenTx) else (operatingSig,operatingTx)
+          slot<-fieldValue "slot" tx :: IO Int64
+          pure $ toJSON [object ["signature" .= sig,"slot" .= slot,"err" .= Null,"confirmationStatus" .= ("finalized"::Text)]]
+        ("getTransaction",[String sig,options])->do
+          fieldValue "commitment" options >>= \x->require (x==("finalized"::Text)) "test_commitment"
+          require (sig==tokenSig || sig==operatingSig) "test_signature"
+          pure $ if sig==tokenSig then tokenTx else operatingTx
+        _->fail "unexpected paired scan RPC"
+      pair primary secondary at=Scan.scanSolanaPairWith primary (Just secondary) config
+        (tokenSig,Just tokenSig) (operatingSig,Just operatingSig) at [] (const $ pure Nothing) (const $ pure Nothing)
+      counted ref who method args=modifyIORef' ref (<>[(who,method)]) >> reply method args
+      successful at results=map fst results==["Solana","SolanaOperating"] && all
+        (\(_,r)->case r of Right batch->W.scanTime batch==at && length(W.scanEvents batch)==1; _->False) results
+      refused code results=length results==2 && all (\(_,r)->case r of Left(BridgeError actual)->actual==code; _->False) results
+      check title p=putStrLn title >> quickCheckWithResult stdArgs (once $ ioProperty p)
+  sequence
+    [ check "paired scans make seven primary/two verifier reads and revalidate on every invocation" $ do
+        calls<-newIORef ([]::[(Text,Text)])
+        first<-pair (counted calls "primary") (counted calls "verifier") 100
+        firstCalls<-readIORef calls
+        second<-pair (counted calls "primary") (counted calls "verifier") 101
+        allCalls<-readIORef calls
+        pure (successful 100 first && successful 101 second && allCalls==firstCalls<>firstCalls
+          && length(filter ((=="primary").fst) firstCalls)==7 && length(filter ((=="verifier").fst) firstCalls)==2
+          && length(filter ((=="getGenesisHash").snd) firstCalls)==2)
+    , check "a failed shared identity refuses both streams before history reads" $ do
+        calls<-newIORef ([]::[(Text,Text)])
+        results<-pair (counted calls "primary") (\_ _->reject "rpc_rate_limited") 100
+        observed<-readIORef calls
+        pure (refused "rpc_rate_limited" results && all ((=="getGenesisHash").snd) observed)
+    , check "later cycles reread mutable mint and token-account policy instead of reusing success" $ do
+        initial<-pair reply reply 100
+        let corrupt address value method args=if method=="getAccountInfo" && take 1 args==[String address]
+              then pure $ object ["value" .= value] else reply method args
+        badPrimary<-pair (corrupt mint Null) reply 101
+        badVerifier<-pair reply (corrupt mint Null) 101
+        badAta<-pair (corrupt ata Null) reply 101
+        pure (successful 100 initial && refused "mint_not_found" badPrimary && refused "mint_not_found" badVerifier
+          && refused "token_account_missing" badAta)
+    , check "one stream failure cannot manufacture a successful batch or freshen its sibling timestamp" $ do
+        results<-pair (\method args->if method=="getTransaction" && take 1 args==[String tokenSig]
+          then reject "rpc_rate_limited" else reply method args) reply 100
+        pure $ case results of
+          [("Solana",Left(BridgeError "rpc_rate_limited")),("SolanaOperating",Right batch)]->W.scanTime batch==100
+          _->False
+    , check "standalone genesis validation checks each provider and rejects wrong or missing verifier" $ do
+        calls<-newIORef ([]::[(Text,Text)])
+        Solana.solanaGenesisWith (counted calls "primary") (Just $ counted calls "verifier") config
+        observed<-readIORef calls
+        wrongPrimary<-rejects "wrong_solana_genesis" $ Solana.solanaGenesisWith (\_ _->pure $ String "wrong") (Just reply) config
+        wrongVerifier<-rejects "verifier_wrong_genesis" $ Solana.solanaGenesisWith reply (Just $ \_ _->pure $ String "wrong") config
+        absent<-rejects "verifier_configuration_mismatch" $ Solana.solanaGenesisWith reply Nothing config
+        pure (observed==[("primary","getGenesisHash"),("verifier","getGenesisHash")] && wrongPrimary && wrongVerifier && absent)
+    ]
 
 solanaIdentityChecks :: IO [Result]
 solanaIdentityChecks=sequence

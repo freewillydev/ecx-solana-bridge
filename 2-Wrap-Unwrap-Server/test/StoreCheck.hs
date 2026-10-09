@@ -2764,10 +2764,10 @@ fixture c OrderWorkflowFunds = PG.withTransaction c $ do
 -- Offline RPC contracts over an actual PostgreSQL snapshot. No live-chain claim.
 custodyContract :: PG.ConnectInfo -> StorePolicy -> PG.Connection -> Reader -> IO ()
 custodyContract database store fixtures reader = do
-  let key=T.replicate 32 "1"; signature=T.replicate 64 "1"; block=T.replicate 64 "a"
-      config=H.SolanaPolicy "contract" "contract" key key key (money 10) (money 10)
+  let key=T.replicate 32 "1"; ata=T.replicate 31 "1"<>"2"; signature=T.replicate 64 "1"; block=T.replicate 64 "a"
+      config=H.SolanaPolicy "contract" "contract" key key ata (money 10) (money 10)
       native=N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:29432" "/unused" "test" 1 "scan-origin"
-      solana=Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing key key key
+      solana=Solana.SolanaSettings W.L2LSignetDevnet "https://api.devnet.solana.com" Nothing key key ata
       settings=ObserverSettings native solana 2 "sol-origin" "opening-signature"
       balance=object ["mine" .= object ["trusted" .= (0.000021::Double),"untrusted_pending" .= (0::Int),"immature" .= (0::Int)],
         "lastprocessedblock" .= object ["hash" .= block,"height" .= (100::Int)]]
@@ -2781,17 +2781,22 @@ custodyContract database store fixtures reader = do
         ["space" .= (165::Int),"parsed" .= object ["type" .= ("account"::T.Text),"info" .= object
           ["mint" .= key,"owner" .= key,"state" .= ("initialized"::T.Text),"isNative" .= False,
            "tokenAmount" .= object ["amount" .= T.pack(show (n::Int)),"decimals" .= (8::Int)]]]]]
+      mintAccount authority=object ["owner" .= Solana.tokenProgram,"executable" .= False,"data" .= object
+        ["space" .= (82::Int),"parsed" .= object ["type" .= ("mint"::T.Text),"info" .= object
+          ["decimals" .= (8::Int),"isInitialized" .= True,"freezeAuthority" .= Null,
+           "mintAuthority" .= (authority::Maybe T.Text),"supply" .= ("1000"::T.Text)]]]]
       owner=object ["owner" .= key,"executable" .= False,"data" .= ["","base64"::T.Text],"lamports" .= (100::Int)]
       solCall n headSignature method params=case (method,params) of
         ("getMultipleAccounts",[addresses,options])->do
           minimumSlot<-fieldValue "minContextSlot" options :: IO Int
           commitment<-fieldValue "commitment" options :: IO T.Text
-          unless (addresses==toJSON [key,key] && minimumSlot==42 && commitment=="finalized") (fail "incorrect custody account request")
-          pure $ object ["context" .= object ["slot" .= (42::Int)],"value" .= [token n,owner]]
+          unless (addresses==toJSON [key,ata,key] && minimumSlot==42 && commitment=="finalized") (fail "incorrect custody account request")
+          pure $ object ["context" .= object ["slot" .= (42::Int)],"value" .= [mintAccount Nothing,token n,owner]]
         ("getSignaturesForAddress",[String address,options])->do
           limit<-fieldValue "limit" options :: IO Int
           minimumSlot<-fieldValue "minContextSlot" options :: IO Int
-          unless (address==key && limit==1 && minimumSlot==42) (fail "incorrect custody history request")
+          commitment<-fieldValue "commitment" options :: IO T.Text
+          unless (address `elem` [ata,key] && limit==1 && minimumSlot==42 && commitment=="finalized") (fail "incorrect custody history request")
           pure $ toJSON [object ["signature" .= headSignature,"slot" .= (42::Int),"err" .= Null,"confirmationStatus" .= ("finalized"::T.Text)]]
         _->fail "unexpected custody Solana RPC"
       inspect clock identity ncall scall verifier cfg=inspectCustodyWith clock identity ncall scall verifier cfg config reader False
@@ -2807,6 +2812,31 @@ custodyContract database store fixtures reader = do
     settings {solanaSettings=solana {Solana.solanaVerifierRpc=Just "https://independent.example"}})
   let dual primary verifier=inspect (pure 100) (pure ()) nativeCall primary (Just verifier)
         settings {solanaSettings=solana {Solana.solanaVerifierRpc=Just "https://independent.example"}}
+  -- Each provider reads one finalized mint/account snapshot and BOTH distinct
+  -- history heads. Equal balances cannot hide offsetting custody movements.
+  primaryCalls<-newIORef []; verifierCalls<-newIORef []
+  let counted ref method params=modifyIORef' ref (<>[(method,params)]) >> good method params
+  _<-dual (counted primaryCalls) (counted verifierCalls)
+  forM_ [primaryCalls,verifierCalls] $ \ref->do
+    calls<-readIORef ref
+    unless (map fst calls==["getMultipleAccounts","getSignaturesForAddress","getSignaturesForAddress"]
+      && [address|("getSignaturesForAddress",String address:_)<-calls]==[ata,key])
+      (fail "custody snapshot call budget or independent heads changed")
+  forM_ [ata,key] $ \changedAddress->do
+    let changedHead method params=case (method,params) of
+          ("getSignaturesForAddress",String address:_) | address==changedAddress->
+            solCall 1000 (T.replicate 63 "1"<>"2") method params
+          _->good method params
+    expectStore "custody_solana_history_advanced" (dual good changedHead)
+    expectStore "custody_solana_history_advanced" (dual changedHead good)
+  let snapshot slot mintValue method params=if method=="getMultipleAccounts"
+        then pure $ object ["context" .= object ["slot" .= (slot::Int)],"value" .= [mintValue,token 1000,owner]]
+        else good method params
+  forM_ [False,True] $ \swap->do
+    let check call=if swap then dual call good else dual good call
+    expectStore "mint_verifier_policy_mismatch" (check $ snapshot 42 $ mintAccount $ Just key)
+    expectStore "mint_not_found" (check $ snapshot 42 Null)
+    expectStore "solana_context_too_old" (check $ snapshot 41 $ mintAccount Nothing)
   primaryStarted<-newEmptyMVar; verifierStarted<-newEmptyMVar
   let rendezvous own other method params=do
         when (method=="getMultipleAccounts") (putMVar own () >> takeMVar other)

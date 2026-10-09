@@ -1,5 +1,5 @@
 module Bridge.Solana
-  ( SolanaSettings(..),validateSolanaSettings,solanaCall,solanaIdentity,solanaIdentityWith
+  ( SolanaSettings(..),validateSolanaSettings,solanaCall,solanaIdentity,solanaIdentityWith,solanaGenesisWith,inspectMintAccount
   , inspectMint,inspectClassicAccount,inspectTokenAccount,finalizedTransaction,finalizedTransactionWith,solanaHistory,solanaAddressHistory,solanaAddressHistoryWith
   , SignatureInfo(..), collectSignatures, tokenProgram,solanaGenesis ) where
 
@@ -46,10 +46,7 @@ solanaIdentity manager c = solanaIdentityWith (solanaCall manager c)
   (fmap (\url->rpc manager url Nothing) $ solanaVerifierRpc c) c
 solanaIdentityWith :: (Text -> [Value] -> IO Value) -> Maybe (Text -> [Value] -> IO Value) -> SolanaSettings -> IO Value
 solanaIdentityWith call verifier c = do
-  validateSolanaSettings c
-  require (maybe False (const True) verifier==maybe False (const True) (solanaVerifierRpc c)) "verifier_configuration_mismatch"
-  genesis <- call "getGenesisHash" [] >>= parseValue parseJSON
-  require (genesis==solanaGenesis (solanaProfile c)) "wrong_solana_genesis"
+  solanaGenesisWith call verifier c
   (authority,info) <- readMint call
   response<-call "getAccountInfo" [toJSON (custodyAta c),object
     ["commitment" .= ("finalized"::Text),"encoding" .= ("jsonParsed"::Text)]]
@@ -58,8 +55,6 @@ solanaIdentityWith call verifier c = do
   _<-either reject pure (inspectTokenAccount (mint c) (custodyOwner c) account)
   case verifier of
     Just verify -> do
-      independent <- verify "getGenesisHash" [] >>= parseValue parseJSON
-      require (independent==genesis) "verifier_wrong_genesis"
       (otherAuthority,_) <- readMint verify
       -- Both reads enforce the same fixed mint policy. Supply can change between
       -- finalized provider views; only issuance authority must also agree.
@@ -71,13 +66,29 @@ solanaIdentityWith call verifier c = do
   readMint request=do
     response <- request "getAccountInfo" [toJSON (mint c),object
       ["commitment" .= ("finalized"::Text),"encoding" .= ("jsonParsed"::Text)]]
-    account <- fieldValue "value" response
-    require (account/=Null) "mint_not_found"
-    program <- fieldValue "owner" account
-    require (program==tokenProgram) "wrong_token_program"
-    (authority,_) <- either (const $ reject "unsupported_mint_policy") pure (parseEither (inspectMint $ Just 8) account)
-    info <- fieldValue "data" account >>= fieldValue "parsed" >>= fieldValue "info"
-    pure (authority,info)
+    fieldValue "value" response >>= inspectMintAccount
+
+-- Standalone custody reconciliation still authenticates both provider networks.
+solanaGenesisWith :: (Text -> [Value] -> IO Value) -> Maybe (Text -> [Value] -> IO Value) -> SolanaSettings -> IO ()
+solanaGenesisWith call verifier c = do
+  validateSolanaSettings c
+  require (maybe False (const True) verifier==maybe False (const True) (solanaVerifierRpc c)) "verifier_configuration_mismatch"
+  genesis <- call "getGenesisHash" [] >>= parseValue parseJSON
+  require (genesis==solanaGenesis (solanaProfile c)) "wrong_solana_genesis"
+  case verifier of
+    Just verify -> do
+      independent <- verify "getGenesisHash" [] >>= parseValue parseJSON
+      require (independent==genesis) "verifier_wrong_genesis"
+    Nothing -> require (solanaProfile c/=CanonicalBeta) "verifier_required"
+
+inspectMintAccount :: Value -> IO (Maybe Text,Value)
+inspectMintAccount account = do
+  require (account/=Null) "mint_not_found"
+  program <- fieldValue "owner" account
+  require (program==tokenProgram) "wrong_token_program"
+  (authority,_) <- either (const $ reject "unsupported_mint_policy") pure (parseEither (inspectMint $ Just 8) account)
+  info <- fieldValue "data" account >>= fieldValue "parsed" >>= fieldValue "info"
+  pure (authority,info)
 
 -- Shared with token administration; accepting other decimals is explicit there.
 -- Supply uses the SPL u64 range, independent of the bridge's signed ledger range.
