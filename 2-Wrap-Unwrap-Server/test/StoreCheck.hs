@@ -4385,7 +4385,7 @@ tlsMain=do
               withProcessListening (runSigningServer checkpointEndpoint checkpointApp) checkpointPort $ do
                 beforeRequests<-readIORef checkpoints
                 fixture fixtures ReadyIntake
-                expectStore "pause_before_upgrade" checkpoint
+                expectStore "pause_before_upgrade_checkpoint" checkpoint
                 readIORef checkpoints >>= check . (==beforeRequests)
                 evalWrite writer (Pause "upgrade checkpoint contract")
                 expectStore "worker_already_running" $
