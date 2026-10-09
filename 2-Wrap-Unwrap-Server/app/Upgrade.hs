@@ -1,6 +1,6 @@
 {-# LANGUAGE DeriveGeneric #-}
 -- Root-only service orchestration. Financial work remains in closed CLI/DSL operations.
-module Upgrade (withLifecycle) where
+module Upgrade (withLifecycle,verifyBundle) where
 import Bridge.AdminKey (privateParent,readPrivate,savePrivate,withFamily)
 import Bridge.Error (require,reject)
 import Bridge.Identity (digest)

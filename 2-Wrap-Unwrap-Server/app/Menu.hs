@@ -5,6 +5,7 @@ module Menu (launch) where
 
 import qualified Configure
 import qualified Bootstrap
+import qualified Upgrade
 import qualified SetupPaths
 import qualified Bridge.Config as C
 import Bridge.AdminKey (readPrivate,privateParent)
@@ -17,7 +18,6 @@ import Data.Aeson
 import Data.Int (Int64)
 import Data.Aeson.Types (parseEither)
 import qualified Data.Aeson.KeyMap as KM
-import qualified Data.ByteString as B
 import qualified Data.ByteString.Lazy.Char8 as L
 import qualified Data.Text as T
 import System.Directory
@@ -89,8 +89,9 @@ launch=do
               current<-canonicalizePath "/opt/ecx-bridge/current"
               putStrLn $ "Installed release: "<>current
               putStrLn $ "Candidate release: "<>maybe "source build (no release package)" id bundle
-              same<-maybe (pure True) (\path->(==) <$> B.readFile(path</>"manifest.sha256") <*> B.readFile(current</>"manifest.sha256")) bundle
-              if not upgrading && same
+              installedId<-Upgrade.verifyBundle current
+              candidateId<-traverse Upgrade.verifyBundle bundle
+              if not upgrading && (candidateId==Nothing || candidateId==Just installedId)
                 then putStrLn "No new release selected. Run the reviewed new installer and choose Upgrade; use Continue to resume this version."
                 else existing setup >>= continue
             else putStrLn "Complete initial setup before upgrading."
