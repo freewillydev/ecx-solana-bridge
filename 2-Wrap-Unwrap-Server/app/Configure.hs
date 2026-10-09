@@ -552,6 +552,7 @@ startUnlocked path=do
     when (M.member (K.fromString name) sources) $ do
       exists<-doesFileExist("/etc/ecx-bridge/worker"</>name)
       require exists "installed_tls_missing_updated_package_required"
+  when completed $ NodeSetup.refreshSignerPolicy directory
   execute "systemctl" ["start","ecx-bridge-signer","ecx-bridge-worker"]
   putStrLn "Services started paused. Checking readiness before enabling orders."
   let operatorArgs=if uid==0 then ["-u","ecxbridgew","--",binary,"operator",config]

@@ -15,7 +15,13 @@ import Bridge.Native (nativeNumber, NativeSettings(..), signetChallenge)
 import Bridge.NativePayment
 import Bridge.RPC (fieldValue)
 import Bridge.Wire (Profile(..))
-import Control.Exception (try)
+import Control.Exception (try,bracket)
+import qualified NodeSetup
+import Bridge.AdminKey (readPrivate)
+import System.Directory (getTemporaryDirectory,removeFile,removeDirectoryRecursive,canonicalizePath)
+import System.FilePath ((</>))
+import System.IO (openTempFile,hClose)
+import qualified System.Posix.Directory as PD
 import Control.Monad (forM)
 import Data.Aeson hiding (Result)
 import qualified Data.Aeson.Key as Key
@@ -162,6 +168,20 @@ checks = do
         pure (signedNativeBytes signed==raw && signedNativeTransaction signed==tx && signedNativeFee signed==fee &&
           length(filter (=="walletprocesspsbt") methods)==1 && last methods=="testmempoolaccept" &&
           all (`notElem` methods) ["sendrawtransaction","sendtoaddress"])
+    , check "generated signer RPC policy permits native signing and saved locks but forbids broadcast" $ once $ ioProperty $ do
+        allowed<-generatedSignerMethods
+        let restricted methods call wallet method args=do
+              require (method `elem` methods) "rpc_method_forbidden"
+              call wallet method args
+        (signed,methods)<-contract (\_ value->pure value) $ \call->signNativeDraft (restricted allowed call) plan draft
+        (broadcastDenied,_)<-contract (\_ value->pure value) $ \call->
+          rejects "rpc_method_forbidden" (restricted allowed call False "sendrawtransaction" [toJSON raw])
+        required<-forM ["lockunspent","testmempoolaccept"] $ \missing->do
+          (refused,_)<-contract (\_ value->pure value) $ \call->
+            rejects "rpc_method_forbidden" (signNativeDraft (restricted (filter (/=missing) allowed) call) plan draft)
+          pure refused
+        pure (signedNativeBytes signed==raw && "lockunspent" `elem` methods
+          && last methods=="testmempoolaccept" && broadcastDenied && and required)
     , check "changed current input value refuses before locking or signing" $ once $ ioProperty $ do
         let change method (Object fields) | method=="gettxout"=pure $ Object $ KM.insert "value" (nativeNumber $ amt 1) fields
             change _ value=pure value
@@ -645,3 +665,34 @@ withNativeReplacementContract action=do
           ("decodepsbt",[psbt]) | psbt==toJSON (draftPsbt draft)->pure newDecoded
           _->reject $ "unexpected_replacement_rpc:"<>method
   action c original draft call calls
+
+-- Generate the real installer policy in a disposable private directory. The
+-- test above enforces it on adapter calls, not just on a copied method list.
+generatedSignerMethods :: IO [Text]
+generatedSignerMethods=bracket temporary removeDirectoryRecursive $ \directory->do
+  (_,_,signer)<-NodeSetup.credentials directory
+  credentialBytes<-readPrivate signer
+  ruleBytes<-readPrivate(directory</>"native-rpc.conf")
+  let credential=TE.decodeUtf8 credentialBytes
+      rules=T.lines $ TE.decodeUtf8 ruleBytes
+  let username=T.takeWhile (/=':') credential
+      prefix="rpcwhitelist="<>username<>":"
+  case [T.splitOn "," methods | line<-rules,Just methods<-[T.stripPrefix prefix line]] of
+    [methods]->do
+      let current=prefix<>T.intercalate "," methods
+          legacy=prefix<>T.intercalate "," (filter (`notElem` ["lockunspent","testmempoolaccept"]) methods)
+          oldBytes=TE.encodeUtf8 $ T.unlines $ map (\row->if row==current then legacy else row) rules
+          unknown=TE.encodeUtf8 $ T.unlines $ map (\row->if row==current then row<>",sendrawtransaction" else row) rules
+          duplicate=ruleBytes<>TE.encodeUtf8(current<>"\n")
+          policy=NodeSetup.signerPolicy credentialBytes
+      require (policy ruleBytes==Right(False,ruleBytes) && policy oldBytes==Right(True,ruleBytes)
+        && either (const True) (const False) (policy unknown)
+        && either (const True) (const False) (policy duplicate)) "signer_policy_refresh_contract_failed"
+      pure methods
+    _->fail "generated signer policy missing or duplicated"
+ where
+  temporary=do
+    base<-getTemporaryDirectory
+    (path,handle)<-openTempFile base "ecx-signer-policy"
+    hClose handle; removeFile path; PD.createDirectory path 0o700
+    canonicalizePath path

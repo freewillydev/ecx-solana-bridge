@@ -1,5 +1,5 @@
 -- One-time local node provisioning, never a worker/signer runtime capability.
-module NodeSetup (credentials,checkConfig,serviceName,provision,persistRestoredWallet) where
+module NodeSetup (credentials,checkConfig,serviceName,provision,persistRestoredWallet,signerPolicy,refreshSignerPolicy) where
 import Bridge.AdminKey (savePrivate,readPrivate,withFamily)
 import Bridge.File (withHandle)
 import System.IO (hFlush)
@@ -18,7 +18,7 @@ import Data.Aeson.Types (parseEither)
 import Control.Exception (bracket)
 import System.Posix.IO (openFd,closeFd,OpenMode(ReadOnly,WriteOnly),defaultFileFlags,OpenFileFlags(..))
 import System.Posix.Unistd (fileSynchronise)
-import Control.Monad (forM,unless,when)
+import Control.Monad (forM,forM_,unless,when)
 import System.Directory (doesFileExist,renameFile)
 import System.FilePath ((</>),takeDirectory)
 import System.Posix.Files
@@ -96,17 +96,33 @@ provision directory=do
       require (not $ any ((=="includeconf") . option) $ B8.lines bytes) "node_include_tree_requires_advanced_configuration"
       savePrivate original bytes
     before<-readPrivate original
-    rules<-readPrivate (directory</>"native-rpc.conf")
+    originalRules<-readPrivate (directory</>"native-rpc.conf")
+    signerAuth<-readPrivate (directory</>"native-signer.auth")
+    (migrating,rules)<-either reject pure (signerPolicy signerAuth originalRules)
+    current<-B.readFile path
+    wallet<-fieldValue "nativeWallet" =<< decode =<< readPrivate (directory</>"worker.json")
+    require (not(T.null wallet) && T.all (`elem` ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"::String)) wallet) "invalid_recovered_wallet_name"
     let settings=map option $ B8.lines before
         priorWhitelist="rpcwhitelist" `elem` settings
         explicitDefault="rpcwhitelistdefault" `elem` settings
         -- Without any prior whitelist the old node allowed authenticated users;
         -- preserve that default while explicitly restricting all three new users.
         preserve=if not priorWhitelist && not explicitDefault then "rpcwhitelistdefault=0\n" else ""
-        expected="# Generated ECX bridge RPC roles\n"<>preserve<>rules<>"\n"<>before
-    current<-B.readFile path
-    require (current==before || current==expected) "node_configuration_changed_review_before_retry"
-    let candidate=directory</>"node-config.after"
+        header="# Generated ECX bridge RPC roles\n"<>preserve
+        updated=header<>rules<>"\n"<>before
+        legacyExpected=header<>originalRules<>"\n"<>before
+        autoload="\nwallet="<>B8.pack(T.unpack wallet)<>"\n"
+        retained=if current `elem` [legacyExpected<>autoload,updated<>autoload] then autoload else ""
+        expected=updated<>retained
+        suffix=if migrating then "-signer-validation" else ""
+        marker=directory</>("node-rpc-installed"<>suffix)
+    require (current `elem` [before,legacyExpected<>retained,expected]) "node_configuration_changed_review_before_retry"
+    restarted<-doesFileExist marker
+    when (migrating && (current/=expected || not restarted)) $ forM_ ["ecx-bridge-worker","ecx-bridge-signer"] $ \unit->do
+      (result,state,_)<-readProcessWithExitCode "systemctl" ["show",unit,"--property=MainPID,ActiveState,LoadState"] ""
+      require (result==ExitSuccess && ("LoadState=not-found" `elem` lines state ||
+        ("MainPID=0" `elem` lines state && any (`elem` lines state) ["ActiveState=inactive","ActiveState=failed"]))) "stop_custody_before_native_policy_refresh"
+    let candidate=directory</>("node-config.after"<>suffix)
     candidateExists<-doesFileExist candidate
     if candidateExists then readPrivate candidate >>= \bytes->require (bytes==expected) "node_configuration_candidate_changed"
       else savePrivate candidate expected
@@ -121,23 +137,47 @@ provision directory=do
         fileSynchronise fd
       renameFile staging path
       sync (takeDirectory path)
-    let marker=directory</>"node-rpc-installed"
-    restarted<-doesFileExist marker
-    unless restarted $ do
+    unless (restarted && current==expected) $ do
       putStrLn "Installing distinct node RPC roles; restarting the configured ECX node service."
       (result,_,_)<-readProcessWithExitCode "systemctl" ["restart",service] ""
       require (result==ExitSuccess) "node_restart_failed_original_configuration_preserved"
-      savePrivate marker "installed\n"
+      unless restarted $ savePrivate marker "installed\n"
  where
   sync path=bracket (openFd path ReadOnly defaultFileFlags) closeFd fileSynchronise
   option=B8.strip . B8.takeWhile (/='=')
   decode bytes=either (const $ reject "invalid_setup_json") pure (eitherDecodeStrict' bytes::Either String Value)
 
+-- Existing installations need the same narrow policy correction. New policies
+-- skip provisioning, including its original pre-autoload configuration binding.
+refreshSignerPolicy :: FilePath -> IO ()
+refreshSignerPolicy directory=do
+  exists<-doesFileExist(directory</>"native-rpc.conf")
+  when exists $ do
+    auth<-readPrivate(directory</>"native-signer.auth")
+    rules<-readPrivate(directory</>"native-rpc.conf")
+    (legacy,_)<-either reject pure (signerPolicy auth rules)
+    when legacy $ provision directory
+
 readMethods,workerMethods,signerMethods,adminMethods :: String
 readMethods="getblockchaininfo,getblockhash,getblockheader,getnetworkinfo,getconnectioncount,getwalletinfo,getbalances,getaddressinfo,gettransaction,gettxout,gettxspendingprevout,getmempoolentry,listsinceblock,listunspent,listlockunspent,decodepsbt,decoderawtransaction,decodescript,estimatesmartfee,getmempoolinfo"
 workerMethods=readMethods<>",getnewaddress,getaddressesbylabel,getrawchangeaddress,walletcreatefundedpsbt,lockunspent,createpsbt,testmempoolaccept,sendrawtransaction"
-signerMethods=readMethods<>",walletcreatefundedpsbt,createpsbt,walletprocesspsbt,finalizepsbt,walletpassphrase,walletlock,backupwallet,listdescriptors"
+signerMethods=readMethods<>",lockunspent,testmempoolaccept,walletcreatefundedpsbt,createpsbt,walletprocesspsbt,finalizepsbt,walletpassphrase,walletlock,backupwallet,listdescriptors"
 adminMethods=readMethods<>",getdescriptorinfo,deriveaddresses,listwalletdir,createwallet,importdescriptors,listdescriptors,getnewaddress,walletpassphrase,walletlock"
+
+-- Only the exact historically generated signer policy can be refreshed. All
+-- passwords, rpcauth salts, other users and original binding files stay intact.
+signerPolicy :: B.ByteString -> B.ByteString -> Either T.Text (Bool,B.ByteString)
+signerPolicy credential rules=do
+  let username=B8.takeWhile (/=':') credential
+      prefix="rpcwhitelist="<>username<>":"
+      old=prefix<>B8.pack (readMethods<>",walletcreatefundedpsbt,createpsbt,walletprocesspsbt,finalizepsbt,walletpassphrase,walletlock,backupwallet,listdescriptors")
+      current=prefix<>B8.pack signerMethods
+      rows=B8.lines rules
+  unless (not(B.null username) && B8.unlines rows==rules) $ Left "unrecognized_native_signer_policy"
+  case filter (B.isPrefixOf prefix) rows of
+    [line] | line==current->Right(False,rules)
+           | line==old->Right(True,B8.unlines $ map (\row->if row==old then current else row) rows)
+    _->Left "unrecognized_native_signer_policy"
 
 -- Managed recovery only, with custody services stopped by the activation journal.
 -- Preserve all RPC restrictions; an unfamiliar scoped config requires review.
