@@ -1,0 +1,130 @@
+#!/bin/sh
+# Infrastructure only: existing operator status, OS health and public HTTPS.
+# Never reads the ledger directly, calls chain RPC or changes bridge readiness.
+set -eu
+umask 077
+export PATH=/usr/sbin:/usr/bin:/sbin:/bin
+[ "$(id -u)" = 0 ] || { echo 'Run monitor as root.' >&2; exit 1; }
+settings=/etc/ecx-bridge/monitor.json
+state=/var/lib/ecx-bridge-monitor
+private() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(stat -c '%u:%a' "$1")" = 0:600 ]; }
+if [ "${1:-}" = --install ]; then
+  [ "$#" = 1 ]
+  [ ! -L "$state" ] && [ ! -L "$settings" ]
+  install -d -o root -g root -m 0700 "$state"
+  if [ ! -e "$settings" ]; then printf '%s\n' '{"expectServing":true,"publicOrigin":null}' > "$settings"; fi
+  private "$settings"
+  cat > /etc/systemd/system/ecx-bridge-monitor.service <<'UNIT'
+[Unit]
+Description=ECX bridge local health report
+After=ecx-bridge-worker.service
+[Service]
+Type=oneshot
+ExecStart=/bin/sh /usr/local/libexec/ecx-bridge-monitor
+UMask=0077
+TimeoutStartSec=90
+Nice=10
+MemoryMax=128M
+TasksMax=32
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/ecx-bridge-monitor
+UNIT
+  cat > /etc/systemd/system/ecx-bridge-monitor.timer <<'UNIT'
+[Unit]
+Description=Check ECX bridge health every five minutes
+[Timer]
+OnBootSec=2min
+OnUnitInactiveSec=5min
+[Install]
+WantedBy=timers.target
+UNIT
+  chmod 0644 /etc/systemd/system/ecx-bridge-monitor.service /etc/systemd/system/ecx-bridge-monitor.timer
+  systemctl daemon-reload
+  systemctl enable --now ecx-bridge-monitor.timer
+  exit 0
+fi
+[ "$#" = 0 ]
+[ -d "$state" ] && [ ! -L "$state" ] && [ "$(stat -c '%u:%a' "$state")" = 0:700 ]
+exec 9>"$state/lock"
+flock -n 9 || exit 0
+if ! private "$settings" || ! jq -e 'type=="object" and (.expectServing|type=="boolean") and
+  (.publicOrigin==null or (.publicOrigin|type=="string" and test("^https://[A-Za-z0-9.-]+(:[0-9]+)?$")))' "$settings" >/dev/null 2>&1; then
+  jq -n --argjson now "$(date +%s)" '{checkedAt:$now,healthy:false,status:null,issues:["monitor:invalid_private_configuration"]}' > "$state/report.new"
+  mv "$state/report.new" "$state/report.json"
+  echo 'ECX health: monitor:invalid_private_configuration'
+  exit 1
+fi
+expect=$(jq -r .expectServing "$settings")
+origin=$(jq -r '.publicOrigin // empty' "$settings")
+work=$(mktemp -d "$state/.check-XXXXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+trap 'exit 1' HUP INT TERM
+now=$(date +%s)
+: > "$work/issues"
+issue() { printf '%s\n' "$1" >> "$work/issues"; }
+for service in ecx-bridge-worker postgresql; do
+  systemctl is-active --quiet "$service" || issue "$service:inactive"
+done
+if [ -f /etc/systemd/system/ecx-betanet.service ]; then
+  systemctl is-active --quiet ecx-betanet || issue 'ecx-betanet:inactive'
+fi
+if systemctl is-active --quiet ecx-bridge-signer; then
+  [ "$expect" = true ] || issue 'signer:unexpectedly_active'
+else
+  [ "$expect" = false ] || issue 'signer:inactive'
+fi
+# An installed operator client only sends the closed Status operation over the
+# worker's protected control socket. Its stdout never goes into the journal.
+if printf '%s\n' '{"operation":"status"}' | timeout 15 runuser -u ecxbridgew -- \
+  /opt/ecx-bridge/current/bin/ecx-bridge operator /etc/ecx-bridge/worker/config.json > "$work/status" 2>/dev/null &&
+  jq -e '(.paused|type=="boolean") and (.criticalSequence|type=="number") and (.backupSequence|type=="number")' "$work/status" >/dev/null; then
+  jq '{paused,criticalSequence,backupSequence}' "$work/status" > "$work/safe-status"
+  if [ "$expect" = true ] && jq -e .paused "$work/status" >/dev/null; then issue 'intake:paused'; fi
+  if jq -e '.backupSequence < .criticalSequence' "$work/status" >/dev/null; then
+    if [ ! -f "$state/lag-since" ]; then
+      printf '%s\n' "$now" > "$state/lag-since.new"; mv "$state/lag-since.new" "$state/lag-since"
+    fi
+    since=$(cat "$state/lag-since")
+    case "$since" in ''|*[!0-9]*) issue 'monitor:invalid_lag_state';;
+      *) if [ "$((now-since))" -ge 300 ]; then issue 'backup:coverage_lag'; fi;; esac
+  else rm -f "$state/lag-since"; fi
+else
+  issue 'operator:unavailable'
+  printf 'null\n' > "$work/safe-status"
+fi
+for path in / /var/lib/ecx-bridge /var/lib/postgresql /var/lib/ecx-betanet; do
+  [ -d "$path" ] || continue
+  if ! df -Pk "$path" | awk 'NR==2 {gsub(/%/,"",$5); ok=($4>=2097152 && $5<90)} END {exit !ok}'; then issue 'disk:low_space'; fi
+  if ! df -Pi "$path" | awk 'NR==2 {gsub(/%/,"",$5); ok=($5<90)} END {exit !ok}'; then issue 'disk:low_inodes'; fi
+done
+if cert=$(jq -er '.signerAuthFile | select(type=="string" and startswith("/")) + ".pem"' /etc/ecx-bridge/worker/config.json 2>/dev/null); then
+  openssl x509 -in "$cert" -noout -checkend 2592000 >/dev/null 2>&1 || issue 'signer_certificate:expires_within_30_days_or_invalid'
+else issue 'signer_certificate:configuration_unavailable'; fi
+if [ -f /etc/ecx-bridge/worker/public-fullchain.pem ]; then
+  openssl x509 -in /etc/ecx-bridge/worker/public-fullchain.pem -noout -checkend 1209600 >/dev/null 2>&1 || issue 'public_certificate:expires_within_14_days_or_invalid'
+fi
+if [ -n "$origin" ]; then
+  if timeout 15 curl --fail --silent --max-time 12 --proto '=https' --output "$work/public" --write-out '%{certs}' "$origin/api/v1/config" > "$work/certs" 2>/dev/null; then
+    jq -e '.availability.available|type=="boolean"' "$work/public" >/dev/null || issue 'public:invalid_response'
+    if [ "$expect" = true ] && ! jq -e .availability.available "$work/public" >/dev/null; then issue 'public:not_ready'; fi
+    openssl x509 -in "$work/certs" -noout -checkend 1209600 >/dev/null 2>&1 || issue 'public_certificate:expires_within_14_days_or_invalid'
+  else issue 'public:https_unavailable'; fi
+fi
+sort -u "$work/issues" | jq -Rsc 'split("\n")|map(select(length>0))' > "$work/issue-list"
+jq -n --argjson checkedAt "$now" --slurpfile status "$work/safe-status" --slurpfile issues "$work/issue-list" \
+  '{checkedAt:$checkedAt,healthy:($issues[0]|length==0),status:$status[0],issues:$issues[0]}' > "$state/report.new"
+mv "$state/report.new" "$state/report.json"
+# Notify only on issue-set changes, including recovery. No destination is enabled
+# by default. An optional root-owned mode-0700 hook receives only this safe report.
+if ! cmp -s "$work/issue-list" "$state/notified-issues"; then
+  printf 'ECX health: '; cat "$work/issue-list"
+  hook=/etc/ecx-bridge/monitor-notify
+  if [ -e "$hook" ]; then
+    [ -f "$hook" ] && [ ! -L "$hook" ] && [ "$(stat -c '%u:%a' "$hook")" = 0:700 ]
+    timeout 20 "$hook" < "$state/report.json"
+  fi
+  cp "$work/issue-list" "$state/notified-issues"
+fi

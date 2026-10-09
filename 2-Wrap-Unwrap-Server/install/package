@@ -63,6 +63,7 @@ trap 'exit 1' HUP INT TERM
 mkdir -p "$staging/bin" "$staging/lib" "$staging/share/web" "$staging/share/migrations" "$staging/share/notices"
 cp "$binary" "$staging/bin/ecx-bridge"
 cp "$restic" "$staging/bin/restic"
+cp 2-Wrap-Unwrap-Server/install/monitor "$staging/monitor"
 cp "$sdk" "$staging/lib/libecx_solana_sdk.so"
 cp -R "$web/." "$staging/share/web/"
 cp 2-Wrap-Unwrap-Server/migrations/*.sql "$staging/share/migrations/"

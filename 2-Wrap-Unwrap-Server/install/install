@@ -375,6 +375,9 @@ fi
 if [ -f /etc/systemd/system/ecx-betanet.service ] && [ -f "$config/signer/backup.json" ]; then
   sh "$target/native-backup"
 fi
+install -d -m 0755 /usr/local/libexec
+install -o root -g root -m 0755 "$target/monitor" /usr/local/libexec/ecx-bridge-monitor
+sh /usr/local/libexec/ecx-bridge-monitor --install
 systemctl daemon-reload
 # Upgrade retains the operator's boot policy, including a deliberately disabled
 # signer. Replacing unit files does not require recreating their enablement links.

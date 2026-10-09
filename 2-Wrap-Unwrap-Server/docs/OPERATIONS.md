@@ -107,26 +107,25 @@ advance scan checkpoints, certify freshness, or automatically resume the ledger.
 Worker and signer managers remain separate: this is reactive backoff, not a
 provider-wide hourly quota allocator.
 
-A successful idle cycle currently needs **at least 16 primary and 9 verifier
+A successful idle cycle currently needs **at least 11 primary and 6 verifier
 requests**, including identity checks, inclusive history anchors and independently
 checked custody balances/history heads. Payments, verified incoming anchors,
 pagination and retries add requests. Scans and custody must be at most 60 seconds
-old, so continuous readiness needs more than the theoretical floors of **960
-primary and 540 verifier requests/hour**, with headroom for cycle duration and
+old, so continuous readiness needs more than the theoretical floors of **660
+primary and 360 verifier requests/hour**, with headroom for cycle duration and
 payments. The worker sleeps 15 seconds *after* each cycle; actual demand depends
-on its duration. A 200/hour verifier allowance supports at most 22 complete idle
-cycles/hour, roughly one every 162 seconds, and cannot meet this freshness policy.
+on its duration. A 200/hour verifier allowance supports at most 33 complete idle
+cycles/hour, roughly one every 108 seconds, and cannot meet this freshness policy.
 Increasing the polling delay or adding cooldown does not make that plan adequate.
 Do not loosen verification or extend freshness to fit an undersized quota.
 
 Provider header units must be checked separately from RPC call counts. OnFinality
 [documents two response units per Solana call](https://documentation.onfinality.io/support/solana),
-so the verifier floor above is 1,080 response units/hour. A header allowance of
+so the verifier floor above is 720 response units/hour. A header allowance of
 200/hour is not evidence of 200 Solana calls/hour. Inspect the existing account's
 plan and key restrictions before buying capacity: advertised plan allowances can
 differ from the effective limits returned by an endpoint. Sharing duplicate
-identity reads alone still leaves five verifier calls per cycle (300/hour at the
-60-second boundary), so it cannot resolve this particular capacity mismatch.
+identity reads reduces demand but cannot resolve this particular capacity mismatch.
 
 ### Installed monitoring and RPC budget
 
@@ -163,6 +162,31 @@ Brief sequence lag during a checkpoint is expected; do not automatically resume 
 lower backup requirements to clear an alert. Route alerts to the chosen operator
 without publishing order capabilities, keys or RPC URLs. Alert delivery, thresholds
 and the public domain remain deployment-specific acceptance work.
+
+The installer also enables `ecx-bridge-monitor.timer`. Every five minutes it
+writes a private `/var/lib/ecx-bridge-monitor/report.json` and journals changes
+in service, intake, five-minute backup-coverage lag, disk/inode and certificate
+health. It uses the existing closed operator status command; it never queries
+chains or the database, starts a signer, resumes intake, or sends a payment.
+Check the report's `checkedAt`: a stopped host or failed monitor cannot report
+its own outage. An external check and actual alert delivery remain necessary.
+
+`/etc/ecx-bridge/monitor.json` is root-owned mode 0600. Its two fields are
+`expectServing` (default true; set false for deliberate observation-only operation)
+and `publicOrigin` (null or an HTTPS origin such as `https://bridge.example.com`).
+Public checks verify normal TLS, configuration availability and 14-day certificate
+expiry. Signer certificates warn at 30 days. Disk warnings mean less than 2 GiB
+free or at least 90% space/inodes used. Backups are checked for ledger coverage,
+not remote repository durability or reachability; keep restore acceptance separate.
+
+No external notification destination is configured automatically. An optional
+root-owned regular mode-0700 `/etc/ecx-bridge/monitor-notify` executable receives
+the sanitized report on stdin when the issue set changes, including recovery.
+It must finish within 20 seconds; failure is retried on the next check. Store its
+credentials privately in `/etc`, not command arguments or journal output. After
+configuring a destination, test it with the report and verify actual receipt.
+The monitor never passes RPC URLs, custody keys or customer/order information.
+A pending notification is retried without re-running any financial operation.
 
 ### Rotate signer transport credentials
 

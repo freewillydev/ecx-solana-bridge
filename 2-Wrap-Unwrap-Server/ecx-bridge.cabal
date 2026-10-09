@@ -6,7 +6,7 @@ license: MIT
 license-file: LICENSE
 build-type: Simple
 data-files: test/fixtures/*.json, migrations/*.sql
-extra-source-files: test/formal/*.tla, test/formal/*.cfg, install/install, install/package, install/source, install/node, install/launch, install/restic-security.patch, chain/Bridge/bip39-english.txt
+extra-source-files: test/formal/*.tla, test/formal/*.cfg, install/install, install/package, install/source, install/node, install/launch, install/monitor, install/restic-security.patch, chain/Bridge/bip39-english.txt
 
 common settings
   default-language: GHC2021
