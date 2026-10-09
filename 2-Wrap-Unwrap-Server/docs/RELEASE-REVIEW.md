@@ -8,6 +8,29 @@ and available acceptance; external recovery, independent review and activation g
 remain open. Its source-size reduction target was not met. Passing an older
 candidate's tests does not certify later source or packages.
 
+## October 9 website and backup integration
+
+Candidate `07bf9bb6b639aa1dca71b79c497b0391ee2bb410` adds public Info,
+optional password-protected Funding and shared navigation. Installer SHA-256:
+`459137b6b853f4e443a916f54605aa79c7575b58ef85df8677dbc22b572f1f0b`.
+Ubuntu Cabal executable/test build and the focused funding contract passed
+(SSM `b86147b1-d369-469e-9307-dacedb62df83`). Independent changed-path review
+found no blocking defect. The exact installer preserved funding-file bytes,
+worker ownership/0600 mode, custom service environment, original configuration
+and fence; published the expected manifest; and left both services stopped.
+The unfunded fixture was restored afterward (SSM
+`fbe53900-219d-45b3-a8c5-d9f5824ac04c`). This used a synthetic post-checkpoint
+journal and proves the installer component, not an end-to-end funded upgrade.
+Installer/bootstrap implementation is unchanged from `cae0681`; earlier
+fresh-setup evidence remains applicable within its recorded scope.
+
+The live observation-only deployment has current backup coverage at sequence76.
+A fresh AWS-to-Mac checkpoint passed full data verification and isolated custody
+recovery; original backups remain intact. Saved setup now references the same
+standard runtime backup paths. Trading remains paused: the independent Solana
+provider returned HTTP429 for transaction-history reads. This release does not
+claim production approval, a new funded round trip or independent security signoff.
+
 ## Financial-core refactor execution
 
 Current checkpoint: **117/120 (A–I, J105–111, J113–117, J120)**. The chronological records below

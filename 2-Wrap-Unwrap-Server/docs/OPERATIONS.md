@@ -407,11 +407,12 @@ allocation through the existing operator workflow. Reserve timestamps may be sta
 
 ### October 9 review deployment
 
-`bridge.bitnames.info` serves the branch candidate `02ea70b` with Bridge, Info and
+`bridge.bitnames.info` serves the candidate `07bf9bb` with Bridge, Info and
 password-protected Funding navigation. The worker runs `observe`: customer intake
 is disabled and the signer is stopped. Stale reserve observations remain visibly
 marked; this deployment does not establish transfer readiness. The published
-`review-2026-10-09-ubuntu` installer still contains the earlier `cae0681` baseline.
+`review-2026-10-09-site` installer matches `07bf9bb`; the earlier Ubuntu
+review release remains available as a separate immutable artifact.
 
 The AWS signer selects the Mac HTTPS restic repository through the standard
 `/etc/ecx-bridge/signer/backup.json` paths, also referenced by saved setup. Original backup
