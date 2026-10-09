@@ -101,7 +101,12 @@ stageFiles owner journal source staging files node=do
   else do
     require (not began) "restore_stage_interrupted_requires_review"
     exists<-doesDirectoryExist parentBase
-    unless exists $ P.createDirectory parentBase 0o711 >> sync(takeDirectory parentBase)
+    unless exists $ do
+      P.createDirectory parentBase 0o700
+      -- Setup runs under umask 077; explicitly allow traversal of this empty
+      -- root-owned parent. Each role's actual staging directory stays 0700.
+      setFileMode parentBase 0o711
+      sync parentBase; sync(takeDirectory parentBase)
     status<-getSymbolicLinkStatus parentBase
     require (isDirectory status && fileOwner status==0 && fileMode status .&. 0o777==0o711) "unsafe_restore_parent"
     savePrivate started (L.toStrict $ encode staging)
