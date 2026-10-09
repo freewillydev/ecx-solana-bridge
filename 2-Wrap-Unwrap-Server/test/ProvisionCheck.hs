@@ -9,7 +9,7 @@ import Control.Exception
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM_,void,unless)
 import qualified Data.ByteString.Char8 as B
-import Data.Profunctor.Product (p2,p3)
+import Data.Profunctor.Product (p2,p3,p4)
 import Data.List (sort,isInfixOf)
 import Data.Int (Int64)
 import qualified Data.Text as T
@@ -26,6 +26,10 @@ import System.Exit (ExitCode(..))
 import System.Timeout (timeout)
 import System.Process (readProcess,callProcess,withCreateProcess,proc,env,getPid,waitForProcess)
 import Test.QuickCheck (quickCheckWithResult,stdArgs,maxSuccess,ioProperty,isSuccess)
+
+data SqlOid
+type NamespaceFields = (O.Field SqlOid,O.Field O.SqlText)
+type ColumnFields = (O.Field O.SqlText,O.Field O.SqlText,O.Field O.SqlText,O.Field O.SqlText)
 
 child :: FilePath -> IO ()
 child root=evalSetup PG.defaultConnectInfo {PG.connectHost=root,PG.connectPort=29479,PG.connectUser="postgres",PG.connectDatabase="postgres"}
@@ -135,21 +139,33 @@ checks root admin=bracket(PG.connect admin) PG.close $ \c->do
         O.where_ (schema O..== O.sqlStrictText "ecx_install")
         pure name
       inventory :: PG.Connection -> IO [[T.Text]]
-      inventory db=mapM (\(schema,table,namespace,column)->sort <$> O.runSelect db (do
-        (space,name)<-O.selectTable $ O.tableWithSchema schema table $
-          p2(O.requiredTableField namespace,O.requiredTableField column)
-        O.where_ (space O..== O.sqlStrictText "public")
-        pure (name :: O.Field O.SqlText)))
-        [("information_schema","tables","table_schema","table_name")
-        ,("pg_catalog","pg_sequences","schemaname","sequencename")
-        ,("information_schema","routines","routine_schema","routine_name")
-        ,("information_schema","table_constraints","constraint_schema","constraint_name")
-        ,("information_schema","triggers","trigger_schema","trigger_name")
-        ,("pg_catalog","pg_indexes","schemaname","indexname")] :: IO [[T.Text]]
+      inventory db=do
+        common<-mapM (\(schema,table,namespace,column)->sort <$> O.runSelect db (do
+          (space,name)<-O.selectTable $ O.tableWithSchema schema table $
+            p2(O.requiredTableField namespace,O.requiredTableField column)
+          O.where_ (space O..== O.sqlStrictText "public")
+          pure (name :: O.Field O.SqlText)))
+          [("information_schema","tables","table_schema","table_name")
+          ,("pg_catalog","pg_sequences","schemaname","sequencename")
+          ,("information_schema","routines","routine_schema","routine_name")
+          ,("information_schema","triggers","trigger_schema","trigger_name")
+          ,("pg_catalog","pg_indexes","schemaname","indexname")]
+        actualConstraints<-O.runSelect db $ do
+          (namespace,name)<-O.selectTable constraints
+          (oid,schema)<-O.selectTable namespaces
+          O.where_ (namespace O..== oid O..&& schema O..== O.sqlStrictText "public")
+          pure name
+        pure(common<>[sort actualConstraints])
+      columns :: PG.Connection -> IO [(T.Text,T.Text,T.Text)]
+      columns db=sort <$> O.runSelect db (do
+        (schema,table,column,nullable)<-O.selectTable columnInfo
+        O.where_ (schema O..== O.sqlStrictText "public")
+        pure(table,column,nullable))
   objects<-bracket(PG.connect target) PG.close $ \db->do
     receiptNames db >>= same "source installer receipt" ["receipt"]
     inventory db
   unless(all (not . null) objects)(fail $ "empty source inventory category; counts="<>show(map length objects))
+  columnState<-bracket(PG.connect target) PG.close columns
   archive<-withReader readerSettings identity False $ \reader->evalBackup reader(ExportLedger root)
   listing<-readProcess "pg_restore" ["--list",archivePath archive] ""
   unless(not $ "ecx_install" `isInfixOf` listing)(fail "installer schema present in archive")
@@ -166,6 +182,7 @@ checks root admin=bracket(PG.connect admin) PG.close $ \c->do
 
       bracket(PG.connect admin {PG.connectDatabase=T.unpack database}) PG.close $ \db->do
         inventory db >>= sameInventory objects
+        columns db >>= same "column nullability unchanged" columnState
         receiptNames db >>= same "restored installer receipt must be absent" []
         restored<-(,) <$> (O.runSelect db $ O.selectTable S.deployment) <*> (O.runSelect db $ O.selectTable S.scanHealth)
         let (rows,observations)=before
@@ -174,6 +191,7 @@ checks root admin=bracket(PG.connect admin) PG.close $ \c->do
   refused "invalid_restore_database" (Backup.discardRestore target)
   bracket(PG.connect target) PG.close $ \db->do
     inventory db >>= sameInventory objects
+    columns db >>= same "column nullability unchanged" columnState
     receiptNames db >>= same "source installer receipt" ["receipt"]
     original<-(,) <$> (O.runSelect db $ O.selectTable S.deployment) <*> (O.runSelect db $ O.selectTable S.scanHealth)
     same "source deployment and observation rows unchanged" before original
@@ -186,11 +204,19 @@ checks root admin=bracket(PG.connect admin) PG.close $ \c->do
   sameInventory :: [[T.Text]] -> [[T.Text]] -> IO ()
   sameInventory expected actual=do
     same "inventory category count" (length expected) (length actual)
-    forM_ (zip3 ["tables/views","sequences","functions","constraints","triggers","indexes"] expected actual) $ \(label,old,new)->
+    forM_ (zip3 ["tables/views","sequences","functions","triggers","indexes","constraints"] expected actual) $ \(label,old,new)->
       unless(old==new)(fail $ "inventory "<>label<>" counts="<>show(length old,length new)
         <>" missing="<>show(take 8 $ filter (`notElem` new) old)<>" added="<>show(take 8 $ filter (`notElem` old) new))
   check True=pure ()
   check False=fail "provisioning invariant failed"
+  -- information_schema synthesizes OID-based names for NOT NULL constraints.
+  -- Compare real named constraints, and cover NOT NULL via column metadata above.
+  constraints :: O.Table NamespaceFields NamespaceFields
+  constraints=O.tableWithSchema "pg_catalog" "pg_constraint" $ p2(O.requiredTableField "connamespace",O.requiredTableField "conname")
+  namespaces :: O.Table NamespaceFields NamespaceFields
+  namespaces=O.tableWithSchema "pg_catalog" "pg_namespace" $ p2(O.requiredTableField "oid",O.requiredTableField "nspname")
+  columnInfo :: O.Table ColumnFields ColumnFields
+  columnInfo=O.tableWithSchema "information_schema" "columns" $ p4(O.requiredTableField "table_schema",O.requiredTableField "table_name",O.requiredTableField "column_name",O.requiredTableField "is_nullable")
   tables :: O.Table (O.Field O.SqlText,O.Field O.SqlText) (O.Field O.SqlText,O.Field O.SqlText)
   tables=O.tableWithSchema "information_schema" "tables" $ p2(O.requiredTableField "table_schema",O.requiredTableField "table_name")
   activity :: O.Table (O.Field O.SqlText,O.FieldNullable O.SqlText,O.Field O.SqlText) (O.Field O.SqlText,O.FieldNullable O.SqlText,O.Field O.SqlText)
