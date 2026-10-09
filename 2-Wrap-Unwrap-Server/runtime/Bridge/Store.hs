@@ -317,7 +317,7 @@ withWriter settings config checkpoint action = bracket (PG.connect settings) PG.
   action writer
 
 evalRead :: Reader -> StoreRead a -> IO a
-evalRead (Reader settings identity remote) operation = bracket (PG.connect settings) PG.close $ \c ->
+evalRead (Reader settings identity remote) operation = bracket connect PG.close $ \c ->
   Tx.withTransactionMode (Tx.TransactionMode Tx.RepeatableRead Tx.ReadOnly) c $ do
     verifyReadRole c >>= flip require "unsafe_read_database_role"
     row <- metadata c identity
@@ -407,6 +407,15 @@ evalRead (Reader settings identity remote) operation = bracket (PG.connect setti
       ReadOrder header identifier -> do
         cap <- checked (bearerHash header)
         readOrder c identity (if remote then Just(S.backupSequence row) else Nothing) cap identifier
+
+ where
+  -- Closing a timed-out client does not reliably cancel its server-side query.
+  -- Fixed report-only connection settings bound lock/query/idle-transaction work;
+  -- these are libpq session options, not a generic SQL operation or new authority.
+  connect=case operation of
+    ReadPublicReport _->PG.connectPostgreSQL $ PG.postgreSQLConnectionString settings
+      <> " connect_timeout=3 options='-c statement_timeout=4000 -c lock_timeout=3000 -c idle_in_transaction_session_timeout=5000'"
+    _->PG.connect settings
 
 evalWrite :: Writer -> StoreWrite a -> IO a
 evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
