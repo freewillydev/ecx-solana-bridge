@@ -10,12 +10,23 @@ candidate's tests does not certify later source or packages.
 
 ## Current production acceptance checklist
 
-Current published installer: `31151a1` (`review-2026-10-09-swap-policy`),
-SHA-256 `16f4e044cc01aa7378596d755607fd54593365e4844a418bc01a8132457310f4`,
-40,145,942 bytes. Native Cabal build, QuickCheck and the complete isolated PostgreSQL
-ledger contracts passed (`e1230c34`). All 49 internal manifest entries and the compiled
-browser hash were verified. This locally trusted artifact is unsigned and has no
-independent build attestation.
+Current published installer: `7be97b4` (`review-2026-10-09-guided-console`),
+SHA-256 `09105b54e0d894b1c207c44b789a8c4a9f557d3b2ce502546c523491dfeaa9f3`,
+40,172,322 bytes. Native build/package passed (`c2af6bbd`); QuickCheck and the full
+isolated PostgreSQL contracts passed at `039c49a` (`16baae9c`). The final change
+reuses existing release verification in the menu. All 49 internal manifest entries
+were verified. Independent exact-artifact upgrade-menu cases passed (`f2c73497`):
+same/different/missing/invalid releases, with no upgrade execution or unintended
+helper dispatch. This locally trusted artifact is unsigned and has no independent
+build attestation.
+
+The numbered console exposes setup, status, funding and explicit treasury allocation,
+reviewed upgrades, pause and backup verification/download through existing commands.
+Funding receipt reads use a specific closed safe DSL operation and Opaleye; allocation
+retains the existing critical checks. Provider preflight checks actual finalized mint
+history and transaction access before wallet setup mutations. Full restoration remains
+an explicit procedure: downloading a verified backup does not activate custody.
+Own-fixture full custody recovery and current funded deployment are still pending.
 
 Customer order bounds were removed from admission, configuration and browser. The
 independent operator withdrawal cap remains; legacy `maxInput` migrates only to it.
@@ -34,7 +45,7 @@ mint/account policy, finalized `minContextSlot`, both history heads and both exi
 history anchors agreed with Alchemy (seven requests per provider). This is new
 provider compatibility evidence, not completed runtime switching or funded acceptance.
 
-The live worker now uses the tested RPC executable through the installed release
+Outside the bounded RPC-maintenance window, the deployed worker uses the tested RPC executable through the installed release
 pointer, with `5cc2ceb` browser assets and the reviewed monitor. It remains
 observation-only; the signer is stopped and disabled. The actual guided upgrade
 saved and verified a new custody checkpoint before publishing the RPC code
