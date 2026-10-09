@@ -9,13 +9,13 @@ The installer sets up the bridge, dedicated signer, PostgreSQL and pruned ECX no
 No Haskell build or Nginx installation is needed.
 
 **Review candidate, not production assurance.** See the
-[release](https://github.com/freewillydev/ecx-solana-bridge/releases/tag/review-2026-10-09-monitor)
+[release](https://github.com/freewillydev/ecx-solana-bridge/releases/tag/review-2026-10-09-config-refresh)
 for verification information. Download and run:
 
 ```sh
 curl --fail --location --proto '=https' --tlsv1.2 \
   -o ecx-bridge-ubuntu-24.04-x86_64.run \
-  https://github.com/freewillydev/ecx-solana-bridge/releases/download/review-2026-10-09-monitor/ecx-bridge-ubuntu-24.04-x86_64.run
+  https://github.com/freewillydev/ecx-solana-bridge/releases/download/review-2026-10-09-config-refresh/ecx-bridge-ubuntu-24.04-x86_64.run
 sudo sh ./ecx-bridge-ubuntu-24.04-x86_64.run
 ```
 

@@ -10,23 +10,30 @@ candidate's tests does not certify later source or packages.
 
 ## Current production acceptance checklist
 
-Current published installer: `54d565d` (`review-2026-10-09-monitor`),
-SHA-256 `d7a580b79d040fd5f248cf0add1ae4db4ed9b522c51be87ebb461b72b2d18391`.
+Current published installer: `5cc2ceb` (`review-2026-10-09-config-refresh`),
+SHA-256 `820c930bea80d20502944bc0f49057e225965214daacfec36e022a6e716838b3`.
 The native executable/SDK are unchanged from `513ac1d` (native production compiled
 at `1a5ae45`, reports `0.1.0.0`). The Haskell browser was rebuilt through root Cabal;
-monitoring is installer infrastructure. All 53 internal manifest entries, reviewed
+monitoring is installer infrastructure. All 49 internal manifest entries, reviewed
 browser/monitor hashes and the anonymous public download were verified. This
 locally trusted artifact is not signed or independently attested.
 
 The live worker now uses the tested RPC executable through the installed release
-pointer, with `54d565d` browser assets and the reviewed monitor. It remains
+pointer, with `5cc2ceb` browser assets and the reviewed monitor. It remains
 observation-only; the signer is stopped and disabled. The actual guided upgrade
 saved and verified a new custody checkpoint before publishing the RPC code
 (SSM `35d60c5c`). Checkpoint, backup, ledger and host fence remained at sequence 76.
 The final resume was refused as `observation_only`: the durable pending/published
 upgrade records remain, with no fabricated completion record. Changing browser
 assets did not change the native binary, pending upgrade or custody state
-(`c2e6619f`); public and loopback JavaScript hashes match (`a1c5f25d`).
+(`69482815`); public and loopback JavaScript hashes match.
+The current browser SHA-256 is
+`b079a8320d04c50e3a1f70be017b20c23d20882042642b7473cc40082a1120b2`.
+Six added Haskell lines clear cached configuration, payment instructions and manual
+payment copies before fetching configuration. Independent compiled-browser checks
+passed malformed/error and delayed responses, saved-order navigation, successful
+recovery and preservation of recovery-link copies. These used isolated HTTP fixtures,
+not funded transactions.
 
 The RPC change reduces idle primary/verifier calls from 16/9 to 11/6 without
 cross-cycle caching. Build and QuickCheck passed (SSM `96553503`); the final
