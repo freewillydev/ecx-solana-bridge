@@ -153,7 +153,7 @@ checks root admin=bracket(PG.connect admin) PG.close $ \c->do
   archive<-withReader readerSettings identity False $ \reader->evalBackup reader(ExportLedger root)
   listing<-readProcess "pg_restore" ["--list",archivePath archive] ""
   check(not $ "ecx_install" `isInfixOf` listing)
-  bracket (evalRestore admin $ RestoreLedger (manifestPath archive) identity 0)
+  bracket (evalRestore target $ RestoreLedger (manifestPath archive) identity 0)
     (\(database,_)->Backup.discardRestore admin {PG.connectDatabase=T.unpack database}) $ \(database,n)->do
       check(n==0 && database/="ecx_bridge")
       let restoredSettings=admin {PG.connectDatabase=T.unpack database}
@@ -170,6 +170,13 @@ checks root admin=bracket(PG.connect admin) PG.close $ \c->do
         restored<-(,) <$> (O.runSelect db $ O.selectTable S.deployment) <*> (O.runSelect db $ O.selectTable S.scanHealth)
         let (rows,observations)=before
         check(restored==([row {S.paused=1,S.pauseReason="restored_requires_reconciliation"} | row<-rows],observations))
+  -- Supplying the existing source DB cannot select it as a restore/cleanup target.
+  refused "invalid_restore_database" (Backup.discardRestore target)
+  bracket(PG.connect target) PG.close $ \db->do
+    inventory db >>= check . (==objects)
+    receiptNames db >>= check . ((==["receipt"]) :: [T.Text]->Bool)
+    original<-(,) <$> (O.runSelect db $ O.selectTable S.deployment) <*> (O.runSelect db $ O.selectTable S.scanHealth)
+    check(original==before)
   bracket(PG.connect readerSettings) PG.close $ \db->verifyReadRole db >>= check
   putStrLn "PASS: provisioned restricted-reader backup, installer receipt excluded, all public tables/sequences/functions/constraints/triggers/indexes restored, ledger and observation data preserved, paused isolated restore, reader remains restricted"
   putStrLn "PASS: foreign role/database refusal, migration rollback, SIGKILL during migration008 and successful retry, changed-migration refusal, read-only roles and initialized ledger/observation preservation"
