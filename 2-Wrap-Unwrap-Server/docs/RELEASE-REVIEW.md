@@ -10,19 +10,30 @@ candidate's tests does not certify later source or packages.
 
 ## Current production acceptance checklist
 
-Current published installer: `513ac1d` (`review-2026-10-09-rpc-cycle`),
-SHA-256 `6d0ed90a73cd7108b6e1bdbd702ee866d40cce369e4f860800586b72a4f0cef4`.
-Production code was compiled at `1a5ae45`; subsequent source changes are tests/docs.
-The executable reports `0.1.0.0`; SDK/browser inputs are unchanged and checked by
-packaging. This locally trusted artifact is not signed or independently attested.
-The live worker remains observation-only on `07bf9bb`; the signer is stopped and disabled.
+Current published installer: `54d565d` (`review-2026-10-09-monitor`),
+SHA-256 `d7a580b79d040fd5f248cf0add1ae4db4ed9b522c51be87ebb461b72b2d18391`.
+The native executable/SDK are unchanged from `513ac1d` (native production compiled
+at `1a5ae45`, reports `0.1.0.0`). The Haskell browser was rebuilt through root Cabal;
+monitoring is installer infrastructure. All 53 internal manifest entries, reviewed
+browser/monitor hashes and the anonymous public download were verified. This
+locally trusted artifact is not signed or independently attested.
+
+The live worker now uses the tested RPC executable through the installed release
+pointer, with `54d565d` browser assets and the reviewed monitor. It remains
+observation-only; the signer is stopped and disabled. The actual guided upgrade
+saved and verified a new custody checkpoint before publishing the RPC code
+(SSM `35d60c5c`). Checkpoint, backup, ledger and host fence remained at sequence 76.
+The final resume was refused as `observation_only`: the durable pending/published
+upgrade records remain, with no fabricated completion record. Changing browser
+assets did not change the native binary, pending upgrade or custody state
+(`c2e6619f`); public and loopback JavaScript hashes match (`a1c5f25d`).
 
 The RPC change reduces idle primary/verifier calls from 16/9 to 11/6 without
 cross-cycle caching. Build and QuickCheck passed (SSM `96553503`); the final
 isolated PostgreSQL suite passed at `513ac1d` (SSM `a53e2650`), including account/head
 validation, failed preparation marking both streams, zero network calls on that
 failure path, and encrypted archive restoration. Independent source/contract review
-approved this narrow change. All 55 artifact manifest entries were verified.
+approved this narrow change. The earlier RPC-only artifact had 55 verified manifest entries.
 This does not establish new funded acceptance or sufficient provider quotas.
 
 | Gate | Evidence retained / remaining acceptance |
@@ -30,10 +41,10 @@ This does not establish new funded acceptance or sufficient provider quotas.
 | Installer integrity and boot policy | Passed exact manifest/hash checks, anonymous download and four enabled/disabled upgrade cases. Synthetic post-checkpoint component scope; see OPERATIONS. |
 | Existing application contracts | New RPC build, QuickCheck and full PostgreSQL ledger contracts passed as recorded above. Earlier installer/funding evidence remains limited to its unchanged component scope. |
 | Current real transfers | Earlier canonical round trip is historical evidence. Complete both directions on the aligned current deployment, with fees, settlement and reconciliation, once independent RPC works. |
-| Customer interface | Live paused state disables creation; 0.00001000 previews fee 0.00000010 and net 0.00000990. Actual wallet signing/payment, saved-order reload and error flows still need complete acceptance; no order was created in this check. |
-| Upgrade and recovery | Sequence-76 isolated restore passed. Full guided checkpoint/upgrade/restore/reconcile/resume and reboot acceptance remain; the separate unfunded fixture now has a real syncing node and isolated HTTPS backup. |
+| Customer interface | Compiled UI passed recovery-link consumption, saved-order reload, mismatched/malformed order rejection, and paused/expired/review payment hiding against isolated HTTP-response fixtures. The deadline fix passed paused, ready and error transitions; actual wallet signing/payment remains separate acceptance. No production order was created. |
+| Upgrade and recovery | Sequence-76 isolated restore passed; the actual guided checkpoint and RPC-code publication now passed. Checked resume, full fresh-host guided restoration/reconciliation and reboot acceptance remain. The unfunded fixture is still syncing its real native node; no duplicate initialization was attempted. |
 | Independent RPC | OnFinality returned actual 429/-32029 with hourly remaining 0 and minute/second headroom. PublicNode returned empty custody/operating heads and null for both configured historical anchors. Neither establishes usable sustained verification. |
-| Monitoring and TLS | Service restart configuration and present public TLS verified; Cloudflare owns public certificate renewal. Automated health/backup/disk/expiry alerts, delivered alert and coordinated signer certificate rotation remain unproven. |
+| Monitoring and TLS | Local five-minute service/coverage/disk/certificate monitoring passed real systemd fixture checks (`fb92034f`) and live observation-mode verification (`8cfdad05`). Timer enabled; reports are private and contain no RPC credentials/customer data. External alert delivery, off-host watchdog and coordinated signer certificate rotation remain unproven. Coverage is not backup-destination reachability. |
 | Distribution and review | Checksum-only review release. Operator-controlled release authority/trusted public-key distribution and independent security/distribution review remain as required below. |
 
 Work that can continue without operator action: isolated fixture lifecycle and
@@ -50,6 +61,16 @@ both finalized history heads and null transactions for both configured anchors.
 This is a failure for this deployment's required history at the time of the check,
 not proof that all PublicNode history is permanently unavailable. No runtime
 provider switch or funded action was performed.
+
+Compiled UI evidence: `54d565d` browser SHA-256
+`986d9ad38095c3412cddb951d073d0f55501e90cd278cb3170cf4c45bc28ec19`.
+The isolated tests served HTTP response fixtures, not invented chain acceptance.
+Real systemd monitor checks covered absent services, malformed/private configuration,
+public HTTPS/certificate checks, unchanged-issue suppression and local failed-hook
+retry. No external notification was sent. A healthy report with `expectServing=false`
+means expected observation-mode health, not transfer readiness. The timer/report
+must itself be monitored off-host; invalid settings fail locally without invoking
+the notifier. Tests and temporary browser/monitor fixtures were cleaned up.
 
 ## October 9 website and backup integration
 
