@@ -52,7 +52,7 @@ import System.Posix.Signals (signalProcess,sigKILL)
 import Data.Bits ((.&.))
 import qualified Bridge.NativePayment as NP
 import Bridge.Error (reject)
-import Bridge.Observer (ObserverSettings(..))
+import Bridge.Observer (ObserverSettings(..),observeOnce)
 import Bridge.Reconciliation (inspectCustodyWith,nativeBalance)
 import Bridge.RPC (fieldValue,newRpcManager,rpcManagerSettings,rpc)
 import qualified Bridge.SolanaPayment as SP
@@ -1812,6 +1812,21 @@ ledgerMain = do
         treasuryContract fixtures reader writer
         -- Unavailable-chain startup and its retained balances are exercised by
         -- serverMain through the actual executable, HTTP and operator transport.
+      -- A preparation failure must invalidate both streams before any RPC.
+      withWriter settings (store policy limits) (const $ pure ()) $ \writer->do
+        let key=T.replicate 32 "1"
+            observer=ObserverSettings
+              (N.NativeSettings W.L2LSignetDevnet "http://127.0.0.1:1" "/unused" "test" 1 "scan-origin")
+              (Solana.SolanaSettings W.L2LSignetDevnet "http://127.0.0.1:1" Nothing key key key)
+              2 "sol-origin" "opening-signature"
+            privilege sql=void $ PG.execute fixtures sql (PG.Only $ Identifier $ T.pack readRole)
+        bracket (newManager defaultManagerSettings {managerModifyRequest=const $ fail "unexpected observer network call"}) closeManager $ \manager->
+          bracket_ (privilege "GRANT INSERT ON TABLE scan_health TO ?")
+            (privilege "REVOKE INSERT ON TABLE scan_health FROM ?") $ do
+              expectStore "unsafe_read_database_role" (observeOnce manager observer reader writer)
+              forM_ ["Solana","SolanaOperating"] $ \chain->do
+                (_,problem,_)<-fixture fixtures (ReadScanHealth chain)
+                check (problem==Just "unsafe_read_database_role")
       customerProjectionContract fixtures reader
       archiveContract settings fixtures reader
       beforeLarge<-evalRead reader ReadBalances
