@@ -27,7 +27,7 @@ import qualified Bridge.Wire as W
 import Control.Monad (forM,forM_,when,forever)
 import qualified Bridge.NativePayment as NP
 import Bridge.NativePayment (NativeSigned,previewNativePayment,checkNativeAcceptance,releaseNativeInputLocks)
-import Bridge.SolanaPayment (SolanaSigned,signedSolanaPlan,solPlanRecent,solPlanFeeLimit,solPlanRentLimit,checkBlockhashWindow,prepareSolanaSigned)
+import Bridge.SolanaPayment (SolanaSigned,signedSolanaPlan,solPlanRecent,solPlanFeeLimit,solPlanRentLimit,checkBlockhashForSend,prepareSolanaSigned)
 import Data.Text (Text)
 import Bridge.PaymentObservation
 import qualified Bridge.Solana as S
