@@ -1,18 +1,18 @@
 # Wrap / unwrap server
 
-The bridge exchanges existing ECX and wrapped-ECX inventory with **1% fees each
-way**. One Haskell Servant server serves the website; a separate signer controls
-keys. PostgreSQL/Opaleye records obligations and payments. Nginx is not required.
+Use the **[`.run` installer and quickstart](../README.md)** on Ubuntu 24.04 x86_64.
+It installs the server, dedicated signer, PostgreSQL and pruned ECX node.
 
-Start with the [repository quickstart](../README.md). The Ubuntu x86_64 candidate
-is under acceptance testing; a public one-command release is not yet verified.
-Keep recovery phrases and independent ledger backups—keys alone cannot recover
-in-flight obligations.
+```sh
+sudo sh ./ecx-bridge-ubuntu-24.04-x86_64.run
+# Resume setup after interruption or funding:
+sudo ecx-bridge
+```
 
-- [Setup, HTTPS and recovery](docs/INSTALL.md)
-- [Operating the bridge](docs/OPERATIONS.md)
-- [Architecture and source audit map](docs/ARCHITECTURE.md#audit-path)
-- [Build and test from source](docs/LOCAL-DEVELOPMENT.md)
-- [Verified results and remaining gates](docs/RELEASE-REVIEW.md)
+The bridge exchanges existing inventory with a 1% fee each way. Keep both recovery
+phrases, the backup password and independent ledger backups. Orders remain paused
+until funding, allocation and readiness checks pass.
 
-`ecx-bridge version` prints the Cabal package version, not a Git revision.
+[Detailed setup](docs/INSTALL.md) · [Operation and upgrades](docs/OPERATIONS.md) ·
+[Architecture](docs/ARCHITECTURE.md) · [Source builds](docs/LOCAL-DEVELOPMENT.md) ·
+[Release evidence](docs/RELEASE-REVIEW.md)

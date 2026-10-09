@@ -41,7 +41,7 @@ deposit/withdrawal and fee collection with saved-attempt submission. Use a separ
 LP wallet/capital; never give it the bridge custody key. Real Devnet acceptance
 now covers nonzero collection (4 units per asset) and an explicit reinvestment
 bounded by those receipts, followed by full withdrawal. See the
-[funded fee evidence](../../3-Create-CPMM-Pool/README.md#nonzero-fees-and-explicit-reinvestment).
+[funded fee evidence](LIQUIDITY.md#nonzero-fees-and-explicit-reinvestment).
 No automated compounding, positive-return guarantee or LP locking is implied.
 
 Jupiter/Orca links provide trading in wrapped tokens; they do not replace native

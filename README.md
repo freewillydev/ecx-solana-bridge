@@ -1,31 +1,42 @@
 # ECX Solana Bridge
 
 Exchange ECX betanet coins and wrapped ECX on Solana Mainnet, **1:1 before a 1% fee
-in each direction**. Customers use payment instructions; no website wallet connection.
-The operator supplies both assets and pays network costs.
+in each direction**. Customers use payment instructions; no wallet connection.
 
-**Release candidate:** funded deployment and interrupted-install acceptance are
-still in progress. A verified public download-and-install command is not published yet.
+**Ubuntu 24.04 x86_64 · 4 GB RAM · 80 GB disk · sudo · internet access**
 
-For a reviewed candidate already downloaded, run this from its directory:
+The installer sets up the bridge, dedicated signer, PostgreSQL and pruned ECX node.
+No Haskell build or Nginx installation is needed.
+
+**Review candidate, not production assurance.** See the
+[release](https://github.com/freewillydev/ecx-solana-bridge/releases/tag/review-2026-10-09-ubuntu)
+for verification information. Download and run:
 
 ```sh
+curl --fail --location --proto '=https' --tlsv1.2 \
+  -o ecx-bridge-ubuntu-24.04-x86_64.run \
+  https://github.com/freewillydev/ecx-solana-bridge/releases/download/review-2026-10-09-ubuntu/ecx-bridge-ubuntu-24.04-x86_64.run
 sudo sh ./ecx-bridge-ubuntu-24.04-x86_64.run
 ```
 
-Target server: **Ubuntu 24.04 x86_64, 4GB RAM, 80GB disk, sudo and internet access**.
-Setup installs the pruned ECX node, PostgreSQL, bridge and dedicated signer.
-Blockchain synchronization and funding take additional time.
+Have two independent Solana Mainnet HTTPS RPC URLs and a **new HTTPS restic backup
+repository with access credentials**. For public HTTPS, also have a domain and
+certificate/key files; otherwise choose local testing.
 
-Have two independent Solana Mainnet RPC URLs and an HTTPS restic backup destination.
-For a public site, also supply its HTTPS origin and certificate/key files.
-Record the generated recovery phrases, then fund the displayed ECX, wrapped-ECX
-and SOL addresses. Orders must remain paused until the readiness checks pass.
-Retain the ledger backups as well as the wallet recovery phrases.
+Answer the prompts, save both recovery phrases and the backup encryption password,
+then follow the funding and allocation instructions for ECX, wrapped ECX and SOL.
+Node synchronization takes time. Orders stay paused until readiness checks pass.
+Keep independent ledger backups: wallet keys alone do not recover pending transfers.
 
-[Server setup and recovery](2-Wrap-Unwrap-Server/docs/INSTALL.md) ·
-[Token administration](1-Make-Wrapped-ECX/README.md) ·
-[Liquidity](3-Create-CPMM-Pool/README.md) ·
+After interruption or funding, resume from any directory:
+
+```sh
+sudo ecx-bridge
+```
+
+[Setup and recovery](2-Wrap-Unwrap-Server/docs/INSTALL.md) ·
+[Upgrade and operation](2-Wrap-Unwrap-Server/docs/OPERATIONS.md) ·
+[Token tools](1-Make-Wrapped-ECX/README.md) · [Liquidity tools](3-Create-CPMM-Pool/README.md) ·
 [Architecture](2-Wrap-Unwrap-Server/docs/ARCHITECTURE.md) ·
 [Source builds](2-Wrap-Unwrap-Server/docs/LOCAL-DEVELOPMENT.md) ·
 [Release evidence](2-Wrap-Unwrap-Server/docs/RELEASE-REVIEW.md) · [License](LICENSE)
