@@ -268,9 +268,9 @@ through an independently verified maintainer channel. Publishing a public key be
 an installer on GitHub is convenient distribution, not independent establishment of
 trust. Only public material, the index and signature leave the signing machine.
 
-For the current `review-2026-10-09-config-refresh` candidate, authorize only the actual
-x86_64 artifact: 40,144,157 bytes, SHA-256
-`820c930bea80d20502944bc0f49057e225965214daacfec36e022a6e716838b3`.
+For the current `review-2026-10-09-swap-policy` candidate, authorize only the actual
+x86_64 artifact: 40,145,942 bytes, SHA-256
+`16f4e044cc01aa7378596d755607fd54593365e4844a418bc01a8132457310f4`.
 Keep its `.run` bytes unchanged. Once signed, publish the index and signature beside
 those bytes; re-download and verify with the separately pinned public key before
 advertising the release as authenticated. A signature authorizes those bytes; it

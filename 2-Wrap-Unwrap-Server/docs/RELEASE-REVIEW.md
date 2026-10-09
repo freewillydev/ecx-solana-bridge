@@ -10,13 +10,29 @@ candidate's tests does not certify later source or packages.
 
 ## Current production acceptance checklist
 
-Current published installer: `5cc2ceb` (`review-2026-10-09-config-refresh`),
-SHA-256 `820c930bea80d20502944bc0f49057e225965214daacfec36e022a6e716838b3`.
-The native executable/SDK are unchanged from `513ac1d` (native production compiled
-at `1a5ae45`, reports `0.1.0.0`). The Haskell browser was rebuilt through root Cabal;
-monitoring is installer infrastructure. All 49 internal manifest entries, reviewed
-browser/monitor hashes and the anonymous public download were verified. This
-locally trusted artifact is not signed or independently attested.
+Current published installer: `31151a1` (`review-2026-10-09-swap-policy`),
+SHA-256 `16f4e044cc01aa7378596d755607fd54593365e4844a418bc01a8132457310f4`,
+40,145,942 bytes. Native Cabal build, QuickCheck and the complete isolated PostgreSQL
+ledger contracts passed (`e1230c34`). All 49 internal manifest entries and the compiled
+browser hash were verified. This locally trusted artifact is unsigned and has no
+independent build attestation.
+
+Customer order bounds were removed from admission, configuration and browser. The
+independent operator withdrawal cap remains; legacy `maxInput` migrates only to it.
+Tests cover zero/one/two units, both directions, amounts above former bounds, Int64
+maximum/overflow, inventory/fee budgets and legacy config identity/conflicts.
+Independent source review and compiled HTTP-fixture browser checks passed; these
+are not real dust/payment acceptance. Browser SHA-256:
+`50f18104d27ca82d0e13e25bb24e8eb52335f4e58666beac07a8bb692e54000b`.
+The first suite found an obsolete scripted configure answer sequence; it was corrected
+before the final passing run. New native/browser deployment is held together until
+the existing pending guided upgrade can complete checked resume. No journal was
+rewritten and no split native-version override was installed.
+
+Helius passed a bounded AWS compatibility check (`db628a9c`): exact canonical genesis,
+mint/account policy, finalized `minContextSlot`, both history heads and both existing
+history anchors agreed with Alchemy (seven requests per provider). This is new
+provider compatibility evidence, not completed runtime switching or funded acceptance.
 
 The live worker now uses the tested RPC executable through the installed release
 pointer, with `5cc2ceb` browser assets and the reviewed monitor. It remains
