@@ -18,7 +18,7 @@ import Bridge.AdminKey (readPrivate,savePrivate,withFamily)
 import Bridge.RPC
 import qualified Bridge.Solana as S
 import Bridge.SolanaDeposit (transactionKeys,lamportEffect,lamportBefore)
-import Bridge.SDKBuild (sdkLibraryPath)
+import qualified SetupPaths
 import Bridge.Signer (verifySigningKey)
 import qualified Token
 import qualified Token.Network as TN
@@ -89,7 +89,8 @@ complete directory=do
     sources<-readRecord (directory</>"sources.json") :: IO Value
     key<-fieldValue "solana.keypair.json" sources
     verifySigningKey (C.custodyOwner c) key
-    expected<-TO.runSafe (TO.Request $ Token.AssociatedAddress sdkLibraryPath (C.custodyOwner c) canonicalMint)
+    setupSdk<-SetupPaths.sdkPath
+    expected<-TO.runSafe (TO.Request $ Token.AssociatedAddress setupSdk (C.custodyOwner c) canonicalMint)
     require (C.custodyAta c==expected) "bootstrap_ata_mismatch"
     bind directory
     let completed=directory</>"bootstrap-complete.json"
@@ -145,8 +146,9 @@ evalSetup (FundCustody directory c key)=bracket newRpcManager closeManager $ \ma
     require (rent>0 && rent<=fromIntegral(units $ C.maxSolAccountRent c)) "bootstrap_rent_exceeds_limit"
     recent<-TO.runSafe (TO.Request $ TN.RecentBlockhash TN.Mainnet (C.solanaRpc c))
     let request=Token.Associated owner canonicalMint ata owner rent recent
-    unsigned<-TO.runSafe (TO.Request $ Token.Prepare sdkLibraryPath request)
-    _<-TO.runCritical (TO.Request $ TN.Sign sdkLibraryPath TN.Mainnet (C.solanaRpc c) fee request unsigned key attempt)
+    setupSdk<-SetupPaths.sdkPath
+    unsigned<-TO.runSafe (TO.Request $ Token.Prepare setupSdk request)
+    _<-TO.runCritical (TO.Request $ TN.Sign setupSdk TN.Mainnet (C.solanaRpc c) fee request unsigned key attempt)
     pure ()
   hasAttempt<-doesFileExist attempt
   when hasAttempt $ do
@@ -212,7 +214,9 @@ initializeBackup directory=do
     sources<-readRecord (directory</>"sources.json") :: IO Value
     executable<-fieldValue "restic" setup
     root<-fieldValue "sourceRoot" setup
-    pins<-B.readFile (root</>"2-Wrap-Unwrap-Server/build/toolchains.json") >>= either (const $ reject "invalid_toolchain_pins") pure . eitherDecodeStrict'
+    method<-fieldValue "method" setup :: IO String
+    let pinsPath=if method=="bundle" then root</>"share/toolchains.json" else root</>"2-Wrap-Unwrap-Server/build/toolchains.json"
+    pins<-B.readFile pinsPath >>= either (const $ reject "invalid_toolchain_pins") pure . eitherDecodeStrict'
     reviewed<-fieldValue "restic-reviewed" pins :: IO Value
     expected<-fieldValue (fromString arch) reviewed :: IO T.Text
     actual<-withBinaryFile executable ReadMode hashHandle

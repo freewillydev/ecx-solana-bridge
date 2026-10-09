@@ -13,7 +13,8 @@ import qualified Data.ByteArray.Encoding as Hex
 import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.Text as T
-import Data.Aeson (Value,eitherDecodeStrict')
+import Data.Aeson (Value,eitherDecodeStrict',withObject,(.:?),(.!=))
+import Data.Aeson.Types (parseEither)
 import Control.Exception (bracket)
 import System.Posix.IO (openFd,closeFd,OpenMode(ReadOnly,WriteOnly),defaultFileFlags,OpenFileFlags(..))
 import System.Posix.Unistd (fileSynchronise)
@@ -64,6 +65,16 @@ provision directory=do
   when generated $ withFamily (directory</>"node-provision") $ do
     path<-fieldValue "nodeConfig" setup
     service<-fieldValue "nodeService" setup >>= serviceName
+    managed<-either (const $ reject "invalid_setup_json") pure
+      (parseEither (withObject "setup" (\o->o .:? "managedNode" .!= False)) setup)
+    when managed $ do
+      require (path=="/var/lib/ecx-betanet/bitcoin.conf" && service=="ecx-betanet.service") "managed_node_identity_changed"
+      method<-fieldValue "method" setup :: IO String
+      require (method `elem` ["source","bundle"]) "managed_node_release_bootstrap_required"
+      root<-fieldValue "sourceRoot" setup
+      let installer=if method=="bundle" then root</>"node" else root</>"2-Wrap-Unwrap-Server/install/node"
+      (result,_,_)<-readProcessWithExitCode "/bin/sh" [installer] ""
+      require (result==ExitSuccess) "managed_node_install_failed_retry_start"
     checkConfig path
     (loaded,_,_)<-readProcessWithExitCode "systemctl" ["cat",service] ""
     require (loaded==ExitSuccess) "node_service_not_found_edit_setup_before_start"

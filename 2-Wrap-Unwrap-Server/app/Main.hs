@@ -3,7 +3,7 @@
 module Main (main) where
 import Data.Version (showVersion)
 import qualified Paths_ecx_bridge as Package
-import Configure (configure,configureAdvanced,start,initializeNative)
+import Configure (launch,configure,configureAdvanced,start,initializeNative)
 import qualified Bridge.Config as C
 import Bridge.BrowserBuild (browserAssetsDirectory)
 import Bridge.Critical (Process(..),runProcess,CustomerSettings(..),SignerSettings(..))
@@ -34,6 +34,7 @@ main :: IO ()
 main=(getArgs >>= command) `catch` (\(BridgeError code)->
   LBS.hPutStrLn stderr (encode $ object ["error" .= code]) >> exitFailure)
  where
+  command []=launch
   command [flag] | flag `elem` ["version","--version"] = putStrLn ("ecx-bridge " <> showVersion Package.version)
   command ["configure"]=configure
   command ["configure","--advanced"]=configureAdvanced

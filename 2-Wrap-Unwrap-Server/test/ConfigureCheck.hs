@@ -267,16 +267,16 @@ simpleContract parent executable=do
                 ack=await "Type saved once you have backed up the phrase:" >> hPutStrLn writer "saved" >> hFlush writer
             answer "Solana Mainnet RPC URL" "https://primary.example.invalid/"
             answer "Independent Mainnet RPC URL" "https://verifier.example.invalid/"
-            answer "ECX node configuration file path" node
-            answer "ECX node systemd service" "fixture.service"
             answer "NEW HTTPS restic repository URL" "rest:https://backup.example.invalid/repository"
             answer "Public HTTPS origin" "-"
             ack;ack
+            -- EOF can make script terminate the child before setup saves.
+            await "Saved private setup"
             hClose writer
             remaining<-hGetContents reader
             _<-evaluate(length remaining)
             code<-waitForProcess process
-            pure(code==ExitSuccess && "Saved private setup" `isInfixOf` remaining)
+            pure(code==ExitSuccess)
         case result of
           Just True->verify directory node
           _->pure False
@@ -307,6 +307,17 @@ simpleContract parent executable=do
                                 && (role/="worker" || all (`notElem` B8.split ',' methods) ["walletprocesspsbt","dumpprivkey","listdescriptors","backupwallet"])
                                 && (role/="signer" || "sendrawtransaction" `notElem` B8.split ',' methods)
         _->False
+    -- Default setup selects the managed node. Exercise existing-node provisioning
+    -- separately against a disposable fixture, without installing a real service.
+    setupValue<-either fail pure . eitherDecodeStrict' =<< B.readFile(setup</>"setup.json")
+    managedSelected<-case setupValue of
+      Object fields->do
+        let selected=KM.lookup "managedNode" fields==Just(Bool True)
+            changed=KM.insert "managedNode" (Bool False) $ KM.insert "nodeConfig" (toJSON node) $
+              KM.insert "nodeService" (String "fixture.service") fields
+        B.writeFile (setup</>"setup.json") (L.toStrict $ encode $ Object changed)
+        pure selected
+      _->pure False
     Bootstrap.bind setup
     NodeSetup.provision setup
     first<-B.readFile node
@@ -321,7 +332,7 @@ simpleContract parent executable=do
     historyChecked<-originContract
     B.appendFile node "# unexpected operator edit\n"
     nodeChanged<-try(NodeSetup.provision setup) :: IO(Either BridgeError ())
-    pure(historyChecked && either (const True) (const False) nodeChanged && all id valid && not runtimeExists && either (const True) (const False) rejected
+    pure(managedSelected && historyChecked && either (const True) (const False) nodeChanged && all id valid && not runtimeExists && either (const True) (const False) rejected
       && C.profile c==CanonicalBeta && C.mint c==Bootstrap.canonicalMint && C.custodyOwner c==base58(B.drop 32 solana)
       && phraseA/=phraseB && first==second && prior=="server=1\n" && "rpcwhitelistdefault=0" `B.isInfixOf` first
       && either (const True) (const False) changed)

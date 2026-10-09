@@ -1,9 +1,10 @@
 {-# LANGUAGE ScopedTypeVariables #-}
 -- Offline installation material only: wallet generation, no RPC/signing/activation.
-module Configure (configure,configureAdvanced,start,initializeNative) where
+module Configure (launch,configure,configureAdvanced,start,initializeNative) where
 import qualified Bridge.Config as C
 import qualified Bootstrap
 import qualified NodeSetup
+import qualified SetupPaths
 import qualified Token
 import qualified Token.Operation as TokenOp
 import Bridge.RPC (independentHttps)
@@ -25,7 +26,7 @@ import Data.Maybe (fromMaybe)
 import Data.List (sort,isPrefixOf)
 import Control.Concurrent (threadDelay)
 import Network.HTTP.Client (parseRequest,HttpException,closeManager,newManager,defaultManagerSettings,managerSetProxy,noProxy,managerResponseTimeout,managerRetryableException,responseTimeoutNone)
-import System.Process (rawSystem,readProcessWithExitCode)
+import System.Process (rawSystem,readProcessWithExitCode,readCreateProcessWithExitCode,proc,CreateProcess(cwd))
 import System.Exit (ExitCode(..))
 import System.Info (os,arch)
 import Text.Read (readMaybe)
@@ -36,10 +37,24 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as L
 import qualified Data.Text as T
-import System.Directory (makeAbsolute,canonicalizePath,removeDirectoryRecursive,doesFileExist,findExecutable)
+import System.Directory (makeAbsolute,canonicalizePath,removeDirectoryRecursive,doesFileExist,doesDirectoryExist,setCurrentDirectory,findExecutable)
 import System.FilePath ((</>),takeDirectory,addTrailingPathSeparator)
 import qualified System.Posix.Directory as P
 import System.IO (hFlush,stdout,stdin,isEOF,hIsTerminalDevice,withFile,IOMode(ReadWriteMode),hPutStrLn,hPutStr,hGetLine)
+
+-- One stable entry point; services continue independently after the console exits.
+launch :: IO ()
+launch=do
+  require (os=="linux") "setup_requires_ubuntu_24_04"
+  getEffectiveUserID >>= \uid->require (uid==0) "run_sudo_ecx_bridge"
+  let home="/var/lib/ecx-bridge-setup"
+  exists<-doesDirectoryExist home
+  when (not exists) $ P.createDirectory home 0o700
+  privateParent (home</>"state")
+  setCurrentDirectory home
+  configured<-doesFileExist(".ecx-bridge"</>"setup.json")
+  when (not configured) configure
+  start ".ecx-bridge"
 
 -- The default path is fresh canonical custody. Advanced/recovery remains explicit.
 configure :: IO ()
@@ -62,11 +77,9 @@ simplified directory=do
     url<-rpcInput input
     independentHttps primary url
     pure url
-  nodeConfig<-prompt "ECX node configuration file path" "/var/lib/ecx-betanet/bitcoin.conf" $ \input->do
-    file<-makeAbsolute input
-    NodeSetup.checkConfig file
-    pure file
-  nodeService<-prompt "ECX node systemd service" "ecx-betanet.service" NodeSetup.serviceName
+  let nodeConfig="/var/lib/ecx-betanet/bitcoin.conf"::FilePath
+      nodeService="ecx-betanet.service"::String
+  putStrLn "A private pruned ECX node is installed automatically during start (Ubuntu 24.04 x86_64)."
   (admin,worker,signer)<-NodeSetup.credentials directory
   repository<-prompt "NEW HTTPS restic repository URL (or private URL file path)" "" $ \input->do
     require (not $ null input) "backup_repository_required"
@@ -90,8 +103,9 @@ simplified directory=do
       cert<-prompt "TLS full-chain certificate file path" "" privateFile
       key<-prompt "TLS private-key file path" "" privateFile
       pure [("public-fullchain.pem",cert),("public-privkey.pem",key)]
-  root<-canonicalizePath (sdkSourceDirectory</>"../..")
-  defaultRestic<-findExecutable "restic"
+  bundle<-SetupPaths.bundleRoot
+  root<-maybe (canonicalizePath (sdkSourceDirectory</>"../..")) pure bundle
+  defaultRestic<-maybe (findExecutable "restic") (pure . Just . (</>"bin/restic")) bundle
   restic<-case defaultRestic of
     Just file->makeAbsolute file
     Nothing->prompt "Reviewed restic executable path (not found on PATH)" "" $ \input->do
@@ -101,10 +115,13 @@ simplified directory=do
       pure file
   (key,owner)<-prepareWallet directory "automatic"
   (phraseFile,_)<-prepareSeed directory "ecx" "automatic"
-  unlockBytes<-getRandomBytes 32
   let unlock=takeDirectory phraseFile</>"native-unlock"
-  savePrivate unlock (B8.pack $ T.unpack $ base58 unlockBytes)
-  ata<-TokenOp.runSafe (TokenOp.Request $ Token.AssociatedAddress sdkLibraryPath owner Bootstrap.canonicalMint)
+  unlocked<-doesFileExist unlock
+  if unlocked then verifyNativeUnlock unlock else do
+    unlockBytes<-getRandomBytes 32
+    savePrivate unlock (B8.pack $ T.unpack $ base58 unlockBytes)
+  setupSdk<-SetupPaths.sdkPath
+  ata<-TokenOp.runSafe (TokenOp.Request $ Token.AssociatedAddress setupSdk owner Bootstrap.canonicalMint)
   let defaults=M.union (M.fromList
         ["profile" .= String "CanonicalBeta","deploymentId" .= String ("ecx-"<>T.take 16 owner)
         ,"nativeWallet" .= String ("ecx-bridge-"<>T.take 16 owner),"backupRequired" .= Bool True
@@ -112,8 +129,8 @@ simplified directory=do
         ,"solanaRpc" .= primary,"solanaVerifierRpc" .= verifier
         ,"nativeCookie" .= worker,"nativeUnlockFile" .= unlock
         ,"solanaHistoryStart" .= String "","solanaOperatingHistoryStart" .= String ""]) template
-      setup=object ["existing" .= False,"method" .= String "source","sourceRoot" .= root,"restic" .= restic
-        ,"nodeConfig" .= nodeConfig,"nodeService" .= nodeService
+      setup=object ["existing" .= False,"method" .= String (maybe "source" (const "bundle") bundle),"sourceRoot" .= root,"restic" .= restic
+        ,"nodeConfig" .= nodeConfig,"nodeService" .= nodeService,"managedNode" .= True
         ,"nativeSeedFile" .= phraseFile,"nativeAdminAuth" .= admin,"nativeRestore" .= False,"nativeRangeEnd" .= (999::Int)]
       sources=object [K.fromString name .= path | (name,path)<-
         [("solana.keypair.json",key),("native-worker.auth",worker),("native-signer.auth",signer)
@@ -292,7 +309,10 @@ prepareWallet directory mode=do
   bytes<-either reject pure (walletKey phrase)
   let key=takeDirectory phraseFile</>"solana.keypair.json"
       owner=base58 (B.drop 32 bytes)
-  savePrivate key (L.toStrict $ encode $ B.unpack bytes)
+  existing<-doesFileExist key
+  let encoded=L.toStrict $ encode $ B.unpack bytes
+  if existing then readPrivate key >>= \saved->require (saved==encoded) "generated_wallet_key_changed"
+    else savePrivate key encoded
   putStrLn $ "Solana custody owner / SOL funding address: "<>T.unpack owner
   putStrLn $ "Recovery derivation: "<>derivationPath
   when (mode/="automatic") $ putStrLn "The custodyAta and history fields must describe this NEW wallet and its configured mint."
@@ -313,13 +333,19 @@ prepareSeed directory asset mode=do
   output<-choose "NEW private wallet directory (preserved if configuration is cancelled)" (directory<>"-"<>asset<>"-wallet") $ \path->do
     file<-makeAbsolute path >>= canonicalizePath
     require (file/=settingsRoot && not(addTrailingPathSeparator settingsRoot `isPrefixOf` file)) "wallet_directory_must_be_outside_settings"
-    P.createDirectory file 0o700
+    exists<-doesDirectoryExist file
+    if exists && mode=="automatic" then privateParent(file</>"state") else P.createDirectory file 0o700
     pure file
-  phrase<-case recovery of
+  let phraseFile=output</>asset<>"-recovery.txt"
+  saved<-doesFileExist phraseFile
+  phrase<-if saved && mode=="automatic" then do
+    value<-B8.unpack . B8.strip <$> readPrivate phraseFile
+    _<-either reject pure (walletKey value)
+    pure value
+   else case recovery of
     Just value->pure value
     Nothing->getRandomBytes 16 >>= either reject pure . mnemonic
-  let phraseFile=output</>asset<>"-recovery.txt"
-  savePrivate phraseFile (B8.pack $ phrase<>"\n")
+  when (not saved) $ savePrivate phraseFile (B8.pack $ phrase<>"\n")
   putStrLn $ "Recovery file saved privately in "<>output<>". Preserve it even if setup is cancelled."
   when (mode/="restore") $ withFile "/dev/tty" ReadWriteMode $ \terminal->do
     hPutStrLn terminal $ "Write down these 12 "<>asset<>" recovery words in order. Anyone with them can spend this wallet's funds:"
@@ -455,6 +481,10 @@ startUnlocked path=do
     require (uid==0) "fresh_install_run_sudo_ecx_bridge_configure_then_sudo_ecx_bridge_start"
     residual<-doesFileExist config
     require (not residual) "installed_material_exists_use_recovery_not_fresh"
+    when (method=="bundle") $ do
+      root<-field "sourceRoot" value
+      (verified,_,_)<-readCreateProcessWithExitCode ((proc "sha256sum" ["--check","--status","manifest.sha256"]) {cwd=Just root}) ""
+      require (verified==ExitSuccess) "installed_setup_bundle_changed"
     Bootstrap.bind directory
     Bootstrap.initializeBackup directory
     NodeSetup.provision directory
@@ -466,6 +496,9 @@ startUnlocked path=do
         restic<-field "restic" value
         binaryPath<-getExecutablePath
         execute "/bin/sh" [root</>"2-Wrap-Unwrap-Server/install/source",binaryPath,sdkLibraryPath,browserAssetsDirectory,restic,directory]
+      "bundle"->do
+        root<-field "sourceRoot" value
+        execute "/bin/sh" [root</>"install","fresh",directory]
       "release"->do
         installer<-field "installer" value
         trust<-field "trustKey" value

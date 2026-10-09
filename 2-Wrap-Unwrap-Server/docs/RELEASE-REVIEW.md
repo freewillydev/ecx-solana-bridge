@@ -1615,3 +1615,27 @@ not establish whole-program constant-time behavior or complete memory erasure:
 mnemonic handling, HMAC/KDF, descriptor encoding, ByteString copies, host policy
 and downstream node key storage remain separate concerns. No funded wallet,
 deployment, chain transaction or KMS configuration was changed.
+
+### One-command setup integration checkpoint (2026-10-08)
+
+On base 501fc3c, the default executable entry resumes from private persistent
+setup under /var/lib/ecx-bridge-setup. The artifact launcher persists a
+manifest-verified bundle before configuration. Bundled SDK/restic/pin paths now
+resolve at runtime rather than referring to the build host. Default configuration
+selects the managed pruned node without asking for a node configuration path.
+Generated wallets survive cancelled settings and are reused with key consistency
+checks. Ubuntu runtime installation includes libsecp256k1-1.
+
+Passed locally with GHC 9.14.1, one build job and the existing external Rust cache:
+`cabal build exe:ecx-bridge -j1 --offline` and
+`cabal test ecx-bridge:test:bridge-test -j1 --offline --test-show-details=direct`.
+The latter includes the integrated native crypto vectors and interactive configure
+contract, with the PTY completion race correction from security commit 00c6489.
+These are macOS build/controlled tests, not Ubuntu artifact acceptance.
+
+AWS managed-node fresh installation and immediate rerun passed previously.
+Separate-host append-only TLS rest-server provisioning completed successfully
+(SSM 2061f96b-ee93-4d0b-b50e-112b16b53c5f); repository authentication, backup,
+restore and denial tests remain. No bridge custody keys or funds were deployed.
+Outstanding: interrupted configuration/install recovery, final Ubuntu bundle,
+three clean-install scenarios, real-chain acceptance and all external gates.

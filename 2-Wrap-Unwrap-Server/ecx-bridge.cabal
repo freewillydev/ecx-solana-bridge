@@ -6,7 +6,7 @@ license: MIT
 license-file: LICENSE
 build-type: Simple
 data-files: test/fixtures/*.json, migrations/*.sql
-extra-source-files: test/formal/*.tla, test/formal/*.cfg, install/install, install/package, install/source, install/restic-security.patch, chain/Bridge/bip39-english.txt
+extra-source-files: test/formal/*.tla, test/formal/*.cfg, install/install, install/package, install/source, install/node, install/launch, install/restic-security.patch, chain/Bridge/bip39-english.txt
 
 common settings
   default-language: GHC2021
@@ -77,7 +77,7 @@ test-suite bridge-test
   hs-source-dirs: test, app
   main-is: Main.hs
   build-tool-depends: ecx-bridge:ecx-bridge
-  other-modules: Bootstrap, NodeSetup, ConfigureCheck, ChainCheck, NativePaymentCheck, SolanaPaymentCheck, ObservationCheck, SigningTransportCheck, LifecycleCheck, Paths_ecx_bridge
+  other-modules: Bootstrap, NodeSetup, SetupPaths, ConfigureCheck, ChainCheck, NativePaymentCheck, SolanaPaymentCheck, ObservationCheck, SigningTransportCheck, LifecycleCheck, Paths_ecx_bridge
   autogen-modules: Paths_ecx_bridge
   build-depends: base, ecx-bridge, ecx-bridge:customer-api, ecx-bridge:chain, ecx-bridge:store, ecx-bridge:workflow, servant, aeson, text, containers,
     QuickCheck >=2.15 && <2.19, bytestring, scientific, http-client, base64-bytestring, wai, wai-extra, http-types, directory, unix, filepath,
@@ -87,7 +87,7 @@ executable ecx-bridge
   import: settings
   hs-source-dirs: app
   main-is: Main.hs
-  other-modules: Configure, Bootstrap, NodeSetup, Paths_ecx_bridge
+  other-modules: Configure, Bootstrap, NodeSetup, SetupPaths, Paths_ecx_bridge
   autogen-modules: Paths_ecx_bridge
   ghc-options: -threaded -rtsopts -with-rtsopts=-N2
   build-depends: base, ecx-bridge, ecx-bridge:workflow, ecx-bridge:chain,

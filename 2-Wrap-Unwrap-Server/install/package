@@ -63,6 +63,9 @@ cp "$sdk" "$staging/lib/libecx_solana_sdk.so"
 cp -R "$web/." "$staging/share/web/"
 cp 2-Wrap-Unwrap-Server/migrations/*.sql "$staging/share/migrations/"
 cp 2-Wrap-Unwrap-Server/install/install "$staging/install"
+cp 2-Wrap-Unwrap-Server/install/node "$staging/node"
+cp 2-Wrap-Unwrap-Server/install/launch "$staging/launch"
+cp 2-Wrap-Unwrap-Server/build/toolchains.json "$staging/share/toolchains.json"
 printf '%s\n' "$arch" > "$staging/architecture"
 if [ "$local_build" = true ]; then
   git -c safe.directory="$root" rev-parse HEAD > "$staging/source-commit"
@@ -89,7 +92,7 @@ trap 'exit 1' HUP INT TERM
 line=$(awk '/^__ECX_PAYLOAD__$/ { print NR+1; exit }' "$0")
 [ -n "$line" ]
 tail -n +"$line" "$0" | tar -xz -C "$staging" --no-same-owner
-sh "$staging/install" "$@"
+if [ "$#" = 0 ]; then sh "$staging/launch"; else sh "$staging/install" "$@"; fi
 exit
 __ECX_PAYLOAD__
 HEADER

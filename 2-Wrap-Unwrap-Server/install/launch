@@ -1,0 +1,39 @@
+#!/bin/sh
+# Entry from an authenticated artifact. Persist the bundle before interactive setup.
+set -eu
+umask 077
+[ "$(id -u)" = 0 ] || { echo 'Run this installer with sudo.' >&2; exit 1; }
+. /etc/os-release
+[ "$ID:$VERSION_ID:$(uname -m)" = ubuntu:24.04:x86_64 ] || { echo 'Ubuntu 24.04 x86_64 required.' >&2; exit 1; }
+bundle=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
+(cd "$bundle" && sha256sum --check --status manifest.sha256)
+release=$(sha256sum "$bundle/manifest.sha256" | cut -d' ' -f1)
+base=/opt/ecx-bridge-bootstrap
+[ ! -L "$base" ] || { echo 'Bootstrap directory must not be a symlink.' >&2; exit 1; }
+install -d -m 0700 "$base"
+exec 9>/run/lock/ecx-bridge-bootstrap.lock
+flock -n 9 || { echo 'Another setup is running.' >&2; exit 1; }
+export DEBIAN_FRONTEND=noninteractive
+apt-get update -qq
+apt-get install -y --no-install-recommends libpq5 libgmp10 libffi8 zlib1g libssl3t64 libsecp256k1-1 ca-certificates openssl jq curl unzip
+target=$base/$release
+if [ ! -e "$target" ]; then
+  staging=$(mktemp -d "$base/.install-XXXXXXXX")
+  trap 'rm -rf -- "${staging:-}"' EXIT
+  trap 'exit 1' HUP INT TERM
+  cp -R "$bundle/." "$staging/"
+  chown -R root:root "$staging"
+  chmod -R go-w "$staging"
+  chmod 0755 "$staging/bin/"*
+  (cd "$staging" && sha256sum --check --status manifest.sha256)
+  mv "$staging" "$target"
+  staging=
+fi
+(cd "$target" && sha256sum --check --status manifest.sha256)
+# Keep one memorable entry command even before the worker is installed.
+if [ -e /usr/local/bin/ecx-bridge ] && [ ! -L /usr/local/bin/ecx-bridge ]; then
+  echo 'Existing /usr/local/bin/ecx-bridge is not a managed symlink; refusing to overwrite.' >&2
+  exit 1
+fi
+ln -sfn "$target/bin/ecx-bridge" /usr/local/bin/ecx-bridge
+exec "$target/bin/ecx-bridge"
