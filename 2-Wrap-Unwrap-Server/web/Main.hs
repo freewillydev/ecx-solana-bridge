@@ -161,6 +161,9 @@ solanaExplorer cfg kind identifier = do
   pure $ "https://explorer.solana.com/" <> kind <> "/" <> encoded <> if pubSolanaCluster cfg=="mainnet-beta" then "" else "?cluster=devnet"
 loadConfig :: IORef State -> IO ()
 loadConfig state = do
+  clearPayment state
+  modifyIORef' state $ \s -> s{configuration=Nothing}
+  text "availability" "Checking availability. Do not pay until instructions are shown."
   cfg <- api state "/api/v1/config" "GET" Nothing
   modifyIORef' state $ \s -> s{configuration=Just cfg}
   text "network" $ case pubProfile cfg of
@@ -207,6 +210,9 @@ loadConfig state = do
 
 clearPayment :: IORef State -> IO ()
 clearPayment state = do
+  oldPayment <- payment <$> readIORef state
+  copied <- value "copy-text"
+  when (not (T.null oldPayment) && copied==oldPayment) closeCopy
   modifyIORef' state $ \s -> s{payment=""}
   link "payment-link" Nothing
   forM_ ["qr","copy-payment"] $ \key -> hidden key True
