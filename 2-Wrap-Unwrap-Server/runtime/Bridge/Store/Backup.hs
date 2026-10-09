@@ -388,8 +388,11 @@ restoreLedger settings archive = mask $ \restore->do
     (restore $ do
       void $ PG.execute admin "REVOKE ALL ON DATABASE ? FROM PUBLIC" name
       void $ PG.execute admin "ALTER DATABASE ? ALLOW_CONNECTIONS true" name
+      -- Only this freshly created random staging DB is cleaned. Explicit schema
+      -- archives include public, which template0 already contains. Legacy archives
+      -- without a schema entry retain the empty default schema.
       withBinaryFile "/dev/null" WriteMode $ \sink->databaseTool target "pg_restore"
-        ["--exit-on-error","--single-transaction","--no-owner","--no-privileges","--no-password"
+        ["--clean","--if-exists","--exit-on-error","--single-transaction","--no-owner","--no-privileges","--no-password"
         ,"--dbname="<>PG.connectDatabase target,archivePath archive] (UseHandle sink)
       pure target) `onException` void (PG.execute admin "DROP DATABASE ?" name)
 
