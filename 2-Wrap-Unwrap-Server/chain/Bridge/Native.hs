@@ -14,6 +14,8 @@ import Bridge.Error
 import Bridge.File (withHandle,readBounded,hashHandle)
 import Bridge.Domain
 import Control.Monad (when)
+import Control.Concurrent (threadDelay)
+import System.Timeout (timeout)
 import Control.Exception (IOException,bracket,catch,throwIO,try,finally)
 import Data.Aeson
 import Data.Bits ((.&.))
@@ -203,7 +205,16 @@ evalNativeRecoveryWith call c operation = do
       -- Phrase stays in this process. RPC receives only derived descriptors.
       phrase<-BC.unpack . BC.strip <$> Private.readPrivate phraseFile
       privateDescriptors<-nativeDescriptors (profile c==L2LSignetDevnet) phrase >>= either reject pure
-      chain<-nativeIdentityWith call c
+      -- Only identity reads may wait/retry. Never replay wallet mutations after
+      -- an unknown outcome merely because the node was restarting.
+      let ready first=nativeIdentityWith call c `catch` \(BridgeError code)->
+            if code `elem` ["rpc_transport_unknown_outcome","rpc_error_-28","native_synchronizing","native_checkpoint_unavailable","native_no_peers"]
+              then do
+                when first $ putStrLn "Waiting up to 60 seconds for the ECX node to finish starting/syncing; saved setup is retained."
+                threadDelay 1000000
+                ready False
+              else throwIO(BridgeError code)
+      chain<-timeout (60*1000000) (ready True) >>= maybe (reject "native_not_ready_rerun_start") pure
       when restoring $ do
         pruned<-fieldValue "pruned" chain
         require (not pruned) "native_seed_restore_requires_full_chain_history"

@@ -25,7 +25,7 @@ import qualified Data.ByteArray.Encoding as Hex
 import Data.Word (Word8)
 import Test.QuickCheck hiding ((.&.))
 import Bridge.SolanaMessage (base58)
-import Control.Exception (bracket,try)
+import Control.Exception (bracket,try,throwIO)
 import Crypto.Error (CryptoFailable(..))
 import qualified Crypto.PubKey.Ed25519 as Ed
 import qualified Data.ByteArray as BA
@@ -213,10 +213,16 @@ nativeSeedContract directory=do
   savePrivate seedFile (B.pack $ map (fromIntegral . fromEnum) phrase)
   exists<-newIORef False;imports<-newIORef (0::Int);creates<-newIORef (0::Int)
   broken<-newIORef False;failImport<-newIORef False;restoring<-newIORef False
+  starting<-newIORef (2::Int)
   let call _ method args=do
         unless (not $ phrase `isInfixOf` show (encode args)) (fail "phrase leaked into RPC")
         case (method,args) of
-          ("getblockchaininfo",[])->pure $ object ["chain" .= ("signet"::T.Text),"initialblockdownload" .= False,"blocks" .= (17000::Int),"pruned" .= False,"signet_challenge" .= N.signetChallenge]
+          ("getblockchaininfo",[])->do
+            remaining<-readIORef starting
+            if remaining>0 then do
+              writeIORef starting (remaining-1)
+              throwIO(BridgeError $ if remaining==2 then "rpc_transport_unknown_outcome" else "rpc_error_-28")
+             else pure $ object ["chain" .= ("signet"::T.Text),"initialblockdownload" .= False,"blocks" .= (17000::Int),"pruned" .= False,"signet_challenge" .= N.signetChallenge]
           ("getblockhash",_)->pure $ String $ N.nativeCheckpointHash settings
           ("getconnectioncount",[])->pure $ Number 1
           ("getdescriptorinfo",[String descriptor])->case lookup descriptor (zip private public) of

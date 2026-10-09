@@ -1783,3 +1783,21 @@ kills/reaps an unresponsive child. The regression uses a real process that ignor
 SIGTERM and confirms timeout refusal, no surviving child and preserved recovery
 material. The installer creates root-owned mode-0755 `/run/sshd` before policy
 validation. Packaging and fresh-host acceptance of these corrections remain open.
+
+### Native readiness and preserved setup (2026-10-08)
+
+The primary AWS wizard completed and both independent phrase backups were encrypted
+and verified off-host before acknowledgement; no terminal transcripts were written.
+A later encrypted whole-setup copy also includes the native unlock secret and wallet
+initialization record. These are setup backups, not a substitute for a live ledger
+custody checkpoint. The actual HTTPS repository is readable with the generated password.
+
+First native startup failed immediately after service restart; a bounded rerun reached
+`fund_solana_owner_then_rerun_start` with the real descriptor wallet initialized.
+The closed InitializeNativeWallet evaluator now waits at most 60 seconds for only
+native identity reads (connection/warmup/synchronization/peer readiness), before
+wallet mutation. Wrong identity/authentication errors still refuse immediately;
+create/import/sign operations are not retried. The fixture injects connection and
+warmup errors and retains the exactly-once create/import assertions. Actual Ubuntu
+full bridge-test and provisioning contracts passed in SSMaefbca10 in 2m46.5s with
+cached dependencies. No new funded payment has been made on AWS.
