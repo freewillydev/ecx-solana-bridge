@@ -298,7 +298,15 @@ Offline inspection never unlocks a wallet.
 5. Point the destination at the verified staged database, adopt the minimum sequence
    without lowering the fence and start in observation mode. Reconcile both real
    chains, full custody and all saved in-flight attempts. Resolve discrepancies.
-6. Start the dedicated signer and paying mode only after old-host exclusion and
+6. Before activating the recovered runtime, arrange native wallet loading on node
+   restart. `restore-native-wallet` deliberately restores with automatic loading
+   disabled. With both bridge processes stopped and the destination fence adopted,
+   add `wallet=THE_VERIFIED_NATIVE_WALLET_NAME` to the ECX node configuration in the
+   appropriate network scope, preserving its RPC restrictions. Restart the node
+   and verify that the configured wallet is loaded. Do not enable automatic loading
+   on a temporary recovery-inspection host. Fresh generated wallets already request
+   persistent loading when created.
+7. Start the dedicated signer and paying mode only after old-host exclusion and
    readiness are established; explicitly resume. Retain the recovery record.
 
 No command overwrites a wallet, automatically activates restored custody or erases

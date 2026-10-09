@@ -2165,3 +2165,23 @@ by these acceptance steps. This proves a successful same-schema upgrade after
 explicit legacy-ledger recovery; it does not establish guided schema-21 migration,
 all interruption windows, separate-host restoration of this new snapshot, customer
 wallet acceptance or production release readiness.
+
+
+Reboot follow-up (`1a6fcd67`) correctly stayed paused: the offline-restored native
+wallet was not registered for startup loading (`getwalletinfo` returned -18),
+although the node was synced and its RPC restrictions were unchanged. This is a
+missing explicit recovery-activation step, not evidence that worker credentials
+could sign. After stopping both bridge services and the node, the verified wallet
+was added to the node configuration without changing RPC restrictions. Node startup
+then loaded it (`c2d8e9d7`); OPERATIONS now includes this recovery-only step. Fresh
+wallet creation already requests persistent loading. Offline restore remains
+non-activating by design.
+
+The subsequent checked resume was blocked by Solana RPC rate limiting, not native
+wallet access. The SELECT-only Opaleye diagnostic (`cbd695f7`) recorded
+`rpc_rate_limited` for both Solana scanners and no native scanner failure. Critical
+and backup sequences remained 76; intake stayed paused. The bridge worker/signer
+were stopped to avoid continued quota consumption. Reboot/resume acceptance remains
+open until provider service permits fresh observations. Do not weaken freshness or
+credential-boundary checks, and do not reinterpret the earlier successful upgrade
+as a passed reboot test.
