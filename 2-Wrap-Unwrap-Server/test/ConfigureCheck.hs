@@ -136,7 +136,7 @@ backupTimeoutContract :: FilePath -> IO Bool
 backupTimeoutContract parent=do
   let root=parent</>"backup-timeout"; executable=root</>"restic"
       pidFile=root</>"pid"; phrase=root</>"recovery"
-  createDirectory root;createDirectory(root</>"share")
+  mapM_ (\path->createDirectory path >> setFileMode path 0o700) [root,root</>"share"]
   savePrivate executable (B8.pack $ "#!/bin/sh\necho $$ > '"<>pidFile<>"'\ntrap '' TERM\nexec sleep 600\n")
   setFileMode executable 0o700
   digest<-withBinaryFile executable ReadMode hashHandle
