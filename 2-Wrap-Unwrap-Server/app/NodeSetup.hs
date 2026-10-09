@@ -100,10 +100,6 @@ provision directory=do
     signerAuth<-readPrivate (directory</>"native-signer.auth")
     (migrating,rules)<-either reject pure (signerPolicy signerAuth originalRules)
     current<-B.readFile path
-    autoload<-if not migrating then pure B.empty else do
-      wallet<-fieldValue "nativeWallet" =<< decode =<< readPrivate (directory</>"worker.json")
-      require (not(T.null wallet) && T.all (`elem` ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"::String)) wallet) "invalid_recovered_wallet_name"
-      pure $ "\nwallet="<>B8.pack(T.unpack wallet)<>"\n"
     let settings=map option $ B8.lines before
         priorWhitelist="rpcwhitelist" `elem` settings
         explicitDefault="rpcwhitelistdefault" `elem` settings
@@ -113,7 +109,13 @@ provision directory=do
         header="# Generated ECX bridge RPC roles\n"<>preserve
         updated=header<>rules<>"\n"<>before
         legacyExpected=header<>originalRules<>"\n"<>before
-        retained=if current `elem` [legacyExpected<>autoload,updated<>autoload] then autoload else ""
+        -- Recovery may have appended one wallet autoload line after provisioning.
+        -- Preserve that existing line; never invent a wallet or accept other edits.
+        retained=case [extra | prefix<-[legacyExpected,updated],Just extra<-[B.stripPrefix prefix current]
+          ,Just line<-[B.stripPrefix "\nwallet=" extra],Just wallet<-[B.stripSuffix "\n" line]
+          ,not(B.null wallet),B8.all (`elem` ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"::String)) wallet] of
+            extra:_->extra
+            []->B.empty
         expected=updated<>retained
         suffix=if migrating then "-signer-validation" else ""
         marker=directory</>("node-rpc-installed"<>suffix)
