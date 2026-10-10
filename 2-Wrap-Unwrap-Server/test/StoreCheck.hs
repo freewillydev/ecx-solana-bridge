@@ -4542,9 +4542,9 @@ tlsMain=do
               checkpointReply<-newIORef (Nothing::Maybe W.BackupReceipt)
               checkpointMinimum<-newIORef required
               checkpoints<-newIORef (0::Int)
-              let fixtureCheckpoint :: forall a. Op.Request 'Op.Signer 'Op.Critical a -> IO a
-                  fixtureCheckpoint request=case Op.resolve request of
-                    Op.SigningDSL (Op.CheckpointSigning (Op.CheckpointCustody fingerprint minimumSequence))->do
+              let fixtureCheckpoint :: forall a. Op.Pending 'Op.Signer 'Op.Critical a -> IO a
+                  fixtureCheckpoint request=case Op.checkedOperation request of
+                    Right (Op.SigningDSL (Op.CheckpointSigning (Op.CheckpointCustody fingerprint minimumSequence)))->do
                       expectedMinimum<-readIORef checkpointMinimum
                       check (fingerprint==identity && minimumSequence==expectedMinimum)
                       modifyIORef' checkpoints (+1)

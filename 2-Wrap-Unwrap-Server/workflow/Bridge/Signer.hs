@@ -36,11 +36,11 @@ type SigningAPI = BasicAuth "signer" () :>
   :<|> ("checkpoint-custody" :> ReqBody '[JSON] (Text,Int64) :> Post '[JSON] CheckpointResult))
 signingAPI :: Proxy SigningAPI
 signingAPI=Proxy
-signingServer :: Operation 'Signer 'Critical SignerCommand => ServerT SigningAPI (Request 'Signer 'Critical)
-signingServer () = (\(identity,identifier,generation)->Request $ SignerAction $ PreparedSigning $ SignPrepared identity identifier generation)
-  :<|> (\(identity,decision)->Request $ SignerAction $ ReplacementSigning $ SignReplacement identity decision)
-  :<|> (\(identity,parent,fee)->Request $ SignerAction $ DraftSigning $ DraftReplacement identity parent fee)
-  :<|> (\(identity,minimumSequence)->Request $ SignerAction $ CheckpointSigning $ CheckpointCustody identity minimumSequence)
+signingServer :: Execution 'Signer 'Critical SignerCommand => ServerT SigningAPI (Pending 'Signer 'Critical)
+signingServer () = (\(identity,identifier,generation)->pending $ SignerAction $ PreparedSigning $ SignPrepared identity identifier generation)
+  :<|> (\(identity,decision)->pending $ SignerAction $ ReplacementSigning $ SignReplacement identity decision)
+  :<|> (\(identity,parent,fee)->pending $ SignerAction $ DraftSigning $ DraftReplacement identity parent fee)
+  :<|> (\(identity,minimumSequence)->pending $ SignerAction $ CheckpointSigning $ CheckpointCustody identity minimumSequence)
 
 data SigningEndpoint = SigningEndpoint { signerPort :: Int, signerAuthFile :: FilePath } deriving (Eq,Show)
 
@@ -63,13 +63,13 @@ signerCertificate endpoint = do
     [pem]->either (const $ reject "invalid_signer_certificate") pure (decodeSignedCertificate $ pemContent pem)
     _->reject "invalid_signer_certificate"
 
-signingApplication :: Operation 'Signer 'Critical SignerCommand => BasicAuthData -> (forall a. Request 'Signer 'Critical a -> IO a) -> IO Application
+signingApplication :: Execution 'Signer 'Critical SignerCommand => BasicAuthData -> (forall a. Pending 'Signer 'Critical a -> IO a) -> IO Application
 signingApplication credentials evaluate = do
   let authenticate=BasicAuthCheck $ \supplied->pure $
         if BA.constEq (basicAuthUsername supplied) (basicAuthUsername credentials)
           && BA.constEq (basicAuthPassword supplied) (basicAuthPassword credentials)
         then Authorized () else Unauthorized
-      interpret :: forall a. Request 'Signer 'Critical a -> Handler a
+      interpret :: forall a. Pending 'Signer 'Critical a -> Handler a
       interpret request = do
         result<-liftIO $ (Right <$> evaluate request) `catch` (\(BridgeError code)->pure $ Left code)
         case result of

@@ -6,7 +6,7 @@ license: MIT
 license-file: LICENSE
 build-type: Simple
 data-files: test/fixtures/*.json, migrations/*.sql
-extra-source-files: test/formal/*.tla, test/formal/*.cfg, install/install, install/package, install/source, install/node, install/launch, install/monitor, install/restic-security.patch, chain/Bridge/bip39-english.txt
+extra-source-files: test/CapabilityCompile.hs, test/formal/*.tla, test/formal/*.cfg, install/install, install/package, install/source, install/node, install/launch, install/monitor, install/restic-security.patch, chain/Bridge/bip39-english.txt
 
 common settings
   default-language: GHC2021
@@ -17,7 +17,7 @@ library
   import: settings
   hs-source-dirs: src
   exposed-modules: Bridge.Domain, Bridge.Error, Bridge.Identity, Bridge.Wire, Bridge.Lifecycle, Bridge.Operation, Bridge.Operation.Internal
-  build-depends: base >=4.20 && <4.23, aeson >=2.2 && <2.4, text >=2.1 && <2.2, containers, bytestring, base16-bytestring, base58-bytestring, crypton >=1 && <1.2, ram >=0.22 && <0.23
+  build-depends: operation-capabilities ==0.1.0.0, base >=4.20 && <4.23, aeson >=2.2 && <2.4, text >=2.1 && <2.2, containers, bytestring, base16-bytestring, base58-bytestring, crypton >=1 && <1.2, ram >=0.22 && <0.23
 
 library customer-api
   import: settings
@@ -80,7 +80,7 @@ test-suite bridge-test
   build-tool-depends: ecx-bridge:ecx-bridge
   other-modules: RestoreGuide, RestoreNative, RestoreGuideCheck, Bootstrap, NodeSetup, SetupPaths, ConfigureCheck, ChainCheck, NativePaymentCheck, SolanaPaymentCheck, ObservationCheck, SigningTransportCheck, LifecycleCheck, Paths_ecx_bridge
   autogen-modules: Paths_ecx_bridge
-  build-depends: base, ecx-bridge, ecx-bridge:customer-api, ecx-bridge:chain, ecx-bridge:store, ecx-bridge:workflow, servant, aeson, text, containers,
+  build-depends: operation-capabilities ==0.1.0.0, base, ecx-bridge, ecx-bridge:customer-api, ecx-bridge:chain, ecx-bridge:store, ecx-bridge:workflow, servant, aeson, text, containers,
     QuickCheck >=2.15 && <2.19, bytestring, scientific, http-client, base64-bytestring, wai, wai-extra, http-types, directory, unix, filepath,
     ecx-build-assets, ecx-bridge:administration, process, async, network, crypton, ram, time, data-default, crypton-pem, crypton-x509, crypton-x509-validation, crypton-x509-store
 

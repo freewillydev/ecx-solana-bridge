@@ -19,6 +19,7 @@ import Data.Int (Int64)
 import qualified Data.ByteString.Lazy.Char8 as BL
 import Data.List (nub)
 import Data.Typeable (typeRep,eqT)
+import Control.Operation
 import Data.Proxy (Proxy(..))
 import Data.Type.Equality ((:~:)(Refl))
 import qualified Data.Map.Strict as M
@@ -55,19 +56,19 @@ fullSuite = do
     , check "customer handlers preserve request, result type and severity" $ once $ property handlerContract
     , check "signer handler resolves an existential to a signer-only critical operation" $ once $ property $
         let prepared :<|> replacement :<|> draft :<|> checkpoint=signingServer ()
-        in case (checkedRequest $ prepared ("deployment","payment",3),checkedRequest $ replacement ("deployment",7),checkedRequest $ draft ("deployment","parent",good $ amount 2),checkedRequest $ checkpoint ("deployment",9)) of
+        in case (checkedOperation $ prepared ("deployment","payment",3),checkedOperation $ replacement ("deployment",7),checkedOperation $ draft ("deployment","parent",good $ amount 2),checkedOperation $ checkpoint ("deployment",9)) of
           (Right(SigningDSL (PreparedSigning (SignPrepared identity identifier generation))),Right(SigningDSL (ReplacementSigning (SignReplacement other decision))),Right(SigningDSL (DraftSigning (DraftReplacement third parent fee))),Right(SigningDSL (CheckpointSigning (CheckpointCustody fourth sequenceNo))))->
             identity=="deployment" && identifier=="payment" && generation==3 && other==identity && decision==7 && third==identity && parent=="parent" && units fee==2 && fourth==identity && sequenceNo==9
           _->False
-    , check "each associated constraint type is distinct and survives DSL resolution" $ once $ property $
-        let identities=[typeRep(Proxy @(OperationContext 'Customer 'Safe CustomerCommand))
-              ,typeRep(Proxy @(OperationContext 'Customer 'Critical CustomerCommand))
-              ,typeRep(Proxy @(OperationContext 'Operator 'Safe OperatorCommand))
-              ,typeRep(Proxy @(OperationContext 'Operator 'Critical OperatorCommand))
-              ,typeRep(Proxy @(OperationContext 'Worker 'Critical WorkerCommand))
-              ,typeRep(Proxy @(OperationContext 'Signer 'Critical SignerCommand))]
-            select :: Request caller severity a -> T.Text
-            select request=case checkedRequest request of
+    , check "library context identity preserves caller and severity through existential preparation" $ once $ property $
+        let identities=[typeRep(Proxy @(Context (CustomerCommand 'Safe ())))
+              ,typeRep(Proxy @(Context (CustomerCommand 'Critical ())))
+              ,typeRep(Proxy @(Context (OperatorCommand 'Safe ())))
+              ,typeRep(Proxy @(Context (OperatorCommand 'Critical ())))
+              ,typeRep(Proxy @(Context (WorkerCommand 'Critical ())))
+              ,typeRep(Proxy @(Context (SignerCommand 'Critical ())))]
+            select :: Pending caller severity a -> T.Text
+            select request=case checkedOperation request of
               Left _->"mismatch"
               Right operation->case operation of
                 ReadCustomer{}->"customer-read"
@@ -77,18 +78,31 @@ fullSuite = do
                 WorkerDSL{}->"worker"
                 SigningDSL{}->"signer"
         in length(nub identities)==6 && and
-          [select(Request $ CustomerQuery PublicConfig)=="customer-read"
-          ,select(Request $ OperatorQuery ServiceState)=="operator-read"
-          ,select(Request $ CustomerChange $ CreateOrder "auth" $ W.OrderRequest NativeToWrapped (good $ amount 100) "dest" "refund" Nothing "key")=="customer-write"
-          ,select(Request $ OperatorChange $ PauseService "reason")=="operator-write"
-          ,select(workerRequest RunWorkerCycle)=="worker"
-          ,select(Request $ SignerAction $ PreparedSigning $ SignPrepared "deployment" "payment" 3)=="signer"]
+          [select(pending $ CustomerQuery PublicConfig)=="customer-read"
+          ,select(pending $ OperatorQuery ServiceState)=="operator-read"
+          ,select(pending $ CustomerChange $ CreateOrder "auth" $ W.OrderRequest NativeToWrapped (good $ amount 100) "dest" "refund" Nothing "key")=="customer-write"
+          ,select(pending $ OperatorChange $ \cap -> pauseService cap "reason")=="operator-write"
+          ,select(workerRequest runWorkerCycle)=="worker"
+          ,select(pending $ SignerAction $ PreparedSigning $ SignPrepared "deployment" "payment" 3)=="signer"]
     , check "distinct dictionary constraints and signer outputs have no equality witness" $ once $ property $
-        absent(eqT @(OperationContext 'Customer 'Safe CustomerCommand) @(OperationContext 'Customer 'Critical CustomerCommand))
-        && absent(eqT @(OperationContext 'Worker 'Critical WorkerCommand) @(OperationContext 'Signer 'Critical SignerCommand))
+        absent(eqT @(Context (CustomerCommand 'Safe ())) @(Context (CustomerCommand 'Critical ())))
+        && absent(eqT @(Context (WorkerCommand 'Critical ())) @(Context (SignerCommand 'Critical ())))
         && absent(eqT @PreparedResult @ReplacementResult) && absent(eqT @PreparedResult @DraftResult)
         && absent(eqT @PreparedResult @CheckpointResult) && absent(eqT @ReplacementResult @DraftResult)
         && absent(eqT @ReplacementResult @CheckpointResult) && absent(eqT @DraftResult @CheckpointResult)
+    , check "library existential dispatch preserves payload and rejects a different caller" $ once $ property $
+        let selector = Compile :: DSL (CustomerCommand 'Safe W.PublicConfiguration)
+            mismatch = interpret (SomeOperation (WorkerAction runWorkerCycle)) selector
+        in case (checkedOperation (pending $ CustomerQuery PublicConfig), mismatch) of
+          (Right (ReadCustomer PublicConfig), Nothing) -> True
+          _ -> False
+    , check "existential interpreter rejects changed severity and signer result" $ once $ property $
+        let order=W.OrderRequest NativeToWrapped (good $ amount 100) "dest" "refund" Nothing "key"
+            wrongSeverity=interpret (SomeOperation (CustomerChange $ CreateOrder "auth" order))
+              (Compile :: DSL (CustomerCommand 'Safe W.OrderView))
+            wrongResult=interpret (SomeOperation (SignerAction $ PreparedSigning $ SignPrepared "deployment" "payment" 3))
+              (Compile :: DSL (SignerCommand 'Critical ReplacementResult))
+        in case (wrongSeverity,wrongResult) of (Nothing,Nothing)->True; _->False
     , check "result equality determines both severity and operation" $ once $ property $
         case resultIndices (Refl :: Result 'Critical SignPrepared :~: Result 'Critical SignPrepared) of
           (Refl,Refl)->True
@@ -183,20 +197,20 @@ handlerContract =
   let config :<|> create :<|> status :<|> instructions = customerServer
       inputRequest = W.OrderRequest NativeToWrapped (good $ amount 100) "destination" "refund" Nothing "key"
       configOK = case config of
-        SafePlan req -> case checkedRequest req of Right(ReadCustomer PublicConfig) -> True; _ -> False
+        SafePlan req -> case checkedOperation req of Right(ReadCustomer PublicConfig) -> True; _ -> False
         _ -> False
       createOK = case create "auth" inputRequest of
-        CriticalPlan req -> case checkedRequest req of
+        CriticalPlan req -> case checkedOperation req of
           Right(WriteCustomer (CreateOrder auth saved)) -> auth=="auth" && saved==inputRequest
           _ -> False
         _ -> False
       statusOK = case status "order" "auth" of
-        SafePlan req -> case checkedRequest req of
+        SafePlan req -> case checkedOperation req of
           Right(ReadCustomer (OrderStatus auth oid)) -> auth=="auth" && oid=="order"
           _ -> False
         _ -> False
       instructionsOK = case instructions "order" "auth" of
-        SafePlan req -> case checkedRequest req of
+        SafePlan req -> case checkedOperation req of
           Right(ReadCustomer (PaymentInstructions auth oid)) -> auth=="auth" && oid=="order"
           _ -> False
         _ -> False

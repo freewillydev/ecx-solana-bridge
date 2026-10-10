@@ -1,14 +1,17 @@
-{-# LANGUAGE DataKinds, FunctionalDependencies, RoleAnnotations, TypeFamilies, TypeFamilyDependencies, ConstraintKinds, UndecidableSuperClasses, TypeApplications, ScopedTypeVariables #-}
+{-# LANGUAGE FlexibleInstances, DataKinds, FunctionalDependencies, RoleAnnotations, TypeFamilies, TypeFamilyDependencies, ConstraintKinds, UndecidableSuperClasses, TypeApplications, ScopedTypeVariables, RankNTypes, QuantifiedConstraints, UndecidableInstances #-}
 {-# OPTIONS_GHC -Werror=incomplete-patterns #-}
--- Closed grammar and evaluation contract. Requests carry data, never IO callbacks.
+-- Closed grammar and capability contract. Handler selections cannot supply IO.
 module Bridge.Operation.Internal where
 
 import Data.Aeson (ToJSON,FromJSON(..),genericParseJSON,defaultOptions,Options(..))
 import GHC.Generics (Generic)
 import Bridge.Domain (Asset,Amount)
 import Bridge.Wire
-import Data.Kind (Constraint,Type)
-import Data.Typeable (Typeable)
+import Data.Kind (Type,Constraint)
+import Data.Typeable (Typeable,eqT)
+import Data.Proxy (Proxy(..))
+import Data.Type.Equality ((:~:)(Refl))
+import Control.Operation
 import Data.Text (Text)
 import Data.Int (Int64)
 
@@ -21,14 +24,14 @@ data Caller = Customer | Signer | Worker | Operator
 -- Concrete instances live beside the evaluators; constructors stay private there.
 data family Evaluation (severity :: Severity)
 
-class Typeable (OperationContext caller severity op)
-    => Operation (caller :: Caller) (severity :: Severity) (op :: Severity -> Type -> Type)
+-- Closed effect capability; the general operation/pipeline machinery is supplied
+-- by operation-capabilities. No evaluation environment enters a pure pipeline.
+class (Typeable caller,Typeable severity,Typeable op)
+    => Execution (caller :: Caller) (severity :: Severity) (op :: Severity -> Type -> Type)
     | caller -> op, op -> caller where
-  type OperationContext caller severity op = (context :: Constraint) | context -> caller severity op
-  command :: op severity a -> DSL caller severity a
-  interpretOperation :: DSL caller severity a -> Either Text (DSL caller severity a)
-  authorizeOperation :: Evaluation severity -> op severity a -> IO ()
-  evaluateOperation :: Evaluation severity -> op severity a -> IO a
+  command :: Typeable a => op severity a -> Program caller severity a
+  authorizeOperation :: Typeable a => Evaluation severity -> op severity a -> IO ()
+  evaluateOperation :: Typeable a => Evaluation severity -> op severity a -> IO a
 
 data CustomerRead a where
   PublicConfig :: CustomerRead PublicConfiguration
@@ -43,25 +46,25 @@ data OperatorRead a where
   ServiceState :: OperatorRead ServiceStatus
   TreasuryReceipts :: OperatorRead [(Text,Asset,Amount)]
 
-data OperatorWrite a where
-  RepairCompletedOrder :: Text -> OperatorWrite ()
-  RebroadcastNative :: Text -> Int64 -> Text -> OperatorWrite Text
-  DraftNativeReplacement :: Text -> Amount -> Text -> OperatorWrite Int64
-  SignNativeReplacement :: Int64 -> OperatorWrite Text
-  CancelNativeReplacement :: Int64 -> Text -> OperatorWrite ()
-  CoverLostSource :: Text -> Int64 -> Amount -> Amount -> Text -> OperatorWrite ()
-  ApproveCovered :: Text -> Int64 -> Text -> OperatorWrite ()
-  RestoreSource :: Text -> Int64 -> Text -> OperatorWrite ()
-  ClassifySpend :: Text -> Text -> Text -> OperatorWrite Int64
-  InitializeOperating :: Text -> Text -> Text -> OperatorWrite Int64
-  AllocateReceipt :: Text -> [(Text,Amount)] -> Text -> OperatorWrite Int64
-  WithdrawFees :: Text -> Asset -> Amount -> Text -> Text -> OperatorWrite Text
-  CancelFeeWithdrawal :: Text -> Text -> OperatorWrite Text
-  RetrySolanaPayment :: Text -> Text -> OperatorWrite ()
-  CancelPreparation :: Text -> Int -> Text -> OperatorWrite ()
-  RefundDeposit :: Text -> OperatorWrite RefundAuthorization
-  PauseService :: Text -> OperatorWrite ()
-  ResumeService :: OperatorWrite ()
+class OperatorWrite value where
+  repairCompletedOrder :: value -> Text -> Program 'Operator 'Critical ()
+  rebroadcastNative :: value -> Text -> Int64 -> Text -> Program 'Operator 'Critical Text
+  draftNativeReplacement :: value -> Text -> Amount -> Text -> Program 'Operator 'Critical Int64
+  signNativeReplacement :: value -> Int64 -> Program 'Operator 'Critical Text
+  cancelNativeReplacement :: value -> Int64 -> Text -> Program 'Operator 'Critical ()
+  coverLostSource :: value -> Text -> Int64 -> Amount -> Amount -> Text -> Program 'Operator 'Critical ()
+  approveCovered :: value -> Text -> Int64 -> Text -> Program 'Operator 'Critical ()
+  restoreSource :: value -> Text -> Int64 -> Text -> Program 'Operator 'Critical ()
+  classifySpend :: value -> Text -> Text -> Text -> Program 'Operator 'Critical Int64
+  initializeOperating :: value -> Text -> Text -> Text -> Program 'Operator 'Critical Int64
+  allocateReceipt :: value -> Text -> [(Text,Amount)] -> Text -> Program 'Operator 'Critical Int64
+  withdrawFees :: value -> Text -> Asset -> Amount -> Text -> Text -> Program 'Operator 'Critical Text
+  cancelFeeWithdrawal :: value -> Text -> Text -> Program 'Operator 'Critical Text
+  retrySolanaPayment :: value -> Text -> Text -> Program 'Operator 'Critical ()
+  cancelPreparation :: value -> Text -> Int -> Text -> Program 'Operator 'Critical ()
+  refundDeposit :: value -> Text -> Program 'Operator 'Critical RefundAuthorization
+  pauseService :: value -> Text -> Program 'Operator 'Critical ()
+  resumeService :: value -> Program 'Operator 'Critical ()
 
 -- Data families are generative and injective in BOTH indices. No type-family
 -- injectivity annotation is needed. Each instance has its own output constructor.
@@ -97,86 +100,136 @@ data SignReplacement a where
 data SignPrepared a where
   SignPrepared :: Text -> Text -> Int -> SignPrepared PreparedResult
 
--- Closed signer instruction set, populated by the Operation.command instances.
+-- Closed signer instruction set, populated by the Execution.command instances.
 data SigningOperation a where
   PreparedSigning :: SignPrepared a -> SigningOperation a
   ReplacementSigning :: SignReplacement a -> SigningOperation a
   DraftSigning :: DraftReplacement a -> SigningOperation a
   CheckpointSigning :: CheckpointCustody a -> SigningOperation a
 
-data WorkerOperation a where
-  CheckpointBackup :: Int64 -> WorkerOperation ()
-  CheckpointForUpgrade :: WorkerOperation BackupReceipt
-  RecoverNativeSettlements :: WorkerOperation ()
-  RecoverNativeSources :: WorkerOperation ()
-  RecoverNativeLocks :: WorkerOperation ()
-  RunWorkerCycle :: WorkerOperation ()
-  ObserveChains :: WorkerOperation ()
-  PrepareOutgoing :: Text -> WorkerOperation ()
-  ReconcileCustody :: WorkerOperation ()
-  SignPreparedPayment :: Text -> WorkerOperation Text
-  ReconcilePayment :: Text -> WorkerOperation ()
-  QueuePayment :: Text -> WorkerOperation Int64
-  BroadcastPayment :: Text -> WorkerOperation ()
+class WorkerOperations value where
+  checkpointBackup :: value -> Int64 -> Program 'Worker 'Critical ()
+  checkpointForUpgrade :: value -> Program 'Worker 'Critical BackupReceipt
+  recoverNativeSettlements :: value -> Program 'Worker 'Critical ()
+  recoverNativeSources :: value -> Program 'Worker 'Critical ()
+  recoverNativeLocks :: value -> Program 'Worker 'Critical ()
+  runWorkerCycle :: value -> Program 'Worker 'Critical ()
+  observeChains :: value -> Program 'Worker 'Critical ()
+  prepareOutgoing :: value -> Text -> Program 'Worker 'Critical ()
+  reconcileCustody :: value -> Program 'Worker 'Critical ()
+  signPreparedPayment :: value -> Text -> Program 'Worker 'Critical Text
+  reconcilePayment :: value -> Text -> Program 'Worker 'Critical ()
+  queuePayment :: value -> Text -> Program 'Worker 'Critical Int64
+  broadcastPayment :: value -> Text -> Program 'Worker 'Critical ()
 
--- These closed families are the only Operation instances. Their constructors
--- retain the precise severity and leaf result, including Result 'Critical op.
-data CustomerCommand severity a where
-  CustomerQuery :: CustomerRead a -> CustomerCommand 'Safe a
-  CustomerChange :: CustomerWrite a -> CustomerCommand 'Critical a
-data OperatorCommand severity a where
-  OperatorQuery :: OperatorRead a -> OperatorCommand 'Safe a
-  OperatorChange :: OperatorWrite a -> OperatorCommand 'Critical a
-data WorkerCommand severity a where
-  WorkerAction :: WorkerOperation a -> WorkerCommand 'Critical a
-data SignerCommand severity a where
-  SignerAction :: SigningOperation a -> SignerCommand 'Critical a
+-- One closed payload GADT carries caller, severity and the exact result type.
+-- Family aliases retain the evaluator's caller -> family functional dependency.
+data Command (caller :: Caller) (severity :: Severity) a where
+  CustomerQuery :: CustomerRead a -> Command 'Customer 'Safe a
+  CustomerChange :: CustomerWrite a -> Command 'Customer 'Critical a
+  OperatorQuery :: OperatorRead a -> Command 'Operator 'Safe a
+  OperatorChange :: (forall value. OperatorWrite value => value -> Program 'Operator 'Critical a) -> Command 'Operator 'Critical a
+  WorkerAction :: (forall value. WorkerOperations value => value -> Program 'Worker 'Critical a) -> Command 'Worker 'Critical a
+  SignerAction :: SigningOperation a -> Command 'Signer 'Critical a
 
--- Each constructor stores the SAME filled-in class context as its Request.
+type CustomerCommand = Command 'Customer
+type OperatorCommand = Command 'Operator
+type WorkerCommand = Command 'Worker
+type SignerCommand = Command 'Signer
+
+-- Concrete action constructors exist only in the evaluator module.
+data family Action (caller :: Caller) a
+
+-- Each constructor stores the same closed execution capability as its operation.
 -- Caller/severity cannot be weakened when command constructs the DSL.
-data DSL (caller :: Caller) (severity :: Severity) a where
-  ReadOperator :: OperationContext 'Operator 'Safe OperatorCommand => OperatorRead a -> DSL 'Operator 'Safe a
-  OperatorDSL :: OperationContext 'Operator 'Critical OperatorCommand => OperatorWrite a -> DSL 'Operator 'Critical a
-  WorkerDSL :: OperationContext 'Worker 'Critical WorkerCommand => WorkerOperation a -> DSL 'Worker 'Critical a
-  SigningDSL :: OperationContext 'Signer 'Critical SignerCommand => SigningOperation a -> DSL 'Signer 'Critical a
-  ReadCustomer :: OperationContext 'Customer 'Safe CustomerCommand => CustomerRead a -> DSL 'Customer 'Safe a
-  WriteCustomer :: OperationContext 'Customer 'Critical CustomerCommand => CustomerWrite a -> DSL 'Customer 'Critical a
+data Program (caller :: Caller) (severity :: Severity) a where
+  ReadOperator :: (Typeable a, Execution 'Operator 'Safe OperatorCommand) => OperatorRead a -> Program 'Operator 'Safe a
+  OperatorDSL :: (Typeable a, Execution 'Operator 'Critical OperatorCommand) => Action 'Operator a -> Program 'Operator 'Critical a
+  WorkerDSL :: (Typeable a, Execution 'Worker 'Critical WorkerCommand) => Action 'Worker a -> Program 'Worker 'Critical a
+  SigningDSL :: (Typeable a, Execution 'Signer 'Critical SignerCommand) => SigningOperation a -> Program 'Signer 'Critical a
+  ReadCustomer :: (Typeable a, Execution 'Customer 'Safe CustomerCommand) => CustomerRead a -> Program 'Customer 'Safe a
+  WriteCustomer :: (Typeable a, Execution 'Customer 'Critical CustomerCommand) => CustomerWrite a -> Program 'Customer 'Critical a
 
--- The existential hides the caller's family (e.g. SignerCommand). Its result a
--- still retains the leaf's Result indices (e.g. Result 'Critical SignPrepared).
-data Request (caller :: Caller) (severity :: Severity) a where
-  Request :: Operation caller severity op => op severity a -> Request caller severity a
+-- The library existential hides the command family. Its nominal capability
+-- indices retain caller, severity and result without a second request wrapper.
+class (Typeable caller, Typeable severity, Typeable a,
+       Outcome value ~ Program caller severity a)
+    => CompileOperation (caller :: Caller) (severity :: Severity) a value
+    | value -> caller severity a where
+  compileOperation :: value -> Program caller severity a
+  operationDSL :: value -> DSL value
 
-type role Request nominal nominal nominal
-resolve :: Request caller severity a -> DSL caller severity a
-resolve (Request op) = command op
+-- Domain methods are real library capabilities on the hidden command payload.
+-- Other callers retain their small closed GADTs (notably the signer boundary).
+type family DomainCaps (caller :: Caller) (severity :: Severity) :: [Type -> Constraint] where
+  DomainCaps 'Operator 'Critical = '[OperatorWrite]
+  DomainCaps 'Worker 'Critical = '[WorkerOperations]
+  DomainCaps caller severity = '[]
+type PreparationCaps caller severity a = CompileOperation caller severity a ': DomainCaps caller severity
+-- Servant needs a partially applied Type -> Type constructor, hence this
+-- zero-cost newtype rather than an unsaturated type synonym. The existential
+-- and its capability evidence belong entirely to the library.
+newtype Pending caller severity a = Pending (SomeOperationWith
+  (PreparationCaps caller severity a) (PreparationCaps caller severity a))
+type role Pending nominal nominal nominal
 
--- Select the original request instance explicitly, then compare its constraint
--- type with the DSL's recovered type. This does not compare dictionary values.
-checkedRequest :: forall caller severity a. Request caller severity a -> Either Text (DSL caller severity a)
-checkedRequest (Request (op :: requested severity a)) =
-  interpretOperation @caller @severity @requested (command op)
+pending :: (Operation value (PreparationCaps caller severity a),
+            Capabilities (PreparationCaps caller severity a) value,
+            Subset (PreparationCaps caller severity a) (PreparationCaps caller severity a))
+        => value -> Pending caller severity a
+pending = Pending . prepare
+
+-- The generic compilation boundary sees only CompileOperation. It receives no
+-- evaluation environment and cannot call Execution methods. Interpretation is
+-- explicit and total: a mismatched existential is rejected, never cast or forced.
+checkedOperation :: forall caller severity a. Pending caller severity a -> Either Text (Program caller severity a)
+checkedOperation (Pending operations) = do
+  compilation <- either (const $ Left "operation_capability_mismatch") Right $
+    pipeline (Restrict (Proxy @'[CompileOperation caller severity a])) operations
+  withCapabilities (\value -> maybe (Left "operation_dictionary_mismatch") Right
+    (interpret (forgetCapabilities compilation) (operationDSL value))) compilation
+
+instance (Typeable a, Execution caller severity (Command caller))
+    => CompileOperation caller severity a (Command caller severity a) where
+  compileOperation = command
+  operationDSL _ = Compile
+
+instance (Typeable a, Execution caller severity (Command caller),
+          caps ~ PreparationCaps caller severity a, UniqueCapabilities caps)
+    => Operation (Command caller severity a) caps where
+  type Context (Command caller severity a) = CompileOperation caller severity a (Command caller severity a)
+  type Outcome (Command caller severity a) = Program caller severity a
+  data DSL (Command caller severity a) where
+    Compile :: CompileOperation caller severity a (Command caller severity a)
+      => DSL (Command caller severity a)
+  interpret (SomeOperation (value :: actual)) Compile =
+    case eqT @actual @(Command caller severity a) of
+      Just Refl -> Just (compileOperation value)
+      Nothing -> Nothing
 
 -- Retain caller identity through dispatch; a critical customer operation cannot
 -- be substituted with a critical operator or signer operation as grammar grows.
 data Plan (caller :: Caller) a where
-  SafePlan :: Request caller 'Safe a -> Plan caller a
-  CriticalPlan :: Request caller 'Critical a -> Plan caller a
+  SafePlan :: Pending caller 'Safe a -> Plan caller a
+  CriticalPlan :: Pending caller 'Critical a -> Plan caller a
 
 type role Plan nominal nominal
-safe :: Operation 'Customer 'Safe CustomerCommand => CustomerRead a -> Plan 'Customer a
-safe = SafePlan . Request . CustomerQuery
-customer :: Operation 'Customer 'Critical CustomerCommand => CustomerWrite a -> Plan 'Customer a
-customer = CriticalPlan . Request . CustomerChange
+safe :: (Typeable a, Execution 'Customer 'Safe CustomerCommand) => CustomerRead a -> Plan 'Customer a
+safe = SafePlan . pending . CustomerQuery
+customer :: (Typeable a, Execution 'Customer 'Critical CustomerCommand) => CustomerWrite a -> Plan 'Customer a
+customer = CriticalPlan . pending . CustomerChange
 
-operator :: Operation 'Operator 'Critical OperatorCommand => OperatorWrite a -> Plan 'Operator a
-operator=CriticalPlan . Request . OperatorChange
-operatorRead :: Operation 'Operator 'Safe OperatorCommand => OperatorRead a -> Plan 'Operator a
-operatorRead=SafePlan . Request . OperatorQuery
+operator :: (Typeable a, Execution 'Operator 'Critical OperatorCommand, OperatorWrite (OperatorCommand 'Critical a))
+         => (forall value. OperatorWrite value => value -> Program 'Operator 'Critical a) -> Plan 'Operator a
+operator select=CriticalPlan (pending $ OperatorChange select)
+operatorRead :: (Typeable a, Execution 'Operator 'Safe OperatorCommand) => OperatorRead a -> Plan 'Operator a
+operatorRead=SafePlan . pending . OperatorQuery
 
-workerRequest :: Operation 'Worker 'Critical WorkerCommand => WorkerOperation a -> Request 'Worker 'Critical a
-workerRequest = Request . WorkerAction
+workerRequest :: (Typeable a, Execution 'Worker 'Critical WorkerCommand, WorkerOperations (WorkerCommand 'Critical a))
+              => (forall value. WorkerOperations value => value -> Program 'Worker 'Critical a) -> Pending 'Worker 'Critical a
+workerRequest select = pending (WorkerAction select)
 
 -- Pure HTTP/control assembly carries these closed instance requirements.
-type CustomerOperations = (Operation 'Customer 'Safe CustomerCommand, Operation 'Customer 'Critical CustomerCommand)
-type OperatorOperations = (Operation 'Operator 'Safe OperatorCommand, Operation 'Operator 'Critical OperatorCommand)
+type CustomerOperations = (Execution 'Customer 'Safe CustomerCommand, Execution 'Customer 'Critical CustomerCommand)
+class (Execution 'Operator 'Safe OperatorCommand, Execution 'Operator 'Critical OperatorCommand,
+       forall a. OperatorWrite (OperatorCommand 'Critical a)) => OperatorOperations
