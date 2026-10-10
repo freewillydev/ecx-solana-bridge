@@ -175,3 +175,9 @@ Next meaningfulreleasework: plan pristinefinalartifactinstall and finalfunded/re
 Freshguided_accounting_review initialFAIL caught B8.unpack doubleencoding; fixed withTE.decodeUtf8 thenT.unpack. FinalscopedstaticPASS aftercorrection. Actualwizardtest expandedblankrejection,Unicodepreservation and0600answerfile; doesnotclaim startupdispatchtest. Diff6files runtime~18netlines/test3net plusdocs.
 
 ACTIVE remoteLinux job858f8fb8-86ee-4c24-8e3b-66edd0ad4884 onbuildi-0a62cafbef864b8a7: exact9adb0f7 cachedallbuild+bridge-test only. Logs /home/ubuntu/ecx/release-9adb0f7-{build,tests}.log. No localbuild underdiskhold. PollSAMEjob; no package/deployment yet. AfterPASS need focusedsecuritydiff and actualguidedstartupacceptance, ideally pristinefinalcandidate ratherthanrepeatingoldsetup. Existing5e75b7d draft/verifiedruntime and prioracceptance preserved; newsource changes mean previousscan/buildartifact notfinalsourceapproval. Stopbuildhostafterwork; freshhoststopped; fundedpilot82edrunning.
+
+## Latest funding confirmation and terminal verification
+
+Public Mainnet finalized read of fresh-host owner9Dfte8EDq1L9F2N4qTuMqtAEZUmDcvXpCu7EGXEHVcjY confirms balance1506560lamports at slot455107494. Latest history contains only saved initial funding3PSqUzwFVUjo2nXZ3pzJczNf62EHgLAehmC1jqqZMovKd6r2nMhbzDvkH7SE61CvA2Zu5qtdeYeRfDWcFSAjCvsA and savedATAcreation4t68xvEFwSYUFDhRuD1QGHAjEiMNZnHqexNKPxhnVidtdMxViKgaqrBLGeNRMTn97hxpWS23FQzumAJfcoZW276G; both finalized/success. This confirms existing funding, not a new additional transfer. No funds moved.
+
+Linux858f8fb8 terminalSuccess0; receipt56029052 confirms bridge-testPASS. Exact9adb0f7 allbuild+bridge-test completed; no package/deployment. Stop requested for idlebuildhost. Next: focused Security diff5e75b7d..9adb0f7 and real guided startup/pristine final-artifact acceptance. Preserve existing funded identities and savedattempts. Full production gates remain unchanged.
