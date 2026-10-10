@@ -17,7 +17,7 @@ import Crypto.MAC.HMAC (hmac,HMAC)
 import Crypto.Hash (SHA256)
 import Crypto.Random (getRandomBytes)
 import Bridge.AdminKey (savePrivate)
-import Bridge.Wallet (mnemonic,walletKey,nativeDescriptors)
+import Bridge.Wallet (mnemonic,mixWalletEntropy,walletKey,nativeDescriptors)
 import Bridge.NativeKey (deriveChild)
 import qualified Bridge.Native as N
 import Bridge.Wire (Profile(..))
@@ -167,6 +167,15 @@ walletProperty=forAll (vectorOf 16 arbitrary) $ \(entropy::[Word8])->
   conjoin [case mnemonic (B.pack entropy) >>= walletKey of
              Right key->property (B.length key==64)
              Left _->property False
+          ,let randomBytes=B.pack (entropy<>entropy)
+               mixed=mixWalletEntropy "ecx" randomBytes "user text"
+           in conjoin [mixWalletEntropy "ecx" randomBytes ""===Right(B.pack entropy)
+              ,property (mixed/=mixWalletEntropy "solana" randomBytes "user text")
+              ,property (mixed/=mixWalletEntropy "ecx" (B.map (+1) randomBytes) "user text")
+              ,property (case mixed >>= mnemonic >>= walletKey of Right key->B.length key==64; _->False)
+              ,mixWalletEntropy "ecx" (B.pack entropy) "user text"===Left "invalid_wallet_entropy"
+              ,mixWalletEntropy "unknown" randomBytes ""===Left "invalid_wallet_entropy"
+              ,fmap (Hex.convertToBase Hex.Base16) (mixWalletEntropy "ecx" (B.pack [0..31]) "user text")===Right ("036bc3ecde7438a76a14bda8ca31c72f" :: B.ByteString)]
           ,ioProperty (nativeScalarContract entropy)
           ,conjoin [counterexample "BIP39/SLIP10 known vector mismatch" $
              mnemonic (B.replicate 16 byte)==Right phrase &&
@@ -321,13 +330,14 @@ simpleContract parent executable=do
                     char<-hGetChar reader
                     let next=drop (max 0 (length found+1-max 256 (length needle))) (found<>[char])
                     unless (not $ any (`isInfixOf` next)
-                      ["Solana Mainnet RPC URL","Independent Mainnet RPC URL","Write down these 12 solana recovery words",priorPhrase])
+                      ["Solana Mainnet RPC URL","Independent Mainnet RPC URL","Write down these 12 solana recovery words","Additional randomness for solana","private-entropy-fixture",priorPhrase])
                       (fail "wizard_repeated_completed_prompt_or_phrase")
                     if needle `isSuffixOf` next then pure () else go next (count+1)
                 answer label value=await label >> await ": " >> hPutStrLn writer value >> hFlush writer
                 ack=await "Type saved once you have backed up the phrase:" >> hPutStrLn writer "saved" >> hFlush writer
             answer "NEW HTTPS restic repository URL" "https://backup.example.invalid/repository"
             answer "Public HTTPS origin" "-"
+            answer "Additional randomness for ecx (hidden; Enter skips)" "private-entropy-fixture"
             ack
             -- EOF can make script terminate the child before setup saves.
             await "Saved private setup"

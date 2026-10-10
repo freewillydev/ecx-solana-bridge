@@ -12,7 +12,7 @@ import Bridge.RPC (independentHttps)
 import Bridge.SDKBuild (sdkLibraryPath,sdkSourceDirectory)
 import Bridge.BrowserBuild (browserAssetsDirectory)
 import System.Environment (getExecutablePath)
-import Bridge.Wallet (mnemonic,walletKey,nativeDescriptors,derivationPath,protectWalletProcess)
+import Bridge.Wallet (mnemonic,mixWalletEntropy,walletKey,nativeDescriptors,derivationPath,protectWalletProcess)
 import qualified Bridge.Native as N
 import Bridge.SolanaMessage (base58)
 import Crypto.Random (getRandomBytes)
@@ -41,7 +41,7 @@ import qualified Data.Text as T
 import System.Directory (makeAbsolute,canonicalizePath,removeDirectoryRecursive,doesFileExist,doesDirectoryExist,findExecutable)
 import System.FilePath ((</>),takeDirectory,addTrailingPathSeparator)
 import qualified System.Posix.Directory as P
-import System.IO (hFlush,stdout,stdin,isEOF,hIsTerminalDevice,withFile,IOMode(ReadWriteMode),hPutStrLn,hPutStr,hGetLine)
+import System.IO (hFlush,stdout,stdin,isEOF,hIsTerminalDevice,withFile,IOMode(ReadWriteMode),hPutStrLn,hPutStr,hGetLine,hGetEcho,hSetEcho,hGetChar)
 
 -- The default path is fresh canonical custody. Advanced/recovery remains explicit.
 configure :: IO ()
@@ -361,7 +361,21 @@ prepareSeed directory asset mode=do
     pure value
    else case recovery of
     Just value->pure value
-    Nothing->getRandomBytes 16 >>= either reject pure . mnemonic
+    Nothing->do
+      extra<-withFile "/dev/tty" ReadWriteMode $ \terminal->
+        bracket (hGetEcho terminal) (hSetEcho terminal) $ \_->do
+          hSetEcho terminal False
+          hPutStrLn terminal "Optional: add your own randomness. Your text is mixed with fresh cryptographically secure system randomness; it does not replace it. Input is hidden and is not saved or logged. Press Enter to skip."
+          hPutStr terminal $ "Additional randomness for "<>asset<>" (hidden; Enter skips): "
+          hFlush terminal
+          let collect n chars=do
+                char<-hGetChar terminal
+                if char=='\n' then pure (T.pack $ reverse chars) else do
+                  require (n<4096) "additional_randomness_too_long"
+                  collect (n+1::Int) (char:chars)
+          collect 0 [] `finally` (hPutStrLn terminal "" >> hFlush terminal)
+      randomBytes<-getRandomBytes 32
+      either reject pure (mixWalletEntropy asset randomBytes extra >>= mnemonic)
   when (not saved) $ savePrivate phraseFile (B8.pack $ phrase<>"\n")
   putStrLn $ "Recovery file saved privately in "<>output<>". Preserve it even if setup is cancelled."
   let acknowledgement=output</>(asset<>"-recovery.saved")

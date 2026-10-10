@@ -35,6 +35,12 @@ It asks for four inputs (Enter accepts displayed defaults):
 
 The managed pruned ECX node is automatic: `/var/lib/ecx-betanet/bitcoin.conf`,
 `ecx-betanet.service`, and loopback RPC port 28532. No node-path prompt is needed.
+New ECX and Solana wallets optionally accept hidden typed text as additional
+randomness. It is mixed with 32 fresh CSPRNG bytes using domain-separated SHA-256;
+blank input skips mixing. The text is not saved or logged, and is not a recovery
+password: preserve the generated phrase. Existing saved wallets and phrase recovery
+do not prompt for additional randomness or generate replacement keys.
+
 Fresh managed ECX nodes bootstrap from a checksum-pinned, chain-only snapshot by
 default, then catch up and verify the configured checkpoint before bridge startup.
 The download is approximately 11 GB and needs 27 GiB total staging space including

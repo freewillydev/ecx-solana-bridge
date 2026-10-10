@@ -24,7 +24,8 @@ repository with access credentials**. For public HTTPS, also have a domain and
 certificate/key files; otherwise choose local testing.
 
 Choose **Set up this server**, answer the prompts and save both recovery phrases
-and the backup encryption password. Use **Funding** for addresses and explicit
+and the backup encryption password. New wallets offer optional hidden text to add
+to fresh system randomness; recovery still uses the saved phrase. Use **Funding** for addresses and explicit
 allocation of your verified deposits; use **Continue** for checked startup.
 Node synchronization takes time. Orders stay paused until readiness checks pass.
 Keep independent ledger backups: wallet keys alone do not recover pending transfers.

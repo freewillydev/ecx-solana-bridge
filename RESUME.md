@@ -2,6 +2,10 @@
 
 Owner: WRAPPED ECX SOL (01a0f386-08b9-7611-896d-93fd473ea928), sole writer of ecx-bridge / codex/ubuntu-one-command. Read controller PROTOCOL.md and OWNERS.md before writes. Helpers/verifiers are read-only. Never delete data or replay completed payments. Public ingress remains OFF.
 
+## Latest optional entropy change — local acceptance
+
+Optional hidden additional randomness now supplements fresh OS entropy for new wallets only; existing saved/recovered keys remain unchanged. Final local bridge-test PASS at /tmp/ecx-optional-entropy-final-test.log; explicit ByteString test annotation fixed a compile ambiguity. Fresh read-only six_confirmation_verifier PASS for exact patch. No new keys or funded operations performed by this change. Linux build/tests/package of prior65e8822 completed Success/0 (SSM a5a99a8f-e625-4656-b86a-122acb891d5f), but the new entropy source still needs incremental Linux acceptance and final release review/upgrade. Fresh start3f053eb6-194d-4e35-8501-5f03e960ddf7 stopped safely at fund_solana_owner_then_rerun_start; pending user question requests0.003SOL at9Dfte8EDq1L9F2N4qTuMqtAEZUmDcvXpCu7EGXEHVcjY. Do not repeat setup or bypass existing custody accounting. Next: freeze this change, incremental Linux build/package and canonical PostgreSQL checks, final security diff review, then checked runtime upgrade. Public OFF; all unmet production gates remain FAIL.
+
 ## Latest requested changes — completed source and live-policy acceptance
 
 Source commits ed71ca1 and bbb07db are pushed. Luke's six-confirmation policy is active on the funded server: worker and signer configurations and both retained setup configs now use six. Old copies are preserved privately. Pinned local native build and full bridge-test PASS (/tmp/ecx-six-confirmations-build.log and /tmp/ecx-six-confirmations-test.log); fresh separate static verifier PASS for default/minimum6, preserved saved terms, README upgrade procedure, snapshot bootstrap and managed-console fix. Public ingress stays OFF; production remains FAIL.
