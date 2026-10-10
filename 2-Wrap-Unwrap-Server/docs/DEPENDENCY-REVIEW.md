@@ -1,5 +1,12 @@
 # Dependency review status
 
+The isolated capability refactor adds `operation-capabilities-0.1.0.0` from
+[freewillydev/operation-capabilities](https://github.com/freewillydev/operation-capabilities)
+at immutable commit `1c93d574cc48d4a8446c390e119b8fa04c93a659`. Its library depends
+only on `base`; the source contains no IO, unsafe casts or unsafe IO. The MIT
+license is retained upstream. Source inspection and compilation are not an
+independent security audit. Existing dependency inventories below predate this addition.
+
 The 2026-10-04 review used the actual native GHC 9.14.1 and JavaScript GHC 9.12.2
 Cabal plans, their freeze files, and the current Cargo.lock. It matched 36 published
 [Haskell advisories](https://github.com/haskell/security-advisories/tree/57073681929c733854f3222e3fa7d14c05262508)

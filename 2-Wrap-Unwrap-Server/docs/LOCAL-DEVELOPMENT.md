@@ -257,3 +257,25 @@ Record tests against their exact source/artifact and real-chain identities. Reus
 funded evidence only within its actual scope. Stop task-owned temporary processes,
 retain disposable databases/wallets until cleanup is authorized, and close temporary tabs after acceptance;
 preserve shared native/PostgreSQL services and funded custody.
+
+### Capability boundary compilation checks
+
+After building the core library, the positive control must compile; each negative
+variant must fail for the named missing capability or incompatible nominal index:
+
+```sh
+cabal exec -- ghc -fno-code -package ecx-bridge -package operation-capabilities \
+  2-Wrap-Unwrap-Server/test/CapabilityCompile.hs
+for check in BAD_COMPILE BAD_WIDEN BAD_CALLER BAD_SEVERITY BAD_RESULT BAD_COERCE; do
+  if cabal exec -- ghc -fno-code -package ecx-bridge -package operation-capabilities \
+      -D"$check" 2-Wrap-Unwrap-Server/test/CapabilityCompile.hs; then
+    echo "Unexpected compilation success: $check"
+    exit 1
+  fi
+done
+```
+
+Inspect diagnostics: a missing package or syntax error is not a passing negative
+test. `bridge-test` also checks actual existential dispatch, all customer/signer
+routes, and mismatched caller, severity and result interpretations. These checks
+are separate from PostgreSQL contracts and do not certify runtime authorization.

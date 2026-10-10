@@ -1,3 +1,4 @@
+{-# LANGUAGE LambdaCase #-}
 {-# LANGUAGE DataKinds, GADTs, RankNTypes #-}
 -- Actual WAI/Servant boundary; the closed evaluator returns public fixture data.
 -- Public/generated test keys only; no chain RPC or funds are used here.
@@ -101,11 +102,11 @@ checks=sequence
         Nothing->counterexample "SDK contract check exceeded 120 seconds" False
   , check "worker loop backs off after policy errors and propagates shutdown" $ once $ ioProperty $ do
       calls<-newIORef (0::Int)
-      let refuse :: forall a. Request 'Worker 'Critical a -> IO a
-          refuse request=case resolve request of
+      let refuse :: forall a. Pending 'Worker 'Critical a -> IO a
+          refuse request=either reject pure (checkedOperation request) >>= \case
             WorkerDSL RunWorkerCycle->modifyIORef' calls (+1) >> reject "offline_loop_contract"
             _->fail "loop dispatched unexpected operation"
-          stop :: forall a. Request 'Worker 'Critical a -> IO a
+          stop :: forall a. Pending 'Worker 'Critical a -> IO a
           stop _=throwIO ThreadKilled
       waited<-timeout 100000 (runWorkerLoop refuse)
       count<-readIORef calls
@@ -159,13 +160,13 @@ checks=sequence
             "deployment" "mint" "owner" 8 M.empty False False (W.Availability False "paused") Nothing
           instruction=W.PaymentInstruction "solana:fixture" "reference" "mint" amount "verified_source_owner"
           evaluate :: forall a. Plan 'Customer a -> IO a
-          evaluate (SafePlan value)=case resolve value of
+          evaluate (SafePlan value)=either reject pure (checkedOperation value) >>= \case
             ReadCustomer PublicConfig->modifyIORef' calls (<>["config"]) >> pure config
             ReadCustomer (OrderStatus header identifier)->do
               require (header=="Bearer fixture" && identifier=="order") "order_not_found"
               modifyIORef' calls (<>["read"]) >> pure order
             ReadCustomer (PaymentInstructions _ _)->modifyIORef' calls (<>["instructions"]) >> pure instruction
-          evaluate (CriticalPlan value)=case resolve value of
+          evaluate (CriticalPlan value)=either reject pure (checkedOperation value) >>= \case
             WriteCustomer (CreateOrder _ input)->require (input==request) "invalid_request" >> modifyIORef' calls (<>["create"]) >> pure order
           send method path headers body=srequest $ SRequest
             ((setPath defaultRequest path) {requestMethod=method,requestHeaders=headers}) body
@@ -212,8 +213,8 @@ checks=sequence
           result=SignedAttempt "fixture-id" "fixture-bytes" "fixture-proof" Nothing
           quantity=either (error . T.unpack) id (D.amount 2)
           unsigned=W.NativeDraft "fixture-psbt" (W.NativeTx "fixture-id" 2 0 [] []) [] quantity
-          evaluate :: forall a. Request 'Signer 'Critical a -> IO a
-          evaluate request=case resolve request of
+          evaluate :: forall a. Pending 'Signer 'Critical a -> IO a
+          evaluate request=either reject pure (checkedOperation request) >>= \case
             SigningDSL (CheckpointSigning (CheckpointCustody identity sequenceNo))->do
               modifyIORef' calls (<>[(identity,"checkpoint",fromIntegral sequenceNo)])
               pure $ CheckpointResult $ W.BackupReceipt identity sequenceNo (T.replicate 64 "a") (T.replicate 64 "b")

@@ -1,3 +1,34 @@
+# Isolated capability refactor continuation
+
+Owner: WRAPPED ECX SOL (2), branch codex/operation-capabilities,
+base847ee86a645cc1214c3cb96bbcd947213ab76687. No live-host authority.
+Dependency pinned1c93d574cc48d4a8446c390e119b8fa04c93a659.
+Current: custom Request existential removed. Pending is a zero-cost Servant
+adapter around library SomeOperationWith; one indexed Command and one argument-free
+Compile selector replace per-caller compilation plumbing. All imports unqualified.
+withCapabilities exposes only CompileOperation. No vacuous production pipeline;
+Stage/Pipeline restrictions tested separately. No financial/effect bodies changed.
+Final all-build and bridge-test PASS: /tmp/ecx-capabilities-build-final.log and
+/tmp/ecx-capabilities-tests-final.log. Positive + six intended compile failures PASS
+(/tmp/ecx-capabilities-positive-final.log and BAD_*-final.log). Fresh independent
+capability_verifier source/type PASS; exact hashes recorded in .audit/capabilities.tsv.
+Broader verification remains FAIL: pool CLI refusal hits its existing 10-second
+limit (both runs); token suite not reached. PostgreSQL contracts hard-code
+/tmp/ecx-pg-seam:29436, already occupied by another server. Our isolated private
+socket cluster therefore could not be used; stopped it and preserved all files.
+Evidence: /tmp/ecx-capabilities-pg-root, /tmp/ecx-capabilities-pg.log. No other
+server or databases modified. Do not call this a complete release PASS.
+Next: original owner integrates/reviews isolated branch and runs contracts in a
+clean supported environment. No production/merge authority here. X9 reserve HOLD:
+last free1.57GiB, no new builds/substantial writes until reserve+peak budget recover.
+No lane-owned VMs/databases/builds/tests left running after final checks.
+Browser bundle reused read-only from unchanged original sources and verified by
+existing Cabal manifest hook. Core source map: Operation.Internal + Critical +
+Signer, 3 files, 1221 -> 1232 physical lines (+11); reduced duplicate dispatch,
+not a net size-reduction claim. Reference Main.hs unchanged.
+
+Original release-owner checkpoint follows unchanged for context:
+
 # Release continuation
 
 Owner: WRAPPED ECX SOL (01a0f386-08b9-7611-896d-93fd473ea928), sole writer of ecx-bridge / codex/ubuntu-one-command. Read controller PROTOCOL.md and OWNERS.md. Helpers read-only. Never delete data or replay completed payments. Public ingress OFF. Production FAIL until every DONE.md gate passes; deadline does not waive gates.

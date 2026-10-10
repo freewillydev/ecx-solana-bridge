@@ -10,3 +10,9 @@ allow-newer: opaleye:base, postgresql-simple:base, postgresql-simple:template-ha
 
 -- Retain the Aeson exponent and X.509 Name Constraints security fixes.
 constraints: aeson >=2.2.5.1, crypton-x509 >=1.9.1, crypton-x509-validation >=1.9.1
+
+-- Immutable base-only capability preparation library.
+source-repository-package
+  type: git
+  location: https://github.com/freewillydev/operation-capabilities.git
+  tag: 1c93d574cc48d4a8446c390e119b8fa04c93a659

@@ -18,3 +18,15 @@ Current verdict: **FAIL / not production ready**. No criterion is waived by a sc
 Verification instructions: [AGENTS.md](AGENTS.md#how-to-run-and-verify-this-project). Evidence and decisions: [.audit/release.tsv](.audit/release.tsv). Resume: [RESUME.md](RESUME.md).
 
 External dependencies intentionally deferred by Luke: manual wallet app, external alert destination, production signing custodian/trust channel. These do not block local security remediation. Do not fabricate substitutes to pass them. Changes to criteria require a logged reason and controller agreement; status/evidence updates do not change criteria.
+
+## Isolated operation-capabilities refactor (not a release verdict)
+
+Base847ee86; original production criteria above remain unchanged. This branch is
+source-only; release owner retains deployment and integration authority.
+
+| Check | Required evidence | Status |
+|---|---|---|
+| Dependency | Exact immutable upstream commit, base-only library, no unsafe casts | PASS scoped: pin1c93d574; source inspected and compiled; independent source review PASS. |
+| Types | Typed preparation restricts capability visibility; negative compile tests reject hidden capability use and caller/severity substitution | PASS: positive compilation and six intended failures, including result substitution/coerce; runtime mismatch tests PASS. |
+| Build | Pinned GHC/Cabal build and bridge contracts pass with no financial changes | PARTIAL / overall FAIL: final all-build and bridge-test PASS. Pool CLI-refusal test times out; token suite not reached by all-suite run. Disposable PostgreSQL attempt failed because tests hard-code an occupied socket; no financial integration PASS claimed. |
+| Review | Fresh separate verifier and original owner review before integration | Fresh capability_verifier source/type PASS on final hashes (audit); original owner integration review pending. |

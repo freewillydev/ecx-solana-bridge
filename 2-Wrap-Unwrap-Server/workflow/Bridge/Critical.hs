@@ -34,8 +34,7 @@ import qualified Bridge.Solana as S
 import Data.Aeson (Value,eitherDecodeStrict',FromJSON,toJSON,object,(.=),parseJSON,encode)
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString.Lazy as BL
-import Data.Typeable (eqT)
-import Data.Type.Equality ((:~:)(Refl))
+import Data.Typeable (Typeable)
 import Bridge.Signer (signingAPI,SigningEndpoint(..),signerCredentials,signerCertificate,verifySigningKey,signingApplication,runSigningServer)
 import Bridge.Store
 import qualified Bridge.Native as N
@@ -53,7 +52,7 @@ import Data.Time.Clock.POSIX (getPOSIXTime)
 import System.Directory (removeDirectoryRecursive)
 import System.FilePath (takeDirectory)
 import System.Timeout (timeout)
-import Network.HTTP.Client hiding (Request)
+import Network.HTTP.Client
 import Network.HTTP.Client.TLS (mkManagerSettings)
 import qualified Network.Connection as NC
 import qualified Network.TLS as TLS
@@ -62,20 +61,26 @@ import Data.X509.CertificateStore (makeCertificateStore)
 import Servant.API ((:<|>)(..))
 import qualified Servant.Client as SC
 
--- Here each filled OperationContext reduces to its ground Operation instance.
--- Recover the dictionary from the closed DSL, never an unchecked request.
-pattern Instruction :: forall caller severity a. ()
-  => forall op. Operation caller severity op => op severity a -> DSL caller severity a
-pattern Instruction op <- (instruction -> Request op)
-{-# COMPLETE Instruction #-}
+-- Evaluators recover their closed effect dictionary from the compiled grammar.
+-- This view is private to evaluator dispatch; it is never returned by a handler.
+data Instruction caller severity a where
+  Instruction :: (Typeable a, Execution caller severity op)
+    => op severity a -> Instruction caller severity a
 
-instruction :: DSL caller severity a -> Request caller severity a
-instruction (ReadOperator op) = Request (OperatorQuery op)
-instruction (OperatorDSL op) = Request (OperatorChange op)
-instruction (WorkerDSL op) = Request (WorkerAction op)
-instruction (ReadCustomer op) = Request (CustomerQuery op)
-instruction (WriteCustomer op) = Request (CustomerChange op)
-instruction (SigningDSL op) = Request (SignerAction op)
+instruction :: Program caller severity a -> Instruction caller severity a
+instruction (ReadOperator op) = Instruction (OperatorQuery op)
+instruction (OperatorDSL op) = Instruction (OperatorChange op)
+instruction (WorkerDSL op) = Instruction (WorkerAction op)
+instruction (ReadCustomer op) = Instruction (CustomerQuery op)
+instruction (WriteCustomer op) = Instruction (CustomerChange op)
+instruction (SigningDSL op) = Instruction (SignerAction op)
+
+-- Recover the closed effect capability after restricted library preparation.
+-- Recover the dictionary from the closed DSL, never an unchecked request.
+pattern Executable :: forall caller severity a. ()
+  => forall op. (Typeable a, Execution caller severity op) => op severity a -> Program caller severity a
+pattern Executable op <- (instruction -> Instruction op)
+{-# COMPLETE Executable #-}
 
 -- Safe interpretation has no writer, signer transport, keys or RPC manager.
 data instance Evaluation 'Safe = SafeEnvironment Reader (Maybe W.PublicConfiguration)
@@ -98,21 +103,16 @@ cachedPublicReport reader cache now=modifyMVar cache $ \saved->do
         && maybe False (\at->at<=now && now-at<=60) (W.reportCustodyAt value)}
   pure(Just(stamp,report),aged <$> report)
 
-evalSafe :: Evaluation 'Safe -> Request caller 'Safe a -> IO a
+evalSafe :: Evaluation 'Safe -> Pending caller 'Safe a -> IO a
 evalSafe environment request=do
-  program<-either reject pure (checkedRequest request)
+  program<-either reject pure (checkedOperation request)
   case program of
-    Instruction op->authorizeOperation environment op >> evaluateOperation environment op
+    Executable op->authorizeOperation environment op >> evaluateOperation environment op
 
--- Ground instances own grammar checks and concrete effects in one place. eqT
--- proves context-type alignment; it does not compare dictionary values.
-instance Operation 'Customer 'Safe CustomerCommand where
-  type OperationContext 'Customer 'Safe CustomerCommand = Operation 'Customer 'Safe CustomerCommand
+-- Ground instances own the closed effect grammar and concrete IO. Payload-type
+-- equality is checked by the library interpreter before these methods run.
+instance Execution 'Customer 'Safe CustomerCommand where
   command (CustomerQuery op)=ReadCustomer op
-  interpretOperation dsl@(Instruction (_ :: actual 'Safe a))=
-    case eqT @(OperationContext 'Customer 'Safe CustomerCommand) @(OperationContext 'Customer 'Safe actual) of
-      Just Refl->Right dsl
-      Nothing->Left "operation_dictionary_mismatch"
   authorizeOperation _ _=pure ()
   evaluateOperation (SafeEnvironment reader public cache) (CustomerQuery operation)=run operation
    where
@@ -138,13 +138,8 @@ instance Operation 'Customer 'Safe CustomerCommand where
       pure $ W.PaymentInstruction uri (T.drop 11 instruction) mint (gross $ W.quote view) "verified_source_owner"
     configured=maybe (reject "customer_configuration_unavailable") pure public
 
-instance Operation 'Operator 'Safe OperatorCommand where
-  type OperationContext 'Operator 'Safe OperatorCommand = Operation 'Operator 'Safe OperatorCommand
+instance Execution 'Operator 'Safe OperatorCommand where
   command (OperatorQuery op)=ReadOperator op
-  interpretOperation dsl@(Instruction (_ :: actual 'Safe a))=
-    case eqT @(OperationContext 'Operator 'Safe OperatorCommand) @(OperationContext 'Operator 'Safe actual) of
-      Just Refl->Right dsl
-      Nothing->Left "operation_dictionary_mismatch"
   authorizeOperation _ _=pure ()
   evaluateOperation (SafeEnvironment reader _ _) (OperatorQuery operation)=run operation
    where
@@ -204,8 +199,8 @@ runProcess rpc reader process=do
   -- The only critical dispatch call site. It cannot escape this service lifetime.
   -- Each OS process owns its own gate; the two processes share no mutable state.
   gate<-newMVar ()
-  let dispatch :: forall caller a. Request caller 'Critical a -> IO a
-      dispatch request=either reject (evalCritical gate environment) (checkedRequest request)
+  let dispatch :: forall caller a. Pending caller 'Critical a -> IO a
+      dispatch request=either reject (evalCritical gate environment) (checkedOperation request)
   case process of
     SignerProcess _ endpoint->do
       credentials<-signerCredentials endpoint
@@ -223,9 +218,9 @@ runProcess rpc reader process=do
         (runPublicServer port app)
         (concurrently_ (runWorkerLoop dispatch) (runControl directory evaluate))
 
-evalCritical :: MVar () -> Evaluation 'Critical -> DSL caller 'Critical a -> IO a
+evalCritical :: MVar () -> Evaluation 'Critical -> Program caller 'Critical a -> IO a
 evalCritical gate environment operation=withMVar gate $ \_->case operation of
-  Instruction op->do
+  Executable op->do
     authorizeOperation environment op
     case (environment,operation) of
       -- Local key work is reachable only here, while the critical gate is held.
@@ -306,23 +301,18 @@ customer (CriticalEnvironment _ _ _ configured _ _ _)=maybe (reject "customer_co
 
 -- Internal instructions are already authorized under the caller's held gate.
 -- They pass through the checked grammar without reacquiring that gate.
-evalWorker :: CriticalEnvironment -> WorkerOperation a -> IO a
+evalWorker :: Typeable a => CriticalEnvironment -> WorkerOperation a -> IO a
 evalWorker environment operation=do
-  program<-either reject pure (checkedRequest $ workerRequest operation)
-  case program of Instruction op->evaluateOperation (WorkerEvaluation environment) op
+  program<-either reject pure (checkedOperation $ workerRequest operation)
+  case program of Executable op->evaluateOperation (WorkerEvaluation environment) op
 
-evaluateSigning :: CriticalEnvironment -> SigningOperation a -> IO a
+evaluateSigning :: Typeable a => CriticalEnvironment -> SigningOperation a -> IO a
 evaluateSigning environment operation=do
-  program<-either reject pure (checkedRequest $ Request $ SignerAction operation)
-  case program of Instruction op->evaluateOperation (WorkerEvaluation environment) op
+  program<-either reject pure (checkedOperation $ pending $ SignerAction operation)
+  case program of Executable op->evaluateOperation (WorkerEvaluation environment) op
 
-instance Operation 'Signer 'Critical SignerCommand where
-  type OperationContext 'Signer 'Critical SignerCommand = Operation 'Signer 'Critical SignerCommand
+instance Execution 'Signer 'Critical SignerCommand where
   command (SignerAction op)=SigningDSL op
-  interpretOperation dsl@(Instruction (_ :: actual 'Critical a))=
-    case eqT @(OperationContext 'Signer 'Critical SignerCommand) @(OperationContext 'Signer 'Critical actual) of
-      Just Refl->Right dsl
-      Nothing->Left "operation_dictionary_mismatch"
   authorizeOperation WorkerEvaluation{} _=reject "signer_operation_forbidden"
   authorizeOperation SignerEvaluation{} _=pure ()
   evaluateOperation (WorkerEvaluation environment@(CriticalEnvironment _ _ _ _ endpoint _ _)) (SignerAction operation)=do
@@ -354,13 +344,8 @@ instance Operation 'Signer 'Critical SignerCommand where
       either (const $ reject "signer_outcome_unknown") pure result
   evaluateOperation SignerEvaluation{} _=reject "signer_evaluator_required"
 
-instance Operation 'Customer 'Critical CustomerCommand where
-  type OperationContext 'Customer 'Critical CustomerCommand = Operation 'Customer 'Critical CustomerCommand
+instance Execution 'Customer 'Critical CustomerCommand where
   command (CustomerChange op)=WriteCustomer op
-  interpretOperation dsl@(Instruction (_ :: actual 'Critical a))=
-    case eqT @(OperationContext 'Customer 'Critical CustomerCommand) @(OperationContext 'Customer 'Critical actual) of
-      Just Refl->Right dsl
-      Nothing->Left "operation_dictionary_mismatch"
   authorizeOperation (WorkerEvaluation environment) _=require (paying environment) "observation_only"
   authorizeOperation SignerEvaluation{} _=reject "signer_context_forbidden"
   evaluateOperation SignerEvaluation{} _=reject "signer_context_forbidden"
@@ -369,13 +354,8 @@ instance Operation 'Customer 'Critical CustomerCommand where
     c<-customer environment
     createCustomerOrder rpc settings config (customerPolicy c) (unsignedSdk c) (\n->evalWorker environment (CheckpointBackup n) >> freshIntake environment) reader writer header request
 
-instance Operation 'Operator 'Critical OperatorCommand where
-  type OperationContext 'Operator 'Critical OperatorCommand = Operation 'Operator 'Critical OperatorCommand
+instance Execution 'Operator 'Critical OperatorCommand where
   command (OperatorChange op)=OperatorDSL op
-  interpretOperation dsl@(Instruction (_ :: actual 'Critical a))=
-    case eqT @(OperationContext 'Operator 'Critical OperatorCommand) @(OperationContext 'Operator 'Critical actual) of
-      Just Refl->Right dsl
-      Nothing->Left "operation_dictionary_mismatch"
   authorizeOperation SignerEvaluation{} _=reject "signer_context_forbidden"
   authorizeOperation (WorkerEvaluation environment) (OperatorChange operation)=case operation of
     PauseService{}->pure ()
@@ -609,13 +589,8 @@ instance Operation 'Operator 'Critical OperatorCommand where
       now<-floor <$> getPOSIXTime
       evalWrite writer (ResumeLedger now [("Native",N.nativeCheckpointHash native),("Solana",tokenOrigin settings),("SolanaOperating",operatingOrigin settings)] reviewed unsigned)
 
-instance Operation 'Worker 'Critical WorkerCommand where
-  type OperationContext 'Worker 'Critical WorkerCommand = Operation 'Worker 'Critical WorkerCommand
+instance Execution 'Worker 'Critical WorkerCommand where
   command (WorkerAction op)=WorkerDSL op
-  interpretOperation dsl@(Instruction (_ :: actual 'Critical a))=
-    case eqT @(OperationContext 'Worker 'Critical WorkerCommand) @(OperationContext 'Worker 'Critical actual) of
-      Just Refl->Right dsl
-      Nothing->Left "operation_dictionary_mismatch"
   authorizeOperation SignerEvaluation{} _=reject "signer_context_forbidden"
   authorizeOperation (WorkerEvaluation environment) (WorkerAction operation)=case operation of
     RecoverNativeSources->pure ()
@@ -941,7 +916,7 @@ refreshSource environment@(CriticalEnvironment rpc settings config _ _ reader wr
 
 -- The caller owns this lifetime (run it alongside HTTP with structured concurrency).
 -- Async cancellation and database failures escape; they are never retried as work.
-runWorkerLoop :: (forall a. Request 'Worker 'Critical a -> IO a) -> IO ()
+runWorkerLoop :: (forall a. Pending 'Worker 'Critical a -> IO a) -> IO ()
 runWorkerLoop evaluate=forever $ do
   evaluate (workerRequest RunWorkerCycle) `catch` (\(BridgeError code)->hPutStrLn stderr ("worker: "<>T.unpack code))
   threadDelay 15000000

@@ -21,7 +21,7 @@ results belong in RELEASE-REVIEW; they are not assumptions that new code is safe
 
 ```mermaid
 flowchart TD
-  API["API.hs: pure Servant handler"] --> Request["Plan / Request → checkedRequest / command"]
+  API["API.hs: pure Servant handler"] --> Request["Plan / Pending → library interpret → Program"]
   Request --> Safe["evalSafe: authorized reads"]
   Request --> Dispatch["runProcess: sole evalCritical call"]
   Dispatch --> Critical["evalCritical: authorize + concrete operation"]
@@ -51,55 +51,59 @@ Read it before changing the operation boundary. The production grammar corrects
 its permissive/incomplete sketch types while retaining its constrained design:
 
 ```haskell
-data family Evaluation (severity :: Severity)
+-- The library supplies the existential and nominal capability indices.
+newtype Pending caller severity a = Pending (SomeOperationWith
+  '[CompileOperation caller severity a] '[CompileOperation caller severity a])
 
-class Typeable (OperationContext caller severity op)
-    => Operation caller severity op | caller -> op, op -> caller where
-  type OperationContext caller severity op = (context :: Constraint)
-    | context -> caller severity op
-  command :: op severity a -> DSL caller severity a
-  interpretOperation :: DSL caller severity a -> Either Text (DSL caller severity a)
-  authorizeOperation :: Evaluation severity -> op severity a -> IO ()
-  evaluateOperation :: Evaluation severity -> op severity a -> IO a
+-- One closed payload type fixes caller, severity and result together.
+data Command caller severity a where
+  CustomerQuery  :: CustomerRead a -> Command 'Customer 'Safe a
+  CustomerChange :: CustomerWrite a -> Command 'Customer 'Critical a
+  -- Operator, worker and signer constructors follow the same closed scheme.
 
-data Request caller severity a where
-  Request :: Operation caller severity op
-          => op severity a -> Request caller severity a
-
-checkedRequest :: forall caller severity a.
-  Request caller severity a -> Either Text (DSL caller severity a)
-checkedRequest (Request (op :: requested severity a)) =
-  interpretOperation @caller @severity @requested (command op)
+instance (Typeable a, Execution caller severity (Command caller))
+    => Operation (Command caller severity a) (PreparationCaps caller severity a) where
+  type Context (Command caller severity a) = CompileOperation caller severity a (Command caller severity a)
+  type Outcome (Command caller severity a) = Program caller severity a
+  data DSL (Command caller severity a) where
+    Compile :: CompileOperation caller severity a (Command caller severity a)
+            => DSL (Command caller severity a)
+  interpret (SomeOperation (value :: actual)) Compile =
+    case eqT @actual @(Command caller severity a) of
+      Just Refl -> Just (compileOperation value)
+      Nothing -> Nothing
 ```
 
-Four closed caller families and six ground instances cover customer/operator
-safe and critical work, and worker/signer critical work. Functional dependencies
-fix each caller's family; severity-indexed GADTs fix its executable instructions.
-The associated `OperationContext` family returns an injective constraint type;
-each instance defines it as its fully specified `Operation` constraint.
-DSL constructors retain only that fully specified associated constraint. The private
-matching-only `Instruction` view lives beside the ground instances in `Critical.hs`,
-where their type equations reduce it to the exact `Operation` dictionary. It recovers
-that dictionary from the closed grammar without admitting arbitrary instructions.
+`Control.Operation` is imported unqualified. Its argument-free `Compile` selector
+carries the precise compilation constraint. Payload arguments occur once in the
+hidden `Command`; the interpreter proves its full type, then calls the specific
+`compileOperation` method. `eqT` compares payload types, including caller, severity
+and result; it does not compare dictionary values or authorize effects.
 
-`checkedRequest` constructs the DSL from the original existential request and
-selects that request's `interpretOperation` instance explicitly. That pure method
-uses `eqT` and `Refl` to establish equality of the request and DSL's **constraint
-types**. There is no `operationDictionary` method or explicit dictionary argument.
-This check does not compare dictionary values, leaf constructors or payloads.
-Coherent ground instance heads, construction from the original request and the
-typed leaf results remain essential; reflection does not replace authorization.
+`Pending` is a zero-cost newtype required by Servant's partially applied
+`Type -> Type` handler parameter. It contains the library's `SomeOperationWith`,
+not another custom existential. Its nominal indices prevent caller, severity or
+result coercion. Pure preparation receives only `CompileOperation`, not an
+execution environment. `withCapabilities` exposes only the declared compilation
+capability to the generic interpreter boundary. No artificial restrict/restore
+pipeline is added: there is currently no domain preparation stage to run there.
+The library's `Stage`/`Pipeline` restrictions are tested for future composition.
+They control visible dictionaries, not permanent revocation or sandboxing;
+`forgetCapabilities` can restore access to canonical capabilities. Financial
+authorization remains in the evaluators.
 
-`Plan caller a` contains a safe or critical existential request. Customer handlers
-have `ServerT CustomerAPI (Plan 'Customer)` and contain no effects. Servant's hoist
-checks and evaluates the request; only its concrete result is serialized.
-Order creation being critical does not confer operator or signer authority.
-Cabal's customer-api component hides `Operation.Internal` and has no runtime,
-store or chain dependency. Pure HTTP/control assembly carries concrete instance
-constraints; startup supplies the implementations. Review exports and component
-dependencies as well as types.
+The compiler emits the closed `Program` effect grammar. Its six constructors retain
+the precise execution constraints and leaf result types. This separates the
+library's pure compilation DSL from concrete IO without copying business rules.
+`Plan caller a` contains a safe or critical pending operation. Customer handlers
+have `ServerT CustomerAPI (Plan 'Customer)`; signer handlers use
+`ServerT SigningAPI (Pending 'Signer 'Critical)`. Servant's hoist compiles/evaluates
+the existential; only the concrete result is serialized. No IO callback is stored
+in a handler result. Customer order creation confers no operator or signer authority.
+Cabal's customer-api component exposes only the customer facade, with no runtime,
+store or chain dependency. Review component boundaries as well as types.
 
-All six `Operation` instances live in `Critical.hs`, beside the safe and critical
+All six `Execution` instances live in `Critical.hs`, beside the safe and critical
 evaluators. Their methods implement concrete effects except local signer execution,
 which belongs directly to the gated critical evaluator. There is no
 `Interpreter` class, callback bundle or arbitrary environment/program execution
@@ -109,7 +113,7 @@ are a reader and public configuration. Critical resources are either worker
 resources or signer resources, which contain no writer. IO is fixed; polymorphism
 in the result preserves the result selected by the operation's GADT.
 
-Both evaluators recover `Instruction` and call `authorizeOperation`. Safe evaluation
+Both evaluators use the private `Executable` view to recover `Instruction` and call `authorizeOperation`. Safe evaluation
 then calls `evaluateOperation`. Critical evaluation matches the four `SigningDSL`
 leaves in a signer context, keeping each read/sign/recheck or checkpoint sequence
 inside its held gate; all other cases call `evaluateOperation`. The signer instance's
@@ -124,7 +128,7 @@ normalizes both startup modes before its single `runProcess` call; its resource
 bracket passes only resource data, never evaluators. Each process retains its own
 gate and resource context. Worker entry refuses
 signer requests; signer entry refuses customer/operator/worker requests. Internal
-worker and signer instructions pass `checkedRequest` and invoke the concrete method
+worker and signer instructions pass `checkedOperation` and invoke the concrete method
 inside the already-held gate, without reacquiring it. Only that internal signer
 method constructs the HTTPS client; the signer context executes local signing.
 
@@ -923,7 +927,7 @@ tests; real-chain and independent-host acceptance remain release gates.
 | Haskell browser and Cabal asset hooks | `web/`, `build/` |
 | QuickCheck and PostgreSQL contracts | `test/Main.hs`, `test/StoreCheck.hs` |
 
-Servant handlers package typed requests; `Operation.command` resolves them into
+Servant handlers package typed requests; `Execution.command` resolves them into
 closed DSL instructions. Separate evaluators enforce safe/critical authority.
 All application database access uses Opaleye inside specific closed operations.
 Only critical evaluation owns the signer client. The signer independently checks
