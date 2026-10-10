@@ -11,17 +11,20 @@ candidate's tests does not certify later source or packages.
 ## Current release pointer
 
 The current review candidate and funded deployment are
-`8c18bd88c0d65b2291802d805a246a754b5d61c0`, release
-`review-2026-10-09-security-remediation`, SHA-256
-`1adc398d1a45a7da34f2ee184da7a7cae282eca0c7259bd2b9b4eeb948fd10b9`.
-It is unsigned and NOT production approved. Current acceptance criteria and open
-security findings are in [DONE.md](../../DONE.md); operational continuation is in
-[RESUME.md](../../RESUME.md). The exact candidate passed the build, core suites,
-ten-mode PostgreSQL matrix and a separate scoped review of both security fixes.
-Its checked upgrade preserved the original Paid orders and backed-up sequence 105.
-Full production approval remains FAIL. Later entries below retain the earlier
-`ef2f17d` funded restore evidence; they do not certify this newer candidate.
-The older checklist below is historical.
+`8c2c9eb4d67192296be9feb806e4f09e0b7b2897`, release
+`review-2026-10-09-six-confirmations`, SHA-256
+`722cba45da5f22e3082dec3ff97519c1dce1ca3e3554e4698b156004fc195c53`.
+It is unsigned and NOT production approved. Ubuntu build and all three suites
+passed; the affected canonical HTTP/HTTPS PostgreSQL contracts passed. The earlier
+8c18bd8 full financial matrix remains baseline evidence, not a rerun on this commit.
+Codex Security diff scan ce915317-fc28-4018-940f-c40583615060 reviewed all 19 changed
+paths since 8c18bd8 with no new findings. Unchanged dependency advisories remain open.
+Checked upgrade preserved the two original Paid orders, quotes, payout IDs and
+backed-up sequence 105. ECX requires six confirmations for new orders; saved terms
+remain unchanged. All services listen privately and public ingress remains OFF.
+Current acceptance criteria are in [DONE.md](../../DONE.md), with exact evidence
+and continuation in [RESUME.md](../../RESUME.md). Earlier records below are historical
+and do not independently certify this candidate.
 
 ## Historical guided-console acceptance checklist
 
