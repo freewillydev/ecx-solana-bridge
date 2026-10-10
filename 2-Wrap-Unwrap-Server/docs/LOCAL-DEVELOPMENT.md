@@ -266,7 +266,7 @@ variant must fail for the named missing capability or incompatible nominal index
 ```sh
 cabal exec -- ghc -fno-code -package ecx-bridge -package operation-capabilities \
   2-Wrap-Unwrap-Server/test/CapabilityCompile.hs
-for check in BAD_COMPILE BAD_WIDEN BAD_CALLER BAD_SEVERITY BAD_RESULT BAD_COERCE; do
+for check in BAD_COMPILE BAD_WIDEN BAD_CALLER BAD_SEVERITY BAD_RESULT BAD_COERCE BAD_DOMAIN BAD_HIDDEN_WORKER BAD_IO; do
   if cabal exec -- ghc -fno-code -package ecx-bridge -package operation-capabilities \
       -D"$check" 2-Wrap-Unwrap-Server/test/CapabilityCompile.hs; then
     echo "Unexpected compilation success: $check"

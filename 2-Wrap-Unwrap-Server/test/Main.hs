@@ -81,8 +81,8 @@ fullSuite = do
           [select(pending $ CustomerQuery PublicConfig)=="customer-read"
           ,select(pending $ OperatorQuery ServiceState)=="operator-read"
           ,select(pending $ CustomerChange $ CreateOrder "auth" $ W.OrderRequest NativeToWrapped (good $ amount 100) "dest" "refund" Nothing "key")=="customer-write"
-          ,select(pending $ OperatorChange $ PauseService "reason")=="operator-write"
-          ,select(workerRequest RunWorkerCycle)=="worker"
+          ,select(pending $ OperatorChange $ \cap -> pauseService cap "reason")=="operator-write"
+          ,select(workerRequest runWorkerCycle)=="worker"
           ,select(pending $ SignerAction $ PreparedSigning $ SignPrepared "deployment" "payment" 3)=="signer"]
     , check "distinct dictionary constraints and signer outputs have no equality witness" $ once $ property $
         absent(eqT @(Context (CustomerCommand 'Safe ())) @(Context (CustomerCommand 'Critical ())))
@@ -92,7 +92,7 @@ fullSuite = do
         && absent(eqT @ReplacementResult @CheckpointResult) && absent(eqT @DraftResult @CheckpointResult)
     , check "library existential dispatch preserves payload and rejects a different caller" $ once $ property $
         let selector = Compile :: DSL (CustomerCommand 'Safe W.PublicConfiguration)
-            mismatch = interpret (SomeOperation (WorkerAction RunWorkerCycle)) selector
+            mismatch = interpret (SomeOperation (WorkerAction runWorkerCycle)) selector
         in case (checkedOperation (pending $ CustomerQuery PublicConfig), mismatch) of
           (Right (ReadCustomer PublicConfig), Nothing) -> True
           _ -> False

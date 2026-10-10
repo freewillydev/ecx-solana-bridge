@@ -1,33 +1,36 @@
 # Isolated capability refactor continuation
 
-Owner: WRAPPED ECX SOL (2), branch codex/operation-capabilities,
-base847ee86a645cc1214c3cb96bbcd947213ab76687. No live-host authority.
-Dependency pinned1c93d574cc48d4a8446c390e119b8fa04c93a659.
-Current: custom Request existential removed. Pending is a zero-cost Servant
-adapter around library SomeOperationWith; one indexed Command and one argument-free
-Compile selector replace per-caller compilation plumbing. All imports unqualified.
-withCapabilities exposes only CompileOperation. No vacuous production pipeline;
-Stage/Pipeline restrictions tested separately. No financial/effect bodies changed.
-Final all-build and bridge-test PASS: /tmp/ecx-capabilities-build-final.log and
-/tmp/ecx-capabilities-tests-final.log. Positive + six intended compile failures PASS
-(/tmp/ecx-capabilities-positive-final.log and BAD_*-final.log). Fresh independent
-capability_verifier source/type PASS; exact hashes recorded in .audit/capabilities.tsv.
-Broader verification remains FAIL: pool CLI refusal hits its existing 10-second
-limit (both runs); token suite not reached. PostgreSQL contracts hard-code
-/tmp/ecx-pg-seam:29436, already occupied by another server. Our isolated private
-socket cluster therefore could not be used; stopped it and preserved all files.
-Evidence: /tmp/ecx-capabilities-pg-root, /tmp/ecx-capabilities-pg.log. No other
-server or databases modified. Do not call this a complete release PASS.
-Next: original owner integrates/reviews isolated branch and runs contracts in a
-clean supported environment. No production/merge authority here. X9 reserve HOLD:
-last free1.57GiB, no new builds/substantial writes until reserve+peak budget recover.
-No lane-owned VMs/databases/builds/tests left running after final checks.
-Browser bundle reused read-only from unchanged original sources and verified by
-existing Cabal manifest hook. Core source map: Operation.Internal + Critical +
-Signer, 3 files, 1221 -> 1232 physical lines (+11); reduced duplicate dispatch,
-not a net size-reduction claim. Reference Main.hs unchanged.
+Owner: WRAPPED ECX SOL (2), branch codex/operation-capabilities.
+New task starts at77350b36; original lane base847ee86. No live-host authority.
+Dependency remains pinned1c93d574cc48d4a8446c390e119b8fa04c93a659.
 
-Original release-owner checkpoint follows unchanged for context:
+Latest source: OperatorWrite and WorkerOperations are capability classes (17/13
+methods); pure rank-2 selections replace their leaf constructor lists. DomainCaps
+places these classes in the library existential. checkedOperation restricts visible
+capabilities to CompileOperation and interprets the canonical existential. Private
+Action instances and all concrete method implementations live in Critical.hs.
+One critical call site, exact observation-mode allowlists and signer grammar remain.
+Three production files total1284->1322 lines (+38); no production files added.
+This changes dispatch representation, not financial effects or database access.
+
+Fresh capability_verifier scoped source/type PASS: exact hashes in audit log.
+Positive and nine intended compile failures PASS (/tmp/ecx-methods-positive.log,
+/tmp/ecx-methods-BAD_*.log). App and test binaries compiled with GHC9.14.1 using
+pinned Cabal-plan dependencies and libsecp256k1; fresh serial test compilation
+/tmp/ecx-methods-test-build.log. Binaries /tmp/ecx-methods-bin/ecx-bridge and
+/tmp/ecx-methods-bridge-test. This is not a new Cabal all-build result.
+Runtime bridge suite PASS (exit0): /tmp/ecx-methods-tests.log. Fresh verifier read
+completed log through final lifecycle property and confirmed source hashes unchanged.
+All task-owned build/test processes have exited; private outputs are retained.
+
+Next: original owner reviews/integrates the method refactor after commit/push,
+then runs the full Cabal/component and PostgreSQL checks in a supported environment.
+Full Cabal and financial PostgreSQL contracts remain FAIL/unverified for new bytes:
+X9 reserve HOLD at1.5GiB prevents substantial builds, and the fixed PostgreSQL socket
+was occupied at the previous attempt. Do not stop or modify shared services.
+Original owner must integrate and run supported contracts in an isolated environment.
+Prior pool CLI timeout and token suite not reached remain unresolved, not passed.
+No deployment, merge, funded transfer or new service has been performed in this lane.
 
 # Release continuation
 

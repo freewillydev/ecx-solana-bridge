@@ -104,7 +104,7 @@ checks=sequence
       calls<-newIORef (0::Int)
       let refuse :: forall a. Pending 'Worker 'Critical a -> IO a
           refuse request=either reject pure (checkedOperation request) >>= \case
-            WorkerDSL RunWorkerCycle->modifyIORef' calls (+1) >> reject "offline_loop_contract"
+            WorkerDSL _->modifyIORef' calls (+1) >> reject "offline_loop_contract"
             _->fail "loop dispatched unexpected operation"
           stop :: forall a. Pending 'Worker 'Critical a -> IO a
           stop _=throwIO ThreadKilled

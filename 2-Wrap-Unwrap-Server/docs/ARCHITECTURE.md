@@ -53,16 +53,20 @@ its permissive/incomplete sketch types while retaining its constrained design:
 ```haskell
 -- The library supplies the existential and nominal capability indices.
 newtype Pending caller severity a = Pending (SomeOperationWith
-  '[CompileOperation caller severity a] '[CompileOperation caller severity a])
+  (PreparationCaps caller severity a) (PreparationCaps caller severity a))
 
 -- One closed payload type fixes caller, severity and result together.
 data Command caller severity a where
   CustomerQuery  :: CustomerRead a -> Command 'Customer 'Safe a
   CustomerChange :: CustomerWrite a -> Command 'Customer 'Critical a
-  -- Operator, worker and signer constructors follow the same closed scheme.
+  WorkerAction :: (forall value. WorkerOperations value
+               => value -> Program 'Worker 'Critical a)
+               -> Command 'Worker 'Critical a
+  -- Operator writes select OperatorWrite methods; signer leaves remain explicit.
 
-instance (Typeable a, Execution caller severity (Command caller))
-    => Operation (Command caller severity a) (PreparationCaps caller severity a) where
+instance (Typeable a, Execution caller severity (Command caller),
+          caps ~ PreparationCaps caller severity a, UniqueCapabilities caps)
+    => Operation (Command caller severity a) caps where
   type Context (Command caller severity a) = CompileOperation caller severity a (Command caller severity a)
   type Outcome (Command caller severity a) = Program caller severity a
   data DSL (Command caller severity a) where
@@ -83,14 +87,18 @@ and result; it does not compare dictionary values or authorize effects.
 `Pending` is a zero-cost newtype required by Servant's partially applied
 `Type -> Type` handler parameter. It contains the library's `SomeOperationWith`,
 not another custom existential. Its nominal indices prevent caller, severity or
-result coercion. Pure preparation receives only `CompileOperation`, not an
-execution environment. `withCapabilities` exposes only the declared compilation
-capability to the generic interpreter boundary. No artificial restrict/restore
-pipeline is added: there is currently no domain preparation stage to run there.
-The library's `Stage`/`Pipeline` restrictions are tested for future composition.
-They control visible dictionaries, not permanent revocation or sandboxing;
-`forgetCapabilities` can restore access to canonical capabilities. Financial
-authorization remains in the evaluators.
+result coercion. `PreparationCaps` contains `CompileOperation` and, for critical
+worker/operator requests, the actual `WorkerOperations` or `OperatorWrite` class.
+For example, `workerRequest (\cap -> queuePayment cap txid)` selects an allowed
+method without supplying IO, keys or a database connection. A stage constrained by
+`WorkerOperations` can use worker methods; it cannot use operator methods.
+
+`checkedOperation` narrows the visible row to `CompileOperation` before its terminal
+`withCapabilities` step. It hands the canonical existential to the library's
+`interpret`, whose `eqT` check chooses the matching compiled result. These are
+visible dictionary restrictions, not irreversible revocation or sandboxing:
+`forgetCapabilities` intentionally retains canonical capability evidence for
+interpretation. Financial authorization still belongs to the evaluators.
 
 The compiler emits the closed `Program` effect grammar. Its six constructors retain
 the precise execution constraints and leaf result types. This separates the
@@ -98,20 +106,28 @@ library's pure compilation DSL from concrete IO without copying business rules.
 `Plan caller a` contains a safe or critical pending operation. Customer handlers
 have `ServerT CustomerAPI (Plan 'Customer)`; signer handlers use
 `ServerT SigningAPI (Pending 'Signer 'Critical)`. Servant's hoist compiles/evaluates
-the existential; only the concrete result is serialized. No IO callback is stored
-in a handler result. Customer order creation confers no operator or signer authority.
+the existential; only the concrete result is serialized. Handlers select constrained methods; they cannot supply an IO callback. Customer order creation confers no operator or signer authority.
 Cabal's customer-api component exposes only the customer facade, with no runtime,
 store or chain dependency. Review component boundaries as well as types.
 
 All six `Execution` instances live in `Critical.hs`, beside the safe and critical
 evaluators. Their methods implement concrete effects except local signer execution,
 which belongs directly to the gated critical evaluator. There is no
-`Interpreter` class, callback bundle or arbitrary environment/program execution
-instance. The core declares an opaque `Evaluation` data family; only `Critical.hs`
+`Interpreter` class or arbitrary environment/program execution instance. The core declares an opaque `Evaluation` data family; only `Critical.hs`
 defines its two concrete severity instances and can construct them. Safe resources
 are a reader and public configuration. Critical resources are either worker
 resources or signer resources, which contain no writer. IO is fixed; polymorphism
-in the result preserves the result selected by the operation's GADT.
+in the result preserves the result selected by the operation's GADT or method.
+
+`OperatorWrite` and `WorkerOperations` replace the former 30 leaf constructors
+and their matching dispatch branches. Each method returns a typed `Program`.
+Their `Action` data-family instances are private to `Critical.hs`: only that module
+can construct an IO action, attach its observation-mode permission and supply its
+resource environment. The operator/worker `Execution` instances inspect that
+permission and run the saved action. The seven recovery/observation worker methods
+and operator pause retain their previous observation-only access. Customer and
+signer leaves remain small explicit GADTs; signer result constructors remain unique.
+Class implementations are checked with `-Werror=missing-methods`.
 
 Both evaluators use the private `Executable` view to recover `Instruction` and call `authorizeOperation`. Safe evaluation
 then calls `evaluateOperation`. Critical evaluation matches the four `SigningDSL`
@@ -134,7 +150,7 @@ method constructs the HTTPS client; the signer context executes local signing.
 
 The bounded `checkpoint CONFIG` worker lifetime acquires the same writer/advisory
 lock and host fence, but starts no HTTP listener, control socket or observer loop.
-It dispatches only `CheckpointForUpgrade` through the existing critical call site.
+It dispatches only `checkpointForUpgrade` through the existing critical call site.
 That closed operation requires a paused ledger and obtains a fresh verified custody
 receipt even when prior backup coverage is current. Receipt acknowledgement must
 complete before the command emits success. The signer remains a separate process;
