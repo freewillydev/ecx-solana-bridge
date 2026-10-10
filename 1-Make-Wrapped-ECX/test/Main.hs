@@ -32,7 +32,7 @@ import Data.Word (Word64)
 import Data.Aeson (Value(..),encode,eitherDecode,object,(.=),withObject,(.:),toJSON)
 import Data.Aeson.Types (parseEither)
 import Bridge.SDKBuild (sdkLibraryPath)
-import Bridge.SolanaMessage (Transaction(..),decodeTransaction,base58)
+import Bridge.SolanaMessage (Transaction(..),decodeTransaction,base58,validateAssociated)
 import qualified Data.ByteString as B
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -137,6 +137,25 @@ main=do
             && isLeft(validate operation {rent=0} transaction)))
           [authority original,"9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu"]
         pure (captured=="GQnRnfs2B9j6pymrbY4KmX9WnAQ6czPAdt2u6XpWZSjQ" && and checks)
+    , quickCheckResult $ once $ ioProperty $ do
+        -- Genuine SDK ATA bytes signed locally; no RPC, funds or fixture key files.
+        let secret=case Ed.secretKey (B.pack [1..32]) of CryptoPassed k->k; _->error "fixture seed"
+            payer=base58 (BA.convert $ Ed.toPublic secret)
+            original=request Mint 1
+        address<-(O.runSafe . O.Request) (AssociatedAddress sdkLibraryPath payer (mint original))
+        let operation=Associated payer (mint original) address payer 2039280 (blockhash original)
+            verify signed=validateAssociated signed payer (mint original) address payer (blockhash original)
+        unsigned<-(O.runSafe . O.Request) (Prepare sdkLibraryPath operation)
+        Transaction _ _ body<-either (fail . T.unpack) pure (decodeTransaction unsigned)
+        let signature=BA.convert (Ed.sign secret (Ed.toPublic secret) body) :: B.ByteString
+            encoded sig message=TE.decodeUtf8 (B64.encode $ B.singleton 1<>sig<>message)
+            signed=encoded signature body
+            corrupted=encoded (B.cons (B.head signature `Bits.xor` 1) $ B.tail signature) body
+        pure (not(isLeft $ verify False unsigned) && not(isLeft $ verify True signed)
+          && isLeft(verify True unsigned) && isLeft(verify False signed) && isLeft(verify True corrupted)
+          && isLeft(validateAssociated True payer (mint original) (mint original) payer (blockhash original) signed)
+          && isLeft(validateAssociated True payer (mint original) address payer (mint original) signed)
+          && isLeft(verify True $ encoded signature (body<>B.singleton 0)))
     , quickCheckResult $ once $ ioProperty signingCheck
     , quickCheckResult $ once $ property $
         eitherDecode (encode $ request Mint maxBound)==Right(request Mint maxBound)

@@ -1,7 +1,7 @@
 {-# LANGUAGE RecordWildCards #-}
 module Bridge.SolanaMessage
   ( Instruction(..), Message(..), Transaction(..), Expected(..), publicKey
-  , signatureBytes, base58, boundedBase64, decodeTransaction, decodePoolTransaction, decodePositionTransaction, decodeLiquidityTransaction, validateTransaction ) where
+  , signatureBytes, base58, boundedBase64, decodeTransaction, decodePoolTransaction, decodePositionTransaction, decodeLiquidityTransaction, validateTransaction, validateAssociated ) where
 
 import Bridge.Domain (Amount, units)
 import Bridge.Identity (publicKey)
@@ -132,3 +132,29 @@ validateTransaction Expected{..} encoded = do
   pure tx
  where little64 :: Word64 -> [Word8]
        little64 n = [fromIntegral (n `div` (256^i)) | i <- [0..7::Int]]
+
+-- Exact ATA creation intent only. The caller must independently bind the derived
+-- address, network, finality and observed rent/fee effects before accounting.
+-- Keeping this pure lets the worker verify signed setup bytes without key access.
+validateAssociated :: Bool -> Text -> Text -> Text -> Text -> Text -> Text -> Either Text Transaction
+validateAssociated signed payer key address recipient recent encoded = do
+  paying<-publicKey payer; token<-publicKey key; destination<-publicKey address; holder<-publicKey recipient
+  recentHash<-publicKey recent; spl<-publicKey "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+  system<-publicKey "11111111111111111111111111111111"
+  ata<-publicKey "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
+  transaction<-decodeTransaction encoded
+  case transaction of
+    Transaction [signature] (Message 1 0 readonly keys hash [Instruction program indexes payload]) _->do
+      let at i=keys !! fromIntegral i -- decoder bounds indices
+          accounts=[paying,destination,holder,token,system,spl]
+      unless (paying/=destination && token/=holder && token/=paying
+        && hash==recentHash && take 1 keys==[paying] && sort keys==sort(nub $ ata:accounts)
+        && sort(take (length keys-fromIntegral readonly) keys)==sort [paying,destination]
+        && at program==ata && map at indexes==accounts && payload==BS.singleton 1) (Left "associated_account_mismatch")
+      if signed then case (Ed.publicKey paying,Ed.signature signature) of
+        (CryptoPassed public,CryptoPassed sig) ->
+          unless (Ed.verify public (case transaction of Transaction _ _ body -> body) sig) (Left "invalid_signature")
+        _ -> Left "invalid_signature"
+      else unless (signature==BS.replicate 64 0) (Left "associated_account_mismatch")
+      pure transaction
+    _->Left "associated_account_shape"
