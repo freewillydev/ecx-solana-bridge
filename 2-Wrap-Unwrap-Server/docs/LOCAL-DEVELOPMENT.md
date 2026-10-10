@@ -282,3 +282,28 @@ Inspect diagnostics: a missing package or syntax error is not a passing negative
 test. `bridge-test` also checks actual existential dispatch, all customer/signer
 routes, and mismatched caller, severity and result interpretations. These checks
 are separate from PostgreSQL contracts and do not certify runtime authorization.
+
+### Evaluation path logs
+
+Customer and signer evaluators write one JSON object per line to stderr. Filter
+`event=operation_path` and group by the process and process-local `trace` number.
+A complete accepted DSL trace records `resolved`, `dsl`, `evaluating`, then `done` or
+`rejected`. Critical traces begin after acquiring the critical gate. `path`,
+`operation` and `expectedResult` are fixed labels; no request arguments, keys,
+authentication headers, transaction bytes or returned payloads are logged.
+`done` means evaluation returned, not that a payment settled. `rejected` also
+covers an exception; it does not prove that no side effect occurred. Ordinary log-write I/O
+errors are ignored. Writes are synchronous and may block; missing logs are not
+evidence that evaluation did not occur. Cancellation, a crash or log loss may
+omit terminal stages.
+
+For signer routes, labels are exactly the `Handler`/`Result` relation and stage
+names in `test/formal/SignerPaths.tla`: `sign-preparation` / `SignPrepared` /
+`PreparedResult`, `sign-replacement` / `SignReplacement` / `ReplacementResult`,
+`draft-replacement` / `DraftReplacement` / `DraftResult`, and
+`checkpoint-custody` / `CheckpointCustody` / `CheckpointResult`.
+The QuickCheck handler contract checks this mapping. The model checks unique
+signer output ownership and evaluator entry; it does not prove runtime logs
+complete or certify customer endpoints. Authentication/decoding failures before
+DSL compilation have no evaluation trace. Customer routes have their own labels;
+their response types are not unique constructors in this signer-only model.

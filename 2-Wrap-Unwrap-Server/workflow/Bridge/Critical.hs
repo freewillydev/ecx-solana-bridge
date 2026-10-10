@@ -1,8 +1,9 @@
 {-# LANGUAGE DataKinds, GADTs, RankNTypes, ScopedTypeVariables, TypeFamilies, TypeApplications, ConstraintKinds, PatternSynonyms, ViewPatterns, FlexibleInstances, QuantifiedConstraints #-}
 {-# OPTIONS_GHC -Werror=incomplete-patterns -Werror=missing-methods #-}
 -- The signer ClientM is constructed only inside this critical evaluator.
-module Bridge.Critical (Process(..),WorkerLifetime(..),runProcess,CustomerSettings(..),SignerSettings(..),runWorkerLoop) where
+module Bridge.Critical (operationPath,Process(..),WorkerLifetime(..),runProcess,CustomerSettings(..),SignerSettings(..),runWorkerLoop) where
 import Bridge.Operation.Internal hiding (customer)
+import qualified Bridge.Operation.Internal as Operation
 import Bridge.Domain (Asset(..),gross,paymentAsset,paymentId,units)
 import Bridge.Identity (payURIFor,digest)
 import Bridge.Admission (checkSolanaPayoutWith)
@@ -50,6 +51,8 @@ import System.IO (hPutStrLn,stderr)
 import Control.Concurrent.MVar (MVar,newMVar,withMVar,modifyMVar)
 import Control.Exception (bracket,onException,try,catch,throwIO,IOException)
 import Data.IORef (newIORef,atomicModifyIORef')
+import Data.Unique (newUnique,hashUnique)
+import System.Posix.Process (getProcessID)
 import qualified Data.ByteString as BS
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import System.Directory (removeDirectoryRecursive)
@@ -109,8 +112,42 @@ cachedPublicReport reader cache now=modifyMVar cache $ \saved->do
 evalSafe :: Evaluation 'Safe -> Pending caller 'Safe a -> IO a
 evalSafe environment request=do
   program<-either reject pure (checkedOperation request)
-  case program of
+  traceEvaluation program $ case program of
     Executable op->authorizeOperation environment op >> evaluateOperation environment op
+
+-- Fixed labels only: never inspect/show request arguments, credentials or results.
+-- Signer labels are the Handler/Result relation in test/formal/SignerPaths.tla.
+operationPath :: Program caller severity a -> Maybe (Text,Text,Text)
+operationPath (SigningDSL signing)=Just $ case signing of
+  PreparedSigning{} -> ("sign-preparation","SignPrepared","PreparedResult")
+  ReplacementSigning{} -> ("sign-replacement","SignReplacement","ReplacementResult")
+  DraftSigning{} -> ("draft-replacement","DraftReplacement","DraftResult")
+  CheckpointSigning{} -> ("checkpoint-custody","CheckpointCustody","CheckpointResult")
+operationPath (ReadCustomer op)=Just $ case op of
+  PublicConfig -> ("GET /api/v1/config","PublicConfig","PublicConfiguration")
+  OrderStatus{} -> ("GET /api/v1/orders/:id","OrderStatus","OrderView")
+  PaymentInstructions{} -> ("POST /api/v1/orders/:id/transaction","PaymentInstructions","PaymentInstruction")
+operationPath (WriteCustomer Operation.CreateOrder{})=Just ("POST /api/v1/orders","CreateOrder","OrderView")
+operationPath _=Nothing
+
+-- Correlation is process-local, not a payment identifier or authorization token.
+-- 'done' records a returned value, not delivery, broadcast or settlement.
+traceEvaluation :: Program caller severity a -> IO a -> IO a
+traceEvaluation program work=case operationPath program of
+  Nothing->work
+  Just (path,operation,constructor)->do
+    correlation<-hashUnique <$> newUnique
+    process<-getProcessID
+    let emit stage=(hPutStrLn stderr $ T.unpack $ TE.decodeUtf8 $ BL.toStrict $ encode $ object
+          ["event" .= ("operation_path"::Text),"trace" .= correlation,"process" .= show process,"path" .= path
+          ,"operation" .= operation,"expectedResult" .= constructor,"stage" .= (stage::Text)])
+          `catch` (\(_::IOException)->pure ())
+    emit "resolved"
+    emit "dsl"
+    emit "evaluating"
+    result<-work `onException` emit "rejected"
+    emit "done"
+    pure result
 
 -- Ground instances own the closed effect grammar and concrete IO. Payload-type
 -- equality is checked by the library interpreter before these methods run.
@@ -203,7 +240,9 @@ runProcess rpc reader process=do
   -- Each OS process owns its own gate; the two processes share no mutable state.
   gate<-newMVar ()
   let dispatch :: forall caller a. Pending caller 'Critical a -> IO a
-      dispatch request=either reject (evalCritical gate environment) (checkedOperation request)
+      dispatch request=do
+        program<-either reject pure (checkedOperation request)
+        evalCritical gate environment program
   case process of
     SignerProcess _ endpoint->do
       credentials<-signerCredentials endpoint
@@ -222,7 +261,7 @@ runProcess rpc reader process=do
         (concurrently_ (runWorkerLoop dispatch) (runControl directory evaluate))
 
 evalCritical :: MVar () -> Evaluation 'Critical -> Program caller 'Critical a -> IO a
-evalCritical gate environment operation=withMVar gate $ \_->case operation of
+evalCritical gate environment operation=withMVar gate $ \_->traceEvaluation operation $ case operation of
   Executable op->do
     authorizeOperation environment op
     case (environment,operation) of

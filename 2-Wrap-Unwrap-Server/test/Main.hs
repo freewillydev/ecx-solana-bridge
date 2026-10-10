@@ -10,7 +10,7 @@ import Bridge.Identity (bearerHash,capabilityHash,payInstruction,payURIFor)
 import Bridge.API (customerServer)
 import Bridge.Signer (signingServer)
 import Bridge.Operation.Internal
-import Bridge.Critical ()
+import Bridge.Critical (operationPath)
 import qualified Bridge.Wire as W
 import Servant.API ((:<|>)(..))
 import Bridge.Domain
@@ -60,6 +60,16 @@ fullSuite = do
           (Right(SigningDSL (PreparedSigning (SignPrepared identity identifier generation))),Right(SigningDSL (ReplacementSigning (SignReplacement other decision))),Right(SigningDSL (DraftSigning (DraftReplacement third parent fee))),Right(SigningDSL (CheckpointSigning (CheckpointCustody fourth sequenceNo))))->
             identity=="deployment" && identifier=="payment" && generation==3 && other==identity && decision==7 && third==identity && parent=="parent" && units fee==2 && fourth==identity && sequenceNo==9
           _->False
+    , check "signer trace labels match the formal path/result relation" $ once $ property $
+        let prepared :<|> replacement :<|> draft :<|> checkpoint=signingServer ()
+            label :: Pending caller severity a -> Maybe (T.Text,T.Text,T.Text)
+            label request=either (const Nothing) operationPath (checkedOperation request)
+        in [label (prepared ("deployment","payment",3)),label (replacement ("deployment",7))
+           ,label (draft ("deployment","parent",good $ amount 2)),label (checkpoint ("deployment",9))]
+           ==map Just [("sign-preparation","SignPrepared","PreparedResult")
+                      ,("sign-replacement","SignReplacement","ReplacementResult")
+                      ,("draft-replacement","DraftReplacement","DraftResult")
+                      ,("checkpoint-custody","CheckpointCustody","CheckpointResult")]
     , check "library context identity preserves caller and severity through existential preparation" $ once $ property $
         let identities=[typeRep(Proxy @(Context (CustomerCommand 'Safe ())))
               ,typeRep(Proxy @(Context (CustomerCommand 'Critical ())))
