@@ -2,6 +2,10 @@
 
 Owner: WRAPPED ECX SOL (01a0f386-08b9-7611-896d-93fd473ea928), sole writer of ecx-bridge / codex/ubuntu-one-command. Read controller PROTOCOL.md and OWNERS.md. Helpers read-only. Never delete data or replay completed payments. Public ingress OFF. Production FAIL until every DONE.md gate passes; deadline does not waive gates.
 
+## Goal blocked on external prerequisites
+
+The same external prerequisites have remained unresolved across three consecutive goal turns. Available build, deployment, security-diff, isolation and stability work is complete. All jobs are terminal; both unused VMs are stopped. Latest read-only Mainnet check still shows zero SOL for the fresh-install wallet. Manual wallet availability, alert destination and production signing custodian/channel remain explicitly deferred; dependency-advisory disposition remains open. No meaningful next action can complete these gates without an external change. Resume at the corresponding numbered step below when an input arrives. Do not mark production ready, merge, enable public access or repeat completed payments.
+
 ## Current source and runtime
 
 Source8c2c9eb4d67192296be9feb806e4f09e0b7b2897 is pushed and installed on sole funded host i-0fc7cf24ffe177dd2. Public unsigned prerelease review-2026-10-09-six-confirmations. Installer40,282,254bytes, SHA256722cba45da5f22e3082dec3ff97519c1dce1ca3e3554e4698b156004fc195c53; GitHub digest matches. Runtime release0ee0664eeaa9e72b2dcb19931fc5d2c2a883592e0136e4415fd04b763577f526. Older source/artifacts/evidence remain preserved.
