@@ -26,7 +26,8 @@ From a built source checkout, the explicit `configure` then `start` commands rem
 available; see [LOCAL-DEVELOPMENT.md](LOCAL-DEVELOPMENT.md) for prerequisites.
 
 The default wizard creates **fresh CanonicalBeta custody with two generated wallets**.
-It asks for four inputs (Enter accepts displayed defaults):
+It asks for the connection inputs below (Enter accepts displayed defaults),
+plus an explicit initial SOL ownership statement saved for startup accounting:
 
 1. Primary Solana Mainnet HTTPS RPC URL, or a private file containing it.
 2. Independent provider's Mainnet HTTPS RPC URL, or a private file containing it.

@@ -24,8 +24,9 @@ results rather than adding it to that percentage.
 
 1. **Finish the actual installer path.** One reviewed command installs the pinned
    pruned ECX node, PostgreSQL, bridge and signer on Ubuntu 24.04 x86_64. The same
-   `sudo ecx-bridge` entry resumes saved setup. Four basic inputs: two independent
-   Mainnet RPC URLs, a new HTTPS backup repository and public origin (or local-only).
+   `sudo ecx-bridge` entry resumes saved setup. Connection inputs: two independent
+   Mainnet RPC URLs, a new HTTPS backup repository and public origin (or local-only),
+   plus an explicit initial SOL ownership statement for startup accounting.
    Generated recovery phrases need explicit acknowledgement after backup. Show
    progress and bounded prerequisite failures; retain wallets and signed attempts.
 2. **Complete fresh-host/interruption acceptance before publishing the command.**

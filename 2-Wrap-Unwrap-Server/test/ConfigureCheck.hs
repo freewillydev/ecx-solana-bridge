@@ -338,6 +338,8 @@ simpleContract parent executable=do
                 ack=await "Type saved once you have backed up the phrase:" >> hPutStrLn writer "saved" >> hFlush writer
             answer "NEW HTTPS restic repository URL" "https://backup.example.invalid/repository"
             answer "Public HTTPS origin" "-"
+            answer "Initial SOL ownership statement (fund once with your own SOL; add trading inventory after startup)" ""
+            answer "Initial SOL ownership statement (fund once with your own SOL; add trading inventory after startup)" "I own the initial SOL funding — opérateur"
             answer "Additional randomness for ecx (hidden; Enter skips)" "private-entropy-fixture"
             ack
             -- EOF can make script terminate the child before setup saves.
@@ -369,7 +371,7 @@ simpleContract parent executable=do
     acknowledgements<-mapM B.readFile
       [directory</>(".ecx-bridge-"<>asset<>"-wallet")</>(asset<>"-recovery.saved") | asset<-["solana","ecx"]]
     answerModes<-mapM (fmap ((.&. 0o777).fileMode) . getFileStatus . (setup</>))
-      ["answer-primary.json","answer-verifier.json","answer-backup.json","answer-origin.json"]
+      ["answer-primary.json","answer-verifier.json","answer-backup.json","answer-origin.json","answer-initial-funding.json"]
     solana<-either (const $ fail "generated_phrase_invalid") pure (walletKey $ B8.unpack phraseA)
     rules<-B8.lines <$> B.readFile(setup</>"native-rpc.conf")
     valid<-forM ["admin","worker","signer"] $ \role->do
@@ -394,6 +396,7 @@ simpleContract parent executable=do
     managedSelected<-case setupValue of
       Object fields->do
         let selected=KM.lookup "managedNode" fields==Just(Bool True)
+              && KM.lookup "initialFundingOwnership" fields==Just(String "I own the initial SOL funding — opérateur")
             changed=KM.insert "managedNode" (Bool False) $ KM.insert "nodeConfig" (toJSON node) $
               KM.insert "nodeService" (String "fixture.service") fields
         B.writeFile (setup</>"setup.json") (L.toStrict $ encode $ Object changed)

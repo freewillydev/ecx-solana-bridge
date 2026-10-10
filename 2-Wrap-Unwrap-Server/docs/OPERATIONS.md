@@ -266,7 +266,13 @@ and reconciliation are required; balance alone is not allocation authority.
 
 Start new custody with a dedicated wallet and acquire trading inventory outside
 custody before transferring it in. If guided setup paid for its own associated token
-account before ledger initialization, use `initialize-operating` while paused:
+account before ledger initialization, new guided configurations save your explicit
+initial SOL ownership statement. Fund once with your own SOL before startup; add
+ECX/wrapped inventory afterwards. `start` uses that statement, the configured
+funding origin and the validated saved ATA transaction to run `initialize-operating`
+through private operator control before normal backup/reconciliation/resume.
+Retries reuse the same accounting request. Older setups without that statement
+retain the explicit command while paused:
 
 ```json
 {"operation":"initialize-operating","deposit":"sol-operating:FUNDING_SIGNATURE","transaction":"ATA_CREATION_SIGNATURE","reason":"I own the complete initial SOL funding receipt"}

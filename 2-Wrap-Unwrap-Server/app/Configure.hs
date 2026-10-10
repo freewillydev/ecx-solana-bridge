@@ -8,6 +8,7 @@ import qualified Upgrade
 import qualified SetupPaths
 import qualified Token
 import qualified Token.Operation as TokenOp
+import qualified Token.Signing as TokenSigning
 import Bridge.RPC (independentHttps)
 import Bridge.SDKBuild (sdkLibraryPath,sdkSourceDirectory)
 import Bridge.BrowserBuild (browserAssetsDirectory)
@@ -38,6 +39,7 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as L
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import System.Directory (makeAbsolute,canonicalizePath,removeDirectoryRecursive,doesFileExist,doesDirectoryExist,findExecutable)
 import System.FilePath ((</>),takeDirectory,addTrailingPathSeparator)
 import qualified System.Posix.Directory as P
@@ -114,6 +116,9 @@ simplified directory=do
     -- Validate presentation without accepting arbitrary schemes or URL credentials.
     Bootstrap.validateOrigin value
     pure value
+  ownership<-savedPrompt directory "initial-funding" "Initial SOL ownership statement (fund once with your own SOL; add trading inventory after startup)" "" $ \input->do
+    require (not(T.null $ T.strip $ T.pack input) && length input<=512) "initial_funding_ownership_statement_required"
+    pure (T.pack input)
   tls<-case origin of
     Nothing->pure []
     Just _->do
@@ -148,7 +153,8 @@ simplified directory=do
         ,"solanaHistoryStart" .= String "","solanaOperatingHistoryStart" .= String ""]) template
       setup=object ["existing" .= False,"method" .= String (maybe "source" (const "bundle") bundle),"sourceRoot" .= root,"restic" .= restic
         ,"nodeConfig" .= nodeConfig,"nodeService" .= nodeService,"managedNode" .= True
-        ,"nativeSeedFile" .= phraseFile,"nativeAdminAuth" .= admin,"nativeRestore" .= False,"nativeRangeEnd" .= (999::Int)]
+        ,"nativeSeedFile" .= phraseFile,"nativeAdminAuth" .= admin,"nativeRestore" .= False,"nativeRangeEnd" .= (999::Int)
+        ,"initialFundingOwnership" .= ownership]
       sources=object [K.fromString name .= path | (name,path)<-
         [("solana.keypair.json",key),("native-worker.auth",worker),("native-signer.auth",signer)
         ,("native-unlock",unlock),("backup.repository",repository),("backup.password",password)]<>tls]
@@ -580,6 +586,17 @@ startUnlocked path=do
           threadDelay 500000
           waitReady (remaining-1)
   waitReady 20
+  ownership<-either (const $ reject "invalid_setup_json") pure
+    (parseEither (withObject "setup" (.:? "initialFundingOwnership")) value)
+  forM_ ownership $ \reason->do
+    require (not(T.null $ T.strip reason) && T.length reason<=512) "invalid_initial_funding_reason"
+    saved<-readPrivate(directory</>"ata-creation.json") >>= either (const $ reject "invalid_saved_ata") pure . eitherDecodeStrict'
+    _<-either reject pure (TokenSigning.validateSaved saved)
+    let request=object ["operation" .= String "initialize-operating"
+          ,"deposit" .= ("sol-operating:"<>C.solanaOperatingHistoryStart installedConfig)
+          ,"transaction" .= TokenSigning.savedId saved,"reason" .= reason]
+    (code,_,_)<-operator (T.unpack $ TE.decodeUtf8 $ L.toStrict $ encode request)
+    require (code==ExitSuccess) "initial_funding_not_ready_check_operator_status_then_rerun_start"
   (result,_,failure)<-readProcessWithExitCode (if uid==0 then "runuser" else "sudo")
     (if uid==0 then ["-u","ecxbridgew","--",binary,"operator",config]
      else ["-u","ecxbridgew",binary,"operator",config]) "{\"operation\":\"resume\"}"

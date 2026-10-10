@@ -161,7 +161,8 @@ evalSetup (FundCustody directory c key)=bracket newRpcManager closeManager $ \ma
     _<-parseValue (S.inspectMint $ Just 8) mint
     pure ()
   putStrLn $ "Fund SOL fees at: "<>T.unpack owner
-  putStrLn $ "Fund canonical wrapped ECX inventory at owner: "<>T.unpack owner<>" (ATA "<>T.unpack ata<>")"
+  putStrLn $ "After initial startup, fund canonical wrapped ECX inventory at owner: "<>T.unpack owner<>" (ATA "<>T.unpack ata<>")"
+  putStrLn "For fresh setup, send one operator-owned SOL funding transfer first; add ECX/wrapped inventory after initial accounting."
   putStrLn "Suggested SOL funding: 0.01 SOL. Startup never buys or mints wrapped ECX."
   let attempt=directory</>"ata-creation.json"
   saved<-doesFileExist attempt
