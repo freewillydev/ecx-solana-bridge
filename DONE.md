@@ -35,5 +35,5 @@ source-only; release owner retains deployment and integration authority.
 
 Library candidate a9aec9b and bridge against32ef15c: core Cabal PASS,
 library properties/type checks PASS, bridge positive/nine negative types PASS.
-Workflow Cabal PASS; focused runtime dispatch PASS. Fresh independent verdict pending. All broader release gates
+Workflow Cabal PASS; focused runtime dispatch PASS. Fresh verifier01a12711-79cf-7532-b6d1-bdd180b66245 bounded source/type and supplied execution evidence PASS, turn01a12714-ba86-7b80-847f-0addf51ae5d5; exact bridge0ea4bf7/librarya9aec9b. All broader release gates
 above retain their original requirements; no current all-component/PG claim.

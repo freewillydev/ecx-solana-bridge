@@ -11,10 +11,11 @@ Bridge actual Cabal core and workflow builds PASS (both exit0); workflow log
 /tmp/ecx-indexed-workflow-cabal.log, output /tmp/ecx-indexed-cabal.
 A supplementary manual source typecheck failed due to exposing both base16
 packages; actual Cabal build uses declared dependencies and supersedes that harness.
-Fresh independent verifier01a12711-79cf-7532-b6d1-bdd180b66245 active via coordinator.
+Fresh independent verifier01a12711-79cf-7532-b6d1-bdd180b66245 bounded PASS,
+turn01a12714-ba86-7b80-847f-0addf51ae5d5, for bridge0ea4bf7/librarya9aec9b.
 Focused runtime dispatch PASS /tmp/ecx-indexed-dispatch-run.log: six routes,
 signer payload and wrong-caller rejection using actual Cabal-built libraries.
-All task compilers/tests exited. Next: fresh review, then original owner integration. Full all-component/PG/release checks unverified.
+All task compilers/tests exited. Next: original owner integration; scoped extension complete. Full all-component/PG/release checks unverified.
 No live/deploy/merge authority. All older evidence below remains historical.
 
 # Isolated capability refactor continuation
