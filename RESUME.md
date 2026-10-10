@@ -10,7 +10,7 @@ Local bridge suite /tmp/ecx-optional-entropy-final-test.log PASS. Linux build/al
 
 Checked upgrade6bc6d80a-42c9-484a-90b3-164624e3d654 Success/0. Stagingcea5edd2 verified source and48manifest entries before runtime change. Postcheck71c4ee3f-656e-4df5-9e5b-3b177bcd564c PASS: managed console current, no pendingupgrade, active worker/signer, configs6, original Paid orders/quotes/payoutIDs unchanged. Statusfa85eba3 PASS: critical=backup105, ready/unpaused; PG/native/worker/signer all127.0.0.1, cloudflaredinactive. Private records /root/ecx-release-8c2c9eb on funded host. Additional isolation receipt2b267739-6e92-4e94-b2d6-07e93ef9fa1a PASS: worker cannot read signer Solana/TLS/native keys or backup password; signer can read required inputs. Separate service users, NoNewPrivileges=yes, PrivateTmp=yes, ProtectSystem=strict, zero restarts.
 
-Active ten-minute soak SSM e422f3ba-c176-4a0a-80b7-865cde982eed, host i-0fc7cf24ffe177dd2. Poll this exact handle; do not restart it on observation timeout. It verifies11samples every60s, Paid orders unchanged, backed-up105, ready, no restarts/publicoff; private soak.jsonl. Get terminal result before claimingPASS.
+Ten-minute soak SSM e422f3ba-c176-4a0a-80b7-865cde982eed on i-0fc7cf24ffe177dd2 completed Success/0: all 11 samples passed, original Paid orders unchanged, sequence105 fully backed up, ready, zero restarts, public access off. Private evidence: /root/ecx-release-8c2c9eb/soak.jsonl. Both unused build host i-0a62cafbef864b8a7 and fresh-install host i-080ffde827e5b745b are confirmed stopped; volumes and logs retained. No local build/test process remains. Only funded deployment and independent backup host need to remain running.
 
 ## Security and verifier
 
@@ -26,12 +26,12 @@ Original fresh bootstrap is sealed atdepth1: do not editbootstrap-bound.json orr
 
 User deferred realSolanaPaywallet-app test, externalalertdestination, productionsigningcustodian/trustchannel. Do notfabricatesubstitutes orrepeatedlyask. WALLET/ALERT/TRUST remainFAIL. PUBLIC andVERIFY dependonallgates. Unsignedreviewartifactdoesnotpassthetrustgate.
 
-## Immediate next steps
+## Immediate next steps and blockers
 
-1. Pollsoake422f3ba; getfreshseparateverifier per-DONErow againstfinalsource/artifact/evidence. Review exact installer upgradeconsole preservation andallapplicablechecks; reportanygapexplicitly.
-2. Retiredsource/build i-0a62cafbef864b8a7 currentlyRUNNING forcompletedbuild; custodyservicesverifiedinactivec5dea03e. Verifier finished inspecting logs. Build-host stop requested and state stopping at00:30UTC; fresh VM confirmed stopped. Preserve volumes/databases; confirm build host reaches stopped. No localbuild/testprocessleft.
-3. Continuefreshacceptance onlywhenSOLfunded/authorizednoncustodyfunderavailable; inspect onchain/savedattemptbeforeanyretry. No newpaymentsneededonexistingPaidorders.
-4. RefreshDONEstatusandthisfilewithterminalsoak/verdict, append.audit/release.tsv. Source/docpointerchangesafter8c2c9eb donotchangebuiltartifact. KeepPRdraft/unmerged/publicOFF.
+1. Fresh release_candidate_verifier independently checked the terminal soak receipt and command: scoped PASS. The soak checks Cloudflared inactivity; separate fa85eba3 confirms localhost listeners, and no complete public HTTPS gate is claimed. All automated jobs are terminal; do not restart tests or VMs without a concrete need.
+2. Fresh-install acceptance requires 0.003 SOL on Mainnet at `9Dfte8EDq1L9F2N4qTuMqtAEZUmDcvXpCu7EGXEHVcjY`, or an authorized funded noncustody wallet. Finalized balance remained zero at 00:35 UTC. The pending funding question has no answer; do not repeat it. After funding, resume the SAME preserved setup and inspect any saved signing attempt before retrying. The sealed depth-one setup needs the already described compatible-runtime/policy transition; never edit its binding or regenerate keys.
+3. User-deferred real wallet-app acceptance, external alert destination, production release-key custodian/trust channel, and release-authority dependency disposition remain unresolved. These are genuine production blockers; do not fabricate substitutes or relax DONE.md.
+4. Keep the draft PR unmerged and public bridge access OFF. Resume meaningful work when an external prerequisite changes; do not perform repeated builds or fund transfers merely to show activity. Earlier goal turn made progress by finishing the stability check and confirming resource cleanup; the no-progress blocked audit starts only once no further meaningful work is available.
 
 ## Custody and snapshot references
 
