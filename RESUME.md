@@ -2,9 +2,11 @@
 
 Owner: WRAPPED ECX SOL (01a0f386-08b9-7611-896d-93fd473ea928), sole writer of ecx-bridge / codex/ubuntu-one-command. Read controller PROTOCOL.md and OWNERS.md. Helpers read-only. Never delete data or replay completed payments. Public ingress OFF. Production FAIL until every DONE.md gate passes; deadline does not waive gates.
 
-## Goal blocked on external prerequisites
+## Funding received; fresh startup exposed a compatibility blocker
 
-The same external prerequisites have remained unresolved across three consecutive goal turns. Available build, deployment, security-diff, isolation and stability work is complete. All jobs are terminal; both unused VMs are stopped. Latest read-only Mainnet check still shows zero SOL for the fresh-install wallet. Manual wallet availability, alert destination and production signing custodian/channel remain explicitly deferred; dependency-advisory disposition remains open. No meaningful next action can complete these gates without an external change. Resume at the corresponding numbered step below when an input arrives. Do not mark production ready, merge, enable public access or repeat completed payments.
+User funded the isolated fresh-install wallet: public Mainnet finalized balance was 3,000,000 lamports (0.003 SOL). AWS ecx-dev session refreshed successfully, and i-080ffde827e5b745b restarted. Preserved setup inspected in e793cba6: original compatible binary, same owner, sealed depth1, no ATA attempt/bootstrap-complete/worker config. Start92c6f634-2fd8-4be1-9292-ed620b104060 failed during primary RPC history preflight before signing: rpc_error_-32015. Direct diagnostic de8ca7c7 showed latest canonical-mint transaction version1 exceeds requested maxSupportedTransactionVersion0. Independent provider confirmed the same failure for the same signature in f3ef0bc8-141e-4b4f-b7bd-778ab83d8b9a. No new signing attempt exists (53b73028). No payment was sent. Stop requested for isolated VM after diagnosis; retain all data and funded keys.
+
+Exact next step: investigate version1 transaction compatibility in Bootstrap.checkHistoryWith and all real Solana observation/history parsers; distinguish the capability probe's unrelated latest-mint transaction from actual custody history. Do not blindly raise maxSupportedTransactionVersion or skip unsupported custody transactions. Add regression coverage and obtain separate review before deploying any compatibility change. Retain frozen8c2c9eb and all acceptance evidence; INSTALL still FAIL. After validated fix, resume SAME setup, inspect any saved attempt first, then complete the explicit six-confirmation transition, checked upgrade/reboot/resume. User-deferred wallet/alerts/signing trust and advisory disposition still block production.
 
 ## Current source and runtime
 
@@ -30,7 +32,7 @@ Original fresh bootstrap is sealed atdepth1: do not editbootstrap-bound.json orr
 
 User deferred realSolanaPaywallet-app test, externalalertdestination, productionsigningcustodian/trustchannel. Do notfabricatesubstitutes orrepeatedlyask. WALLET/ALERT/TRUST remainFAIL. PUBLIC andVERIFY dependonallgates. Unsignedreviewartifactdoesnotpassthetrustgate.
 
-## Immediate next steps and blockers
+## Prior blocked-state checklist (superseded by funding/compatibility update above)
 
 1. Fresh release_candidate_verifier independently checked the terminal soak receipt and command: scoped PASS. The soak checks Cloudflared inactivity; separate fa85eba3 confirms localhost listeners, and no complete public HTTPS gate is claimed. All automated jobs are terminal; do not restart tests or VMs without a concrete need.
 2. Fresh-install acceptance requires 0.003 SOL on Mainnet at `9Dfte8EDq1L9F2N4qTuMqtAEZUmDcvXpCu7EGXEHVcjY`, or an authorized funded noncustody wallet. Finalized balance remained zero at 00:35 UTC. The pending funding question has no answer; do not repeat it. After funding, resume the SAME preserved setup and inspect any saved signing attempt before retrying. The sealed depth-one setup needs the already described compatible-runtime/policy transition; never edit its binding or regenerate keys.
