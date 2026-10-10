@@ -2,12 +2,14 @@
 -- An unclassified result must remain a liability and must not authorize a payout.
 {-# LANGUAGE RecordWildCards #-}
 module Bridge.SolanaDeposit
-  ( PayBinding(..), payInstruction, payReference, payURIFor, transactionKeys, verifyPay
+  ( InitialAta, initialSignature, initialSlot, initialBefore, initialRent, initialFee, initialEvidence, verifyInitialAta
+  , PayBinding(..), payInstruction, payReference, payURIFor, transactionKeys, verifyPay
   , DepositBinding(..), SolanaDeposit(..), verifyDeposit
   , CustodyEffect(..), custodyEffect, LamportEffect(..), lamportEffect, transactionMemo, transactionAccounts, historicalTokenBalance, depositInstructions
   ) where
 
 import Bridge.Solana (tokenProgram)
+import qualified Bridge.SolanaMessage as Message
 import Bridge.Identity (publicKey, payInstruction, payReference)
 import Bridge.Domain (Amount, amount, units, parseUnits, renderCoins)
 import Control.Monad (unless,when)
@@ -22,6 +24,77 @@ import Data.List (elemIndices,nub)
 import Data.Text (Text)
 import qualified Data.Text as T
 import qualified Data.Text.Encoding as TE
+
+-- A verified intent/effects pair, not a finality or accounting authorization.
+-- Only this parser constructs it; the critical operation must agree on both RPCs.
+data InitialAta = InitialAta !Text !Int64 !Amount !Amount !Amount !Value deriving (Eq,Show)
+initialSignature :: InitialAta -> Text
+initialSignature (InitialAta x _ _ _ _ _)=x
+initialSlot :: InitialAta -> Int64
+initialSlot (InitialAta _ x _ _ _ _)=x
+initialBefore, initialRent, initialFee :: InitialAta -> Amount
+initialBefore (InitialAta _ _ x _ _ _)=x
+initialRent (InitialAta _ _ _ x _ _)=x
+initialFee (InitialAta _ _ _ _ x _)=x
+initialEvidence :: InitialAta -> Value
+initialEvidence (InitialAta _ _ _ _ _ x)=x
+
+verifyInitialAta :: Text -> Text -> Text -> Text -> Amount -> Amount -> Text -> Value -> Either Text InitialAta
+verifyInitialAta signature owner mint account feeCap rentCap encoded value = do
+  (Message.Transaction signatures (Message.Message required readonlySigned readonly keys hash instructions) _) <- Message.decodeTransaction encoded
+  _ <- Message.validateAssociated True owner mint account owner (Message.base58 hash) encoded
+  unless (map Message.base58 signatures==[signature]) (Left "initial_ata_signature_mismatch")
+  either (const $ Left "initial_ata_effects_mismatch") Right $ parseEither (inspect required readonlySigned readonly keys hash instructions) value
+ where
+  inspect required readonlySigned readonly keys hash instructions v = do
+    version<-optional "version" v :: Parser (Maybe Value)
+    ensure (version `elem` [Nothing,Just(String "legacy")]) "legacy setup required"
+    slot<-get "slot" v
+    ensure (slot>=0) "invalid slot"
+    tx<-get "transaction" v
+    actualSignatures<-get "signatures" tx
+    ensure (actualSignatures==[signature]) "wrong transaction"
+    msg<-get "message" tx
+    header<-get "header" msg
+    r<-get "numRequiredSignatures" header :: Parser Int
+    rs<-get "numReadonlySignedAccounts" header :: Parser Int
+    ru<-get "numReadonlyUnsignedAccounts" header :: Parser Int
+    recent<-get "recentBlockhash" msg
+    meta<-get "meta" v
+    accounts<-transactionAccounts msg meta
+    lookups<-optional "addressTableLookups" msg :: Parser (Maybe [Value])
+    ensure (accounts==map Message.base58 keys && maybe True null lookups
+      && (r,rs,ru)==(fromIntegral required,fromIntegral readonlySigned,fromIntegral readonly)
+      && recent==Message.base58 hash) "raw message mismatch"
+    jsonInstructions<-get "instructions" msg
+    ensure (length jsonInstructions==length instructions) "extra JSON instructions"
+    semantic<-depositInstructions accounts jsonInstructions
+    let at i=Message.base58 (keys!!fromIntegral i) -- raw decoder bounds indices
+        rawSemantic (Message.Instruction program indexes payload)=
+          (at program,map fromIntegral indexes,map at indexes,payload)
+    ensure (semantic==map rawSemantic instructions) "raw instruction mismatch"
+    err<-get "err" meta :: Parser Value
+    ensure (err==Null) "failed setup"
+    before<-get "preBalances" meta :: Parser [Integer]
+    after<-get "postBalances" meta :: Parser [Integer]
+    ensure (length before==length accounts && length after==length accounts
+      && all (>=0) (before<>after)) "invalid balances"
+    idx<-case elemIndices account accounts of [i]->pure i; _->fail "missing ATA"
+    fee<-get "fee" meta >>= boundedAmount
+    rent<-boundedAmount (after!!idx)
+    starting<-boundedAmount (head before)
+    ensure (units fee>0 && fee<=feeCap && units rent>0 && rent<=rentCap
+      && before!!idx==0 && head before-head after==toInteger(units rent)+toInteger(units fee)
+      && and [a==b | (i,(a,b))<-zip [0..] (zip before after),i/=0 && i/=idx]) "unexpected setup costs"
+    pre<-get "preTokenBalances" meta :: Parser [Value]
+    post<-get "postTokenBalances" meta :: Parser [Value]
+    ensure (null pre && length post==1) "unexpected token accounts"
+    tokenBalance<-historicalTokenBalance mint idx owner post
+    program<-get "programId" (head post)
+    ensure (tokenBalance==0 && program==tokenProgram) "unexpected token state"
+    pure (InitialAta signature slot starting rent fee
+      (object ["signedTransaction" .= encoded,"transaction" .= v]))
+  boundedAmount n=either (fail . T.unpack) pure (amount n)
 
 data DepositBinding = DepositBinding
   { boundSignature :: Text, boundOwner :: Text, boundMint :: Text
@@ -38,6 +111,22 @@ optional :: FromJSON a => Key -> Value -> Parser (Maybe a)
 optional key = withObject "RPC object" (.:? key)
 ensure :: Bool -> String -> Parser ()
 ensure ok msg = unless ok (fail msg)
+
+-- RPC JSON normalizes instruction/account indexing across legacy, v0 and v1.
+-- v1 has inline accounts only. Fees/effects are read from finalized metadata,
+-- never inferred from its new transactionConfig or ComputeBudget instructions.
+transactionFormat :: Value -> Parser ()
+transactionFormat value = do
+  version <- optional "version" value :: Parser (Maybe Value)
+  ensure (version `elem` [Nothing,Just(String "legacy"),Just(Number 0),Just(Number 1)]) "unsupported transaction version"
+  when (version==Just(Number 1)) $ do
+    message <- get "transaction" value >>= get "message"
+    meta <- get "meta" value
+    static <- get "accountKeys" message :: Parser [Text]
+    accounts <- transactionAccounts message meta
+    lookups <- optional "addressTableLookups" message :: Parser (Maybe [Value])
+    _ <- get "transactionConfig" message :: Parser Object
+    ensure (length static<=64 && accounts==static && maybe True null lookups) "invalid v1 accounts"
 
 -- Classification is intentionally broader than automatic deposit authorization:
 -- a successful CPI or no-memo receipt still changes custody and must be held.
@@ -57,6 +146,7 @@ lamportEffect :: Text -> Text -> Value -> Either Text LamportEffect
 lamportEffect signature address = either (const $ Left "unclassified_lamport_effect") Right . parseEither inspect
  where
   inspect value = do
+    transactionFormat value
     slot <- get "slot" value
     ensure (slot>=0) "invalid slot"
     tx <- get "transaction" value
@@ -82,6 +172,7 @@ custodyEffect signature mint custody owner =
   either (const $ Left "unclassified_custody_effect") Right . parseEither parseEffect
  where
   parseEffect value = do
+    transactionFormat value
     slot <- get "slot" value
     ensure (slot>=0) "invalid slot"
     transaction <- get "transaction" value
@@ -124,6 +215,7 @@ transactionMemo :: Value -> Maybe Text
 transactionMemo value = either (const Nothing) id $ parseEither parseMemo value
  where
   parseMemo v = do
+    transactionFormat v
     transaction <- get "transaction" v
     message <- get "message" transaction
     meta <- get "meta" v
@@ -151,8 +243,7 @@ verify DepositBinding{..} value = do
   meta <- get "meta" value
   err <- get "err" meta :: Parser Value
   ensure (err==Null) "failed transaction"
-  version <- optional "version" value :: Parser (Maybe Value)
-  ensure (version==Nothing || version==Just (String "legacy") || version==Just (Number 0)) "unsupported transaction version"
+  transactionFormat value
   transaction <- get "transaction" value
   signatures <- get "signatures" transaction :: Parser [Text]
   ensure (signatures==[boundSignature]) "unexpected signer count or transaction"
@@ -242,6 +333,7 @@ payURIFor owner mintId instruction quantity = do
 
 transactionKeys :: Value -> Either Text [Text]
 transactionKeys = either (const $ Left "invalid_pay_accounts") Right . parseEither (\value->do
+  transactionFormat value
   transaction <- get "transaction" value; message <- get "message" transaction; meta <- get "meta" value; transactionAccounts message meta)
 
 verifyPay :: PayBinding -> Value -> Either Text SolanaDeposit
@@ -253,8 +345,7 @@ verifyPayProof PayBinding{..} value = do
   meta <- get "meta" value
   err <- get "err" meta :: Parser Value
   ensure (err==Null) "failed transfer"
-  version <- optional "version" value :: Parser(Maybe Value)
-  ensure (version==Nothing || version==Just(String "legacy") || version==Just(Number 0)) "unsupported version"
+  transactionFormat value
   tx <- get "transaction" value
   signatures <- get "signatures" tx :: Parser [Text]
   message <- get "message" tx

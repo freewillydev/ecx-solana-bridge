@@ -21,7 +21,7 @@ results belong in RELEASE-REVIEW; they are not assumptions that new code is safe
 
 ```mermaid
 flowchart TD
-  API["API.hs: pure Servant handler"] --> Request["Plan / Request → checkedRequest / command"]
+  API["API.hs: pure Servant handler"] --> Request["Plan / Pending → library interpret → Program"]
   Request --> Safe["evalSafe: authorized reads"]
   Request --> Dispatch["runProcess: sole evalCritical call"]
   Dispatch --> Critical["evalCritical: authorize + concrete operation"]
@@ -51,65 +51,85 @@ Read it before changing the operation boundary. The production grammar corrects
 its permissive/incomplete sketch types while retaining its constrained design:
 
 ```haskell
-data family Evaluation (severity :: Severity)
+-- The library supplies the existential and nominal capability indices.
+newtype Pending caller severity a = Pending (SomeOperationWith
+  (PreparationCaps caller severity a) (PreparationCaps caller severity a))
 
-class Typeable (OperationContext caller severity op)
-    => Operation caller severity op | caller -> op, op -> caller where
-  type OperationContext caller severity op = (context :: Constraint)
-    | context -> caller severity op
-  command :: op severity a -> DSL caller severity a
-  interpretOperation :: DSL caller severity a -> Either Text (DSL caller severity a)
-  authorizeOperation :: Evaluation severity -> op severity a -> IO ()
-  evaluateOperation :: Evaluation severity -> op severity a -> IO a
+-- One closed payload type fixes caller, severity and result together.
+data Command caller severity a where
+  CustomerQuery  :: CustomerRead a -> Command 'Customer 'Safe a
+  CustomerChange :: CustomerWrite a -> Command 'Customer 'Critical a
+  WorkerAction :: (forall value. WorkerOperations value
+               => value -> Program 'Worker 'Critical a)
+               -> Command 'Worker 'Critical a
+  -- Operator writes select OperatorWrite methods; signer leaves remain explicit.
 
-data Request caller severity a where
-  Request :: Operation caller severity op
-          => op severity a -> Request caller severity a
-
-checkedRequest :: forall caller severity a.
-  Request caller severity a -> Either Text (DSL caller severity a)
-checkedRequest (Request (op :: requested severity a)) =
-  interpretOperation @caller @severity @requested (command op)
+instance (Typeable a, Execution caller severity (Command caller),
+          caps ~ PreparationCaps caller severity a, UniqueCapabilities caps)
+    => Operation (Command caller severity a) caps where
+  type Context (Command caller severity a) = CompileOperation caller severity a (Command caller severity a)
+  type Outcome (Command caller severity a) = Program caller severity a
+  data DSL (Command caller severity a) where
+    Compile :: CompileOperation caller severity a (Command caller severity a)
+            => DSL (Command caller severity a)
+  interpret (SomeOperation (value :: actual)) Compile =
+    case eqT @actual @(Command caller severity a) of
+      Just Refl -> Just (compileOperation value)
+      Nothing -> Nothing
 ```
 
-Four closed caller families and six ground instances cover customer/operator
-safe and critical work, and worker/signer critical work. Functional dependencies
-fix each caller's family; severity-indexed GADTs fix its executable instructions.
-The associated `OperationContext` family returns an injective constraint type;
-each instance defines it as its fully specified `Operation` constraint.
-DSL constructors retain only that fully specified associated constraint. The private
-matching-only `Instruction` view lives beside the ground instances in `Critical.hs`,
-where their type equations reduce it to the exact `Operation` dictionary. It recovers
-that dictionary from the closed grammar without admitting arbitrary instructions.
+`Control.Operation` is imported unqualified. Its argument-free `Compile` selector
+carries the precise compilation constraint. Payload arguments occur once in the
+hidden `Command`; the interpreter proves its full type, then calls the specific
+`compileOperation` method. `eqT` compares payload types, including caller, severity
+and result; it does not compare dictionary values or authorize effects.
 
-`checkedRequest` constructs the DSL from the original existential request and
-selects that request's `interpretOperation` instance explicitly. That pure method
-uses `eqT` and `Refl` to establish equality of the request and DSL's **constraint
-types**. There is no `operationDictionary` method or explicit dictionary argument.
-This check does not compare dictionary values, leaf constructors or payloads.
-Coherent ground instance heads, construction from the original request and the
-typed leaf results remain essential; reflection does not replace authorization.
+`Pending` is a zero-cost newtype required by Servant's partially applied
+`Type -> Type` handler parameter. It contains the library's `SomeOperationWith`,
+not another custom existential. Its nominal indices prevent caller, severity or
+result coercion. `PreparationCaps` contains `CompileOperation` and, for critical
+worker/operator requests, the actual `WorkerOperations` or `OperatorWrite` class.
+For example, `workerRequest (\cap -> queuePayment cap txid)` selects an allowed
+method without supplying IO, keys or a database connection. A stage constrained by
+`WorkerOperations` can use worker methods; it cannot use operator methods.
 
-`Plan caller a` contains a safe or critical existential request. Customer handlers
-have `ServerT CustomerAPI (Plan 'Customer)` and contain no effects. Servant's hoist
-checks and evaluates the request; only its concrete result is serialized.
-Order creation being critical does not confer operator or signer authority.
-Cabal's customer-api component hides `Operation.Internal` and has no runtime,
-store or chain dependency. Pure HTTP/control assembly carries concrete instance
-constraints; startup supplies the implementations. Review exports and component
-dependencies as well as types.
+`checkedOperation` narrows the visible row to `CompileOperation` before its terminal
+`withCapabilities` step. It hands the canonical existential to the library's
+`interpret`, whose `eqT` check chooses the matching compiled result. These are
+visible dictionary restrictions, not irreversible revocation or sandboxing:
+`forgetCapabilities` intentionally retains canonical capability evidence for
+interpretation. Financial authorization still belongs to the evaluators.
 
-All six `Operation` instances live in `Critical.hs`, beside the safe and critical
+The compiler emits the closed `Program` effect grammar. Its six constructors retain
+the precise execution constraints and leaf result types. This separates the
+library's pure compilation DSL from concrete IO without copying business rules.
+`Plan caller a` contains a safe or critical pending operation. Customer handlers
+have `ServerT CustomerAPI (Plan 'Customer)`; signer handlers use
+`ServerT SigningAPI (Pending 'Signer 'Critical)`. Servant's hoist compiles/evaluates
+the existential; only the concrete result is serialized. Handlers select constrained methods; they cannot supply an IO callback. Customer order creation confers no operator or signer authority.
+Cabal's customer-api component exposes only the customer facade, with no runtime,
+store or chain dependency. Review component boundaries as well as types.
+
+All six `Execution` instances live in `Critical.hs`, beside the safe and critical
 evaluators. Their methods implement concrete effects except local signer execution,
 which belongs directly to the gated critical evaluator. There is no
-`Interpreter` class, callback bundle or arbitrary environment/program execution
-instance. The core declares an opaque `Evaluation` data family; only `Critical.hs`
+`Interpreter` class or arbitrary environment/program execution instance. The core declares an opaque `Evaluation` data family; only `Critical.hs`
 defines its two concrete severity instances and can construct them. Safe resources
 are a reader and public configuration. Critical resources are either worker
 resources or signer resources, which contain no writer. IO is fixed; polymorphism
-in the result preserves the result selected by the operation's GADT.
+in the result preserves the result selected by the operation's GADT or method.
 
-Both evaluators recover `Instruction` and call `authorizeOperation`. Safe evaluation
+`OperatorWrite` and `WorkerOperations` replace the former 31 leaf constructors
+and their matching dispatch branches. Each method returns a typed `Program`.
+Their `Action` data-family instances are private to `Critical.hs`: only that module
+can construct an IO action, attach its observation-mode permission and supply its
+resource environment. The operator/worker `Execution` instances inspect that
+permission and run the saved action. The seven recovery/observation worker methods
+and operator pause retain their previous observation-only access. Customer and
+signer leaves remain small explicit GADTs; signer result constructors remain unique.
+Class implementations are checked with `-Werror=missing-methods`.
+
+Both evaluators use the private `Executable` view to recover `Instruction` and call `authorizeOperation`. Safe evaluation
 then calls `evaluateOperation`. Critical evaluation matches the four `SigningDSL`
 leaves in a signer context, keeping each read/sign/recheck or checkpoint sequence
 inside its held gate; all other cases call `evaluateOperation`. The signer instance's
@@ -124,13 +144,13 @@ normalizes both startup modes before its single `runProcess` call; its resource
 bracket passes only resource data, never evaluators. Each process retains its own
 gate and resource context. Worker entry refuses
 signer requests; signer entry refuses customer/operator/worker requests. Internal
-worker and signer instructions pass `checkedRequest` and invoke the concrete method
+worker and signer instructions pass `checkedOperation` and invoke the concrete method
 inside the already-held gate, without reacquiring it. Only that internal signer
 method constructs the HTTPS client; the signer context executes local signing.
 
 The bounded `checkpoint CONFIG` worker lifetime acquires the same writer/advisory
 lock and host fence, but starts no HTTP listener, control socket or observer loop.
-It dispatches only `CheckpointForUpgrade` through the existing critical call site.
+It dispatches only `checkpointForUpgrade` through the existing critical call site.
 That closed operation requires a paused ledger and obtains a fresh verified custody
 receipt even when prior backup coverage is current. Receipt acknowledgement must
 complete before the command emits success. The signer remains a separate process;
@@ -250,6 +270,18 @@ monotonic durable clock prevent clock rollback from resetting budgets. Expiry
 releases only provisional holds. Funded/signed work retains its protection. Treasury
 allocation requires a finalized eligible unbound receipt, an exact split, paused
 service, ownership attestation and matching custody; SOL only funds operating.
+
+Initial self-funded ATA accounting is a private `initializeOperating` operator
+leaf. It verifies exact signed setup bytes and matching finalized JSON effects on
+two independent providers before `InitializeSolanaOperating` commits under the
+writer lock. The immutable proof type has no exported constructor or record-update
+fields. The store rechecks revision, fresh scan heads, original history boundaries,
+receipt and observation identity, cost caps, zero prior financial activity and exact
+unallocated balances. Allocation and observed setup-cost classification commit or
+roll back together. It creates no signing or broadcast authority and leaves custody
+uncertified and paused. Exact committed receipt/signature/attestation replay is a
+closed read before any live RPC prerequisite; ordinary treasury and reconciliation
+checks are unchanged. See `initial_funding` and `initial_customer` PostgreSQL modes.
 
 ## Customer and payment lifecycle
 
@@ -535,6 +567,12 @@ They are critical worker-only instructions, implemented by `Critical.hs` and
 specific Store operations. The cycle observes/reconciles while paused; preparation,
 queue/send and signing require their saved policy/readiness checks. The guarded
 payment boundary pauses on failure. Recovery never implicitly resumes intake.
+Explicit resume also handles a complete native preparation with a lost signing
+reply: it validates the saved PSBT and unspent prevouts using paused lock recovery,
+then atomically compares the exact preparation, cancellation flag and empty attempt
+set before resuming. The normal worker reuses that generation and PSBT. Resume
+neither signs nor cancels it; missing attempts alone never establish that no
+signature was produced. Changed or spent inputs keep the service paused.
 
 The four signer leaves and result constructors are listed above. Their payloads
 are respectively `(deployment,payment,generation)`, `(deployment,decision)`,
@@ -917,7 +955,7 @@ tests; real-chain and independent-host acceptance remain release gates.
 | Haskell browser and Cabal asset hooks | `web/`, `build/` |
 | QuickCheck and PostgreSQL contracts | `test/Main.hs`, `test/StoreCheck.hs` |
 
-Servant handlers package typed requests; `Operation.command` resolves them into
+Servant handlers package typed requests; `Execution.command` resolves them into
 closed DSL instructions. Separate evaluators enforce safe/critical authority.
 All application database access uses Opaleye inside specific closed operations.
 Only critical evaluation owns the signer client. The signer independently checks
@@ -968,3 +1006,30 @@ from verified deposit effects. Only actual chain observations credit deposits.
 [Token administration](../../../1-Make-Wrapped-ECX/README.md) and
 [liquidity operations](../../../3-Create-CPMM-Pool/README.md) use separate keys outside
 customer custody. Trading links do not provide the native wrap/unwrap service.
+
+### Bounded Solana observation catch-up
+
+Observation scans retain at most 500 oldest fetched signatures and fetch at most
+four 100-signature pages per cycle. Two versioned bounded progress records use
+reserved `history-progress-v1:` keys in `checkpoints`; only the closed
+ReadHistoryProgress, RecordHistoryProgress and CommitHistoryScan operations access
+them. They are scratch pagination state, never coverage heads or financial facts.
+Normal scan health joins only the three real streams.
+
+The exact previous signature/origin must be found before any retained receipts are
+posted. A complete contiguous oldest window advances coverage; discarded newer
+history is rediscovered in later cycles. This bounds memory/database state at the
+cost of refetching deep histories. Each progress write compares the expected saved
+state and current real checkpoint under the ordinary deployment lock. Classified
+receipts, evidence, coverage and scratch retirement commit atomically. Partial
+coverage keeps health failed and intake paused. Completed coverage uses its original
+scan-start time; customer receipt observation time remains the classification time.
+A complete scan never automatically resumes the ledger.
+
+Pending independent verification has a reserved 500-entry share; remaining entries
+stay queued and suppress readiness. Expiry/absence proofs continue to use the strict
+all-or-error collector, never these partial results. An older binary can advance
+coverage while ignoring auxiliary rows. On re-upgrade, scratch bound to a different
+real checkpoint is obsolete and ignored; only a subsequent closed write replaces
+it, with no rewind or replay of accounting. Backups include the ordinary checkpoints
+table, including these records; final acceptance must verify their restoration.

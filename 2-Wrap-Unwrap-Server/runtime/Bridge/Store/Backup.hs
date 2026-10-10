@@ -60,7 +60,8 @@ archiveLedger settings directory identity version sequenceNo snapshot = do
         removeFile path
   bracketOnError (openBinaryTempFile directory "ledger.dump-") cleanup $ \(path,handle) -> do
     setFileMode path 0o600
-    run "pg_dump" ["--format=custom","--no-owner","--no-privileges","--no-password","--snapshot="<>T.unpack snapshot] (UseHandle handle)
+    -- Installer receipts are private infrastructure, not part of the ledger.
+    run "pg_dump" ["--schema=public","--format=custom","--no-owner","--no-privileges","--no-password","--snapshot="<>T.unpack snapshot] (UseHandle handle)
     hClose handle
     syncFile path
     withBinaryFile "/dev/null" WriteMode $ \sink->run "pg_restore" ["--list",path] (UseHandle sink)
@@ -387,8 +388,11 @@ restoreLedger settings archive = mask $ \restore->do
     (restore $ do
       void $ PG.execute admin "REVOKE ALL ON DATABASE ? FROM PUBLIC" name
       void $ PG.execute admin "ALTER DATABASE ? ALLOW_CONNECTIONS true" name
+      -- Only this freshly created random staging DB is cleaned. Explicit schema
+      -- archives include public, which template0 already contains. Legacy archives
+      -- without a schema entry retain the empty default schema.
       withBinaryFile "/dev/null" WriteMode $ \sink->databaseTool target "pg_restore"
-        ["--exit-on-error","--single-transaction","--no-owner","--no-privileges","--no-password"
+        ["--clean","--if-exists","--exit-on-error","--single-transaction","--no-owner","--no-privileges","--no-password"
         ,"--dbname="<>PG.connectDatabase target,archivePath archive] (UseHandle sink)
       pure target) `onException` void (PG.execute admin "DROP DATABASE ?" name)
 

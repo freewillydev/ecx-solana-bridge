@@ -12,6 +12,8 @@ flock -n 9 || fail 'another node installation is running'
 version=L1-ecash-bitcoin-31.1.0-ca64033c1374-x86_64-unknown-linux-gnu
 checksum=1fcdaad74888f8d445a335c54102ffe540d17e8942d6939713d4c5d71c31a17e
 url=https://releases.ecash.com/L1-ecash-bitcoin/betanet/ca64033c1374/L1-ecash-bitcoin-x86_64-unknown-linux-gnu.zip
+sync_mode=${ECX_NODE_SYNC:-snapshot}
+case "$sync_mode" in snapshot|full) ;; *) fail 'ECX_NODE_SYNC must be snapshot or full' ;; esac
 base=/opt/ecx-node
 home=/var/lib/ecx-betanet
 unit=/etc/systemd/system/ecx-betanet.service
@@ -76,6 +78,71 @@ if [ -e "$unit" ]; then
   cmp -s "$unit" "$staging/service" || fail 'existing service differs; refusing to overwrite'
 else
   install -m 0644 "$staging/service" "$unit"
+fi
+# Chain-only bootstrap. The digest pins an operator snapshot, not a trustless sync.
+# Existing nodes are never replaced; a durable ready marker resumes interrupted moves.
+snapshot_hash=87e21e2cb2054fa079f1873e42dee555de2f1631eadf4e09e7dab376ea172428
+snapshot_url=https://ecx-betanet-snapshots-242254325782-us-east-2.s3.us-east-2.amazonaws.com/$snapshot_hash/chain.tar.gz
+snapshot=/var/lib/ecx-node-snapshot-$snapshot_hash
+[ ! -L "$snapshot" ] || fail 'snapshot staging symlink refused'
+if [ "$sync_mode" = snapshot ] && { [ -f "$snapshot/ready" ] || { [ ! -e "$home/blocks" ] && [ ! -e "$home/chainstate" ]; }; }; then
+  systemctl is-active --quiet ecx-betanet.service && fail 'stop the node before snapshot bootstrap'
+  # Protect root extraction from preexisting untrusted staging/ancestors.
+  [ "$(stat -c '%u:%a' "$base")" = 0:755 ] || fail 'node directory must be root-owned mode 755'
+  if [ -e "$snapshot" ]; then
+    [ "$(stat -c '%u:%a' "$snapshot")" = 0:700 ] || fail 'unsafe snapshot staging'
+  else
+    mkdir -m 0700 "$snapshot"
+  fi
+  # The root-owned installer lock serializes managed starts. Stop the service
+  # to cancel pending restarts; never open node-owned .lock as root.
+  systemctl daemon-reload
+  systemctl stop ecx-betanet.service
+  [ "$(stat -c %d "$snapshot")" = "$(stat -c %d "$home")" ] || fail 'snapshot staging and node data must share a filesystem'
+  if [ ! -f "$snapshot/ready" ]; then
+    # Space includes the compressed archive, extracted chainstate and headroom.
+    available=$(df -Pk "$snapshot" | awk 'NR==2 {print $4}')
+    retained=$(du -sk "$snapshot" | cut -f1)
+    [ "$((available + retained))" -ge 28311552 ] || fail 'snapshot bootstrap needs 27 GiB total space including its cache'
+    echo 'Downloading the pinned chain-only ECX snapshot (about 11 GB).'
+    if [ ! -f "$snapshot/chain.tar.gz" ]; then
+      curl --fail --location --proto '=https' --proto-redir '=https' --tlsv1.2 --retry 3 --connect-timeout 20 --max-time 7200 -C - "$snapshot_url" -o "$snapshot/chain.download"
+      printf '%s  %s\n' "$snapshot_hash" "$snapshot/chain.download" | sha256sum --check --status || fail 'snapshot checksum mismatch'
+      mv "$snapshot/chain.download" "$snapshot/chain.tar.gz"
+    fi
+    printf '%s  %s\n' "$snapshot_hash" "$snapshot/chain.tar.gz" | sha256sum --check --status || fail 'snapshot checksum mismatch'
+    tar -tzf "$snapshot/chain.tar.gz" > "$snapshot/entries"
+    awk '/(^\/|(^|\/)\.\.(\/|$))/ {exit 1} !/^(blocks|chainstate)(\/|$)/ {exit 1} END {if (NR==0) exit 1}' "$snapshot/entries" || fail 'unexpected snapshot paths'
+    tar -tvzf "$snapshot/chain.tar.gz" > "$snapshot/types"
+    awk 'substr($0,1,1)!="-" && substr($0,1,1)!="d" {exit 1}' "$snapshot/types" || fail 'snapshot links or special files refused'
+    # Retrying extraction is safe inside this root-private directory: the pinned
+    # archive contains no links, and the node cannot access it before promotion.
+    mkdir -p -m 0700 "$snapshot/unpacked"
+    tar -xzf "$snapshot/chain.tar.gz" --no-same-owner --no-same-permissions -C "$snapshot/unpacked"
+    for part in blocks chainstate; do
+      [ -d "$snapshot/unpacked/$part" ] || fail 'snapshot chain directory missing'
+      chown -R ecxnode:ecxnode "$snapshot/unpacked/$part"
+    done
+    sync
+    touch "$snapshot/ready"
+    sync
+  fi
+  for part in blocks chainstate; do
+    [ ! -L "$home/$part" ] || fail 'chain directory symlink refused'
+    if [ -d "$snapshot/unpacked/$part" ]; then
+      [ ! -e "$home/$part" ] || fail 'refusing to replace existing chain data'
+      mv "$snapshot/unpacked/$part" "$home/$part"
+      sync
+    else
+      [ -d "$home/$part" ] || fail 'incomplete snapshot promotion'
+    fi
+  done
+  mv "$snapshot/ready" "$snapshot/complete"
+  sync
+fi
+# A partial directory is never treated as a successful bootstrap.
+if [ -e "$home/blocks" ] || [ -e "$home/chainstate" ]; then
+  [ -d "$home/blocks" ] && [ -d "$home/chainstate" ] || fail 'incomplete existing chain data; operator review required'
 fi
 systemctl daemon-reload
 systemctl enable ecx-betanet.service

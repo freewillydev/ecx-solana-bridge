@@ -1,6 +1,6 @@
 {-# LANGUAGE TemplateHaskell, CPP, ForeignFunctionInterface #-}
 -- Offline BIP-39 English / SLIP-0010 ed25519. No RPC or signing authority.
-module Bridge.Wallet (mnemonic, walletKey, nativeDescriptors, derivationPath, protectWalletProcess) where
+module Bridge.Wallet (mnemonic, mixWalletEntropy, walletKey, nativeDescriptors, derivationPath, protectWalletProcess) where
 import System.Posix.Resource (setResourceLimit,Resource(ResourceCoreFileSize),ResourceLimits(..),ResourceLimit(..))
 #if defined(linux_HOST_OS)
 import Bridge.Error (require)
@@ -11,6 +11,7 @@ import Control.Monad (unless)
 import Crypto.Hash (Digest,SHA256,SHA512,RIPEMD160,hash)
 import Bridge.NativeKey (deriveChild)
 import Control.Monad.Trans.Except (ExceptT(..),runExceptT)
+import qualified Data.Text.Encoding as TE
 import qualified Data.Text as T
 import Control.Monad (foldM)
 import Data.ByteArray.Encoding (convertToBase,Base(Base16))
@@ -41,6 +42,13 @@ wordList = $(do
   addDependentFile path
   contents<-runIO (readFile path)
   lift (words contents))
+
+-- Optional user text supplements mandatory OS entropy; it is never a recovery input.
+mixWalletEntropy :: String -> B.ByteString -> Text -> Either Text B.ByteString
+mixWalletEntropy asset randomBytes extra=do
+  unless (asset `elem` ["ecx","solana"] && B.length randomBytes==32) (Left "invalid_wallet_entropy")
+  pure $ if T.null extra then B.take 16 randomBytes else B.take 16
+    (BA.convert (hash ("ecx-bridge/wallet-entropy/v1\0"<>B8.pack asset<>"\0"<>randomBytes<>TE.encodeUtf8 extra) :: Digest SHA256))
 
 mnemonic :: B.ByteString -> Either Text String
 mnemonic entropy=do

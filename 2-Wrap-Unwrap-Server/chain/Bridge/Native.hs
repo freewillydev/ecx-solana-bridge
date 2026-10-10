@@ -199,6 +199,7 @@ data NativeRecovery a where
   BackupNativeWallet :: FilePath -> NativeRecovery FilePath
   ReceiveNativeWalletBackup :: FilePath -> NativeRecovery FilePath
   ServeNativeWalletBackup :: FilePath -> NativeRecovery ()
+  CheckNativeRestore :: FilePath -> NativeRecovery ()
   RestoreNativeWallet :: FilePath -> NativeRecovery ()
   InspectNativeWalletBackup :: FilePath -> NativeRecovery (Text,FilePath,Text)
 
@@ -300,12 +301,12 @@ evalNativeRecoveryWith call c operation = do
       require (result==Just ()) "native_backup_service_timeout"
     ReceiveNativeWalletBackup destination -> backup destination True
     BackupNativeWallet destination -> backup destination False
+    CheckNativeRestore manifest -> do
+      (wallet,_,_)<-restoreReady manifest
+      require (wallet==nativeWallet c) "native_restore_wallet_mismatch"
+      pure ()
     RestoreNativeWallet manifest -> do
-      (_,backup,_,expected)<-load manifest
-      _<-nativeIdentityWith call c
-      wallets<-call False "listwalletdir" [] >>= fieldValue "wallets" :: IO [Value]
-      names<-mapM (fieldValue "name") wallets
-      require (nativeWallet c `notElem` names) "native_restore_wallet_exists"
+      (_,backup,expected)<-restoreReady manifest
       result<-call False "restorewallet" [toJSON $ nativeWallet c,toJSON backup,Bool False]
       name<-fieldValue "name" result
       require (name==nativeWallet c) "native_restore_wallet_mismatch"
@@ -316,6 +317,13 @@ evalNativeRecoveryWith call c operation = do
       (wallet,backup,checksum,_)<-load manifest
       pure (wallet,backup,checksum)
  where
+  restoreReady manifest=do
+    (wallet,backup,_,expected)<-load manifest
+    _<-nativeIdentityWith call c
+    wallets<-call False "listwalletdir" [] >>= fieldValue "wallets" :: IO [Value]
+    names<-mapM (fieldValue "name") wallets
+    require (nativeWallet c `notElem` names) "native_restore_wallet_exists"
+    pure (wallet,backup,expected)
   backupIdentity=digest . BL.toStrict . encode $ object
     ["profile" .= profile c,"wallet" .= nativeWallet c,"height" .= nativeCheckpointHeight c,"checkpoint" .= nativeCheckpointHash c]
   backup destination transferred = do

@@ -2,6 +2,10 @@ module ConfigureCheck (contract,walletProperty) where
 import qualified Bridge.Config as C
 import qualified NodeSetup
 import qualified Bootstrap
+import qualified Token
+import qualified Token.Signing as TS
+import qualified Token.Operation as TO
+import Bridge.SDKBuild (sdkLibraryPath)
 import System.Environment (getEnv,setEnv)
 import System.Info (os,arch)
 import Bridge.File (hashHandle)
@@ -17,11 +21,12 @@ import Crypto.MAC.HMAC (hmac,HMAC)
 import Crypto.Hash (SHA256)
 import Crypto.Random (getRandomBytes)
 import Bridge.AdminKey (savePrivate)
-import Bridge.Wallet (mnemonic,walletKey,nativeDescriptors)
+import Bridge.Wallet (mnemonic,mixWalletEntropy,walletKey,nativeDescriptors)
 import Bridge.NativeKey (deriveChild)
 import qualified Bridge.Native as N
 import Bridge.Wire (Profile(..))
-import Bridge.Error (BridgeError(..))
+import Bridge.Error (BridgeError(..),require)
+import Bridge.RPC (fieldValue)
 import qualified Data.Aeson.KeyMap as KM
 import Data.IORef
 import Control.Monad (unless,forM)
@@ -111,12 +116,28 @@ contract=bracket temporary removeDirectoryRecursive $ \directory->do
     settingsRemain<-doesDirectoryExist interrupted
     nativeChecked<-nativeSeedContract directory
     simplifiedChecked<-simpleContract directory executable
+    -- A verified pre-created ATA has no local creation attempt. Do not block
+    -- ordinary reconciliation, and never silently skip an existing corrupt file.
+    externalAta<-Bootstrap.initialAccounting directory config "owned SOL"
+    let ownerText=T.pack owner; mint=Bootstrap.canonicalMint
+        attempt=directory</>"ata-creation.json"
+    ata<-TO.runSafe (TO.Request $ Token.AssociatedAddress sdkLibraryPath ownerText mint)
+    let operation=Token.Associated ownerText mint ata ownerText 2039280 (base58 $ B.replicate 32 1)
+    unsigned<-TO.runSafe (TO.Request $ Token.Prepare sdkLibraryPath operation)
+    signature<-TO.runCritical (TO.Request $ TS.SignOffline key operation unsigned attempt)
+    localAta<-Bootstrap.initialAccounting directory config "owned SOL"
+    localReplay<-Bootstrap.initialAccounting directory config "owned SOL"
+    B.writeFile attempt "{}"
+    corruptAta<-try(Bootstrap.initialAccounting directory config "owned SOL") :: IO (Either BridgeError (Maybe Value))
     historyPreflight<-preflightContract
     backupChecked<-backupTimeoutContract directory
     handoffChecked<-backupHandoffCancellation directory
     expectedKey<-either (const $ fail "fixture mnemonic") pure (walletKey phrase)
     let expectedSetup=object ["existing" .= False,"method" .= ("source"::String),"sourceRoot" .= directory,"restic" .= worker]
-    pure(historyPreflight && handoffChecked && backupChecked && simplifiedChecked && nativeChecked && C.fingerprint config==C.fingerprint other && C.nativeCookie config/=C.nativeCookie other
+    pure(externalAta==Nothing && either (const True) (const False) corruptAta
+      && localAta==localReplay && localAta==Just(object ["operation" .= ("initialize-operating"::T.Text)
+        ,"deposit" .= ("sol-operating:"<>C.solanaOperatingHistoryStart config),"transaction" .= signature,"reason" .= ("owned SOL"::T.Text)])
+      && historyPreflight && handoffChecked && backupChecked && simplifiedChecked && nativeChecked && C.fingerprint config==C.fingerprint other && C.nativeCookie config/=C.nativeCookie other
       && sort entries==["interface.json","setup.json","signer.json","sources.json","worker.json"]
       && sources==M.fromList [("solana.keypair.json",key),("native-worker.auth",worker),("native-signer.auth",signer)]
       && originalKey==L.toStrict(encode $ B.unpack(seed<>public)) && originalWorker=="worker:password" && originalSigner=="signer:password"
@@ -167,6 +188,15 @@ walletProperty=forAll (vectorOf 16 arbitrary) $ \(entropy::[Word8])->
   conjoin [case mnemonic (B.pack entropy) >>= walletKey of
              Right key->property (B.length key==64)
              Left _->property False
+          ,let randomBytes=B.pack (entropy<>entropy)
+               mixed=mixWalletEntropy "ecx" randomBytes "user text"
+           in conjoin [mixWalletEntropy "ecx" randomBytes ""===Right(B.pack entropy)
+              ,property (mixed/=mixWalletEntropy "solana" randomBytes "user text")
+              ,property (mixed/=mixWalletEntropy "ecx" (B.map (+1) randomBytes) "user text")
+              ,property (case mixed >>= mnemonic >>= walletKey of Right key->B.length key==64; _->False)
+              ,mixWalletEntropy "ecx" (B.pack entropy) "user text"===Left "invalid_wallet_entropy"
+              ,mixWalletEntropy "unknown" randomBytes ""===Left "invalid_wallet_entropy"
+              ,fmap (Hex.convertToBase Hex.Base16) (mixWalletEntropy "ecx" (B.pack [0..31]) "user text")===Right ("036bc3ecde7438a76a14bda8ca31c72f" :: B.ByteString)]
           ,ioProperty (nativeScalarContract entropy)
           ,conjoin [counterexample "BIP39/SLIP10 known vector mismatch" $
              mnemonic (B.replicate 16 byte)==Right phrase &&
@@ -321,13 +351,16 @@ simpleContract parent executable=do
                     char<-hGetChar reader
                     let next=drop (max 0 (length found+1-max 256 (length needle))) (found<>[char])
                     unless (not $ any (`isInfixOf` next)
-                      ["Solana Mainnet RPC URL","Independent Mainnet RPC URL","Write down these 12 solana recovery words",priorPhrase])
+                      ["Solana Mainnet RPC URL","Independent Mainnet RPC URL","Write down these 12 solana recovery words","Additional randomness for solana","private-entropy-fixture",priorPhrase])
                       (fail "wizard_repeated_completed_prompt_or_phrase")
                     if needle `isSuffixOf` next then pure () else go next (count+1)
                 answer label value=await label >> await ": " >> hPutStrLn writer value >> hFlush writer
                 ack=await "Type saved once you have backed up the phrase:" >> hPutStrLn writer "saved" >> hFlush writer
             answer "NEW HTTPS restic repository URL" "https://backup.example.invalid/repository"
             answer "Public HTTPS origin" "-"
+            answer "Initial SOL ownership statement (fund once with your own SOL; add trading inventory after startup)" ""
+            answer "Initial SOL ownership statement (fund once with your own SOL; add trading inventory after startup)" "I own the initial SOL funding — opérateur"
+            answer "Additional randomness for ecx (hidden; Enter skips)" "private-entropy-fixture"
             ack
             -- EOF can make script terminate the child before setup saves.
             await "Saved private setup"
@@ -358,7 +391,7 @@ simpleContract parent executable=do
     acknowledgements<-mapM B.readFile
       [directory</>(".ecx-bridge-"<>asset<>"-wallet")</>(asset<>"-recovery.saved") | asset<-["solana","ecx"]]
     answerModes<-mapM (fmap ((.&. 0o777).fileMode) . getFileStatus . (setup</>))
-      ["answer-primary.json","answer-verifier.json","answer-backup.json","answer-origin.json"]
+      ["answer-primary.json","answer-verifier.json","answer-backup.json","answer-origin.json","answer-initial-funding.json"]
     solana<-either (const $ fail "generated_phrase_invalid") pure (walletKey $ B8.unpack phraseA)
     rules<-B8.lines <$> B.readFile(setup</>"native-rpc.conf")
     valid<-forM ["admin","worker","signer"] $ \role->do
@@ -383,6 +416,7 @@ simpleContract parent executable=do
     managedSelected<-case setupValue of
       Object fields->do
         let selected=KM.lookup "managedNode" fields==Just(Bool True)
+              && KM.lookup "initialFundingOwnership" fields==Just(String "I own the initial SOL funding — opérateur")
             changed=KM.insert "managedNode" (Bool False) $ KM.insert "nodeConfig" (toJSON node) $
               KM.insert "nodeService" (String "fixture.service") fields
         B.writeFile (setup</>"setup.json") (L.toStrict $ encode $ Object changed)
@@ -439,7 +473,9 @@ preflightContract=do
         ("getSignaturesForAddress",[String mint,_]) | mint==Bootstrap.canonicalMint->
           if variant=="forbidden" then throwIO(BridgeError "rpc_method_forbidden")
           else pure $ toJSON (if variant=="empty" then [] else [object ["signature" .= signature]])
-        ("getTransaction",[String sig,_]) | sig==signature->
+        ("getTransaction",[String sig,options]) | sig==signature->do
+          maximumVersion<-fieldValue "maxSupportedTransactionVersion" options :: IO Int
+          require (maximumVersion==1) "preflight_requires_v1"
           if variant=="missing" then pure Null else pure $ object
             ["meta" .= object [],"transaction" .= object
               ["signatures" .= [if variant=="wrong-signature" then base58(B.replicate 64 2) else signature]

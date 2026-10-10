@@ -1,6 +1,9 @@
 -- Closed offline installer operation. Never adopts, resumes or replaces a ledger.
-module Bridge.Store.Provision (provisionDatabase) where
+module Bridge.Store.Provision (provisionDatabase,provisionRestoredDatabase) where
 import Bridge.Error
+import qualified Bridge.Store.Schema as S
+import Bridge.Store.Catalog (claimWorker,verifyReadRole)
+import Data.Int (Int64)
 import Bridge.Identity (digest)
 import Control.Exception (bracket)
 import Control.Monad (forM,forM_,void)
@@ -84,6 +87,47 @@ provisionDatabase settings token=do
         saved<-O.runSelect target (O.selectTable receipt) :: IO [(Text,Text)]
         require (saved==[(token,checksum)]) "installation_receipt_mismatch"
       void $ PG.execute_ target "REVOKE ALL ON SCHEMA public FROM PUBLIC; REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC; REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC; GRANT CONNECT ON DATABASE ecx_bridge TO ecxbridgew,ecxbridger,ecxbridges; GRANT USAGE ON SCHEMA public TO ecxbridgew,ecxbridger,ecxbridges; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO ecxbridgew; GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO ecxbridgew; GRANT SELECT ON ALL TABLES IN SCHEMA public TO ecxbridger,ecxbridges; GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO ecxbridger,ecxbridges"
+
+-- Closed recovery setup: grant service roles on an already restored paused ledger.
+-- No initialization, database rename or financial-row mutation is permitted.
+provisionRestoredDatabase :: PG.ConnectInfo -> Text -> Int64 -> IO ()
+provisionRestoredDatabase settings identity sequenceNo=do
+  let name=T.pack $ PG.connectDatabase settings
+  require (PG.connectUser settings=="postgres" && sequenceNo>=0 && T.length name==44
+    && "ecx_restore_" `T.isPrefixOf` name
+    && T.all (`elem` ("0123456789abcdef"::String)) (T.drop 12 name)) "invalid_restored_database_target"
+  bracket (PG.connect settings) PG.close $ \db->PG.withTransaction db $ do
+    claimWorker db >>= flip require "worker_already_running"
+    rows<-O.runSelect db (O.selectTable S.deployment) :: IO [S.Deployment]
+    require (case rows of
+      [r]->S.singleton r==1 && S.schemaVersion r==22 && S.fingerprint r==identity
+        && S.criticalSequence r==sequenceNo && S.paused r==1
+        && S.pauseReason r=="restored_requires_reconciliation"
+      _->False) "restored_database_identity_or_state_mismatch"
+    forM_ ["ecxbridgew","ecxbridger","ecxbridges"] $ \role->do
+      present<-O.runSelect db $ do
+        (n,super,createDB,createRole,replication,bypass,login,_)<-O.selectTable rolesTable
+        O.where_ (n O..== O.sqlStrictText role)
+        pure (super O..|| createDB O..|| createRole O..|| replication O..|| bypass,login)
+        :: IO [(Bool,Bool)]
+      case present of
+        []->void $ PG.execute db "CREATE ROLE ? LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS" (PG.Only $ Identifier role)
+        [(False,True)]->pure ()
+        _->reject "unsafe_restored_service_role"
+      memberships<-O.runSelect db $ do
+        (n,_,_,_,_,_,_,oid)<-O.selectTable rolesTable
+        member<-O.selectTable $ O.tableWithSchema "pg_catalog" "pg_auth_members" (O.requiredTableField "member")
+        O.where_ (n O..== O.sqlStrictText role O..&& member O..== oid)
+        pure n
+        :: IO [Text]
+      require (null memberships) "inherited_restored_service_role"
+    void $ PG.execute db "REVOKE ALL ON DATABASE ? FROM PUBLIC" (PG.Only $ Identifier name)
+    void $ PG.execute db "GRANT CONNECT ON DATABASE ? TO ecxbridgew,ecxbridger,ecxbridges" (PG.Only $ Identifier name)
+    void $ PG.execute_ db "REVOKE ALL ON SCHEMA public FROM PUBLIC; REVOKE ALL ON ALL TABLES IN SCHEMA public FROM PUBLIC; REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC; GRANT USAGE ON SCHEMA public TO ecxbridgew,ecxbridger,ecxbridges; GRANT SELECT,INSERT,UPDATE,DELETE ON ALL TABLES IN SCHEMA public TO ecxbridgew; GRANT USAGE,SELECT ON ALL SEQUENCES IN SCHEMA public TO ecxbridgew; GRANT SELECT ON ALL TABLES IN SCHEMA public TO ecxbridger,ecxbridges; GRANT SELECT ON ALL SEQUENCES IN SCHEMA public TO ecxbridger,ecxbridges"
+    forM_ ["ecxbridger","ecxbridges"] $ \role->do
+      void $ PG.execute db "SET LOCAL ROLE ?" (PG.Only $ Identifier role)
+      verifyReadRole db >>= flip require "unsafe_restored_reader_role"
+      void $ PG.execute_ db "RESET ROLE"
 
 data SqlOid
 type Oid=O.Field SqlOid

@@ -26,7 +26,8 @@ From a built source checkout, the explicit `configure` then `start` commands rem
 available; see [LOCAL-DEVELOPMENT.md](LOCAL-DEVELOPMENT.md) for prerequisites.
 
 The default wizard creates **fresh CanonicalBeta custody with two generated wallets**.
-It asks for four inputs (Enter accepts displayed defaults):
+It asks for the connection inputs below (Enter accepts displayed defaults),
+plus an explicit initial SOL ownership statement saved for startup accounting:
 
 1. Primary Solana Mainnet HTTPS RPC URL, or a private file containing it.
 2. Independent provider's Mainnet HTTPS RPC URL, or a private file containing it.
@@ -35,6 +36,25 @@ It asks for four inputs (Enter accepts displayed defaults):
 
 The managed pruned ECX node is automatic: `/var/lib/ecx-betanet/bitcoin.conf`,
 `ecx-betanet.service`, and loopback RPC port 28532. No node-path prompt is needed.
+New ECX and Solana wallets optionally accept hidden typed text as additional
+randomness. It is mixed with 32 fresh CSPRNG bytes using domain-separated SHA-256;
+blank input skips mixing. The text is not saved or logged, and is not a recovery
+password: preserve the generated phrase. Existing saved wallets and phrase recovery
+do not prompt for additional randomness or generate replacement keys.
+
+Fresh managed ECX nodes bootstrap from a checksum-pinned, chain-only snapshot by
+default, then catch up and verify the configured checkpoint before bridge startup.
+The download is approximately 11 GB and needs 27 GiB total staging space including
+its retained cache. Existing node data and wallets are never overwritten. This
+trusts the published operator snapshot; it is not validation from genesis. To
+choose full synchronization for a new installation, run the installer with
+`sudo env ECX_NODE_SYNC=full sh ./ecx-bridge-ubuntu-24.04-x86_64.run`.
+Interrupted downloads/extractions can be retried; partially promoted directories
+resume from the private journal. Unexpected existing data fails closed for review.
+The snapshot is public blockchain data in a separate bucket; custody backups and
+keys remain private. Hosting it incurs storage and download-transfer costs; monitor
+usage and configure S3 access logging or CloudTrail data events for deployment.
+
 Pruning limits retained block data; initial synchronization still takes time and
 additional disk space is needed for chainstate, the database and temporary work.
 
@@ -74,7 +94,9 @@ transaction is durably saved before submission, and reruns reuse it. Pending or
 unavailable confirmation leaves startup stopped with the saved attempt intact.
 An expired/failed attempt requires the existing reviewed token recovery workflow;
 startup never silently generates a replacement signature. If someone already
-created the correct ATA, setup verifies and uses it.
+created the correct ATA, setup verifies and uses it without a local creation file.
+It then performs normal reconciliation; use Funding to allocate your owned SOL,
+since no self-paid ATA cost needs the special initial-accounting operation.
 
 Both independent providers must agree on bounded finalized address histories,
 and the origins must resolve to transactions involving the right accounts. Only
@@ -268,9 +290,9 @@ through an independently verified maintainer channel. Publishing a public key be
 an installer on GitHub is convenient distribution, not independent establishment of
 trust. Only public material, the index and signature leave the signing machine.
 
-For the current `review-2026-10-09-guided-console` candidate, authorize only the actual
-x86_64 artifact: 40,172,322 bytes, SHA-256
-`09105b54e0d894b1c207c44b789a8c4a9f557d3b2ce502546c523491dfeaa9f3`.
+For the current `review-2026-10-09-funded-recovery` candidate, authorize only the actual
+x86_64 artifact: 40,254,658 bytes, SHA-256
+`2fa48bb4216f1dd028d512a44cd21d4d67358f9421050697f0774f64006110b2`.
 Keep its `.run` bytes unchanged. Once signed, publish the index and signature beside
 those bytes; re-download and verify with the separately pinned public key before
 advertising the release as authenticated. A signature authorizes those bytes; it
@@ -526,5 +548,7 @@ observations about tested plans, not permanent endorsements or guarantees. Revie
 provider allowances for sustained use; no paid upgrades are performed automatically.
 
 Backup menu actions verify or download an exact snapshot with an independently
-retained minimum sequence. They do not activate recovered custody. Full restoration
-still requires the explicit fencing/database/wallet procedure in OPERATIONS.
+retained minimum sequence. Separate menu actions stage the original wallet and a new
+paused database, then activate through checked reconciliation after permanent source
+exclusion. Follow the recovery procedure in OPERATIONS; verification alone does not
+activate custody.

@@ -8,9 +8,27 @@ and available acceptance; external recovery, independent review and activation g
 remain open. Its source-size reduction target was not met. Passing an older
 candidate's tests does not certify later source or packages.
 
-## Current production acceptance checklist
+## Current release pointer
 
-Current published installer: `7be97b4` (`review-2026-10-09-guided-console`),
+The current review candidate and funded deployment are
+`8c2c9eb4d67192296be9feb806e4f09e0b7b2897`, release
+`review-2026-10-09-six-confirmations`, SHA-256
+`722cba45da5f22e3082dec3ff97519c1dce1ca3e3554e4698b156004fc195c53`.
+It is unsigned and NOT production approved. Ubuntu build and all three suites
+passed; the affected canonical HTTP/HTTPS PostgreSQL contracts passed. The earlier
+8c18bd8 full financial matrix remains baseline evidence, not a rerun on this commit.
+Codex Security diff scan ce915317-fc28-4018-940f-c40583615060 reviewed all 19 changed
+paths since 8c18bd8 with no new findings. Unchanged dependency advisories remain open.
+Checked upgrade preserved the two original Paid orders, quotes, payout IDs and
+backed-up sequence 105. ECX requires six confirmations for new orders; saved terms
+remain unchanged. All services listen privately and public ingress remains OFF.
+Current acceptance criteria are in [DONE.md](../../DONE.md), with exact evidence
+and continuation in [RESUME.md](../../RESUME.md). Earlier records below are historical
+and do not independently certify this candidate.
+
+## Historical guided-console acceptance checklist
+
+Then-published installer: `7be97b4` (`review-2026-10-09-guided-console`),
 SHA-256 `09105b54e0d894b1c207c44b789a8c4a9f557d3b2ce502546c523491dfeaa9f3`,
 40,172,322 bytes. Native build/package passed (`c2af6bbd`); QuickCheck and the full
 isolated PostgreSQL contracts passed at `039c49a` (`16baae9c`). The final change
@@ -2366,3 +2384,42 @@ restored custody staging/database were untouched. Checkpoint marker files in thi
 component test were synthetic preconditions, **not** custody/checkpoint proof.
 This closes that specific publication interruption window, not funded upgrade
 resumption or all crash/reboot boundaries.
+
+### Funded round trip and activated recovery — 2026-10-09
+
+Tested runtime source `ef2f17d131ea50413b5835f11956b97dd13cc033`; Ubuntu artifact
+SHA-256 `2fa48bb4216f1dd028d512a44cd21d4d67358f9421050697f0774f64006110b2`.
+Build, core/transport/QuickCheck and full isolated PostgreSQL financial/backup
+contracts passed (`09fa82bc`). Checked upgrade completed before the payout.
+
+Both existing funded orders settled: 3,000 wrapped to 2,970 native units, then
+1,000 native to 990 wrapped units. Two independent providers verified the finalized
+990-unit receipt and actual 5,000-lamport fee (`e2e8ece8`). The expired prior signed
+attempt remained absent; its retained expiry proof and fresh independent checks
+preceded the closed retry approval. No new customer deposit or order was created.
+
+A full verified sequence-105 checkpoint was restored on the separate Ubuntu host
+only after the source ledger was retired and its custody/tunnel services masked.
+Guided restoration preserved the original wallet and used a new paused PostgreSQL
+database (`862a18c4`). Checked activation passed (`cdba8103`), then actual reboot,
+wallet autoload and explicit checked resume passed (`9bae1239`, `e49bed8e`). Both
+saved customer orders retained identical paid transaction IDs. The source remained
+retired and stopped (`1e390f55`). The restored node independently reported nine
+confirmations and no conflicts for the original 1,000-unit native deposit. A fresh
+full backup from the restored server also passed (`e7c415f2`), followed by checked
+resume at ledger/backup sequence 105/105. The existing Mac backups remain retained.
+
+These results cover funded recovery and reboot/resume; they do not establish a
+long-duration soak, manual customer-wallet acceptance, independent security review,
+external alert delivery, production release-signing trust, or final publication.
+
+The exact artifact is published as `review-2026-10-09-funded-recovery`; public HTTPS
+re-download matched the deployed checksum. A bounded 15-minute idle funded-runtime
+soak passed all 31 samples (`a806f632`): ready105/105, unchanged paid order IDs and
+no service restarts. Eight read-only HTTP boundary checks and oversized/cross-site
+write rejections passed without creating orders (`b2716c75`, `d10be729`). The worker
+could not read signer keys, unlock or backup credentials; critical listeners were
+loopback-only. These checks are integrator evidence, not independent review.
+The release assets contain the review brief and OSV results/triage for 149 crate
+and 213 Hackage lockfile entries. Advisory findings and untested scope remain
+explicit; no production signing authority or independent audit is claimed.

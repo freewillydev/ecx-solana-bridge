@@ -18,7 +18,7 @@
   "maxQueued": 4,
   "quoteSeconds": 300,
   "confirmationGraceSeconds": 1200,
-  "nativeConfirmations": 1,
+  "nativeConfirmations": 6,
   "maxNativeFee": "1000",
   "maxSolFee": "10000",
   "maxSolAccountRent": "2100000",

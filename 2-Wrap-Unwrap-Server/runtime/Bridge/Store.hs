@@ -7,6 +7,8 @@ module Bridge.Store
   , StoreBackup(..), LedgerArchive(..), BackupReceipt(..), evalBackup, StoreRestore(..), evalRestore, CustodyArchive(..)
   , withReader, withWriter, withFencedWriter, evalRead, evalWrite ) where
 
+import qualified Bridge.Solana as Solana
+import qualified Bridge.SolanaDeposit as SD
 import qualified Bridge.NativePayment as N
 import Bridge.Error
 import Bridge.Fence (withFence)
@@ -67,10 +69,12 @@ data CustodySnapshot = CustodySnapshot
 -- requires a paused source and verified archive. Neither operation adopts a fence.
 data StoreSetup a where
   ProvisionDatabase :: Text -> StoreSetup ()
+  ProvisionRestoredDatabase :: Text -> Int64 -> StoreSetup ()
   InitializeLedger :: Text -> StoreSetup ()
   MigratePaymentRoots :: Text -> Int64 -> FilePath -> StoreSetup (Int64,Int)
 
 evalSetup :: PG.ConnectInfo -> StoreSetup a -> IO a
+evalSetup settings (ProvisionRestoredDatabase identity sequenceNo) = Provision.provisionRestoredDatabase settings identity sequenceNo
 evalSetup settings (ProvisionDatabase token) = Provision.provisionDatabase settings token
 evalSetup settings (MigratePaymentRoots identity minimumSequence manifest) =
   Migration.migratePaymentRoots settings identity minimumSequence manifest
@@ -209,6 +213,8 @@ data StoreRead a where
   FindOrder :: Text -> W.OrderRequest -> StoreRead (Maybe Text)
   ReadProvisioning :: Text -> Text -> StoreRead (W.OrderView,Maybe Int64)
   CheckIntake :: Int64 -> StoreRead ()
+  ReadInitialFundingReplay :: Text -> Text -> Text -> StoreRead (Maybe Int64)
+  ReadInitialFundingContext :: Int64 -> StoreRead (Int64,[(Text,Text)])
   ReadCustodyRevision :: StoreRead Int64
   ReadCustodySnapshot :: Int64 -> [(Text,Text)] -> Bool -> StoreRead CustodySnapshot
   ReadCustodyEvent :: Text -> Text -> StoreRead (Text,Text,Value)
@@ -216,9 +222,11 @@ data StoreRead a where
   PendingAttempts :: StoreRead [Text]
   PaymentCandidates :: StoreRead [Text]
   ReadState :: StoreRead LedgerState
+  ReadServiceStatus :: StoreRead W.ServiceStatus
   ReadPublicReport :: Int64 -> StoreRead W.PublicReport
   ReadBalances :: StoreRead (M.Map (Asset,Account) Integer)
   ReadPaymentWork :: Text -> StoreRead (PaymentView,Maybe PreparedPayment,[Text])
+  ReadPaymentAttempts :: Text -> StoreRead [Text]
   ReadSigningDecision :: Int64 -> Text -> Int -> StoreRead PreparedPayment
   ReadAttempt :: Text -> StoreRead RecordedAttempt
   ReadPreparation :: Text -> StoreRead PreparedPayment
@@ -235,6 +243,7 @@ data StoreRead a where
   MaximumNativeDepth :: Int -> StoreRead Int
   ReadSourceWorkHash :: Text -> StoreRead Text
   ReadCheckpoint :: Text -> StoreRead (Maybe Text)
+  ReadHistoryProgress :: Text -> StoreRead (Maybe Solana.HistoryProgress)
   ReadSource :: Text -> StoreRead W.Deposit
   ReadSourceEvidence :: Text -> StoreRead (Text,Text)
 data StoreWrite a where
@@ -249,13 +258,14 @@ data StoreWrite a where
   ApproveCoveredSource :: Int64 -> Text -> Int64 -> Text -> Value -> StoreWrite ()
   ApproveSourceRestoration :: Int64 -> Text -> Int64 -> Text -> StoreWrite ()
   ClassifyTreasurySpend :: Text -> Text -> Text -> StoreWrite Int64
+  InitializeSolanaOperating :: Int64 -> (Int64,[(Text,Text)]) -> [(Text,Text)] -> Text -> SD.InitialAta -> Text -> StoreWrite Int64
   AllocateTreasury :: Int64 -> Text -> [(Text,Amount)] -> Text -> StoreWrite Int64
   RecordSolanaExpiry :: RecordedAttempt -> Text -> StoreWrite ()
   ApproveSolanaRetry :: Int64 -> RecordedAttempt -> Text -> Text -> StoreWrite ()
   BeginCancellation :: PreparedPayment -> Int64 -> Text -> Text -> StoreWrite ()
   FinishCancellation :: PreparedPayment -> Text -> Text -> StoreWrite ()
   AuthorizeRefund :: Int64 -> Text -> StoreWrite W.RefundAuthorization
-  ResumeLedger :: Int64 -> [(Text,Text)] -> [RecordedAttempt] -> StoreWrite ()
+  ResumeLedger :: Int64 -> [(Text,Text)] -> [RecordedAttempt] -> Maybe NativeLockWork -> StoreWrite ()
   RecordNativeLockRestore :: NativeLockWork -> Int -> StoreWrite ()
   RecordCustody :: Int64 -> Int64 -> Maybe Text -> Maybe Value -> StoreWrite ()
   MarkBroadcast :: Int64 -> Text -> StoreWrite Int64
@@ -267,6 +277,8 @@ data StoreWrite a where
   PreparePayment :: Int64 -> Text -> Amount -> Text -> StoreWrite PreparedPayment
   SaveDraft :: Text -> Int -> Text -> StoreWrite ()
   CommitScan :: W.ScanBatch -> StoreWrite ()
+  RecordHistoryProgress :: Text -> Maybe Solana.HistoryProgress -> Solana.HistoryProgress -> StoreWrite ()
+  CommitHistoryScan :: Maybe Solana.HistoryProgress -> W.ScanBatch -> Bool -> StoreWrite ()
   ScanFailed :: Text -> Int64 -> Text -> StoreWrite ()
   RecordSourceCheck :: W.Deposit -> W.SourceCheck -> StoreWrite ()
   PromoteDeposit :: Int64 -> Text -> StoreWrite Bool
@@ -329,6 +341,8 @@ evalRead (Reader settings identity remote) operation = bracket connect PG.close 
         view<-readOrder c identity Nothing cap identifier
         pure (view,S.instructionSequence row)
       CheckIntake now -> intakeReady c identity now
+      ReadInitialFundingReplay receipt key reason -> initialFundingReplay c receipt key reason
+      ReadInitialFundingContext now -> (,) <$> readCustodyRevision c <*> scanHeads c now
       ReadCustodyRevision -> readCustodyRevision c
       ReadPublicReport now -> publicReport c now
       ReadCustodySnapshot now origins losses -> custodySnapshot c now origins losses
@@ -382,6 +396,10 @@ evalRead (Reader settings identity remote) operation = bracket connect PG.close 
       PendingAttempts -> pendingAttempts c
       PaymentCandidates -> paymentCandidates c
       ReadState -> pure (LedgerState (S.criticalSequence row) (S.backupSequence row) (S.paused row/=0) (S.pauseReason row))
+      ReadServiceStatus -> do
+        health<-O.runSelect c (O.selectTable S.scanHealth)
+        pure $ W.ServiceStatus (S.paused row/=0) (S.pauseReason row) (S.criticalSequence row) (S.backupSequence row)
+          [W.ScannerStatus chain success failure checked | (chain,success,failure,checked)<-health]
       ReadLossCover key recovery -> lossCover c key recovery
       NativeSourceCandidates -> nativeSourceCandidates c
       ReadNativeSourceInspection key -> nativeSourceInspection c key
@@ -396,6 +414,14 @@ evalRead (Reader settings identity remote) operation = bracket connect PG.close 
       ReadCancellation identifier generation -> readCancellation c identifier generation
       ReadUnsignedPreparation identifier -> cancellationPreparation c identity identifier
       ReadPaymentWork identifier -> paymentWork c identity identifier
+      ReadPaymentAttempts identifier -> do
+        _<-readPayment c identity identifier
+        rows<-O.runSelect c $ O.limit 1001 $ O.orderBy (O.asc id) $ do
+          row<-O.selectTable S.attempts
+          O.where_ (S.attemptIntent row O..== O.sqlStrictText identifier)
+          pure (S.attemptId row)
+        require (length rows<=1000) "payment_history_too_large"
+        pure rows
       ReadSigningDecision now identifier generation -> signingDecision c identity remote now identifier generation
       ReadAttempt identifier -> readAttempt c identifier
       ReadPreparation identifier -> readPreparation c identity identifier
@@ -408,6 +434,7 @@ evalRead (Reader settings identity remote) operation = bracket connect PG.close 
       MaximumNativeDepth minimumDepth -> maximumNativeDepth c minimumDepth
       ReadSourceWorkHash identifier -> sourceWorkHash c identifier
       ReadCheckpoint chain -> readCheckpoint c chain
+      ReadHistoryProgress chain -> readHistoryProgress c chain
       ReadSource identifier -> readSource c identifier >>= asDeposit
       ReadSourceEvidence txid -> sourceEvidence c txid
       PromotionCandidates -> promotionCandidates c
@@ -440,7 +467,7 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
   BeginCancellation expected now reason cleanup -> beginCancellation c config expected now reason cleanup
   FinishCancellation expected reason cleanup -> finishCancellation c config expected reason cleanup
   AuthorizeRefund now receipt -> authorizeRefund c config now receipt
-  ResumeLedger now origins reviewed -> resumeLedger c config now origins reviewed
+  ResumeLedger now origins reviewed nativeWork -> resumeLedger c config now origins reviewed nativeWork
   RecordNativeLockRestore expected count -> do
     current<-nativeLockWork c (deploymentFingerprint $ paymentPolicy policy)
     require (current==Just expected && not(lockCancelling expected) && preparedDraft(lockPreparation expected)/=Nothing && count>0 && count<=100) "native_lock_work_changed"
@@ -473,6 +500,20 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
   PreparePayment now identifier allowance plan -> preparePayment c config now identifier allowance plan
   SaveDraft identifier generation draft -> saveDraft c (deploymentFingerprint $ paymentPolicy policy) identifier generation draft
   CommitScan batch -> commitScan c batch
+  RecordHistoryProgress chain expected next -> do
+    require (Solana.historyProgressValid next) "invalid_solana_history_progress"
+    checkHistoryProgress c chain expected (Solana.progressOrigin next) (Solana.progressPrevious next)
+    forM_ expected $ \old->require (Solana.progressTime old==Solana.progressTime next
+      && Solana.progressHead old==Solana.progressHead next) "solana_history_progress_changed"
+    saveHistoryProgress c chain (Just next)
+    scanFailed c chain (Solana.progressTime next) "solana_history_catching_up"
+  CommitHistoryScan expected batch complete -> do
+    let chain=W.scanChain batch
+    checkHistoryProgress c chain expected (W.scanOrigin batch) (W.scanPrevious batch)
+    forM_ expected $ \old->require (W.scanTime batch==Solana.progressTime old) "solana_history_progress_changed"
+    commitScan c batch
+    saveHistoryProgress c chain Nothing
+    unless complete $ scanFailed c chain (W.scanTime batch) "solana_history_catching_up"
   ScanFailed chain now code -> scanFailed c chain now code
   RecordSourceCheck expected check -> do
     current <- readSource c (W.depositId expected)
@@ -541,6 +582,7 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
   ApproveCoveredSource now key recovery reason proof -> approveSourceRecovery c policy (Just proof) now key recovery reason
   ApproveSourceRestoration now key restoration reason -> approveSourceRecovery c policy Nothing now key restoration reason
   ClassifyTreasurySpend chain key reason -> classifyTreasurySpend c policy chain key reason
+  InitializeSolanaOperating now expected origins receipt proof reason -> initializeSolanaOperating c policy now expected origins receipt proof reason
   AllocateTreasury now receipt split reason -> allocateTreasury c policy now receipt split reason
   RepairCompletedOrderView now identifier -> repairCompletedOrderView c policy now identifier
   ReserveFees now key currency n destination explanation -> do
@@ -1294,6 +1336,48 @@ readCheckpoint c chain = do
     O.where_ (key O..== O.sqlStrictText chain)
     pure anchor
   case rows of []->pure Nothing; [anchor]->pure(Just anchor); _->reject "duplicate_checkpoint"
+
+-- Two reserved, versioned checkpoint records; never real coverage heads.
+-- All access is through the closed history operations, under the existing writer
+-- transaction. Old readers join only real scan_health streams. Old observers
+-- still fail closed at their original cap rather than interpreting these rows.
+historyKey :: Text -> IO Text
+historyKey chain=do
+  require (chain `elem` ["Solana","SolanaOperating"]) "invalid_history_stream"
+  pure("history-progress-v1:"<>chain)
+readHistoryProgress :: PG.Connection -> Text -> IO (Maybe Solana.HistoryProgress)
+readHistoryProgress c chain=do
+  key<-historyKey chain
+  rows<-O.runSelect c $ do
+    (stream,value)<-O.selectTable S.checkpoints
+    O.where_ (stream O..== O.sqlStrictText key)
+    pure value
+  case rows of
+    []->pure Nothing
+    [raw]->do
+      require (T.length raw<=131072) "history_progress_too_large"
+      progress<-decodeSaved raw
+      cursor<-readCheckpoint c chain
+      -- An older binary can finish a strict complete scan while leaving this
+      -- auxiliary row. Its committed coverage wins; the next closed write
+      -- replaces the obsolete scratch state without rewinding any effects.
+      pure(if Solana.progressPrevious progress==cursor then Just progress else Nothing)
+    _->reject "duplicate_history_progress"
+checkHistoryProgress :: PG.Connection -> Text -> Maybe Solana.HistoryProgress -> Text -> Maybe Text -> IO ()
+checkHistoryProgress c chain expected origin previous=do
+  actual<-readHistoryProgress c chain
+  require (actual==expected) "stale_history_progress"
+  cursor<-readCheckpoint c chain
+  require (cursor==previous) "stale_scan_cursor"
+  forM_ expected $ \p->require (Solana.progressOrigin p==origin && Solana.progressPrevious p==previous) "solana_history_progress_changed"
+saveHistoryProgress :: PG.Connection -> Text -> Maybe Solana.HistoryProgress -> IO ()
+saveHistoryProgress c chain progress=do
+  key<-historyKey chain
+  -- Delete+insert and final receipts/checkpoint are in one locked transaction;
+  -- interruption cannot retire progress without committing its classified batch.
+  void $ O.runDelete c O.Delete {O.dTable=S.checkpoints,O.dWhere= \(name,_)->name O..== O.sqlStrictText key,O.dReturning=O.rCount}
+  forM_ progress $ \p->void $ O.runInsert c O.Insert {O.iTable=S.checkpoints
+    ,O.iRows=[(O.sqlStrictText key,O.sqlStrictText $ encodeSaved p)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
 
 observeDeposit :: PG.Connection -> W.Deposit -> IO ()
 observeDeposit c deposit = do
@@ -2285,8 +2369,8 @@ operatingHolds c asset = do
 
 -- One atomic resume after the runtime has verified the exact saved attempts.
 -- Reuse custody's review/source/journal checks instead of maintaining a second set.
-resumeLedger :: PG.Connection -> StorePolicy -> Int64 -> [(Text,Text)] -> [RecordedAttempt] -> IO ()
-resumeLedger c config now origins reviewed = do
+resumeLedger :: PG.Connection -> StorePolicy -> Int64 -> [(Text,Text)] -> [RecordedAttempt] -> Maybe NativeLockWork -> IO ()
+resumeLedger c config now origins reviewed nativeWork = do
   let identity=deploymentFingerprint $ paymentPolicy $ executionTerms config
       txid=signedId.recordedSigned
   state<-metadata c identity
@@ -2299,7 +2383,21 @@ resumeLedger c config now origins reviewed = do
     row<-O.selectTable S.paymentRoots
     O.where_ (S.rootPhase row O..== O.sqlStrictText "active")
     pure (S.rootId row)
-  require (all (`elem` map recordedPayment reviewed) unresolved) "unresolved_intents_require_review"
+  -- A lost native signing reply may leave a complete durable PSBT but no
+  -- attempt. The runtime revalidates its exact template and unspent prevouts;
+  -- bind that evidence here under the same lock as resume. Never reprepare it.
+  preparedIds<-case nativeWork of
+    Nothing->pure []
+    Just expected->do
+      current<-nativeLockWork c identity
+      require (current==Just expected && not(lockCancelling expected)
+        && null(lockAttempts expected)) "resume_preparation_changed"
+      let prepared=lockPreparation expected
+          identifier=paymentId $ savedPayment $ preparedView prepared
+      actual<-unsignedPreparation c identity identifier (preparedGeneration prepared)
+      require (actual==prepared) "resume_preparation_changed"
+      pure [identifier]
+  require (all (`elem` (map recordedPayment reviewed<>preparedIds)) unresolved) "unresolved_intents_require_review"
   problems<-O.runSelect c $ O.limit 1 $ do
     (key,_,_,state)<-P.orderObligations
     O.where_ (state O..== O.sqlStrictText "review")
@@ -2688,6 +2786,118 @@ allocateTreasury c policy now receipt split reason = do
       pure sequenceNo
     _->reject "duplicate_treasury_allocation"
  where field key value=either (const $ reject "invalid_treasury_evidence") pure (parseEither (withObject "treasury evidence" (.: key)) value)
+
+initialFundingReplay :: PG.Connection -> Text -> Text -> Text -> IO (Maybe Int64)
+initialFundingReplay c receipt key reason = do
+  rows<-O.runSelect c $ do
+    (identifier,_,saved,_)<-O.selectTable S.treasuryAllocations
+    (chain,tx,_,_,_,sequenceNo)<-O.selectTable S.treasurySpends
+    O.where_ (identifier O..== O.sqlStrictText receipt O..&& chain O..== O.sqlStrictText "SolanaOperating" O..&& tx O..== O.sqlStrictText key)
+    pure (saved,sequenceNo)
+    :: IO [(Text,Int64)]
+  case rows of
+    []->pure Nothing
+    [(saved,sequenceNo)]->do
+      value<-decodeSaved saved
+      (signature,attestation)<-either (const $ reject "initial_funding_replay_conflict") pure $
+        parseEither (withObject "initial funding" $ \o->(,) <$> o .: "initialSignature" <*> o .: "ownershipAttestation") value
+      require (signature==key && attestation==reason) "initial_funding_replay_conflict"
+      pure (Just sequenceNo)
+    _->reject "duplicate_initial_funding"
+
+-- Initial self-funded ATA setup predates the ledger. Account for its verified
+-- funding and cost together; never manufacture a custody certification to do so.
+initializeSolanaOperating :: PG.Connection -> PaymentTerms -> Int64 -> (Int64,[(Text,Text)]) -> [(Text,Text)] -> Text -> SD.InitialAta -> Text -> IO Int64
+initializeSolanaOperating c policy now expected origins receipt proof reason = do
+  validReason reason
+  let text=O.sqlStrictText; num=O.sqlInt8
+      key=SD.initialSignature proof; incoming=T.drop 14 receipt
+      allocation=encodeSaved [("operating"::Text,SD.initialBefore proof)]
+      evidence=encodeSaved $ object ["ownershipAttestation" .= reason,"initialSignature" .= key,"initialAta" .= SD.initialEvidence proof]
+  require ("sol-operating:" `T.isPrefixOf` receipt && not(T.null incoming) && incoming/=key
+    && T.length evidence<=32768) "invalid_initial_funding"
+  -- Exact replay precedes fresh-ledger guards; a successful commit is no longer fresh.
+  old<-O.runSelect c $ do
+    (identifier,split,saved,_)<-O.selectTable S.treasuryAllocations
+    (chain,tx,_,_,_,sequenceNo)<-O.selectTable S.treasurySpends
+    O.where_ (identifier O..== text receipt O..&& chain O..== text "SolanaOperating" O..&& tx O..== text key)
+    pure (split,saved,sequenceNo)
+    :: IO [(Text,Text,Int64)]
+  case old of
+    [(split,saved,sequenceNo)]->do
+      require (split==allocation && saved==evidence) "initial_funding_replay_conflict"
+      pure sequenceNo
+    []->do
+      state<-metadata c (deploymentFingerprint $ paymentPolicy policy)
+      require (SD.initialFee proof<=savedSolanaFee(paymentLimits policy)
+        && SD.initialRent proof<=savedSolanaRent(paymentLimits policy)) "initial_funding_cost_limit"
+      require (S.paused state==1 && S.criticalSequence state==0) "initial_funding_requires_unused_paused_ledger"
+      actual<-(,) <$> readCustodyRevision c <*> scanHeads c now
+      require (actual==expected) "initial_funding_observation_changed"
+      savedOrigins<-O.runSelect c (O.selectTable S.scanOrigins) :: IO [(Text,Text)]
+      require (sortOn fst origins==sortOn fst savedOrigins
+        && lookup "SolanaOperating" origins==Just incoming && lookup "Solana" origins==Just key
+        && lookup "SolanaOperating" (snd actual)==Just key && lookup "Solana" (snd actual)==Just key)
+        "initial_funding_history_mismatch"
+      occupied<-mapM (O.runSelect c . O.limit 1)
+        [O.sqlBool True <$ O.selectTable S.orders,O.sqlBool True <$ O.selectTable S.obligations
+        ,O.sqlBool True <$ O.selectTable S.paymentRoots,O.sqlBool True <$ O.selectTable S.withdrawals
+        ,O.sqlBool True <$ O.selectTable S.reservations,O.sqlBool True <$ O.selectTable S.operatingReservations
+        ,O.sqlBool True <$ O.selectTable S.treasuryAllocations,O.sqlBool True <$ O.selectTable S.treasurySpends
+        ,O.sqlBool True <$ S.workAttempts,O.sqlBool True <$ S.workPreparations] :: IO [[Bool]]
+      require (all null occupied) "initial_funding_customer_or_treasury_activity"
+      deposits<-O.runSelect c (O.limit 2 $ O.selectTable S.deposits) :: IO [S.Deposit]
+      source<-case deposits of [row] | S.depositId row==receipt->pure row; _->reject "initial_funding_requires_single_receipt"
+      require (S.depositAsset source=="Sol" && S.depositOrder source==Nothing && S.depositEligible source==1
+        && S.depositAllocated source==0 && S.depositAmount source==units(SD.initialBefore proof)) "initial_funding_receipt_mismatch"
+      fundingSlot<-maybe (reject "initial_funding_anchor_invalid") pure (readMaybe $ T.unpack $ S.depositAnchor source)
+      require (fundingSlot>=0 && fundingSlot<SD.initialSlot proof) "initial_funding_order_mismatch"
+      events<-O.runSelect c $ do
+        event<-O.selectTable S.chainEvents
+        O.where_ (S.eventChain event O../= text "Native" O..|| S.eventReview event O../= num 0)
+        pure event
+        :: IO [S.ChainEvent]
+      require (sortOn id [(S.eventChain e,S.eventId e) | e<-events]==
+        sortOn id [("Solana",key),("SolanaOperating",incoming),("SolanaOperating",key)]
+        && all (\e->S.eventReview e==0 || (S.eventChain e=="SolanaOperating" && S.eventId e==key)) events)
+        "initial_funding_unexpected_history"
+      (kind,anchor,incomingProof)<-custodyEvent c "SolanaOperating" incoming
+      delta<-field "delta" incomingProof
+      require (kind=="unmatched_incoming" && anchor==S.depositAnchor source
+        && delta==T.pack(show $ units $ SD.initialBefore proof)) "initial_funding_receipt_evidence_changed"
+      -- Reviewed outgoing evidence cannot use custodyEvent, which intentionally refuses it.
+      rows<-O.runSelect c $ do
+        event<-O.selectTable S.chainEvents
+        (hash,chain,tx,raw)<-O.selectTable S.observationEvidence
+        O.where_ (S.eventChain event O..== text "SolanaOperating" O..&& S.eventId event O..== text key
+          O..&& S.eventHash event O..== hash O..&& chain O..== text "SolanaOperating" O..&& tx O..== text key)
+        pure (S.eventKind event,S.eventAnchor event,raw)
+        :: IO [(Text,Text,Text)]
+      (outKind,outAnchor,raw)<-case rows of [row]->pure row; _->reject "initial_funding_outflow_missing"
+      observed<-decodeSaved raw >>= field "proof"
+      economic<-checked (W.economicOutflow "SolanaOperating" observed)
+      total<-checked $ amount (toInteger(units $ SD.initialRent proof)+toInteger(units $ SD.initialFee proof))
+      payload<-field "transaction" (SD.initialEvidence proof)
+      payloadHash<-field "rpcPayloadHash" observed
+      require (outKind=="outgoing" && outAnchor==T.pack(show $ SD.initialSlot proof)
+        && economic==(Sol,total,SD.initialFee proof) && payloadHash==digest(BL.toStrict $ encode (payload::Value)))
+        "initial_funding_outflow_evidence_changed"
+      booked<-balances c
+      let quantity=toInteger(units $ SD.initialBefore proof)
+      require (M.filter (/=0) booked==M.fromList [((Sol,Unallocated),quantity),((Sol,External),negate quantity)])
+        "initial_funding_unexpected_balances"
+      sequenceNo<-nextSequence c
+      post c ("treasury:"<>receipt) "operator allocation of verified initial SOL funding"
+        [Posting Sol Unallocated (-quantity),Posting Sol Operating quantity]
+      inserted<-O.runInsert c O.Insert {O.iTable=S.treasuryAllocations,
+        O.iRows=[(text receipt,text allocation,text evidence,num sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      updated<-O.runUpdate c O.Update {O.uTable=S.deposits,O.uUpdateWith= \row->row {S.depositAllocated=num 1,S.depositState=text "treasury"},
+        O.uWhere= \row->S.depositId row O..== text receipt,O.uReturning=O.rCount}
+      require (inserted==1 && updated==1) "initial_funding_allocation_changed"
+      -- Same writer transaction: any failure rolls back allocation and postings.
+      classifyTreasurySpend c policy "SolanaOperating" key reason
+    _->reject "duplicate_initial_funding"
+ where field name value=either (const $ reject "invalid_initial_funding_evidence") pure (parseEither (withObject "initial funding" (.: name)) value)
 
 -- Book an observed outflow once; never create signing or broadcast authority.
 classifyTreasurySpend :: PG.Connection -> PaymentTerms -> Text -> Text -> Text -> IO Int64

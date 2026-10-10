@@ -1,7 +1,7 @@
 {-# LANGUAGE GADTs #-}
 -- Fresh generated custody only, before installation. No customer or runtime entry.
 -- Reuse token administration's closed, saved-before-send ATA operation; never mint.
-module Bootstrap (preflight,checkHistoryWith,canonicalMint,interface,validateOrigin,setupConfig,bind,complete,initializeBackup,agreedOrigin) where
+module Bootstrap (preflight,checkHistoryWith,canonicalMint,interface,validateOrigin,setupConfig,bind,complete,initializeBackup,agreedOrigin,initialAccounting) where
 import qualified Bridge.Config as C
 import Bridge.Domain (units)
 import Bridge.File (hashHandle)
@@ -56,6 +56,20 @@ readRecord path=readPrivate path >>= either (const $ reject "invalid_bootstrap_r
 writeRecord :: ToJSON a => FilePath -> a -> IO ()
 writeRecord path=savePrivate path . L.toStrict . encode
 
+-- A pre-created ATA has no local cost to classify. Normal reconciliation and
+-- explicit treasury allocation still apply; absence never authorizes spending.
+initialAccounting :: FilePath -> C.Config -> T.Text -> IO (Maybe Value)
+initialAccounting directory c reason=do
+  require (not(T.null $ T.strip reason) && T.length reason<=512) "invalid_initial_funding_reason"
+  let path=directory</>"ata-creation.json"
+  exists<-doesFileExist path
+  if not exists then pure Nothing else do
+    saved<-readRecord path
+    _<-either reject pure (TS.validateSaved saved)
+    pure $ Just $ object ["operation" .= String "initialize-operating"
+      ,"deposit" .= ("sol-operating:"<>C.solanaOperatingHistoryStart c)
+      ,"transaction" .= TS.savedId saved,"reason" .= reason]
+
 setupConfig :: FilePath -> IO C.Config
 setupConfig directory=do
   pending<-doesFileExist (directory</>"bootstrap.json")
@@ -78,7 +92,7 @@ checkHistoryWith :: (T.Text -> [Value] -> IO Value) -> IO ()
 checkHistoryWith call=do
   rows<-call "getSignaturesForAddress" [toJSON canonicalMint,object ["limit" .= (1::Int),"commitment" .= String "finalized"]] >>= parseValue parseJSON :: IO [Value]
   signature<-case rows of [row]->fieldValue "signature" row; _->reject "rpc_required_history_unavailable"
-  tx<-call "getTransaction" [toJSON(signature::T.Text),object ["encoding" .= String "json","commitment" .= String "finalized","maxSupportedTransactionVersion" .= (0::Int)]]
+  tx<-call "getTransaction" [toJSON(signature::T.Text),object ["encoding" .= String "json","commitment" .= String "finalized","maxSupportedTransactionVersion" .= (1::Int)]]
   require (tx/=Null) "rpc_required_history_unavailable"
   keys<-either reject pure (transactionKeys tx)
   transaction<-fieldValue "transaction" tx
@@ -161,8 +175,13 @@ evalSetup (FundCustody directory c key)=bracket newRpcManager closeManager $ \ma
     _<-parseValue (S.inspectMint $ Just 8) mint
     pure ()
   putStrLn $ "Fund SOL fees at: "<>T.unpack owner
-  putStrLn $ "Fund canonical wrapped ECX inventory at owner: "<>T.unpack owner<>" (ATA "<>T.unpack ata<>")"
+  putStrLn $ "After initial startup, fund canonical wrapped ECX inventory at owner: "<>T.unpack owner<>" (ATA "<>T.unpack ata<>")"
+  putStrLn "For fresh setup, send one operator-owned SOL funding transfer first; add ECX/wrapped inventory after initial accounting."
   putStrLn "Suggested SOL funding: 0.01 SOL. Startup never buys or mints wrapped ECX."
+  let attempt=directory</>"ata-creation.json"
+  saved<-doesFileExist attempt
+  accounts<-mapM (\url->account url ata) endpoints
+  let creating=not saved && all (==Null) accounts
   forM_ endpoints $ \url->do
     payer<-account url owner
     require (payer/=Null) "fund_solana_owner_then_rerun_start"
@@ -170,11 +189,11 @@ evalSetup (FundCustody directory c key)=bracket newRpcManager closeManager $ \ma
     executable<-fieldValue "executable" payer
     balance<-fieldValue "lamports" payer :: IO Integer
     require (program=="11111111111111111111111111111111" && not executable) "invalid_bootstrap_payer"
-    require (balance>=toInteger(units $ C.maxSolAccountRent c)+toInteger fee) "fund_solana_owner_then_rerun_start"
-  let attempt=directory</>"ata-creation.json"
-  saved<-doesFileExist attempt
-  accounts<-mapM (\url->account url ata) endpoints
-  when (not saved && all (==Null) accounts) $ do
+    -- Rent is needed before creation, not again when verifying a saved attempt
+    -- whose finalized transaction has already paid it. Saved bytes stay unchanged.
+    let required=toInteger fee + if creating then toInteger(units $ C.maxSolAccountRent c) else 0
+    require (balance>=required) "fund_solana_owner_then_rerun_start"
+  when creating $ do
     rent<-call (C.solanaRpc c) "getMinimumBalanceForRentExemption" [toJSON (165::Int),object ["commitment" .= String "finalized"]] >>= parseValue parseJSON
     require (rent>0 && rent<=fromIntegral(units $ C.maxSolAccountRent c)) "bootstrap_rent_exceeds_limit"
     recent<-TO.runSafe (TO.Request $ TN.RecentBlockhash TN.Mainnet (C.solanaRpc c))
@@ -217,7 +236,7 @@ agreedOrigin endpoints call address=do
     [first,second] | not(null first) && first==second -> do
       let (origin,_,_)=last first
       forM_ endpoints $ \url->do
-        transaction<-call url "getTransaction" [toJSON origin,object ["commitment" .= String "finalized","encoding" .= String "json","maxSupportedTransactionVersion" .= (0::Int)]]
+        transaction<-call url "getTransaction" [toJSON origin,object ["commitment" .= String "finalized","encoding" .= String "json","maxSupportedTransactionVersion" .= (1::Int)]]
         require (transaction/=Null) "bootstrap_origin_history_unavailable"
         tx<-fieldValue "transaction" transaction
         signatures<-fieldValue "signatures" tx :: IO [T.Text]

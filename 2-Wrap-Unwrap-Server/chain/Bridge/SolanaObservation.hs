@@ -1,5 +1,5 @@
 {-# LANGUAGE ScopedTypeVariables #-}
-module Bridge.SolanaObservation (scanSolanaWith,scanSolanaOperatingWith,scanSolanaPairWith) where
+module Bridge.SolanaObservation (scanSolanaWith,scanSolanaOperatingWith,scanSolanaPairWith,ObservationStep(..),scanSolanaPairProgressWith) where
 import Bridge.Domain
 import Bridge.Wire
 import Bridge.Solana
@@ -36,6 +36,13 @@ scanToken call verifier c origin previous now pending lookupInstruction lookupRe
   mapM_ (either reject (const $ pure ()) . signatureBytes) pending
   history <- collectSignatures origin previous $ \before ->
     solanaAddressHistoryWith call (custodyAta c) before Nothing >>= parseValue parseJSON
+  tokenHistory call verifier c origin previous now pending lookupInstruction lookupReferences history
+
+tokenHistory :: Call -> Maybe Call -> SolanaSettings -> Text -> Maybe Text -> Int64
+  -> [Text] -> (Text -> IO (Maybe Binding)) -> ([Text] -> IO (Maybe (Text,OrderRequest,PolicySnapshot,Text))) -> [SignatureInfo] -> IO ScanBatch
+tokenHistory call verifier c origin previous now pending lookupInstruction lookupReferences history = do
+  require (length pending<=1000) "solana_verification_backlog"
+  mapM_ (either reject (const $ pure ()) . signatureBytes) pending
   let historyIds=map historySignature history
       work=[(historySignature h,Just h) | h<-history] <> [(sig,Nothing) | sig<-pending,sig `notElem` historyIds]
   require (length work<=1000) "solana_verification_backlog"
@@ -113,6 +120,10 @@ scanOperating call c origin previous now = do
   validateCursor origin previous now
   history <- collectSignatures origin previous $ \before ->
     solanaAddressHistoryWith call (custodyOwner c) before Nothing >>= parseValue parseJSON
+  operatingHistory call c origin previous now history
+
+operatingHistory :: Call -> SolanaSettings -> Text -> Maybe Text -> Int64 -> [SignatureInfo] -> IO ScanBatch
+operatingHistory call c origin previous now history = do
   observations <- forM history $ \h -> do
     let sig=historySignature h
         anchor=T.pack (show $ historySlot h)
@@ -166,3 +177,36 @@ validateCursor :: Text -> Maybe Text -> Int64 -> IO ()
 validateCursor origin previous now = do
   require (now>=0) "invalid_scan_time"
   mapM_ (either reject (const $ pure ()) . signatureBytes) (origin:maybe [] pure previous)
+
+-- Progress never masquerades as a completed ScanBatch. Only the observer's
+-- closed store operations persist it or commit classified contiguous effects.
+data ObservationStep = ObservationMore !HistoryProgress | ObservationReady !ScanBatch !Bool
+scanSolanaPairProgressWith :: Call -> Maybe Call -> SolanaSettings
+  -> (Text,Maybe Text,Maybe HistoryProgress) -> (Text,Maybe Text,Maybe HistoryProgress)
+  -> Int64 -> [Text] -> (Text -> IO (Maybe Binding))
+  -> ([Text] -> IO (Maybe (Text,OrderRequest,PolicySnapshot,Text)))
+  -> IO [(Text,Either BridgeError ObservationStep)]
+scanSolanaPairProgressWith call verifier c token operating now pending lookupInstruction lookupReferences=do
+  identity<-checked $ solanaIdentityWith call verifier c
+  case identity of
+    Left problem->pure [("Solana",Left problem),("SolanaOperating",Left problem)]
+    Right _->do
+      a<-checked $ step (custodyAta c) token $ \origin previous _ history->
+        tokenHistory call verifier c origin previous now (take 500 pending) lookupInstruction lookupReferences history
+      b<-checked $ step (custodyOwner c) operating $ \origin previous _ history->
+        operatingHistory call c origin previous now history
+      let boundedPending result=case result of
+            Right(ObservationReady batch complete)->Right(ObservationReady batch (complete && length pending<=500))
+            other->other
+      pure [("Solana",boundedPending a),("SolanaOperating",b)]
+ where
+  checked action=try (action `catch` (\(_::IOException)->reject "observer_io_unavailable"))
+  step address (origin,previous,progress) classify=do
+    validateCursor origin previous now
+    result<-collectObservationHistory origin previous now progress $ \before->
+      solanaAddressHistoryWith call address before Nothing >>= parseValue parseJSON
+    case result of
+      HistoryMore next->pure(ObservationMore next)
+      HistoryReady history started complete->do
+        batch<-classify origin previous started history
+        pure(ObservationReady batch {scanTime=started} complete)

@@ -66,6 +66,7 @@ import qualified Bridge.Native as N
 import qualified Bridge.Solana as Solana
 import qualified Bridge.SolanaHelper as H
 import qualified Bridge.SolanaMessage as SolanaMessage
+import qualified Bridge.SolanaDeposit as SD
 import Network.HTTP.Client (newManager,closeManager,defaultManagerSettings,managerModifyRequest)
 import Network.HTTP.Client.TLS (mkManagerSettings)
 import qualified Network.Connection as NC
@@ -99,6 +100,8 @@ main=lookupEnv "ECX_PROVISION_CHILD" >>= maybe normal ProvisionCheck.child
 contractMain :: IO ()
 contractMain = do
   credentialsContract
+  initialFunding<-lookupEnv "ECX_INITIAL_FUNDING_ONLY"
+  historyOnly<-lookupEnv "ECX_REBUILD_HISTORY_ONLY"
   cacheOnly<-lookupEnv "ECX_REPORT_CACHE_ONLY"
   migration<-lookupEnv "ECX_REBUILD_MIGRATION_ONLY"
   roots<-lookupEnv "ECX_REBUILD_PAYMENT_ROOTS_ONLY"
@@ -112,7 +115,7 @@ contractMain = do
   custody<-lookupEnv "ECX_REBUILD_CUSTODY_ONLY"
   when (encrypted==Just "1" && (native/=Just "1" || custody/=Just "1"))
     (fail "encrypted native acceptance requires native recovery and custody modes")
-  if cacheOnly==Just "1" then reportCacheMain else if roots==Just "child" then paymentRootsChild else if roots==Just "1" then paymentRootsMain else if migration==Just "1" then migrationMain else case live of
+  if initialFunding==Just "1" then initialFundingMain else if historyOnly==Just "1" then historyProgressMain else if cacheOnly==Just "1" then reportCacheMain else if roots==Just "child" then paymentRootsChild else if roots==Just "1" then paymentRootsMain else if migration==Just "1" then migrationMain else case live of
     Just path->liveObserverMain path
     Nothing->if setup==Just "1" then setupMain else if native==Just "1" then nativeRecoveryMain else if tls==Just "1" then tlsMain else if fence==Just "1" then fenceMain else if server==Just "1" then serverMain else ledgerMain
 
@@ -977,6 +980,109 @@ reportCacheMain=do
         evalRead reader ReadBalances >>= check "public cache changed financial balances" . (==bookedBefore)
         putStrLn "PASS real HTTP report cache: concurrent timeout coalesced, backend canceled, failure cached, TTL recovery, successful cache, unchanged ledger"
 
+-- Real captured Mainnet signed ATA bytes; RPC metadata below is an offline
+-- protocol fixture. This test neither connects to a chain nor sends a transaction.
+initialFundingMain :: IO ()
+initialFundingMain=do
+  scenario<-lookupEnv "ECX_INITIAL_FUNDING_CASE"
+  database<-getEnv "ECX_REBUILD_CONTRACT_DATABASE"
+  unless ("ecx_rebuild_contract_" `T.isPrefixOf` T.pack database) (fail "disposable database required")
+  user<-getEnv "USER"; readRole<-getEnv "ECX_REBUILD_CONTRACT_READER"
+  let settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
+      identity=digest "initial-funding-contract"
+      policy=PaymentTerms (PolicySnapshot 6 "finalized" identity) (CostLimits (money 10) (money 5000) (money 2000000))
+      store=StorePolicy policy (OrderLimits (money 1000) 100 100 100 (money 100000) (money 100000)) identity True
+      owner="9Dfte8EDq1L9F2N4qTuMqtAEZUmDcvXpCu7EGXEHVcjY"; mint="EVHqNdzjCupKi4rQkbuYw52sa1m8A7jeUAMP23S9AVVq"
+      account="6YJUhxxb3Udg2SBu2P7JktUfMMCNUw7itdNTHzDk3Xec"
+      signature="4t68xvEFwSYUFDhRuD1QGHAjEiMNZnHqexNKPxhnVidtdMxViKgaqrBLGeNRMTn97hxpWS23FQzumAJfcoZW276G"
+      funding="3PSqUzwFVUjo2nXZ3pzJczNf62EHgLAehmC1jqqZMovKd6r2nMhbzDvkH7SE61CvA2Zu5qtdeYeRfDWcFSAjCvsA"
+      receipt="sol-operating:"<>funding
+      bytes="AcIbm48/uGz8AYrd6qJVjIupnLbxTXULfLEcZH8CZyr/yrg9wi14P2rUPljI1EjgKhMyglpY3cpsoC9QlW1mDAEBAAQGehxwRmi+wUtXYVbChkTzduMDT6cY17XNkSV2bumktg9STzOphUyGJ8clGVhOeRSrSLc6wD5CX5xKRLK3hcn8fQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABt324ddloZPZy+FGzut5rBy0he1fWzeROoz1hX7/AKmMlyWPTiSJ8bs9ECkUjg2DC1oTmdr/EIQEjnvY2+n4WchnOht9Qe/F6nikuyGOxcgU5Owu9wAVFwz0DUrxHMgAm4YofHc0Qu9BuigNf6mCUAEgiKlmqBkzhAdHMB/i1nQBBAYAAQAFAgMBAQ=="
+      check ok=unless ok (fail "initial funding contract failed")
+      write :: (Writer -> IO a) -> IO a
+      write action=withWriter settings store (const $ pure ()) action
+  SolanaMessage.Transaction _ (SolanaMessage.Message r rs ru keys recent instructions) _<-either (fail . T.unpack) pure (SolanaMessage.decodeTransaction bytes)
+  let message=object ["header" .= object ["numRequiredSignatures" .= r,"numReadonlySignedAccounts" .= rs,"numReadonlyUnsignedAccounts" .= ru]
+        ,"accountKeys" .= map SolanaMessage.base58 keys,"recentBlockhash" .= SolanaMessage.base58 recent
+        ,"instructions" .= [object ["programIdIndex" .= p,"accounts" .= is,"data" .= SolanaMessage.base58 raw] | SolanaMessage.Instruction p is raw<-instructions]]
+      transaction=object ["slot" .= (455084780::Int64),"version" .= ("legacy"::T.Text)
+        ,"transaction" .= object ["signatures" .= [signature],"message" .= message]
+        ,"meta" .= object ["err" .= Null,"fee" .= (5000::Int),"preBalances" .= ([3000000,0,1,200654906,3388612899,1066800]::[Integer])
+          ,"postBalances" .= ([1506560,1488440,1,200654906,3388612899,1066800]::[Integer])
+          ,"preTokenBalances" .= ([]::[Value]),"postTokenBalances" .= [object ["accountIndex" .= (1::Int),"mint" .= mint,"owner" .= owner
+            ,"programId" .= Solana.tokenProgram,"uiTokenAmount" .= object ["amount" .= ("0"::T.Text),"decimals" .= (8::Int)]]]]]
+      outflow=object ["signature" .= signature,"slot" .= (455084780::Int64),"owner" .= owner,"delta" .= ("-1493440"::T.Text)
+        ,"feeUnits" .= money 5000,"failed" .= False,"rpcPayloadHash" .= digest(BL.toStrict $ encode transaction)]
+      origins=[("Native","native-origin"),("Solana",signature),("SolanaOperating",funding)]
+  proof<-either (fail . T.unpack) pure (SD.verifyInitialAta signature owner mint account (money 5000) (money 2000000) bytes transaction)
+  evalSetup settings (InitializeLedger identity)
+  withReader (settings {PG.connectUser=readRole}) identity True $ \reader->bracket (PG.connect settings) PG.close $ \fixtures->do
+    write $ \writer->do
+      evalWrite writer $ CommitScan $ W.ScanBatch "Native" "native-origin" Nothing "native-origin" 100 [] []
+      evalWrite writer $ CommitScan $ W.ScanBatch "Solana" signature Nothing signature 100 []
+        [W.ChainEvent signature "reference" "455084780" (object ["delta" .= ("0"::T.Text)])]
+      evalWrite writer $ CommitScan $ W.ScanBatch "SolanaOperating" funding Nothing signature 100
+        [W.Deposit receipt Nothing Sol (money 3000000) "455065641" 1 True 100]
+        [W.ChainEvent funding "unmatched_incoming" "455065641" (object ["delta" .= ("3000000"::T.Text),"failed" .= False])
+        ,W.ChainEvent signature "outgoing" "455084780" outflow]
+      expectStore "custody_not_reconciled" $ evalWrite writer $ AllocateTreasury 100 receipt [("operating",money 3000000)] "owned initial funds"
+    expected<-evalRead reader (ReadInitialFundingContext 100)
+    before<-evalRead reader ReadBalances
+    write $ \writer->expectStore "initial_funding_observation_changed" $ evalWrite writer $
+      InitializeSolanaOperating 100 (fst expected+1,snd expected) origins receipt proof "owned initial funds"
+    evalRead reader ReadBalances >>= check . (==before)
+    -- Each refusal preserves the ledger, then the exact observation is restored.
+    fixture fixtures (SeedTreasuryEvidence "SolanaOperating" signature "455084780" "outgoing" 1
+      (case outflow of Object o->Object(KM.insert "rpcPayloadHash" (toJSON ("changed"::T.Text)) o); x->x))
+    changed<-evalRead reader (ReadInitialFundingContext 100)
+    write $ \writer->expectStore "initial_funding_outflow_evidence_changed" $ evalWrite writer $
+      InitializeSolanaOperating 100 changed origins receipt proof "owned initial funds"
+    evalRead reader ReadBalances >>= check . (==before)
+    fixture fixtures (SeedTreasuryEvidence "SolanaOperating" signature "455084780" "outgoing" 1 outflow)
+    fixture fixtures (SeedTreasuryEvidence "Native" "unexpected-review" "native-origin" "unclassified" 1 (object []))
+    extra<-evalRead reader (ReadInitialFundingContext 100)
+    write $ \writer->expectStore "initial_funding_unexpected_history" $ evalWrite writer $
+      InitializeSolanaOperating 100 extra origins receipt proof "owned initial funds"
+    fixture fixtures (SeedTreasuryEvidence "Native" "unexpected-review" "native-origin" "reference" 0 (object []))
+    fixture fixtures (SourceEligibility receipt False)
+    ineligible<-evalRead reader (ReadInitialFundingContext 100)
+    write $ \writer->expectStore "initial_funding_receipt_mismatch" $ evalWrite writer $
+      InitializeSolanaOperating 100 ineligible origins receipt proof "owned initial funds"
+    fixture fixtures (SourceEligibility receipt True)
+    expected<-evalRead reader (ReadInitialFundingContext 100)
+    evalRead reader ReadBalances >>= check . (==before)
+    if scenario==Just "customer" then do
+      fixture fixtures SeedOrders
+      occupied<-evalRead reader (ReadInitialFundingContext 100)
+      write $ \writer->expectStore "initial_funding_customer_or_treasury_activity" $ evalWrite writer $
+        InitializeSolanaOperating 100 occupied origins receipt proof "owned initial funds"
+      evalRead reader ReadBalances >>= check . (==before)
+      putStrLn "PASS initial SOL accounting refuses customer activity, changed evidence, extra history and ineligible receipt"
+    else do
+      -- Failure after the allocation's writes proves transaction-wide rollback.
+      PG.execute_ fixtures "CREATE FUNCTION ecx_initial_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'initial allocation rollback test'; END $$" >> pure ()
+      PG.execute_ fixtures "CREATE TRIGGER ecx_initial_failure BEFORE INSERT ON treasury_spends FOR EACH ROW EXECUTE FUNCTION ecx_initial_failure()" >> pure ()
+      failed<-try (write $ \writer->evalWrite writer $ InitializeSolanaOperating 100 expected origins receipt proof "owned initial funds") :: IO (Either PG.SqlError Int64)
+      check (case failed of Left _->True; _->False)
+      evalRead reader ReadBalances >>= check . (==before)
+      evalRead reader ReadState >>= check . ((==0).ledgerSequence)
+      evalRead reader (ReadInitialFundingReplay receipt signature "owned initial funds") >>= check . (==Nothing)
+      PG.execute_ fixtures "DROP TRIGGER ecx_initial_failure ON treasury_spends" >> pure ()
+      sequenceNo<-write $ \writer->evalWrite writer $ InitializeSolanaOperating 100 expected origins receipt proof "owned initial funds"
+      after<-evalRead reader ReadBalances
+      check (M.filter (/=0) after==M.fromList [((Sol,Operating),1506560),((Sol,External),-1506560)])
+      replay<-write $ \writer->evalWrite writer $ InitializeSolanaOperating 100 expected origins receipt proof "owned initial funds"
+      check (replay==sequenceNo)
+      evalRead reader ReadBalances >>= check . (==after)
+      -- The closed replay lookup remains usable without live scans or RPC.
+      evalRead reader (ReadInitialFundingReplay receipt signature "owned initial funds") >>= check . (==Just sequenceNo)
+      expectStore "initial_funding_replay_conflict" $ evalRead reader (ReadInitialFundingReplay receipt signature "different owner")
+      snapshot<-evalRead reader (ReadCustodySnapshot 100 origins False)
+      check (M.lookup Sol (custodyTotals snapshot)==Just 1506560)
+      evalRead reader ReadState >>= check . ledgerPaused
+
+  when (scenario/=Just "customer") $ putStrLn "PASS initial SOL accounting: cycle reproduced, stale refusal, allocation rollback, exact replay, reconciliable balance, remains paused"
+
 ledgerMain :: IO ()
 ledgerMain = do
   database <- getEnv "ECX_REBUILD_CONTRACT_DATABASE"
@@ -1108,13 +1214,46 @@ ledgerMain = do
       withWriter settings (store policy limits) (const $ pure ()) $ \writer->do
         fixture fixtures RefreshCustody
         beforeResume<-evalRead reader ReadBalances
-        evalWrite writer (ResumeLedger 100 origins [])
+        evalWrite writer (ResumeLedger 100 origins [] Nothing)
         evalRead reader ReadState >>= check . not . ledgerPaused
-        expectStore "pause_before_operator_action" (evalWrite writer $ ResumeLedger 100 origins [])
+        expectStore "pause_before_operator_action" (evalWrite writer $ ResumeLedger 100 origins [] Nothing)
         evalWrite writer (Pause "resume contract")
-        expectStore "scanners_not_fresh" (evalWrite writer $ ResumeLedger 161 origins [])
+        expectStore "scanners_not_fresh" (evalWrite writer $ ResumeLedger 161 origins [] Nothing)
         evalRead reader ReadState >>= check . ledgerPaused
         evalRead reader ReadBalances >>= check . (==beforeResume)
+        -- Isolate resume from the unrelated review orders seeded below.
+        let resumeKey=digest "native-preparation-resume-contract"
+            identifier="fee:"<>resumeKey
+        fixture fixtures RefreshCustody
+        void $ evalWrite writer (ReserveFees 100 resumeKey Native (money 10) "recipient" "resume contract")
+        fixture fixtures ReadyIntake
+        void $ evalWrite writer (PreparePayment 100 identifier (money 5) "{}")
+        evalWrite writer (SaveDraft identifier 0 "{\"fixture\":1}")
+        prepared<-evalRead reader (ReadPreparation identifier)
+        work<-evalRead reader ReadNativeLockWork
+        check (work==Just(NativeLockWork prepared False []))
+        evalWrite writer (Pause "unknown native signing outcome")
+        fixture fixtures RefreshCustody
+        held<-evalRead reader ReadBalances
+        expectStore "unresolved_intents_require_review" (evalWrite writer $ ResumeLedger 100 origins [] Nothing)
+        forM_ work $ \saved->do
+          forM_ [prepared {preparedDraft=Just "changed"},prepared {preparedGeneration=1}] $ \changed->
+            expectStore "resume_preparation_changed" (evalWrite writer $ ResumeLedger 100 origins [] (Just saved {lockPreparation=changed}))
+          expectStore "resume_preparation_changed" (evalWrite writer $ ResumeLedger 100 origins [] (Just saved {lockCancelling=True}))
+        evalWrite writer (ResumeLedger 100 origins [] work)
+        evalRead reader ReadState >>= check . not . ledgerPaused
+        evalRead reader (ReadPreparation identifier) >>= check . (==prepared)
+        evalRead reader ReadBalances >>= check . (==held)
+        -- This synthetic fixture never called a signer; clean up via closed DSL.
+        evalWrite writer (Pause "resume fixture cleanup")
+        fixture fixtures RefreshCustody
+        evalWrite writer (BeginCancellation prepared 100 "fixture cleanup" "{}")
+        expectStore "resume_preparation_changed" (evalWrite writer $ ResumeLedger 100 origins [] work)
+        evalWrite writer (FinishCancellation prepared "fixture cleanup" "{}")
+        fixture fixtures RefreshCustody
+        void $ evalWrite writer (CancelFees resumeKey "fixture cleanup")
+        evalRead reader ReadBalances >>= check . (==beforeResume)
+        putStrLn "PASS: native preparation resume preserves exact work and refuses changed or cancelling evidence"
       fixture fixtures SeedOrders
       let auth="Bearer "<>T.replicate 64 "0"
       hidden <- evalRead reader (ReadOrder auth "hidden")
@@ -1130,14 +1269,14 @@ ledgerMain = do
       check (W.depositInstruction visible==Just "instruction-visible" && W.status visible=="AwaitingDeposit")
       withWriter settings (store policy limits) (const $ pure ()) $ \writer->do
         fixture fixtures RefreshCustody
-        expectStore "legacy_order_cost_review_required" (evalWrite writer $ ResumeLedger 100 origins [])
+        expectStore "legacy_order_cost_review_required" (evalWrite writer $ ResumeLedger 100 origins [] Nothing)
         evalRead reader ReadState >>= check . ledgerPaused
       fixture fixtures SeedReview
       reviewed <- evalRead reader (ReadOrder auth "visible")
       check (W.status reviewed=="NeedsReview")
       withWriter settings (store policy limits) (const $ pure ()) $ \writer->do
         fixture fixtures RefreshCustody
-        expectStore "obligations_require_review" (evalWrite writer $ ResumeLedger 100 origins [])
+        expectStore "obligations_require_review" (evalWrite writer $ ResumeLedger 100 origins [] Nothing)
         evalRead reader ReadState >>= check . ledgerPaused
       snapshot<-evalRead reader (ReadCustodySnapshot 100 origins False)
       check (custodyTotals snapshot==M.fromList [(Native,2100),(Wrapped,1000),(Sol,100)]
@@ -1738,6 +1877,12 @@ ledgerMain = do
         unchanged<-evalRead reader ReadBalances
         check (unchanged==observed)
         evalWrite writer (ScanFailed "Native" 101 "provider_down")
+        stateBeforeStatus<-evalRead reader ReadState
+        W.ServiceStatus paused reason sequenceNo backup scanners<-evalRead reader ReadServiceStatus
+        check (paused==ledgerPaused stateBeforeStatus && reason==ledgerReason stateBeforeStatus
+          && sequenceNo==ledgerSequence stateBeforeStatus && backup==ledgerBackup stateBeforeStatus
+          && W.ScannerStatus "Native" (Just 100) (Just "provider_down") 101 `elem` scanners)
+        evalRead reader ReadState >>= check . (==stateBeforeStatus)
         health<-fixture fixtures (ReadScanHealth "Native")
         cursorAfterFailure<-evalRead reader (ReadCheckpoint "Native")
         check (health==(Just 100,Just "provider_down",101) && cursorAfterFailure==Just "scan-2")
@@ -2032,6 +2177,7 @@ data Fixture a where
   RefundProof :: T.Text -> T.Text -> T.Text -> Fixture ()
   SeedReceipt :: T.Text -> Maybe T.Text -> Asset -> Int64 -> Int64 -> Bool -> Int64 -> Fixture ()
   CheckPromotion :: T.Text -> T.Text -> Asset -> Int64 -> T.Text -> Fixture Bool
+  HistoryCheckpointRows :: Fixture [(T.Text,T.Text)]
   Initialize :: Fixture ()
   InitializeIdentity :: T.Text -> Fixture ()
   RefreshCustody :: Fixture ()
@@ -2445,6 +2591,7 @@ fixture c LockRestoreAudits = O.runSelect c $ do
   (_,kind,subject)<-O.selectTable S.audit
   O.where_ (kind O..== O.sqlStrictText "native_locks_restored")
   pure subject
+fixture c HistoryCheckpointRows = O.runSelect c (O.selectTable S.checkpoints)
 fixture c Initialize = fixture c (InitializeIdentity "contract")
 fixture c (InitializeIdentity identity) = PG.withTransaction c $ do
   void $ O.runInsert c O.Insert {O.iTable=S.deployment,O.iRows=[S.Deployment (O.sqlInt8 1) (O.sqlInt8 2200) (O.sqlStrictText identity) (O.sqlInt8 0) (O.sqlInt8 0) (O.sqlInt8 1) (O.sqlStrictText "test")],O.iReturning=O.rCount,O.iOnConflict=Nothing}
@@ -3049,6 +3196,16 @@ nativeCustodyFamilies fixtures reader writer settings config base solana=do
   void $ evalWrite writer (MarkBroadcast 100 $ txid child)
   mapM_ evidence [parent,child]
   fixture fixtures (FreshAt 100)
+  -- Changed depth/anchor invalidates scans; changed money remains a hard error.
+  let observeParent=inspect $ call [parent,child] True False (Just $ txid parent) 2089 0
+      changedProof anchor depth fee=fixture fixtures $ SeedTreasuryEvidence "Native" (txid parent) anchor "outgoing" 0
+        (object ["confirmations" .= (depth::Int),"walletNetUnits" .= ("-10"::T.Text),"feeUnits" .= money fee])
+  forM_ [("unconfirmed",1),(block,0)] $ \(anchor,depth)->do
+    changedProof anchor depth 1
+    expectStore "custody_native_history_advanced" observeParent
+  changedProof block 1 2
+  expectStore "custody_payment_observation_mismatch" observeParent
+  evidence parent
   assertReport [parent,child] True False (Just $ txid parent) 2089 0 [] (-11) True
   assertReport [parent,child] True False (Just $ txid child) 2088 0 [] (-12) True
   -- Both replacement alternatives exclude the same two whole prevouts once.
@@ -3106,7 +3263,8 @@ orderWorkflowContract fixtures reader writer storePolicy = do
       backup n=evalWrite writer (AcknowledgeBackup "contract" n $ T.replicate 64 "d")
       transport=OrderTransport (pure 110) (const $ modifyIORef' admissions (+1)) (modifyIORef' identities (+1)) call backup
       create=createCustomerOrderWith transport native True reader writer header
-      check ok=unless ok (fail "customer workflow contract failed")
+      check :: HasCallStack => Bool -> IO ()
+      check ok=unless ok (fail $ "customer workflow contract failed\n"<>prettyCallStack callStack)
   expectStore "invalid_idempotency_key" (create unwrap {W.idempotencyKey=""})
   missing<-evalRead reader (FindOrder header unwrap)
   check (missing==Nothing)
@@ -3147,6 +3305,12 @@ orderWorkflowContract fixtures reader writer storePolicy = do
         "contract" key key 8 (M.fromList [("NativeToWrapped",100),("WrappedToNative",100)]) False False (W.Availability False "starting") Nothing
       customerSettings=CustomerSettings public storePolicy "/unused/sdk"
       endpoint=SigningEndpoint 9443 "/unused/auth"
+  -- The worker uses wall time, unlike the provisioning fixture's clock above.
+  -- Establish expiry before comparing separate HTTP/reader snapshots, and pause
+  -- explicitly rather than racing the worker's first rejected offline scan.
+  now<-floor <$> getPOSIXTime
+  evalWrite writer (ExpireQuotes now)
+  evalWrite writer (Pause "offline customer HTTP contract")
   bracket (newManager defaultManagerSettings {managerModifyRequest= \_ -> reject "offline_process_rpc"}) closeManager $ \manager->do
     forM_ [False,True] $ \paying->
       withWorkerProcess manager reader writer chainSettings config
@@ -3424,7 +3588,7 @@ serverMain = do
       NS.bind sock (NS.SockAddrInet 0 (NS.tupleToHostAddress (127,0,0,1)))
       address<-NS.getSocketName sock
       case address of NS.SockAddrInet n _->pure (fromIntegral n); _->fail "unexpected listener address"
-    let network=if canonical then base {Config.profile=W.CanonicalBeta,Config.backupRequired=True,
+    let network=if canonical then base {Config.profile=W.CanonicalBeta,Config.backupRequired=True,Config.nativeConfirmations=6,
           Config.nativeCheckpointHeight=967680,Config.nativeCheckpointHash="00000000000000030101ba5cfea54b22becc79f95dc6040beb76e01dd9d04042",
           Config.mint="EVHqNdzjCupKi4rQkbuYw52sa1m8A7jeUAMP23S9AVVq",Config.solanaVerifierRpc=Just "https://localhost:1"} else base
         config=network {Config.serverPort=port,Config.fenceDirectory=directory<>"/fence",
@@ -3930,6 +4094,7 @@ expiryContract fixtures reader writer=do
   evalRead reader PendingAttempts >>= check . notElem "expiry-signed-0"
   (view,active,attempts)<-evalRead reader (ReadPaymentWork identifier)
   check (savedStatus view==PaymentReview && active==Nothing && null attempts)
+  evalRead reader (ReadPaymentAttempts identifier) >>= check . (==["expiry-signed-0"])
   evalRead reader ReadBalances >>= check . (==before)
   ready
   expectStore "preparation_retry_not_authorized" (evalWrite writer $ PreparePayment 110 identifier (money 20) "{}")
@@ -4377,9 +4542,9 @@ tlsMain=do
               checkpointReply<-newIORef (Nothing::Maybe W.BackupReceipt)
               checkpointMinimum<-newIORef required
               checkpoints<-newIORef (0::Int)
-              let fixtureCheckpoint :: forall a. Op.Request 'Op.Signer 'Op.Critical a -> IO a
-                  fixtureCheckpoint request=case Op.resolve request of
-                    Op.SigningDSL (Op.CheckpointSigning (Op.CheckpointCustody fingerprint minimumSequence))->do
+              let fixtureCheckpoint :: forall a. Op.Pending 'Op.Signer 'Op.Critical a -> IO a
+                  fixtureCheckpoint request=case Op.checkedOperation request of
+                    Right (Op.SigningDSL (Op.CheckpointSigning (Op.CheckpointCustody fingerprint minimumSequence)))->do
                       expectedMinimum<-readIORef checkpointMinimum
                       check (fingerprint==identity && minimumSequence==expectedMinimum)
                       modifyIORef' checkpoints (+1)
@@ -5076,3 +5241,73 @@ archiveContract settings fixtures reader = do
     fixture fixtures ArchiveRecords >>= check . (==records)
     fixture fixtures MigrationRecords >>= check . (==history)
     putStrLn "PASS: same-count financial change excluded by exported snapshot, complete financial records restored, same-length archive corruption refused, authenticated download, restricted paused restore, stale/identity/schema/hash refusal, failed-stage cleanup, private snapshot, real restic encryption/readback/restore, repository/permission/integrity/password refusal, unchanged coverage, exact signed attempts and every ledger posting"
+
+-- Dedicated disposable-DB regression for durable observation progress and atomic
+-- retirement. No chain/network calls, signer, payment or generic database escape.
+historyProgressMain :: IO ()
+historyProgressMain=do
+  database<-getEnv "ECX_REBUILD_CONTRACT_DATABASE"
+  unless ("ecx_rebuild_contract_" `T.isPrefixOf` T.pack database) (fail "disposable database required")
+  user<-getEnv "USER"; role<-getEnv "ECX_REBUILD_CONTRACT_READER"
+  let settings=PG.defaultConnectInfo {PG.connectHost="/tmp/ecx-pg-seam",PG.connectPort=29436,PG.connectUser=user,PG.connectDatabase=database}
+      policy=StorePolicy (PaymentTerms (PolicySnapshot 2 "finalized" "contract") (CostLimits (money 10) (money 10) (money 10)))
+        (OrderLimits (money 1000) 100 100 100 (money 100000) (money 100000)) "contract" True
+      sig n=SolanaMessage.base58 (BS.replicate 63 0<>BS.singleton n)
+      progress=Solana.HistoryProgress (sig 0) Nothing 100 (Solana.SignatureInfo (sig 2) 2 False)
+        [Solana.SignatureInfo (sig 2) 2 False,Solana.SignatureInfo (sig 1) 1 False] False
+      batch=W.ScanBatch "Solana" (sig 0) Nothing (sig 2) 100
+        [W.Deposit ("solana:"<>sig 1) Nothing Wrapped (money 10) "1" 1 True 100] []
+      check condition=unless condition (fail "history progress contract failed")
+      writing=withWriter settings policy (const $ pure ())
+  bracket (PG.connect settings) PG.close $ \c->fixture c Initialize
+  withReader (settings {PG.connectUser=role}) "contract" True $ \reader->do
+    initial<-evalRead reader ReadBalances
+    writing $ \writer->do
+      evalWrite writer (RecordHistoryProgress "Solana" Nothing progress)
+      evalRead reader (ReadHistoryProgress "Solana") >>= check . (==Just progress)
+      evalRead reader (ReadCheckpoint "Solana") >>= check . (==Nothing)
+      evalRead reader ReadState >>= check . ledgerPaused
+      evalRead reader ReadBalances >>= check . (==initial)
+      expectStore "stale_history_progress" (evalWrite writer $ RecordHistoryProgress "Solana" Nothing progress)
+      expectStore "invalid_history_stream" (evalRead reader $ ReadHistoryProgress "Native")
+    -- Production archive/restore must preserve the bounded scratch rows too.
+    nonce<-digest <$> (getRandomBytes 32 :: IO BS.ByteString)
+    let directory="/tmp/ecx-history-backup-"<>T.unpack nonce
+    createDirectory directory; setFileMode directory 0o700
+    archive<-evalBackup reader (ExportLedger directory)
+    (restored,_)<-evalRestore settings (RestoreLedger (manifestPath archive) "contract" (archiveSequence archive))
+    originalRows<-bracket (PG.connect settings) PG.close (\c->fixture c HistoryCheckpointRows)
+    restoredRows<-bracket (PG.connect settings {PG.connectDatabase=T.unpack restored}) PG.close (\c->fixture c HistoryCheckpointRows)
+    check(sort originalRows==sort restoredRows)
+    putStrLn $ "History restore fixture retained: "<>T.unpack restored<>"; "<>directory
+    -- Reopen both writer and its transaction resources, retaining database state.
+    writing $ \writer->do
+      saved<-evalRead reader (ReadHistoryProgress "Solana")
+      check(saved==Just progress)
+      expectStore "invalid_observation_kind" $ evalWrite writer $ CommitHistoryScan saved
+        batch {W.scanEvents=[W.ChainEvent (sig 1) "invalid" "1" Null]} False
+      evalRead reader ReadBalances >>= check . (==initial)
+      evalRead reader (ReadCheckpoint "Solana") >>= check . (==Nothing)
+      evalRead reader (ReadHistoryProgress "Solana") >>= check . (==saved)
+      evalWrite writer (CommitHistoryScan saved batch False)
+      evalRead reader (ReadHistoryProgress "Solana") >>= check . (==Nothing)
+      evalRead reader (ReadCheckpoint "Solana") >>= check . (==Just(sig 2))
+      state<-evalRead reader ReadState
+      check(ledgerPaused state && "scanner_unavailable:" `T.isPrefixOf` ledgerReason state)
+      balances<-evalRead reader ReadBalances
+      check(M.findWithDefault 0 (Wrapped,Unallocated) balances==M.findWithDefault 0 (Wrapped,Unallocated) initial+10)
+      expectStore "stale_history_progress" $ evalWrite writer (CommitHistoryScan saved batch False)
+      evalRead reader ReadBalances >>= check . (==balances)
+      evalWrite writer (CommitHistoryScan Nothing batch {W.scanPrevious=Just(sig 2),W.scanTime=101} True)
+      evalRead reader ReadBalances >>= check . (==balances)
+      evalRead reader ReadState >>= check . ledgerPaused
+      let later=progress {Solana.progressPrevious=Just(sig 2),Solana.progressHead=Solana.SignatureInfo (sig 3) 3 False
+            ,Solana.progressWindow=[Solana.SignatureInfo (sig 3) 3 False],Solana.progressTime=102}
+      evalWrite writer (RecordHistoryProgress "Solana" Nothing later)
+      -- Older binaries use the unchanged strict CommitScan and ignore auxiliary
+      -- progress. Re-upgrading must use their newer committed coverage.
+      evalWrite writer (CommitScan batch {W.scanPrevious=Just(sig 2),W.scanNext=sig 3,W.scanTime=103})
+      evalRead reader (ReadHistoryProgress "Solana") >>= check . (==Nothing)
+      evalWrite writer (CommitHistoryScan Nothing batch {W.scanPrevious=Just(sig 3),W.scanNext=sig 3,W.scanTime=104} True)
+      evalRead reader ReadBalances >>= check . (==balances)
+  putStrLn "PASS history progress: restart, stale CAS, rollback, contiguous checkpoint, no duplicate posting, no automatic resume"

@@ -175,21 +175,7 @@ validate NonceMint{authority=payer,mint=key,account=address,quantity=n,blockhash
     _->Left "nonce_mint_transaction_shape"
 validate Associated{authority=payer,mint=key,account=address,owner=recipient,rent=lamports,blockhash=recent} encoded=do
   unless (lamports>0) (Left "invalid_account_rent")
-  paying<-publicKey payer; token<-publicKey key; destination<-publicKey address; holder<-publicKey recipient
-  recentHash<-publicKey recent; spl<-publicKey tokenProgram
-  system<-publicKey "11111111111111111111111111111111"
-  ata<-publicKey "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL"
-  transaction<-decodeTransaction encoded
-  case transaction of
-    Transaction [signature] (Message 1 0 readonly keys hash [Instruction program indexes payload]) _->do
-      let at i=keys !! fromIntegral i -- decoder bounds indices
-          accounts=[paying,destination,holder,token,system,spl]
-      unless (paying/=destination && token/=holder && token/=paying && signature==B.replicate 64 0
-        && hash==recentHash && take 1 keys==[paying] && sort keys==sort(nub $ ata:accounts)
-        && sort(take (length keys-fromIntegral readonly) keys)==sort [paying,destination]
-        && at program==ata && map at indexes==accounts && payload==B.singleton 1) (Left "associated_account_mismatch")
-      pure transaction
-    _->Left "associated_account_shape"
+  validateAssociated False payer key address recipient recent encoded
 validate Metadata{authority=owner,mint=key,metadata=terms,blockhash=recent} encoded=M.validate owner key recent terms encoded
 validate request@CreateMint{} encoded=do
   owner<-publicKey (authority request)

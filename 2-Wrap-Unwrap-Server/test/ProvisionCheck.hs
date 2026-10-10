@@ -2,13 +2,15 @@
 -- Owns an unfunded temporary PostgreSQL cluster; never uses the caller's PG* DB.
 module ProvisionCheck (contract,child) where
 import Bridge.Store
+import qualified Bridge.Store.Backup as Backup
 import qualified Bridge.Store.Schema as S
 import Bridge.Store.Catalog (verifyReadRole)
 import Control.Exception
 import Control.Concurrent (threadDelay)
 import Control.Monad (forM_,void,unless)
 import qualified Data.ByteString.Char8 as B
-import Data.Profunctor.Product (p2,p3)
+import Data.Profunctor.Product (p2,p3,p4)
+import Data.List (sort,isInfixOf)
 import Data.Int (Int64)
 import qualified Data.Text as T
 import qualified Database.PostgreSQL.Simple as PG
@@ -22,8 +24,12 @@ import System.Posix.Files (setFileMode)
 import System.Posix.Signals (signalProcess,sigKILL)
 import System.Exit (ExitCode(..))
 import System.Timeout (timeout)
-import System.Process (callProcess,withCreateProcess,proc,env,getPid,waitForProcess)
+import System.Process (readProcess,callProcess,withCreateProcess,proc,env,getPid,waitForProcess)
 import Test.QuickCheck (quickCheckWithResult,stdArgs,maxSuccess,ioProperty,isSuccess)
+
+data SqlOid
+type NamespaceFields = (O.Field SqlOid,O.Field O.SqlText)
+type ColumnFields = (O.Field O.SqlText,O.Field O.SqlText,O.Field O.SqlText,O.Field O.SqlText)
 
 child :: FilePath -> IO ()
 child root=evalSetup PG.defaultConnectInfo {PG.connectHost=root,PG.connectPort=29479,PG.connectUser="postgres",PG.connectDatabase="postgres"}
@@ -48,7 +54,7 @@ checks root admin=bracket(PG.connect admin) PG.close $ \c->do
   let token="0123456789abcdef0123456789abcdef"
       run=evalSetup admin(ProvisionDatabase token)
       ddl sql=void(PG.execute_ c sql)
-      refused expected action=(action >> fail "expected refusal") `catch` \(BridgeError actual)->check(actual==expected)
+      refused expected action=(action >> fail "expected refusal") `catch` \(BridgeError actual)->unless(actual==expected)(fail $ "expected "<>T.unpack expected<>"; received "<>T.unpack actual)
       target=admin {PG.connectDatabase="ecx_bridge"}
   ddl "CREATE ROLE ecxbridgew NOLOGIN"
   refused "foreign_installation_roles" run
@@ -123,10 +129,94 @@ checks root admin=bracket(PG.connect admin) PG.close $ \c->do
       refused "installation_receipt_mismatch" run
   forM_ ["ecxbridger","ecxbridges"] $ \role->
     bracket(PG.connect target {PG.connectUser=role}) PG.close $ \db->verifyReadRole db >>= check
+  -- Real provisioning creates ecx_install.receipt, deliberately inaccessible to
+  -- the runtime reader. Back up that exact layout, not a migration-only fixture.
+  let identity=T.replicate 64 "a"
+      readerSettings=target {PG.connectUser="ecxbridger"}
+      receiptNames :: PG.Connection -> IO [T.Text]
+      receiptNames db=O.runSelect db $ do
+        (schema,name)<-O.selectTable tables
+        O.where_ (schema O..== O.sqlStrictText "ecx_install")
+        pure name
+      inventory :: PG.Connection -> IO [[T.Text]]
+      inventory db=do
+        common<-mapM (\(schema,table,namespace,column)->sort <$> O.runSelect db (do
+          (space,name)<-O.selectTable $ O.tableWithSchema schema table $
+            p2(O.requiredTableField namespace,O.requiredTableField column)
+          O.where_ (space O..== O.sqlStrictText "public")
+          pure (name :: O.Field O.SqlText)))
+          [("information_schema","tables","table_schema","table_name")
+          ,("pg_catalog","pg_sequences","schemaname","sequencename")
+          ,("information_schema","routines","routine_schema","routine_name")
+          ,("information_schema","triggers","trigger_schema","trigger_name")
+          ,("pg_catalog","pg_indexes","schemaname","indexname")]
+        actualConstraints<-O.runSelect db $ do
+          (namespace,name)<-O.selectTable constraints
+          (oid,schema)<-O.selectTable namespaces
+          O.where_ (namespace O..== oid O..&& schema O..== O.sqlStrictText "public")
+          pure name
+        pure(common<>[sort actualConstraints])
+      columns :: PG.Connection -> IO [(T.Text,T.Text,T.Text)]
+      columns db=sort <$> O.runSelect db (do
+        (schema,table,column,nullable)<-O.selectTable columnInfo
+        O.where_ (schema O..== O.sqlStrictText "public")
+        pure(table,column,nullable))
+  objects<-bracket(PG.connect target) PG.close $ \db->do
+    receiptNames db >>= same "source installer receipt" ["receipt"]
+    inventory db
+  unless(all (not . null) objects)(fail $ "empty source inventory category; counts="<>show(map length objects))
+  columnState<-bracket(PG.connect target) PG.close columns
+  archive<-withReader readerSettings identity False $ \reader->evalBackup reader(ExportLedger root)
+  listing<-readProcess "pg_restore" ["--list",archivePath archive] ""
+  unless(not $ "ecx_install" `isInfixOf` listing)(fail "installer schema present in archive")
+  bracket (evalRestore target $ RestoreLedger (manifestPath archive) identity 0)
+    (\(database,_)->Backup.discardRestore admin {PG.connectDatabase=T.unpack database}) $ \(database,n)->do
+      unless(n==0 && database/="ecx_bridge")(fail $ "restore target/sequence: "<>show(database,n))
+      let restoredSettings=admin {PG.connectDatabase=T.unpack database}
+      refused "restored_database_identity_or_state_mismatch" (evalSetup restoredSettings $ ProvisionRestoredDatabase "wrong" n)
+      refused "restored_database_identity_or_state_mismatch" (evalSetup restoredSettings $ ProvisionRestoredDatabase identity (n+1))
+      evalSetup restoredSettings (ProvisionRestoredDatabase identity n)
+      evalSetup restoredSettings (ProvisionRestoredDatabase identity n)
+      forM_ ["ecxbridger","ecxbridges"] $ \role->
+        bracket(PG.connect restoredSettings {PG.connectUser=role}) PG.close $ \db->verifyReadRole db >>= same "reader privileges after restore" True
+
+      bracket(PG.connect admin {PG.connectDatabase=T.unpack database}) PG.close $ \db->do
+        inventory db >>= sameInventory objects
+        columns db >>= same "column nullability unchanged" columnState
+        receiptNames db >>= same "restored installer receipt must be absent" []
+        restored<-(,) <$> (O.runSelect db $ O.selectTable S.deployment) <*> (O.runSelect db $ O.selectTable S.scanHealth)
+        let (rows,observations)=before
+        same "restored deployment and observation rows" ([row {S.paused=1,S.pauseReason="restored_requires_reconciliation"} | row<-rows],observations) restored
+  -- Supplying the existing source DB cannot select it as a restore/cleanup target.
+  refused "invalid_restore_database" (Backup.discardRestore target)
+  bracket(PG.connect target) PG.close $ \db->do
+    inventory db >>= sameInventory objects
+    columns db >>= same "column nullability unchanged" columnState
+    receiptNames db >>= same "source installer receipt" ["receipt"]
+    original<-(,) <$> (O.runSelect db $ O.selectTable S.deployment) <*> (O.runSelect db $ O.selectTable S.scanHealth)
+    same "source deployment and observation rows unchanged" before original
+  bracket(PG.connect readerSettings) PG.close $ \db->verifyReadRole db >>= same "reader privileges after restore" True
+  putStrLn "PASS: provisioned restricted-reader backup, installer receipt excluded, all public tables/sequences/functions/constraints/triggers/indexes restored, ledger and observation data preserved, paused isolated restore, reader remains restricted"
   putStrLn "PASS: foreign role/database refusal, migration rollback, SIGKILL during migration008 and successful retry, changed-migration refusal, read-only roles and initialized ledger/observation preservation"
  where
+  same :: (Eq a,Show a) => String -> a -> a -> IO ()
+  same label expected actual=unless(expected==actual)(fail $ label<>" expected="<>show expected<>" actual="<>show actual)
+  sameInventory :: [[T.Text]] -> [[T.Text]] -> IO ()
+  sameInventory expected actual=do
+    same "inventory category count" (length expected) (length actual)
+    forM_ (zip3 ["tables/views","sequences","functions","triggers","indexes","constraints"] expected actual) $ \(label,old,new)->
+      unless(old==new)(fail $ "inventory "<>label<>" counts="<>show(length old,length new)
+        <>" missing="<>show(take 8 $ filter (`notElem` new) old)<>" added="<>show(take 8 $ filter (`notElem` old) new))
   check True=pure ()
   check False=fail "provisioning invariant failed"
+  -- information_schema synthesizes OID-based names for NOT NULL constraints.
+  -- Compare real named constraints, and cover NOT NULL via column metadata above.
+  constraints :: O.Table NamespaceFields NamespaceFields
+  constraints=O.tableWithSchema "pg_catalog" "pg_constraint" $ p2(O.requiredTableField "connamespace",O.requiredTableField "conname")
+  namespaces :: O.Table NamespaceFields NamespaceFields
+  namespaces=O.tableWithSchema "pg_catalog" "pg_namespace" $ p2(O.requiredTableField "oid",O.requiredTableField "nspname")
+  columnInfo :: O.Table ColumnFields ColumnFields
+  columnInfo=O.tableWithSchema "information_schema" "columns" $ p4(O.requiredTableField "table_schema",O.requiredTableField "table_name",O.requiredTableField "column_name",O.requiredTableField "is_nullable")
   tables :: O.Table (O.Field O.SqlText,O.Field O.SqlText) (O.Field O.SqlText,O.Field O.SqlText)
   tables=O.tableWithSchema "information_schema" "tables" $ p2(O.requiredTableField "table_schema",O.requiredTableField "table_name")
   activity :: O.Table (O.Field O.SqlText,O.FieldNullable O.SqlText,O.Field O.SqlText) (O.Field O.SqlText,O.FieldNullable O.SqlText,O.Field O.SqlText)

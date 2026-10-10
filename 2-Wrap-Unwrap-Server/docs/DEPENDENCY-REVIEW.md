@@ -1,11 +1,27 @@
 # Dependency review status
 
+The isolated capability refactor adds `operation-capabilities-0.1.0.0` from
+[freewillydev/operation-capabilities](https://github.com/freewillydev/operation-capabilities)
+at immutable commit `1c93d574cc48d4a8446c390e119b8fa04c93a659`. Its library depends
+only on `base`; the source contains no IO, unsafe casts or unsafe IO. The MIT
+license is retained upstream. Source inspection and compilation are not an
+independent security audit. Existing dependency inventories below predate this addition.
+
 The 2026-10-04 review used the actual native GHC 9.14.1 and JavaScript GHC 9.12.2
 Cabal plans, their freeze files, and the current Cargo.lock. It matched 36 published
 [Haskell advisories](https://github.com/haskell/security-advisories/tree/57073681929c733854f3222e3fa7d14c05262508)
 and ran cargo-audit 0.22.2 against RustSec commit
 `ef6173cbc5c50ec8166f9a5b28f07834144373ee` (1,290 advisories).
 These are version/source checks, not independent security certification.
+
+Rechecked against the primary advisory pages on 2026-10-09:
+[bincode](https://rustsec.org/advisories/RUSTSEC-2025-0141.html) still lists no patched version;
+[Cabal](https://haskell.github.io/security-advisories/advisory/HSEC-2026-0006.html)
+still lists versions >=2.2 as affected;
+[base](https://haskell.github.io/security-advisories/advisory/HSEC-2023-0007.html)
+still lists versions >=3.0.3.1 as affected. No new patched-version claim justifies
+changing the pinned toolchain. The scoped mitigations below remain evidence for
+release review, not acceptance or waiver of these advisories.
 
 | Inputs checked | Result after remediation |
 | --- | --- |

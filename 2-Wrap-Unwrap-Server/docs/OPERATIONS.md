@@ -70,7 +70,13 @@ is separate from signer HTTPS.
 For canonical ECX/Solana Mainnet, adapt the ECX betanet example with reviewed
 deployment values. Set `profile` to `CanonicalBeta`, `mint` to
 `EVHqNdzjCupKi4rQkbuYw52sa1m8A7jeUAMP23S9AVVq`, and `backupRequired` to `true`.
-Retain the pinned ECX checkpoint at height 967680. Both Solana RPC endpoints must
+Retain the pinned ECX checkpoint at height 967680. ECX setup defaults to six
+confirmations; both ECX profiles require at least six (higher values remain
+configurable). Existing orders keep their saved confirmation terms. For an older
+installation configured below six, pause intake and update both service
+configurations and the retained setup before upgrading; never edit saved ledger
+terms or an unfinished upgrade plan. L2L Signet retains its test default of one.
+Both Solana RPC endpoints must
 use HTTPS, have different hostnames and report Mainnet genesis; configure an
 independent provider, not two URLs for one service. Use the actual Mainnet custody
 owner/ATA and token/SOL history origins, matching native wallet and deployment
@@ -235,6 +241,7 @@ are JSON integers. Returned IDs/sequences must be retained exactly.
 | `status`, `native-reviews`, `resume` | None |
 | `pause` | `reason` |
 | `repair-completed-order` | `order` |
+| `initialize-operating` | `deposit`, `transaction`, `reason` |
 | `allocate-treasury` | `deposit`, `split`, `reason` |
 | `classify-spend` | `chain`, `transaction`, `reason` |
 | `withdraw-fees` | `id`, `asset`, `amount`, `recipient`, `reason` |
@@ -257,13 +264,33 @@ pairs, for example `[["float","90000"],["operating","10000"]]` for a matching
 100000-unit native receipt. SOL may only fund operating. The recorded attestation
 and reconciliation are required; balance alone is not allocation authority.
 
-Start new custody with a dedicated wallet. Pay its associated-token-account setup
-from a separate funding wallet, and acquire trading inventory outside custody before
-transferring it in. Retain complete token and SOL history, including account creation
-and funding. Spending from an unallocated custody wallet can prevent its opening
-reconciliation: allocation requires reconciliation, while classifying a spend requires
-allocated capital. Do not work around this by skipping history or inventing an opening
-balance. Existing custody with financial history requires migration or recovery.
+Start new custody with a dedicated wallet and acquire trading inventory outside
+custody before transferring it in. If guided setup paid for its own associated token
+account before ledger initialization, new guided configurations save your explicit
+initial SOL ownership statement. Fund once with your own SOL before startup; add
+ECX/wrapped inventory afterwards. `start` uses that statement, the configured
+funding origin and the validated saved ATA transaction to run `initialize-operating`
+through private operator control before normal backup/reconciliation/resume.
+Retries reuse the same accounting request. Older setups without that statement
+retain the explicit command while paused:
+
+```json
+{"operation":"initialize-operating","deposit":"sol-operating:FUNDING_SIGNATURE","transaction":"ATA_CREATION_SIGNATURE","reason":"I own the complete initial SOL funding receipt"}
+```
+
+Use the recorded funding receipt and saved account-creation signature; this command
+does not create or send a transaction. It requires an unused ledger, complete fresh
+history from that funding, no customer activity or other unexplained outflows, and
+matching finalized setup bytes/effects from both RPC providers. It allocates the
+whole initial receipt to operating and books only the verified account rent and fee
+in one transaction. An exact replay returns the recorded sequence without RPC or
+new postings. Conflicting requests refuse. The ledger remains paused: checkpoint,
+then run normal reconciliation/resume before serving payments.
+
+Separately funded account creation can use ordinary treasury allocation. Retain
+complete token and SOL history in either case; never skip history or invent an
+opening balance. Existing custody with financial history requires migration or
+recovery, not this initial-funding operation.
 
 Earned withdrawal uses a fresh 64-lowercase-hex `id`, asset `Native` or `Wrapped`,
 amount and external recipient. Its reservations, preparation, signing and settlement
@@ -335,6 +362,43 @@ format 2 binds a copied `native-unlock` file. Export checks the secret against t
 wallet before and after backup. After relocation, point the restored signer's
 `nativeUnlockFile` to that protected copied file. Unencrypted bundles retain format 1.
 Offline inspection never unlocks a wallet.
+
+## Guided recovery
+
+The `review-2026-10-09-funded-recovery` installer includes this flow. Its funded
+restoration, checked activation and reboot/resume acceptance are recorded in
+RELEASE-REVIEW.md. It remains a review prerelease with separate production gates.
+
+From `sudo ecx-bridge`, choose **Backup and recovery**. Download/verify an exact
+snapshot with an independently retained minimum sequence, then select **Restore
+verified custody to staging**. Supply a root-private target configuration and the
+verified `custody.json`. The packaged launcher installs local PostgreSQL; guided
+CanonicalBeta recovery installs the pinned pruned ECX node if absent. Node
+synchronization must finish before restoration. The original native wallet name
+must be unused. The guide never
+reinitializes a ledger or regenerates recovered keys.
+
+Only the native backup is staged privately for `ecxnode`; only the ledger archive
+is staged privately for `postgres`. The complete bundle and Solana/unlock secrets
+remain root-private. Interrupted operations with an unknown outcome refuse blind
+repetition. Completed restore steps reuse their saved results. Preserve the journal
+at `/var/lib/ecx-bridge-restore` and do not delete its markers to force a retry.
+
+Select **Activate staged recovery** after permanently excluding the old signer.
+This is an operator confirmation, not remote proof that copied keys cannot spend.
+Provide private files containing the HTTPS backup repository URL and password.
+On a clean destination, activation installs the recovered keys, generates fresh
+transport/RPC credentials, grants restricted roles on the restored database, adopts
+the fence and enables native wallet loading on reboot. Services remain blocked
+until these steps complete. The existing resume operation then checks chain history,
+reserves, saved attempts and backup readiness; refusal stops both services and
+retains the recovery plan. Success registers this installation for future startup
+and upgrades. Public TLS/forwarding is separate destination configuration; the
+recovery defaults to the existing loopback listener without copying old TLS secrets.
+
+A previously installed destination must first have its old deployment explicitly
+retired and preserved. Recovery does not erase existing application directories,
+replace service accounts, overwrite a native wallet or drop a database.
 
 ## Restore or upgrade
 
@@ -567,3 +631,20 @@ that build identity. Packaging used the existing locally trusted build path;
 source commit context is not a build-provenance attestation. SHA-256:
 `29d08ecfc37fce6431cb09b5bcf3e71e5df451bb051b73fc6e7f93d7c2b701b2`.
 Previous release assets and the deployed observation worker remain unchanged.
+
+### Recovery staging after the ancestry hardening change
+
+New recovery plans stage native and ledger files beneath the root-owned
+`/var/lib/ecx-bridge-restore-stage/native` and `ledger` directories. Every ancestor
+must be a real root-owned directory without group/other write permission. Shared
+parents are traversal-only (0711); each role's leaf remains private (0700).
+The private recovery journal remains `/var/lib/ecx-bridge-restore` (0700).
+
+Pending plans using the old service-owned parent paths refuse with
+`legacy_restore_staging_requires_review` before restoration setup proceeds. Keep
+all plans, markers, backups and created databases/wallets. Do not rewrite paths or
+delete started markers to force a retry: recorded command identity prevents duplicate
+restoration effects. Review the saved outcome and use the explicit activation flow
+only if staging and both restoration effects were already completed and verified.
+An interrupted legacy plan needs a separately reviewed recovery procedure; this
+change does not silently migrate it or claim it safe to replay.

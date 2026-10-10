@@ -34,49 +34,52 @@ controlPlan=withObject "operator command" $ \o->do
     "native-reviews"->fields ["operation"] >> pure (ControlPlan $ operatorRead NativeReviews)
     "rebroadcast-native"->do
       fields ["operation","transaction","recovery","reason"]
-      ControlPlan . operator <$> (RebroadcastNative <$> o .: "transaction" <*> o .: "recovery" <*> o .: "reason")
-    "repair-completed-order"->fields ["operation","order"] >> (ControlPlan . operator . RepairCompletedOrder <$> o .: "order")
+      (\transaction recovery reason -> ControlPlan $ operator $ \cap -> rebroadcastNative cap transaction recovery reason) <$> o .: "transaction" <*> o .: "recovery" <*> o .: "reason"
+    "repair-completed-order"->fields ["operation","order"] >> ((\order -> ControlPlan $ operator $ \cap -> repairCompletedOrder cap order) <$> o .: "order")
     "treasury-receipts"->fields ["operation"] >> pure (ControlPlan $ operatorRead TreasuryReceipts)
     "status"->fields ["operation"] >> pure (ControlPlan $ operatorRead ServiceState)
-    "pause"->fields ["operation","reason"] >> (ControlPlan . operator . PauseService <$> o .: "reason")
+    "pause"->fields ["operation","reason"] >> ((\reason -> ControlPlan $ operator $ \cap -> pauseService cap reason) <$> o .: "reason")
     "cover-source-loss"->do
       fields ["operation","deposit","recovery","float","earned","reason"]
-      ControlPlan . operator <$> (CoverLostSource <$> o .: "deposit" <*> o .: "recovery" <*> o .: "float" <*> o .: "earned" <*> o .: "reason")
+      (\deposit recovery float earned reason -> ControlPlan $ operator $ \cap -> coverLostSource cap deposit recovery float earned reason) <$> o .: "deposit" <*> o .: "recovery" <*> o .: "float" <*> o .: "earned" <*> o .: "reason"
     "approve-covered-source"->do
       fields ["operation","payment","recovery","reason"]
-      ControlPlan . operator <$> (ApproveCovered <$> o .: "payment" <*> o .: "recovery" <*> o .: "reason")
+      (\payment recovery reason -> ControlPlan $ operator $ \cap -> approveCovered cap payment recovery reason) <$> o .: "payment" <*> o .: "recovery" <*> o .: "reason"
     "approve-source-recovery"->do
       fields ["operation","payment","restoration","reason"]
-      ControlPlan . operator <$> (RestoreSource <$> o .: "payment" <*> o .: "restoration" <*> o .: "reason")
+      (\payment restoration reason -> ControlPlan $ operator $ \cap -> restoreSource cap payment restoration reason) <$> o .: "payment" <*> o .: "restoration" <*> o .: "reason"
     "classify-spend"->do
       fields ["operation","chain","transaction","reason"]
-      ControlPlan . operator <$> (ClassifySpend <$> o .: "chain" <*> o .: "transaction" <*> o .: "reason")
+      (\chain transaction reason -> ControlPlan $ operator $ \cap -> classifySpend cap chain transaction reason) <$> o .: "chain" <*> o .: "transaction" <*> o .: "reason"
+    "initialize-operating"->do
+      fields ["operation","deposit","transaction","reason"]
+      (\deposit transaction reason -> ControlPlan $ operator $ \cap -> initializeOperating cap deposit transaction reason) <$> o .: "deposit" <*> o .: "transaction" <*> o .: "reason"
     "allocate-treasury"->do
       fields ["operation","deposit","split","reason"]
-      ControlPlan . operator <$> (AllocateReceipt <$> o .: "deposit" <*> o .: "split" <*> o .: "reason")
+      (\deposit split reason -> ControlPlan $ operator $ \cap -> allocateReceipt cap deposit split reason) <$> o .: "deposit" <*> o .: "split" <*> o .: "reason"
     "withdraw-fees"->do
       fields ["operation","id","asset","amount","recipient","reason"]
-      ControlPlan . operator <$> (WithdrawFees <$> o .: "id" <*> o .: "asset" <*> o .: "amount" <*> o .: "recipient" <*> o .: "reason")
+      (\id asset amount recipient reason -> ControlPlan $ operator $ \cap -> withdrawFees cap id asset amount recipient reason) <$> o .: "id" <*> o .: "asset" <*> o .: "amount" <*> o .: "recipient" <*> o .: "reason"
     "cancel-fees"->do
       fields ["operation","id","reason"]
-      ControlPlan . operator <$> (CancelFeeWithdrawal <$> o .: "id" <*> o .: "reason")
+      (\id reason -> ControlPlan $ operator $ \cap -> cancelFeeWithdrawal cap id reason) <$> o .: "id" <*> o .: "reason"
     "draft-replacement"->do
       fields ["operation","parent","fee","reason"]
-      ControlPlan . operator <$> (DraftNativeReplacement <$> o .: "parent" <*> o .: "fee" <*> o .: "reason")
+      (\parent fee reason -> ControlPlan $ operator $ \cap -> draftNativeReplacement cap parent fee reason) <$> o .: "parent" <*> o .: "fee" <*> o .: "reason"
     "sign-replacement"->do
       fields ["operation","decision"]
-      ControlPlan . operator . SignNativeReplacement <$> o .: "decision"
+      (\decision -> ControlPlan $ operator $ \cap -> signNativeReplacement cap decision) <$> o .: "decision"
     "cancel-replacement"->do
       fields ["operation","decision","reason"]
-      ControlPlan . operator <$> (CancelNativeReplacement <$> o .: "decision" <*> o .: "reason")
+      (\decision reason -> ControlPlan $ operator $ \cap -> cancelNativeReplacement cap decision reason) <$> o .: "decision" <*> o .: "reason"
     "retry-solana"->do
       fields ["operation","transaction","reason"]
-      ControlPlan . operator <$> (RetrySolanaPayment <$> o .: "transaction" <*> o .: "reason")
+      (\transaction reason -> ControlPlan $ operator $ \cap -> retrySolanaPayment cap transaction reason) <$> o .: "transaction" <*> o .: "reason"
     "cancel-preparation"->do
       fields ["operation","payment","generation","reason"]
-      ControlPlan . operator <$> (CancelPreparation <$> o .: "payment" <*> o .: "generation" <*> o .: "reason")
-    "refund"->fields ["operation","deposit"] >> (ControlPlan . operator . RefundDeposit <$> o .: "deposit")
-    "resume"->fields ["operation"] >> pure (ControlPlan $ operator ResumeService)
+      (\payment generation reason -> ControlPlan $ operator $ \cap -> cancelPreparation cap payment generation reason) <$> o .: "payment" <*> o .: "generation" <*> o .: "reason"
+    "refund"->fields ["operation","deposit"] >> ((\deposit -> ControlPlan $ operator $ \cap -> refundDeposit cap deposit) <$> o .: "deposit")
+    "resume"->fields ["operation"] >> pure (ControlPlan $ operator resumeService)
     _->fail "unknown operation"
 
 privatePath :: Bool -> FilePath -> IO ()

@@ -55,23 +55,30 @@ Resolve(r) ==
   /\ stage' = [stage EXCEPT ![r] = "dsl"]
   /\ dsl' = [dsl EXCEPT ![r] = Command(operation[r])]
   /\ UNCHANGED <<path,authenticated,eligible,stable,operation,output,paying,dispatched>>
+\* Runtime operation_path logs use resolved/dsl/evaluating/done/rejected.
+\* EnterEvaluator corresponds to acquisition of the signer critical gate;
+\* logs themselves are diagnostic, not an additional authorization mechanism.
+EnterEvaluator(r) ==
+  /\ stage[r] = "dsl"
+  /\ stage' = [stage EXCEPT ![r] = "evaluating"]
+  /\ UNCHANGED <<path,authenticated,eligible,stable,operation,dsl,output,paying,dispatched>>
 Evaluate(r) ==
-  /\ stage[r] = "dsl" /\ eligible[r] /\ stable[r]
+  /\ stage[r] = "evaluating" /\ eligible[r] /\ stable[r]
   /\ stage' = [stage EXCEPT ![r] = "done"]
   /\ output' = [output EXCEPT ![r] = Result(dsl[r].operation)]
   /\ UNCHANGED <<path,authenticated,eligible,stable,operation,dsl,paying,dispatched>>
 Reject(r) ==
   /\ \/ stage[r] = "requested" /\ ~paying[r]
      \/ stage[r] = "received" /\ (~authenticated[r] \/ path[r] \notin Paths)
-     \/ stage[r] = "dsl" /\ (~eligible[r] \/ ~stable[r])
+     \/ stage[r] = "evaluating" /\ (~eligible[r] \/ ~stable[r])
   /\ stage' = [stage EXCEPT ![r] = "rejected"]
   /\ UNCHANGED <<path,authenticated,eligible,stable,operation,dsl,output,paying,dispatched>>
 Next == \E r \in Requests :
           (\E p \in Paths \cup {"unknown"}, a,e,s,mode \in BOOLEAN : Receive(r,p,a,e,s,mode))
-          \/ Dispatch(r) \/ Route(r) \/ Resolve(r) \/ Evaluate(r) \/ Reject(r)
+          \/ Dispatch(r) \/ Route(r) \/ Resolve(r) \/ EnterEvaluator(r) \/ Evaluate(r) \/ Reject(r)
 Spec == Init /\ [][Next]_vars
 TypeOK ==
-  /\ stage \in [Requests -> {"idle","requested","received","resolved","dsl","done","rejected"}]
+  /\ stage \in [Requests -> {"idle","requested","received","resolved","dsl","evaluating","done","rejected"}]
   /\ path \in [Requests -> Paths \cup {None,"unknown"}]
   /\ authenticated \in [Requests -> BOOLEAN]
   /\ eligible \in [Requests -> BOOLEAN] /\ stable \in [Requests -> BOOLEAN]
@@ -91,11 +98,11 @@ Alignment == \A r \in Requests :
           /\ path[r] = Owner(output[r]))
 OnlyCriticalDispatch == \A r \in Requests :
   /\ (dispatched[r] => paying[r])
-  /\ (stage[r] \in {"received","resolved","dsl","done"} => dispatched[r])
+  /\ (stage[r] \in {"received","resolved","dsl","evaluating","done"} => dispatched[r])
   /\ (output[r] # None => dispatched[r])
 OnlyDispatcherEnters == [] [\A r \in Requests : dispatched'[r] # dispatched[r] => Dispatch(r)]_vars
 OnlyEvaluatorCreates == [] [\A r \in Requests : output'[r] # output[r] =>
-  stage[r] = "dsl" /\ eligible[r] /\ stable[r] /\ Evaluate(r)]_vars
+  stage[r] = "evaluating" /\ eligible[r] /\ stable[r] /\ Evaluate(r)]_vars
 NoOutputOnRefusal == \A r \in Requests : stage[r] = "rejected" => output[r] = None
 \* Inductive argument: Init has no operation/DSL/output. Route is the only writer
 \* of operation and checks authentication/path. Dispatch is the only entry

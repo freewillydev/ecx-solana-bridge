@@ -1,6 +1,7 @@
 module Main (main) where
 import Token
 import qualified Bridge.AdminStatus as Status
+import qualified Bridge.SolanaDeposit as Deposit
 import qualified Bridge.AdminKey as Key
 import Bridge.Error (BridgeError(..))
 import Bridge.Identity (digest)
@@ -32,7 +33,7 @@ import Data.Word (Word64)
 import Data.Aeson (Value(..),encode,eitherDecode,object,(.=),withObject,(.:),toJSON)
 import Data.Aeson.Types (parseEither)
 import Bridge.SDKBuild (sdkLibraryPath)
-import Bridge.SolanaMessage (Transaction(..),decodeTransaction,base58)
+import Bridge.SolanaMessage (Transaction(..),Message(..),Instruction(..),decodeTransaction,base58,validateAssociated)
 import qualified Data.ByteString as B
 import Data.Text (Text)
 import qualified Data.Text as T
@@ -137,6 +138,56 @@ main=do
             && isLeft(validate operation {rent=0} transaction)))
           [authority original,"9hSR6S7WPtxmTojgo6GG3k4yDPecgJY292j7xrsUGWBu"]
         pure (captured=="GQnRnfs2B9j6pymrbY4KmX9WnAQ6czPAdt2u6XpWZSjQ" && and checks)
+    , quickCheckResult $ once $ ioProperty $ do
+        -- Genuine SDK ATA bytes signed locally; no RPC, funds or fixture key files.
+        let secret=case Ed.secretKey (B.pack [1..32]) of CryptoPassed k->k; _->error "fixture seed"
+            payer=base58 (BA.convert $ Ed.toPublic secret)
+            original=request Mint 1
+        address<-(O.runSafe . O.Request) (AssociatedAddress sdkLibraryPath payer (mint original))
+        let operation=Associated payer (mint original) address payer 2039280 (blockhash original)
+            verify signed=validateAssociated signed payer (mint original) address payer (blockhash original)
+        unsigned<-(O.runSafe . O.Request) (Prepare sdkLibraryPath operation)
+        Transaction _ (Message required rs ru keys recent instructions) body<-either (fail . T.unpack) pure (decodeTransaction unsigned)
+        let signature=BA.convert (Ed.sign secret (Ed.toPublic secret) body) :: B.ByteString
+            encoded sig message=TE.decodeUtf8 (B64.encode $ B.singleton 1<>sig<>message)
+            signed=encoded signature body
+            corrupted=encoded (B.cons (B.head signature `Bits.xor` 1) $ B.tail signature) body
+            names=map base58 keys
+            balancesBefore=[if i==0 then 3000000 else 0::Integer | i<-[0..length keys-1]]
+            balancesAfter=[if i==0 then 956220 else if key==address then 2039280 else 0::Integer | (i,key)<-zip [0..] names]
+            indexes=[i | (i,key)<-zip [0::Int ..] names,key==address]
+            tokenBalance=object ["accountIndex" .= head indexes,"mint" .= mint original,"owner" .= payer
+              ,"programId" .= ("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"::Text)
+              ,"uiTokenAmount" .= object ["amount" .= ("0"::Text),"decimals" .= (8::Int)]]
+            rpcMessage=object ["header" .= object ["numRequiredSignatures" .= required,"numReadonlySignedAccounts" .= rs,"numReadonlyUnsignedAccounts" .= ru]
+              ,"accountKeys" .= names,"recentBlockhash" .= base58 recent,"instructions" .=
+                [object ["programIdIndex" .= p,"accounts" .= is,"data" .= base58 bytes] | Instruction p is bytes<-instructions]]
+            metadata=object ["err" .= Null,"fee" .= (4500::Integer),"preBalances" .= balancesBefore,"postBalances" .= balancesAfter
+              ,"preTokenBalances" .= ([]::[Value]),"postTokenBalances" .= [tokenBalance]]
+            transaction=object ["signatures" .= [base58 signature],"message" .= rpcMessage]
+            evidence=object ["slot" .= (100::Int),"version" .= ("legacy"::Text),"transaction" .= transaction,"meta" .= metadata]
+            set field x (Object o)=Object(KM.insert field x o)
+            set _ _ x=x
+            mutateMeta field x=set "meta" (set field x metadata) evidence
+            mutateMessage field x=set "transaction" (set "message" (set field x rpcMessage) transaction) evidence
+            cap n=either (error . T.unpack) id (amount n)
+            effects=Deposit.verifyInitialAta (base58 signature) payer (mint original) address (cap 5000) (cap 2039280) signed
+            badEffects=[mutateMeta "err" (object []),mutateMeta "fee" (toJSON (5001::Int))
+              ,mutateMeta "preBalances" (toJSON $ tail balancesBefore),mutateMeta "postBalances" (toJSON balancesBefore)
+              ,mutateMeta "postTokenBalances" (toJSON [tokenBalance,tokenBalance])
+              ,mutateMeta "preTokenBalances" (toJSON [tokenBalance])
+              ,mutateMessage "recentBlockhash" (toJSON $ mint original),mutateMessage "instructions" (toJSON ([]::[Value]))
+              ,set "version" (toJSON (0::Int)) evidence]
+            effectsOK=case effects evidence of
+              Right proof->Deposit.initialSlot proof==100 && Deposit.initialBefore proof==cap 3000000
+                && Deposit.initialRent proof==cap 2039280 && Deposit.initialFee proof==cap 4500
+              Left _->False
+        pure (effectsOK && all (isLeft . effects) badEffects
+          && not(isLeft $ verify False unsigned) && not(isLeft $ verify True signed)
+          && isLeft(verify True unsigned) && isLeft(verify False signed) && isLeft(verify True corrupted)
+          && isLeft(validateAssociated True payer (mint original) (mint original) payer (blockhash original) signed)
+          && isLeft(validateAssociated True payer (mint original) address payer (mint original) signed)
+          && isLeft(verify True $ encoded signature (body<>B.singleton 0)))
     , quickCheckResult $ once $ ioProperty signingCheck
     , quickCheckResult $ once $ property $
         eitherDecode (encode $ request Mint maxBound)==Right(request Mint maxBound)

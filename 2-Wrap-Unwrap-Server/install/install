@@ -12,9 +12,9 @@ absent() { [ ! -e "$1" ] && [ ! -L "$1" ]; }
 . /etc/os-release
 [ "$ID:$VERSION_ID" = ubuntu:24.04 ] || fail 'Ubuntu 24.04 required'
 mode=${1:-}; material=${2:-}
-case "$mode" in fresh) [ "$#" = 2 ] || fail 'fresh requires a private material directory';;
+case "$mode" in fresh|recover) [ "$#" = 2 ] || fail 'fresh/recover requires a private material directory';;
   upgrade|prepare-upgrade) [ "$#" = 1 ] || fail 'upgrade takes no material; existing custody is retained';;
-  *) fail 'usage: fresh PRIVATE_MATERIAL_DIRECTORY | upgrade';;
+  *) fail 'usage: fresh PRIVATE_MATERIAL_DIRECTORY | recover PRIVATE_MATERIAL_DIRECTORY | upgrade';;
 esac
 bundle=$(CDPATH='' cd -- "$(dirname -- "$0")" && pwd)
 [ "$(cat "$bundle/architecture")" = "$(uname -m)" ] || fail 'wrong architecture'
@@ -27,6 +27,25 @@ worker=ecxbridgew
 signer=ecxbridges
 reader=ecxbridger
 journal=/var/lib/ecx-bridge-install
+database=ecx_bridge
+minimum_sequence=0
+if [ "$mode" = recover ]; then
+  recovery=/var/lib/ecx-bridge-restore
+  for record in pending ledger.completed native-wallet.completed services.blocked; do
+    [ -f "$recovery/$record" ] && [ ! -L "$recovery/$record" ] && [ "$(stat -c '%u:%a:%h' "$recovery/$record")" = 0:600:1 ] || fail 'verified staged recovery required'
+  done
+  [ "$(stat -c '%u:%a' "$recovery")" = 0:700 ] || fail 'private recovery journal required'
+  database=$(jq -er '.database | select(test("^ecx_restore_[0-9a-f]{32}$"))' "$recovery/ledger.completed")
+  minimum_sequence=$(jq -er '.criticalSequence | select(type=="number" and .>=0 and floor==.)' "$recovery/ledger.completed")
+  jq -e '.paused==true' "$recovery/ledger.completed" >/dev/null || fail 'paused restored ledger required'
+  [ -f "$recovery/source-excluded" ] && [ ! -L "$recovery/source-excluded" ] && [ "$(stat -c '%u:%a:%h' "$recovery/source-excluded")" = 0:600:1 ] || fail 'explicit old-host exclusion required'
+else
+  if [ -f "$journal/database" ]; then database=$(cat "$journal/database"); fi
+fi
+case "$database" in ecx_bridge) ;; ecx_restore_*)
+  printf '%s' "$database" | grep -Eq '^ecx_restore_[0-9a-f]{32}$' || fail 'invalid installed database';;
+  *) fail 'invalid installed database';;
+esac
 exec 9>/run/lock/ecx-bridge-install.lock
 flock -n 9 || fail 'another installation is running'
 resuming=false
@@ -34,7 +53,7 @@ if [ -e "$journal" ] || [ -L "$journal" ]; then
   [ -d "$journal" ] && [ ! -L "$journal" ] && [ "$(stat -c '%u:%a' "$journal")" = 0:700 ] || fail 'unsafe installation journal'
   resuming=true
 fi
-if [ "$mode" = fresh ]; then
+if [ "$mode" = fresh ] || [ "$mode" = recover ]; then
   case "$material" in /*) ;; *) fail 'material directory must be absolute';; esac
   [ -d "$material" ] && [ ! -L "$material" ] || fail 'material directory required'
   material=$(realpath -e -- "$material")
@@ -79,7 +98,7 @@ if [ "$missing" = true ]; then
   # shellcheck disable=SC2086
   apt-get install -y --no-install-recommends $packages
 fi
-if [ "$mode" = fresh ]; then
+if [ "$mode" = fresh ] || [ "$mode" = recover ]; then
   # Inputs are data, never sourced shell. Refuse symlinks and exposed material.
   [ "$(stat -c '%u:%a' "$material")" = 0:700 ] || fail 'material must be root-owned mode 0700'
   # Resolve only the closed list below. Legacy manually prepared bundles still work.
@@ -127,9 +146,15 @@ if [ "$mode" = fresh ]; then
       private_source "$source"
     done
   fi
+  if [ "$mode" = recover ]; then
+    deployment_identity=$("$bundle/bin/ecx-bridge" check-config "$material/worker.json" | jq -er .fingerprint)
+    [ "$deployment_identity" = "$(jq -er .identity "$recovery/pending")" ] || fail 'recovery identity changed'
+    [ "$(jq -er .nativeWallet "$material/worker.json")" = "$(jq -er .wallet "$recovery/native-wallet.completed")" ] || fail 'recovery native wallet changed'
+  fi
   identity_file=$(mktemp /run/ecx-install-material-XXXXXXXX)
   {
     printf '%s\n%s\n' "$release" "$material"
+    if [ "$mode" = recover ]; then printf '%s\n%s\n%s\n' "$mode" "$database" "$minimum_sequence"; sha256sum "$recovery/pending" "$recovery/ledger.completed" "$recovery/native-wallet.completed" "$recovery/source-excluded"; fi
     for name in worker.json signer.json sources.json interface.json; do
       if [ -f "$material/$name" ]; then sha256sum "$material/$name"; fi
     done
@@ -181,7 +206,7 @@ if [ "$mode" = prepare-upgrade ]; then
   echo "Verified candidate staged at $target; services unchanged."
   exit 0
 fi
-if [ "$mode" = fresh ]; then
+if [ "$mode" = fresh ] || [ "$mode" = recover ]; then
   if [ ! -f "$journal/configured.sha256" ]; then
   for role in worker signer; do
     if [ "$role" = worker ]; then account=$worker; else account=$signer; fi
@@ -245,6 +270,9 @@ if [ "$mode" = fresh ]; then
       '{restic:$restic,repositoryFile:$repositoryFile,passwordFile:$passwordFile}' > "$config/signer/backup.json"
     chown "$signer:$signer" "$config/signer/backup.json"; chmod 0600 "$config/signer/backup.json"
   fi
+  printf '%s\n' "$database" > "$journal/database"
+  chmod 0600 "$journal/database"
+  sync -f "$journal/database"
   # Both configurations must describe exactly the same deployment and transport.
   first=$("$target/bin/ecx-bridge" check-config "$config/worker/config.json")
   [ "$first" = "$("$target/bin/ecx-bridge" check-config "$config/signer/config.json")" ] || fail 'deployment identities differ'
@@ -268,11 +296,17 @@ if [ "$mode" = fresh ]; then
   rm "$journal/permissions.check"
   sha256sum --check --status "$journal/configured.sha256" || fail 'installed configuration changed during interrupted setup'
   systemctl start postgresql
-  runuser -u postgres -- env PGHOST=/var/run/postgresql PGPORT=5432 PGDATABASE=postgres PGUSER=postgres ecx_bridge_datadir="$target/share" \
-    "$target/bin/ecx-bridge" provision-database < "$journal/owner"
+  if [ "$mode" = recover ]; then
+    deployment_identity=$("$target/bin/ecx-bridge" check-config "$config/worker/config.json" | jq -er .fingerprint)
+    runuser -u postgres -- env PGHOST=/var/run/postgresql PGPORT=5432 PGDATABASE="$database" PGUSER=postgres \
+      "$target/bin/ecx-bridge" provision-restored-database "$deployment_identity" "$minimum_sequence"
+  else
+    runuser -u postgres -- env PGHOST=/var/run/postgresql PGPORT=5432 PGDATABASE=postgres PGUSER=postgres ecx_bridge_datadir="$target/share" \
+      "$target/bin/ecx-bridge" provision-database < "$journal/owner"
+  fi
   # Ordered, database-specific peer rules. No password or broad trust rule.
-  if ! grep -qxF 'local ecx_bridge all peer map=ecx_bridge_install' /etc/postgresql/16/main/pg_hba.conf; then
-    sed -i '1i local ecx_bridge all peer map=ecx_bridge_install' /etc/postgresql/16/main/pg_hba.conf
+  if ! grep -qxF "local $database all peer map=ecx_bridge_install" /etc/postgresql/16/main/pg_hba.conf; then
+    sed -i "1i local $database all peer map=ecx_bridge_install" /etc/postgresql/16/main/pg_hba.conf
   fi
   for rule in 'ecx_bridge_install postgres postgres' 'ecx_bridge_install ecxbridgew ecxbridgew' 'ecx_bridge_install ecxbridgew ecxbridger' 'ecx_bridge_install ecxbridges ecxbridges'; do
     grep -qxF "$rule" /etc/postgresql/16/main/pg_ident.conf || printf '%s\n' "$rule" >> /etc/postgresql/16/main/pg_ident.conf
@@ -288,14 +322,16 @@ sync -f "$prefix"
 ln -sfn "$target" "$prefix/current.new"
 mv -Tf "$prefix/current.new" "$prefix/current"
 sync -f "$prefix"
-if [ "$mode" = fresh ]; then
+if [ "$mode" = fresh ] || [ "$mode" = recover ]; then
   deployment_identity=$("$prefix/current/bin/ecx-bridge" check-config "$config/worker/config.json" | jq -er .fingerprint)
   # Only the offline database owner installs constraints. The worker keeps DML
   # privileges and never gains schema ownership or access to another role's files.
-  runuser -u postgres -- env PGHOST=/var/run/postgresql PGPORT=5432 PGDATABASE=ecx_bridge PGUSER=postgres ecx_bridge_datadir="$prefix/current/share" \
-    "$prefix/current/bin/ecx-bridge" initialize-ledger --fingerprint "$deployment_identity"
-  runuser -u "$worker" -- env PGHOST=/var/run/postgresql PGPORT=5432 PGDATABASE=ecx_bridge PGUSER="$worker" \
-    "$prefix/current/bin/ecx-bridge" adopt-ledger "$config/worker/config.json" 0
+  if [ "$mode" = fresh ]; then
+    runuser -u postgres -- env PGHOST=/var/run/postgresql PGPORT=5432 PGDATABASE=ecx_bridge PGUSER=postgres ecx_bridge_datadir="$prefix/current/share" \
+      "$prefix/current/bin/ecx-bridge" initialize-ledger --fingerprint "$deployment_identity"
+  fi
+  runuser -u "$worker" -- env PGHOST=/var/run/postgresql PGPORT=5432 PGDATABASE="$database" PGUSER="$worker" \
+    "$prefix/current/bin/ecx-bridge" adopt-ledger "$config/worker/config.json" "$minimum_sequence"
 fi
 for role in worker signer; do
   if [ "$role" = worker ]; then
@@ -305,10 +341,12 @@ for role in worker signer; do
     if [ -f "$config/signer/backup.json" ] && [ -f /etc/systemd/system/ecx-betanet.service ]; then extra="Environment=ECX_NATIVE_BACKUP_SERVICE=1"; fi
     if [ -f "$config/signer/backup.json" ]; then args="$args $config/signer/backup.json $state/signer"; fi
   fi
-  cat > "/etc/systemd/system/ecx-bridge-$role.service" <<UNIT
+  unit_pending=$(mktemp /etc/systemd/system/.ecx-bridge-unit-XXXXXXXX)
+  cat > "$unit_pending" <<UNIT
 [Unit]
 Description=ECX bridge $role
 ConditionPathExists=$config/installed
+ConditionPathExists=!/var/lib/ecx-bridge-restore/services.blocked
 After=postgresql.service network-online.target
 Requires=postgresql.service
 Wants=network-online.target
@@ -318,7 +356,7 @@ Group=$account
 UMask=0077
 Environment=PGHOST=/var/run/postgresql
 Environment=PGPORT=5432
-Environment=PGDATABASE=ecx_bridge
+Environment=PGDATABASE=$database
 Environment=PGUSER=$account
 Environment=ECX_ASSETS=$prefix/current/share/web
 Environment=ecx_bridge_datadir=$prefix/current/share
@@ -355,7 +393,10 @@ UNIT
     } > "$dropin/30-configure.conf"
     chmod 0644 "$dropin/30-configure.conf"
   fi
-  chmod 0644 "/etc/systemd/system/ecx-bridge-$role.service"
+  chmod 0644 "$unit_pending"
+  sync -f "$unit_pending"
+  mv -Tf "$unit_pending" "/etc/systemd/system/ecx-bridge-$role.service"
+  sync -f /etc/systemd/system
 done
 # A no-login shell alone still permits SSH forwarding with an authorized key.
 if [ -x /usr/sbin/sshd ]; then
@@ -388,4 +429,11 @@ printf '%s\n' "$release" > "$config/installed.pending"
 sync -f "$config"
 mv "$config/installed.pending" "$config/installed"
 sync -f "$config"
+# Keep the console on the installed runtime after direct checked upgrades too.
+# The launcher's bootstrap link otherwise keeps executing an obsolete parser.
+[ ! -e /usr/local/bin/ecx-bridge ] || [ -L /usr/local/bin/ecx-bridge ] || fail 'existing console is not a managed symlink'
+[ ! -e /usr/local/bin/ecx-bridge.new ] || [ -L /usr/local/bin/ecx-bridge.new ] || fail 'unexpected console staging path'
+ln -sfn "$prefix/current/bin/ecx-bridge" /usr/local/bin/ecx-bridge.new
+mv -Tf /usr/local/bin/ecx-bridge.new /usr/local/bin/ecx-bridge
+sync -f /usr/local/bin
 echo 'Installed. Services are STOPPED. Configure native wallet backup staging/HTTPS, verify backup and isolation, then start services; the worker starts paused. Explicit checked resume is required.'

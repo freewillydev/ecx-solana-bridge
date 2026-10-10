@@ -5,7 +5,8 @@ available acceptance are complete; external gates J112, J118 and J119 remain ope
 The source-size reduction target was not met; see the measured J117 results. This replaces the
 completed implementation checklist, not its evidence. Execution baseline source is
 `3d4970b3e502de9d4c9a89803610df3802e3e322` (implementation `bc9713c`). The funded
-pilot stays on `548c509`. See [RELEASE-REVIEW.md](RELEASE-REVIEW.md) for the actual
+pilot was then on `548c509`; that deployment pointer is historical. See the current
+pointer in [RELEASE-REVIEW.md](RELEASE-REVIEW.md) for the actual
 acceptance record and open release gates. Do not relabel old tests as evidence
 for new code.
 
@@ -23,8 +24,9 @@ results rather than adding it to that percentage.
 
 1. **Finish the actual installer path.** One reviewed command installs the pinned
    pruned ECX node, PostgreSQL, bridge and signer on Ubuntu 24.04 x86_64. The same
-   `sudo ecx-bridge` entry resumes saved setup. Four basic inputs: two independent
-   Mainnet RPC URLs, a new HTTPS backup repository and public origin (or local-only).
+   `sudo ecx-bridge` entry resumes saved setup. Connection inputs: two independent
+   Mainnet RPC URLs, a new HTTPS backup repository and public origin (or local-only),
+   plus an explicit initial SOL ownership statement for startup accounting.
    Generated recovery phrases need explicit acknowledgement after backup. Show
    progress and bounded prerequisite failures; retain wallets and signed attempts.
 2. **Complete fresh-host/interruption acceptance before publishing the command.**

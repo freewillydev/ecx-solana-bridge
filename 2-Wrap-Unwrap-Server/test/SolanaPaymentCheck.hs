@@ -112,6 +112,19 @@ checks=do
           else call Null method args
         after<-readIORef height
         pure (recent==solPlanRecent plan && tooShort && aged && after==962)
+    , check "sending keeps hard expiry and live hash validation after preparation headroom is spent" $ forAll (chooseInt (1,39)) $ \remaining->ioProperty $ do
+        let sendRPC height valid slot method args=case method of
+              "getBlockHeight"->pure $ toJSON (height::Int)
+              "isBlockhashValid"->do
+                require (args==[toJSON hash,object ["commitment" .= ("confirmed"::Text),"minContextSlot" .= (100::Int)]]) "wrong_send_hash_context"
+                pure $ object ["context" .= object ["slot" .= (slot::Int)],"value" .= valid]
+              _->fail "unexpected send validity RPC"
+            recent=solPlanRecent plan
+        checkBlockhashForSend (sendRPC (1000-remaining) True 100) recent
+        expired<-rejects "solana_blockhash_expired" $ checkBlockhashForSend (sendRPC 1000 True 100) recent
+        invalid<-rejects "solana_blockhash_expired" $ checkBlockhashForSend (sendRPC 999 False 100) recent
+        stale<-rejects "solana_context_too_old" $ checkBlockhashForSend (sendRPC 999 True 99) recent
+        pure (expired && invalid && stale)
     , check "unsigned Solana cancellation validates saved policy without RPC or a draft" $ once $ ioProperty $ do
         let noRPC _ _ _=fail "Solana cancellation reached native RPC"
         (points,cleanup)<-cancellationPlan noRPC W.L2LSignetDevnet config prepared

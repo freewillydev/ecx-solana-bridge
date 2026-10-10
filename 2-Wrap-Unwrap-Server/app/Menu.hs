@@ -3,6 +3,8 @@
 -- operator transport; keys, chain RPC, SQL and signer clients never enter here.
 module Menu (launch) where
 
+import qualified RestoreGuide
+import qualified RestoreActivate
 import qualified Configure
 import qualified Bootstrap
 import qualified Upgrade
@@ -240,7 +242,7 @@ allocate=do
 
 recovery :: IO ()
 recovery=do
-  putStrLn "1. Backup coverage/status\n2. Verify a custody backup\n3. Download and verify a specific backup\n4. Full server restoration requirements\n0. Back"
+  putStrLn "1. Backup coverage/status\n2. Verify a custody backup\n3. Download and verify a specific backup\n4. Restore verified custody to staging\n5. Activate staged recovery\n0. Back"
   selection<-ask "Choose" "0"
   case selection of
     Just "1"->status
@@ -261,9 +263,13 @@ recovery=do
         require (not exists) "restore_destination_exists"
         pure ["recover-custody",config,backup,snapshot,directory,minimumSequence]
       confirm "Verify/download only. This does not replace a database, activate a wallet, adopt a fence or resume transfers." $ do
+        case args of
+          ["recover-custody",_,_,_,directory,_]->P.createDirectory directory 0o700
+          _->pure ()
         executable<-getExecutablePath
         (code,out,_)<-readProcessWithExitCode executable args ""
         require (code==ExitSuccess) "backup_recovery_refused_check_identity_access_and_minimum_sequence"
         putStr out
-    Just "4"->putStrLn "Full restoration requires a verified custody backup and trusted minimum sequence, exclusion of the old signer, restoration into a new database/native wallet, host-fence adoption, credentials and fresh independent reconciliation. This menu does not activate recovered custody. Follow docs/OPERATIONS.md on the reviewed release with your recovery operator; wallet seeds alone cannot reconstruct pending transfers."
+    Just "4"->RestoreGuide.restoreGuide
+    Just "5"->RestoreActivate.activate
     _->pure ()

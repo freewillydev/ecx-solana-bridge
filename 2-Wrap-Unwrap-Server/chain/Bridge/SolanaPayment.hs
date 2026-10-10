@@ -1,7 +1,7 @@
 {-# LANGUAGE DeriveAnyClass, RecordWildCards #-}
 module Bridge.SolanaPayment
   ( SolanaRPC, RecentBlockhash(..), SolanaPlan(..), SolanaSigned(..), SolanaOutcome(..)
-  , contextValue, checkBlockhashWindow, getRecentBlockhash, solanaOperatingLimit
+  , contextValue, checkBlockhashWindow, checkBlockhashForSend, getRecentBlockhash, solanaOperatingLimit
   , solanaPayoutRequest, systemLamports, solanaDestinationRent
   , prepareSolanaSigned, verifySolanaOutcome ) where
 
@@ -40,14 +40,25 @@ contextValue minimumSlot response = do
   value <- fieldValue "value" response
   pure (slot,value)
 
--- A conservative preparation floor, measured in block heights rather than
--- wall-clock seconds. First-send handling must check it again after backups.
+-- Preparation reserves time for signing and backups. Sending checks actual
+-- validity again, without requiring that preparation work's remaining headroom.
 checkBlockhashWindow :: SolanaRPC -> RecentBlockhash -> IO ()
-checkBlockhashWindow call RecentBlockhash{..} = do
+checkBlockhashWindow=checkBlockhashHeight 40 "solana_blockhash_window_too_short"
+
+checkBlockhashForSend :: SolanaRPC -> RecentBlockhash -> IO ()
+checkBlockhashForSend call recent@RecentBlockhash{..} = do
+  checkBlockhashHeight 1 "solana_blockhash_expired" call recent
+  (_,value)<-call "isBlockhashValid" [toJSON recentHash,object
+    ["commitment" .= ("confirmed"::Text),"minContextSlot" .= recentSlot]] >>= contextValue recentSlot
+  valid<-parseValue parseJSON value
+  require valid "solana_blockhash_expired"
+
+checkBlockhashHeight :: Int64 -> Text -> SolanaRPC -> RecentBlockhash -> IO ()
+checkBlockhashHeight remaining code call RecentBlockhash{..} = do
   _ <- either reject pure (publicKey recentHash)
   require (recentSlot>=0 && recentLastValidHeight>0) "invalid_blockhash_context"
   height <- call "getBlockHeight" [object ["commitment" .= ("confirmed"::Text),"minContextSlot" .= recentSlot]] >>= parseValue parseJSON :: IO Int64
-  require (height>=0 && toInteger recentLastValidHeight-toInteger height>=40) "solana_blockhash_window_too_short"
+  require (height>=0 && toInteger recentLastValidHeight-toInteger height>=toInteger remaining) code
 
 getRecentBlockhash :: SolanaRPC -> IO RecentBlockhash
 getRecentBlockhash call = do

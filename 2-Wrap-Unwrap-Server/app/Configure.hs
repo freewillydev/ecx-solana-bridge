@@ -12,7 +12,7 @@ import Bridge.RPC (independentHttps)
 import Bridge.SDKBuild (sdkLibraryPath,sdkSourceDirectory)
 import Bridge.BrowserBuild (browserAssetsDirectory)
 import System.Environment (getExecutablePath)
-import Bridge.Wallet (mnemonic,walletKey,nativeDescriptors,derivationPath,protectWalletProcess)
+import Bridge.Wallet (mnemonic,mixWalletEntropy,walletKey,nativeDescriptors,derivationPath,protectWalletProcess)
 import qualified Bridge.Native as N
 import Bridge.SolanaMessage (base58)
 import Crypto.Random (getRandomBytes)
@@ -38,10 +38,11 @@ import qualified Data.ByteString as B
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.ByteString.Lazy as L
 import qualified Data.Text as T
+import qualified Data.Text.Encoding as TE
 import System.Directory (makeAbsolute,canonicalizePath,removeDirectoryRecursive,doesFileExist,doesDirectoryExist,findExecutable)
 import System.FilePath ((</>),takeDirectory,addTrailingPathSeparator)
 import qualified System.Posix.Directory as P
-import System.IO (hFlush,stdout,stdin,isEOF,hIsTerminalDevice,withFile,IOMode(ReadWriteMode),hPutStrLn,hPutStr,hGetLine)
+import System.IO (hFlush,stdout,stdin,isEOF,hIsTerminalDevice,withFile,IOMode(ReadWriteMode),hPutStrLn,hPutStr,hGetLine,hGetEcho,hSetEcho,hGetChar)
 
 -- The default path is fresh canonical custody. Advanced/recovery remains explicit.
 configure :: IO ()
@@ -114,6 +115,9 @@ simplified directory=do
     -- Validate presentation without accepting arbitrary schemes or URL credentials.
     Bootstrap.validateOrigin value
     pure value
+  ownership<-savedPrompt directory "initial-funding" "Initial SOL ownership statement (fund once with your own SOL; add trading inventory after startup)" "" $ \input->do
+    require (not(T.null $ T.strip $ T.pack input) && length input<=512) "initial_funding_ownership_statement_required"
+    pure (T.pack input)
   tls<-case origin of
     Nothing->pure []
     Just _->do
@@ -148,7 +152,8 @@ simplified directory=do
         ,"solanaHistoryStart" .= String "","solanaOperatingHistoryStart" .= String ""]) template
       setup=object ["existing" .= False,"method" .= String (maybe "source" (const "bundle") bundle),"sourceRoot" .= root,"restic" .= restic
         ,"nodeConfig" .= nodeConfig,"nodeService" .= nodeService,"managedNode" .= True
-        ,"nativeSeedFile" .= phraseFile,"nativeAdminAuth" .= admin,"nativeRestore" .= False,"nativeRangeEnd" .= (999::Int)]
+        ,"nativeSeedFile" .= phraseFile,"nativeAdminAuth" .= admin,"nativeRestore" .= False,"nativeRangeEnd" .= (999::Int)
+        ,"initialFundingOwnership" .= ownership]
       sources=object [K.fromString name .= path | (name,path)<-
         [("solana.keypair.json",key),("native-worker.auth",worker),("native-signer.auth",signer)
         ,("native-unlock",unlock),("backup.repository",repository),("backup.password",password)]<>tls]
@@ -157,7 +162,7 @@ simplified directory=do
     ,("interface.json",Bootstrap.interface origin),("setup.json",setup)]
   putStrLn "Saved private setup. Runtime configuration is published only after verified funding/history."
   putStrLn "Defaults: local ECX RPC http://127.0.0.1:28532; PostgreSQL and services installed automatically."
-  putStrLn "No fixed swap minimum or maximum; available reserves and network feasibility apply. 4 queued orders; 1 native confirmation."
+  putStrLn "No fixed swap minimum or maximum; available reserves and network feasibility apply. 4 queued orders; 6 ECX confirmations."
   putStrLn "Per-transaction caps: 1,000 native base units, 10,000 lamports fee, 2,100,000 lamports rent."
   putStrLn "Daily cost caps: 10,000 native base units and 10,000,000 lamports. Review before funding."
   putStrLn "Advanced values are in .ecx-bridge/bootstrap.json; never edit identity after bootstrap starts."
@@ -361,7 +366,21 @@ prepareSeed directory asset mode=do
     pure value
    else case recovery of
     Just value->pure value
-    Nothing->getRandomBytes 16 >>= either reject pure . mnemonic
+    Nothing->do
+      extra<-withFile "/dev/tty" ReadWriteMode $ \terminal->
+        bracket (hGetEcho terminal) (hSetEcho terminal) $ \_->do
+          hSetEcho terminal False
+          hPutStrLn terminal "Optional: add your own randomness. Your text is mixed with fresh cryptographically secure system randomness; it does not replace it. Input is hidden and is not saved or logged. Press Enter to skip."
+          hPutStr terminal $ "Additional randomness for "<>asset<>" (hidden; Enter skips): "
+          hFlush terminal
+          let collect n chars=do
+                char<-hGetChar terminal
+                if char=='\n' then pure (T.pack $ reverse chars) else do
+                  require (n<4096) "additional_randomness_too_long"
+                  collect (n+1::Int) (char:chars)
+          collect 0 [] `finally` (hPutStrLn terminal "" >> hFlush terminal)
+      randomBytes<-getRandomBytes 32
+      either reject pure (mixWalletEntropy asset randomBytes extra >>= mnemonic)
   when (not saved) $ savePrivate phraseFile (B8.pack $ phrase<>"\n")
   putStrLn $ "Recovery file saved privately in "<>output<>". Preserve it even if setup is cancelled."
   let acknowledgement=output</>(asset<>"-recovery.saved")
@@ -469,7 +488,7 @@ prompt label fallback validate=do
     `catch` (\(_::IOException)->putStrLn "Cannot read that private file/path; check ownership and permissions." >> prompt label fallback validate)
 
 template :: Object
-template=case eitherDecodeStrict' "{\"profile\":\"ECXBetanetDevnet\",\"deploymentId\":\"ecx-betanet-devnet-operator\",\"nativeRpc\":\"http://127.0.0.1:28532\",\"nativeCookie\":\"/run/ecx-betanet/rpc.cookie\",\"nativeWallet\":\"ecx-bridge-betanet-test\",\"nativeCheckpointHeight\":967680,\"nativeCheckpointHash\":\"00000000000000030101ba5cfea54b22becc79f95dc6040beb76e01dd9d04042\",\"solanaRpc\":\"https://api.devnet.solana.com\",\"solanaVerifierRpc\":null,\"mint\":\"REQUIRED_REAL_DEVNET_MINT\",\"custodyOwner\":\"REQUIRED_DEVNET_CUSTODY_OWNER\",\"custodyAta\":\"REQUIRED_DEVNET_CUSTODY_ATA\",\"signerPort\":8081,\"signerAuthFile\":\"/etc/ecx-bridge/signing.auth\",\"solanaSdkLibrary\":\"/opt/ecx-bridge/current/lib/libecx_solana_sdk.so\",\"maxWithdrawal\":\"100000\",\"maxQueued\":4,\"quoteSeconds\":300,\"confirmationGraceSeconds\":1200,\"nativeConfirmations\":1,\"maxNativeFee\":\"1000\",\"maxSolFee\":\"10000\",\"maxSolAccountRent\":\"2100000\",\"maxNativeDailyCost\":\"10000\",\"maxSolDailyCost\":\"10000000\",\"backupRequired\":false,\"solanaHistoryStart\":\"REQUIRED_EARLIEST_CUSTODY_TOKEN_HISTORY_SIGNATURE\",\"solanaOperatingHistoryStart\":\"REQUIRED_EARLIEST_FEE_PAYER_SOL_HISTORY_SIGNATURE\",\"serverPort\":8080,\"fenceDirectory\":\"/var/lib/ecx-bridge/fence\",\"nativeUnlockFile\":null}" of
+template=case eitherDecodeStrict' "{\"profile\":\"ECXBetanetDevnet\",\"deploymentId\":\"ecx-betanet-devnet-operator\",\"nativeRpc\":\"http://127.0.0.1:28532\",\"nativeCookie\":\"/run/ecx-betanet/rpc.cookie\",\"nativeWallet\":\"ecx-bridge-betanet-test\",\"nativeCheckpointHeight\":967680,\"nativeCheckpointHash\":\"00000000000000030101ba5cfea54b22becc79f95dc6040beb76e01dd9d04042\",\"solanaRpc\":\"https://api.devnet.solana.com\",\"solanaVerifierRpc\":null,\"mint\":\"REQUIRED_REAL_DEVNET_MINT\",\"custodyOwner\":\"REQUIRED_DEVNET_CUSTODY_OWNER\",\"custodyAta\":\"REQUIRED_DEVNET_CUSTODY_ATA\",\"signerPort\":8081,\"signerAuthFile\":\"/etc/ecx-bridge/signing.auth\",\"solanaSdkLibrary\":\"/opt/ecx-bridge/current/lib/libecx_solana_sdk.so\",\"maxWithdrawal\":\"100000\",\"maxQueued\":4,\"quoteSeconds\":300,\"confirmationGraceSeconds\":1200,\"nativeConfirmations\":6,\"maxNativeFee\":\"1000\",\"maxSolFee\":\"10000\",\"maxSolAccountRent\":\"2100000\",\"maxNativeDailyCost\":\"10000\",\"maxSolDailyCost\":\"10000000\",\"backupRequired\":false,\"solanaHistoryStart\":\"REQUIRED_EARLIEST_CUSTODY_TOKEN_HISTORY_SIGNATURE\",\"solanaOperatingHistoryStart\":\"REQUIRED_EARLIEST_FEE_PAYER_SOL_HISTORY_SIGNATURE\",\"serverPort\":8080,\"fenceDirectory\":\"/var/lib/ecx-bridge/fence\",\"nativeUnlockFile\":null}" of
   Right (Object fields)->fields
   _->error "invalid embedded configuration template"
 
@@ -552,6 +571,7 @@ startUnlocked path=do
     when (M.member (K.fromString name) sources) $ do
       exists<-doesFileExist("/etc/ecx-bridge/worker"</>name)
       require exists "installed_tls_missing_updated_package_required"
+  when completed $ NodeSetup.refreshSignerPolicy directory
   execute "systemctl" ["start","ecx-bridge-signer","ecx-bridge-worker"]
   putStrLn "Services started paused. Checking readiness before enabling orders."
   let operatorArgs=if uid==0 then ["-u","ecxbridgew","--",binary,"operator",config]
@@ -565,6 +585,15 @@ startUnlocked path=do
           threadDelay 500000
           waitReady (remaining-1)
   waitReady 20
+  ownership<-either (const $ reject "invalid_setup_json") pure
+    (parseEither (withObject "setup" (.:? "initialFundingOwnership")) value)
+  forM_ ownership $ \reason->do
+    request<-Bootstrap.initialAccounting directory installedConfig reason
+    case request of
+      Nothing->putStrLn "No local ATA cost to classify. After reconciliation, use Funding to allocate your owned SOL."
+      Just command->do
+        (code,_,_)<-operator (T.unpack $ TE.decodeUtf8 $ L.toStrict $ encode command)
+        require (code==ExitSuccess) "initial_funding_not_ready_check_operator_status_then_rerun_start"
   (result,_,failure)<-readProcessWithExitCode (if uid==0 then "runuser" else "sudo")
     (if uid==0 then ["-u","ecxbridgew","--",binary,"operator",config]
      else ["-u","ecxbridgew",binary,"operator",config]) "{\"operation\":\"resume\"}"
