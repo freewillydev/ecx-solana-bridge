@@ -6,20 +6,20 @@ import Control.Operation
 import Data.Coerce (coerce)
 import Data.Proxy (Proxy(..))
 
-valid :: Stage '[CompileOperation 'Customer 'Safe ()]
+valid :: Stage String '[CompileOperation 'Customer 'Safe ()]
 valid = Stage (\value -> compileOperation value `seq` Right value)
 
-workerStage :: Stage '[WorkerOperations]
+workerStage :: Stage String '[WorkerOperations]
 workerStage = Stage (\value -> queuePayment value "transaction" `seq` Right value)
-operatorStage :: Stage '[OperatorWrite]
+operatorStage :: Stage String '[OperatorWrite]
 operatorStage = Stage (\value -> pauseService value "review" `seq` Right value)
 
 #ifdef BAD_DOMAIN
-operatorFromWorker :: Stage '[WorkerOperations]
+operatorFromWorker :: Stage String '[WorkerOperations]
 operatorFromWorker = Stage (\value -> pauseService value "review" `seq` Right value)
 #endif
 #ifdef BAD_HIDDEN_WORKER
-hiddenWorker :: Stage '[]
+hiddenWorker :: Stage String '[]
 hiddenWorker = Stage (\value -> queuePayment value "transaction" `seq` Right value)
 #endif
 #ifdef BAD_IO
@@ -29,11 +29,12 @@ injectIO action = workerRequest (\_ -> action)
 #endif
 
 #ifdef BAD_COMPILE
-hiddenCompile :: Stage '[]
+hiddenCompile :: Stage String '[]
 hiddenCompile = Stage (\value -> compileOperation value `seq` Right value)
 #endif
 #ifdef BAD_WIDEN
-widen :: Pipeline (PreparationCaps 'Customer 'Safe ()) '[] (PreparationCaps 'Customer 'Safe ())
+widen :: Pipeline String (SomeOperationWith (PreparationCaps 'Customer 'Safe ()) '[])
+  (SomeOperationWith (PreparationCaps 'Customer 'Safe ()) (PreparationCaps 'Customer 'Safe ()))
 widen = Restrict (Proxy @(PreparationCaps 'Customer 'Safe ()))
 #endif
 #ifdef BAD_CALLER

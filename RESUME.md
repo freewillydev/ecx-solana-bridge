@@ -1,3 +1,22 @@
+# Indexed pipeline extension (current isolated work)
+
+Base bridge32ef15c; library candidate a9aec9b9fb1d7f101f01237fb1acd887f2eabf11
+(base1c93d574), published on codex/indexed-pipeline. Bridge depends on0.2.0.0.
+checkedOperation now composes Restrict :>>> Interpret; eqT/caller/severity/result
+and sole critical boundary preserved. Production Internal.hs234->232 lines;
+library Control.Operation122->138. No runtime effect body changed.
+Library Cabal build/properties PASS (9x10000), positive/14 intended negatives PASS
+on9.6.7 and9.14.1. Bridge direct positive/nine intended negatives PASS.
+Bridge actual Cabal core and workflow builds PASS (both exit0); workflow log
+/tmp/ecx-indexed-workflow-cabal.log, output /tmp/ecx-indexed-cabal.
+A supplementary manual source typecheck failed due to exposing both base16
+packages; actual Cabal build uses declared dependencies and supersedes that harness.
+Fresh independent verifier01a12711-79cf-7532-b6d1-bdd180b66245 active via coordinator.
+Focused runtime dispatch PASS /tmp/ecx-indexed-dispatch-run.log: six routes,
+signer payload and wrong-caller rejection using actual Cabal-built libraries.
+All task compilers/tests exited. Next: fresh review, then original owner integration. Full all-component/PG/release checks unverified.
+No live/deploy/merge authority. All older evidence below remains historical.
+
 # Isolated capability refactor continuation
 
 Owner: WRAPPED ECX SOL (2), branch codex/operation-capabilities.

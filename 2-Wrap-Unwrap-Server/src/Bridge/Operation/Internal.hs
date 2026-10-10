@@ -182,11 +182,9 @@ pending = Pending . prepare
 -- evaluation environment and cannot call Execution methods. Interpretation is
 -- explicit and total: a mismatched existential is rejected, never cast or forced.
 checkedOperation :: forall caller severity a. Pending caller severity a -> Either Text (Program caller severity a)
-checkedOperation (Pending operations) = do
-  compilation <- either (const $ Left "operation_capability_mismatch") Right $
-    pipeline (Restrict (Proxy @'[CompileOperation caller severity a])) operations
-  withCapabilities (\value -> maybe (Left "operation_dictionary_mismatch") Right
-    (interpret (forgetCapabilities compilation) (operationDSL value))) compilation
+checkedOperation (Pending operations) = pipeline
+  (Restrict (Proxy @'[CompileOperation caller severity a]) :>>>
+   Interpret "operation_dictionary_mismatch" (Select . operationDSL)) operations
 
 instance (Typeable a, Execution caller severity (Command caller))
     => CompileOperation caller severity a (Command caller severity a) where

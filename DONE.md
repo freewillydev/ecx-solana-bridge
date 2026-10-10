@@ -30,3 +30,10 @@ source-only; release owner retains deployment and integration authority.
 | Types | Typed preparation restricts capability visibility; negative compile tests reject hidden capability use and caller/severity substitution | PASS scoped on latest source: positive compilation and nine intended failures, including worker/operator separation and arbitrary IO refusal. Latest runtime mismatch checks PASS. |
 | Build | Pinned GHC/Cabal build and bridge contracts pass with no financial changes | FAIL / partial evidence: latest app/test binaries compile with GHC9.14.1 and pinned Cabal-plan dependencies in /tmp; full bridge suite PASS (/tmp/ecx-methods-tests.log), fresh verifier evidence check PASS. Full Cabal rerun held by low X9 space. Earlier pool timeout and fixed occupied PostgreSQL socket remain unresolved; no new financial integration PASS. |
 | Review | Fresh separate verifier and original owner review before integration | Fresh capability_verifier source/type PASS on latest method-refactor hashes (audit); runtime evidence review PASS; original owner integration review pending. |
+
+## Indexed pipeline extension, 2026-10-10 (scoped, not release completion)
+
+Library candidate a9aec9b and bridge against32ef15c: core Cabal PASS,
+library properties/type checks PASS, bridge positive/nine negative types PASS.
+Workflow Cabal PASS; focused runtime dispatch PASS. Fresh independent verdict pending. All broader release gates
+above retain their original requirements; no current all-component/PG claim.

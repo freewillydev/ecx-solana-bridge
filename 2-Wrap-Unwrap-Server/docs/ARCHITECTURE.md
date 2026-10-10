@@ -93,12 +93,14 @@ For example, `workerRequest (\cap -> queuePayment cap txid)` selects an allowed
 method without supplying IO, keys or a database connection. A stage constrained by
 `WorkerOperations` can use worker methods; it cannot use operator methods.
 
-`checkedOperation` narrows the visible row to `CompileOperation` before its terminal
-`withCapabilities` step. It hands the canonical existential to the library's
-`interpret`, whose `eqT` check chooses the matching compiled result. These are
-visible dictionary restrictions, not irreversible revocation or sandboxing:
-`forgetCapabilities` intentionally retains canonical capability evidence for
-interpretation. Financial authorization still belongs to the evaluators.
+`checkedOperation` composes `Restrict :>>> Interpret` in the library's
+`Pipeline Text input output`. Its input is the capability envelope and its output
+is `Program caller severity a`. `Select` proves the operation's `Outcome` equals
+that output, while `interpret` retains the existing payload `eqT` check. The
+library handles existential unpacking and mismatch propagation; no manual
+`withCapabilities`/`forgetCapabilities` plumbing is needed here. Capability
+restriction remains dictionary visibility, not irreversible revocation or a
+sandbox. Financial authorization still belongs to the evaluators.
 
 The compiler emits the closed `Program` effect grammar. Its six constructors retain
 the precise execution constraints and leaf result types. This separates the

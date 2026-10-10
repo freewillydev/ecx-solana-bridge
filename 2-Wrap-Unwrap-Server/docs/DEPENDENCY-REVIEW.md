@@ -1,8 +1,8 @@
 # Dependency review status
 
-The isolated capability refactor adds `operation-capabilities-0.1.0.0` from
+The isolated capability refactor adds `operation-capabilities-0.2.0.0` from
 [freewillydev/operation-capabilities](https://github.com/freewillydev/operation-capabilities)
-at immutable commit `1c93d574cc48d4a8446c390e119b8fa04c93a659`. Its library depends
+at immutable commit `a9aec9b9fb1d7f101f01237fb1acd887f2eabf11`. Its library depends
 only on `base`; the source contains no IO, unsafe casts or unsafe IO. The MIT
 license is retained upstream. Source inspection and compilation are not an
 independent security audit. Existing dependency inventories below predate this addition.
