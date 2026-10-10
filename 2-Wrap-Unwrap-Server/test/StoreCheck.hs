@@ -1772,6 +1772,12 @@ ledgerMain = do
         unchanged<-evalRead reader ReadBalances
         check (unchanged==observed)
         evalWrite writer (ScanFailed "Native" 101 "provider_down")
+        stateBeforeStatus<-evalRead reader ReadState
+        W.ServiceStatus paused reason sequenceNo backup scanners<-evalRead reader ReadServiceStatus
+        check (paused==ledgerPaused stateBeforeStatus && reason==ledgerReason stateBeforeStatus
+          && sequenceNo==ledgerSequence stateBeforeStatus && backup==ledgerBackup stateBeforeStatus
+          && W.ScannerStatus "Native" (Just 100) (Just "provider_down") 101 `elem` scanners)
+        evalRead reader ReadState >>= check . (==stateBeforeStatus)
         health<-fixture fixtures (ReadScanHealth "Native")
         cursorAfterFailure<-evalRead reader (ReadCheckpoint "Native")
         check (health==(Just 100,Just "provider_down",101) && cursorAfterFailure==Just "scan-2")

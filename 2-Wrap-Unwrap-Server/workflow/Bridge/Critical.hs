@@ -151,9 +151,7 @@ instance Operation 'Operator 'Safe OperatorCommand where
     run :: OperatorRead a -> IO a
     run NativeReviews=evalRead reader ReadNativeReviews
     run TreasuryReceipts=evalRead reader ReadTreasuryReceipts
-    run ServiceState=do
-      state<-evalRead reader ReadState
-      pure $ W.ServiceStatus (ledgerPaused state) (ledgerReason state) (ledgerSequence state) (ledgerBackup state)
+    run ServiceState=evalRead reader ReadServiceStatus
 
 data CustomerSettings = CustomerSettings
   { publicConfiguration :: W.PublicConfiguration, customerPolicy :: StorePolicy

@@ -160,7 +160,12 @@ data PaymentSource = PaymentSource
 
 -- Private operator status; no wallet credentials or RPC response is exposed.
 data ServiceStatus = ServiceStatus
-  { paused :: !Bool, pauseReason :: !Text, criticalSequence :: !Int64, backupSequence :: !Int64 }
+  { paused :: !Bool, pauseReason :: !Text, criticalSequence :: !Int64, backupSequence :: !Int64
+  , scanners :: ![ScannerStatus] }
+  deriving stock (Eq,Show,Generic) deriving anyclass (ToJSON,FromJSON)
+
+data ScannerStatus = ScannerStatus
+  { chain :: !Text, lastSuccess :: !(Maybe Int64), failure :: !(Maybe Text), checkedAt :: !Int64 }
   deriving stock (Eq,Show,Generic) deriving anyclass (ToJSON,FromJSON)
 
 -- Saved refund destination and full principal; callers never choose either.

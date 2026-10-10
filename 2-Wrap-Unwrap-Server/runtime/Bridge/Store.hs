@@ -219,6 +219,7 @@ data StoreRead a where
   PendingAttempts :: StoreRead [Text]
   PaymentCandidates :: StoreRead [Text]
   ReadState :: StoreRead LedgerState
+  ReadServiceStatus :: StoreRead W.ServiceStatus
   ReadPublicReport :: Int64 -> StoreRead W.PublicReport
   ReadBalances :: StoreRead (M.Map (Asset,Account) Integer)
   ReadPaymentWork :: Text -> StoreRead (PaymentView,Maybe PreparedPayment,[Text])
@@ -389,6 +390,10 @@ evalRead (Reader settings identity remote) operation = bracket connect PG.close 
       PendingAttempts -> pendingAttempts c
       PaymentCandidates -> paymentCandidates c
       ReadState -> pure (LedgerState (S.criticalSequence row) (S.backupSequence row) (S.paused row/=0) (S.pauseReason row))
+      ReadServiceStatus -> do
+        health<-O.runSelect c (O.selectTable S.scanHealth)
+        pure $ W.ServiceStatus (S.paused row/=0) (S.pauseReason row) (S.criticalSequence row) (S.backupSequence row)
+          [W.ScannerStatus chain success failure checked | (chain,success,failure,checked)<-health]
       ReadLossCover key recovery -> lossCover c key recovery
       NativeSourceCandidates -> nativeSourceCandidates c
       ReadNativeSourceInspection key -> nativeSourceInspection c key
