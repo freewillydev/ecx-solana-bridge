@@ -53,6 +53,7 @@ data OperatorWrite a where
   ApproveCovered :: Text -> Int64 -> Text -> OperatorWrite ()
   RestoreSource :: Text -> Int64 -> Text -> OperatorWrite ()
   ClassifySpend :: Text -> Text -> Text -> OperatorWrite Int64
+  InitializeOperating :: Text -> Text -> Text -> OperatorWrite Int64
   AllocateReceipt :: Text -> [(Text,Amount)] -> Text -> OperatorWrite Int64
   WithdrawFees :: Text -> Asset -> Amount -> Text -> Text -> OperatorWrite Text
   CancelFeeWithdrawal :: Text -> Text -> OperatorWrite Text

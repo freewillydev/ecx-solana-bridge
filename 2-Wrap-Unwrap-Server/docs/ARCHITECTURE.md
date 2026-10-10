@@ -251,6 +251,18 @@ releases only provisional holds. Funded/signed work retains its protection. Trea
 allocation requires a finalized eligible unbound receipt, an exact split, paused
 service, ownership attestation and matching custody; SOL only funds operating.
 
+Initial self-funded ATA accounting is a private `InitializeOperating` operator
+leaf. It verifies exact signed setup bytes and matching finalized JSON effects on
+two independent providers before `InitializeSolanaOperating` commits under the
+writer lock. The immutable proof type has no exported constructor or record-update
+fields. The store rechecks revision, fresh scan heads, original history boundaries,
+receipt and observation identity, cost caps, zero prior financial activity and exact
+unallocated balances. Allocation and observed setup-cost classification commit or
+roll back together. It creates no signing or broadcast authority and leaves custody
+uncertified and paused. Exact committed receipt/signature/attestation replay is a
+closed read before any live RPC prerequisite; ordinary treasury and reconciliation
+checks are unchanged. See `initial_funding` and `initial_customer` PostgreSQL modes.
+
 ## Customer and payment lifecycle
 
 A random saved 32-byte capability and idempotency key precede order creation.

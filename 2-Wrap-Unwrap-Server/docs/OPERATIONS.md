@@ -241,6 +241,7 @@ are JSON integers. Returned IDs/sequences must be retained exactly.
 | `status`, `native-reviews`, `resume` | None |
 | `pause` | `reason` |
 | `repair-completed-order` | `order` |
+| `initialize-operating` | `deposit`, `transaction`, `reason` |
 | `allocate-treasury` | `deposit`, `split`, `reason` |
 | `classify-spend` | `chain`, `transaction`, `reason` |
 | `withdraw-fees` | `id`, `asset`, `amount`, `recipient`, `reason` |
@@ -263,13 +264,27 @@ pairs, for example `[["float","90000"],["operating","10000"]]` for a matching
 100000-unit native receipt. SOL may only fund operating. The recorded attestation
 and reconciliation are required; balance alone is not allocation authority.
 
-Start new custody with a dedicated wallet. Pay its associated-token-account setup
-from a separate funding wallet, and acquire trading inventory outside custody before
-transferring it in. Retain complete token and SOL history, including account creation
-and funding. Spending from an unallocated custody wallet can prevent its opening
-reconciliation: allocation requires reconciliation, while classifying a spend requires
-allocated capital. Do not work around this by skipping history or inventing an opening
-balance. Existing custody with financial history requires migration or recovery.
+Start new custody with a dedicated wallet and acquire trading inventory outside
+custody before transferring it in. If guided setup paid for its own associated token
+account before ledger initialization, use `initialize-operating` while paused:
+
+```json
+{"operation":"initialize-operating","deposit":"sol-operating:FUNDING_SIGNATURE","transaction":"ATA_CREATION_SIGNATURE","reason":"I own the complete initial SOL funding receipt"}
+```
+
+Use the recorded funding receipt and saved account-creation signature; this command
+does not create or send a transaction. It requires an unused ledger, complete fresh
+history from that funding, no customer activity or other unexplained outflows, and
+matching finalized setup bytes/effects from both RPC providers. It allocates the
+whole initial receipt to operating and books only the verified account rent and fee
+in one transaction. An exact replay returns the recorded sequence without RPC or
+new postings. Conflicting requests refuse. The ledger remains paused: checkpoint,
+then run normal reconciliation/resume before serving payments.
+
+Separately funded account creation can use ordinary treasury allocation. Retain
+complete token and SOL history in either case; never skip history or invent an
+opening balance. Existing custody with financial history requires migration or
+recovery, not this initial-funding operation.
 
 Earned withdrawal uses a fresh 64-lowercase-hex `id`, asset `Native` or `Wrapped`,
 amount and external recipient. Its reservations, preparation, signing and settlement

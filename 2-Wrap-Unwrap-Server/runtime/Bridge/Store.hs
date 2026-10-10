@@ -8,6 +8,7 @@ module Bridge.Store
   , withReader, withWriter, withFencedWriter, evalRead, evalWrite ) where
 
 import qualified Bridge.Solana as Solana
+import qualified Bridge.SolanaDeposit as SD
 import qualified Bridge.NativePayment as N
 import Bridge.Error
 import Bridge.Fence (withFence)
@@ -212,6 +213,8 @@ data StoreRead a where
   FindOrder :: Text -> W.OrderRequest -> StoreRead (Maybe Text)
   ReadProvisioning :: Text -> Text -> StoreRead (W.OrderView,Maybe Int64)
   CheckIntake :: Int64 -> StoreRead ()
+  ReadInitialFundingReplay :: Text -> Text -> Text -> StoreRead (Maybe Int64)
+  ReadInitialFundingContext :: Int64 -> StoreRead (Int64,[(Text,Text)])
   ReadCustodyRevision :: StoreRead Int64
   ReadCustodySnapshot :: Int64 -> [(Text,Text)] -> Bool -> StoreRead CustodySnapshot
   ReadCustodyEvent :: Text -> Text -> StoreRead (Text,Text,Value)
@@ -255,6 +258,7 @@ data StoreWrite a where
   ApproveCoveredSource :: Int64 -> Text -> Int64 -> Text -> Value -> StoreWrite ()
   ApproveSourceRestoration :: Int64 -> Text -> Int64 -> Text -> StoreWrite ()
   ClassifyTreasurySpend :: Text -> Text -> Text -> StoreWrite Int64
+  InitializeSolanaOperating :: Int64 -> (Int64,[(Text,Text)]) -> [(Text,Text)] -> Text -> SD.InitialAta -> Text -> StoreWrite Int64
   AllocateTreasury :: Int64 -> Text -> [(Text,Amount)] -> Text -> StoreWrite Int64
   RecordSolanaExpiry :: RecordedAttempt -> Text -> StoreWrite ()
   ApproveSolanaRetry :: Int64 -> RecordedAttempt -> Text -> Text -> StoreWrite ()
@@ -337,6 +341,8 @@ evalRead (Reader settings identity remote) operation = bracket connect PG.close 
         view<-readOrder c identity Nothing cap identifier
         pure (view,S.instructionSequence row)
       CheckIntake now -> intakeReady c identity now
+      ReadInitialFundingReplay receipt key reason -> initialFundingReplay c receipt key reason
+      ReadInitialFundingContext now -> (,) <$> readCustodyRevision c <*> scanHeads c now
       ReadCustodyRevision -> readCustodyRevision c
       ReadPublicReport now -> publicReport c now
       ReadCustodySnapshot now origins losses -> custodySnapshot c now origins losses
@@ -576,6 +582,7 @@ evalWrite writer@(Writer _ config _) operation = transaction writer $ \c ->
   ApproveCoveredSource now key recovery reason proof -> approveSourceRecovery c policy (Just proof) now key recovery reason
   ApproveSourceRestoration now key restoration reason -> approveSourceRecovery c policy Nothing now key restoration reason
   ClassifyTreasurySpend chain key reason -> classifyTreasurySpend c policy chain key reason
+  InitializeSolanaOperating now expected origins receipt proof reason -> initializeSolanaOperating c policy now expected origins receipt proof reason
   AllocateTreasury now receipt split reason -> allocateTreasury c policy now receipt split reason
   RepairCompletedOrderView now identifier -> repairCompletedOrderView c policy now identifier
   ReserveFees now key currency n destination explanation -> do
@@ -2779,6 +2786,118 @@ allocateTreasury c policy now receipt split reason = do
       pure sequenceNo
     _->reject "duplicate_treasury_allocation"
  where field key value=either (const $ reject "invalid_treasury_evidence") pure (parseEither (withObject "treasury evidence" (.: key)) value)
+
+initialFundingReplay :: PG.Connection -> Text -> Text -> Text -> IO (Maybe Int64)
+initialFundingReplay c receipt key reason = do
+  rows<-O.runSelect c $ do
+    (identifier,_,saved,_)<-O.selectTable S.treasuryAllocations
+    (chain,tx,_,_,_,sequenceNo)<-O.selectTable S.treasurySpends
+    O.where_ (identifier O..== O.sqlStrictText receipt O..&& chain O..== O.sqlStrictText "SolanaOperating" O..&& tx O..== O.sqlStrictText key)
+    pure (saved,sequenceNo)
+    :: IO [(Text,Int64)]
+  case rows of
+    []->pure Nothing
+    [(saved,sequenceNo)]->do
+      value<-decodeSaved saved
+      (signature,attestation)<-either (const $ reject "initial_funding_replay_conflict") pure $
+        parseEither (withObject "initial funding" $ \o->(,) <$> o .: "initialSignature" <*> o .: "ownershipAttestation") value
+      require (signature==key && attestation==reason) "initial_funding_replay_conflict"
+      pure (Just sequenceNo)
+    _->reject "duplicate_initial_funding"
+
+-- Initial self-funded ATA setup predates the ledger. Account for its verified
+-- funding and cost together; never manufacture a custody certification to do so.
+initializeSolanaOperating :: PG.Connection -> PaymentTerms -> Int64 -> (Int64,[(Text,Text)]) -> [(Text,Text)] -> Text -> SD.InitialAta -> Text -> IO Int64
+initializeSolanaOperating c policy now expected origins receipt proof reason = do
+  validReason reason
+  let text=O.sqlStrictText; num=O.sqlInt8
+      key=SD.initialSignature proof; incoming=T.drop 14 receipt
+      allocation=encodeSaved [("operating"::Text,SD.initialBefore proof)]
+      evidence=encodeSaved $ object ["ownershipAttestation" .= reason,"initialSignature" .= key,"initialAta" .= SD.initialEvidence proof]
+  require ("sol-operating:" `T.isPrefixOf` receipt && not(T.null incoming) && incoming/=key
+    && T.length evidence<=32768) "invalid_initial_funding"
+  -- Exact replay precedes fresh-ledger guards; a successful commit is no longer fresh.
+  old<-O.runSelect c $ do
+    (identifier,split,saved,_)<-O.selectTable S.treasuryAllocations
+    (chain,tx,_,_,_,sequenceNo)<-O.selectTable S.treasurySpends
+    O.where_ (identifier O..== text receipt O..&& chain O..== text "SolanaOperating" O..&& tx O..== text key)
+    pure (split,saved,sequenceNo)
+    :: IO [(Text,Text,Int64)]
+  case old of
+    [(split,saved,sequenceNo)]->do
+      require (split==allocation && saved==evidence) "initial_funding_replay_conflict"
+      pure sequenceNo
+    []->do
+      state<-metadata c (deploymentFingerprint $ paymentPolicy policy)
+      require (SD.initialFee proof<=savedSolanaFee(paymentLimits policy)
+        && SD.initialRent proof<=savedSolanaRent(paymentLimits policy)) "initial_funding_cost_limit"
+      require (S.paused state==1 && S.criticalSequence state==0) "initial_funding_requires_unused_paused_ledger"
+      actual<-(,) <$> readCustodyRevision c <*> scanHeads c now
+      require (actual==expected) "initial_funding_observation_changed"
+      savedOrigins<-O.runSelect c (O.selectTable S.scanOrigins) :: IO [(Text,Text)]
+      require (sortOn fst origins==sortOn fst savedOrigins
+        && lookup "SolanaOperating" origins==Just incoming && lookup "Solana" origins==Just key
+        && lookup "SolanaOperating" (snd actual)==Just key && lookup "Solana" (snd actual)==Just key)
+        "initial_funding_history_mismatch"
+      occupied<-mapM (O.runSelect c . O.limit 1)
+        [O.sqlBool True <$ O.selectTable S.orders,O.sqlBool True <$ O.selectTable S.obligations
+        ,O.sqlBool True <$ O.selectTable S.paymentRoots,O.sqlBool True <$ O.selectTable S.withdrawals
+        ,O.sqlBool True <$ O.selectTable S.reservations,O.sqlBool True <$ O.selectTable S.operatingReservations
+        ,O.sqlBool True <$ O.selectTable S.treasuryAllocations,O.sqlBool True <$ O.selectTable S.treasurySpends
+        ,O.sqlBool True <$ S.workAttempts,O.sqlBool True <$ S.workPreparations] :: IO [[Bool]]
+      require (all null occupied) "initial_funding_customer_or_treasury_activity"
+      deposits<-O.runSelect c (O.limit 2 $ O.selectTable S.deposits) :: IO [S.Deposit]
+      source<-case deposits of [row] | S.depositId row==receipt->pure row; _->reject "initial_funding_requires_single_receipt"
+      require (S.depositAsset source=="Sol" && S.depositOrder source==Nothing && S.depositEligible source==1
+        && S.depositAllocated source==0 && S.depositAmount source==units(SD.initialBefore proof)) "initial_funding_receipt_mismatch"
+      fundingSlot<-maybe (reject "initial_funding_anchor_invalid") pure (readMaybe $ T.unpack $ S.depositAnchor source)
+      require (fundingSlot>=0 && fundingSlot<SD.initialSlot proof) "initial_funding_order_mismatch"
+      events<-O.runSelect c $ do
+        event<-O.selectTable S.chainEvents
+        O.where_ (S.eventChain event O../= text "Native" O..|| S.eventReview event O../= num 0)
+        pure event
+        :: IO [S.ChainEvent]
+      require (sortOn id [(S.eventChain e,S.eventId e) | e<-events]==
+        sortOn id [("Solana",key),("SolanaOperating",incoming),("SolanaOperating",key)]
+        && all (\e->S.eventReview e==0 || (S.eventChain e=="SolanaOperating" && S.eventId e==key)) events)
+        "initial_funding_unexpected_history"
+      (kind,anchor,incomingProof)<-custodyEvent c "SolanaOperating" incoming
+      delta<-field "delta" incomingProof
+      require (kind=="unmatched_incoming" && anchor==S.depositAnchor source
+        && delta==T.pack(show $ units $ SD.initialBefore proof)) "initial_funding_receipt_evidence_changed"
+      -- Reviewed outgoing evidence cannot use custodyEvent, which intentionally refuses it.
+      rows<-O.runSelect c $ do
+        event<-O.selectTable S.chainEvents
+        (hash,chain,tx,raw)<-O.selectTable S.observationEvidence
+        O.where_ (S.eventChain event O..== text "SolanaOperating" O..&& S.eventId event O..== text key
+          O..&& S.eventHash event O..== hash O..&& chain O..== text "SolanaOperating" O..&& tx O..== text key)
+        pure (S.eventKind event,S.eventAnchor event,raw)
+        :: IO [(Text,Text,Text)]
+      (outKind,outAnchor,raw)<-case rows of [row]->pure row; _->reject "initial_funding_outflow_missing"
+      observed<-decodeSaved raw >>= field "proof"
+      economic<-checked (W.economicOutflow "SolanaOperating" observed)
+      total<-checked $ amount (toInteger(units $ SD.initialRent proof)+toInteger(units $ SD.initialFee proof))
+      payload<-field "transaction" (SD.initialEvidence proof)
+      payloadHash<-field "rpcPayloadHash" observed
+      require (outKind=="outgoing" && outAnchor==T.pack(show $ SD.initialSlot proof)
+        && economic==(Sol,total,SD.initialFee proof) && payloadHash==digest(BL.toStrict $ encode (payload::Value)))
+        "initial_funding_outflow_evidence_changed"
+      booked<-balances c
+      let quantity=toInteger(units $ SD.initialBefore proof)
+      require (M.filter (/=0) booked==M.fromList [((Sol,Unallocated),quantity),((Sol,External),negate quantity)])
+        "initial_funding_unexpected_balances"
+      sequenceNo<-nextSequence c
+      post c ("treasury:"<>receipt) "operator allocation of verified initial SOL funding"
+        [Posting Sol Unallocated (-quantity),Posting Sol Operating quantity]
+      inserted<-O.runInsert c O.Insert {O.iTable=S.treasuryAllocations,
+        O.iRows=[(text receipt,text allocation,text evidence,num sequenceNo)],O.iReturning=O.rCount,O.iOnConflict=Nothing}
+      updated<-O.runUpdate c O.Update {O.uTable=S.deposits,O.uUpdateWith= \row->row {S.depositAllocated=num 1,S.depositState=text "treasury"},
+        O.uWhere= \row->S.depositId row O..== text receipt,O.uReturning=O.rCount}
+      require (inserted==1 && updated==1) "initial_funding_allocation_changed"
+      -- Same writer transaction: any failure rolls back allocation and postings.
+      classifyTreasurySpend c policy "SolanaOperating" key reason
+    _->reject "duplicate_initial_funding"
+ where field name value=either (const $ reject "invalid_initial_funding_evidence") pure (parseEither (withObject "initial funding" (.: name)) value)
 
 -- Book an observed outflow once; never create signing or broadcast authority.
 classifyTreasurySpend :: PG.Connection -> PaymentTerms -> Text -> Text -> Text -> IO Int64

@@ -31,6 +31,8 @@ import Bridge.SolanaPayment (SolanaSigned,signedSolanaPlan,solPlanRecent,solPlan
 import Data.Text (Text)
 import Bridge.PaymentObservation
 import qualified Bridge.Solana as S
+import qualified Bridge.SolanaDeposit as SD
+import qualified Bridge.AdminStatus as Admin
 import Data.Aeson (Value,eitherDecodeStrict',FromJSON,toJSON,object,(.=),parseJSON,encode)
 import qualified Data.Text.Encoding as TE
 import qualified Data.ByteString.Lazy as BL
@@ -454,6 +456,39 @@ instance Operation 'Operator 'Critical OperatorCommand where
           now<-floor <$> getPOSIXTime
           evalWrite writer (ApproveSourceRestoration now key restoration reason)
     run (ClassifySpend chain key reason)=evalWrite writer (ClassifyTreasurySpend chain key reason)
+    run (InitializeOperating receipt signature reason)=do
+      require (not(T.null $ T.strip reason) && T.length reason<=512) "invalid_initial_funding_reason"
+      replay<-evalRead reader (ReadInitialFundingReplay receipt signature reason)
+      case replay of
+        Just sequenceNo->pure sequenceNo
+        Nothing->do
+          state<-evalRead reader ReadState
+          require (ledgerPaused state) "initial_funding_requires_pause"
+          now<-floor <$> getPOSIXTime
+          expected<-evalRead reader (ReadInitialFundingContext now)
+          independent<-maybe (reject "independent_rpc_required") pure (S.solanaVerifierRpc solana)
+          let primary=S.solanaCall rpc solana
+              verify=RPC.rpc rpc independent Nothing
+              origins=[("Native",N.nativeCheckpointHash native),("Solana",tokenOrigin settings),("SolanaOperating",operatingOrigin settings)]
+          S.solanaGenesisWith primary (Just verify) solana
+          proofs<-forM [primary,verify] $ \call->do
+            statuses<-call "getSignatureStatuses" [toJSON [signature],object ["searchTransactionHistory" .= True]] >>= RPC.fieldValue "value"
+            status<-case statuses of [value]->pure value; _->reject "invalid_initial_funding_status"
+            raw<-call "getTransaction" [toJSON signature,object ["encoding" .= ("base64"::Text),"commitment" .= ("finalized"::Text),"maxSupportedTransactionVersion" .= (0::Int)]]
+            encoded<-RPC.fieldValue "transaction" raw
+            bytes<-case encoded of [value,"base64"]->pure value; _->reject "invalid_initial_funding_transaction"
+            outcome<-either (const $ reject "initial_funding_not_finalized") pure (Admin.classifyStatus bytes status raw True)
+            require (outcome==Admin.Finalized) "initial_funding_not_finalized"
+            transaction<-S.finalizedTransactionWith call signature
+            proof<-either reject pure (SD.verifyInitialAta signature (H.custodyOwner config) (H.mint config) (H.custodyAta config)
+              (H.maxSolFee config) (H.maxSolAccountRent config) bytes transaction)
+            rawSlot<-RPC.fieldValue "slot" raw
+            statusSlot<-RPC.fieldValue "slot" status
+            require (rawSlot==SD.initialSlot proof && statusSlot==rawSlot) "initial_funding_slot_mismatch"
+            pure proof
+          proof<-case proofs of [first,second] | first==second->pure first; _->reject "initial_funding_provider_disagreement"
+          checkedAt<-floor <$> getPOSIXTime
+          evalWrite writer (InitializeSolanaOperating checkedAt expected origins receipt proof reason)
     run (AllocateReceipt receipt split reason)=do
       now<-floor <$> getPOSIXTime
       evalWrite writer (AllocateTreasury now receipt split reason)

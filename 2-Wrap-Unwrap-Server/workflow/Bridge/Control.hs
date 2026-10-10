@@ -51,6 +51,9 @@ controlPlan=withObject "operator command" $ \o->do
     "classify-spend"->do
       fields ["operation","chain","transaction","reason"]
       ControlPlan . operator <$> (ClassifySpend <$> o .: "chain" <*> o .: "transaction" <*> o .: "reason")
+    "initialize-operating"->do
+      fields ["operation","deposit","transaction","reason"]
+      ControlPlan . operator <$> (InitializeOperating <$> o .: "deposit" <*> o .: "transaction" <*> o .: "reason")
     "allocate-treasury"->do
       fields ["operation","deposit","split","reason"]
       ControlPlan . operator <$> (AllocateReceipt <$> o .: "deposit" <*> o .: "split" <*> o .: "reason")
