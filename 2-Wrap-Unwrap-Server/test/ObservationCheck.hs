@@ -55,15 +55,27 @@ checks=do
       sourceCall value method params=case (method,params) of
         ("getTransaction",[String signature,options])->do
           commitment<-fieldValue "commitment" options :: IO Text
-          require (signature==boundSignature expected && commitment=="finalized") "wrong_source_request"
+          version<-fieldValue "maxSupportedTransactionVersion" options :: IO Int
+          require (version==1 && signature==boundSignature expected && commitment=="finalized") "wrong_source_request"
           pure value
         _->fail "unexpected source RPC"
       verifySource value verifier=verifyPaymentSource (\_ _ _->fail "unexpected native RPC") (sourceCall value) verifier W.L2LSignetDevnet sourcePolicy
   versioned<-versionZero (boundCustody expected) payProof
   local<-sequence
-    [ check "focused Solana source checks bind legacy and Pay receipts and independent proofs" $ once $ ioProperty $ do
+    [ check "v1 deposits preserve proofs and reject lookup accounts and future versions" $ once $
+        verifyDeposit expected (versionOne proof)==verifyDeposit expected proof &&
+        verifyPay pay (versionOne payProof)==verifyPay pay payProof &&
+        effect (versionOne proof)==effect proof &&
+        transactionKeys (versionOne proof)==transactionKeys proof &&
+        transactionMemo (versionOne proof)==transactionMemo proof &&
+        isLeft (transactionKeys $ replace ["transaction","message","addressTableLookups"] (toJSON [object []]) $ versionOne proof) &&
+        isLeft (transactionKeys $ replace ["transaction","message","accountKeys"] (toJSON [base58(BS.replicate 32 n) | n<-[1..65]]) $ versionOne proof) &&
+        isLeft (verifyPay pay $ versionOne versioned) &&
+        isLeft (transactionKeys $ replace ["version"] (Number 2) proof) &&
+        isLeft (verifyPay pay $ replace ["transaction","message","transactionConfig"] Null $ versionOne payProof)
+    , check "focused Solana source checks bind legacy and Pay receipts and independent proofs" $ once $ ioProperty $ do
         legacy<-verifySource proof (Just $ sourceCall proof) (sourceBinding $ boundMemo expected)
-        paySource<-verifySource payProof Nothing (sourceBinding $ "solana-pay:"<>reference)
+        paySource<-verifySource (versionOne payProof) (Just $ sourceCall $ versionOne payProof) (sourceBinding $ "solana-pay:"<>reference)
         changedAmount<-rejects "source_binding_mismatch" $ verifySource proof Nothing
           (sourceBinding (boundMemo expected)) {W.sourceDeposit=sourceDeposit {W.depositAmount=amt 1}}
         disagreement<-rejects "source_verifier_disagreement" $ verifySource proof
@@ -90,7 +102,7 @@ checks=do
         isLeft (verifyPay pay {payOrderReference=boundMint expected} payProof) &&
         isLeft (verifyPay pay $ replace ["transaction","message","header","numReadonlyUnsignedAccounts"] (Number 0) payProof)
     , check "deposit authorization refuses failed versioned CPI and historical identity mutations" $ once $
-        let mutations=[(["meta","err"],String "failure"),(["version"],Number 1),
+        let mutations=[(["meta","err"],String "failure"),(["version"],Number 2),
               (["transaction","message","header","numRequiredSignatures"],Number 0),
               (["meta","postTokenBalances"],toJSON ([]::[Value])),
               (["meta","innerInstructions"],toJSON [object ["instructions" .= [object []]]])]
@@ -155,7 +167,14 @@ capturedEffect kind=do
   check ("captured SOL fees and rent for "<>kind<>" ATA") $ once $
     (lamportDelta <$> effect proof)==Right (if kind=="new" then -1493440 else -5000) &&
     (lamportFee <$> effect proof)==Right (amt 5000) &&
+    effect (versionOne proof)==effect proof &&
+    effect (replace ["meta","err"] (String "failure") $ versionOne proof)==failed &&
     (if kind=="new" then isLeft failed else (lamportFailed <$> failed)==Right True)
+
+-- Offline JSON contract for the normalized v1 representation, not a signed tx.
+versionOne :: Value -> Value
+versionOne = replace ["version"] (Number 1) . replace ["transaction","message","transactionConfig"] (object
+  ["computeUnitLimit" .= (200000::Int),"loadedAccountsDataSizeLimit" .= (67108864::Int),"priorityFee" .= (0::Int),"heapSize" .= Null])
 
 -- Re-index only JSON evidence. This is not a newly signed/submitted transaction.
 versionZero :: Text -> Value -> IO Value

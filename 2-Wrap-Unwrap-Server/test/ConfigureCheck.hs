@@ -21,7 +21,8 @@ import Bridge.Wallet (mnemonic,mixWalletEntropy,walletKey,nativeDescriptors)
 import Bridge.NativeKey (deriveChild)
 import qualified Bridge.Native as N
 import Bridge.Wire (Profile(..))
-import Bridge.Error (BridgeError(..))
+import Bridge.Error (BridgeError(..),require)
+import Bridge.RPC (fieldValue)
 import qualified Data.Aeson.KeyMap as KM
 import Data.IORef
 import Control.Monad (unless,forM)
@@ -449,7 +450,9 @@ preflightContract=do
         ("getSignaturesForAddress",[String mint,_]) | mint==Bootstrap.canonicalMint->
           if variant=="forbidden" then throwIO(BridgeError "rpc_method_forbidden")
           else pure $ toJSON (if variant=="empty" then [] else [object ["signature" .= signature]])
-        ("getTransaction",[String sig,_]) | sig==signature->
+        ("getTransaction",[String sig,options]) | sig==signature->do
+          maximumVersion<-fieldValue "maxSupportedTransactionVersion" options :: IO Int
+          require (maximumVersion==1) "preflight_requires_v1"
           if variant=="missing" then pure Null else pure $ object
             ["meta" .= object [],"transaction" .= object
               ["signatures" .= [if variant=="wrong-signature" then base58(B.replicate 64 2) else signature]

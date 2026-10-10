@@ -61,7 +61,7 @@ verifyPaymentSource native solana independent profile config binding = do
           owner<-maybe (reject "source_owner_missing") pure (W.sourceOwner request)
           pure (verifyDeposit $ DepositBinding signature owner (H.mint config) (H.custodyAta config) (H.custodyOwner config) instruction)
       let proof call=call "getTransaction" [toJSON signature,object
-            ["commitment" .= ("finalized"::Text),"encoding" .= ("json"::Text),"maxSupportedTransactionVersion" .= (0::Int)]] >>= either reject pure . verify
+            ["commitment" .= ("finalized"::Text),"encoding" .= ("json"::Text),"maxSupportedTransactionVersion" .= (1::Int)]] >>= either reject pure . verify
       verified<-proof solana
       require (verifiedAmount verified==W.depositAmount deposit && T.pack(show $ verifiedSlot verified)==W.depositAnchor deposit) "source_binding_mismatch"
       case independent of

@@ -154,7 +154,7 @@ finalizedTransaction :: Manager -> SolanaSettings -> Text -> IO Value
 finalizedTransaction manager c = finalizedTransactionWith (solanaCall manager c)
 finalizedTransactionWith :: (Text -> [Value] -> IO Value) -> Text -> IO Value
 finalizedTransactionWith call signature = call "getTransaction"
-  [toJSON signature,object ["commitment" .= ("finalized"::Text),"encoding" .= ("json"::Text),"maxSupportedTransactionVersion" .= (0::Int)]]
+  [toJSON signature,object ["commitment" .= ("finalized"::Text),"encoding" .= ("json"::Text),"maxSupportedTransactionVersion" .= (1::Int)]]
 solanaHistory :: Manager -> SolanaSettings -> Maybe Text -> Maybe Text -> IO Value
 solanaHistory manager c = solanaAddressHistory manager c (custodyAta c)
 solanaAddressHistory :: Manager -> SolanaSettings -> Text -> Maybe Text -> Maybe Text -> IO Value

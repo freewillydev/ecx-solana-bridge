@@ -217,7 +217,7 @@ pendingSolanaEffect native solana profile config reader saved = do
         pure []
   signed<-either (const $ reject "invalid_saved_payment") pure (eitherDecodeStrict' $ TE.encodeUtf8 $ signedPolicy $ recordedSigned saved)
   proof<-solana "getTransaction" [toJSON txid,object
-    ["commitment" .= ("finalized"::Text),"encoding" .= ("json"::Text),"maxSupportedTransactionVersion" .= (0::Int)]]
+    ["commitment" .= ("finalized"::Text),"encoding" .= ("json"::Text),"maxSupportedTransactionVersion" .= (1::Int)]]
   if proof==Null then unseen else do
     recorded
     outcome<-either reject pure (verifySolanaOutcome config signed proof)

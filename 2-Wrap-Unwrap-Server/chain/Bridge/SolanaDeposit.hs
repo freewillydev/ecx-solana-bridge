@@ -39,6 +39,22 @@ optional key = withObject "RPC object" (.:? key)
 ensure :: Bool -> String -> Parser ()
 ensure ok msg = unless ok (fail msg)
 
+-- RPC JSON normalizes instruction/account indexing across legacy, v0 and v1.
+-- v1 has inline accounts only. Fees/effects are read from finalized metadata,
+-- never inferred from its new transactionConfig or ComputeBudget instructions.
+transactionFormat :: Value -> Parser ()
+transactionFormat value = do
+  version <- optional "version" value :: Parser (Maybe Value)
+  ensure (version `elem` [Nothing,Just(String "legacy"),Just(Number 0),Just(Number 1)]) "unsupported transaction version"
+  when (version==Just(Number 1)) $ do
+    message <- get "transaction" value >>= get "message"
+    meta <- get "meta" value
+    static <- get "accountKeys" message :: Parser [Text]
+    accounts <- transactionAccounts message meta
+    lookups <- optional "addressTableLookups" message :: Parser (Maybe [Value])
+    _ <- get "transactionConfig" message :: Parser Object
+    ensure (length static<=64 && accounts==static && maybe True null lookups) "invalid v1 accounts"
+
 -- Classification is intentionally broader than automatic deposit authorization:
 -- a successful CPI or no-memo receipt still changes custody and must be held.
 data CustodyEffect = CustodyEffect
@@ -57,6 +73,7 @@ lamportEffect :: Text -> Text -> Value -> Either Text LamportEffect
 lamportEffect signature address = either (const $ Left "unclassified_lamport_effect") Right . parseEither inspect
  where
   inspect value = do
+    transactionFormat value
     slot <- get "slot" value
     ensure (slot>=0) "invalid slot"
     tx <- get "transaction" value
@@ -82,6 +99,7 @@ custodyEffect signature mint custody owner =
   either (const $ Left "unclassified_custody_effect") Right . parseEither parseEffect
  where
   parseEffect value = do
+    transactionFormat value
     slot <- get "slot" value
     ensure (slot>=0) "invalid slot"
     transaction <- get "transaction" value
@@ -124,6 +142,7 @@ transactionMemo :: Value -> Maybe Text
 transactionMemo value = either (const Nothing) id $ parseEither parseMemo value
  where
   parseMemo v = do
+    transactionFormat v
     transaction <- get "transaction" v
     message <- get "message" transaction
     meta <- get "meta" v
@@ -151,8 +170,7 @@ verify DepositBinding{..} value = do
   meta <- get "meta" value
   err <- get "err" meta :: Parser Value
   ensure (err==Null) "failed transaction"
-  version <- optional "version" value :: Parser (Maybe Value)
-  ensure (version==Nothing || version==Just (String "legacy") || version==Just (Number 0)) "unsupported transaction version"
+  transactionFormat value
   transaction <- get "transaction" value
   signatures <- get "signatures" transaction :: Parser [Text]
   ensure (signatures==[boundSignature]) "unexpected signer count or transaction"
@@ -242,6 +260,7 @@ payURIFor owner mintId instruction quantity = do
 
 transactionKeys :: Value -> Either Text [Text]
 transactionKeys = either (const $ Left "invalid_pay_accounts") Right . parseEither (\value->do
+  transactionFormat value
   transaction <- get "transaction" value; message <- get "message" transaction; meta <- get "meta" value; transactionAccounts message meta)
 
 verifyPay :: PayBinding -> Value -> Either Text SolanaDeposit
@@ -253,8 +272,7 @@ verifyPayProof PayBinding{..} value = do
   meta <- get "meta" value
   err <- get "err" meta :: Parser Value
   ensure (err==Null) "failed transfer"
-  version <- optional "version" value :: Parser(Maybe Value)
-  ensure (version==Nothing || version==Just(String "legacy") || version==Just(Number 0)) "unsupported version"
+  transactionFormat value
   tx <- get "transaction" value
   signatures <- get "signatures" tx :: Parser [Text]
   message <- get "message" tx
