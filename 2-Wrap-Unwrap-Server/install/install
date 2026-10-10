@@ -429,4 +429,11 @@ printf '%s\n' "$release" > "$config/installed.pending"
 sync -f "$config"
 mv "$config/installed.pending" "$config/installed"
 sync -f "$config"
+# Keep the console on the installed runtime after direct checked upgrades too.
+# The launcher's bootstrap link otherwise keeps executing an obsolete parser.
+[ ! -e /usr/local/bin/ecx-bridge ] || [ -L /usr/local/bin/ecx-bridge ] || fail 'existing console is not a managed symlink'
+[ ! -e /usr/local/bin/ecx-bridge.new ] || [ -L /usr/local/bin/ecx-bridge.new ] || fail 'unexpected console staging path'
+ln -sfn "$prefix/current/bin/ecx-bridge" /usr/local/bin/ecx-bridge.new
+mv -Tf /usr/local/bin/ecx-bridge.new /usr/local/bin/ecx-bridge
+sync -f /usr/local/bin
 echo 'Installed. Services are STOPPED. Configure native wallet backup staging/HTTPS, verify backup and isolation, then start services; the worker starts paused. Explicit checked resume is required.'

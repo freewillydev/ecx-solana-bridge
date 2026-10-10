@@ -14,6 +14,14 @@ Funded-host policy transition SSMf4544024-8559-4530-b2f0-7fbb1f6b799b currently 
 
 Next: finish both active jobs, verify config6 and original Paid orders/backup, validate and stop isolated snapshot-test node, finish fresh-host catch-up/start from preserved setup (set its bootstrap policy6 before first runtime publication), then batch one Linux build/package for these code changes. No production completion claim; existing deferred gates below remain.
 
+### Policy acceptance follow-up
+
+SSMf4544024 changed the four configs after the verified old-policy checkpoint, then start failed invalid_config_json because /usr/local/bin/ecx-bridge still referenced bootstrap210f939 rather than installedb3492835. Current-binary checked start2f6a8d90-50cc-400f-ac14-724379b50d73 PASS. Read-onlyd8797769-e58e-4238-9aca-35bbec0f99d5 verified both active services/config6, backup=critical105, paused=false, publicOFF; preserved and repaired the old console symlink to /opt/ecx-bridge/current/bin/ecx-bridge. Customer comparisonfc2d9533-e6b1-4bb6-976c-35b681303792 PASS: both same Paid orders/quotes/payouts and saved depth1. No new transfers. New-config checkpoint and PATH-console checked start3cc791a9-b5c7-4639-9448-d738dbfb9b98 is running; inspect exact result before retry.
+
+Installer now atomically publishes its managed console symlink after direct checked upgrades as well. Fresh separate static reviewer PASS for that narrow change; shell syntax/diff checks pass. New runtime package remains pending. Default snapshot full anonymous download digest check37fd5274-58a8-43ec-938e-921974dd1211 running; snapshot integration57cb5a3b still running. Preserve files and stop isolated test node when done.
+
+Six-document supplemental Codex Security review saved via plugin at artifacts/deferred-document-review-20261009.md in the existing standalone security artifact directory, SHA2563e2e616853539a3891ab8ec335953ccf1d1b02fa5eb9a9bc1d2ab7acb047dad8. Scoped PASS after owner pointer corrections; sealed179/185 scan unchanged, no full legal/current-dependency certification.
+
 ## Current state
 
 Production remains FAIL. Exact candidate 8c18bd88c0d65b2291802d805a246a754b5d61c0 is now installed on sole funded host i-0fc7cf24ffe177dd2. Installer SHA256 1adc398d1a45a7da34f2ee184da7a7cae282eca0c7259bd2b9b4eeb948fd10b9 (40,278,127 bytes, 48 manifest entries). Release directory /opt/ecx-bridge/releases/b3492835d90f0cb86c900aa32e0cbdd9066bca266219e8ea722a1d2d97ae8a19. This supersedes old ef2f17d runtime; retain old artifact and all backups.
