@@ -163,6 +163,10 @@ evalSetup (FundCustody directory c key)=bracket newRpcManager closeManager $ \ma
   putStrLn $ "Fund SOL fees at: "<>T.unpack owner
   putStrLn $ "Fund canonical wrapped ECX inventory at owner: "<>T.unpack owner<>" (ATA "<>T.unpack ata<>")"
   putStrLn "Suggested SOL funding: 0.01 SOL. Startup never buys or mints wrapped ECX."
+  let attempt=directory</>"ata-creation.json"
+  saved<-doesFileExist attempt
+  accounts<-mapM (\url->account url ata) endpoints
+  let creating=not saved && all (==Null) accounts
   forM_ endpoints $ \url->do
     payer<-account url owner
     require (payer/=Null) "fund_solana_owner_then_rerun_start"
@@ -170,11 +174,11 @@ evalSetup (FundCustody directory c key)=bracket newRpcManager closeManager $ \ma
     executable<-fieldValue "executable" payer
     balance<-fieldValue "lamports" payer :: IO Integer
     require (program=="11111111111111111111111111111111" && not executable) "invalid_bootstrap_payer"
-    require (balance>=toInteger(units $ C.maxSolAccountRent c)+toInteger fee) "fund_solana_owner_then_rerun_start"
-  let attempt=directory</>"ata-creation.json"
-  saved<-doesFileExist attempt
-  accounts<-mapM (\url->account url ata) endpoints
-  when (not saved && all (==Null) accounts) $ do
+    -- Rent is needed before creation, not again when verifying a saved attempt
+    -- whose finalized transaction has already paid it. Saved bytes stay unchanged.
+    let required=toInteger fee + if creating then toInteger(units $ C.maxSolAccountRent c) else 0
+    require (balance>=required) "fund_solana_owner_then_rerun_start"
+  when creating $ do
     rent<-call (C.solanaRpc c) "getMinimumBalanceForRentExemption" [toJSON (165::Int),object ["commitment" .= String "finalized"]] >>= parseValue parseJSON
     require (rent>0 && rent<=fromIntegral(units $ C.maxSolAccountRent c)) "bootstrap_rent_exceeds_limit"
     recent<-TO.runSafe (TO.Request $ TN.RecentBlockhash TN.Mainnet (C.solanaRpc c))
