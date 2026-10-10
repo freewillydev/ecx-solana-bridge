@@ -2,6 +2,10 @@ module ConfigureCheck (contract,walletProperty) where
 import qualified Bridge.Config as C
 import qualified NodeSetup
 import qualified Bootstrap
+import qualified Token
+import qualified Token.Signing as TS
+import qualified Token.Operation as TO
+import Bridge.SDKBuild (sdkLibraryPath)
 import System.Environment (getEnv,setEnv)
 import System.Info (os,arch)
 import Bridge.File (hashHandle)
@@ -112,12 +116,28 @@ contract=bracket temporary removeDirectoryRecursive $ \directory->do
     settingsRemain<-doesDirectoryExist interrupted
     nativeChecked<-nativeSeedContract directory
     simplifiedChecked<-simpleContract directory executable
+    -- A verified pre-created ATA has no local creation attempt. Do not block
+    -- ordinary reconciliation, and never silently skip an existing corrupt file.
+    externalAta<-Bootstrap.initialAccounting directory config "owned SOL"
+    let ownerText=T.pack owner; mint=Bootstrap.canonicalMint
+        attempt=directory</>"ata-creation.json"
+    ata<-TO.runSafe (TO.Request $ Token.AssociatedAddress sdkLibraryPath ownerText mint)
+    let operation=Token.Associated ownerText mint ata ownerText 2039280 (base58 $ B.replicate 32 1)
+    unsigned<-TO.runSafe (TO.Request $ Token.Prepare sdkLibraryPath operation)
+    signature<-TO.runCritical (TO.Request $ TS.SignOffline key operation unsigned attempt)
+    localAta<-Bootstrap.initialAccounting directory config "owned SOL"
+    localReplay<-Bootstrap.initialAccounting directory config "owned SOL"
+    B.writeFile attempt "{}"
+    corruptAta<-try(Bootstrap.initialAccounting directory config "owned SOL") :: IO (Either BridgeError (Maybe Value))
     historyPreflight<-preflightContract
     backupChecked<-backupTimeoutContract directory
     handoffChecked<-backupHandoffCancellation directory
     expectedKey<-either (const $ fail "fixture mnemonic") pure (walletKey phrase)
     let expectedSetup=object ["existing" .= False,"method" .= ("source"::String),"sourceRoot" .= directory,"restic" .= worker]
-    pure(historyPreflight && handoffChecked && backupChecked && simplifiedChecked && nativeChecked && C.fingerprint config==C.fingerprint other && C.nativeCookie config/=C.nativeCookie other
+    pure(externalAta==Nothing && either (const True) (const False) corruptAta
+      && localAta==localReplay && localAta==Just(object ["operation" .= ("initialize-operating"::T.Text)
+        ,"deposit" .= ("sol-operating:"<>C.solanaOperatingHistoryStart config),"transaction" .= signature,"reason" .= ("owned SOL"::T.Text)])
+      && historyPreflight && handoffChecked && backupChecked && simplifiedChecked && nativeChecked && C.fingerprint config==C.fingerprint other && C.nativeCookie config/=C.nativeCookie other
       && sort entries==["interface.json","setup.json","signer.json","sources.json","worker.json"]
       && sources==M.fromList [("solana.keypair.json",key),("native-worker.auth",worker),("native-signer.auth",signer)]
       && originalKey==L.toStrict(encode $ B.unpack(seed<>public)) && originalWorker=="worker:password" && originalSigner=="signer:password"

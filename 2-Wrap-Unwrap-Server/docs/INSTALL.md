@@ -94,7 +94,9 @@ transaction is durably saved before submission, and reruns reuse it. Pending or
 unavailable confirmation leaves startup stopped with the saved attempt intact.
 An expired/failed attempt requires the existing reviewed token recovery workflow;
 startup never silently generates a replacement signature. If someone already
-created the correct ATA, setup verifies and uses it.
+created the correct ATA, setup verifies and uses it without a local creation file.
+It then performs normal reconciliation; use Funding to allocate your owned SOL,
+since no self-paid ATA cost needs the special initial-accounting operation.
 
 Both independent providers must agree on bounded finalized address histories,
 and the origins must resolve to transactions involving the right accounts. Only

@@ -1,7 +1,7 @@
 {-# LANGUAGE GADTs #-}
 -- Fresh generated custody only, before installation. No customer or runtime entry.
 -- Reuse token administration's closed, saved-before-send ATA operation; never mint.
-module Bootstrap (preflight,checkHistoryWith,canonicalMint,interface,validateOrigin,setupConfig,bind,complete,initializeBackup,agreedOrigin) where
+module Bootstrap (preflight,checkHistoryWith,canonicalMint,interface,validateOrigin,setupConfig,bind,complete,initializeBackup,agreedOrigin,initialAccounting) where
 import qualified Bridge.Config as C
 import Bridge.Domain (units)
 import Bridge.File (hashHandle)
@@ -55,6 +55,20 @@ readRecord :: FromJSON a => FilePath -> IO a
 readRecord path=readPrivate path >>= either (const $ reject "invalid_bootstrap_record") pure . eitherDecodeStrict'
 writeRecord :: ToJSON a => FilePath -> a -> IO ()
 writeRecord path=savePrivate path . L.toStrict . encode
+
+-- A pre-created ATA has no local cost to classify. Normal reconciliation and
+-- explicit treasury allocation still apply; absence never authorizes spending.
+initialAccounting :: FilePath -> C.Config -> T.Text -> IO (Maybe Value)
+initialAccounting directory c reason=do
+  require (not(T.null $ T.strip reason) && T.length reason<=512) "invalid_initial_funding_reason"
+  let path=directory</>"ata-creation.json"
+  exists<-doesFileExist path
+  if not exists then pure Nothing else do
+    saved<-readRecord path
+    _<-either reject pure (TS.validateSaved saved)
+    pure $ Just $ object ["operation" .= String "initialize-operating"
+      ,"deposit" .= ("sol-operating:"<>C.solanaOperatingHistoryStart c)
+      ,"transaction" .= TS.savedId saved,"reason" .= reason]
 
 setupConfig :: FilePath -> IO C.Config
 setupConfig directory=do

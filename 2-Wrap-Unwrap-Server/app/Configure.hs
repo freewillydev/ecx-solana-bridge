@@ -8,7 +8,6 @@ import qualified Upgrade
 import qualified SetupPaths
 import qualified Token
 import qualified Token.Operation as TokenOp
-import qualified Token.Signing as TokenSigning
 import Bridge.RPC (independentHttps)
 import Bridge.SDKBuild (sdkLibraryPath,sdkSourceDirectory)
 import Bridge.BrowserBuild (browserAssetsDirectory)
@@ -589,14 +588,12 @@ startUnlocked path=do
   ownership<-either (const $ reject "invalid_setup_json") pure
     (parseEither (withObject "setup" (.:? "initialFundingOwnership")) value)
   forM_ ownership $ \reason->do
-    require (not(T.null $ T.strip reason) && T.length reason<=512) "invalid_initial_funding_reason"
-    saved<-readPrivate(directory</>"ata-creation.json") >>= either (const $ reject "invalid_saved_ata") pure . eitherDecodeStrict'
-    _<-either reject pure (TokenSigning.validateSaved saved)
-    let request=object ["operation" .= String "initialize-operating"
-          ,"deposit" .= ("sol-operating:"<>C.solanaOperatingHistoryStart installedConfig)
-          ,"transaction" .= TokenSigning.savedId saved,"reason" .= reason]
-    (code,_,_)<-operator (T.unpack $ TE.decodeUtf8 $ L.toStrict $ encode request)
-    require (code==ExitSuccess) "initial_funding_not_ready_check_operator_status_then_rerun_start"
+    request<-Bootstrap.initialAccounting directory installedConfig reason
+    case request of
+      Nothing->putStrLn "No local ATA cost to classify. After reconciliation, use Funding to allocate your owned SOL."
+      Just command->do
+        (code,_,_)<-operator (T.unpack $ TE.decodeUtf8 $ L.toStrict $ encode command)
+        require (code==ExitSuccess) "initial_funding_not_ready_check_operator_status_then_rerun_start"
   (result,_,failure)<-readProcessWithExitCode (if uid==0 then "runuser" else "sudo")
     (if uid==0 then ["-u","ecxbridgew","--",binary,"operator",config]
      else ["-u","ecxbridgew",binary,"operator",config]) "{\"operation\":\"resume\"}"
